@@ -54,3 +54,8 @@ Source audits that informed the architecture:
 
 - [`docs/research/ghostty-lessons.md`](docs/research/ghostty-lessons.md)
 - [`docs/research/deepseek-harness-lessons.md`](docs/research/deepseek-harness-lessons.md)
+- [`docs/research/fx-pi-harness-lessons.md`](docs/research/fx-pi-harness-lessons.md)
+
+Accepted designs:
+
+- [`docs/design/0001-first-real-harness.md`](docs/design/0001-first-real-harness.md)
