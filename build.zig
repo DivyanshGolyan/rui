@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
                 .cpu_arch = .wasm32,
                 .os_tag = .freestanding,
             }),
-            .optimize = optimize,
+            .optimize = .ReleaseSmall,
         }),
     });
     core.entry = .disabled;
@@ -33,6 +33,17 @@ pub fn build(b: *std.Build) void {
     });
     host.root_module.link_libc = true;
     b.installArtifact(host);
+
+    const cli = b.addExecutable(.{
+        .name = "onepage",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    cli.root_module.link_libc = true;
+    b.installArtifact(cli);
 
     const inspector_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -101,6 +112,32 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    const model_operation_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/model_operation.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    const cli_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    cli_tests.root_module.link_libc = true;
+    const agent_integration = b.addExecutable(.{
+        .name = "onepage-agent-integration",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/agent_integration.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    agent_integration.root_module.link_libc = true;
+    const run_agent_integration = b.addRunArtifact(agent_integration);
+    run_agent_integration.addFileArg(core.getEmittedBin());
     const test_step = b.step("test", "Run the deterministic spike tests");
     test_step.dependOn(&b.addRunArtifact(inspector_tests).step);
     test_step.dependOn(&b.addRunArtifact(checkpoint_tests).step);
@@ -111,6 +148,29 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(harness_tests).step);
     test_step.dependOn(&b.addRunArtifact(durable_transition_tests).step);
     test_step.dependOn(&b.addRunArtifact(session_tests).step);
+    test_step.dependOn(&b.addRunArtifact(model_operation_tests).step);
+    test_step.dependOn(&b.addRunArtifact(cli_tests).step);
+    test_step.dependOn(&run_agent_integration.step);
+
+    const fixture_answer_step = b.step(
+        "fixture-answer",
+        "Run one durable fixture-model operation and print its Final Answer",
+    );
+    const run_fixture_answer = b.addRunArtifact(cli);
+    run_fixture_answer.addArg("--core");
+    run_fixture_answer.addFileArg(core.getEmittedBin());
+    run_fixture_answer.addArgs(&.{
+        "--state",
+        ".zig-cache/onepage-fixture-sessions",
+        "--repo",
+        ".",
+        "--model",
+        "fixture:answer",
+        "--fixture-response",
+        "OnePage completed a durable model turn inside one fixed Wasm page.",
+        "Explain this repository in one sentence.",
+    });
+    fixture_answer_step.dependOn(&run_fixture_answer.step);
 
     const run_step = b.step("run", "Run the memory-model spike");
     const run_host = b.addRunArtifact(host);

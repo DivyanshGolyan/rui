@@ -33,9 +33,9 @@ A crash can therefore leave the log exactly one entry ahead. Resume validates th
 
 ## Ownership fencing
 
-Every owner receives a `(session_id, ownership_epoch)` token. Authorization rereads the durable manifest and rejects a mismatched token. Completion and operation-journal records carry the attempt's dispatch epoch without growing their established 40-byte and 64-byte sizes. The Session fence proves current-owner authority before every drive. The durable transition adapter rejects future epochs, while permitting the current owner to reconcile an older completion only when the journal contains its exact accepted attempt.
+Every owner receives a `(session_id, ownership_epoch)` token. Authorization rereads the durable manifest and rejects a mismatched token. Completion and operation-journal records carry the attempt's dispatch epoch. The Session fence proves current-owner authority before every drive. The durable transition adapter rejects future epochs, while permitting the current owner to reconcile an older completion only when the journal contains its exact accepted attempt.
 
-The operation journal format is version 2. It keeps the 64-byte record by using 32-bit agent and operation generations and adds the 64-bit ownership epoch. The 40-byte Completion keeps full 64-bit Agent, Operation, epoch, and result values plus both 32-bit generations. A one-bit-per-slot completion map distinguishes that full record from the other ingress encodings.
+The operation journal format is now version 3 and 80 bytes so accepted intent also names a stable Attempt, recovery class, and immutable descriptor digest. The 40-byte Completion keeps full 64-bit Agent, Operation, epoch, and result values plus both 32-bit generations. A one-bit-per-slot completion map distinguishes that full record from the other ingress encodings. The adapter rereads accepted metadata when persisting a completion, trading bounded disk work for zero extra resident control fields.
 
 ## Bounds and tests
 

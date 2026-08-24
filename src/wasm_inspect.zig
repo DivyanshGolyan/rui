@@ -122,7 +122,7 @@ fn inspectCode(reader: *Reader, report: *Report) !void {
             const opcode = try body.byte();
             switch (opcode) {
                 0x02, 0x03, 0x04 => try readBlockType(&body),
-                0x05, 0x0b, 0x0f, 0x1a, 0x1b, 0x45...0xbf => {},
+                0x00, 0x01, 0x05, 0x0b, 0x0f, 0x1a, 0x1b, 0x45...0xbf => {},
                 0x0c, 0x0d => _ = try body.uleb(u32),
                 0x0e => {
                     var labels = try body.uleb(u32);
@@ -164,10 +164,28 @@ fn inspectCode(reader: *Reader, report: *Report) !void {
                 0x42 => _ = try body.sleb(i64),
                 0x43 => _ = try body.take(4),
                 0x44 => _ = try body.take(8),
+                0xfc => try inspectMiscInstruction(&body),
                 0xd0 => _ = try body.byte(),
                 else => return error.UnsupportedInstruction,
             }
         }
+    }
+}
+
+fn inspectMiscInstruction(reader: *Reader) !void {
+    const opcode = try reader.uleb(u32);
+    switch (opcode) {
+        0...7 => {},
+        8 => {
+            _ = try reader.uleb(u32);
+            _ = try reader.uleb(u32);
+        },
+        9, 11, 13, 15...17 => _ = try reader.uleb(u32),
+        10, 12, 14 => {
+            _ = try reader.uleb(u32);
+            _ = try reader.uleb(u32);
+        },
+        else => return error.UnsupportedMiscInstruction,
     }
 }
 

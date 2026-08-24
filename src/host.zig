@@ -26,6 +26,8 @@ const owner_generation: u32 = 7;
 const owner_ownership_epoch: u64 = 1;
 const owner_operation: u32 = 90_042;
 const owner_operation_generation: u32 = 1;
+const owner_attempt: u64 = 90_043;
+const owner_descriptor_digest: u64 = 0x6f776e65722d6f70;
 const owner_result: u32 = 0xc0ffee;
 const crash_exit_status: u8 = 86;
 const checkpoint_crash_exit_base: u8 = 90;
@@ -640,8 +642,11 @@ fn ownerPrepare(io: std.Io, allocator: std.mem.Allocator, runtime: *const Runtim
         .agent_generation = owner_generation,
         .operation_id = owner_operation,
         .operation_generation = owner_operation_generation,
+        .attempt_id = owner_attempt,
         .ownership_epoch = owner_ownership_epoch,
+        .recovery_class = .safe_read,
         .sequence = 1,
+        .descriptor_digest = owner_descriptor_digest,
         .result = 0,
     });
     try runtime.callTwoNumbers(accept, owner_operation, owner_operation_generation);
@@ -954,8 +959,11 @@ fn lifecyclePrepare(io: std.Io, allocator: std.mem.Allocator, runtime: *const Ru
             .agent_generation = lifecycle_generation,
             .operation_id = operation_id,
             .operation_generation = 1,
+            .attempt_id = lifecycleAttemptId(operation_id),
             .ownership_epoch = lifecycle_ownership_epoch,
+            .recovery_class = .safe_read,
             .sequence = journal_sequence,
+            .descriptor_digest = lifecycleDescriptorDigest(operation_id),
             .result = 0,
         });
 
@@ -978,8 +986,11 @@ fn lifecyclePrepare(io: std.Io, allocator: std.mem.Allocator, runtime: *const Ru
                 .agent_generation = lifecycle_generation,
                 .operation_id = operation_id,
                 .operation_generation = 1,
+                .attempt_id = lifecycleAttemptId(operation_id),
                 .ownership_epoch = lifecycle_ownership_epoch,
+                .recovery_class = .safe_read,
                 .sequence = journal_sequence,
+                .descriptor_digest = lifecycleDescriptorDigest(operation_id),
                 .result = lifecycleResult(operation_id),
             });
         }
@@ -1051,8 +1062,11 @@ fn lifecycleComplete(io: std.Io) !void {
             .agent_generation = lifecycle_generation,
             .operation_id = operation_id,
             .operation_generation = 1,
+            .attempt_id = lifecycleAttemptId(operation_id),
             .ownership_epoch = lifecycle_ownership_epoch,
+            .recovery_class = .safe_read,
             .sequence = journal.last_sequence + 1,
+            .descriptor_digest = lifecycleDescriptorDigest(operation_id),
             .result = lifecycleResult(operation_id),
         });
     }
@@ -1271,6 +1285,12 @@ fn validateLifecycleRecord(record: operation_log.Record) !void {
         1,
         lifecycle_ownership_epoch,
     );
+    if (record.attempt_id != lifecycleAttemptId(@intCast(record.operation_id)) or
+        record.descriptor_digest != lifecycleDescriptorDigest(@intCast(record.operation_id)) or
+        record.recovery_class != .safe_read)
+    {
+        return error.InvalidLifecycleAttempt;
+    }
     if (record.kind == .completed and record.result != lifecycleResult(@intCast(record.operation_id))) {
         return error.InvalidLifecycleResult;
     }
@@ -1321,6 +1341,14 @@ fn lifecyclePath(buffer: []u8, agent_id: u32) ![]u8 {
 
 fn lifecycleOperationId(agent_id: u32) u32 {
     return 10_000 + agent_id;
+}
+
+fn lifecycleAttemptId(operation_id: u32) u64 {
+    return @as(u64, operation_id) + 10_000_000;
+}
+
+fn lifecycleDescriptorDigest(operation_id: u32) u64 {
+    return @as(u64, operation_id) ^ 0x6c6966656379636c;
 }
 
 fn lifecycleResult(operation_id: u32) u32 {

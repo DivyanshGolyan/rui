@@ -38,8 +38,8 @@ The passing run reports:
 
 ```text
 owner prepare          accepted operation durable
-owner recover          applied; journal 128 B; control 1536 B
-owner recover          duplicate; journal 128 B; control 1536 B
+owner recover          applied; journal 160 B; control 1536 B
+owner recover          duplicate; journal 160 B; control 1536 B
 fixed-credit owner crash suite
 fresh child processes 4
 crash boundary        completion fsync -> slot apply
@@ -50,7 +50,7 @@ second recovery       duplicate, no mutation
 
 The 1,536-byte figure is fixed native control metadata: `Harness`, `durable_transition.Adapter`, and the JSC slot bridge, including its open checkpoint-directory handle. It excludes JavaScriptCore, the 64 KiB core linear-memory page, the 65,600-byte checkpoint encoding buffer, journal and checkpoint files, process runtime memory, and build machinery.
 
-The durable journal remains exactly two canonical 64-byte records after both recoveries. No recovery appends another completion.
+The durable journal remains exactly two canonical 80-byte records after both recoveries. No recovery appends another completion.
 
 ## Bounds
 

@@ -26,9 +26,9 @@ pub fn verify(wasm: []const u8) !void {
         report.global_reads != 0 or
         report.global_writes != 0 or
         report.memory_grows != 0 or
-        report.function_exports != 13 or
-        report.exports != 14 or
-        report.data_section_bytes != 0)
+        report.function_exports != 25 or
+        report.exports != 26 or
+        report.data_section_bytes > 1024)
     {
         return error.OnePageContractViolated;
     }

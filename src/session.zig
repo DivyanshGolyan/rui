@@ -1,4 +1,7 @@
 const std = @import("std");
+const blob_store = @import("blob_store.zig");
+const checkpoint = @import("checkpoint.zig");
+const checkpoint_store = @import("checkpoint_store.zig");
 const durable_transition = @import("durable_transition.zig");
 const harness = @import("harness.zig");
 const operation_log = @import("operation_log.zig");
@@ -15,6 +18,10 @@ const manifest_path = "manifest";
 const manifest_temp_path = "manifest.tmp";
 const conversation_path = "conversation.log";
 const lock_path = "owner.lock";
+const blobs_path = "blobs";
+const operation_path = "operations.log";
+const checkpoint_path = "core.page";
+const checkpoint_temp_path = "core.page.tmp";
 
 const manifest_crc_offset = 20;
 
@@ -106,6 +113,60 @@ pub const FaultHook = struct {
     reached: *const fn (*anyopaque, AppendBoundary) anyerror!void,
 };
 
+pub const BlobWriter = struct {
+    session: *Session,
+    token: OwnerToken,
+    blobs: std.Io.Dir,
+    writer: blob_store.Writer,
+    open: bool = true,
+
+    pub fn append(self: *BlobWriter, bytes: []const u8) !void {
+        if (!self.open) return error.BlobWriterClosed;
+        try self.session.authorize(self.token);
+        try self.writer.append(self.session.io, bytes);
+    }
+
+    pub fn finish(self: *BlobWriter) !void {
+        if (!self.open) return error.BlobWriterClosed;
+        try self.session.authorize(self.token);
+        try self.writer.finish(self.session.io);
+        self.blobs.close(self.session.io);
+        self.open = false;
+    }
+
+    pub fn abort(self: *BlobWriter) void {
+        if (!self.open) return;
+        self.writer.abort(self.session.io);
+        self.blobs.close(self.session.io);
+        self.open = false;
+    }
+};
+
+pub const BlobReader = struct {
+    session: *Session,
+    token: OwnerToken,
+    blobs: std.Io.Dir,
+    reader: blob_store.Reader,
+    open: bool = true,
+
+    pub fn length(self: *const BlobReader) u64 {
+        return self.reader.meta.length;
+    }
+
+    pub fn readWindow(self: *BlobReader, offset: u64, out: []u8) ![]const u8 {
+        if (!self.open) return error.BlobReaderClosed;
+        try self.session.authorize(self.token);
+        return self.reader.readWindow(self.session.io, offset, out);
+    }
+
+    pub fn close(self: *BlobReader) void {
+        if (!self.open) return;
+        self.reader.close(self.session.io);
+        self.blobs.close(self.session.io);
+        self.open = false;
+    }
+};
+
 pub const Session = struct {
     io: std.Io,
     dir: std.Io.Dir,
@@ -159,7 +220,7 @@ pub const Session = struct {
 
         var name_buffer: [16]u8 = undefined;
         const name = sessionName(config.identities.session_id, &name_buffer);
-        try root.createDir(io, name, .default_dir);
+        try root.createDir(io, name, .fromMode(0o700));
         try syncDir(root, io);
         var dir = try root.openDir(io, name, .{});
         errdefer dir.close(io);
@@ -173,6 +234,15 @@ pub const Session = struct {
             lock_file.unlock(io);
             lock_file.close(io);
         }
+
+        try dir.createDir(io, blobs_path, .default_dir);
+        try syncDir(dir, io);
+        var blobs = try dir.openDir(io, blobs_path, .{});
+        defer blobs.close(io);
+        try blob_store.put(blobs, io, config.identities.task_id, config.task);
+        var operations = try operation_log.Writer.createIn(dir, io, operation_path);
+        operations.close(io);
+        try syncDir(dir, io);
 
         var conversation = try dir.createFile(io, conversation_path, .{ .exclusive = true });
         defer conversation.close(io);
@@ -342,6 +412,114 @@ pub const Session = struct {
         return readEntryFile(conversation, self.io, sequence - 1);
     }
 
+    pub fn storeBlob(
+        self: *Session,
+        token: OwnerToken,
+        reference: u64,
+        bytes: []const u8,
+    ) !void {
+        try self.authorize(token);
+        var blobs = try self.dir.openDir(self.io, blobs_path, .{});
+        defer blobs.close(self.io);
+        blob_store.put(blobs, self.io, reference, bytes) catch |err| {
+            self.failed = true;
+            return err;
+        };
+    }
+
+    pub fn beginBlob(
+        self: *Session,
+        token: OwnerToken,
+        reference: u64,
+    ) !BlobWriter {
+        try self.authorize(token);
+        var blobs = try self.dir.openDir(self.io, blobs_path, .{});
+        errdefer blobs.close(self.io);
+        const writer = try blob_store.Writer.begin(blobs, self.io, reference);
+        return .{ .session = self, .token = token, .blobs = blobs, .writer = writer };
+    }
+
+    pub fn readBlob(
+        self: *Session,
+        token: OwnerToken,
+        reference: u64,
+        offset: u64,
+        out: []u8,
+    ) ![]const u8 {
+        try self.authorize(token);
+        var blobs = try self.dir.openDir(self.io, blobs_path, .{});
+        defer blobs.close(self.io);
+        return blob_store.readWindow(blobs, self.io, reference, offset, out);
+    }
+
+    pub fn openBlob(
+        self: *Session,
+        token: OwnerToken,
+        reference: u64,
+    ) !BlobReader {
+        try self.authorize(token);
+        var blobs = try self.dir.openDir(self.io, blobs_path, .{});
+        errdefer blobs.close(self.io);
+        const reader = try blob_store.Reader.openIn(blobs, self.io, reference);
+        return .{ .session = self, .token = token, .blobs = blobs, .reader = reader };
+    }
+
+    pub fn openOperationJournal(
+        self: *Session,
+        token: OwnerToken,
+    ) !operation_log.Writer {
+        try self.authorize(token);
+        return operation_log.Writer.openAppendIn(self.dir, self.io, operation_path);
+    }
+
+    pub fn openOperationReader(
+        self: *Session,
+        token: OwnerToken,
+    ) !operation_log.Reader {
+        try self.authorize(token);
+        return operation_log.Reader.openIn(self.dir, self.io, operation_path);
+    }
+
+    pub fn publishCheckpoint(
+        self: *Session,
+        token: OwnerToken,
+        generation: u32,
+        encoded: []u8,
+        page: []const u8,
+    ) !void {
+        try self.authorize(token);
+        try checkpoint_store.publish(
+            self.dir,
+            self.io,
+            checkpoint_path,
+            checkpoint_temp_path,
+            encoded,
+            self.agent_id,
+            generation,
+            page,
+            null,
+        );
+    }
+
+    pub fn restoreCheckpoint(
+        self: *Session,
+        token: OwnerToken,
+        generation: u32,
+        encoded: []u8,
+        page: []u8,
+    ) !void {
+        try self.authorize(token);
+        if (encoded.len != checkpoint.encoded_size or page.len != checkpoint.page_size) {
+            return error.InvalidCheckpointBuffer;
+        }
+        var file = try self.dir.openFile(self.io, checkpoint_path, .{});
+        defer file.close(self.io);
+        const actual = try file.readPositionalAll(self.io, encoded, 0);
+        if (actual != encoded.len) return error.TruncatedCheckpoint;
+        const restored = try checkpoint.decode(encoded, self.agent_id, generation);
+        @memcpy(page, restored.page);
+    }
+
     pub fn close(self: *Session) void {
         if (!self.open) return;
         self.lock_file.unlock(self.io);
@@ -374,7 +552,75 @@ fn validateWorkspace(io: std.Io, path: []const u8) !void {
     else
         std.Io.Dir.cwd().openDir(io, path, .{}) catch return error.WorkspaceUnavailable;
     defer workspace.close(io);
-    workspace.access(io, ".git", .{}) catch return error.NotGitWorktree;
+
+    if (workspace.openDir(io, ".git", .{})) |git_dir_value| {
+        var git_dir = git_dir_value;
+        defer git_dir.close(io);
+        try validateGitDir(git_dir, io, false);
+        return;
+    } else |_| {}
+
+    var marker = workspace.openFile(io, ".git", .{}) catch return error.NotGitWorktree;
+    defer marker.close(io);
+    const stat = marker.stat(io) catch return error.NotGitWorktree;
+    if (stat.size == 0 or stat.size > 1024) return error.NotGitWorktree;
+    var marker_buffer: [1024]u8 = undefined;
+    const length: usize = @intCast(stat.size);
+    const actual = marker.readPositionalAll(io, marker_buffer[0..length], 0) catch
+        return error.NotGitWorktree;
+    if (actual != length) return error.NotGitWorktree;
+    const value = std.mem.trim(u8, marker_buffer[0..length], " \t\r\n");
+    const prefix = "gitdir: ";
+    if (!std.mem.startsWith(u8, value, prefix) or value.len == prefix.len) {
+        return error.NotGitWorktree;
+    }
+    const git_path = value[prefix.len..];
+    var git_dir = if (std.fs.path.isAbsolute(git_path))
+        std.Io.Dir.openDirAbsolute(io, git_path, .{}) catch return error.NotGitWorktree
+    else
+        workspace.openDir(io, git_path, .{}) catch return error.NotGitWorktree;
+    defer git_dir.close(io);
+    try validateGitDir(git_dir, io, true);
+}
+
+fn validateGitDir(git_dir: std.Io.Dir, io: std.Io, linked: bool) !void {
+    var buffer: [1024]u8 = undefined;
+    const head = readSmallFile(git_dir, io, "HEAD", &buffer) catch return error.NotGitWorktree;
+    const symbolic = std.mem.startsWith(u8, head, "ref: refs/") and head.len > "ref: refs/".len;
+    var detached = head.len == 40 or head.len == 64;
+    for (head) |byte| detached = detached and std.ascii.isHex(byte);
+    if (!symbolic and !detached) return error.NotGitWorktree;
+    if (linked) {
+        const common_path = readSmallFile(git_dir, io, "commondir", &buffer) catch
+            return error.NotGitWorktree;
+        var common = if (std.fs.path.isAbsolute(common_path))
+            std.Io.Dir.openDirAbsolute(io, common_path, .{}) catch return error.NotGitWorktree
+        else
+            git_dir.openDir(io, common_path, .{}) catch return error.NotGitWorktree;
+        defer common.close(io);
+        try validateGitCommon(common, io);
+        return;
+    }
+    try validateGitCommon(git_dir, io);
+}
+
+fn validateGitCommon(git_dir: std.Io.Dir, io: std.Io) !void {
+    git_dir.access(io, "config", .{}) catch return error.NotGitWorktree;
+    var objects = git_dir.openDir(io, "objects", .{}) catch return error.NotGitWorktree;
+    objects.close(io);
+    var refs = git_dir.openDir(io, "refs", .{}) catch return error.NotGitWorktree;
+    refs.close(io);
+}
+
+fn readSmallFile(dir: std.Io.Dir, io: std.Io, path: []const u8, buffer: []u8) ![]const u8 {
+    var file = try dir.openFile(io, path, .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.size == 0 or stat.size > buffer.len) return error.InvalidControlFile;
+    const length: usize = @intCast(stat.size);
+    const actual = try file.readPositionalAll(io, buffer[0..length], 0);
+    if (actual != length) return error.TruncatedControlFile;
+    return std.mem.trim(u8, buffer[0..length], " \t\r\n");
 }
 
 fn publishManifest(dir: std.Io.Dir, io: std.Io, view: ManifestView) !void {
@@ -657,6 +903,20 @@ fn testConfig(workspace_path: []const u8, session_id: u64) CreateConfig {
     };
 }
 
+fn initTestGitWorktree(dir: std.Io.Dir, io: std.Io) !void {
+    try dir.createDir(io, ".git", .default_dir);
+    var git_dir = try dir.openDir(io, ".git", .{});
+    defer git_dir.close(io);
+    try git_dir.createDir(io, "objects", .default_dir);
+    try git_dir.createDir(io, "refs", .default_dir);
+    var config = try git_dir.createFile(io, "config", .{});
+    defer config.close(io);
+    try config.writePositionalAll(io, "[core]\n\trepositoryformatversion = 0\n", 0);
+    var head = try git_dir.createFile(io, "HEAD", .{});
+    defer head.close(io);
+    try head.writePositionalAll(io, "ref: refs/heads/main\n", 0);
+}
+
 const TestLayout = struct {
     tmp: std.testing.TmpDir,
     sessions: std.Io.Dir,
@@ -671,7 +931,7 @@ const TestLayout = struct {
         try tmp.dir.createDir(io, "repo", .default_dir);
         var workspace = try tmp.dir.openDir(io, "repo", .{});
         errdefer workspace.close(io);
-        try workspace.createDir(io, ".git", .default_dir);
+        try initTestGitWorktree(workspace, io);
         const sessions = try tmp.dir.openDir(io, "sessions", .{});
         var workspace_path: [128]u8 = undefined;
         const rendered = try std.fmt.bufPrint(
@@ -740,6 +1000,16 @@ test "create and exact resume preserve distinct identities and one owner" {
     try std.testing.expectEqual(EntryKind.user, root.kind);
     try std.testing.expectEqual(@as(u64, 0), root.parent_id);
     try std.testing.expectEqual(restored.session.task_id, root.content_ref);
+    var task_buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Fix the failing test",
+        try restored.session.readBlob(
+            restored.session.ownerToken(),
+            root.content_ref,
+            0,
+            &task_buffer,
+        ),
+    );
 }
 
 test "conversation append advances the leaf only after its record is durable" {
@@ -750,6 +1020,7 @@ test "conversation append advances the leaf only after its record is durable" {
     defer created.close();
     const token = created.ownerToken();
 
+    try created.storeBlob(token, 900, "The test is fixed.");
     const assistant = try created.appendConversation(token, .assistant, 900, null);
 
     try std.testing.expectEqual(@as(u64, 2), assistant.entry_id);
@@ -757,6 +1028,12 @@ test "conversation append advances the leaf only after its record is durable" {
     try std.testing.expectEqual(@as(u64, 2), created.active_leaf_id);
     const stored = try created.readEntry(2);
     try std.testing.expectEqualDeep(assistant, stored);
+
+    var response_buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "The test is fixed.",
+        try created.readBlob(token, 900, 0, &response_buffer),
+    );
 }
 
 test "conversation records preserve parent links needed by future forks" {
@@ -846,7 +1123,7 @@ test "creation rejects non Git workspaces and aliased identities" {
     );
     try std.testing.expectError(error.NotGitWorktree, Session.createExact(sessions, io, testConfig(plain_path, 60)));
 
-    try plain.createDir(io, ".git", .default_dir);
+    try initTestGitWorktree(plain, io);
     var invalid = testConfig(plain_path, 70);
     invalid.identities.agent_id = invalid.identities.session_id;
     try std.testing.expectError(error.InvalidIdentity, Session.createExact(sessions, io, invalid));
@@ -1058,8 +1335,11 @@ test "resume reconciles a prior epoch journal ahead of the restored slot" {
             .agent_generation = completion.agent_generation,
             .operation_id = completion.operation_id,
             .operation_generation = completion.operation_generation,
+            .attempt_id = 702,
             .ownership_epoch = completion.ownership_epoch,
+            .recovery_class = .billable_retry,
             .sequence = 1,
+            .descriptor_digest = 703,
             .result = 0,
         });
         try initial.appendDurable(io, .{
@@ -1068,8 +1348,11 @@ test "resume reconciles a prior epoch journal ahead of the restored slot" {
             .agent_generation = completion.agent_generation,
             .operation_id = completion.operation_id,
             .operation_generation = completion.operation_generation,
+            .attempt_id = 702,
             .ownership_epoch = completion.ownership_epoch,
+            .recovery_class = .billable_retry,
             .sequence = 2,
+            .descriptor_digest = 703,
             .result = completion.result,
         });
     }

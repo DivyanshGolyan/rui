@@ -50,10 +50,9 @@ pub const Adapter = struct {
         const self: *Adapter = @ptrCast(@alignCast(context));
         const completion = try completionFrom(input);
         if (completion.ownership_epoch > self.ownership_epoch) return .stale;
-
         var reader = try operation_log.Reader.openIn(self.dir, self.io, self.journal_path);
         defer reader.close(self.io);
-        var accepted = false;
+        var accepted: ?operation_log.Record = null;
         var durable_result: ?u64 = null;
         while (try reader.next(self.io)) |record| {
             if (record.agent_id != completion.agent_id or
@@ -66,16 +65,23 @@ pub const Adapter = struct {
             }
             switch (record.kind) {
                 .accepted => {
-                    if (accepted or durable_result != null) return error.InvalidOperationHistory;
-                    accepted = true;
+                    if (accepted != null or durable_result != null) return error.InvalidOperationHistory;
+                    accepted = record;
                 },
                 .completed => {
-                    if (!accepted or durable_result != null) return error.InvalidOperationHistory;
+                    const intent = accepted orelse return error.InvalidOperationHistory;
+                    if (durable_result != null or
+                        record.attempt_id != intent.attempt_id or
+                        record.descriptor_digest != intent.descriptor_digest or
+                        record.recovery_class != intent.recovery_class)
+                    {
+                        return error.InvalidOperationHistory;
+                    }
                     durable_result = record.result;
                 },
             }
         }
-        if (!accepted) return .stale;
+        _ = accepted orelse return .stale;
 
         const slot_state = try self.slot.inspect(self.slot.context, completion);
         if (durable_result) |result| {
@@ -89,14 +95,38 @@ pub const Adapter = struct {
     fn persist(context: *anyopaque, input: harness.Input) anyerror!void {
         const self: *Adapter = @ptrCast(@alignCast(context));
         const completion = try completionFrom(input);
+        var reader = try operation_log.Reader.openIn(self.dir, self.io, self.journal_path);
+        defer reader.close(self.io);
+        var accepted: ?operation_log.Record = null;
+        while (try reader.next(self.io)) |record| {
+            if (record.agent_id != completion.agent_id or
+                record.agent_generation != completion.agent_generation or
+                record.operation_id != completion.operation_id or
+                record.operation_generation != completion.operation_generation or
+                record.ownership_epoch != completion.ownership_epoch)
+            {
+                continue;
+            }
+            switch (record.kind) {
+                .accepted => {
+                    if (accepted != null) return error.InvalidOperationHistory;
+                    accepted = record;
+                },
+                .completed => return error.OperationAlreadyCompleted,
+            }
+        }
+        const intent = accepted orelse return error.MissingAcceptedAttempt;
         try self.writer.appendDurable(self.io, .{
             .kind = .completed,
             .agent_id = completion.agent_id,
             .agent_generation = completion.agent_generation,
             .operation_id = completion.operation_id,
             .operation_generation = completion.operation_generation,
+            .attempt_id = intent.attempt_id,
             .ownership_epoch = completion.ownership_epoch,
+            .recovery_class = intent.recovery_class,
             .sequence = self.writer.last_sequence + 1,
+            .descriptor_digest = intent.descriptor_digest,
             .result = completion.result,
         });
         if (self.fault) |fault| try fault.after_persist(fault.context);
@@ -149,8 +179,11 @@ fn appendAccepted(writer: *operation_log.Writer, io: std.Io) !void {
         .agent_generation = test_completion.agent_generation,
         .operation_id = test_completion.operation_id,
         .operation_generation = test_completion.operation_generation,
+        .attempt_id = 23,
         .ownership_epoch = test_completion.ownership_epoch,
+        .recovery_class = .safe_read,
         .sequence = writer.last_sequence + 1,
+        .descriptor_digest = 29,
         .result = 0,
     });
 }
@@ -201,8 +234,11 @@ test "reconstruction applies a durable completion once without a second append" 
             .agent_generation = test_completion.agent_generation,
             .operation_id = test_completion.operation_id,
             .operation_generation = test_completion.operation_generation,
+            .attempt_id = 23,
             .ownership_epoch = test_completion.ownership_epoch,
+            .recovery_class = .safe_read,
             .sequence = initial.last_sequence + 1,
+            .descriptor_digest = 29,
             .result = test_completion.result,
         });
     }

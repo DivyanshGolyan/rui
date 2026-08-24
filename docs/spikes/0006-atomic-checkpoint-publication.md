@@ -43,7 +43,7 @@ old/new canonical only pass
 journal reappend         0
 ```
 
-Each recovery reports a 128-byte journal and exactly 1,536 bytes of fixed native control metadata. Every build asserts that the combined `Harness`, Session fence, durable adapter, and JSC slot bridge remain at most 1,536 bytes.
+Each recovery reports a 160-byte journal and exactly 1,536 bytes of fixed native control metadata. Every build asserts that the combined `Harness`, Session fence, durable adapter, and JSC slot bridge remain at most 1,536 bytes.
 
 The control figure excludes JavaScriptCore, the core's 64 KiB linear-memory page, the fixed 65,600-byte checkpoint encoding buffer, file-system cache, process runtime state, and durable files.
 

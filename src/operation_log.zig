@@ -1,7 +1,7 @@
 const std = @import("std");
 
-pub const record_size = 64;
-pub const version: u16 = 2;
+pub const record_size = 80;
+pub const version: u16 = 3;
 
 const magic = "ONEOP\x00\x00\x00";
 const offset_version = 8;
@@ -11,14 +11,22 @@ const offset_agent_id = 12;
 const offset_agent_generation = 20;
 const offset_operation_generation = 24;
 const offset_operation_id = 28;
-const offset_ownership_epoch = 36;
-const offset_sequence = 44;
-const offset_result = 52;
-const offset_crc = 60;
+const offset_attempt_id = 36;
+const offset_ownership_epoch = 44;
+const offset_sequence = 52;
+const offset_descriptor_digest = 60;
+const offset_result = 68;
+const offset_crc = 76;
 
 pub const Kind = enum(u8) {
     accepted = 1,
     completed = 2,
+};
+
+pub const RecoveryClass = enum(u8) {
+    safe_read = 1,
+    billable_retry = 2,
+    consequential = 3,
 };
 
 pub const Record = struct {
@@ -27,8 +35,11 @@ pub const Record = struct {
     agent_generation: u32,
     operation_id: u64,
     operation_generation: u32,
+    attempt_id: u64,
     ownership_epoch: u64,
+    recovery_class: RecoveryClass,
     sequence: u64,
+    descriptor_digest: u64,
     result: u64,
 };
 
@@ -115,21 +126,25 @@ pub fn encode(out: *[record_size]u8, record: Record) !void {
     if (record.agent_generation == 0) return error.InvalidAgentGeneration;
     if (record.operation_id == 0) return error.InvalidOperationIdentity;
     if (record.operation_generation == 0) return error.InvalidOperationGeneration;
+    if (record.attempt_id == 0) return error.InvalidAttemptIdentity;
     if (record.ownership_epoch == 0) return error.InvalidOwnershipEpoch;
     if (record.sequence == 0) return error.InvalidSequence;
+    if (record.descriptor_digest == 0) return error.InvalidDescriptorDigest;
     if (record.kind == .accepted and record.result != 0) return error.AcceptedRecordHasResult;
 
     @memset(out, 0);
     @memcpy(out[0..magic.len], magic);
     write(u16, out, offset_version, version);
     out[offset_kind] = @intFromEnum(record.kind);
-    out[offset_flags] = 0;
+    out[offset_flags] = @intFromEnum(record.recovery_class);
     write(u64, out, offset_agent_id, record.agent_id);
     write(u32, out, offset_agent_generation, record.agent_generation);
     write(u32, out, offset_operation_generation, record.operation_generation);
     write(u64, out, offset_operation_id, record.operation_id);
+    write(u64, out, offset_attempt_id, record.attempt_id);
     write(u64, out, offset_ownership_epoch, record.ownership_epoch);
     write(u64, out, offset_sequence, record.sequence);
+    write(u64, out, offset_descriptor_digest, record.descriptor_digest);
     write(u64, out, offset_result, record.result);
     write(u32, out, offset_crc, std.hash.Crc32.hash(out[0..offset_crc]));
 }
@@ -137,7 +152,12 @@ pub fn encode(out: *[record_size]u8, record: Record) !void {
 pub fn decode(bytes: *const [record_size]u8) !Record {
     if (!std.mem.eql(u8, bytes[0..magic.len], magic)) return error.InvalidMagic;
     if (read(u16, bytes, offset_version) != version) return error.UnsupportedVersion;
-    if (bytes[offset_flags] != 0) return error.UnsupportedFlags;
+    const recovery_class: RecoveryClass = switch (bytes[offset_flags]) {
+        1 => .safe_read,
+        2 => .billable_retry,
+        3 => .consequential,
+        else => return error.InvalidRecoveryClass,
+    };
 
     const stored_crc = read(u32, bytes, offset_crc);
     if (stored_crc != std.hash.Crc32.hash(bytes[0..offset_crc])) {
@@ -155,8 +175,11 @@ pub fn decode(bytes: *const [record_size]u8) !Record {
         .agent_generation = read(u32, bytes, offset_agent_generation),
         .operation_id = read(u64, bytes, offset_operation_id),
         .operation_generation = read(u32, bytes, offset_operation_generation),
+        .attempt_id = read(u64, bytes, offset_attempt_id),
         .ownership_epoch = read(u64, bytes, offset_ownership_epoch),
+        .recovery_class = recovery_class,
         .sequence = read(u64, bytes, offset_sequence),
+        .descriptor_digest = read(u64, bytes, offset_descriptor_digest),
         .result = read(u64, bytes, offset_result),
     };
 
@@ -198,8 +221,11 @@ test "operation record round trip" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .attempt_id = 100,
         .ownership_epoch = 2,
+        .recovery_class = .safe_read,
         .sequence = 3,
+        .descriptor_digest = 101,
         .result = 1234,
     };
     var bytes: [record_size]u8 = undefined;
@@ -215,8 +241,11 @@ test "operation record rejects corruption and unsupported metadata" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .attempt_id = 100,
         .ownership_epoch = 2,
+        .recovery_class = .safe_read,
         .sequence = 3,
+        .descriptor_digest = 101,
         .result = 0,
     };
     var bytes: [record_size]u8 = undefined;
@@ -229,6 +258,11 @@ test "operation record rejects corruption and unsupported metadata" {
     bytes[offset_kind] = 9;
     write(u32, &bytes, offset_crc, std.hash.Crc32.hash(bytes[0..offset_crc]));
     try std.testing.expectError(error.InvalidKind, decode(&bytes));
+
+    bytes[offset_kind] = @intFromEnum(Kind.accepted);
+    bytes[offset_flags] = 0;
+    write(u32, &bytes, offset_crc, std.hash.Crc32.hash(bytes[0..offset_crc]));
+    try std.testing.expectError(error.InvalidRecoveryClass, decode(&bytes));
 }
 
 test "accepted records cannot contain results" {
@@ -239,8 +273,11 @@ test "accepted records cannot contain results" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .attempt_id = 100,
         .ownership_epoch = 2,
+        .recovery_class = .safe_read,
         .sequence = 3,
+        .descriptor_digest = 101,
         .result = 1,
     }));
 }
@@ -252,8 +289,11 @@ test "expected identity rejects stale records" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .attempt_id = 100,
         .ownership_epoch = 2,
+        .recovery_class = .safe_read,
         .sequence = 3,
+        .descriptor_digest = 101,
         .result = 1,
     };
     try validateExpected(record, 42, 7, 99, 4, 2);
@@ -275,8 +315,11 @@ test "journal rejects truncation and nonmonotonic sequence" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .attempt_id = 100,
         .ownership_epoch = 2,
+        .recovery_class = .safe_read,
         .sequence = 2,
+        .descriptor_digest = 101,
         .result = 0,
     };
     const second: Record = .{
@@ -285,8 +328,11 @@ test "journal rejects truncation and nonmonotonic sequence" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .attempt_id = 100,
         .ownership_epoch = 2,
+        .recovery_class = .safe_read,
         .sequence = 1,
+        .descriptor_digest = 101,
         .result = 1234,
     };
     var first_bytes: [record_size]u8 = undefined;
@@ -323,8 +369,11 @@ test "writer synchronizes canonical records" {
             .agent_generation = 7,
             .operation_id = 99,
             .operation_generation = 4,
+            .attempt_id = 100,
             .ownership_epoch = 2,
+            .recovery_class = .safe_read,
             .sequence = 1,
+            .descriptor_digest = 101,
             .result = 0,
         });
     }
@@ -337,8 +386,11 @@ test "writer synchronizes canonical records" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .attempt_id = 100,
         .ownership_epoch = 2,
+        .recovery_class = .safe_read,
         .sequence = 2,
+        .descriptor_digest = 101,
         .result = 1234,
     });
     try std.testing.expectEqual(@as(u64, record_size * 2), resumed.offset);
@@ -348,8 +400,11 @@ test "writer synchronizes canonical records" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .attempt_id = 100,
         .ownership_epoch = 2,
+        .recovery_class = .safe_read,
         .sequence = 2,
+        .descriptor_digest = 101,
         .result = 1234,
     }));
 }

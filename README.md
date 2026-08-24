@@ -28,6 +28,15 @@ durable ownership epochs, and an append-only parent-linked conversation. Resume 
 epoch before bounded reconstruction and advances a manifest that may lag the conversation log by one
 synced entry.
 
+The first agent slice now performs one real durable model turn through the product CLI. A fixture
+provider validates the request reconstructed from the conversation, writes a complete response spool,
+and wakes a restored one-page core. The core alone classifies the response as a Final Answer, which is
+then committed as an immutable conversation entry and reproduced by exact Session resume.
+
+```sh
+zig build fixture-answer -Doptimize=ReleaseSmall
+```
+
 The atomic checkpoint spike publishes through temporary write, file sync, same-directory rename,
 and parent-directory sync. Sixteen fresh child processes terminate at each boundary and recover only
 the old or new canonical page while keeping the journal unchanged.
@@ -56,6 +65,7 @@ See the spike notes for architecture, measurements, caveats, and next questions:
 - [`docs/spikes/0005-owner-crash-recovery.md`](docs/spikes/0005-owner-crash-recovery.md)
 - [`docs/spikes/0006-atomic-checkpoint-publication.md`](docs/spikes/0006-atomic-checkpoint-publication.md)
 - [`docs/spikes/0007-durable-session.md`](docs/spikes/0007-durable-session.md)
+- [`docs/spikes/0008-fixture-model-final-answer.md`](docs/spikes/0008-fixture-model-final-answer.md)
 
 Source audits that informed the architecture:
 
