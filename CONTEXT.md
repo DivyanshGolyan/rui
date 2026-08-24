@@ -1,6 +1,6 @@
 # OnePage agent
 
-OnePage runs durable coding tasks through a small, explicit action vocabulary. This glossary distinguishes the agent's decisions from the external work and notifications that advance them.
+OnePage runs durable coding tasks through a small, explicit domain language. This glossary distinguishes the agent's decisions from the external work and notifications that advance them.
 
 ## Language
 
@@ -11,7 +11,7 @@ A durable statement of one repository outcome requested within a session.
 _Avoid_: Repair, job, prompt
 
 **Agent**:
-The identified decision-maker responsible for advancing tasks within a session through actions.
+The identified decision-maker responsible for advancing tasks within a session through model responses.
 _Avoid_: Run, worker
 
 **Session**:
@@ -50,6 +50,10 @@ _Avoid_: Agent call, recursive call, subroutine
 The repository checkout whose state a session observes and may be authorized to change.
 _Avoid_: Session, conversation, repository history
 
+**Final Answer**:
+A non-empty assistant response with no tool call that completes the current task turn and is shown to the user.
+_Avoid_: Finish action, stop action, terminal tool
+
 ### Execution
 
 **Activation**:
@@ -57,8 +61,8 @@ A temporary period in which an agent occupies an execution page and advances its
 _Avoid_: Agent, session, process
 
 **Action**:
-One policy-valid next step selected by the agent. An action either requests external work or ends the task.
-_Avoid_: Tool call, command, event
+One policy-valid request by the agent for external work. A V1 tool call selects an action; a Final Answer does not.
+_Avoid_: Tool call, command, Final Answer, event
 
 **Operation**:
 A uniquely identified instance of external work initiated by an action. An operation progresses through submitted, accepted, and completed states and may require more than one attempt.
@@ -95,5 +99,5 @@ A committed, observer-facing view of agent state or history that is not itself a
 _Avoid_: Event, callback, log
 
 **Outcome**:
-The terminal resolution of a task: success, an explained stop, cancellation, or failure when safe progress cannot continue.
+The terminal resolution of a task: a Final Answer, cancellation, or failure when safe progress cannot continue.
 _Avoid_: Completion, result, exit code

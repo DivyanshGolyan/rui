@@ -24,7 +24,7 @@ fx explicitly places composition at the root, agent contracts and policy in core
 
 OnePage should enforce the same ownership in a smaller shape:
 
-- the 64 KiB core owns the next logical action and termination decision;
+- the 64 KiB core owns tool-call interpretation and the termination decision;
 - provider transport owns authentication, wire encoding, HTTP, and response reduction;
 - tool adapters own bounded repository and process mechanisms;
 - terminal presentation observes committed events and owns no agent state;
@@ -69,7 +69,7 @@ fx's default permission rule is also a good conservative baseline: allow read-on
 
 fx's production runtime supports many providers, tools, permission modes, presentation sinks, recovery paths, subagents, hooks, dynamic tools, and secondary publications. That breadth is appropriate for fx, but its runtime dependency record exposes dozens of callbacks and optional capabilities ([source](https://github.com/vercel-labs/fx/blob/88cb3da8d5559a960fc3d08fbaed45e0ba6df863/src/core/agent/runtime/deps.zig#L167-L245)).
 
-For OnePage, copying that surface would make callers learn the implementation choreography. The initial harness should have fixed built-in action kinds and only the adapters required by the deterministic fixture and OpenRouter path.
+For OnePage, copying that surface would make callers learn the implementation choreography. The initial harness should have fixed built-in tool kinds and only the adapters required by the deterministic fixture and OpenRouter path.
 
 ## Pi
 
@@ -79,14 +79,15 @@ Pi's low-level loop has the useful essential shape: stream one assistant respons
 
 OnePage v1 should simplify further:
 
-- exactly one action per assistant response;
+- at most one tool call per assistant response;
 - exactly one accepted external operation at a time;
 - no parallel tool batch;
 - no in-page transcript array;
 - incomplete or length-truncated output produces a typed failure result and no effect;
-- an explicit `finish` or `stop` action ends the run.
+- `bash` and `apply_patch` are the complete tool vocabulary;
+- a complete non-empty response with no tool call is the Final Answer.
 
-This is enough for search → read → patch → verify without inventing an extensibility system.
+This is enough for Bash inspection → structured patch → Bash verification → Final Answer without inventing an extensibility system.
 
 ### Adopt durable operation facts and replay classification
 
@@ -101,7 +102,7 @@ OnePage already has submitted/accepted/completed records and generation fencing.
 - durable content handle created;
 - completion result and uncertainty disposition.
 
-Replay safety belongs to the operation kind, not to a generic retry count. Reads and searches may be replay-safe; patch application and commands require reconciliation or user resolution after an ambiguous crash.
+Replay safety belongs to the operation kind, not to a generic retry count. A `possibly_executed` Bash Attempt is indeterminate and never replays automatically; `apply_patch` reconciles exact preimage, postimage, or divergent state.
 
 ### Avoid the resident `Agent` object graph
 

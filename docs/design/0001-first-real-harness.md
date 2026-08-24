@@ -25,6 +25,7 @@ Architectural decisions:
 - [`0002-compose-agents-through-durable-delegation.md`](../adr/0002-compose-agents-through-durable-delegation.md)
 - [`0003-treat-user-worktrees-as-external-truth.md`](../adr/0003-treat-user-worktrees-as-external-truth.md)
 - [`0004-reconcile-uncertain-effect-attempts.md`](../adr/0004-reconcile-uncertain-effect-attempts.md)
+- [`0005-use-two-tools-and-final-assistant-text.md`](../adr/0005-use-two-tools-and-final-assistant-text.md)
 
 ## Decision
 
@@ -57,8 +58,8 @@ The CLI is the highest product test seam. `Harness` is the highest deterministic
 ## Constraints
 
 - The agent policy core has exactly one initial and maximum 64 KiB WebAssembly page.
-- The core owns task phase, context selection, action interpretation, approval state, retry decisions, and termination.
-- The native host supplies bounded mechanisms and may not infer the next agent action.
+- The core owns task phase, context selection, assistant-response interpretation, permission state, retry decisions, and termination.
+- The native host supplies bounded mechanisms and may not infer the next tool call or Final Answer.
 - One logical agent, one resident execution slot, one model operation, and one tool operation are sufficient for the first coding-task loop.
 - Every operation follows submitted → accepted → completed.
 - Accepted intent can outlive the process and does not require a resident page; the corresponding external effect may remain uncertain.
@@ -376,9 +377,8 @@ Recovery depends on the effect class:
 | Effect | Recovery after `possibly_executed` |
 | --- | --- |
 | Model inference | A new attempt is permitted; duplicate provider work or billing is possible and reported. |
-| Repository search or read | A new attempt is permitted only while the bound workspace generation still matches. |
 | One-file patch | Classify the file as preimage, postimage, or divergent; retry from the preimage only after renewed approval, accept the observed postimage, and stop on divergence. |
-| Command or verification | Never retry automatically; complete with an indeterminate result because the command may have external effects. |
+| Bash | Never retry automatically; complete with an indeterminate result because the command may have external effects. |
 
 Persistence ordering cannot make arbitrary external effects exactly once. Reconciliation and explicit uncertainty are part of the normal operation lifecycle, not exceptional telemetry.
 
@@ -417,7 +417,7 @@ decode
 -> offer completion
 ```
 
-Approval never causes the host to decode mutable model text again. Verification uses the consequential command recovery class: approval grants one exact attempt, and ambiguous execution is indeterminate rather than automatically replayed.
+Approval never causes the host to decode mutable model text again. Bash uses the consequential-effect recovery class: permission applies to one exact immutable call, and ambiguous execution is indeterminate rather than automatically replayed.
 
 ## Internal seams and adapters
 
@@ -451,7 +451,7 @@ Dependency category: local-substitutable.
 
 Adapters:
 
-- Bounded local repository search, read, guarded patch, and verification process execution.
+- Bounded Bash execution and guarded one-file `apply_patch` using controlled Git mechanisms.
 - Deterministic or fault-injecting adapter for narrow lifecycle tests.
 
 The anchor black-box test uses the real local adapter in a temporary Git repository.
@@ -464,7 +464,7 @@ The harness returns projections instead of calling a UI callback. The CLI render
 
 The following need no adapter:
 
-- core state reducer and action parser;
+- core state reducer and assistant-response parser;
 - prompt selection and request reconstruction;
 - operation and generation allocation;
 - approval digesting;
@@ -476,22 +476,24 @@ Introducing seams for them would expose implementation rather than enable a real
 
 ## Tool and model protocol
 
-The first action union is closed:
+The first tool vocabulary is closed:
 
 ```text
-search
-read
-propose_patch
-verify
-finish
-stop
+bash
+apply_patch
 ```
 
-Exactly one action may be selected by a complete assistant response. A length-truncated or otherwise incomplete response authorizes nothing and produces a typed protocol failure.
+`bash` accepts one bounded command plus timeout metadata and always runs from the bound Workspace through the host's sanitized environment. It covers repository inspection and verification without separate search, read, or verification tools. Resident output is bounded, complete output is spooled, and a `possibly_executed` Bash Attempt is never replayed automatically.
 
-Search and read are read-only. Patch and verification require exact approval. Each action has explicit field, nesting, path, byte, result, and execution bounds.
+`apply_patch` accepts one unified diff for one regular file. The host stores the exact bytes, validates structure and confinement, checks applicability through controlled Git mechanisms, and submits the immutable call to the same permission gate as Bash. On permission, the host invokes `git apply` with controlled arguments and input; the model never supplies that host command.
 
-Adding an action changes the closed union, versioned encoding, policy validation, prompt schema, implementation, and tests. There is no dynamic tool registry in the first harness.
+Permission is an independent `allow`, `ask`, or `deny` decision after validation and before Attempt creation. The default interactive policy asks for each exact Bash or `apply_patch` call; deterministic tests may inject a policy that allows named fixture calls. Permission changes admission, not the tool vocabulary.
+
+A complete assistant response may contain at most one tool call. A valid tool call executes, its typed Result becomes a Conversation Entry, and the harness begins another model turn. Text accompanying a tool call is not final. A complete non-empty response with no tool call becomes the Final Answer and completes the Task turn.
+
+A length-truncated, aborted, errored, empty, malformed, or multiple-tool response cannot authorize an effect or become the Final Answer. The harness returns a bounded protocol failure when recovery is safe and otherwise ends with a failure Outcome.
+
+Adding a tool changes the closed vocabulary, versioned encoding, validation, prompt schema, implementation, and tests. There is no dynamic tool registry in the first harness.
 
 ## Memory ownership
 
@@ -515,13 +517,13 @@ onepage \
   "Fix the failing test"
 ```
 
-The fixture model verifies the actual request history, chooses search, read, patch, verify, and finish based on real typed results, and is not a timed transcript. The test approves the exact patch and command through standard input, then requires the repository to finish green.
+The fixture model verifies the actual request history, inspects and verifies through Bash, requests `apply_patch`, and returns a Final Answer based on real typed Results. It is not a timed transcript. The test decides each exact call through standard input and requires the repository to finish green.
 
 ### Harness seam
 
 Open `Harness` with the real one-page core, fixed storage, fault-injecting durable store, and deterministic effect adapters. Test:
 
-- every valid task/action state transition;
+- every valid task, tool-call, and Final Answer state transition;
 - immediate and delayed completions;
 - full and busy admission;
 - stale and duplicate generations;
@@ -545,16 +547,16 @@ Keep mechanical tests for codecs, bounds, checksums, parsers, and the Wasm contr
 
 ## Implementation order
 
-1. Replace the synthetic core event accumulator with the closed task/action state machine while keeping the one-page verifier green.
-2. Deepen the current harness and durable transition adapter into the accepted `open` / `offer` / `drive` interface, including exclusive session ownership and explicit resume identity.
-3. Add the durable session, parent-linked conversation entries, operation and attempt records, journal-forward checkpoint reconciliation, and blob references required by one model request and one search result.
-4. Add the fixture model and CLI for task → search → finish.
-5. Add bounded read and a second model turn.
-6. Add one-file patch validation, digest-bound approval, guarded application, and preimage/postimage/divergent reconciliation.
-7. Add verification process execution, output spooling, indeterminate command recovery, and finish.
-8. Add OpenRouter transport behind the model port.
-9. Add crash injection across the now-real model, approval, patch, and verification boundaries.
-10. Implement runtime-configurable active capacity from issue #3 using measured sizes and wait states.
+1. Deepen the current harness and durable transition adapter into the accepted `open` / `offer` / `drive` owner loop over the closed task/tool-call state machine.
+2. Add exclusive session creation, ownership, explicit resume identity, parent-linked conversation entries, and journal-forward checkpoint reconciliation.
+3. Add the fixture model and CLI for one model request and Final Answer through the durable model seam.
+4. Add permissioned Bash, bounded output spooling, indeterminate recovery, and a second model turn.
+5. Add one-file `apply_patch` validation and digest-bound permission.
+6. Add guarded patch application and preimage/postimage/divergent reconciliation.
+7. Compose Bash inspection, `apply_patch`, Bash verification, and the Final Answer into the deterministic repair.
+8. Add OpenRouter transport behind the same model port.
+9. Add crash injection across the now-real model, permission, Bash, and patch boundaries.
+10. Package the honest one-page terminal demonstration; implement runtime-configurable active capacity separately in issue #3 after measuring the real loop.
 
 Every stage must leave a vertically executable command or test. Avoid horizontal registries, plugin frameworks, and unused protocol variants.
 
@@ -575,6 +577,6 @@ Every stage must leave a vertically executable command or test. Avoid horizontal
 - Caller-owned storage makes `open` configuration exacting.
 - `drive` may synchronously wait for semantic durability barriers.
 - The process interface is not an embedding interface.
-- One active effect and a closed action union limit flexibility intentionally.
+- One active effect and a two-tool vocabulary limit flexibility intentionally.
 
-These costs are desirable in the first implementation. A second real client or action should create the evidence for another seam; hypothetical flexibility should not.
+These costs are desirable in the first implementation. A second real client or tool should create the evidence for another seam; hypothetical flexibility should not.
