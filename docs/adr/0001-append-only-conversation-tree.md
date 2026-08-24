@@ -1,0 +1,3 @@
+# Store conversations as append-only trees
+
+OnePage stores model-visible history as immutable parent-linked conversation entries inside a durable session, while it stores effect-recovery records in a separate operation journal. Model context is a bounded projection of one root-to-leaf branch, and future compaction appends a validated context checkpoint that names its source range, replacement projection, retained tail, policy version, and predecessor without rewriting or deleting source history. V1 exposes only the main branch and does not implement compaction, but adopting the tree shape now avoids a storage migration and preserves deterministic context reconstruction without a resident transcript.

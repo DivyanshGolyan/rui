@@ -1,0 +1,5 @@
+# Compose agents through durable delegation
+
+OnePage models delegation as an asynchronous operation that creates a child agent, session, and task through the same harness used for a root agent. After the parent-child link and operation are durable, the parent can release its execution page and later receive the child's outcome as a typed result; no recursive call stack or resident ancestry is retained. V1 does not expose delegation, but agent identity, scheduling, recovery, and capacity must remain independent of delegation depth and topology.
+
+For one selected agent, activation, suspension, resume, admission, and completion routing must perform bounded work and retain bounded memory independent of ancestor depth, descendant count, and sibling count. These paths address durable records directly and never traverse or hydrate the delegation tree. The system has no product-level nesting-depth limit; shared active-slot and storage limits remain host policy. Topology can still change total work, disk consumption, and critical-path latency, so OnePage does not claim those quantities are constant.

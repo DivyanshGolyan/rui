@@ -55,6 +55,8 @@ Source audits that informed the architecture:
 - [`docs/research/ghostty-lessons.md`](docs/research/ghostty-lessons.md)
 - [`docs/research/deepseek-harness-lessons.md`](docs/research/deepseek-harness-lessons.md)
 - [`docs/research/fx-pi-harness-lessons.md`](docs/research/fx-pi-harness-lessons.md)
+- [`docs/research/codex-cli-session-lessons.md`](docs/research/codex-cli-session-lessons.md)
+- [`docs/research/cursor-origin-wal-lessons.md`](docs/research/cursor-origin-wal-lessons.md)
 
 Accepted designs:
 
@@ -63,3 +65,9 @@ Accepted designs:
 Canonical domain language:
 
 - [`CONTEXT.md`](CONTEXT.md)
+
+Architectural decisions:
+
+- [`docs/adr/0001-append-only-conversation-tree.md`](docs/adr/0001-append-only-conversation-tree.md)
+- [`docs/adr/0002-compose-agents-through-durable-delegation.md`](docs/adr/0002-compose-agents-through-durable-delegation.md)
+- [`docs/adr/0003-treat-user-worktrees-as-external-truth.md`](docs/adr/0003-treat-user-worktrees-as-external-truth.md)

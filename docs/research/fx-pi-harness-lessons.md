@@ -111,6 +111,10 @@ Pi's established `Agent` owns resident message arrays, listener sets, steering a
 
 Pi's experimental durable `AgentHarness` interface exposes prompting, skills, templates, compaction, navigation, resume, abort, three queue modes, queue cancellation, usage recording, idle callbacks, manual action stepping, model/tool mutation, session access, and watches ([source](https://github.com/earendil-works/pi/blob/dcd461925db2edf69a43c8135db1180d418afd54/packages/agent/src/harness/agent-harness.ts#L265-L303)). Many methods are not yet implemented at the pinned revision.
 
+Pi's session shape is more valuable to OnePage than its broad harness interface. Conversation entries are immutable nodes with stable identity and a parent link, while operation records are a separate type family for recovery and execution history ([source](https://github.com/earendil-works/pi/blob/dcd461925db2edf69a43c8135db1180d418afd54/packages/agent/src/harness/session/types.ts#L14-L74), [source](https://github.com/earendil-works/pi/blob/dcd461925db2edf69a43c8135db1180d418afd54/packages/agent/src/harness/session/types.ts#L80-L160)). Its context builder projects one path and treats the latest compaction entry as a replacement view over older entries rather than deleting the underlying tree ([source](https://github.com/earendil-works/pi/blob/dcd461925db2edf69a43c8135db1180d418afd54/packages/agent/src/harness/session/context.ts#L45-L99)).
+
+OnePage should adopt those semantics in a smaller form: one session, one `main` leaf, immutable parent-linked entries, a separate operation journal, and deterministic branch-to-context projection. It should not adopt resident message arrays, multiple lanes, navigation commands, or compaction behaviour until the first task loop proves the storage and projection path.
+
 This is useful negative evidence for OnePage. The first interface should not mirror every product capability. A deep harness should accept task/completion facts and return progress/outcome while keeping navigation, projection, provider, tools, and recovery inside its implementation.
 
 ## DeepSeek Harness findings that remain binding

@@ -12,10 +12,18 @@ Research basis:
 - [`fx-pi-harness-lessons.md`](../research/fx-pi-harness-lessons.md)
 - [`deepseek-harness-lessons.md`](../research/deepseek-harness-lessons.md)
 - [`ghostty-lessons.md`](../research/ghostty-lessons.md)
+- [`codex-cli-session-lessons.md`](../research/codex-cli-session-lessons.md)
+- [`cursor-origin-wal-lessons.md`](../research/cursor-origin-wal-lessons.md)
 
 Domain language:
 
 - [`CONTEXT.md`](../../CONTEXT.md)
+
+Architectural decisions:
+
+- [`0001-append-only-conversation-tree.md`](../adr/0001-append-only-conversation-tree.md)
+- [`0002-compose-agents-through-durable-delegation.md`](../adr/0002-compose-agents-through-durable-delegation.md)
+- [`0003-treat-user-worktrees-as-external-truth.md`](../adr/0003-treat-user-worktrees-as-external-truth.md)
 
 ## Decision
 
@@ -59,6 +67,45 @@ The CLI is the highest product test seam. `Harness` is the highest deterministic
 - Partial model output cannot authorize an effect.
 - Mutations and commands require approval bound to the exact immutable operation descriptor.
 - The first design must leave room for runtime-configurable slot capacity without implementing it yet.
+
+## Session and context model
+
+A task is not a session, and a conversation is not model context. V1 creates one durable session for one agent and one task, but keeps their identities distinct so the same session can later contain follow-up tasks without redefining stored history.
+
+The session has two append-only durable surfaces:
+
+1. The conversation tree contains immutable, parent-linked entries that may become model-visible. V1 advances only a `main` leaf, but every entry carries its parent relationship from the first implementation.
+2. The operation journal contains recovery and effect-lifecycle records. These records never enter model context merely because they exist; an authoritative result becomes model-visible only through a committed conversation entry.
+
+A branch is one root-to-leaf conversation path. Model context is a deterministic, bounded projection of the active branch for one model operation, not a stored or resident transcript. The core selects entries and bounded durable ranges; the host walks the branch and serializes that selection without adding, reordering, or summarizing semantic content.
+
+Compaction is deferred as behaviour, not erased from the architecture. A future compaction operation will append an immutable context checkpoint that names the source interval, stable replacement projection or durable handles, retained tail, context-policy version, previous checkpoint, and digest. Context construction selects the newest valid checkpoint and replays later entries while the original branch remains available for audit, branching, and a different future projection. A checkpoint is published only after its complete replacement projection is durable; invalid or incomplete checkpoints fall back to an older checkpoint or the branch root.
+
+Resume continues the same session and branch. A future conversation fork creates another branch over a frozen committed entry and operation-journal watermark within that session; it does not copy the parent transcript or create another session merely to represent alternate history. V1 permits neither navigation nor forking, but its entry identities and storage reads must preserve those semantics.
+
+The resident core retains only stable session identity, the active conversation leaf, bounded selection state, and generation-tagged handles. The conversation tree and operation journal remain on disk and are traversed through bounded reads or an on-disk index; no resident object graph grows with conversation length.
+
+## Workspace continuity
+
+Conversation reconstruction and workspace reconstruction are different claims. V1 operates on a user-owned Git worktree that may change outside OnePage, so the worktree remains external truth. The operation journal records the exact preimage identity, immutable mutation descriptor, observed postimage identity, and uncertainty disposition for each consequential repository operation; these are fields on the existing operation record, not a third history.
+
+On resume or delayed application, the harness compares the current workspace state with the expected generation and fails closed for reconciliation on mismatch. It never treats transcript text, command output, or an accepted-but-unreconciled operation as proof of repository state.
+
+A future harness-owned isolated workspace may close every mutation path, store a durable Git baseline plus semantic mutations, and treat the checked-out repository as a disposable materialization. Cursor Origin's WAL-first repository reconstruction applies only in that mode. Physical mutation-log checkpointing in such a workspace is distinct from conversation compaction: the former preserves exact repository semantics, while the latter deliberately changes model-visible detail.
+
+## Agent composition
+
+Agents compose through durable delegation, not recursive calls. A delegation action creates a fresh child agent, session, and task as an external operation. The parent-child relation and accepted operation become durable before the child can run or the parent can release its page.
+
+The child is an ordinary logical agent driven through the same `Harness`. It may delegate again without retaining any ancestor in memory. When the child reaches a terminal outcome, that outcome is durably summarized as the result of the parent's delegation operation and routed through the normal completion path. The child's full conversation does not enter the parent's model context implicitly.
+
+Delegation creates a durable tree rather than a process stack. Scheduling, completion routing, restoration, and capacity admission use stable agent and operation identities directly; none walks the ancestry chain to advance an agent. The system imposes no product limit on logical delegation depth, although total logical population, disk use, total work, and serial critical-path latency still grow with the workload.
+
+Topology independence is a measurable invariant: for one selected agent, activation, suspension, resume, admission, and completion routing perform bounded work and retain bounded memory independent of ancestor depth, descendant count, and sibling count. Global discovery and observability may query a durable topology index, but those paths are outside agent advancement and must paginate rather than hydrate the tree. Capacity limits apply to shared active resources and durable storage, never to nesting depth.
+
+V1 does not include a `delegate` action or child scheduler. It must preserve this shape by avoiding root-only identities, resident caller frames, synchronous reentry, or capacity accounting based on ancestry depth. A later closed-union `delegate` action can therefore reuse submitted → accepted → completed, quiescent suspension, and typed results without changing the three-entry harness interface.
+
+A child receives a bounded delegation packet selected by its parent, not a copied parent conversation. Resuming an agent restores only that agent; it never walks, hydrates, or awakens descendants. Direct durable runnable and completion records make each logical agent independently schedulable regardless of its position in the delegation tree.
 
 ## Designs considered
 
@@ -145,7 +192,7 @@ onepage \
 - Parse the invocation and resolve the repository.
 - Select and construct the model adapter.
 - Reserve caller-owned harness storage.
-- Open the durable task directory.
+- Open or create the durable session.
 - Start the task through `Harness.offer`.
 - Pump external completions into `Harness.offer`.
 - Call `Harness.drive` until suspended or terminal.
@@ -396,7 +443,7 @@ Adding an action changes the closed union, versioned encoding, policy validation
 
 - Core mutable state and core-owned scratch: exactly one 64 KiB page.
 - Native harness metadata and queues: caller-owned fixed storage, measured separately.
-- Task text, transcript, request bodies, responses, patches, and command output: durable blobs and bounded windows.
+- Task text, conversation entries, request bodies, responses, patches, and command output: durable blobs and bounded windows.
 - Tool output: bounded resident tail plus complete durable spool.
 - JavaScriptCore, transport buffers, filesystem cache, subprocesses, and UI: outside the one-page claim and reported separately.
 - Sleeping logical agents: durable identity, records, checkpoint, and blob references; no resident object graph.
@@ -439,7 +486,7 @@ Keep mechanical tests for codecs, bounds, checksums, parsers, and the Wasm contr
 
 1. Replace the synthetic core event accumulator with the closed task/action state machine while keeping the one-page verifier green.
 2. Deepen the current harness and durable transition adapter into the accepted `open` / `offer` / `drive` interface.
-3. Add semantic journal records and durable blob references required by one model request and one search result.
+3. Add the durable session, parent-linked conversation entries, semantic operation records, and blob references required by one model request and one search result.
 4. Add the fixture model and CLI for task → search → finish.
 5. Add bounded read and a second model turn.
 6. Add patch validation, digest-bound approval, and guarded application.
