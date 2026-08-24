@@ -13,14 +13,15 @@ recover, and replay 1,000 operations while their agents are absent from memory. 
 processes restore every page through the same slot without building a resident per-agent index.
 
 The fixed-credit harness spike extracts the compiled Wasm contract into one verifier and adds a
-1.5 KiB-bounded native owner with nonblocking completion admission, durable-before-apply ordering,
-stale and duplicate rejection, bounded drive quanta, and crash/replay tests. Its 32-entry maximum is
-fixed at compile time and does not vary with logical-agent count.
+1.5 KiB-bounded native owner with nonblocking task, completion, permission, cancellation, and
+shutdown admission; durable-before-apply ordering; committed projections; bounded drive quanta;
+and crash/replay tests. Its 32-entry maximum is fixed at compile time and does not vary with
+logical-agent count.
 
 The owner crash-recovery spike connects that harness to the real operation journal and JavaScriptCore
 slot. A child process exits after the completion record is synced but before slot mutation; two fresh
 recovery processes then prove one application followed by one duplicate. The fixed native control
-metadata is 1,528 bytes, excluding the runtime, one-page core, and checkpoint staging buffer.
+metadata is 1,536 bytes, excluding the runtime, one-page core, and checkpoint staging buffer.
 
 The atomic checkpoint spike publishes through temporary write, file sync, same-directory rename,
 and parent-directory sync. Sixteen fresh child processes terminate at each boundary and recover only

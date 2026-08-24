@@ -42,8 +42,16 @@ pub const Adapter = struct {
         };
     }
 
-    fn classify(context: *anyopaque, completion: harness.Completion) anyerror!harness.CompletionState {
+    fn completionFrom(input: harness.Input) !harness.Completion {
+        return switch (input) {
+            .completion => |completion| completion,
+            else => error.UnsupportedInput,
+        };
+    }
+
+    fn classify(context: *anyopaque, input: harness.Input) anyerror!harness.InputState {
         const self: *Adapter = @ptrCast(@alignCast(context));
+        const completion = try completionFrom(input);
         if (completion.agent_id != self.agent_id or
             completion.agent_generation != self.agent_generation or
             completion.operation_id != self.operation_id or
@@ -86,8 +94,9 @@ pub const Adapter = struct {
         return .applicable;
     }
 
-    fn persist(context: *anyopaque, completion: harness.Completion) anyerror!void {
+    fn persist(context: *anyopaque, input: harness.Input) anyerror!void {
         const self: *Adapter = @ptrCast(@alignCast(context));
+        const completion = try completionFrom(input);
         try self.writer.appendDurable(self.io, .{
             .kind = .completed,
             .agent_id = completion.agent_id,
@@ -100,8 +109,9 @@ pub const Adapter = struct {
         if (self.fault) |fault| try fault.after_persist(fault.context);
     }
 
-    fn apply(context: *anyopaque, completion: harness.Completion) anyerror!void {
+    fn apply(context: *anyopaque, input: harness.Input) anyerror!void {
         const self: *Adapter = @ptrCast(@alignCast(context));
+        const completion = try completionFrom(input);
         try self.slot.apply(self.slot.context, completion);
     }
 };
@@ -152,7 +162,7 @@ fn appendAccepted(writer: *operation_log.Writer, io: std.Io) !void {
 
 fn openHarness(adapter: *Adapter) !harness.Harness {
     return harness.Harness.open(.{
-        .completion_capacity = 1,
+        .input_capacity = 1,
         .drive_quantum = 1,
         .transition = adapter.transition(),
     });
@@ -178,7 +188,7 @@ test "the adapter persists a real completion record before slot application" {
         .slot = slot.interface(),
     };
     var owner = try openHarness(&adapter);
-    try std.testing.expectEqual(harness.OfferResult.queued, owner.offer(test_completion));
+    try std.testing.expectEqual(harness.OfferResult.queued, owner.offer(.{ .completion = test_completion }));
     const progress = try owner.drive();
     try std.testing.expectEqual(@as(u8, 1), progress.applied);
     try std.testing.expectEqual(@as(u8, 1), slot.apply_count);
@@ -218,12 +228,12 @@ test "reconstruction applies a durable completion once without a second append" 
         .slot = slot.interface(),
     };
     var owner = try openHarness(&adapter);
-    try std.testing.expectEqual(harness.OfferResult.queued, owner.offer(test_completion));
+    try std.testing.expectEqual(harness.OfferResult.queued, owner.offer(.{ .completion = test_completion }));
     const recovered = try owner.drive();
     try std.testing.expectEqual(@as(u8, 1), recovered.applied);
     try std.testing.expectEqual(@as(u64, operation_log.record_size * 2), writer.offset);
 
-    try std.testing.expectEqual(harness.OfferResult.queued, owner.offer(test_completion));
+    try std.testing.expectEqual(harness.OfferResult.queued, owner.offer(.{ .completion = test_completion }));
     const replayed = try owner.drive();
     try std.testing.expectEqual(@as(u8, 1), replayed.duplicate);
     try std.testing.expectEqual(@as(u8, 1), slot.apply_count);
@@ -250,7 +260,7 @@ test "an unreadable journal fail-stops the owner" {
         .slot = slot.interface(),
     };
     var owner = try openHarness(&adapter);
-    try std.testing.expectEqual(harness.OfferResult.queued, owner.offer(test_completion));
+    try std.testing.expectEqual(harness.OfferResult.queued, owner.offer(.{ .completion = test_completion }));
     try std.testing.expectError(error.TruncatedRecord, owner.drive());
-    try std.testing.expectEqual(harness.OfferResult.unavailable, owner.offer(test_completion));
+    try std.testing.expectEqual(harness.OfferResult.unavailable, owner.offer(.{ .completion = test_completion }));
 }

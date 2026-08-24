@@ -665,11 +665,11 @@ fn ownerCrashAfterSync(io: std.Io, allocator: std.mem.Allocator, runtime: *const
         .fault = .{ .context = &slot, .after_persist = exitAfterPersist },
     };
     var owner = try harness.Harness.open(.{
-        .completion_capacity = 1,
+        .input_capacity = 1,
         .drive_quantum = 1,
         .transition = adapter.transition(),
     });
-    if (owner.offer(ownerCompletion()) != .queued) return error.OwnerAdmissionFailed;
+    if (owner.offer(.{ .completion = ownerCompletion() }) != .queued) return error.OwnerAdmissionFailed;
     _ = try owner.drive();
     return error.CrashInjectionDidNotExit;
 }
@@ -698,11 +698,11 @@ fn ownerRecover(
         .slot = slot.interface(),
     };
     var owner = try harness.Harness.open(.{
-        .completion_capacity = 1,
+        .input_capacity = 1,
         .drive_quantum = 1,
         .transition = adapter.transition(),
     });
-    if (owner.offer(ownerCompletion()) != .queued) return error.OwnerAdmissionFailed;
+    if (owner.offer(.{ .completion = ownerCompletion() }) != .queued) return error.OwnerAdmissionFailed;
     const progress = try owner.drive();
     if (journal.offset != journal_bytes_before or
         journal.offset != operation_log.record_size * 2)
@@ -777,11 +777,11 @@ fn checkpointCrash(
         .slot = slot.interface(),
     };
     var owner = try harness.Harness.open(.{
-        .completion_capacity = 1,
+        .input_capacity = 1,
         .drive_quantum = 1,
         .transition = adapter.transition(),
     });
-    if (owner.offer(ownerCompletion()) != .queued) return error.OwnerAdmissionFailed;
+    if (owner.offer(.{ .completion = ownerCompletion() }) != .queued) return error.OwnerAdmissionFailed;
     _ = try owner.drive();
     return error.CheckpointCrashInjectionDidNotExit;
 }
