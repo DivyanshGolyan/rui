@@ -71,3 +71,4 @@ Architectural decisions:
 - [`docs/adr/0001-append-only-conversation-tree.md`](docs/adr/0001-append-only-conversation-tree.md)
 - [`docs/adr/0002-compose-agents-through-durable-delegation.md`](docs/adr/0002-compose-agents-through-durable-delegation.md)
 - [`docs/adr/0003-treat-user-worktrees-as-external-truth.md`](docs/adr/0003-treat-user-worktrees-as-external-truth.md)
+- [`docs/adr/0004-reconcile-uncertain-effect-attempts.md`](docs/adr/0004-reconcile-uncertain-effect-attempts.md)

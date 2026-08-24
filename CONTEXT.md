@@ -61,8 +61,12 @@ One policy-valid next step selected by the agent. An action either requests exte
 _Avoid_: Tool call, command, event
 
 **Operation**:
-A uniquely identified instance of external work initiated by an action. An operation progresses through submitted, accepted, and completed states.
+A uniquely identified instance of external work initiated by an action. An operation progresses through submitted, accepted, and completed states and may require more than one attempt.
 _Avoid_: Action, job, request
+
+**Attempt**:
+One uniquely identified try to execute an accepted operation. Its disposition states whether execution definitely did not occur, may have occurred, or produced a durable terminal result.
+_Avoid_: Operation, retry, request
 
 **Result**:
 The durable, typed outcome of a completed operation that the agent can use in a later decision.
@@ -71,6 +75,10 @@ _Avoid_: Completion, output, response
 **Completion**:
 A bounded notification that an operation's durable result is ready to apply to agent state.
 _Avoid_: Result, event, callback
+
+**Reconciliation**:
+The resolution of an uncertain operation by comparing durable intent with observed external state.
+_Avoid_: Retry, replay, recovery
 
 **Approval**:
 A user's decision to authorize or reject one exact consequential operation.
@@ -87,5 +95,5 @@ A committed, observer-facing view of agent state or history that is not itself a
 _Avoid_: Event, callback, log
 
 **Outcome**:
-The terminal resolution of a task: success, an explained stop, or failure when safe progress cannot continue.
+The terminal resolution of a task: success, an explained stop, cancellation, or failure when safe progress cannot continue.
 _Avoid_: Completion, result, exit code

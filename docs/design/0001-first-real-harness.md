@@ -24,6 +24,7 @@ Architectural decisions:
 - [`0001-append-only-conversation-tree.md`](../adr/0001-append-only-conversation-tree.md)
 - [`0002-compose-agents-through-durable-delegation.md`](../adr/0002-compose-agents-through-durable-delegation.md)
 - [`0003-treat-user-worktrees-as-external-truth.md`](../adr/0003-treat-user-worktrees-as-external-truth.md)
+- [`0004-reconcile-uncertain-effect-attempts.md`](../adr/0004-reconcile-uncertain-effect-attempts.md)
 
 ## Decision
 
@@ -60,7 +61,7 @@ The CLI is the highest product test seam. `Harness` is the highest deterministic
 - The native host supplies bounded mechanisms and may not infer the next agent action.
 - One logical agent, one resident execution slot, one model operation, and one tool operation are sufficient for the first coding-task loop.
 - Every operation follows submitted → accepted → completed.
-- Accepted work can outlive the process and does not require a resident page.
+- Accepted intent can outlive the process and does not require a resident page; the corresponding external effect may remain uncertain.
 - No callback reenters the core.
 - Immediate and deferred completions follow the same path.
 - Large payloads live in durable storage and cross the core interface through bounded windows and generation-tagged handles.
@@ -85,9 +86,24 @@ Resume continues the same session and branch. A future conversation fork creates
 
 The resident core retains only stable session identity, the active conversation leaf, bounded selection state, and generation-tagged handles. The conversation tree and operation journal remain on disk and are traversed through bounded reads or an on-disk index; no resident object graph grows with conversation length.
 
+## Session ownership and resume
+
+At most one live `Harness` owns transition authority for a durable session. `Harness.open` acquires an exclusive operating-system lock for the session lifetime and durably advances its ownership epoch before it may restore, dispatch, or apply work. Every dispatch and completion carries that epoch in addition to agent and operation generations. A stale owner cannot dispatch, journal, or apply work after losing ownership; the current owner may accept a late completion from an older epoch only when it names an open durable attempt, then reconcile it through the normal completion path.
+
+A new invocation and a recovery invocation are distinct product operations:
+
+```text
+onepage [--repo PATH] --model PROVIDER:MODEL TASK
+onepage --resume SESSION_ID
+```
+
+Creating a session prints its stable identity before the first external effect. Resume restores the recorded repository binding, model selection, session, agent, task, and active branch; credentials remain external and must still be available to the relevant adapter. If the session lock is held, the command fails without opening a second owner. Repeating task text creates a new session and never implies resume.
+
 ## Workspace continuity
 
 Conversation reconstruction and workspace reconstruction are different claims. V1 operates on a user-owned Git worktree that may change outside OnePage, so the worktree remains external truth. The operation journal records the exact preimage identity, immutable mutation descriptor, observed postimage identity, and uncertainty disposition for each consequential repository operation; these are fields on the existing operation record, not a third history.
+
+V1 patch operations touch exactly one regular file. Patch application is reconcilable, not transactionally atomic with the worktree: recovery classifies the current file as the expected preimage, expected postimage, or divergent. The preimage permits a new attempt only after renewed approval, the postimage proves the intended mutation is already present, and divergence stops automatically with an indeterminate result. A later multi-file patch must define the same classification per file and may not claim all-or-nothing mutation without an isolated transactional mechanism.
 
 On resume or delayed application, the harness compares the current workspace state with the expected generation and fails closed for reconciliation on mismatch. It never treats transcript text, command output, or an accepted-but-unreconciled operation as proof of repository state.
 
@@ -103,7 +119,9 @@ Delegation creates a durable tree rather than a process stack. Scheduling, compl
 
 Topology independence is a measurable invariant: for one selected agent, activation, suspension, resume, admission, and completion routing perform bounded work and retain bounded memory independent of ancestor depth, descendant count, and sibling count. Global discovery and observability may query a durable topology index, but those paths are outside agent advancement and must paginate rather than hydrate the tree. Capacity limits apply to shared active resources and durable storage, never to nesting depth.
 
-V1 does not include a `delegate` action or child scheduler. It must preserve this shape by avoiding root-only identities, resident caller frames, synchronous reentry, or capacity accounting based on ancestry depth. A later closed-union `delegate` action can therefore reuse submitted → accepted → completed, quiescent suspension, and typed results without changing the three-entry harness interface.
+The V1 compatibility constraints are to avoid root-only identities, resident caller frames, synchronous reentry, and capacity accounting based on ancestry depth. V1 does not include a `delegate` action or child scheduler.
+
+The future scheduler requirements are bounded per-agent advancement independent of topology and no product-level nesting-depth limit. A later closed-union `delegate` action can reuse submitted → accepted → completed, quiescent suspension, and typed results without changing the three-entry harness interface.
 
 A child receives a bounded delegation packet selected by its parent, not a copied parent conversation. Resuming an agent restores only that agent; it never walks, hydrates, or awakens descendants. Direct durable runnable and completion records make each logical agent independently schedulable regardless of its position in the delegation tree.
 
@@ -148,6 +166,7 @@ Interface:
 ```text
 onepage [--repo PATH] --model PROVIDER:MODEL TASK
 onepage [--repo PATH] --model fixture:PATH TASK
+onepage --resume SESSION_ID
 ```
 
 This gives the common caller and employment-funnel demonstration the smallest possible interface. A deterministic fixture and a live model run through the same executable. Its weakness is poor embeddability if treated as the only module.
@@ -192,7 +211,8 @@ onepage \
 - Parse the invocation and resolve the repository.
 - Select and construct the model adapter.
 - Reserve caller-owned harness storage.
-- Open or create the durable session.
+- Create a durable session or explicitly resume one by identity.
+- Acquire and retain exclusive session ownership before driving it.
 - Start the task through `Harness.offer`.
 - Pump external completions into `Harness.offer`.
 - Call `Harness.drive` until suspended or terminal.
@@ -230,7 +250,7 @@ pub const Harness = struct {
 };
 ```
 
-`open` borrows caller-owned fixed storage and adapters. The harness allocates no capacity after opening. The caller owns adapter and backing-storage lifetimes.
+`open` borrows caller-owned fixed storage and adapters. The harness allocates no capacity after opening. The caller owns adapter and backing-storage lifetimes. Opening a durable session also acquires its exclusive lifetime lock and publishes a new ownership epoch before transition authority becomes available.
 
 `offer` is the only producer-to-owner transfer. It performs no I/O, allocation, wait, or core call. Ownership transfers only when it returns `queued`.
 
@@ -252,9 +272,13 @@ pub const Input = union(enum) {
 
 `TaskInput` is copied into fixed ingress storage before `offer` returns `queued`. Oversized input is rejected as a disposition.
 
-`Completion` contains only stable identity, generations, a typed disposition, and a durable result reference. Large provider and tool bodies never enter the completion ring.
+`Completion` contains only stable session, agent, operation, attempt, and ownership-epoch identity; generations; a typed disposition; and a durable result reference. Large provider and tool bodies never enter the completion ring.
 
 `ApprovalDecision` contains the agent and operation generations plus the digest of the descriptor and bytes displayed to the user. A stale or mismatched decision cannot authorize an effect.
+
+Cancellation is a durable request to stop further agent decisions, not a claim that an accepted effect did not happen. The harness admits no new operation after cancellation, but every accepted operation must still reach a terminal or indeterminate disposition. If a completion races cancellation, the journal records and reconciles the completion before the task reaches its cancelled outcome.
+
+Shutdown stops new admission and asks the harness to relinquish ownership cleanly. `closed` is valid only after every accepted operation has a terminal or indeterminate disposition and the final checkpoint reflects it. If an adapter cannot stop or prove a result, shutdown records uncertainty according to the operation's effect class rather than discarding the operation.
 
 ### Progress
 
@@ -281,7 +305,9 @@ pub const State = enum {
 
 The projection slice is borrowed from caller-owned storage until the next `drive`. Projections contain compact fields or durable text references and become visible only after the authoritative fact commits.
 
-Ordinary model, tool, approval, timeout, cancellation, and verification failures are typed durable results. `drive` errors are reserved for corruption, impossible state, adapter contract violation, failed durability, or an unreconciled transition that makes continued ownership unsafe.
+Volatile edge projections, such as streaming text deltas, may be lost across a crash. Durable level projections, including approval-required, indeterminate, cancelled, and terminal outcomes, are regenerated from restored state on the first `drive` after `open` and whenever the authoritative state changes. Recovery therefore does not require an event cursor or make a previously displayed prompt authoritative.
+
+Ordinary model, tool, approval, timeout, cancellation, indeterminate-effect, and verification failures are typed durable results. A timeout is a terminal attempt result produced by an adapter from the immutable timeout descriptor; the core has no implicit clock. If a crash prevents that result from becoming durable, normal effect-uncertainty recovery applies. `drive` errors are reserved for corruption, impossible state, adapter contract violation, failed durability, or an unreconciled transition that makes continued ownership unsafe.
 
 ### Offer dispositions
 
@@ -299,6 +325,10 @@ unavailable
 
 ## Authoritative ordering
 
+The operation journal is authoritative for external-effect lifecycle. A checkpoint is an atomic snapshot of core state that may lag the journal. On disagreement, recovery restores the newest valid checkpoint and reconciles it forward from journal records; it never rolls the journal back to match the page.
+
+An operation describes the logical external work and completes at most once. Each delivery or execution try has a stable attempt identity beneath that operation. Before an adapter may observe an attempt, the journal durably records its operation, attempt identity, ownership epoch, immutable descriptor digest, and recovery class.
+
 ### Starting an effect
 
 ```text
@@ -308,11 +338,12 @@ core publishes immutable submitted descriptor
 -> append and sync accepted record
 -> advance core to accepted
 -> publish accepted checkpoint
--> admit effect to its adapter
+-> append and sync delivery-attempt record
+-> admit that attempt to its adapter
 -> release page at a quiescent yield
 ```
 
-The adapter cannot observe an operation before durable acceptance. A slot cannot be released while its only copy of a submitted operation remains in the page.
+The adapter cannot observe an operation before durable acceptance and attempt identity. A slot cannot be released while its only copy of a submitted operation remains in the page. A crash with no later attempt disposition is conservatively `possibly_executed` unless the adapter can prove `definitely_unsent`.
 
 ### Completing an effect
 
@@ -320,7 +351,7 @@ The adapter cannot observe an operation before durable acceptance. A slot cannot
 adapter spools complete bounded result
 -> offer stable completion
 -> restore and generation-check page
--> classify journal plus slot state
+-> classify journal, ownership epoch, attempt, and slot state
 -> append and sync completed record when needed
 -> apply completion through core ABI
 -> publish completed checkpoint
@@ -330,6 +361,27 @@ adapter spools complete bounded result
 
 A journal-durable result absent from the page applies once without a second append. A duplicate is consumed idempotently. A stale generation never mutates state.
 
+### Attempt dispositions and recovery
+
+Every attempt is durably classified as one of three dispositions:
+
+- `definitely_unsent`: the adapter proves that the external effect did not begin;
+- `possibly_executed`: the effect may have occurred but no trustworthy terminal result is available;
+- `terminal(result)`: the complete typed result is durable.
+
+An exact late result may refine `possibly_executed` to `terminal(result)` while its operation remains incomplete. The first terminal result committed for an operation completes it. A later result from another attempt remains evidence but cannot complete or advance the operation again. Retry always creates a new attempt identity; transport and agent layers never retry the same attempt independently.
+
+Recovery depends on the effect class:
+
+| Effect | Recovery after `possibly_executed` |
+| --- | --- |
+| Model inference | A new attempt is permitted; duplicate provider work or billing is possible and reported. |
+| Repository search or read | A new attempt is permitted only while the bound workspace generation still matches. |
+| One-file patch | Classify the file as preimage, postimage, or divergent; retry from the preimage only after renewed approval, accept the observed postimage, and stop on divergence. |
+| Command or verification | Never retry automatically; complete with an indeterminate result because the command may have external effects. |
+
+Persistence ordering cannot make arbitrary external effects exactly once. Reconciliation and explicit uncertainty are part of the normal operation lifecycle, not exceptional telemetry.
+
 ### Model dispatch
 
 ```text
@@ -337,15 +389,16 @@ core selects ordered durable context handles
 -> reconstruct provider request deterministically
 -> persist request intent and digest
 -> serialize and validate request
+-> append and sync attempt identity
 -> admit provider delivery
--> mark delivery definitely_unsent or possibly_sent
+-> record definitely_unsent, possibly_executed, or terminal result
 -> stream volatile sanitized preview if desired
 -> spool complete response
 -> persist terminal result
 -> offer completion
 ```
 
-Verification builds reconstruct the request from durable records and compare it with the dispatched bytes. Transport and agent retry ownership are explicit; both layers cannot retry the same attempt.
+Verification builds reconstruct the request from durable records and compare it with the dispatched bytes. A model retry creates a new attempt under the same operation. Possible duplicate billing is part of durable result accounting rather than hidden by an exactly-once claim.
 
 ### Consequential tools
 
@@ -358,12 +411,13 @@ decode
 -> publish approval-required projection
 -> receive digest-bound decision
 -> persist approved intent
+-> append and sync attempt identity
 -> execute immutable descriptor
 -> persist typed result
 -> offer completion
 ```
 
-Approval never causes the host to decode mutable model text again.
+Approval never causes the host to decode mutable model text again. Verification uses the consequential command recovery class: approval grants one exact attempt, and ambiguous execution is indeterminate rather than automatically replayed.
 
 ## Internal seams and adapters
 
@@ -475,6 +529,13 @@ Open `Harness` with the real one-page core, fixed storage, fault-injecting durab
 - partial or length-truncated model output;
 - process exit before and after every semantic publication;
 - recovery from accepted operations with no resident page;
+- exclusive session ownership, stale-owner dispatch rejection, and current-owner reconciliation of a matching late completion;
+- explicit resume by session identity;
+- crash recovery for every attempt disposition and effect class;
+- regenerated approval and terminal projections after restoration;
+- cancellation and shutdown races with accepted effects;
+- one-file patch reconciliation from preimage, postimage, and divergent content;
+- journal-ahead-of-checkpoint reconciliation;
 - request reconstruction equality;
 - fixed memory across repeated turns.
 
@@ -485,12 +546,12 @@ Keep mechanical tests for codecs, bounds, checksums, parsers, and the Wasm contr
 ## Implementation order
 
 1. Replace the synthetic core event accumulator with the closed task/action state machine while keeping the one-page verifier green.
-2. Deepen the current harness and durable transition adapter into the accepted `open` / `offer` / `drive` interface.
-3. Add the durable session, parent-linked conversation entries, semantic operation records, and blob references required by one model request and one search result.
+2. Deepen the current harness and durable transition adapter into the accepted `open` / `offer` / `drive` interface, including exclusive session ownership and explicit resume identity.
+3. Add the durable session, parent-linked conversation entries, operation and attempt records, journal-forward checkpoint reconciliation, and blob references required by one model request and one search result.
 4. Add the fixture model and CLI for task → search → finish.
 5. Add bounded read and a second model turn.
-6. Add patch validation, digest-bound approval, and guarded application.
-7. Add verification process execution, output spooling, and finish.
+6. Add one-file patch validation, digest-bound approval, guarded application, and preimage/postimage/divergent reconciliation.
+7. Add verification process execution, output spooling, indeterminate command recovery, and finish.
 8. Add OpenRouter transport behind the model port.
 9. Add crash injection across the now-real model, approval, patch, and verification boundaries.
 10. Implement runtime-configurable active capacity from issue #3 using measured sizes and wait states.
