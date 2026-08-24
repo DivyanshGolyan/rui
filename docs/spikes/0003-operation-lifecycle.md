@@ -41,6 +41,10 @@ The host retains accepted operations and completions in bounded durable storage.
 identifies the operation, agent generation, status, result handle, byte length, and checksum.
 Generation checks reject stale results after handles or slots are reused.
 
+The current core uses a 32-bit operation generation and refuses a new submission when that counter
+is exhausted. It never wraps to a previously valid generation. A later format can rotate logical
+agent identity under a durable barrier if operation counts make this boundary reachable.
+
 Completions preserve dependency order and use free-running sequence numbers. The scheduler admits
 and drains fixed-size batches so that a backlog cannot monopolize an execution slot. Full mailboxes
 apply backpressure and pause new work instead of growing resident memory.
@@ -51,31 +55,66 @@ progress events or one durable terminal completion.
 
 ## Representation decision
 
-The contract does not require shared circular rings. Because only one logical agent runs in an
-execution slot at a time, fixed command and event batches may use less page space and be easier to
-inspect. The implementation spike must compare both layouts after the descriptor fields and
-alignment are known.
+The host journal now uses canonical, checksummed 64-byte records. Each record identifies its kind,
+logical agent, agent generation, operation, operation generation, global sequence, and result. The
+writer synchronizes the file after every accepted or completed record. Replay rejects corrupt,
+noncanonical, truncated, and nonmonotonic records.
+
+The page still uses one fixed operation slot rather than a shared circular ring. Because only one
+logical agent runs in an execution slot at a time, fixed command and event batches may use less page
+space and be easier to inspect. A later spike can compare both layouts after real descriptor fields
+and alignment are known.
 
 The operating-system backend is also separate from the protocol. A later macOS host can use
 readiness notification for sockets and pipes and a fixed worker pool for unavoidable blocking work
 without exposing either mechanism to the core.
 
-## Required experiments
+## Current result
 
-1. Crash immediately before and after operation acceptance, then prove that acknowledged work is
-   present and unacknowledged work is never reported as accepted.
-2. Complete an operation while its agent has no resident page, restart the host, and deliver the
-   completion to the correct restored generation.
-3. Send immediate and deferred completions through the same queue and prove that neither re-enters
-   the core.
-4. Fill the submission and completion bounds and prove deterministic backpressure without memory
-   growth or record loss.
-5. Reuse operation and buffer slots across generations and reject stale or duplicate completions.
-6. Measure resident host memory while durable accepted operations increase with execution-slot
-   count fixed.
+`zig build lifecycle -Doptimize=ReleaseSmall` launches four host processes: preparation, completion,
+recovery, and repeated recovery. The preparation process drives 1,000 agents through one resident
+JavaScriptCore instance and one 64 KiB page. Each agent writes its submitted checkpoint before the
+host appends and synchronizes acceptance, then the page becomes eligible for reuse.
+
+One completion is available immediately after acceptance but still enters the journal instead of
+re-entering the core. The completion process reopens and validates the journal, resumes after global
+sequence 1,001, and appends the other 999 completions while no logical-agent page is loaded. Agent
+500 deliberately keeps a submitted page image after its acceptance is durable. Agent 1,001 keeps a
+submitted page image without an accepted journal record.
+
+The recovery process starts with a fresh JavaScriptCore context, compiled module, and execution
+page. It scans the journal without a resident per-agent index, restores pages only as their
+completions are encountered, reconciles agent 500's accepted transition, and leaves agent 1,001
+submitted. All 1,000 accepted operations reach their expected completed state. The second recovery
+process replays the same journal over already-completed pages and reaches the same result.
+
+One measured run on 2026-08-24 reported:
+
+| Boundary | Result |
+| --- | ---: |
+| Resident execution slots | 1 |
+| Accepted operations | 1,000 |
+| Queued completions | 1,000 |
+| Journal size | 128,000 B |
+| Checkpoint storage, including unaccepted probe | 65,665,600 B |
+| Preparation RSS after agents 1, 100, and 1,000 | 8,650,752 B each |
+| Preparation time | 743 ms |
+| Completion publication time | 50 ms |
+| First recovery time | 1,962 ms |
+| Lost accepted operations | 0 |
+| Resident per-agent index | 0 B |
+
+The recovery scan deliberately trades disk reads and compute for resident memory. For each
+completion it scans the prior journal prefix to prove that a matching acceptance exists and that no
+earlier completion exists. This makes the current verifier quadratic in record count but bounded in
+memory; it is evidence for the memory tradeoff, not a proposed production scheduler.
 
 ## Deliberate omissions
 
-This note does not choose an on-page queue representation, journal record encoding, mailbox storage
-layout, or macOS I/O backend. It does not promise exactly-once execution for arbitrary external
-effects. Those decisions require measurements from the next implementation spike.
+This spike proves recovery across a clean process boundary. It does not yet prove recovery from
+power loss or a kill at every write boundary. Checkpoint replacement is not atomic, and the journal
+sync does not yet include a parent-directory durability barrier.
+
+The spike also does not choose an on-page queue representation, mailbox compaction strategy, bounded
+runnable index, or macOS I/O backend. It does not promise exactly-once execution for arbitrary
+external effects. Those decisions require named failure injection around atomic publication.

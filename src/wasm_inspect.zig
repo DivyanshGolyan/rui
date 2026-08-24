@@ -121,7 +121,14 @@ fn inspectCode(reader: *Reader, report: *Report) !void {
         while (!body.done()) {
             const opcode = try body.byte();
             switch (opcode) {
-                0x0b, 0x1a, 0x1b, 0x45...0xbf => {},
+                0x02, 0x03, 0x04 => try readBlockType(&body),
+                0x05, 0x0b, 0x0f, 0x1a, 0x1b, 0x45...0xbf => {},
+                0x0c, 0x0d => _ = try body.uleb(u32),
+                0x0e => {
+                    var labels = try body.uleb(u32);
+                    while (labels > 0) : (labels -= 1) _ = try body.uleb(u32);
+                    _ = try body.uleb(u32);
+                },
                 0x10, 0x20...0x22, 0xd2 => _ = try body.uleb(u32),
                 0x11 => {
                     _ = try body.uleb(u32);
@@ -161,6 +168,23 @@ fn inspectCode(reader: *Reader, report: *Report) !void {
                 else => return error.UnsupportedInstruction,
             }
         }
+    }
+}
+
+fn readBlockType(reader: *Reader) !void {
+    const first = try reader.byte();
+    if (first == 0x40 or first == 0x7f or first == 0x7e or first == 0x7d or first == 0x7c or
+        first == 0x7b or first == 0x70 or first == 0x6f)
+    {
+        return;
+    }
+    if (first & 0x80 == 0) return;
+
+    var remaining: u8 = first;
+    var bytes: u8 = 1;
+    while (remaining & 0x80 != 0) : (bytes += 1) {
+        if (bytes >= 5) return error.IntegerOverflow;
+        remaining = try reader.byte();
     }
 }
 
@@ -287,4 +311,19 @@ test "enumerate globals tables exports and code access" {
     try std.testing.expectEqual(@as(?i32, 4096), report.first_global_i32_init);
     try std.testing.expectEqual(@as(u32, 1), report.global_reads);
     try std.testing.expectEqual(@as(u32, 1), report.table_reads);
+}
+
+test "inspect structured control flow" {
+    const module = "\x00asm\x01\x00\x00\x00" ++
+        "\x0a\x0f\x01\x0d\x00\x02\x40\x41\x01\x0d\x00\x0e\x01\x00\x00\x0b\x0b";
+    const report = try inspect(module);
+    try std.testing.expectEqual(@as(u32, 0), report.memory_grows);
+}
+
+test "inspect if else control flow" {
+    const module = "\x00asm\x01\x00\x00\x00" ++
+        "\x0a\x10\x01\x0e\x00\x41\x01\x04\x40\x41\x01\x1a" ++
+        "\x05\x41\x00\x1a\x0b\x0b";
+    const report = try inspect(module);
+    try std.testing.expectEqual(@as(u32, 0), report.memory_grows);
 }

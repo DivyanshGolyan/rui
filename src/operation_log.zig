@@ -1,0 +1,341 @@
+const std = @import("std");
+
+pub const record_size = 64;
+pub const version: u16 = 1;
+
+const magic = "ONEOP\x00\x00\x00";
+const offset_version = 8;
+const offset_kind = 10;
+const offset_flags = 11;
+const offset_agent_id = 12;
+const offset_agent_generation = 20;
+const offset_operation_id = 28;
+const offset_operation_generation = 36;
+const offset_sequence = 40;
+const offset_result = 48;
+const offset_crc = 56;
+const offset_reserved_tail = 60;
+
+pub const Kind = enum(u8) {
+    accepted = 1,
+    completed = 2,
+};
+
+pub const Record = struct {
+    kind: Kind,
+    agent_id: u64,
+    agent_generation: u64,
+    operation_id: u64,
+    operation_generation: u32,
+    sequence: u64,
+    result: u64,
+};
+
+pub const Writer = struct {
+    file: std.Io.File,
+    offset: u64,
+    last_sequence: u64,
+
+    pub fn create(io: std.Io, path: []const u8) !Writer {
+        return createIn(std.Io.Dir.cwd(), io, path);
+    }
+
+    pub fn createIn(dir: std.Io.Dir, io: std.Io, path: []const u8) !Writer {
+        return .{
+            .file = try dir.createFile(io, path, .{}),
+            .offset = 0,
+            .last_sequence = 0,
+        };
+    }
+
+    pub fn openAppend(io: std.Io, path: []const u8) !Writer {
+        return openAppendIn(std.Io.Dir.cwd(), io, path);
+    }
+
+    pub fn openAppendIn(dir: std.Io.Dir, io: std.Io, path: []const u8) !Writer {
+        var reader = try Reader.openIn(dir, io, path);
+        defer reader.close(io);
+        while (try reader.next(io)) |_| {}
+
+        return .{
+            .file = try dir.openFile(io, path, .{ .mode = .read_write }),
+            .offset = reader.offset,
+            .last_sequence = reader.last_sequence,
+        };
+    }
+
+    pub fn close(self: *Writer, io: std.Io) void {
+        self.file.close(io);
+    }
+
+    pub fn appendDurable(self: *Writer, io: std.Io, record: Record) !void {
+        if (record.sequence <= self.last_sequence) return error.NonMonotonicSequence;
+        var bytes: [record_size]u8 = undefined;
+        try encode(&bytes, record);
+        try self.file.writePositionalAll(io, &bytes, self.offset);
+        try self.file.sync(io);
+        self.offset += record_size;
+        self.last_sequence = record.sequence;
+    }
+};
+
+pub const Reader = struct {
+    file: std.Io.File,
+    offset: u64 = 0,
+    last_sequence: u64 = 0,
+
+    pub fn open(io: std.Io, path: []const u8) !Reader {
+        return openIn(std.Io.Dir.cwd(), io, path);
+    }
+
+    pub fn openIn(dir: std.Io.Dir, io: std.Io, path: []const u8) !Reader {
+        return .{ .file = try dir.openFile(io, path, .{}) };
+    }
+
+    pub fn close(self: *Reader, io: std.Io) void {
+        self.file.close(io);
+    }
+
+    pub fn next(self: *Reader, io: std.Io) !?Record {
+        var bytes: [record_size]u8 = undefined;
+        const bytes_read = try self.file.readPositionalAll(io, &bytes, self.offset);
+        if (bytes_read == 0) return null;
+        if (bytes_read != record_size) return error.TruncatedRecord;
+        const record = try decode(&bytes);
+        if (record.sequence <= self.last_sequence) return error.NonMonotonicSequence;
+        self.offset += record_size;
+        self.last_sequence = record.sequence;
+        return record;
+    }
+};
+
+pub fn encode(out: *[record_size]u8, record: Record) !void {
+    if (record.agent_id == 0) return error.InvalidAgentIdentity;
+    if (record.agent_generation == 0) return error.InvalidAgentGeneration;
+    if (record.operation_id == 0) return error.InvalidOperationIdentity;
+    if (record.operation_generation == 0) return error.InvalidOperationGeneration;
+    if (record.sequence == 0) return error.InvalidSequence;
+    if (record.kind == .accepted and record.result != 0) return error.AcceptedRecordHasResult;
+
+    @memset(out, 0);
+    @memcpy(out[0..magic.len], magic);
+    write(u16, out, offset_version, version);
+    out[offset_kind] = @intFromEnum(record.kind);
+    out[offset_flags] = 0;
+    write(u64, out, offset_agent_id, record.agent_id);
+    write(u64, out, offset_agent_generation, record.agent_generation);
+    write(u64, out, offset_operation_id, record.operation_id);
+    write(u32, out, offset_operation_generation, record.operation_generation);
+    write(u64, out, offset_sequence, record.sequence);
+    write(u64, out, offset_result, record.result);
+    write(u32, out, offset_crc, std.hash.Crc32.hash(out[0..offset_crc]));
+    write(u32, out, offset_reserved_tail, 0);
+}
+
+pub fn decode(bytes: *const [record_size]u8) !Record {
+    if (!std.mem.eql(u8, bytes[0..magic.len], magic)) return error.InvalidMagic;
+    if (read(u16, bytes, offset_version) != version) return error.UnsupportedVersion;
+    if (bytes[offset_flags] != 0) return error.UnsupportedFlags;
+    if (read(u32, bytes, offset_reserved_tail) != 0) return error.NonzeroReservedBytes;
+
+    const stored_crc = read(u32, bytes, offset_crc);
+    if (stored_crc != std.hash.Crc32.hash(bytes[0..offset_crc])) {
+        return error.ChecksumMismatch;
+    }
+
+    const kind: Kind = switch (bytes[offset_kind]) {
+        1 => .accepted,
+        2 => .completed,
+        else => return error.InvalidKind,
+    };
+    const record: Record = .{
+        .kind = kind,
+        .agent_id = read(u64, bytes, offset_agent_id),
+        .agent_generation = read(u64, bytes, offset_agent_generation),
+        .operation_id = read(u64, bytes, offset_operation_id),
+        .operation_generation = read(u32, bytes, offset_operation_generation),
+        .sequence = read(u64, bytes, offset_sequence),
+        .result = read(u64, bytes, offset_result),
+    };
+
+    var canonical: [record_size]u8 = undefined;
+    try encode(&canonical, record);
+    if (!std.mem.eql(u8, bytes, &canonical)) return error.NonCanonicalRecord;
+    return record;
+}
+
+pub fn validateExpected(
+    record: Record,
+    expected_agent_id: u64,
+    expected_agent_generation: u64,
+    expected_operation_id: u64,
+    expected_operation_generation: u32,
+) !void {
+    if (record.agent_id != expected_agent_id) return error.AgentIdentityMismatch;
+    if (record.agent_generation != expected_agent_generation) return error.AgentGenerationMismatch;
+    if (record.operation_id != expected_operation_id) return error.OperationIdentityMismatch;
+    if (record.operation_generation != expected_operation_generation) {
+        return error.OperationGenerationMismatch;
+    }
+}
+
+fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
+    std.mem.writeInt(T, out[offset..][0..@sizeOf(T)], value, .little);
+}
+
+fn read(comptime T: type, input: []const u8, offset: usize) T {
+    return std.mem.readInt(T, input[offset..][0..@sizeOf(T)], .little);
+}
+
+test "operation record round trip" {
+    const expected: Record = .{
+        .kind = .completed,
+        .agent_id = 42,
+        .agent_generation = 7,
+        .operation_id = 99,
+        .operation_generation = 4,
+        .sequence = 3,
+        .result = 1234,
+    };
+    var bytes: [record_size]u8 = undefined;
+    try encode(&bytes, expected);
+    const actual = try decode(&bytes);
+    try std.testing.expectEqualDeep(expected, actual);
+}
+
+test "operation record rejects corruption and unsupported metadata" {
+    const accepted: Record = .{
+        .kind = .accepted,
+        .agent_id = 42,
+        .agent_generation = 7,
+        .operation_id = 99,
+        .operation_generation = 4,
+        .sequence = 3,
+        .result = 0,
+    };
+    var bytes: [record_size]u8 = undefined;
+    try encode(&bytes, accepted);
+
+    bytes[offset_operation_id] ^= 1;
+    try std.testing.expectError(error.ChecksumMismatch, decode(&bytes));
+    bytes[offset_operation_id] ^= 1;
+
+    bytes[offset_kind] = 9;
+    write(u32, &bytes, offset_crc, std.hash.Crc32.hash(bytes[0..offset_crc]));
+    try std.testing.expectError(error.InvalidKind, decode(&bytes));
+}
+
+test "accepted records cannot contain results" {
+    var bytes: [record_size]u8 = undefined;
+    try std.testing.expectError(error.AcceptedRecordHasResult, encode(&bytes, .{
+        .kind = .accepted,
+        .agent_id = 42,
+        .agent_generation = 7,
+        .operation_id = 99,
+        .operation_generation = 4,
+        .sequence = 3,
+        .result = 1,
+    }));
+}
+
+test "expected identity rejects stale records" {
+    const record: Record = .{
+        .kind = .completed,
+        .agent_id = 42,
+        .agent_generation = 7,
+        .operation_id = 99,
+        .operation_generation = 4,
+        .sequence = 3,
+        .result = 1,
+    };
+    try validateExpected(record, 42, 7, 99, 4);
+    try std.testing.expectError(error.AgentIdentityMismatch, validateExpected(record, 43, 7, 99, 4));
+    try std.testing.expectError(error.AgentGenerationMismatch, validateExpected(record, 42, 8, 99, 4));
+    try std.testing.expectError(error.OperationIdentityMismatch, validateExpected(record, 42, 7, 100, 4));
+    try std.testing.expectError(error.OperationGenerationMismatch, validateExpected(record, 42, 7, 99, 5));
+}
+
+test "journal rejects truncation and nonmonotonic sequence" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const first: Record = .{
+        .kind = .accepted,
+        .agent_id = 42,
+        .agent_generation = 7,
+        .operation_id = 99,
+        .operation_generation = 4,
+        .sequence = 2,
+        .result = 0,
+    };
+    const second: Record = .{
+        .kind = .completed,
+        .agent_id = 42,
+        .agent_generation = 7,
+        .operation_id = 99,
+        .operation_generation = 4,
+        .sequence = 1,
+        .result = 1234,
+    };
+    var first_bytes: [record_size]u8 = undefined;
+    var second_bytes: [record_size]u8 = undefined;
+    try encode(&first_bytes, first);
+    try encode(&second_bytes, second);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "truncated", .data = first_bytes[0 .. record_size - 1] });
+    var truncated = try Reader.openIn(tmp.dir, io, "truncated");
+    defer truncated.close(io);
+    try std.testing.expectError(error.TruncatedRecord, truncated.next(io));
+
+    var combined: [record_size * 2]u8 = undefined;
+    @memcpy(combined[0..record_size], &first_bytes);
+    @memcpy(combined[record_size..], &second_bytes);
+    try tmp.dir.writeFile(io, .{ .sub_path = "nonmonotonic", .data = &combined });
+    var nonmonotonic = try Reader.openIn(tmp.dir, io, "nonmonotonic");
+    defer nonmonotonic.close(io);
+    _ = try nonmonotonic.next(io);
+    try std.testing.expectError(error.NonMonotonicSequence, nonmonotonic.next(io));
+}
+
+test "writer synchronizes canonical records" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        var writer = try Writer.createIn(tmp.dir, io, "journal");
+        defer writer.close(io);
+        try writer.appendDurable(io, .{
+            .kind = .accepted,
+            .agent_id = 42,
+            .agent_generation = 7,
+            .operation_id = 99,
+            .operation_generation = 4,
+            .sequence = 1,
+            .result = 0,
+        });
+    }
+
+    var resumed = try Writer.openAppendIn(tmp.dir, io, "journal");
+    defer resumed.close(io);
+    try resumed.appendDurable(io, .{
+        .kind = .completed,
+        .agent_id = 42,
+        .agent_generation = 7,
+        .operation_id = 99,
+        .operation_generation = 4,
+        .sequence = 2,
+        .result = 1234,
+    });
+    try std.testing.expectEqual(@as(u64, record_size * 2), resumed.offset);
+    try std.testing.expectError(error.NonMonotonicSequence, resumed.appendDurable(io, .{
+        .kind = .completed,
+        .agent_id = 42,
+        .agent_generation = 7,
+        .operation_id = 99,
+        .operation_generation = 4,
+        .sequence = 2,
+        .result = 1234,
+    }));
+}

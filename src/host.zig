@@ -1,5 +1,6 @@
 const std = @import("std");
 const checkpoint = @import("checkpoint.zig");
+const operation_log = @import("operation_log.zig");
 const wasm_inspect = @import("wasm_inspect.zig");
 const c = @cImport({
     @cInclude("libproc.h");
@@ -8,6 +9,11 @@ const c = @cImport({
 
 const page_size = checkpoint.page_size;
 const density_agents = 1000;
+const lifecycle_agents = 1000;
+const lifecycle_generation = 1;
+const lifecycle_journal_path = "snapshots/lifecycle.journal";
+const interrupted_agent = 500;
+const unaccepted_agent = lifecycle_agents + 1;
 const framework_path = "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore";
 
 const JSContext = opaque {};
@@ -150,29 +156,48 @@ const Runtime = struct {
         return object;
     }
 
-    fn callTwoNumbers(self: *const Runtime, function_ref: JSObjectRef, first: u32, second: u32) !void {
-        const arguments = [_]JSValueRef{
-            self.api.JSValueMakeNumber(self.context, @floatFromInt(first)),
-            self.api.JSValueMakeNumber(self.context, @floatFromInt(second)),
-        };
+    fn callNumbers(self: *const Runtime, function_ref: JSObjectRef, numbers: []const u32) !void {
+        if (numbers.len > 3) return error.TooManyArguments;
+        var arguments: [3]JSValueRef = undefined;
+        for (numbers, 0..) |number, index| {
+            arguments[index] = self.api.JSValueMakeNumber(self.context, @floatFromInt(number));
+        }
         var exception: JSValueRef = null;
         _ = self.api.JSObjectCallAsFunction(
             self.context,
             function_ref,
             null,
-            arguments.len,
+            numbers.len,
             &arguments,
             &exception,
         );
         if (exception != null) return error.JavaScriptCallFailed;
+    }
+
+    fn callTwoNumbers(self: *const Runtime, function_ref: JSObjectRef, first: u32, second: u32) !void {
+        try self.callNumbers(function_ref, &.{ first, second });
+    }
+
+    fn callThreeNumbers(
+        self: *const Runtime,
+        function_ref: JSObjectRef,
+        first: u32,
+        second: u32,
+        third: u32,
+    ) !void {
+        try self.callNumbers(function_ref, &.{ first, second, third });
     }
 };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len != 2) {
-        std.debug.print("usage: {s} <onepage-core.wasm>\n", .{args[0]});
+    if (args.len < 2 or args.len > 3) {
+        std.debug.print(
+            "usage: {s} <onepage-core.wasm> " ++
+                "[lifecycle-prepare|lifecycle-complete|lifecycle-recover]\n",
+            .{args[0]},
+        );
         return error.InvalidArguments;
     }
 
@@ -207,8 +232,8 @@ pub fn main(init: std.process.Init) !void {
         report.global_reads != 0 or
         report.global_writes != 0 or
         report.memory_grows != 0 or
-        report.function_exports != 6 or
-        report.exports != 7 or
+        report.function_exports != 13 or
+        report.exports != 14 or
         report.data_section_bytes != 0)
     {
         return error.OnePageContractViolated;
@@ -240,6 +265,22 @@ pub fn main(init: std.process.Init) !void {
         "__onepage.instances = [new WebAssembly.Instance(__onepage.module, {})]; " ++
             "__onepage.instance = __onepage.instances[0]",
     );
+
+    if (args.len == 3) {
+        if (std.mem.eql(u8, args[2], "lifecycle-prepare")) {
+            try lifecyclePrepare(init.io, allocator, &runtime);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "lifecycle-complete")) {
+            try lifecycleComplete(init.io);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "lifecycle-recover")) {
+            try lifecycleRecover(init.io, allocator, &runtime);
+            return;
+        }
+        return error.InvalidArguments;
+    }
 
     _ = try runtime.evaluate(allocator, "__onepage.instance.exports.initialize(7)");
     _ = try runtime.evaluate(allocator, "__onepage.instance.exports.deliver(11)");
@@ -383,6 +424,442 @@ pub fn main(init: std.process.Init) !void {
             slot_rss[3],
         },
     );
+}
+
+fn lifecyclePrepare(io: std.Io, allocator: std.mem.Allocator, runtime: *const Runtime) !void {
+    try ensureLifecycleDirectory(io);
+    var journal = try operation_log.Writer.create(io, lifecycle_journal_path);
+    defer journal.close(io);
+
+    const memory = try runtime.memory(allocator);
+    const checkpoint_buffer = try allocator.alloc(u8, checkpoint.encoded_size);
+    defer allocator.free(checkpoint_buffer);
+    const submit = try runtime.function(
+        allocator,
+        "__onepage.lifecycleSubmit = function(agentId, operationId) { " ++
+            "__onepage.instance.exports.initialize(agentId); " ++
+            "if (__onepage.instance.exports.submitOperation(operationId, agentId) !== 1) " ++
+            "throw new Error('submit failed'); " ++
+            "}; __onepage.lifecycleSubmit",
+    );
+    const accept = try runtime.function(
+        allocator,
+        "__onepage.lifecycleAccept = function(operationId, operationGeneration) { " ++
+            "if (__onepage.instance.exports.acceptOperation(operationId, operationGeneration) !== 1) " ++
+            "throw new Error('accept failed'); " ++
+            "}; __onepage.lifecycleAccept",
+    );
+    const bounds = try runtime.function(
+        allocator,
+        "__onepage.lifecycleBounds = function(unusedA, unusedB) { " ++
+            "__onepage.instance.exports.initialize(9999); " ++
+            "if (__onepage.instance.exports.submitOperation(1, 1) !== 1 || " ++
+            "__onepage.instance.exports.submitOperation(2, 2) !== 0 || " ++
+            "__onepage.instance.exports.acceptOperation(1, 2) !== 0 || " ++
+            "__onepage.instance.exports.acceptOperation(1, 1) !== 1 || " ++
+            "__onepage.instance.exports.completeOperation(1, 2, 3) !== 0 || " ++
+            "__onepage.instance.exports.completeOperation(1, 1, 3) !== 1 || " ++
+            "__onepage.instance.exports.submitOperation(1, 3) !== 1 || " ++
+            "__onepage.instance.exports.acceptOperation(1, 2) !== 1 || " ++
+            "__onepage.instance.exports.completeOperation(1, 1, 3) !== 0 || " ++
+            "__onepage.instance.exports.completeOperation(1, 2, 4) !== 1 || " ++
+            "__onepage.instance.exports.completeOperation(1, 2, 4) !== 0) " ++
+            "throw new Error('operation bounds failed'); " ++
+            "}; __onepage.lifecycleBounds",
+    );
+    try runtime.callTwoNumbers(bounds, 0, 0);
+
+    const rss_first_slot = try residentBytes();
+    var rss_after_first: u64 = 0;
+    var rss_after_hundred: u64 = 0;
+    var journal_sequence: u64 = 0;
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    var path_buffer: [80]u8 = undefined;
+
+    for (0..lifecycle_agents) |index| {
+        const agent_id: u32 = @intCast(index + 1);
+        const operation_id = lifecycleOperationId(agent_id);
+        @memset(memory, 0);
+        try runtime.callTwoNumbers(submit, agent_id, operation_id);
+
+        try writeLifecycleCheckpoint(
+            io,
+            checkpoint_buffer,
+            memory,
+            agent_id,
+            &path_buffer,
+        );
+
+        journal_sequence += 1;
+        try journal.appendDurable(io, .{
+            .kind = .accepted,
+            .agent_id = agent_id,
+            .agent_generation = lifecycle_generation,
+            .operation_id = operation_id,
+            .operation_generation = 1,
+            .sequence = journal_sequence,
+            .result = 0,
+        });
+
+        if (agent_id != interrupted_agent) {
+            try runtime.callTwoNumbers(accept, operation_id, 1);
+            try writeLifecycleCheckpoint(
+                io,
+                checkpoint_buffer,
+                memory,
+                agent_id,
+                &path_buffer,
+            );
+        }
+
+        if (agent_id == 1) {
+            journal_sequence += 1;
+            try journal.appendDurable(io, .{
+                .kind = .completed,
+                .agent_id = agent_id,
+                .agent_generation = lifecycle_generation,
+                .operation_id = operation_id,
+                .operation_generation = 1,
+                .sequence = journal_sequence,
+                .result = lifecycleResult(operation_id),
+            });
+        }
+
+        if (agent_id == 1) rss_after_first = try residentBytes();
+        if (agent_id == 100) rss_after_hundred = try residentBytes();
+    }
+    const rss_after_accepted = try residentBytes();
+
+    @memset(memory, 0);
+    const orphan_operation_id = lifecycleOperationId(unaccepted_agent);
+    try runtime.callTwoNumbers(submit, unaccepted_agent, orphan_operation_id);
+    try writeLifecycleCheckpoint(
+        io,
+        checkpoint_buffer,
+        memory,
+        unaccepted_agent,
+        &path_buffer,
+    );
+
+    const elapsed = started.untilNow(io).raw.toMilliseconds();
+    const rss_after_prepare = try residentBytes();
+
+    std.debug.print(
+        "lifecycle prepare\n" ++
+            "durable agents        {d}\n" ++
+            "resident slots        1\n" ++
+            "accepted operations   {d}\n" ++
+            "queued completions     1\n" ++
+            "immediate queued       1\n" ++
+            "deferred pending       {d}\n" ++
+            "unaccepted preserved   {d}\n" ++
+            "submitted at crash    {d}\n" ++
+            "journal bytes         {d}\n" ++
+            "elapsed               {d} ms\n" ++
+            "RSS first slot        {d} B\n" ++
+            "RSS agents 1/100/1000 {d} / {d} / {d} B\n" ++
+            "RSS after prepare     {d} B\n",
+        .{
+            lifecycle_agents,
+            lifecycle_agents,
+            lifecycle_agents - 1,
+            unaccepted_agent,
+            interrupted_agent,
+            journal.offset,
+            elapsed,
+            rss_first_slot,
+            rss_after_first,
+            rss_after_hundred,
+            rss_after_accepted,
+            rss_after_prepare,
+        },
+    );
+}
+
+fn lifecycleComplete(io: std.Io) !void {
+    var journal = try operation_log.Writer.openAppend(io, lifecycle_journal_path);
+    defer journal.close(io);
+    const resumed_sequence = journal.last_sequence;
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+
+    for (0..lifecycle_agents) |index| {
+        const agent_id: u32 = @intCast((index * 997) % lifecycle_agents + 1);
+        if (agent_id == 1) continue;
+        const operation_id = lifecycleOperationId(agent_id);
+        try journal.appendDurable(io, .{
+            .kind = .completed,
+            .agent_id = agent_id,
+            .agent_generation = lifecycle_generation,
+            .operation_id = operation_id,
+            .operation_generation = 1,
+            .sequence = journal.last_sequence + 1,
+            .result = lifecycleResult(operation_id),
+        });
+    }
+
+    std.debug.print(
+        "lifecycle complete\n" ++
+            "fresh host process    yes\n" ++
+            "resumed sequence      {d}\n" ++
+            "deferred completed    {d}\n" ++
+            "journal records       {d}\n" ++
+            "journal bytes         {d}\n" ++
+            "elapsed               {d} ms\n",
+        .{
+            resumed_sequence,
+            lifecycle_agents - 1,
+            journal.offset / operation_log.record_size,
+            journal.offset,
+            started.untilNow(io).raw.toMilliseconds(),
+        },
+    );
+}
+
+fn lifecycleRecover(io: std.Io, allocator: std.mem.Allocator, runtime: *const Runtime) !void {
+    var journal = try operation_log.Reader.open(io, lifecycle_journal_path);
+    defer journal.close(io);
+
+    const memory = try runtime.memory(allocator);
+    const checkpoint_buffer = try allocator.alloc(u8, checkpoint.encoded_size);
+    defer allocator.free(checkpoint_buffer);
+    const reconcile = try runtime.function(
+        allocator,
+        "__onepage.lifecycleReconcile = function(operationId, operationGeneration, result) { " ++
+            "let state = __onepage.instance.exports.operationState(); " ++
+            "if (state === 1 && " ++
+            "__onepage.instance.exports.acceptOperation(operationId, operationGeneration) !== 1) " ++
+            "throw new Error('reconcile accept failed'); " ++
+            "state = __onepage.instance.exports.operationState(); " ++
+            "if (state === 2 && __onepage.instance.exports.completeOperation(" ++
+            "operationId, operationGeneration, result) !== 1) " ++
+            "throw new Error('reconcile complete failed'); " ++
+            "if (__onepage.instance.exports.operationState() !== 3 || " ++
+            "__onepage.instance.exports.operationId() !== BigInt(operationId) || " ++
+            "__onepage.instance.exports.operationGeneration() !== operationGeneration || " ++
+            "__onepage.instance.exports.operationResult() !== BigInt(result)) " ++
+            "throw new Error('reconcile result mismatch'); " ++
+            "}; __onepage.lifecycleReconcile",
+    );
+
+    const rss_first_slot = try residentBytes();
+    var accepted_count: usize = 0;
+    var completed_count: usize = 0;
+    var reconciled_submission = false;
+    var replayed_completion = false;
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    var path_buffer: [80]u8 = undefined;
+
+    while (try journal.next(io)) |record| {
+        try validateLifecycleRecord(record);
+        switch (record.kind) {
+            .accepted => accepted_count += 1,
+            .completed => {
+                const completion_offset = journal.offset - operation_log.record_size;
+                try verifyAcceptedPrefix(io, record, completion_offset);
+                const agent_id: u32 = @intCast(record.agent_id);
+                const operation_id: u32 = @intCast(record.operation_id);
+                const operation_generation = record.operation_generation;
+                const result: u32 = @intCast(record.result);
+                try readLifecycleCheckpoint(
+                    io,
+                    checkpoint_buffer,
+                    memory,
+                    agent_id,
+                    &path_buffer,
+                );
+                if (agent_id == interrupted_agent) {
+                    const state_value = try runtime.evaluate(
+                        allocator,
+                        "__onepage.instance.exports.operationState()",
+                    );
+                    const state_text = try runtime.valueString(allocator, state_value);
+                    defer allocator.free(state_text);
+                    if (std.mem.eql(u8, state_text, "1")) {
+                        reconciled_submission = true;
+                    } else if (std.mem.eql(u8, state_text, "3")) {
+                        replayed_completion = true;
+                    } else {
+                        return error.SubmittedCrashBoundaryNotRecoverable;
+                    }
+                }
+                try runtime.callThreeNumbers(reconcile, operation_id, operation_generation, result);
+                try writeLifecycleCheckpoint(
+                    io,
+                    checkpoint_buffer,
+                    memory,
+                    agent_id,
+                    &path_buffer,
+                );
+                completed_count += 1;
+            },
+        }
+    }
+
+    if (accepted_count != lifecycle_agents or completed_count != lifecycle_agents) {
+        return error.IncompleteLifecycleJournal;
+    }
+    if (!reconciled_submission and !replayed_completion) {
+        return error.SubmittedCrashBoundaryNotExercised;
+    }
+
+    try readLifecycleCheckpoint(
+        io,
+        checkpoint_buffer,
+        memory,
+        unaccepted_agent,
+        &path_buffer,
+    );
+    try expectString(runtime, allocator, "__onepage.instance.exports.operationState()", "1");
+    if (try hasAcceptedRecord(
+        io,
+        unaccepted_agent,
+        lifecycle_generation,
+        lifecycleOperationId(unaccepted_agent),
+        1,
+        std.math.maxInt(u64),
+    )) {
+        return error.UnacceptedOperationWasPublished;
+    }
+
+    const elapsed = started.untilNow(io).raw.toMilliseconds();
+    const rss_after_recovery = try residentBytes();
+    std.debug.print(
+        "lifecycle recover\n" ++
+            "fresh host process    yes\n" ++
+            "accepted recovered    {d}\n" ++
+            "completions delivered {d}\n" ++
+            "submitted reconciled  {d}\n" ++
+            "completed replay      {s}\n" ++
+            "unaccepted preserved  {d}\n" ++
+            "lost operations       0\n" ++
+            "resident index        0 B\n" ++
+            "elapsed               {d} ms\n" ++
+            "RSS first slot        {d} B\n" ++
+            "RSS after recovery    {d} B\n",
+        .{
+            accepted_count,
+            completed_count,
+            interrupted_agent,
+            if (replayed_completion) "yes" else "no",
+            unaccepted_agent,
+            elapsed,
+            rss_first_slot,
+            rss_after_recovery,
+        },
+    );
+}
+
+fn verifyAcceptedPrefix(
+    io: std.Io,
+    completion: operation_log.Record,
+    completion_offset: u64,
+) !void {
+    if (!try hasAcceptedRecord(
+        io,
+        completion.agent_id,
+        completion.agent_generation,
+        completion.operation_id,
+        completion.operation_generation,
+        completion_offset,
+    )) {
+        return error.MissingAcceptedOperation;
+    }
+}
+
+fn hasAcceptedRecord(
+    io: std.Io,
+    agent_id: u64,
+    agent_generation: u64,
+    operation_id: u64,
+    operation_generation: u32,
+    before_offset: u64,
+) !bool {
+    var scan = try operation_log.Reader.open(io, lifecycle_journal_path);
+    defer scan.close(io);
+    var accepted = false;
+    while (scan.offset < before_offset) {
+        const record = (try scan.next(io)) orelse break;
+        if (record.agent_id != agent_id or
+            record.agent_generation != agent_generation or
+            record.operation_id != operation_id or
+            record.operation_generation != operation_generation)
+        {
+            continue;
+        }
+        switch (record.kind) {
+            .accepted => accepted = true,
+            .completed => return error.DuplicateCompletion,
+        }
+    }
+    return accepted;
+}
+
+fn validateLifecycleRecord(record: operation_log.Record) !void {
+    if (record.agent_id == 0 or record.agent_id > lifecycle_agents) {
+        return error.InvalidLifecycleAgent;
+    }
+    const agent_id: u32 = @intCast(record.agent_id);
+    try operation_log.validateExpected(
+        record,
+        agent_id,
+        lifecycle_generation,
+        lifecycleOperationId(agent_id),
+        1,
+    );
+    if (record.kind == .completed and record.result != lifecycleResult(@intCast(record.operation_id))) {
+        return error.InvalidLifecycleResult;
+    }
+}
+
+fn ensureLifecycleDirectory(io: std.Io) !void {
+    std.Io.Dir.cwd().createDir(io, "snapshots", .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    std.Io.Dir.cwd().createDir(io, "snapshots/lifecycle", .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+}
+
+fn writeLifecycleCheckpoint(
+    io: std.Io,
+    buffer: []u8,
+    memory: []const u8,
+    agent_id: u32,
+    path_buffer: []u8,
+) !void {
+    try checkpoint.encode(buffer, agent_id, lifecycle_generation, memory);
+    const path = try lifecyclePath(path_buffer, agent_id);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buffer });
+}
+
+fn readLifecycleCheckpoint(
+    io: std.Io,
+    buffer: []u8,
+    memory: []u8,
+    agent_id: u32,
+    path_buffer: []u8,
+) !void {
+    const path = try lifecyclePath(path_buffer, agent_id);
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const bytes_read = try file.readPositionalAll(io, buffer, 0);
+    if (bytes_read != checkpoint.encoded_size) return error.InvalidCheckpointLength;
+    const restored = try checkpoint.decode(buffer, agent_id, lifecycle_generation);
+    @memcpy(memory, restored.page);
+}
+
+fn lifecyclePath(buffer: []u8, agent_id: u32) ![]u8 {
+    return std.fmt.bufPrint(buffer, "snapshots/lifecycle/agent-{d:0>4}.page", .{agent_id});
+}
+
+fn lifecycleOperationId(agent_id: u32) u32 {
+    return 10_000 + agent_id;
+}
+
+fn lifecycleResult(operation_id: u32) u32 {
+    return operation_id ^ 0xa5a5;
 }
 
 fn residentBytes() !u64 {

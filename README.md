@@ -8,6 +8,10 @@ The first memory-model spike is now executable on macOS Apple Silicon. It compil
 the one-page contract, snapshots and restores the complete page, scrubs reused slots, and multiplexes
 1,000 checksummed durable simulated agents through one resident execution slot.
 
+The operation-lifecycle spike uses four separate host processes to submit, durably accept, complete,
+recover, and replay 1,000 operations while their agents are absent from memory. Both recovery
+processes restore every page through the same slot without building a resident per-agent index.
+
 ## Requirements
 
 - macOS on Apple Silicon
@@ -18,6 +22,7 @@ the one-page contract, snapshots and restores the complete page, scrubs reused s
 ```sh
 zig build test -Doptimize=ReleaseSafe
 zig build run -Doptimize=ReleaseSmall
+zig build lifecycle -Doptimize=ReleaseSmall
 ```
 
 Generated page snapshots are written under `snapshots/` and ignored by Git.

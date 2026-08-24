@@ -48,12 +48,38 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    const operation_log_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/operation_log.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
     const test_step = b.step("test", "Run the deterministic spike tests");
     test_step.dependOn(&b.addRunArtifact(inspector_tests).step);
     test_step.dependOn(&b.addRunArtifact(checkpoint_tests).step);
+    test_step.dependOn(&b.addRunArtifact(operation_log_tests).step);
 
     const run_step = b.step("run", "Run the memory-model spike");
     const run_host = b.addRunArtifact(host);
     run_host.addFileArg(core.getEmittedBin());
     run_step.dependOn(&run_host.step);
+
+    const lifecycle_step = b.step("lifecycle", "Run the durable operation lifecycle spike");
+    const prepare_lifecycle = b.addRunArtifact(host);
+    prepare_lifecycle.addFileArg(core.getEmittedBin());
+    prepare_lifecycle.addArg("lifecycle-prepare");
+    const complete_lifecycle = b.addRunArtifact(host);
+    complete_lifecycle.addFileArg(core.getEmittedBin());
+    complete_lifecycle.addArg("lifecycle-complete");
+    complete_lifecycle.step.dependOn(&prepare_lifecycle.step);
+    const recover_lifecycle = b.addRunArtifact(host);
+    recover_lifecycle.addFileArg(core.getEmittedBin());
+    recover_lifecycle.addArg("lifecycle-recover");
+    recover_lifecycle.step.dependOn(&complete_lifecycle.step);
+    const replay_lifecycle = b.addRunArtifact(host);
+    replay_lifecycle.addFileArg(core.getEmittedBin());
+    replay_lifecycle.addArg("lifecycle-recover");
+    replay_lifecycle.step.dependOn(&recover_lifecycle.step);
+    lifecycle_step.dependOn(&replay_lifecycle.step);
 }

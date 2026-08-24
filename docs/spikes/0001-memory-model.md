@@ -35,7 +35,7 @@ linear memory       65,536 B
 imports             0
 table               funcref min=1 max=1, unexported, unused
 mutable global      i32 init=4096, unexported, unused
-function exports    6
+function exports    13
 data section        0 B
 ```
 
@@ -95,15 +95,16 @@ the one-page core alone could not prevent.
 - One compiled `WebAssembly.Module` is reused to construct all measured resident instances.
 - Checkpoint headers and payloads are checksummed independently and reject stale identity or
   generation metadata before restoration.
+- A second four-process spike durably accepts and completes 1,000 operations while reusing the same
+  execution slot. See `0003-operation-lifecycle.md` for its separate measurements and caveats.
 
 ## Next questions
 
 1. Measure process physical footprint in addition to RSS and repeat samples across fresh processes.
-2. Define and test the submitted, accepted, and completed operation boundaries before a slot can be
-   reused.
-3. Replace one-file-per-agent output with an atomic publication protocol and the minimal journal.
-4. Add explicit crash points around checkpoint and operation publication and verify recovery from
+2. Replace checkpoint overwrites with an atomic publication protocol and add parent-directory
+   durability barriers.
+3. Add explicit crash points around checkpoint and operation publication and verify recovery from
    every valid prefix used by the spike.
-5. Measure restore latency and slot scheduling independently from filesystem cache effects.
-6. Decide the initial execution-slot default only after measuring one, two, four, and eight slots on
+4. Measure restore latency and slot scheduling independently from filesystem cache effects.
+5. Decide the initial execution-slot default only after measuring one, two, four, and eight slots on
    representative machines.
