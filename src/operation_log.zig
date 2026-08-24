@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const record_size = 64;
-pub const version: u16 = 1;
+pub const version: u16 = 2;
 
 const magic = "ONEOP\x00\x00\x00";
 const offset_version = 8;
@@ -9,12 +9,12 @@ const offset_kind = 10;
 const offset_flags = 11;
 const offset_agent_id = 12;
 const offset_agent_generation = 20;
+const offset_operation_generation = 24;
 const offset_operation_id = 28;
-const offset_operation_generation = 36;
-const offset_sequence = 40;
-const offset_result = 48;
-const offset_crc = 56;
-const offset_reserved_tail = 60;
+const offset_ownership_epoch = 36;
+const offset_sequence = 44;
+const offset_result = 52;
+const offset_crc = 60;
 
 pub const Kind = enum(u8) {
     accepted = 1,
@@ -24,9 +24,10 @@ pub const Kind = enum(u8) {
 pub const Record = struct {
     kind: Kind,
     agent_id: u64,
-    agent_generation: u64,
+    agent_generation: u32,
     operation_id: u64,
     operation_generation: u32,
+    ownership_epoch: u64,
     sequence: u64,
     result: u64,
 };
@@ -114,6 +115,7 @@ pub fn encode(out: *[record_size]u8, record: Record) !void {
     if (record.agent_generation == 0) return error.InvalidAgentGeneration;
     if (record.operation_id == 0) return error.InvalidOperationIdentity;
     if (record.operation_generation == 0) return error.InvalidOperationGeneration;
+    if (record.ownership_epoch == 0) return error.InvalidOwnershipEpoch;
     if (record.sequence == 0) return error.InvalidSequence;
     if (record.kind == .accepted and record.result != 0) return error.AcceptedRecordHasResult;
 
@@ -123,20 +125,19 @@ pub fn encode(out: *[record_size]u8, record: Record) !void {
     out[offset_kind] = @intFromEnum(record.kind);
     out[offset_flags] = 0;
     write(u64, out, offset_agent_id, record.agent_id);
-    write(u64, out, offset_agent_generation, record.agent_generation);
-    write(u64, out, offset_operation_id, record.operation_id);
+    write(u32, out, offset_agent_generation, record.agent_generation);
     write(u32, out, offset_operation_generation, record.operation_generation);
+    write(u64, out, offset_operation_id, record.operation_id);
+    write(u64, out, offset_ownership_epoch, record.ownership_epoch);
     write(u64, out, offset_sequence, record.sequence);
     write(u64, out, offset_result, record.result);
     write(u32, out, offset_crc, std.hash.Crc32.hash(out[0..offset_crc]));
-    write(u32, out, offset_reserved_tail, 0);
 }
 
 pub fn decode(bytes: *const [record_size]u8) !Record {
     if (!std.mem.eql(u8, bytes[0..magic.len], magic)) return error.InvalidMagic;
     if (read(u16, bytes, offset_version) != version) return error.UnsupportedVersion;
     if (bytes[offset_flags] != 0) return error.UnsupportedFlags;
-    if (read(u32, bytes, offset_reserved_tail) != 0) return error.NonzeroReservedBytes;
 
     const stored_crc = read(u32, bytes, offset_crc);
     if (stored_crc != std.hash.Crc32.hash(bytes[0..offset_crc])) {
@@ -151,9 +152,10 @@ pub fn decode(bytes: *const [record_size]u8) !Record {
     const record: Record = .{
         .kind = kind,
         .agent_id = read(u64, bytes, offset_agent_id),
-        .agent_generation = read(u64, bytes, offset_agent_generation),
+        .agent_generation = read(u32, bytes, offset_agent_generation),
         .operation_id = read(u64, bytes, offset_operation_id),
         .operation_generation = read(u32, bytes, offset_operation_generation),
+        .ownership_epoch = read(u64, bytes, offset_ownership_epoch),
         .sequence = read(u64, bytes, offset_sequence),
         .result = read(u64, bytes, offset_result),
     };
@@ -167,9 +169,10 @@ pub fn decode(bytes: *const [record_size]u8) !Record {
 pub fn validateExpected(
     record: Record,
     expected_agent_id: u64,
-    expected_agent_generation: u64,
+    expected_agent_generation: u32,
     expected_operation_id: u64,
     expected_operation_generation: u32,
+    expected_ownership_epoch: u64,
 ) !void {
     if (record.agent_id != expected_agent_id) return error.AgentIdentityMismatch;
     if (record.agent_generation != expected_agent_generation) return error.AgentGenerationMismatch;
@@ -177,6 +180,7 @@ pub fn validateExpected(
     if (record.operation_generation != expected_operation_generation) {
         return error.OperationGenerationMismatch;
     }
+    if (record.ownership_epoch != expected_ownership_epoch) return error.OwnershipEpochMismatch;
 }
 
 fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
@@ -194,6 +198,7 @@ test "operation record round trip" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .ownership_epoch = 2,
         .sequence = 3,
         .result = 1234,
     };
@@ -210,6 +215,7 @@ test "operation record rejects corruption and unsupported metadata" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .ownership_epoch = 2,
         .sequence = 3,
         .result = 0,
     };
@@ -233,6 +239,7 @@ test "accepted records cannot contain results" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .ownership_epoch = 2,
         .sequence = 3,
         .result = 1,
     }));
@@ -245,14 +252,16 @@ test "expected identity rejects stale records" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .ownership_epoch = 2,
         .sequence = 3,
         .result = 1,
     };
-    try validateExpected(record, 42, 7, 99, 4);
-    try std.testing.expectError(error.AgentIdentityMismatch, validateExpected(record, 43, 7, 99, 4));
-    try std.testing.expectError(error.AgentGenerationMismatch, validateExpected(record, 42, 8, 99, 4));
-    try std.testing.expectError(error.OperationIdentityMismatch, validateExpected(record, 42, 7, 100, 4));
-    try std.testing.expectError(error.OperationGenerationMismatch, validateExpected(record, 42, 7, 99, 5));
+    try validateExpected(record, 42, 7, 99, 4, 2);
+    try std.testing.expectError(error.AgentIdentityMismatch, validateExpected(record, 43, 7, 99, 4, 2));
+    try std.testing.expectError(error.AgentGenerationMismatch, validateExpected(record, 42, 8, 99, 4, 2));
+    try std.testing.expectError(error.OperationIdentityMismatch, validateExpected(record, 42, 7, 100, 4, 2));
+    try std.testing.expectError(error.OperationGenerationMismatch, validateExpected(record, 42, 7, 99, 5, 2));
+    try std.testing.expectError(error.OwnershipEpochMismatch, validateExpected(record, 42, 7, 99, 4, 3));
 }
 
 test "journal rejects truncation and nonmonotonic sequence" {
@@ -266,6 +275,7 @@ test "journal rejects truncation and nonmonotonic sequence" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .ownership_epoch = 2,
         .sequence = 2,
         .result = 0,
     };
@@ -275,6 +285,7 @@ test "journal rejects truncation and nonmonotonic sequence" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .ownership_epoch = 2,
         .sequence = 1,
         .result = 1234,
     };
@@ -312,6 +323,7 @@ test "writer synchronizes canonical records" {
             .agent_generation = 7,
             .operation_id = 99,
             .operation_generation = 4,
+            .ownership_epoch = 2,
             .sequence = 1,
             .result = 0,
         });
@@ -325,6 +337,7 @@ test "writer synchronizes canonical records" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .ownership_epoch = 2,
         .sequence = 2,
         .result = 1234,
     });
@@ -335,6 +348,7 @@ test "writer synchronizes canonical records" {
         .agent_generation = 7,
         .operation_id = 99,
         .operation_generation = 4,
+        .ownership_epoch = 2,
         .sequence = 2,
         .result = 1234,
     }));

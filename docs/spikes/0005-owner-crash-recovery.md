@@ -38,8 +38,8 @@ The passing run reports:
 
 ```text
 owner prepare          accepted operation durable
-owner recover          applied; journal 128 B; control 1528 B
-owner recover          duplicate; journal 128 B; control 1528 B
+owner recover          applied; journal 128 B; control 1536 B
+owner recover          duplicate; journal 128 B; control 1536 B
 fixed-credit owner crash suite
 fresh child processes 4
 crash boundary        completion fsync -> slot apply
@@ -48,7 +48,7 @@ first recovery        applied durable completion
 second recovery       duplicate, no mutation
 ```
 
-The 1,528-byte figure is fixed native control metadata: `Harness`, `durable_transition.Adapter`, and the JSC slot bridge, including its open checkpoint-directory handle. It excludes JavaScriptCore, the 64 KiB core linear-memory page, the 65,600-byte checkpoint encoding buffer, journal and checkpoint files, process runtime memory, and build machinery.
+The 1,536-byte figure is fixed native control metadata: `Harness`, `durable_transition.Adapter`, and the JSC slot bridge, including its open checkpoint-directory handle. It excludes JavaScriptCore, the 64 KiB core linear-memory page, the 65,600-byte checkpoint encoding buffer, journal and checkpoint files, process runtime memory, and build machinery.
 
 The durable journal remains exactly two canonical 64-byte records after both recoveries. No recovery appends another completion.
 
@@ -74,4 +74,4 @@ The result supports a narrow claim: logical agent count does not require residen
 
 Checkpoint replacement now uses the atomic publisher and crash matrix in [`0006-atomic-checkpoint-publication.md`](0006-atomic-checkpoint-publication.md). This spike's original direct-write limitation is retained there as a tested old-or-new checkpoint invariant.
 
-The remaining recovery limitation is manual reoffering of the known completion. A scheduler must eventually scan a durable journal cursor into fixed admission credits without constructing a resident agent catalogue.
+The remaining recovery limitation is manual reoffering of the known completion. Durable Session ownership and epoch fencing are implemented in [`0007-durable-session.md`](0007-durable-session.md); a scheduler must still scan a durable journal cursor into fixed admission credits without constructing a resident agent catalogue.

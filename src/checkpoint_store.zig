@@ -22,7 +22,7 @@ pub fn publish(
     temp_path: []const u8,
     encoded: []u8,
     agent_id: u64,
-    generation: u64,
+    generation: u32,
     page: []const u8,
     fault: ?FaultHook,
 ) !void {

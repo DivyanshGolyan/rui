@@ -15,13 +15,15 @@ const page_size = checkpoint.page_size;
 const density_agents = 1000;
 const lifecycle_agents = 1000;
 const lifecycle_generation = 1;
+const lifecycle_ownership_epoch = 1;
 const lifecycle_journal_path = "snapshots/lifecycle.journal";
 const owner_journal_path = "snapshots/owner-crash.journal";
 const owner_checkpoint_path = "snapshots/owner-crash.page";
 const owner_checkpoint_name = "owner-crash.page";
 const owner_checkpoint_temp_name = "owner-crash.page.tmp";
 const owner_agent: u32 = 42;
-const owner_generation: u64 = 7;
+const owner_generation: u32 = 7;
+const owner_ownership_epoch: u64 = 1;
 const owner_operation: u32 = 90_042;
 const owner_operation_generation: u32 = 1;
 const owner_result: u32 = 0xc0ffee;
@@ -638,6 +640,7 @@ fn ownerPrepare(io: std.Io, allocator: std.mem.Allocator, runtime: *const Runtim
         .agent_generation = owner_generation,
         .operation_id = owner_operation,
         .operation_generation = owner_operation_generation,
+        .ownership_epoch = owner_ownership_epoch,
         .sequence = 1,
         .result = 0,
     });
@@ -657,10 +660,7 @@ fn ownerCrashAfterSync(io: std.Io, allocator: std.mem.Allocator, runtime: *const
         .dir = std.Io.Dir.cwd(),
         .journal_path = owner_journal_path,
         .writer = &journal,
-        .agent_id = owner_agent,
-        .agent_generation = owner_generation,
-        .operation_id = owner_operation,
-        .operation_generation = owner_operation_generation,
+        .ownership_epoch = owner_ownership_epoch,
         .slot = slot.interface(),
         .fault = .{ .context = &slot, .after_persist = exitAfterPersist },
     };
@@ -691,10 +691,7 @@ fn ownerRecover(
         .dir = std.Io.Dir.cwd(),
         .journal_path = owner_journal_path,
         .writer = &journal,
-        .agent_id = owner_agent,
-        .agent_generation = owner_generation,
-        .operation_id = owner_operation,
-        .operation_generation = owner_operation_generation,
+        .ownership_epoch = owner_ownership_epoch,
         .slot = slot.interface(),
     };
     var owner = try harness.Harness.open(.{
@@ -770,10 +767,7 @@ fn checkpointCrash(
         .dir = std.Io.Dir.cwd(),
         .journal_path = owner_journal_path,
         .writer = &journal,
-        .agent_id = owner_agent,
-        .agent_generation = owner_generation,
-        .operation_id = owner_operation,
-        .operation_generation = owner_operation_generation,
+        .ownership_epoch = owner_ownership_epoch,
         .slot = slot.interface(),
     };
     var owner = try harness.Harness.open(.{
@@ -848,6 +842,7 @@ fn ownerCompletion() harness.Completion {
         .agent_generation = owner_generation,
         .operation_id = owner_operation,
         .operation_generation = owner_operation_generation,
+        .ownership_epoch = owner_ownership_epoch,
         .result = owner_result,
     };
 }
@@ -959,6 +954,7 @@ fn lifecyclePrepare(io: std.Io, allocator: std.mem.Allocator, runtime: *const Ru
             .agent_generation = lifecycle_generation,
             .operation_id = operation_id,
             .operation_generation = 1,
+            .ownership_epoch = lifecycle_ownership_epoch,
             .sequence = journal_sequence,
             .result = 0,
         });
@@ -982,6 +978,7 @@ fn lifecyclePrepare(io: std.Io, allocator: std.mem.Allocator, runtime: *const Ru
                 .agent_generation = lifecycle_generation,
                 .operation_id = operation_id,
                 .operation_generation = 1,
+                .ownership_epoch = lifecycle_ownership_epoch,
                 .sequence = journal_sequence,
                 .result = lifecycleResult(operation_id),
             });
@@ -1054,6 +1051,7 @@ fn lifecycleComplete(io: std.Io) !void {
             .agent_generation = lifecycle_generation,
             .operation_id = operation_id,
             .operation_generation = 1,
+            .ownership_epoch = lifecycle_ownership_epoch,
             .sequence = journal.last_sequence + 1,
             .result = lifecycleResult(operation_id),
         });
@@ -1178,6 +1176,7 @@ fn lifecycleRecover(io: std.Io, allocator: std.mem.Allocator, runtime: *const Ru
         lifecycle_generation,
         lifecycleOperationId(unaccepted_agent),
         1,
+        lifecycle_ownership_epoch,
         std.math.maxInt(u64),
     )) {
         return error.UnacceptedOperationWasPublished;
@@ -1222,6 +1221,7 @@ fn verifyAcceptedPrefix(
         completion.agent_generation,
         completion.operation_id,
         completion.operation_generation,
+        completion.ownership_epoch,
         completion_offset,
     )) {
         return error.MissingAcceptedOperation;
@@ -1231,9 +1231,10 @@ fn verifyAcceptedPrefix(
 fn hasAcceptedRecord(
     io: std.Io,
     agent_id: u64,
-    agent_generation: u64,
+    agent_generation: u32,
     operation_id: u64,
     operation_generation: u32,
+    ownership_epoch: u64,
     before_offset: u64,
 ) !bool {
     var scan = try operation_log.Reader.open(io, lifecycle_journal_path);
@@ -1244,7 +1245,8 @@ fn hasAcceptedRecord(
         if (record.agent_id != agent_id or
             record.agent_generation != agent_generation or
             record.operation_id != operation_id or
-            record.operation_generation != operation_generation)
+            record.operation_generation != operation_generation or
+            record.ownership_epoch != ownership_epoch)
         {
             continue;
         }
@@ -1267,6 +1269,7 @@ fn validateLifecycleRecord(record: operation_log.Record) !void {
         lifecycle_generation,
         lifecycleOperationId(agent_id),
         1,
+        lifecycle_ownership_epoch,
     );
     if (record.kind == .completed and record.result != lifecycleResult(@intCast(record.operation_id))) {
         return error.InvalidLifecycleResult;

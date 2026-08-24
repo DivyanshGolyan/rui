@@ -56,7 +56,8 @@ progress events or one durable terminal completion.
 ## Representation decision
 
 The host journal now uses canonical, checksummed 64-byte records. Each record identifies its kind,
-logical agent, agent generation, operation, operation generation, global sequence, and result. The
+logical agent, agent generation, operation, operation generation, ownership epoch, global sequence,
+and result. The
 writer synchronizes the file after every accepted or completed record. Replay rejects corrupt,
 noncanonical, truncated, and nonmonotonic records.
 

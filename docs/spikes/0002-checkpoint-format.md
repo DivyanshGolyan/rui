@@ -26,6 +26,10 @@ Every checkpoint is exactly 65,600 bytes:
 CRC32 detects accidental corruption; it is not an authentication mechanism. A later format can add
 authenticated integrity if the threat model requires protection from malicious modification.
 
+Agent generations are a 32-bit domain value across task admission, completions, journals, and
+checkpoints. The checkpoint retains its original 8-byte field for format stability; encoders zero
+the high 32 bits and decoders reject them when nonzero.
+
 ## Bounds
 
 The host allocates one 65,600-byte checkpoint buffer per active execution path and reuses it for all

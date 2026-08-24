@@ -26,10 +26,7 @@ pub const Adapter = struct {
     dir: std.Io.Dir,
     journal_path: []const u8,
     writer: *operation_log.Writer,
-    agent_id: u64,
-    agent_generation: u64,
-    operation_id: u64,
-    operation_generation: u32,
+    ownership_epoch: u64,
     slot: Slot,
     fault: ?FaultHook = null,
 
@@ -52,13 +49,7 @@ pub const Adapter = struct {
     fn classify(context: *anyopaque, input: harness.Input) anyerror!harness.InputState {
         const self: *Adapter = @ptrCast(@alignCast(context));
         const completion = try completionFrom(input);
-        if (completion.agent_id != self.agent_id or
-            completion.agent_generation != self.agent_generation or
-            completion.operation_id != self.operation_id or
-            completion.operation_generation != self.operation_generation)
-        {
-            return .stale;
-        }
+        if (completion.ownership_epoch > self.ownership_epoch) return .stale;
 
         var reader = try operation_log.Reader.openIn(self.dir, self.io, self.journal_path);
         defer reader.close(self.io);
@@ -68,7 +59,8 @@ pub const Adapter = struct {
             if (record.agent_id != completion.agent_id or
                 record.agent_generation != completion.agent_generation or
                 record.operation_id != completion.operation_id or
-                record.operation_generation != completion.operation_generation)
+                record.operation_generation != completion.operation_generation or
+                record.ownership_epoch != completion.ownership_epoch)
             {
                 continue;
             }
@@ -103,6 +95,7 @@ pub const Adapter = struct {
             .agent_generation = completion.agent_generation,
             .operation_id = completion.operation_id,
             .operation_generation = completion.operation_generation,
+            .ownership_epoch = completion.ownership_epoch,
             .sequence = self.writer.last_sequence + 1,
             .result = completion.result,
         });
@@ -145,6 +138,7 @@ const test_completion: harness.Completion = .{
     .agent_generation = 3,
     .operation_id = 19,
     .operation_generation = 2,
+    .ownership_epoch = 5,
     .result = 101,
 };
 
@@ -155,6 +149,7 @@ fn appendAccepted(writer: *operation_log.Writer, io: std.Io) !void {
         .agent_generation = test_completion.agent_generation,
         .operation_id = test_completion.operation_id,
         .operation_generation = test_completion.operation_generation,
+        .ownership_epoch = test_completion.ownership_epoch,
         .sequence = writer.last_sequence + 1,
         .result = 0,
     });
@@ -181,10 +176,7 @@ test "the adapter persists a real completion record before slot application" {
         .dir = tmp.dir,
         .journal_path = "journal",
         .writer = &writer,
-        .agent_id = test_completion.agent_id,
-        .agent_generation = test_completion.agent_generation,
-        .operation_id = test_completion.operation_id,
-        .operation_generation = test_completion.operation_generation,
+        .ownership_epoch = test_completion.ownership_epoch,
         .slot = slot.interface(),
     };
     var owner = try openHarness(&adapter);
@@ -209,6 +201,7 @@ test "reconstruction applies a durable completion once without a second append" 
             .agent_generation = test_completion.agent_generation,
             .operation_id = test_completion.operation_id,
             .operation_generation = test_completion.operation_generation,
+            .ownership_epoch = test_completion.ownership_epoch,
             .sequence = initial.last_sequence + 1,
             .result = test_completion.result,
         });
@@ -221,10 +214,7 @@ test "reconstruction applies a durable completion once without a second append" 
         .dir = tmp.dir,
         .journal_path = "journal",
         .writer = &writer,
-        .agent_id = test_completion.agent_id,
-        .agent_generation = test_completion.agent_generation,
-        .operation_id = test_completion.operation_id,
-        .operation_generation = test_completion.operation_generation,
+        .ownership_epoch = test_completion.ownership_epoch,
         .slot = slot.interface(),
     };
     var owner = try openHarness(&adapter);
@@ -253,14 +243,72 @@ test "an unreadable journal fail-stops the owner" {
         .dir = tmp.dir,
         .journal_path = "journal",
         .writer = &writer,
-        .agent_id = test_completion.agent_id,
-        .agent_generation = test_completion.agent_generation,
-        .operation_id = test_completion.operation_id,
-        .operation_generation = test_completion.operation_generation,
+        .ownership_epoch = test_completion.ownership_epoch,
         .slot = slot.interface(),
     };
     var owner = try openHarness(&adapter);
     try std.testing.expectEqual(harness.OfferResult.queued, owner.offer(.{ .completion = test_completion }));
     try std.testing.expectError(error.TruncatedRecord, owner.drive());
     try std.testing.expectEqual(harness.OfferResult.unavailable, owner.offer(.{ .completion = test_completion }));
+}
+
+test "a resumed owner reconciles a late completion from an accepted prior epoch" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var writer = try operation_log.Writer.createIn(tmp.dir, io, "journal");
+    defer writer.close(io);
+    try appendAccepted(&writer, io);
+    const offset_before = writer.offset;
+    var slot: FakeSlot = .{ .state = .accepted };
+    var adapter: Adapter = .{
+        .io = io,
+        .dir = tmp.dir,
+        .journal_path = "journal",
+        .writer = &writer,
+        .ownership_epoch = test_completion.ownership_epoch + 1,
+        .slot = slot.interface(),
+    };
+    var owner = try openHarness(&adapter);
+    try std.testing.expectEqual(
+        harness.OfferResult.queued,
+        owner.offer(.{ .completion = test_completion }),
+    );
+
+    const progress = try owner.drive();
+
+    try std.testing.expectEqual(@as(u8, 1), progress.committed);
+    try std.testing.expectEqual(@as(u8, 1), progress.applied);
+    try std.testing.expectEqual(offset_before + operation_log.record_size, writer.offset);
+    try std.testing.expectEqual(@as(u8, 1), slot.apply_count);
+}
+
+test "a completion from a future ownership epoch cannot journal or apply" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var writer = try operation_log.Writer.createIn(tmp.dir, io, "journal");
+    defer writer.close(io);
+    try appendAccepted(&writer, io);
+    const offset_before = writer.offset;
+    var slot: FakeSlot = .{ .state = .accepted };
+    var adapter: Adapter = .{
+        .io = io,
+        .dir = tmp.dir,
+        .journal_path = "journal",
+        .writer = &writer,
+        .ownership_epoch = test_completion.ownership_epoch - 1,
+        .slot = slot.interface(),
+    };
+    var owner = try openHarness(&adapter);
+    try std.testing.expectEqual(
+        harness.OfferResult.queued,
+        owner.offer(.{ .completion = test_completion }),
+    );
+
+    const progress = try owner.drive();
+
+    try std.testing.expectEqual(@as(u8, 1), progress.stale);
+    try std.testing.expectEqual(offset_before, writer.offset);
+    try std.testing.expectEqual(@as(u8, 0), slot.apply_count);
 }

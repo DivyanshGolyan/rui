@@ -23,6 +23,11 @@ slot. A child process exits after the completion record is synced but before slo
 recovery processes then prove one application followed by one duplicate. The fixed native control
 metadata is 1,536 bytes, excluding the runtime, one-page core, and checkpoint staging buffer.
 
+The durable Session layer adds exact create and resume identities, a lifetime operating-system lock,
+durable ownership epochs, and an append-only parent-linked conversation. Resume publishes the new
+epoch before bounded reconstruction and advances a manifest that may lag the conversation log by one
+synced entry.
+
 The atomic checkpoint spike publishes through temporary write, file sync, same-directory rename,
 and parent-directory sync. Sixteen fresh child processes terminate at each boundary and recover only
 the old or new canonical page while keeping the journal unchanged.
@@ -50,6 +55,7 @@ See the spike notes for architecture, measurements, caveats, and next questions:
 - [`docs/spikes/0004-fixed-credit-harness.md`](docs/spikes/0004-fixed-credit-harness.md)
 - [`docs/spikes/0005-owner-crash-recovery.md`](docs/spikes/0005-owner-crash-recovery.md)
 - [`docs/spikes/0006-atomic-checkpoint-publication.md`](docs/spikes/0006-atomic-checkpoint-publication.md)
+- [`docs/spikes/0007-durable-session.md`](docs/spikes/0007-durable-session.md)
 
 Source audits that informed the architecture:
 

@@ -1,26 +1,28 @@
 const std = @import("std");
+const owner_fence = @import("owner_fence.zig");
 
 pub const max_input_capacity = 32;
 
 /// A bounded value copied across the producer-to-owner boundary.
 pub const Completion = extern struct {
     agent_id: u64,
-    agent_generation: u64,
     operation_id: u64,
-    operation_generation: u32,
+    ownership_epoch: u64,
     result: u64,
+    agent_generation: u32,
+    operation_generation: u32,
 };
 
 pub const TaskInput = extern struct {
     task_id: u64,
     agent_id: u64,
-    agent_generation: u64,
+    agent_generation: u32,
     task_ref: u64,
 };
 
 pub const AgentIdentity = extern struct {
     agent_id: u64,
-    agent_generation: u64,
+    agent_generation: u32,
 };
 
 pub const Permission = enum(u8) {
@@ -30,7 +32,7 @@ pub const Permission = enum(u8) {
 
 pub const PermissionDecision = extern struct {
     agent_id: u64,
-    agent_generation: u64,
+    agent_generation: u32,
     operation_id: u64,
     operation_generation: u32,
     decision: Permission,
@@ -72,6 +74,7 @@ pub const Config = struct {
     input_capacity: u8,
     drive_quantum: u8,
     transition: Transition,
+    owner_fence: ?owner_fence.Fence = null,
 };
 
 pub const Progress = struct {
@@ -128,7 +131,8 @@ fn tagBits(tag: std.meta.Tag(Input)) u64 {
     return @as(u64, @intFromEnum(tag)) << 56;
 }
 
-fn entryTag(entry: Entry) std.meta.Tag(Input) {
+fn entryTag(entry: Entry, is_completion: bool) std.meta.Tag(Input) {
+    if (is_completion) return .completion;
     return @enumFromInt(@as(u8, @truncate(entry.words[3] >> 56)));
 }
 
@@ -143,9 +147,10 @@ fn encode(input: Input) Entry {
         } },
         .completion => |completion| .{ .words = .{
             completion.agent_id,
-            completion.agent_generation,
             completion.operation_id,
-            tagBits(.completion) | completion.operation_generation,
+            completion.ownership_epoch,
+            @as(u64, completion.operation_generation) |
+                (@as(u64, completion.agent_generation) << 32),
             completion.result,
         } },
         .permission => |permission| .{ .words = .{
@@ -168,24 +173,25 @@ fn encode(input: Input) Entry {
     };
 }
 
-fn decode(entry: Entry) Input {
-    return switch (entryTag(entry)) {
+fn decode(entry: Entry, is_completion: bool) Input {
+    return switch (entryTag(entry, is_completion)) {
         .start_task => .{ .start_task = .{
             .task_id = entry.words[0],
             .agent_id = entry.words[1],
-            .agent_generation = entry.words[2],
+            .agent_generation = @truncate(entry.words[2]),
             .task_ref = entry.words[4],
         } },
         .completion => .{ .completion = .{
             .agent_id = entry.words[0],
-            .agent_generation = entry.words[1],
-            .operation_id = entry.words[2],
-            .operation_generation = @truncate(entry.words[3]),
+            .operation_id = entry.words[1],
+            .ownership_epoch = entry.words[2],
             .result = entry.words[4],
+            .agent_generation = @truncate(entry.words[3] >> 32),
+            .operation_generation = @truncate(entry.words[3]),
         } },
         .permission => .{ .permission = .{
             .agent_id = entry.words[0],
-            .agent_generation = entry.words[1],
+            .agent_generation = @truncate(entry.words[1]),
             .operation_id = entry.words[2],
             .operation_generation = @truncate(entry.words[3]),
             .decision = @enumFromInt(@as(u8, @truncate(entry.words[3] >> 32))),
@@ -193,7 +199,7 @@ fn decode(entry: Entry) Input {
         } },
         .cancel => .{ .cancel = .{
             .agent_id = entry.words[0],
-            .agent_generation = entry.words[1],
+            .agent_generation = @truncate(entry.words[1]),
         } },
         .shutdown => .shutdown,
     };
@@ -208,7 +214,8 @@ fn structurallyValid(input: Input) bool {
         .completion => |completion| completion.agent_id != 0 and
             completion.agent_generation != 0 and
             completion.operation_id != 0 and
-            completion.operation_generation != 0,
+            completion.operation_generation != 0 and
+            completion.ownership_epoch != 0,
         .permission => |permission| permission.agent_id != 0 and
             permission.agent_generation != 0 and
             permission.operation_id != 0 and
@@ -245,6 +252,9 @@ pub const Harness = struct {
     task_admitted: bool = false,
     cancel_admitted: bool = false,
     shutdown_admitted: bool = false,
+    completion_slots: u32 = 0,
+    owner_context: *anyopaque = undefined,
+    authorize_owner: ?*const fn (*anyopaque) anyerror!void = null,
     admission_lock: std.atomic.Mutex = .unlocked,
 
     /// Constructs one fixed-capacity owner. No allocation occurs here or later.
@@ -255,11 +265,17 @@ pub const Harness = struct {
         {
             return error.InvalidCapacity;
         }
-        return .{
+        if (config.owner_fence) |fence| try fence.authorize(fence.context);
+        var harness: Harness = .{
             .capacity = config.input_capacity,
             .quantum = config.drive_quantum,
             .transition = config.transition,
         };
+        if (config.owner_fence) |fence| {
+            harness.owner_context = fence.context;
+            harness.authorize_owner = fence.authorize;
+        }
+        return harness;
     }
 
     /// Attempts to transfer one bounded input without waiting or performing I/O.
@@ -279,6 +295,12 @@ pub const Harness = struct {
         if (self.len == self.capacity) return .full;
         const tail = (self.head + self.len) % self.capacity;
         self.entries[tail] = encode(input);
+        const mask = @as(u32, 1) << @intCast(tail);
+        if (input == .completion) {
+            self.completion_slots |= mask;
+        } else {
+            self.completion_slots &= ~mask;
+        }
         self.len += 1;
         switch (input) {
             .start_task => self.task_admitted = true,
@@ -297,6 +319,12 @@ pub const Harness = struct {
         if (self.phase == .closed) return error.HarnessClosed;
         if (self.phase == .failed) return error.HarnessUnavailable;
         if (self.phase == .finished and self.len == 0) return error.HarnessFinished;
+        if (self.authorize_owner) |authorize| {
+            authorize(self.owner_context) catch |err| {
+                self.phase = .failed;
+                return err;
+            };
+        }
         var consumed: u8 = 0;
         var committed: u8 = 0;
         var applied: u8 = 0;
@@ -305,7 +333,11 @@ pub const Harness = struct {
         var projections: [max_input_capacity + 1]Projection = undefined;
         var projection_count: u8 = 0;
         while (consumed < self.quantum and self.len > 0) {
-            const input = decode(self.entries[self.head]);
+            const head_mask = @as(u32, 1) << @intCast(self.head);
+            const input = decode(
+                self.entries[self.head],
+                self.completion_slots & head_mask != 0,
+            );
             const state = self.transition.classify(self.transition.context, input) catch |err| {
                 self.phase = .failed;
                 return err;
@@ -349,7 +381,11 @@ pub const Harness = struct {
             }
             if (self.phase == .cancelling and
                 (self.len == 0 or
-                    (self.len == 1 and entryTag(self.entries[self.head]) == .shutdown)))
+                    (self.len == 1 and
+                        entryTag(
+                            self.entries[self.head],
+                            self.completion_slots & (@as(u32, 1) << @intCast(self.head)) != 0,
+                        ) == .shutdown)))
             {
                 self.phase = .finished;
                 projections[projection_count] = .{
@@ -364,6 +400,7 @@ pub const Harness = struct {
             projections[projection_count] = .{ .kind = .closed, .subject = 0 };
             projection_count += 1;
             @memset(std.mem.asBytes(&self.entries), 0);
+            self.completion_slots = 0;
             self.head = 0;
         }
         return .{
@@ -416,6 +453,7 @@ test "ingress encoding preserves every bounded field" {
             .agent_generation = 6,
             .operation_id = 7,
             .operation_generation = std.math.maxInt(u32),
+            .ownership_epoch = std.math.maxInt(u64),
             .result = std.math.maxInt(u64),
         } },
         .{ .permission = .{
@@ -428,11 +466,13 @@ test "ingress encoding preserves every bounded field" {
         } },
         .{ .cancel = .{
             .agent_id = std.math.maxInt(u64),
-            .agent_generation = std.math.maxInt(u64),
+            .agent_generation = std.math.maxInt(u32),
         } },
         .shutdown,
     };
-    for (inputs) |input| try std.testing.expectEqualDeep(input, decode(encode(input)));
+    for (inputs) |input| {
+        try std.testing.expectEqualDeep(input, decode(encode(input), input == .completion));
+    }
 }
 
 const InputTrace = struct {
@@ -481,9 +521,10 @@ test "all input kinds share the bounded durable owner path" {
     } }));
     try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = .{
         .agent_id = 7,
-        .agent_generation = 3,
+        .agent_generation = std.math.maxInt(u32),
         .operation_id = 19,
         .operation_generation = 2,
+        .ownership_epoch = 1,
         .result = 101,
     } }));
     try std.testing.expectEqual(@as(u8, 0), trace.persisted);
@@ -547,9 +588,10 @@ test "cancellation settles an already accepted completion before finishing" {
     } }));
     try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = .{
         .agent_id = 7,
-        .agent_generation = 3,
+        .agent_generation = std.math.maxInt(u32),
         .operation_id = 19,
         .operation_generation = 2,
+        .ownership_epoch = 1,
         .result = 101,
     } }));
 
@@ -593,6 +635,7 @@ test "offer consumes exactly the configured resident credits" {
         .agent_generation = 1,
         .operation_id = 11,
         .operation_generation = 1,
+        .ownership_epoch = 1,
         .result = 101,
     };
     var second = first;
@@ -640,6 +683,7 @@ test "drive persists a completion before applying it" {
         .agent_generation = 3,
         .operation_id = 19,
         .operation_generation = 2,
+        .ownership_epoch = 1,
         .result = 101,
     };
     try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = completion }));
@@ -669,6 +713,7 @@ test "offer rejects structurally invalid completion identities" {
         .agent_generation = 1,
         .operation_id = 11,
         .operation_generation = 1,
+        .ownership_epoch = 1,
         .result = 101,
     };
 
@@ -700,6 +745,7 @@ test "drive rejects a stale generation before persistence or mutation" {
         .agent_generation = 3,
         .operation_id = 19,
         .operation_generation = 2,
+        .ownership_epoch = 1,
         .result = 101,
     };
     try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = completion }));
@@ -760,6 +806,7 @@ test "a replayed durable completion applies exactly once after owner restart" {
         .agent_generation = 3,
         .operation_id = 19,
         .operation_generation = 2,
+        .ownership_epoch = 1,
         .result = 101,
     };
 
@@ -809,6 +856,7 @@ test "a classification failure makes the owner unavailable" {
         .agent_generation = 3,
         .operation_id = 19,
         .operation_generation = 2,
+        .ownership_epoch = 1,
         .result = 101,
     };
     try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = completion }));
@@ -833,6 +881,7 @@ test "a transition failure makes the owner unavailable until reconstruction" {
         .agent_generation = 3,
         .operation_id = 19,
         .operation_generation = 2,
+        .ownership_epoch = 1,
         .result = 101,
     };
     try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = completion }));
@@ -867,6 +916,7 @@ test "shutdown is offered and driven instead of bypassing the owner loop" {
         .agent_generation = 3,
         .operation_id = 19,
         .operation_generation = 2,
+        .ownership_epoch = 1,
         .result = 101,
     };
 
@@ -892,6 +942,7 @@ const Producer = struct {
                 .agent_generation = 1,
                 .operation_id = id + 100,
                 .operation_generation = 1,
+                .ownership_epoch = 1,
                 .result = id,
             };
             while (true) switch (self.harness.offer(.{ .completion = completion })) {
@@ -949,6 +1000,7 @@ test "concurrent producers cannot exceed fixed admission credits" {
         .agent_generation = 1,
         .operation_id = 199,
         .operation_generation = 1,
+        .ownership_epoch = 1,
         .result = 99,
     };
     try std.testing.expectEqual(OfferResult.full, harness.offer(.{ .completion = overflow }));
@@ -987,6 +1039,7 @@ test "drive bounds each owner turn by the configured quantum" {
             .agent_generation = 1,
             .operation_id = id + 100,
             .operation_generation = 1,
+            .ownership_epoch = 1,
             .result = id,
         } }));
     }
@@ -1018,6 +1071,7 @@ test "ten thousand reuse cycles keep the resident control budget fixed" {
             .agent_generation = 1,
             .operation_id = id,
             .operation_generation = 1,
+            .ownership_epoch = 1,
             .result = id,
         } }));
         const progress = try harness.drive();

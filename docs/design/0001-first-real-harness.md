@@ -265,17 +265,17 @@ Shutdown is an input followed by driving to `closed`; it is not a fourth lifecyc
 pub const Input = union(enum) {
     start_task: TaskInput,
     completion: Completion,
-    approval: ApprovalDecision,
+    permission: PermissionDecision,
     cancel: AgentIdentity,
     shutdown,
 };
 ```
 
-`TaskInput` is copied into fixed ingress storage before `offer` returns `queued`. Oversized input is rejected as a disposition.
+`TaskInput` contains fixed identity fields and a durable reference to the bounded task bytes. It is copied into fixed ingress storage before `offer` returns `queued`; oversized task content is rejected before the reference is created.
 
-`Completion` contains only stable session, agent, operation, attempt, and ownership-epoch identity; generations; a typed disposition; and a durable result reference. Large provider and tool bodies never enter the completion ring.
+`Completion` contains stable agent, operation, and ownership-epoch identity, both generations, and a durable result reference. The operation journal resolves the Session and Attempt relationship. Large provider and tool bodies never enter the ingress ring.
 
-`ApprovalDecision` contains the agent and operation generations plus the digest of the descriptor and bytes displayed to the user. A stale or mismatched decision cannot authorize an effect.
+`PermissionDecision` contains the agent and operation generations plus the digest of the descriptor and bytes displayed to the user. A stale or mismatched decision cannot authorize an effect.
 
 Cancellation is a durable request to stop further agent decisions, not a claim that an accepted effect did not happen. The harness admits no new operation after cancellation, but every accepted operation must still reach a terminal or indeterminate disposition. If a completion races cancellation, the journal records and reconciles the completion before the task reaches its cancelled outcome.
 
@@ -318,7 +318,6 @@ full
 busy
 closed
 invalid
-too_large
 unavailable
 ```
 

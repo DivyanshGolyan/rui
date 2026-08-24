@@ -22,7 +22,7 @@ Harness.drive()
 
 ## Resident bounds
 
-Every public input is encoded into an exact 40-byte fixed-layout ingress record. Completion fields retain their previous widths; task, permission, cancellation, and shutdown use the same storage, with the input tag encoded in bits unused by that record kind. The harness contains storage for at most 32 records. Configuration may expose fewer credits but cannot grow the compiled maximum.
+Every public input is encoded into an exact 40-byte fixed-layout ingress record. Completion retains 64-bit Agent, Operation, ownership-epoch, and result fields plus 32-bit agent and operation generations. One bit per physical slot distinguishes it from the non-completion encodings, whose tags use otherwise unused bits. The harness contains storage for at most 32 records. Configuration may expose fewer credits but cannot grow the compiled maximum.
 
 Every build mechanically enforces the two native byte bounds, and the test suite enforces the behavioral and Wasm bounds:
 

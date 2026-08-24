@@ -18,11 +18,11 @@ const offset_reserved = 44;
 
 pub const Decoded = struct {
     agent_id: u64,
-    generation: u64,
+    generation: u32,
     page: []const u8,
 };
 
-pub fn encode(out: []u8, agent_id: u64, generation: u64, page: []const u8) !void {
+pub fn encode(out: []u8, agent_id: u64, generation: u32, page: []const u8) !void {
     if (out.len != encoded_size) return error.InvalidOutputLength;
     if (page.len != page_size) return error.InvalidPageLength;
 
@@ -39,7 +39,7 @@ pub fn encode(out: []u8, agent_id: u64, generation: u64, page: []const u8) !void
     @memcpy(out[header_size..], page);
 }
 
-pub fn decode(record: []const u8, expected_agent_id: u64, expected_generation: u64) !Decoded {
+pub fn decode(record: []const u8, expected_agent_id: u64, expected_generation: u32) !Decoded {
     if (record.len != encoded_size) return error.InvalidRecordLength;
     if (!std.mem.eql(u8, record[0..magic.len], magic)) return error.InvalidMagic;
     if (read(u16, record, offset_version) != version) return error.UnsupportedVersion;
@@ -57,7 +57,9 @@ pub fn decode(record: []const u8, expected_agent_id: u64, expected_generation: u
 
     const agent_id = read(u64, record, offset_agent_id);
     if (agent_id != expected_agent_id) return error.AgentIdentityMismatch;
-    const generation = read(u64, record, offset_generation);
+    const encoded_generation = read(u64, record, offset_generation);
+    if (encoded_generation > std.math.maxInt(u32)) return error.InvalidGeneration;
+    const generation: u32 = @intCast(encoded_generation);
     if (generation != expected_generation) return error.GenerationMismatch;
 
     const page = record[header_size..];
@@ -87,7 +89,7 @@ test "checkpoint round trip" {
 
     const decoded = try decode(encoded, 42, 7);
     try std.testing.expectEqual(@as(u64, 42), decoded.agent_id);
-    try std.testing.expectEqual(@as(u64, 7), decoded.generation);
+    try std.testing.expectEqual(@as(u32, 7), decoded.generation);
     try std.testing.expectEqualSlices(u8, page, decoded.page);
 }
 
@@ -121,6 +123,10 @@ test "checkpoint rejects stale identity and generation" {
 
     try std.testing.expectError(error.AgentIdentityMismatch, decode(encoded, 43, 7));
     try std.testing.expectError(error.GenerationMismatch, decode(encoded, 42, 8));
+
+    write(u64, encoded, offset_generation, @as(u64, std.math.maxInt(u32)) + 1);
+    write(u32, encoded, offset_header_crc, std.hash.Crc32.hash(encoded[0..offset_header_crc]));
+    try std.testing.expectError(error.InvalidGeneration, decode(encoded, 42, 7));
 }
 
 test "checkpoint rejects unsupported metadata" {
