@@ -127,6 +127,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     bash_tool_tests.root_module.link_libc = true;
+    const patch_tool_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/patch_tool.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    patch_tool_tests.root_module.link_libc = true;
     const cli_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/cli.zig"),
@@ -158,6 +166,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(session_tests).step);
     test_step.dependOn(&b.addRunArtifact(model_operation_tests).step);
     test_step.dependOn(&b.addRunArtifact(bash_tool_tests).step);
+    test_step.dependOn(&b.addRunArtifact(patch_tool_tests).step);
     test_step.dependOn(&b.addRunArtifact(cli_tests).step);
     test_step.dependOn(&run_agent_integration.step);
 
@@ -203,6 +212,29 @@ pub fn build(b: *std.Build) void {
         "Inspect this repository with Bash.",
     });
     fixture_bash_step.dependOn(&run_fixture_bash.step);
+
+    const fixture_patch_step = b.step(
+        "fixture-patch-deny",
+        "Validate and deny one exact apply_patch call without changing the worktree",
+    );
+    const run_fixture_patch = b.addRunArtifact(cli);
+    run_fixture_patch.addArg("--core");
+    run_fixture_patch.addFileArg(core.getEmittedBin());
+    run_fixture_patch.addArgs(&.{
+        "--state",
+        ".zig-cache/onepage-patch-sessions",
+        "--repo",
+        ".",
+        "--model",
+        "fixture:patch",
+        "--fixture-response",
+        "The exact patch was denied; its typed result reached turn two without changing the worktree.",
+        "--fixture-patch",
+        "fixtures/one-file.patch",
+        "--deny-patch",
+        "Validate this patch and request exact permission.",
+    });
+    fixture_patch_step.dependOn(&run_fixture_patch.step);
 
     const run_step = b.step("run", "Run the memory-model spike");
     const run_host = b.addRunArtifact(host);

@@ -1,6 +1,7 @@
 const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
 const model_protocol = @import("model_protocol.zig");
+const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 
 pub const request_header_size = 16;
@@ -234,7 +235,9 @@ pub const ToolFixture = struct {
     expected_task: []const u8,
     tool_arguments: []const u8,
     final_answer: []const u8,
+    tool: model_protocol.Tool = .bash,
     expected_tool_status: bash_tool.Status = .success,
+    expected_patch_status: patch_tool.ResultStatus = .denied,
     calls: u8 = 0,
 
     pub fn provider(self: *ToolFixture) Provider {
@@ -271,7 +274,7 @@ pub const ToolFixture = struct {
                 if (!std.mem.eql(u8, task, self.expected_task)) return error.UnexpectedFixtureRequest;
                 break :blk try model_protocol.encodeTool(
                     &encoded_buffer,
-                    .bash,
+                    self.tool,
                     self.tool_arguments,
                 );
             },
@@ -288,7 +291,8 @@ pub const ToolFixture = struct {
                 }
                 const call_length = read(u64, second, 32);
                 if (call_length != self.tool_arguments.len) return error.ToolCallMissingFromContext;
-                var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
+                if (call_length > request_window_size) return error.ToolCallMissingFromContext;
+                var call_buffer: [request_window_size]u8 = undefined;
                 const call_bytes = try request.readWindow(
                     second_header_offset + entry_header_size,
                     call_buffer[0..@intCast(call_length)],
@@ -303,7 +307,7 @@ pub const ToolFixture = struct {
                     return error.ToolResultMissingFromContext;
                 }
                 const result_length = read(u64, third, 32);
-                if (result_length < bash_tool.result_header_size or result_length > request_window_size) {
+                if (result_length > request_window_size) {
                     return error.InvalidFixtureToolResult;
                 }
                 var result_buffer: [request_window_size]u8 = undefined;
@@ -311,8 +315,20 @@ pub const ToolFixture = struct {
                     third_header_offset + entry_header_size,
                     result_buffer[0..@intCast(result_length)],
                 );
-                const view = try bash_tool.decodeResult(result);
-                if (view.status != self.expected_tool_status) return error.UnexpectedFixtureToolStatus;
+                switch (self.tool) {
+                    .bash => {
+                        if (result_length < bash_tool.result_header_size) return error.InvalidFixtureToolResult;
+                        const view = try bash_tool.decodeResult(result);
+                        if (view.status != self.expected_tool_status) return error.UnexpectedFixtureToolStatus;
+                    },
+                    .apply_patch => {
+                        if (result_length != patch_tool.result_size) return error.InvalidFixtureToolResult;
+                        const bytes: *const [patch_tool.result_size]u8 = @ptrCast(result.ptr);
+                        const view = try patch_tool.decodeResult(bytes);
+                        if (view.status != self.expected_patch_status) return error.UnexpectedFixtureToolStatus;
+                    },
+                    .none => return error.UnexpectedFixtureTool,
+                }
                 break :blk try model_protocol.encodeText(
                     &encoded_buffer,
                     .complete,

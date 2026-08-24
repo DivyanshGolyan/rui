@@ -27,6 +27,9 @@ pub const Kind = enum(u8) {
     attempt_result = 6,
     attempt_indeterminate = 7,
     denied_result = 8,
+    approval_required = 9,
+    permission_bound = 10,
+    preflight_result = 11,
 };
 
 pub const RecoveryClass = enum(u8) {
@@ -134,7 +137,7 @@ pub fn encode(out: *[record_size]u8, record: Record) !void {
     if (record.operation_generation == 0) return error.InvalidOperationGeneration;
     const needs_attempt = switch (record.kind) {
         .accepted, .completed, .attempt_started, .attempt_result, .attempt_indeterminate => true,
-        .descriptor_validated, .permission_decided, .denied_result => false,
+        .descriptor_validated, .permission_decided, .denied_result, .approval_required, .permission_bound, .preflight_result => false,
     };
     if (needs_attempt == (record.attempt_id == 0)) return error.InvalidAttemptIdentity;
     if (record.ownership_epoch == 0) return error.InvalidOwnershipEpoch;
@@ -144,7 +147,7 @@ pub fn encode(out: *[record_size]u8, record: Record) !void {
         .accepted => if (record.result != 0) return error.AcceptedRecordHasResult,
         .descriptor_validated, .attempt_started => if (record.result != 0) return error.IntentRecordHasResult,
         .permission_decided => if (record.result < 1 or record.result > 2) return error.InvalidPermissionResult,
-        .completed, .attempt_result, .denied_result => if (record.result == 0) return error.ResultRecordMissingResult,
+        .completed, .attempt_result, .denied_result, .approval_required, .permission_bound, .preflight_result => if (record.result == 0) return error.ResultRecordMissingResult,
         .attempt_indeterminate => {},
     }
 
@@ -189,6 +192,9 @@ pub fn decode(bytes: *const [record_size]u8) !Record {
         6 => .attempt_result,
         7 => .attempt_indeterminate,
         8 => .denied_result,
+        9 => .approval_required,
+        10 => .permission_bound,
+        11 => .preflight_result,
         else => return error.InvalidKind,
     };
     const record: Record = .{
@@ -256,6 +262,28 @@ test "operation record round trip" {
     try std.testing.expectEqualDeep(expected, actual);
 }
 
+test "patch permission facts are canonical records without Attempts" {
+    const kinds = [_]Kind{ .approval_required, .permission_bound, .preflight_result };
+    for (kinds, 0..) |kind, index| {
+        const expected: Record = .{
+            .kind = kind,
+            .agent_id = 42,
+            .agent_generation = 7,
+            .operation_id = 99,
+            .operation_generation = 1,
+            .attempt_id = 0,
+            .ownership_epoch = 2,
+            .recovery_class = .consequential,
+            .sequence = index + 1,
+            .descriptor_digest = 101,
+            .result = 1234 + index,
+        };
+        var bytes: [record_size]u8 = undefined;
+        try encode(&bytes, expected);
+        try std.testing.expectEqualDeep(expected, try decode(&bytes));
+    }
+}
+
 test "operation record rejects corruption and unsupported metadata" {
     const accepted: Record = .{
         .kind = .accepted,
@@ -277,7 +305,7 @@ test "operation record rejects corruption and unsupported metadata" {
     try std.testing.expectError(error.ChecksumMismatch, decode(&bytes));
     bytes[offset_operation_id] ^= 1;
 
-    bytes[offset_kind] = 9;
+    bytes[offset_kind] = 255;
     write(u32, &bytes, offset_crc, std.hash.Crc32.hash(bytes[0..offset_crc]));
     try std.testing.expectError(error.InvalidKind, decode(&bytes));
 

@@ -3,6 +3,7 @@ const agent = @import("agent.zig");
 const bash_tool = @import("bash_tool.zig");
 const core_contract = @import("core_contract.zig");
 const model_operation = @import("model_operation.zig");
+const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 
 const max_core_size = 1024 * 1024;
@@ -15,8 +16,11 @@ const Arguments = struct {
     model: ?[]const u8 = null,
     fixture_response: ?[]const u8 = null,
     fixture_bash_command: ?[]const u8 = null,
+    fixture_patch_path: ?[]const u8 = null,
     bash_timeout_ms: u32 = 5000,
     allow_bash: bool = false,
+    allow_patch: bool = false,
+    deny_patch: bool = false,
     task: ?[]const u8 = null,
     resume_id: ?u64 = null,
 };
@@ -75,6 +79,56 @@ pub fn main(init: std.process.Init) !void {
         const workspace_path = try resolveWorkspacePath(init.io, allocator, arguments.repo_path);
         defer allocator.free(workspace_path);
         var output: Output = .{ .io = init.io };
+        if (arguments.fixture_patch_path) |patch_path| {
+            const patch = try std.Io.Dir.cwd().readFileAlloc(
+                init.io,
+                patch_path,
+                allocator,
+                .limited(patch_tool.max_patch_size),
+            );
+            defer allocator.free(patch);
+            var fixture: model_operation.ToolFixture = .{
+                .expected_task = task,
+                .tool = .apply_patch,
+                .tool_arguments = patch,
+                .final_answer = response,
+                .expected_patch_status = .denied,
+            };
+            var permission: InteractivePatchPolicy = .{
+                .io = init.io,
+                .mode = if (arguments.allow_patch)
+                    .allow
+                else if (arguments.deny_patch)
+                    .deny
+                else
+                    .ask,
+            };
+            if (agent.runNew(
+                sessions,
+                init.io,
+                allocator,
+                wasm,
+                .{
+                    .workspace_path = workspace_path,
+                    .model = model,
+                    .task = task,
+                    .patch_policy = permission.policy(),
+                },
+                fixture.provider(),
+                output.observer(),
+            )) |value| {
+                break :blk value;
+            } else |err| switch (err) {
+                error.PatchExecutionDeferred => {
+                    try std.Io.File.stdout().writeStreamingAll(
+                        init.io,
+                        "Patch approved and durably bound; application is deferred to the next implementation step.\n",
+                    );
+                    return;
+                },
+                else => return err,
+            }
+        }
         if (arguments.fixture_bash_command) |command| {
             var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
             const encoded_call = try bash_tool.encodeCall(&call_buffer, .{
@@ -172,12 +226,20 @@ fn parseArguments(args: []const []const u8) !Arguments {
             index += 1;
             if (index == args.len) return error.InvalidArguments;
             parsed.fixture_bash_command = args[index];
+        } else if (std.mem.eql(u8, argument, "--fixture-patch")) {
+            index += 1;
+            if (index == args.len) return error.InvalidArguments;
+            parsed.fixture_patch_path = args[index];
         } else if (std.mem.eql(u8, argument, "--bash-timeout-ms")) {
             index += 1;
             if (index == args.len) return error.InvalidArguments;
             parsed.bash_timeout_ms = try std.fmt.parseInt(u32, args[index], 10);
         } else if (std.mem.eql(u8, argument, "--allow-bash")) {
             parsed.allow_bash = true;
+        } else if (std.mem.eql(u8, argument, "--allow-patch")) {
+            parsed.allow_patch = true;
+        } else if (std.mem.eql(u8, argument, "--deny-patch")) {
+            parsed.deny_patch = true;
         } else if (std.mem.eql(u8, argument, "--resume")) {
             index += 1;
             if (index == args.len) return error.InvalidArguments;
@@ -192,9 +254,14 @@ fn parseArguments(args: []const []const u8) !Arguments {
     }
     if (parsed.resume_id != null and
         (parsed.task != null or parsed.model != null or parsed.fixture_response != null or
-            parsed.repo_path != null or parsed.fixture_bash_command != null or parsed.allow_bash))
+            parsed.repo_path != null or parsed.fixture_bash_command != null or parsed.allow_bash or
+            parsed.fixture_patch_path != null or parsed.allow_patch or parsed.deny_patch))
     {
         return error.ResumeArgumentsConflict;
+    }
+    if (parsed.allow_patch and parsed.deny_patch) return error.ConflictingPatchPolicy;
+    if ((parsed.allow_patch or parsed.deny_patch) and parsed.fixture_patch_path == null) {
+        return error.PatchPolicyWithoutPatch;
     }
     return parsed;
 }
@@ -228,6 +295,76 @@ const InteractivePolicy = struct {
         return count > 0 and (answer[0] == 'y' or answer[0] == 'Y');
     }
 };
+
+const InteractivePatchPolicy = struct {
+    const Mode = enum { ask, allow, deny };
+
+    io: std.Io,
+    mode: Mode,
+
+    fn policy(self: *InteractivePatchPolicy) patch_tool.Policy {
+        return .{ .context = self, .classify_fn = classify, .ask_fn = ask };
+    }
+
+    fn classify(context: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!patch_tool.Decision {
+        const self: *InteractivePatchPolicy = @ptrCast(@alignCast(context));
+        return switch (self.mode) {
+            .ask => .ask,
+            .allow => .allow,
+            .deny => .deny,
+        };
+    }
+
+    fn ask(context: *anyopaque, subject: patch_tool.PermissionSubject, patch: []const u8) anyerror!bool {
+        const self: *InteractivePatchPolicy = @ptrCast(@alignCast(context));
+        var header: [256]u8 = undefined;
+        const prompt = try std.fmt.bufPrint(
+            &header,
+            "apply_patch (operation {x:0>16}/{d}, digest {x:0>16}, workspace {x:0>16}):\n",
+            .{
+                subject.operation_id,
+                subject.operation_generation,
+                subject.validation.patch_digest,
+                subject.validation.workspace_digest,
+            },
+        );
+        try std.Io.File.stdout().writeStreamingAll(self.io, prompt);
+        const escaped = try escapePatch(std.heap.page_allocator, patch);
+        defer std.heap.page_allocator.free(escaped);
+        try std.Io.File.stdout().writeStreamingAll(self.io, escaped);
+        try std.Io.File.stdout().writeStreamingAll(self.io, "Allow? [y/N] ");
+        var answer: [8]u8 = undefined;
+        const count = try std.Io.File.stdin().readStreaming(self.io, &.{&answer});
+        return count > 0 and (answer[0] == 'y' or answer[0] == 'Y');
+    }
+};
+
+fn escapePatch(allocator: std.mem.Allocator, patch: []const u8) ![]u8 {
+    const capacity = try std.math.mul(usize, patch.len, 4);
+    const out = try allocator.alloc(u8, capacity);
+    errdefer allocator.free(out);
+    const hex = "0123456789abcdef";
+    var cursor: usize = 0;
+    for (patch) |byte| {
+        if (byte == '\n') {
+            out[cursor] = '\n';
+            cursor += 1;
+        } else if (byte == '\\') {
+            @memcpy(out[cursor..][0..2], "\\\\");
+            cursor += 2;
+        } else if (byte >= 0x20 and byte <= 0x7e) {
+            out[cursor] = byte;
+            cursor += 1;
+        } else {
+            out[cursor] = '\\';
+            out[cursor + 1] = 'x';
+            out[cursor + 2] = hex[byte >> 4];
+            out[cursor + 3] = hex[byte & 0x0f];
+            cursor += 4;
+        }
+    }
+    return allocator.realloc(out, cursor);
+}
 
 fn resolveCorePath(
     io: std.Io,
@@ -298,4 +435,28 @@ test "CLI arguments distinguish create from exact resume" {
         "000000000000000a",
     });
     try std.testing.expectEqual(@as(u64, 10), resumed.resume_id.?);
+
+    const patch = try parseArguments(&.{
+        "onepage",
+        "--fixture-patch",
+        "change.patch",
+        "--deny-patch",
+        "task",
+    });
+    try std.testing.expectEqualStrings("change.patch", patch.fixture_patch_path.?);
+    try std.testing.expect(patch.deny_patch);
+    try std.testing.expectError(error.ConflictingPatchPolicy, parseArguments(&.{
+        "onepage",
+        "--fixture-patch",
+        "change.patch",
+        "--allow-patch",
+        "--deny-patch",
+        "task",
+    }));
+}
+
+test "patch display escapes terminal controls and backslashes losslessly" {
+    const escaped = try escapePatch(std.testing.allocator, "safe\n\x1b[2J\\x1b\t\xff");
+    defer std.testing.allocator.free(escaped);
+    try std.testing.expectEqualStrings("safe\n\\x1b[2J\\\\x1b\\x09\\xff", escaped);
 }

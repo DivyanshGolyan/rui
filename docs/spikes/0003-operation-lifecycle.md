@@ -59,8 +59,9 @@ The host journal now uses canonical, checksummed 80-byte version-3 records. Each
 kind, logical agent, agent generation, operation, operation generation, Attempt, ownership epoch,
 recovery class, immutable descriptor digest, global sequence, and result. Version 3 also assigns
 canonical kinds to descriptor validation, permission, Attempt start, typed result, and indeterminate
-effect recovery without creating another history. The writer synchronizes the file after every
-record. Replay rejects corrupt,
+effect recovery without creating another history. Patch preflight adds approval-required,
+permission-binding, and preflight-result facts to the same record union. The writer synchronizes the
+file after every record. Replay rejects corrupt,
 noncanonical, truncated, and nonmonotonic records.
 
 The page still uses one fixed operation slot rather than a shared circular ring. Because only one

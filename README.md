@@ -46,6 +46,15 @@ second model turn. Ambiguous crash recovery records `possibly_executed` and neve
 zig build fixture-bash -Doptimize=ReleaseSmall
 ```
 
+The patch-permission slice validates one exact, tracked, regular-file diff, binds its preimage and
+permission evidence durably, and can regenerate an approval-required prompt after a restart. The
+deterministic fixture denies the call, gives the typed result to turn two, and leaves the worktree
+unchanged.
+
+```sh
+zig build fixture-patch-deny -Doptimize=ReleaseSmall
+```
+
 The atomic checkpoint spike publishes through temporary write, file sync, same-directory rename,
 and parent-directory sync. Sixteen fresh child processes terminate at each boundary and recover only
 the old or new canonical page while keeping the journal unchanged.
@@ -76,6 +85,7 @@ See the spike notes for architecture, measurements, caveats, and next questions:
 - [`docs/spikes/0007-durable-session.md`](docs/spikes/0007-durable-session.md)
 - [`docs/spikes/0008-fixture-model-final-answer.md`](docs/spikes/0008-fixture-model-final-answer.md)
 - [`docs/spikes/0009-permissioned-bash.md`](docs/spikes/0009-permissioned-bash.md)
+- [`docs/spikes/0010-apply-patch-permission.md`](docs/spikes/0010-apply-patch-permission.md)
 
 Source audits that informed the architecture:
 

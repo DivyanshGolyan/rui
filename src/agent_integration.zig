@@ -3,6 +3,7 @@ const agent = @import("agent.zig");
 const bash_tool = @import("bash_tool.zig");
 const core_contract = @import("core_contract.zig");
 const model_operation = @import("model_operation.zig");
+const patch_tool = @import("patch_tool.zig");
 
 const task = "Explain the fixture repository.";
 const answer = "The fixture contains a durable one-page agent.";
@@ -55,6 +56,18 @@ pub fn main(init: std.process.Init) !void {
     switch (git_init.term) {
         .exited => |code| if (code != 0) return error.GitInitFailed,
         else => return error.GitInitFailed,
+    }
+    try writeRepoFile(repo, init.io, "note.txt", "old\n");
+    const git_add = try std.process.run(allocator, init.io, .{
+        .argv = &.{ "/usr/bin/git", "-C", repo_path, "add", "note.txt" },
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(1024),
+    });
+    defer allocator.free(git_add.stdout);
+    defer allocator.free(git_add.stderr);
+    switch (git_add.term) {
+        .exited => |code| if (code != 0) return error.GitAddFailed,
+        else => return error.GitAddFailed,
     }
 
     var incompatible = try allocator.dupe(u8, wasm);
@@ -459,6 +472,208 @@ pub fn main(init: std.process.Init) !void {
     const uncertain_length = try uncertain_file.readPositionalAll(init.io, &uncertain_bytes, 0);
     if (uncertain_length != 1 or uncertain_bytes[0] != 'x') return error.UncertainBashReplayed;
 
+    const patch =
+        "diff --git a/note.txt b/note.txt\n" ++
+        "--- a/note.txt\n" ++
+        "+++ b/note.txt\n" ++
+        "@@ -1 +1 @@\n" ++
+        "-old\n" ++
+        "+new\n";
+    var patch_deny_fixture: model_operation.ToolFixture = .{
+        .expected_task = task,
+        .tool = .apply_patch,
+        .tool_arguments = patch,
+        .final_answer = "The exact patch was denied and the worktree was not changed.",
+        .expected_patch_status = .denied,
+    };
+    var patch_deny: PatchDenyPolicy = .{};
+    var patch_denied = try agent.runNew(
+        sessions,
+        init.io,
+        allocator,
+        wasm,
+        .{
+            .workspace_path = repo_path,
+            .model = "fixture:patch-denied",
+            .task = task,
+            .patch_policy = patch_deny.policy(),
+        },
+        patch_deny_fixture.provider(),
+        null,
+    );
+    patch_denied.close();
+    try expectRepoFile(repo, init.io, "note.txt", "old\n");
+
+    var patch_stale_fixture: model_operation.ToolFixture = .{
+        .expected_task = task,
+        .tool = .apply_patch,
+        .tool_arguments = patch,
+        .final_answer = "The approved patch became stale and the external bytes were preserved.",
+        .expected_patch_status = .stale,
+    };
+    var patch_stale: PatchStalePolicy = .{ .io = init.io, .repo = repo };
+    var patch_stale_completed = try agent.runNew(
+        sessions,
+        init.io,
+        allocator,
+        wasm,
+        .{
+            .workspace_path = repo_path,
+            .model = "fixture:patch-stale",
+            .task = task,
+            .patch_policy = patch_stale.policy(),
+        },
+        patch_stale_fixture.provider(),
+        null,
+    );
+    patch_stale_completed.close();
+    try expectRepoFile(repo, init.io, "note.txt", "external\n");
+    try writeRepoFile(repo, init.io, "note.txt", "old\n");
+
+    var patch_allow_fixture: model_operation.ToolFixture = .{
+        .expected_task = task,
+        .tool = .apply_patch,
+        .tool_arguments = patch,
+        .final_answer = "must wait for the patch application step",
+    };
+    var patch_allow: PatchAllowPolicy = .{};
+    var patch_allow_capture: SessionCapture = .{};
+    if (agent.runNew(
+        sessions,
+        init.io,
+        allocator,
+        wasm,
+        .{
+            .workspace_path = repo_path,
+            .model = "fixture:patch-allowed",
+            .task = task,
+            .patch_policy = patch_allow.policy(),
+        },
+        patch_allow_fixture.provider(),
+        patch_allow_capture.observer(),
+    )) |unexpected| {
+        var value = unexpected;
+        value.close();
+        return error.AllowedPatchExecutedDuringPermissionStep;
+    } else |err| if (err != error.PatchExecutionDeferred) {
+        return err;
+    }
+    try expectRepoFile(repo, init.io, "note.txt", "old\n");
+    if (agent.resumeSession(sessions, init.io, allocator, wasm, patch_allow_capture.session_id)) |unexpected| {
+        var value = unexpected;
+        value.close();
+        return error.AllowedPatchResumedPastPermissionStep;
+    } else |err| if (err != error.PatchExecutionDeferred) {
+        return err;
+    }
+
+    var patch_ask_fixture: model_operation.ToolFixture = .{
+        .expected_task = task,
+        .tool = .apply_patch,
+        .tool_arguments = patch,
+        .final_answer = "must wait for approval",
+    };
+    var patch_ask: PatchAskCrashPolicy = .{};
+    var patch_ask_capture: SessionCapture = .{};
+    if (agent.runNew(
+        sessions,
+        init.io,
+        allocator,
+        wasm,
+        .{
+            .workspace_path = repo_path,
+            .model = "fixture:patch-approval",
+            .task = task,
+            .patch_policy = patch_ask.policy(),
+        },
+        patch_ask_fixture.provider(),
+        patch_ask_capture.observer(),
+    )) |unexpected| {
+        var value = unexpected;
+        value.close();
+        return error.PatchApprovalDidNotSuspend;
+    } else |err| if (err != error.InjectedApprovalCrash) {
+        return err;
+    }
+    for (0..2) |_| {
+        if (agent.resumeSession(sessions, init.io, allocator, wasm, patch_ask_capture.session_id)) |unexpected| {
+            var value = unexpected;
+            value.close();
+            return error.PatchApprovalProjectionMissing;
+        } else |err| if (err != error.PatchApprovalRequired) {
+            return err;
+        }
+    }
+    try expectRepoFile(repo, init.io, "note.txt", "old\n");
+
+    const permission_crash_cases = [_]struct {
+        classification: patch_tool.Decision,
+        answer: bool,
+        allowed: bool,
+    }{
+        .{ .classification = .allow, .answer = false, .allowed = true },
+        .{ .classification = .deny, .answer = false, .allowed = false },
+        .{ .classification = .ask, .answer = true, .allowed = true },
+        .{ .classification = .ask, .answer = false, .allowed = false },
+    };
+    for (permission_crash_cases) |case| {
+        var crash_fixture: model_operation.ToolFixture = .{
+            .expected_task = task,
+            .tool = .apply_patch,
+            .tool_arguments = patch,
+            .final_answer = "The recovered permission decision reached turn two.",
+            .expected_patch_status = .denied,
+        };
+        var crash_policy: PatchCrashPolicy = .{
+            .classification = case.classification,
+            .answer = case.answer,
+        };
+        var crash_capture: SessionCapture = .{};
+        var permission_injection: CrashInjection = .{ .target = .after_patch_permission_binding };
+        if (agent.runNew(
+            sessions,
+            init.io,
+            allocator,
+            wasm,
+            .{
+                .workspace_path = repo_path,
+                .model = "fixture:patch-permission-crash",
+                .task = task,
+                .patch_policy = crash_policy.policy(),
+                .fault = permission_injection.hook(),
+            },
+            crash_fixture.provider(),
+            crash_capture.observer(),
+        )) |unexpected| {
+            var value = unexpected;
+            value.close();
+            return error.PatchPermissionBindingCrashMissed;
+        } else |err| if (err != error.InjectedCrash) {
+            return err;
+        }
+        if (case.allowed) {
+            if (agent.resumeSession(sessions, init.io, allocator, wasm, crash_capture.session_id)) |unexpected| {
+                var value = unexpected;
+                value.close();
+                return error.RecoveredPatchPermissionExecuted;
+            } else |err| if (err != error.PatchExecutionDeferred) {
+                return err;
+            }
+        } else {
+            var recovered_permission = try agent.resumeWithProvider(
+                sessions,
+                init.io,
+                allocator,
+                wasm,
+                crash_capture.session_id,
+                crash_fixture.provider(),
+            );
+            recovered_permission.close();
+            if (crash_fixture.calls != 2) return error.RecoveredPatchDenialMissingFromTurnTwo;
+        }
+        try expectRepoFile(repo, init.io, "note.txt", "old\n");
+    }
+
     var incomplete: model_operation.Fixture = .{
         .expected_task = task,
         .final_answer = "not published",
@@ -557,9 +772,106 @@ const DenyPolicy = struct {
     }
 };
 
+const PatchAllowPolicy = struct {
+    fn policy(self: *PatchAllowPolicy) patch_tool.Policy {
+        return .{ .context = self, .classify_fn = classify, .ask_fn = ask };
+    }
+
+    fn classify(_: *anyopaque, subject: patch_tool.PermissionSubject, patch: []const u8) anyerror!patch_tool.Decision {
+        if (subject.validation.patch_digest == 0 or subject.operation_id == 0 or patch.len == 0) {
+            return error.InvalidPermissionSubject;
+        }
+        return .allow;
+    }
+
+    fn ask(_: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!bool {
+        return error.UnexpectedApprovalPrompt;
+    }
+};
+
+const PatchDenyPolicy = struct {
+    fn policy(self: *PatchDenyPolicy) patch_tool.Policy {
+        return .{ .context = self, .classify_fn = classify, .ask_fn = ask };
+    }
+
+    fn classify(_: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!patch_tool.Decision {
+        return .deny;
+    }
+
+    fn ask(_: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!bool {
+        return error.UnexpectedApprovalPrompt;
+    }
+};
+
+const PatchStalePolicy = struct {
+    io: std.Io,
+    repo: std.Io.Dir,
+
+    fn policy(self: *PatchStalePolicy) patch_tool.Policy {
+        return .{ .context = self, .classify_fn = classify, .ask_fn = ask };
+    }
+
+    fn classify(_: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!patch_tool.Decision {
+        return .ask;
+    }
+
+    fn ask(context: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!bool {
+        const self: *PatchStalePolicy = @ptrCast(@alignCast(context));
+        try writeRepoFile(self.repo, self.io, "note.txt", "external\n");
+        return true;
+    }
+};
+
+const PatchAskCrashPolicy = struct {
+    fn policy(self: *PatchAskCrashPolicy) patch_tool.Policy {
+        return .{ .context = self, .classify_fn = classify, .ask_fn = ask };
+    }
+
+    fn classify(_: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!patch_tool.Decision {
+        return .ask;
+    }
+
+    fn ask(_: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!bool {
+        return error.InjectedApprovalCrash;
+    }
+};
+
+const PatchCrashPolicy = struct {
+    classification: patch_tool.Decision,
+    answer: bool,
+
+    fn policy(self: *PatchCrashPolicy) patch_tool.Policy {
+        return .{ .context = self, .classify_fn = classify, .ask_fn = ask };
+    }
+
+    fn classify(context: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!patch_tool.Decision {
+        const self: *PatchCrashPolicy = @ptrCast(@alignCast(context));
+        return self.classification;
+    }
+
+    fn ask(context: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!bool {
+        const self: *PatchCrashPolicy = @ptrCast(@alignCast(context));
+        return self.answer;
+    }
+};
+
 fn cancelAgentBash(io: std.Io, cancellation: *std.atomic.Value(bool)) !void {
     try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake);
     cancellation.store(true, .release);
+}
+
+fn writeRepoFile(repo: std.Io.Dir, io: std.Io, path: []const u8, bytes: []const u8) !void {
+    var file = try repo.createFile(io, path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, bytes);
+}
+
+fn expectRepoFile(repo: std.Io.Dir, io: std.Io, path: []const u8, expected: []const u8) !void {
+    var file = try repo.openFile(io, path, .{});
+    defer file.close(io);
+    var buffer: [128]u8 = undefined;
+    const count = try file.readPositionalAll(io, &buffer, 0);
+    if (!std.mem.eql(u8, buffer[0..count], expected)) return error.RepositoryFileMismatch;
 }
 
 fn expectAnswer(completed: *agent.Completed) !void {

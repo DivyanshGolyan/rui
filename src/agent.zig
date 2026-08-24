@@ -7,6 +7,7 @@ const jsc = @import("jsc_runtime.zig");
 const model_operation = @import("model_operation.zig");
 const model_protocol = @import("model_protocol.zig");
 const operation_log = @import("operation_log.zig");
+const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 
 const agent_generation: u32 = 1;
@@ -19,6 +20,7 @@ pub const NewConfig = struct {
     fault: ?FaultHook = null,
     bash_policy: ?bash_tool.Policy = null,
     bash_cancelled: ?*const std.atomic.Value(bool) = null,
+    patch_policy: ?patch_tool.Policy = null,
 };
 
 pub const FaultBoundary = enum {
@@ -29,6 +31,7 @@ pub const FaultBoundary = enum {
     after_bash_result,
     after_tool_result_entry,
     after_tool_checkpoint,
+    after_patch_permission_binding,
 };
 
 pub const FaultHook = struct {
@@ -361,23 +364,45 @@ pub fn runNew(
             return modelFailure(try core.value(core.response_failure));
         }
         if (model_sequence != 1) return error.TooManyModelTurns;
-        const policy = config.bash_policy orelse return error.ToolCallDeferred;
-        try executeBashCall(
-            io,
-            allocator,
-            &session,
-            token,
-            &core,
-            checkpoint_buffer,
-            &journal,
-            ids,
-            wasm,
-            &core_open,
-            config.workspace_path,
-            policy,
-            config.bash_cancelled,
-            config.fault,
-        );
+        switch (try core.value(core.response_tool)) {
+            @intFromEnum(model_protocol.Tool.bash) => {
+                const policy = config.bash_policy orelse return error.ToolCallDeferred;
+                try executeBashCall(
+                    io,
+                    allocator,
+                    &session,
+                    token,
+                    &core,
+                    checkpoint_buffer,
+                    &journal,
+                    ids,
+                    wasm,
+                    &core_open,
+                    config.workspace_path,
+                    policy,
+                    config.bash_cancelled,
+                    config.fault,
+                );
+            },
+            @intFromEnum(model_protocol.Tool.apply_patch) => {
+                const policy = config.patch_policy orelse return error.ToolCallDeferred;
+                const outcome = try requestPatchPermission(
+                    io,
+                    allocator,
+                    &session,
+                    token,
+                    &core,
+                    checkpoint_buffer,
+                    &journal,
+                    ids,
+                    config.workspace_path,
+                    policy,
+                    config.fault,
+                );
+                if (outcome == .approved) return error.PatchExecutionDeferred;
+            },
+            else => return error.UnsupportedTool,
+        }
     }
     return error.FinalAnswerMissing;
 }
@@ -582,6 +607,196 @@ fn executeBashCall(
     try reach(fault, .after_tool_checkpoint);
 }
 
+const PatchPermissionOutcome = enum { ready, approved };
+
+fn requestPatchPermission(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    core: *Core,
+    checkpoint_buffer: []u8,
+    journal: *operation_log.Writer,
+    ids: OperationIds,
+    workspace_path: []const u8,
+    policy: patch_tool.Policy,
+    fault: ?FaultHook,
+) !PatchPermissionOutcome {
+    const arguments_offset = try core.value(core.response_arguments_offset);
+    const arguments_length = try core.value(core.response_arguments_length);
+    const memory = try core.runtime.memory(allocator);
+    if (arguments_length == 0 or arguments_length > patch_tool.max_patch_size or
+        arguments_offset > memory.len or arguments_length > memory.len - arguments_offset)
+    {
+        return error.InvalidPatchRange;
+    }
+    var patch_buffer: [patch_tool.max_patch_size]u8 = undefined;
+    @memcpy(patch_buffer[0..arguments_length], memory[arguments_offset..][0..arguments_length]);
+    const patch = patch_buffer[0..arguments_length];
+    const validation = try patch_tool.validate(allocator, io, workspace_path, patch);
+    const tool_operation_id = (@as(u64, 3) << 62) | ids.operation_id;
+    const patch_ref = (@as(u64, 1) << 60) | ids.response_ref;
+    const approval_ref = (@as(u64, 1) << 59) | ids.response_ref;
+    const permission_ref = (@as(u64, 1) << 58) | ids.response_ref;
+    const result_ref = (@as(u64, 1) << 57) | ids.response_ref;
+    try session.storeBlob(token, patch_ref, patch);
+    try appendToolRecord(
+        journal,
+        io,
+        session,
+        token,
+        .descriptor_validated,
+        tool_operation_id,
+        0,
+        validation.patch_digest,
+        0,
+    );
+    const call_entry = try session.appendConversation(token, .assistant, patch_ref, null);
+
+    const subject: patch_tool.PermissionSubject = .{
+        .operation_id = tool_operation_id,
+        .operation_generation = 1,
+        .validation = validation,
+    };
+    const classification = try policy.classify(subject, patch);
+    var allowed = classification == .allow;
+    if (classification == .ask) {
+        try storePatchBinding(
+            session,
+            token,
+            approval_ref,
+            .ask,
+            tool_operation_id,
+            validation,
+            patch_ref,
+        );
+        try appendToolRecord(
+            journal,
+            io,
+            session,
+            token,
+            .approval_required,
+            tool_operation_id,
+            0,
+            validation.patch_digest,
+            approval_ref,
+        );
+        try session.publishCheckpoint(token, agent_generation, checkpoint_buffer, memory);
+        allowed = try policy.ask(subject, patch);
+    }
+    const decision: patch_tool.Decision = if (allowed) .allow else .deny;
+    try storePatchBinding(
+        session,
+        token,
+        permission_ref,
+        decision,
+        tool_operation_id,
+        validation,
+        patch_ref,
+    );
+    try appendToolRecord(
+        journal,
+        io,
+        session,
+        token,
+        .permission_bound,
+        tool_operation_id,
+        0,
+        validation.patch_digest,
+        permission_ref,
+    );
+    try reach(fault, .after_patch_permission_binding);
+    try appendToolRecord(
+        journal,
+        io,
+        session,
+        token,
+        .permission_decided,
+        tool_operation_id,
+        0,
+        validation.patch_digest,
+        if (allowed) 1 else 2,
+    );
+
+    var status: patch_tool.ResultStatus = .denied;
+    var observed_workspace_digest: u64 = 0;
+    if (allowed) {
+        const observed = patch_tool.validate(allocator, io, workspace_path, patch) catch |err| switch (err) {
+            error.FileNotFound,
+            error.NotDir,
+            error.SymLinkLoop,
+            error.AccessDenied,
+            error.UnsupportedSpecialFile,
+            error.SymlinkEscape,
+            error.PatchNotApplicable,
+            error.NotTrackedRepositoryFile,
+            error.PreimageChangedDuringRead,
+            error.PreimageChangedDuringValidation,
+            => null,
+            else => return err,
+        };
+        if (observed) |current| {
+            observed_workspace_digest = current.workspace_digest;
+            if (patch_tool.sameWorkspace(validation, current)) {
+                try session.publishCheckpoint(token, agent_generation, checkpoint_buffer, memory);
+                return .approved;
+            }
+        } else {
+            observed_workspace_digest = 1;
+        }
+        status = .stale;
+    }
+
+    var result_bytes: [patch_tool.result_size]u8 = undefined;
+    try patch_tool.encodeResult(&result_bytes, .{
+        .status = status,
+        .patch_digest = validation.patch_digest,
+        .expected_workspace_digest = validation.workspace_digest,
+        .observed_workspace_digest = observed_workspace_digest,
+    });
+    try session.storeBlob(token, result_ref, &result_bytes);
+    try appendToolRecord(
+        journal,
+        io,
+        session,
+        token,
+        .preflight_result,
+        tool_operation_id,
+        0,
+        validation.patch_digest,
+        result_ref,
+    );
+    const result_entry = try session.appendConversation(token, .tool_result, result_ref, null);
+    try core.call(core.commit_tool, &.{ @intCast(call_entry.entry_id), @intCast(result_entry.entry_id) });
+    try session.publishCheckpoint(token, agent_generation, checkpoint_buffer, memory);
+    return .ready;
+}
+
+fn storePatchBinding(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    binding_ref: u64,
+    decision: patch_tool.Decision,
+    operation_id: u64,
+    validation: patch_tool.Validation,
+    patch_ref: u64,
+) !void {
+    var bytes: [patch_tool.binding_size]u8 = undefined;
+    try patch_tool.encodeBinding(&bytes, .{
+        .decision = decision,
+        .operation_id = operation_id,
+        .operation_generation = 1,
+        .ownership_epoch = token.epoch,
+        .patch_ref = patch_ref,
+        .patch_digest = validation.patch_digest,
+        .workspace_digest = validation.workspace_digest,
+        .preimage_size = validation.preimage_size,
+        .preimage_inode = @intCast(validation.preimage_inode),
+        .preimage_digest = validation.preimage_digest,
+    });
+    try session.storeBlob(token, binding_ref, &bytes);
+}
+
 fn appendToolRecord(
     journal: *operation_log.Writer,
     io: std.Io,
@@ -654,14 +869,18 @@ pub fn resumeSession(
         return .{ .session = restored.session, .final_ref = final_ref };
     }
     if (outcome == 4) {
-        switch (try reconcileBash(
+        switch (try reconcileToolCall(
             &restored.session,
             token,
             &core,
             checkpoint_buffer,
+            allocator,
+            restored.manifest.workspace_path,
         )) {
             .indeterminate => return error.BashPossiblyExecuted,
             .ready => return error.SessionNeedsModel,
+            .approval_required => return error.PatchApprovalRequired,
+            .approved => return error.PatchExecutionDeferred,
             .none => return error.ToolCallDeferred,
         }
     }
@@ -711,9 +930,18 @@ pub fn resumeWithProvider(
         outcome = try core.value(core.task_outcome);
     }
     if (outcome == 4) {
-        switch (try reconcileBash(&restored.session, token, &core, checkpoint_buffer)) {
+        switch (try reconcileToolCall(
+            &restored.session,
+            token,
+            &core,
+            checkpoint_buffer,
+            allocator,
+            restored.manifest.workspace_path,
+        )) {
             .indeterminate => return error.BashPossiblyExecuted,
             .ready => outcome = 1,
+            .approval_required => return error.PatchApprovalRequired,
+            .approved => return error.PatchExecutionDeferred,
             .none => return error.ToolCallDeferred,
         }
     }
@@ -747,14 +975,36 @@ pub fn resumeWithProvider(
     return .{ .session = restored.session, .final_ref = final_ref };
 }
 
-const BashRecovery = enum { none, ready, indeterminate };
+const ToolRecovery = enum { none, ready, indeterminate, approval_required, approved };
+
+fn reconcileToolCall(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    core: *Core,
+    checkpoint_buffer: []u8,
+    allocator: std.mem.Allocator,
+    workspace_path: []const u8,
+) !ToolRecovery {
+    return switch (try core.value(core.response_tool)) {
+        @intFromEnum(model_protocol.Tool.bash) => reconcileBash(session, token, core, checkpoint_buffer),
+        @intFromEnum(model_protocol.Tool.apply_patch) => reconcilePatch(
+            session,
+            token,
+            core,
+            checkpoint_buffer,
+            allocator,
+            workspace_path,
+        ),
+        else => error.UnsupportedTool,
+    };
+}
 
 fn reconcileBash(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
     checkpoint_buffer: []u8,
-) !BashRecovery {
+) !ToolRecovery {
     var reader = try session.openOperationReader(token);
     defer reader.close(session.io);
     var started: ?operation_log.Record = null;
@@ -812,6 +1062,193 @@ fn reconcileBash(
     return .indeterminate;
 }
 
+fn reconcilePatch(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    core: *Core,
+    checkpoint_buffer: []u8,
+    allocator: std.mem.Allocator,
+    workspace_path: []const u8,
+) !ToolRecovery {
+    const model_operation_id = try core.value(core.operation_id);
+    const response_ref: u32 = @truncate(try core.value(core.operation_result));
+    const operation_id = (@as(u64, 3) << 62) | model_operation_id;
+    const patch_ref = (@as(u64, 1) << 60) | response_ref;
+    const result_ref = (@as(u64, 1) << 57) | response_ref;
+    var reader = try session.openOperationReader(token);
+    defer reader.close(session.io);
+    var descriptor: ?operation_log.Record = null;
+    var approval: ?operation_log.Record = null;
+    var permission_binding: ?operation_log.Record = null;
+    var decision: ?operation_log.Record = null;
+    var result: ?operation_log.Record = null;
+    while (try reader.next(session.io)) |record| {
+        if (record.operation_id != operation_id) continue;
+        switch (record.kind) {
+            .descriptor_validated => descriptor = try uniqueRecord(descriptor, record),
+            .approval_required => approval = try uniqueRecord(approval, record),
+            .permission_bound => permission_binding = try uniqueRecord(permission_binding, record),
+            .permission_decided => decision = try uniqueRecord(decision, record),
+            .preflight_result => result = try uniqueRecord(result, record),
+            else => {},
+        }
+    }
+    const validated = descriptor orelse return .none;
+    if (validated.descriptor_digest == 0 or validated.operation_generation != 1) {
+        return error.InvalidPatchHistory;
+    }
+    if (result) |settled| {
+        if (settled.descriptor_digest != validated.descriptor_digest or settled.result != result_ref) {
+            return error.InvalidPatchHistory;
+        }
+        try reconcileToolResult(session, token, core, checkpoint_buffer, patch_ref, settled);
+        return .ready;
+    }
+    const bound = permission_binding orelse return if (approval != null) .approval_required else .none;
+    if (bound.descriptor_digest != validated.descriptor_digest) {
+        return error.InvalidPatchHistory;
+    }
+    var binding_bytes: [patch_tool.binding_size]u8 = undefined;
+    try readExactBlob(session, token, bound.result, &binding_bytes);
+    const binding = try patch_tool.decodeBinding(&binding_bytes);
+    if (binding.operation_id != operation_id or binding.operation_generation != 1 or
+        binding.patch_ref != patch_ref or binding.patch_digest != validated.descriptor_digest)
+    {
+        return error.InvalidPatchPermissionBinding;
+    }
+    const decision_result: u64 = switch (binding.decision) {
+        .allow => 1,
+        .deny => 2,
+        .ask => return error.InvalidFinalPatchPermission,
+    };
+    if (decision) |decided| {
+        if (decided.descriptor_digest != validated.descriptor_digest or decided.result != decision_result) {
+            return error.InvalidPatchHistory;
+        }
+    } else {
+        var journal = try session.openOperationJournal(token);
+        defer journal.close(session.io);
+        try appendToolRecord(
+            &journal,
+            session.io,
+            session,
+            token,
+            .permission_decided,
+            operation_id,
+            0,
+            validated.descriptor_digest,
+            decision_result,
+        );
+    }
+    if (binding.decision == .allow) {
+        var patch_buffer: [patch_tool.max_patch_size]u8 = undefined;
+        const patch = try readBoundedBlob(session, token, patch_ref, &patch_buffer);
+        const target_path = try patch_tool.validateStructure(patch);
+        const expected: patch_tool.Validation = .{
+            .target_path = target_path,
+            .patch_digest = binding.patch_digest,
+            .preimage_digest = binding.preimage_digest,
+            .workspace_digest = binding.workspace_digest,
+            .preimage_size = binding.preimage_size,
+            .preimage_inode = @intCast(binding.preimage_inode),
+        };
+        const observed = patch_tool.validate(allocator, session.io, workspace_path, patch) catch null;
+        if (observed) |current| {
+            if (patch_tool.sameWorkspace(expected, current)) return .approved;
+        }
+        const observed_digest = if (observed) |current| current.workspace_digest else 1;
+        try persistPatchPreflightResult(
+            session,
+            token,
+            core,
+            checkpoint_buffer,
+            operation_id,
+            patch_ref,
+            result_ref,
+            validated.descriptor_digest,
+            .stale,
+            binding.workspace_digest,
+            observed_digest,
+        );
+        return .ready;
+    }
+    try persistPatchPreflightResult(
+        session,
+        token,
+        core,
+        checkpoint_buffer,
+        operation_id,
+        patch_ref,
+        result_ref,
+        validated.descriptor_digest,
+        .denied,
+        binding.workspace_digest,
+        0,
+    );
+    return .ready;
+}
+
+fn uniqueRecord(existing: ?operation_log.Record, record: operation_log.Record) !operation_log.Record {
+    if (existing != null) return error.DuplicatePatchRecord;
+    return record;
+}
+
+fn persistPatchPreflightResult(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    core: *Core,
+    checkpoint_buffer: []u8,
+    operation_id: u64,
+    patch_ref: u64,
+    result_ref: u64,
+    descriptor_digest: u64,
+    status: patch_tool.ResultStatus,
+    expected_workspace_digest: u64,
+    observed_workspace_digest: u64,
+) !void {
+    var result_bytes: [patch_tool.result_size]u8 = undefined;
+    try patch_tool.encodeResult(&result_bytes, .{
+        .status = status,
+        .patch_digest = descriptor_digest,
+        .expected_workspace_digest = expected_workspace_digest,
+        .observed_workspace_digest = observed_workspace_digest,
+    });
+    try storeOrExpectBlob(session, token, result_ref, &result_bytes);
+    var journal = try session.openOperationJournal(token);
+    defer journal.close(session.io);
+    try appendToolRecord(
+        &journal,
+        session.io,
+        session,
+        token,
+        .preflight_result,
+        operation_id,
+        0,
+        descriptor_digest,
+        result_ref,
+    );
+    try reconcileToolResult(
+        session,
+        token,
+        core,
+        checkpoint_buffer,
+        patch_ref,
+        .{
+            .kind = .preflight_result,
+            .agent_id = session.agent_id,
+            .agent_generation = agent_generation,
+            .operation_id = operation_id,
+            .operation_generation = 1,
+            .attempt_id = 0,
+            .ownership_epoch = token.epoch,
+            .recovery_class = .consequential,
+            .sequence = journal.last_sequence,
+            .descriptor_digest = descriptor_digest,
+            .result = result_ref,
+        },
+    );
+}
+
 fn reconcileBashResult(
     session: *session_store.Session,
     token: session_store.OwnerToken,
@@ -822,6 +1259,17 @@ fn reconcileBashResult(
     const response_ref: u32 = @truncate(result.result);
     if (result.result != ((@as(u64, 1) << 61) | response_ref)) return error.InvalidToolResultReference;
     const descriptor_ref = (@as(u64, 1) << 62) | response_ref;
+    try reconcileToolResult(session, token, core, checkpoint_buffer, descriptor_ref, result);
+}
+
+fn reconcileToolResult(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    core: *Core,
+    checkpoint_buffer: []u8,
+    descriptor_ref: u64,
+    result: operation_log.Record,
+) !void {
     const active = try session.readEntry(session.active_leaf_id);
     var call_entry: session_store.ConversationEntry = undefined;
     var result_entry: session_store.ConversationEntry = undefined;
@@ -955,6 +1403,59 @@ fn expectBlob(reader: *session_store.BlobReader, expected: []const u8) !void {
         const actual = try reader.readWindow(offset, &window);
         if (actual.len == 0 or !std.mem.eql(u8, actual, expected[offset..][0..actual.len])) {
             return error.FinalAnswerBlobMismatch;
+        }
+        offset += actual.len;
+    }
+}
+
+fn readExactBlob(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    reference: u64,
+    out: []u8,
+) !void {
+    var reader = try session.openBlob(token, reference);
+    defer reader.close();
+    if (reader.length() != out.len) return error.BlobLengthMismatch;
+    const bytes = try reader.readWindow(0, out);
+    if (bytes.len != out.len) return error.TruncatedBlob;
+}
+
+fn readBoundedBlob(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    reference: u64,
+    out: []u8,
+) ![]const u8 {
+    var reader = try session.openBlob(token, reference);
+    defer reader.close();
+    if (reader.length() == 0 or reader.length() > out.len) return error.BlobLengthMismatch;
+    const bytes = try reader.readWindow(0, out[0..@intCast(reader.length())]);
+    if (bytes.len != reader.length()) return error.TruncatedBlob;
+    return bytes;
+}
+
+fn storeOrExpectBlob(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    reference: u64,
+    bytes: []const u8,
+) !void {
+    var reader = session.openBlob(token, reference) catch |err| switch (err) {
+        error.FileNotFound => {
+            try session.storeBlob(token, reference, bytes);
+            return;
+        },
+        else => return err,
+    };
+    defer reader.close();
+    if (reader.length() != bytes.len) return error.BlobContentMismatch;
+    var window: [4096]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const actual = try reader.readWindow(offset, &window);
+        if (actual.len == 0 or !std.mem.eql(u8, actual, bytes[offset..][0..actual.len])) {
+            return error.BlobContentMismatch;
         }
         offset += actual.len;
     }
