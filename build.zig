@@ -55,10 +55,38 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    const core_contract_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core_contract.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    const core_contract_check = b.addExecutable(.{
+        .name = "onepage-core-contract-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core_contract_check.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    core_contract_check.root_module.link_libc = true;
+    const run_core_contract_check = b.addRunArtifact(core_contract_check);
+    run_core_contract_check.addFileArg(core.getEmittedBin());
+    const harness_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/harness.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
     const test_step = b.step("test", "Run the deterministic spike tests");
     test_step.dependOn(&b.addRunArtifact(inspector_tests).step);
     test_step.dependOn(&b.addRunArtifact(checkpoint_tests).step);
     test_step.dependOn(&b.addRunArtifact(operation_log_tests).step);
+    test_step.dependOn(&b.addRunArtifact(core_contract_tests).step);
+    test_step.dependOn(&run_core_contract_check.step);
+    test_step.dependOn(&b.addRunArtifact(harness_tests).step);
 
     const run_step = b.step("run", "Run the memory-model spike");
     const run_host = b.addRunArtifact(host);

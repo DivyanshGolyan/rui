@@ -1,5 +1,6 @@
 const std = @import("std");
 const checkpoint = @import("checkpoint.zig");
+const core_contract = @import("core_contract.zig");
 const operation_log = @import("operation_log.zig");
 const wasm_inspect = @import("wasm_inspect.zig");
 const c = @cImport({
@@ -208,36 +209,8 @@ pub fn main(init: std.process.Init) !void {
         .limited(1024 * 1024),
     );
     defer allocator.free(wasm);
+    try core_contract.verify(wasm);
     const report = try wasm_inspect.inspect(wasm);
-    if (report.imports != 0 or
-        report.memories != 1 or
-        report.memory_min_pages != 1 or
-        report.memory_max_pages == null or
-        report.memory_max_pages.? != 1 or
-        report.memory_exports != 1 or
-        report.tables != 1 or
-        report.table_ref_type != 0x70 or
-        report.table_min != 1 or
-        report.table_max == null or
-        report.table_max.? != 1 or
-        report.table_exports != 0 or
-        report.table_reads != 0 or
-        report.table_writes != 0 or
-        report.indirect_calls != 0 or
-        report.globals != 1 or
-        report.mutable_globals != 1 or
-        report.first_global_type != 0x7f or
-        report.first_global_i32_init != 4 * 1024 or
-        report.global_exports != 0 or
-        report.global_reads != 0 or
-        report.global_writes != 0 or
-        report.memory_grows != 0 or
-        report.function_exports != 13 or
-        report.exports != 14 or
-        report.data_section_bytes != 0)
-    {
-        return error.OnePageContractViolated;
-    }
     const hex = try encodeHex(allocator, wasm);
     defer allocator.free(hex);
     const bootstrap = try std.mem.concat(allocator, u8, &.{

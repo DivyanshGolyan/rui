@@ -12,6 +12,11 @@ The operation-lifecycle spike uses four separate host processes to submit, durab
 recover, and replay 1,000 operations while their agents are absent from memory. Both recovery
 processes restore every page through the same slot without building a resident per-agent index.
 
+The fixed-credit harness spike extracts the compiled Wasm contract into one verifier and adds a
+1.5 KiB-bounded native owner with nonblocking completion admission, durable-before-apply ordering,
+stale and duplicate rejection, bounded drive quanta, and crash/replay tests. Its 32-entry maximum is
+fixed at compile time and does not vary with logical-agent count.
+
 ## Requirements
 
 - macOS on Apple Silicon
@@ -32,3 +37,9 @@ See the spike notes for architecture, measurements, caveats, and next questions:
 - [`docs/spikes/0001-memory-model.md`](docs/spikes/0001-memory-model.md)
 - [`docs/spikes/0002-checkpoint-format.md`](docs/spikes/0002-checkpoint-format.md)
 - [`docs/spikes/0003-operation-lifecycle.md`](docs/spikes/0003-operation-lifecycle.md)
+- [`docs/spikes/0004-fixed-credit-harness.md`](docs/spikes/0004-fixed-credit-harness.md)
+
+Source audits that informed the architecture:
+
+- [`docs/research/ghostty-lessons.md`](docs/research/ghostty-lessons.md)
+- [`docs/research/deepseek-harness-lessons.md`](docs/research/deepseek-harness-lessons.md)
