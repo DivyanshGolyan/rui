@@ -83,7 +83,7 @@ The existing memory-model and four-process lifecycle spikes continue to use the 
 
 ## Deliberate omissions
 
-The transition adapter is deterministic test infrastructure. It is not yet backed by the real operation journal, atomic checkpoint replacement, or JavaScriptCore slot pool. Recovery currently reoffers the durable completion to a reconstructed harness; automatic journal scanning belongs in the production storage adapter.
+The deterministic transition adapter described by this spike has now been followed by the real journal/JSC integration in [`0005-owner-crash-recovery.md`](0005-owner-crash-recovery.md). Atomic checkpoint replacement and automatic recovery scanning beyond the offered operation remain absent.
 
 Crash injection currently uses an explicit adapter failure, not process termination at every filesystem instruction. The test proves transition ordering and idempotent replay semantics, not parent-directory durability, power-loss behavior, or exactly-once external effects.
 

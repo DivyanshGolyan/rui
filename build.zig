@@ -80,6 +80,13 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    const durable_transition_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/durable_transition.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
     const test_step = b.step("test", "Run the deterministic spike tests");
     test_step.dependOn(&b.addRunArtifact(inspector_tests).step);
     test_step.dependOn(&b.addRunArtifact(checkpoint_tests).step);
@@ -87,6 +94,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(core_contract_tests).step);
     test_step.dependOn(&run_core_contract_check.step);
     test_step.dependOn(&b.addRunArtifact(harness_tests).step);
+    test_step.dependOn(&b.addRunArtifact(durable_transition_tests).step);
 
     const run_step = b.step("run", "Run the memory-model spike");
     const run_host = b.addRunArtifact(host);
@@ -110,4 +118,13 @@ pub fn build(b: *std.Build) void {
     replay_lifecycle.addArg("lifecycle-recover");
     replay_lifecycle.step.dependOn(&recover_lifecycle.step);
     lifecycle_step.dependOn(&replay_lifecycle.step);
+
+    const owner_crash_step = b.step(
+        "owner-crash",
+        "Crash after completion sync and recover through the fixed-credit owner",
+    );
+    const run_owner_crash = b.addRunArtifact(host);
+    run_owner_crash.addFileArg(core.getEmittedBin());
+    run_owner_crash.addArg("owner-crash-suite");
+    owner_crash_step.dependOn(&run_owner_crash.step);
 }

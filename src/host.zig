@@ -1,6 +1,8 @@
 const std = @import("std");
 const checkpoint = @import("checkpoint.zig");
 const core_contract = @import("core_contract.zig");
+const durable_transition = @import("durable_transition.zig");
+const harness = @import("harness.zig");
 const operation_log = @import("operation_log.zig");
 const wasm_inspect = @import("wasm_inspect.zig");
 const c = @cImport({
@@ -13,6 +15,14 @@ const density_agents = 1000;
 const lifecycle_agents = 1000;
 const lifecycle_generation = 1;
 const lifecycle_journal_path = "snapshots/lifecycle.journal";
+const owner_journal_path = "snapshots/owner-crash.journal";
+const owner_checkpoint_path = "snapshots/owner-crash.page";
+const owner_agent: u32 = 42;
+const owner_generation: u64 = 7;
+const owner_operation: u32 = 90_042;
+const owner_operation_generation: u32 = 1;
+const owner_result: u32 = 0xc0ffee;
+const crash_exit_status: u8 = 86;
 const interrupted_agent = 500;
 const unaccepted_agent = lifecycle_agents + 1;
 const framework_path = "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore";
@@ -44,6 +54,7 @@ const Api = struct {
     JSStringGetMaximumUTF8CStringSize: *const fn (JSStringRef) callconv(.c) usize,
     JSStringGetUTF8CString: *const fn (JSStringRef, [*]u8, usize) callconv(.c) usize,
     JSValueToObject: *const fn (JSContextRef, JSValueRef, *JSValueRef) callconv(.c) JSObjectRef,
+    JSValueToNumber: *const fn (JSContextRef, JSValueRef, *JSValueRef) callconv(.c) f64,
     JSValueMakeNumber: *const fn (JSContextRef, f64) callconv(.c) JSValueRef,
     JSObjectCallAsFunction: *const fn (
         JSContextRef,
@@ -158,13 +169,21 @@ const Runtime = struct {
     }
 
     fn callNumbers(self: *const Runtime, function_ref: JSObjectRef, numbers: []const u32) !void {
+        _ = try self.callNumbersValue(function_ref, numbers);
+    }
+
+    fn callNumbersValue(
+        self: *const Runtime,
+        function_ref: JSObjectRef,
+        numbers: []const u32,
+    ) !JSValueRef {
         if (numbers.len > 3) return error.TooManyArguments;
         var arguments: [3]JSValueRef = undefined;
         for (numbers, 0..) |number, index| {
             arguments[index] = self.api.JSValueMakeNumber(self.context, @floatFromInt(number));
         }
         var exception: JSValueRef = null;
-        _ = self.api.JSObjectCallAsFunction(
+        const value = self.api.JSObjectCallAsFunction(
             self.context,
             function_ref,
             null,
@@ -173,6 +192,15 @@ const Runtime = struct {
             &exception,
         );
         if (exception != null) return error.JavaScriptCallFailed;
+        return value;
+    }
+
+    fn callNumber(self: *const Runtime, function_ref: JSObjectRef, numbers: []const u32) !f64 {
+        const value = try self.callNumbersValue(function_ref, numbers);
+        var exception: JSValueRef = null;
+        const number = self.api.JSValueToNumber(self.context, value, &exception);
+        if (exception != null) return error.JavaScriptNumberConversionFailed;
+        return number;
     }
 
     fn callTwoNumbers(self: *const Runtime, function_ref: JSObjectRef, first: u32, second: u32) !void {
@@ -195,11 +223,17 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len < 2 or args.len > 3) {
         std.debug.print(
-            "usage: {s} <onepage-core.wasm> " ++
-                "[lifecycle-prepare|lifecycle-complete|lifecycle-recover]\n",
+            "usage: {s} <onepage-core.wasm> [lifecycle-prepare|" ++
+                "lifecycle-complete|lifecycle-recover|owner-crash-suite|" ++
+                "owner-prepare|owner-crash-after-sync|owner-recover]\n",
             .{args[0]},
         );
         return error.InvalidArguments;
+    }
+
+    if (args.len == 3 and std.mem.eql(u8, args[2], "owner-crash-suite")) {
+        try ownerCrashSuite(init.io, args[0], args[1]);
+        return;
     }
 
     const wasm = try std.Io.Dir.cwd().readFileAlloc(
@@ -250,6 +284,18 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, args[2], "lifecycle-recover")) {
             try lifecycleRecover(init.io, allocator, &runtime);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "owner-prepare")) {
+            try ownerPrepare(init.io, allocator, &runtime);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "owner-crash-after-sync")) {
+            try ownerCrashAfterSync(init.io, allocator, &runtime);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "owner-recover")) {
+            try ownerRecover(init.io, allocator, &runtime);
             return;
         }
         return error.InvalidArguments;
@@ -397,6 +443,283 @@ pub fn main(init: std.process.Init) !void {
             slot_rss[3],
         },
     );
+}
+
+const OwnerSlot = struct {
+    io: std.Io,
+    runtime: *const Runtime,
+    inspect_function: JSObjectRef,
+    reconcile_function: JSObjectRef,
+    memory: []u8,
+    checkpoint_buffer: []u8,
+
+    fn inspect(context: *anyopaque, completion: harness.Completion) anyerror!durable_transition.SlotState {
+        const self: *OwnerSlot = @ptrCast(@alignCast(context));
+        const state = try self.runtime.callNumber(self.inspect_function, &.{
+            @intCast(completion.operation_id),
+            completion.operation_generation,
+            @intCast(completion.result),
+        });
+        return switch (@as(u32, @intFromFloat(state))) {
+            1 => .submitted,
+            2 => .accepted,
+            3 => .completed,
+            else => error.InvalidSlotOperationState,
+        };
+    }
+
+    fn apply(context: *anyopaque, completion: harness.Completion) anyerror!void {
+        const self: *OwnerSlot = @ptrCast(@alignCast(context));
+        try self.runtime.callThreeNumbers(
+            self.reconcile_function,
+            @intCast(completion.operation_id),
+            completion.operation_generation,
+            @intCast(completion.result),
+        );
+        try checkpoint.encode(
+            self.checkpoint_buffer,
+            completion.agent_id,
+            completion.agent_generation,
+            self.memory,
+        );
+        try std.Io.Dir.cwd().writeFile(self.io, .{
+            .sub_path = owner_checkpoint_path,
+            .data = self.checkpoint_buffer,
+        });
+    }
+
+    fn interface(self: *OwnerSlot) durable_transition.Slot {
+        return .{ .context = self, .inspect = inspect, .apply = apply };
+    }
+};
+
+fn ownerCrashSuite(io: std.Io, executable: []const u8, wasm_path: []const u8) !void {
+    try runOwnerChild(io, executable, wasm_path, "owner-prepare", 0);
+    try runOwnerChild(io, executable, wasm_path, "owner-crash-after-sync", crash_exit_status);
+    try runOwnerChild(io, executable, wasm_path, "owner-recover", 0);
+    try runOwnerChild(io, executable, wasm_path, "owner-recover", 0);
+    std.debug.print(
+        "fixed-credit owner crash suite\n" ++
+            "fresh child processes 4\n" ++
+            "crash boundary        completion fsync -> slot apply\n" ++
+            "forced exit observed  {d}\n" ++
+            "first recovery        applied durable completion\n" ++
+            "second recovery       duplicate, no mutation\n",
+        .{crash_exit_status},
+    );
+}
+
+fn runOwnerChild(
+    io: std.Io,
+    executable: []const u8,
+    wasm_path: []const u8,
+    mode: []const u8,
+    expected_status: u8,
+) !void {
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ executable, wasm_path, mode },
+        .stdin = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    switch (try child.wait(io)) {
+        .exited => |status| if (status != expected_status) return error.UnexpectedChildExit,
+        else => return error.UnexpectedChildTermination,
+    }
+}
+
+fn ownerPrepare(io: std.Io, allocator: std.mem.Allocator, runtime: *const Runtime) !void {
+    ensureSnapshotsDirectory(io) catch |err| return err;
+    var journal = try operation_log.Writer.create(io, owner_journal_path);
+    defer journal.close(io);
+    const memory = try runtime.memory(allocator);
+    const checkpoint_buffer = try allocator.alloc(u8, checkpoint.encoded_size);
+    defer allocator.free(checkpoint_buffer);
+    const submit = try runtime.function(
+        allocator,
+        "__onepage.ownerSubmit = function(agentId, operationId) { " ++
+            "__onepage.instance.exports.initialize(agentId); " ++
+            "if (__onepage.instance.exports.submitOperation(operationId, agentId) !== 1) " ++
+            "throw new Error('owner submit failed'); " ++
+            "}; __onepage.ownerSubmit",
+    );
+    const accept = try runtime.function(
+        allocator,
+        "__onepage.ownerAccept = function(operationId, generation) { " ++
+            "if (__onepage.instance.exports.acceptOperation(operationId, generation) !== 1) " ++
+            "throw new Error('owner accept failed'); " ++
+            "}; __onepage.ownerAccept",
+    );
+
+    @memset(memory, 0);
+    try runtime.callTwoNumbers(submit, owner_agent, owner_operation);
+    try writeOwnerCheckpoint(io, checkpoint_buffer, memory);
+    try journal.appendDurable(io, .{
+        .kind = .accepted,
+        .agent_id = owner_agent,
+        .agent_generation = owner_generation,
+        .operation_id = owner_operation,
+        .operation_generation = owner_operation_generation,
+        .sequence = 1,
+        .result = 0,
+    });
+    try runtime.callTwoNumbers(accept, owner_operation, owner_operation_generation);
+    try writeOwnerCheckpoint(io, checkpoint_buffer, memory);
+    std.debug.print("owner prepare          accepted operation durable\n", .{});
+}
+
+fn ownerCrashAfterSync(io: std.Io, allocator: std.mem.Allocator, runtime: *const Runtime) !void {
+    var journal = try operation_log.Writer.openAppend(io, owner_journal_path);
+    defer journal.close(io);
+    var slot = try openOwnerSlot(io, allocator, runtime);
+    defer allocator.free(slot.checkpoint_buffer);
+    var adapter: durable_transition.Adapter = .{
+        .io = io,
+        .dir = std.Io.Dir.cwd(),
+        .journal_path = owner_journal_path,
+        .writer = &journal,
+        .agent_id = owner_agent,
+        .agent_generation = owner_generation,
+        .operation_id = owner_operation,
+        .operation_generation = owner_operation_generation,
+        .slot = slot.interface(),
+        .fault = .{ .context = &slot, .after_persist = exitAfterPersist },
+    };
+    var owner = try harness.Harness.open(.{
+        .completion_capacity = 1,
+        .drive_quantum = 1,
+        .transition = adapter.transition(),
+    });
+    if (owner.offer(ownerCompletion()) != .queued) return error.OwnerAdmissionFailed;
+    _ = try owner.drive();
+    return error.CrashInjectionDidNotExit;
+}
+
+fn ownerRecover(io: std.Io, allocator: std.mem.Allocator, runtime: *const Runtime) !void {
+    var journal = try operation_log.Writer.openAppend(io, owner_journal_path);
+    defer journal.close(io);
+    const journal_bytes_before = journal.offset;
+    var slot = try openOwnerSlot(io, allocator, runtime);
+    defer allocator.free(slot.checkpoint_buffer);
+    var adapter: durable_transition.Adapter = .{
+        .io = io,
+        .dir = std.Io.Dir.cwd(),
+        .journal_path = owner_journal_path,
+        .writer = &journal,
+        .agent_id = owner_agent,
+        .agent_generation = owner_generation,
+        .operation_id = owner_operation,
+        .operation_generation = owner_operation_generation,
+        .slot = slot.interface(),
+    };
+    var owner = try harness.Harness.open(.{
+        .completion_capacity = 1,
+        .drive_quantum = 1,
+        .transition = adapter.transition(),
+    });
+    if (owner.offer(ownerCompletion()) != .queued) return error.OwnerAdmissionFailed;
+    const progress = try owner.drive();
+    if (journal.offset != journal_bytes_before or
+        journal.offset != operation_log.record_size * 2)
+    {
+        return error.RecoveryAppendedCompletion;
+    }
+    if (try OwnerSlot.inspect(&slot, ownerCompletion()) != .completed) {
+        return error.OwnerRecoveryIncomplete;
+    }
+    if ((progress.applied == 1) == (progress.duplicate == 1)) {
+        return error.InvalidRecoveryDisposition;
+    }
+    std.debug.print(
+        "owner recover          {s}; journal {d} B; control {d} B\n",
+        .{
+            if (progress.applied == 1) "applied" else "duplicate",
+            journal.offset,
+            @sizeOf(harness.Harness) +
+                @sizeOf(durable_transition.Adapter) +
+                @sizeOf(OwnerSlot),
+        },
+    );
+}
+
+fn openOwnerSlot(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    runtime: *const Runtime,
+) !OwnerSlot {
+    const memory = try runtime.memory(allocator);
+    const checkpoint_buffer = try allocator.alloc(u8, checkpoint.encoded_size);
+    errdefer allocator.free(checkpoint_buffer);
+    try readOwnerCheckpoint(io, checkpoint_buffer, memory);
+    const inspect_function = try runtime.function(
+        allocator,
+        "__onepage.ownerInspect = function(operationId, generation, result) { " ++
+            "const state = __onepage.instance.exports.operationState(); " ++
+            "if (__onepage.instance.exports.operationId() !== BigInt(operationId) || " ++
+            "__onepage.instance.exports.operationGeneration() !== generation) " ++
+            "throw new Error('owner identity mismatch'); " ++
+            "if (state === 3 && __onepage.instance.exports.operationResult() !== BigInt(result)) " ++
+            "throw new Error('owner result mismatch'); " ++
+            "return state; }; __onepage.ownerInspect",
+    );
+    const reconcile_function = try runtime.function(
+        allocator,
+        "__onepage.ownerReconcile = function(operationId, generation, result) { " ++
+            "let state = __onepage.instance.exports.operationState(); " ++
+            "if (state === 1 && __onepage.instance.exports.acceptOperation(operationId, generation) !== 1) " ++
+            "throw new Error('owner reconcile accept failed'); " ++
+            "state = __onepage.instance.exports.operationState(); " ++
+            "if (state === 2 && __onepage.instance.exports.completeOperation(" ++
+            "operationId, generation, result) !== 1) " ++
+            "throw new Error('owner reconcile complete failed'); " ++
+            "}; __onepage.ownerReconcile",
+    );
+    return .{
+        .io = io,
+        .runtime = runtime,
+        .inspect_function = inspect_function,
+        .reconcile_function = reconcile_function,
+        .memory = memory,
+        .checkpoint_buffer = checkpoint_buffer,
+    };
+}
+
+fn ownerCompletion() harness.Completion {
+    return .{
+        .agent_id = owner_agent,
+        .agent_generation = owner_generation,
+        .operation_id = owner_operation,
+        .operation_generation = owner_operation_generation,
+        .result = owner_result,
+    };
+}
+
+fn exitAfterPersist(_: *anyopaque) anyerror!void {
+    std.process.exit(crash_exit_status);
+}
+
+fn ensureSnapshotsDirectory(io: std.Io) !void {
+    std.Io.Dir.cwd().createDir(io, "snapshots", .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+}
+
+fn writeOwnerCheckpoint(io: std.Io, buffer: []u8, memory: []const u8) !void {
+    try checkpoint.encode(buffer, owner_agent, owner_generation, memory);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = owner_checkpoint_path,
+        .data = buffer,
+    });
+}
+
+fn readOwnerCheckpoint(io: std.Io, buffer: []u8, memory: []u8) !void {
+    var file = try std.Io.Dir.cwd().openFile(io, owner_checkpoint_path, .{});
+    defer file.close(io);
+    const bytes_read = try file.readPositionalAll(io, buffer, 0);
+    if (bytes_read != checkpoint.encoded_size) return error.InvalidCheckpointLength;
+    const restored = try checkpoint.decode(buffer, owner_agent, owner_generation);
+    @memcpy(memory, restored.page);
 }
 
 fn lifecyclePrepare(io: std.Io, allocator: std.mem.Allocator, runtime: *const Runtime) !void {

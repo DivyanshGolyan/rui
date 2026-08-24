@@ -29,7 +29,7 @@ pub const CompletionState = enum {
 
 pub const Transition = struct {
     context: *anyopaque,
-    classify: *const fn (*anyopaque, Completion) CompletionState,
+    classify: *const fn (*anyopaque, Completion) anyerror!CompletionState,
     persist: *const fn (*anyopaque, Completion) anyerror!void,
     apply: *const fn (*anyopaque, Completion) anyerror!void,
 };
@@ -107,7 +107,11 @@ pub const Harness = struct {
         var duplicate_count: u8 = 0;
         while (consumed < self.quantum and self.len > 0) {
             const completion = self.entries[self.head];
-            switch (self.transition.classify(self.transition.context, completion)) {
+            const state = self.transition.classify(self.transition.context, completion) catch |err| {
+                self.failed = true;
+                return err;
+            };
+            switch (state) {
                 .applicable => {
                     self.transition.persist(self.transition.context, completion) catch |err| {
                         self.failed = true;
@@ -159,7 +163,7 @@ comptime {
     std.debug.assert(@sizeOf(Harness) <= 1536);
 }
 
-fn applicable(_: *anyopaque, _: Completion) CompletionState {
+fn applicable(_: *anyopaque, _: Completion) anyerror!CompletionState {
     return .applicable;
 }
 
@@ -265,7 +269,7 @@ test "offer rejects structurally invalid completion identities" {
     try std.testing.expectEqual(OfferResult.invalid, harness.offer(invalid));
 }
 
-fn stale(_: *anyopaque, _: Completion) CompletionState {
+fn stale(_: *anyopaque, _: Completion) anyerror!CompletionState {
     return .stale;
 }
 
@@ -309,7 +313,7 @@ const RecoveryState = struct {
     persist_count: u8 = 0,
     apply_count: u8 = 0,
 
-    fn classify(context: *anyopaque, _: Completion) CompletionState {
+    fn classify(context: *anyopaque, _: Completion) anyerror!CompletionState {
         const self: *RecoveryState = @ptrCast(@alignCast(context));
         if (self.applied) return .duplicate;
         if (self.persisted) return .durable;
@@ -376,6 +380,34 @@ test "a replayed durable completion applies exactly once after owner restart" {
 
 fn persistenceFailure(_: *anyopaque, _: Completion) anyerror!void {
     return error.StorageUnavailable;
+}
+
+fn classificationFailure(_: *anyopaque, _: Completion) anyerror!CompletionState {
+    return error.JournalUnreadable;
+}
+
+test "a classification failure makes the owner unavailable" {
+    var context: u8 = 0;
+    var harness = try Harness.open(.{
+        .completion_capacity = 1,
+        .drive_quantum = 1,
+        .transition = .{
+            .context = &context,
+            .classify = classificationFailure,
+            .persist = noOp,
+            .apply = noOp,
+        },
+    });
+    const completion: Completion = .{
+        .agent_id = 7,
+        .agent_generation = 3,
+        .operation_id = 19,
+        .operation_generation = 2,
+        .result = 101,
+    };
+    try std.testing.expectEqual(OfferResult.queued, harness.offer(completion));
+    try std.testing.expectError(error.JournalUnreadable, harness.drive());
+    try std.testing.expectEqual(OfferResult.unavailable, harness.offer(completion));
 }
 
 test "a transition failure makes the owner unavailable until reconstruction" {
