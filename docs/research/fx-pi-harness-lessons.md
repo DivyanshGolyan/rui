@@ -137,7 +137,7 @@ See [`deepseek-harness-lessons.md`](deepseek-harness-lessons.md) for pinned sour
 6. Tool handling separates decode/validation, authority and approval, durable admission, and execution.
 7. Partial model output may be shown as a volatile projection but cannot authorize an effect.
 8. UI and metrics consume committed events. Their failure cannot roll back agent state.
-9. One logical agent, one active operation, and one page are enough for the first repair loop. Concurrency and capacity configuration follow measurement.
+9. One logical agent, one active operation, and one page are enough for the first coding-task loop. Concurrency and capacity configuration follow measurement.
 10. The external harness interface should remain small even if its implementation contains several internal modules and adapters.
 
 ## Open interface question

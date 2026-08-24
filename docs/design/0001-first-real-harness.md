@@ -1,10 +1,10 @@
 # First real harness design
 
-Status: accepted for the first repair loop
+Status: accepted for the first coding-task loop
 
 Related specifications:
 
-- [Build the first real one-page coding-agent repair loop](https://github.com/DivyanshGolyan/onepage/issues/2)
+- [Build the first real one-page coding-agent loop](https://github.com/DivyanshGolyan/onepage/issues/2)
 - [Make active capacity runtime-configurable and population-independent](https://github.com/DivyanshGolyan/onepage/issues/3)
 
 Research basis:
@@ -13,21 +13,25 @@ Research basis:
 - [`deepseek-harness-lessons.md`](../research/deepseek-harness-lessons.md)
 - [`ghostty-lessons.md`](../research/ghostty-lessons.md)
 
+Domain language:
+
+- [`CONTEXT.md`](../../CONTEXT.md)
+
 ## Decision
 
 The first useful OnePage agent has two modules at two deliberate seams:
 
-1. `RepairCommand` presents the process interface used by people and black-box tests.
-2. `Harness` presents a three-entry owner-loop interface used by the command implementation.
+1. `Cli` presents the process interface used by people and black-box tests.
+2. `Harness` presents a three-entry owner-loop interface used by the CLI implementation.
 
-These are not duplicate orchestration layers. `RepairCommand` translates process input and output. `Harness` owns the agent lifecycle and every correctness-sensitive ordering rule.
+These are not duplicate orchestration layers. `Cli` translates process input and output. `Harness` owns the agent lifecycle and every correctness-sensitive ordering rule.
 
 ```text
 terminal / black-box test
           |
-          | onepage repair ...
+          | onepage [options] TASK
           v
-   RepairCommand module
+        Cli module
           |
           | open / offer / drive
           v
@@ -46,7 +50,7 @@ The CLI is the highest product test seam. `Harness` is the highest deterministic
 - The agent policy core has exactly one initial and maximum 64 KiB WebAssembly page.
 - The core owns task phase, context selection, action interpretation, approval state, retry decisions, and termination.
 - The native host supplies bounded mechanisms and may not infer the next agent action.
-- One logical agent, one resident execution slot, one model operation, and one tool operation are sufficient for the first repair loop.
+- One logical agent, one resident execution slot, one model operation, and one tool operation are sufficient for the first coding-task loop.
 - Every operation follows submitted → accepted → completed.
 - Accepted work can outlive the process and does not require a resident page.
 - No callback reenters the core.
@@ -86,24 +90,24 @@ AgentRuntime.close() !void
 
 This is attractive for several simultaneous clients: terminal, structured JSON, editor, and a future scheduler. It also gives clients durable cursors and explicit blob reads.
 
-It is premature for the first repair. No second real client currently needs the event and blob protocol, and exposing it would make callers understand five lifecycle concepts before the core loop has proved useful. A convenience facade would then be required for the common case.
+It is premature for the first task. No second real client currently needs the event and blob protocol, and exposing it would make callers understand five lifecycle concepts before the core loop has proved useful. A convenience facade would then be required for the common case.
 
 Decision: reject for v1. Reconsider only after a second real client cannot use the process interface or `Harness` projections.
 
-### 3. Process-level repair command
+### 3. Process-level task invocation
 
 Interface:
 
 ```text
-onepage repair [--repo PATH] --model PROVIDER:MODEL TASK
-onepage repair [--repo PATH] --model fixture:PATH TASK
+onepage [--repo PATH] --model PROVIDER:MODEL TASK
+onepage [--repo PATH] --model fixture:PATH TASK
 ```
 
 This gives the common caller and employment-funnel demonstration the smallest possible interface. A deterministic fixture and a live model run through the same executable. Its weakness is poor embeddability if treated as the only module.
 
 Decision: accept as the product interface, backed by the owner-loop `Harness` rather than replacing it.
 
-## `RepairCommand` module
+## `Cli` module
 
 ### Interface
 
@@ -121,7 +125,7 @@ exit status
 Interactive example:
 
 ```sh
-onepage repair \
+onepage \
   --repo ./fixture \
   --model openrouter:MODEL \
   "Fix the failing parser test"
@@ -130,7 +134,7 @@ onepage repair \
 Deterministic example:
 
 ```sh
-onepage repair \
+onepage \
   --repo ./fixture \
   --model fixture:./repair.fixture \
   "Fix the failing parser test"
@@ -353,7 +357,7 @@ The anchor black-box test uses the real local adapter in a temporary Git reposit
 
 ### Projection consumption
 
-The harness returns projections instead of calling a UI callback. The command renders them; tests record them. There is no UI callback capable of reentry or rolling back state.
+The harness returns projections instead of calling a UI callback. The CLI renders them; tests record them. There is no UI callback capable of reentry or rolling back state.
 
 ### In-process implementation
 
@@ -404,7 +408,7 @@ Adding an action changes the closed union, versioned encoding, policy validation
 Spawn the real command against a temporary broken Git repository and fixture model:
 
 ```sh
-onepage repair \
+onepage \
   --repo "$fixture_repo" \
   --model fixture:"$fixture_model" \
   "Fix the failing test"
@@ -436,7 +440,7 @@ Keep mechanical tests for codecs, bounds, checksums, parsers, and the Wasm contr
 1. Replace the synthetic core event accumulator with the closed task/action state machine while keeping the one-page verifier green.
 2. Deepen the current harness and durable transition adapter into the accepted `open` / `offer` / `drive` interface.
 3. Add semantic journal records and durable blob references required by one model request and one search result.
-4. Add the fixture model and process-level command for task → search → finish.
+4. Add the fixture model and CLI for task → search → finish.
 5. Add bounded read and a second model turn.
 6. Add patch validation, digest-bound approval, and guarded application.
 7. Add verification process execution, output spooling, and finish.

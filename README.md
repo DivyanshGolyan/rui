@@ -59,3 +59,7 @@ Source audits that informed the architecture:
 Accepted designs:
 
 - [`docs/design/0001-first-real-harness.md`](docs/design/0001-first-real-harness.md)
+
+Canonical domain language:
+
+- [`CONTEXT.md`](CONTEXT.md)
