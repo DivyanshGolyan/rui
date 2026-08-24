@@ -21,6 +21,12 @@ const offset_crc = 76;
 pub const Kind = enum(u8) {
     accepted = 1,
     completed = 2,
+    descriptor_validated = 3,
+    permission_decided = 4,
+    attempt_started = 5,
+    attempt_result = 6,
+    attempt_indeterminate = 7,
+    denied_result = 8,
 };
 
 pub const RecoveryClass = enum(u8) {
@@ -126,11 +132,21 @@ pub fn encode(out: *[record_size]u8, record: Record) !void {
     if (record.agent_generation == 0) return error.InvalidAgentGeneration;
     if (record.operation_id == 0) return error.InvalidOperationIdentity;
     if (record.operation_generation == 0) return error.InvalidOperationGeneration;
-    if (record.attempt_id == 0) return error.InvalidAttemptIdentity;
+    const needs_attempt = switch (record.kind) {
+        .accepted, .completed, .attempt_started, .attempt_result, .attempt_indeterminate => true,
+        .descriptor_validated, .permission_decided, .denied_result => false,
+    };
+    if (needs_attempt == (record.attempt_id == 0)) return error.InvalidAttemptIdentity;
     if (record.ownership_epoch == 0) return error.InvalidOwnershipEpoch;
     if (record.sequence == 0) return error.InvalidSequence;
     if (record.descriptor_digest == 0) return error.InvalidDescriptorDigest;
-    if (record.kind == .accepted and record.result != 0) return error.AcceptedRecordHasResult;
+    switch (record.kind) {
+        .accepted => if (record.result != 0) return error.AcceptedRecordHasResult,
+        .descriptor_validated, .attempt_started => if (record.result != 0) return error.IntentRecordHasResult,
+        .permission_decided => if (record.result < 1 or record.result > 2) return error.InvalidPermissionResult,
+        .completed, .attempt_result, .denied_result => if (record.result == 0) return error.ResultRecordMissingResult,
+        .attempt_indeterminate => {},
+    }
 
     @memset(out, 0);
     @memcpy(out[0..magic.len], magic);
@@ -167,6 +183,12 @@ pub fn decode(bytes: *const [record_size]u8) !Record {
     const kind: Kind = switch (bytes[offset_kind]) {
         1 => .accepted,
         2 => .completed,
+        3 => .descriptor_validated,
+        4 => .permission_decided,
+        5 => .attempt_started,
+        6 => .attempt_result,
+        7 => .attempt_indeterminate,
+        8 => .denied_result,
         else => return error.InvalidKind,
     };
     const record: Record = .{

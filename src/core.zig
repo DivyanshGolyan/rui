@@ -45,6 +45,9 @@ const State = extern struct {
     context_count: u32,
     response_text_offset: u32,
     response_text_length: u32,
+    response_tool: u32,
+    response_arguments_offset: u32,
+    response_arguments_length: u32,
 };
 
 var state: State = .{
@@ -69,6 +72,9 @@ var state: State = .{
     .context_count = 0,
     .response_text_offset = 0,
     .response_text_length = 0,
+    .response_tool = 0,
+    .response_arguments_offset = 0,
+    .response_arguments_length = 0,
 };
 
 export fn initialize(agent_id: u32) void {
@@ -94,6 +100,9 @@ export fn initialize(agent_id: u32) void {
         .context_count = 0,
         .response_text_offset = 0,
         .response_text_length = 0,
+        .response_tool = 0,
+        .response_arguments_offset = 0,
+        .response_arguments_length = 0,
     };
 }
 
@@ -206,6 +215,9 @@ export fn beginModelOperation(operation_id: u32, sequence: u32) u32 {
     state.response_failure = 0;
     state.response_text_offset = 0;
     state.response_text_length = 0;
+    state.response_tool = 0;
+    state.response_arguments_offset = 0;
+    state.response_arguments_length = 0;
     state.task_phase = .awaiting_model;
     return 1;
 }
@@ -231,6 +243,9 @@ export fn interpretModelResponse(offset: u32, length: u32, response_ref: u32) u3
     state.response_failure = @intFromEnum(parsed.failure);
     state.response_text_offset = offset + parsed.text_offset;
     state.response_text_length = parsed.text_length;
+    state.response_tool = @intFromEnum(parsed.tool);
+    state.response_arguments_offset = offset + parsed.arguments_offset;
+    state.response_arguments_length = parsed.arguments_length;
     state.task_phase = switch (parsed.disposition) {
         .final_answer => .final_candidate,
         .tool_call => .awaiting_tool,
@@ -247,6 +262,20 @@ export fn commitFinalAnswer(entry_id: u32) u32 {
     state.active_leaf_id = entry_id;
     state.final_entry_id = entry_id;
     state.task_phase = .finished;
+    state.yielded = 1;
+    return 1;
+}
+
+export fn commitToolResult(call_entry_id: u32, result_entry_id: u32) u32 {
+    if (state.magic != magic or state.yielded != 1 or call_entry_id == 0 or result_entry_id == 0) return 0;
+    if (state.task_phase != .awaiting_tool or
+        call_entry_id != state.active_leaf_id + 1 or result_entry_id != call_entry_id + 1)
+    {
+        return 0;
+    }
+    state.yielded = 0;
+    state.active_leaf_id = result_entry_id;
+    state.task_phase = .ready;
     state.yielded = 1;
     return 1;
 }
@@ -273,6 +302,18 @@ export fn responseTextOffset() u32 {
 
 export fn responseTextLength() u32 {
     return state.response_text_length;
+}
+
+export fn responseTool() u32 {
+    return state.response_tool;
+}
+
+export fn responseArgumentsOffset() u32 {
+    return state.response_arguments_offset;
+}
+
+export fn responseArgumentsLength() u32 {
+    return state.response_arguments_length;
 }
 
 export fn taskOutcome() u32 {

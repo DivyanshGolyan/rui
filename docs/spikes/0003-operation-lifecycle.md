@@ -57,8 +57,10 @@ progress events or one durable terminal completion.
 
 The host journal now uses canonical, checksummed 80-byte version-3 records. Each record identifies its
 kind, logical agent, agent generation, operation, operation generation, Attempt, ownership epoch,
-recovery class, immutable descriptor digest, global sequence, and result. The writer synchronizes
-the file after every accepted or completed record. Replay rejects corrupt,
+recovery class, immutable descriptor digest, global sequence, and result. Version 3 also assigns
+canonical kinds to descriptor validation, permission, Attempt start, typed result, and indeterminate
+effect recovery without creating another history. The writer synchronizes the file after every
+record. Replay rejects corrupt,
 noncanonical, truncated, and nonmonotonic records.
 
 The page still uses one fixed operation slot rather than a shared circular ring. Because only one

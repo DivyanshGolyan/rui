@@ -1,0 +1,557 @@
+const std = @import("std");
+
+pub const version: u16 = 1;
+pub const call_header_size = 16;
+pub const result_header_size = 32;
+pub const max_command_size = 2048;
+pub const max_output_size = 64 * 1024;
+pub const min_timeout_ms = 100;
+pub const max_timeout_ms = 120_000;
+
+const call_magic = "ONEBASH\x00";
+const result_magic = "ONERES\x00\x00";
+
+pub const Call = struct {
+    command: []const u8,
+    timeout_ms: u32,
+};
+
+pub const Decision = enum(u8) {
+    allow = 1,
+    ask = 2,
+    deny = 3,
+};
+
+pub const Status = enum(u8) {
+    success = 1,
+    nonzero_exit = 2,
+    timeout = 3,
+    cancelled = 4,
+    missing_executable = 5,
+    truncated = 6,
+    denied = 7,
+    indeterminate = 8,
+    spawn_error = 9,
+};
+
+pub const Execution = struct {
+    allocator: std.mem.Allocator,
+    status: Status,
+    exit_code: u8 = 0,
+    stdout: []u8,
+    stderr: []u8,
+
+    pub fn deinit(self: *Execution) void {
+        self.allocator.free(self.stdout);
+        self.allocator.free(self.stderr);
+    }
+};
+
+pub const ResultView = struct {
+    status: Status,
+    exit_code: u8,
+    stdout: []const u8,
+    stderr: []const u8,
+};
+
+pub const Control = struct {
+    cancelled: ?*const std.atomic.Value(bool) = null,
+    bash_path: []const u8 = "/bin/bash",
+};
+
+pub const Policy = struct {
+    context: *anyopaque,
+    classify_fn: *const fn (*anyopaque, u64, Call) anyerror!Decision,
+    ask_fn: *const fn (*anyopaque, u64, Call) anyerror!bool,
+
+    pub fn decide(self: Policy, digest: u64, call: Call) !bool {
+        return switch (try self.classify_fn(self.context, digest, call)) {
+            .allow => true,
+            .deny => false,
+            .ask => self.ask_fn(self.context, digest, call),
+        };
+    }
+};
+
+pub fn encodeCall(out: []u8, call: Call) ![]const u8 {
+    try validate(call);
+    const total = call_header_size + call.command.len;
+    if (total > out.len) return error.CallBufferTooSmall;
+    @memset(out[0..total], 0);
+    @memcpy(out[0..call_magic.len], call_magic);
+    write(u16, out, 8, version);
+    write(u16, out, 10, call_header_size);
+    write(u32, out, 12, call.timeout_ms);
+    @memcpy(out[call_header_size..total], call.command);
+    return out[0..total];
+}
+
+pub fn decodeCall(bytes: []const u8) !Call {
+    if (bytes.len < call_header_size or bytes.len > call_header_size + max_command_size) {
+        return error.InvalidBashCall;
+    }
+    if (!std.mem.eql(u8, bytes[0..call_magic.len], call_magic) or
+        read(u16, bytes, 8) != version or read(u16, bytes, 10) != call_header_size)
+    {
+        return error.InvalidBashCall;
+    }
+    const call: Call = .{
+        .timeout_ms = read(u32, bytes, 12),
+        .command = bytes[call_header_size..],
+    };
+    try validate(call);
+    return call;
+}
+
+pub fn descriptorDigest(bytes: []const u8) u64 {
+    var digest_bytes: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest_bytes, .{});
+    var digest = std.mem.readInt(u64, digest_bytes[0..8], .little);
+    if (digest == 0) digest = 1;
+    return digest;
+}
+
+pub fn execute(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    workspace_path: []const u8,
+    call: Call,
+) !Execution {
+    return executeControlled(allocator, io, workspace_path, call, .{});
+}
+
+pub fn executeControlled(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    workspace_path: []const u8,
+    call: Call,
+    control: Control,
+) !Execution {
+    try validate(call);
+    if (control.cancelled) |cancelled| {
+        if (cancelled.load(.acquire)) return emptyExecution(allocator, .cancelled);
+    }
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("PATH", "/usr/bin:/bin");
+    try environment.put("LC_ALL", "C");
+    try environment.put("ONEPAGE_SANITIZED", "1");
+
+    const run = runBounded(allocator, io, .{
+        .argv = &.{ control.bash_path, "--noprofile", "--norc", "-c", call.command },
+        .cwd = .{ .path = workspace_path },
+        .environ_map = &environment,
+        .timeout_ms = call.timeout_ms,
+        .cancelled = control.cancelled,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return emptyExecution(allocator, .missing_executable),
+        else => return emptyExecution(allocator, .spawn_error),
+    };
+    const status: Status, const exit_code: u8 = switch (run.termination) {
+        .timeout => .{ .timeout, 0 },
+        .cancelled => .{ .cancelled, 0 },
+        .truncated => .{ .truncated, 0 },
+        .term => |term| switch (term) {
+            .exited => |code| .{ if (code == 0) .success else .nonzero_exit, code },
+            else => .{ .nonzero_exit, 255 },
+        },
+    };
+    return .{
+        .allocator = allocator,
+        .status = status,
+        .exit_code = exit_code,
+        .stdout = run.stdout,
+        .stderr = run.stderr,
+    };
+}
+
+const RunOptions = struct {
+    argv: []const []const u8,
+    cwd: std.process.Child.Cwd,
+    environ_map: *const std.process.Environ.Map,
+    timeout_ms: u32,
+    cancelled: ?*const std.atomic.Value(bool),
+};
+
+const Termination = union(enum) {
+    term: std.process.Child.Term,
+    timeout,
+    cancelled,
+    truncated,
+};
+
+const RunResult = struct {
+    stdout: []u8,
+    stderr: []u8,
+    termination: Termination,
+};
+
+fn runBounded(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    options: RunOptions,
+) !RunResult {
+    var child = try std.process.spawn(io, .{
+        .argv = options.argv,
+        .cwd = options.cwd,
+        .environ_map = options.environ_map,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .pgid = 0,
+    });
+    const process_group = child.id.?;
+    var child_live = true;
+    defer if (child_live) terminateGroup(&child, io);
+
+    var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(
+        allocator,
+        io,
+        multi_reader_buffer.toStreams(),
+        &.{ child.stdout.?, child.stderr.? },
+    );
+    defer multi_reader.deinit();
+    const stdout_reader = multi_reader.reader(0);
+    const stderr_reader = multi_reader.reader(1);
+    const clock = std.Io.Clock.awake;
+    const duration: std.Io.Clock.Duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(options.timeout_ms),
+        .clock = clock,
+    };
+    const deadline = std.Io.Clock.Timestamp.now(io, clock).addDuration(duration);
+    const poll: std.Io.Timeout = .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(10),
+        .clock = clock,
+    } };
+    var termination: ?Termination = null;
+    var pipes_eof = false;
+    while (termination == null) {
+        if (options.cancelled) |cancelled| {
+            if (cancelled.load(.acquire)) {
+                termination = .cancelled;
+                break;
+            }
+        }
+        multi_reader.fill(4096, poll) catch |err| switch (err) {
+            error.EndOfStream => {
+                pipes_eof = true;
+                break;
+            },
+            error.Timeout => {
+                const now = std.Io.Clock.Timestamp.now(io, clock);
+                if (!now.compare(.lt, deadline)) termination = .timeout;
+                continue;
+            },
+            error.Canceled => {
+                termination = .cancelled;
+                break;
+            },
+            else => return err,
+        };
+        if (stdout_reader.buffered().len > max_output_size or
+            stderr_reader.buffered().len > max_output_size)
+        {
+            termination = .truncated;
+        }
+    }
+    if (termination) |_| {
+        terminateGroup(&child, io);
+        child_live = false;
+    } else {
+        std.debug.assert(pipes_eof);
+        var wait_done: std.atomic.Value(bool) = .init(false);
+        var wait_future = io.async(waitChild, .{ &child, io, &wait_done });
+        while (!wait_done.load(.acquire)) {
+            if (options.cancelled) |cancelled| {
+                if (cancelled.load(.acquire)) {
+                    termination = .cancelled;
+                    break;
+                }
+            }
+            const now = std.Io.Clock.Timestamp.now(io, clock);
+            if (!now.compare(.lt, deadline)) {
+                termination = .timeout;
+                break;
+            }
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), clock);
+        }
+        if (termination != null) std.posix.kill(-process_group, .KILL) catch {};
+        const term = try wait_future.await(io);
+        child_live = false;
+        if (termination == null) termination = .{ .term = term };
+    }
+    var stdout = try multi_reader.toOwnedSlice(0);
+    errdefer allocator.free(stdout);
+    if (stdout.len > max_output_size) stdout = try allocator.realloc(stdout, max_output_size);
+    var stderr = try multi_reader.toOwnedSlice(1);
+    errdefer allocator.free(stderr);
+    if (stderr.len > max_output_size) stderr = try allocator.realloc(stderr, max_output_size);
+    return .{ .stdout = stdout, .stderr = stderr, .termination = termination.? };
+}
+
+fn waitChild(
+    child: *std.process.Child,
+    io: std.Io,
+    done: *std.atomic.Value(bool),
+) !std.process.Child.Term {
+    defer done.store(true, .release);
+    return child.wait(io);
+}
+
+fn terminateGroup(child: *std.process.Child, io: std.Io) void {
+    const pid = child.id orelse return;
+    std.posix.kill(-pid, .KILL) catch {};
+    child.kill(io);
+}
+
+pub fn encodeResult(out: []u8, execution: Execution) ![]const u8 {
+    const total = result_header_size + execution.stdout.len + execution.stderr.len;
+    if (total > out.len) return error.ResultBufferTooSmall;
+    @memset(out[0..total], 0);
+    @memcpy(out[0..result_magic.len], result_magic);
+    write(u16, out, 8, version);
+    write(u16, out, 10, result_header_size);
+    out[12] = @intFromEnum(execution.status);
+    out[13] = execution.exit_code;
+    write(u32, out, 16, @intCast(execution.stdout.len));
+    write(u32, out, 20, @intCast(execution.stderr.len));
+    const stdout_end = result_header_size + execution.stdout.len;
+    @memcpy(out[result_header_size..stdout_end], execution.stdout);
+    @memcpy(out[stdout_end..total], execution.stderr);
+    return out[0..total];
+}
+
+pub fn decodeResult(bytes: []const u8) !ResultView {
+    if (bytes.len < result_header_size or
+        !std.mem.eql(u8, bytes[0..result_magic.len], result_magic) or
+        read(u16, bytes, 8) != version or read(u16, bytes, 10) != result_header_size or
+        bytes[14] != 0 or bytes[15] != 0 or read(u64, bytes, 24) != 0)
+    {
+        return error.InvalidBashResult;
+    }
+    const status: Status = switch (bytes[12]) {
+        1 => .success,
+        2 => .nonzero_exit,
+        3 => .timeout,
+        4 => .cancelled,
+        5 => .missing_executable,
+        6 => .truncated,
+        7 => .denied,
+        8 => .indeterminate,
+        9 => .spawn_error,
+        else => return error.InvalidBashResult,
+    };
+    const stdout_length: usize = read(u32, bytes, 16);
+    const stderr_length: usize = read(u32, bytes, 20);
+    if (stdout_length > bytes.len - result_header_size or
+        stderr_length > bytes.len - result_header_size - stdout_length or
+        result_header_size + stdout_length + stderr_length != bytes.len)
+    {
+        return error.InvalidBashResult;
+    }
+    return .{
+        .status = status,
+        .exit_code = bytes[13],
+        .stdout = bytes[result_header_size..][0..stdout_length],
+        .stderr = bytes[result_header_size + stdout_length ..],
+    };
+}
+
+fn emptyExecution(allocator: std.mem.Allocator, status: Status) !Execution {
+    return .{
+        .allocator = allocator,
+        .status = status,
+        .stdout = try allocator.alloc(u8, 0),
+        .stderr = try allocator.alloc(u8, 0),
+    };
+}
+
+fn validate(call: Call) !void {
+    if (call.command.len == 0 or call.command.len > max_command_size or
+        call.timeout_ms < min_timeout_ms or call.timeout_ms > max_timeout_ms or
+        std.mem.indexOfScalar(u8, call.command, 0) != null or !std.unicode.utf8ValidateSlice(call.command))
+    {
+        return error.InvalidBashCall;
+    }
+}
+
+fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
+    std.mem.writeInt(T, out[offset..][0..@sizeOf(T)], value, .little);
+}
+
+fn read(comptime T: type, input: []const u8, offset: usize) T {
+    return std.mem.readInt(T, input[offset..][0..@sizeOf(T)], .little);
+}
+
+test "bash call is canonical, bounded, and digest bound" {
+    var buffer: [call_header_size + max_command_size]u8 = undefined;
+    const encoded = try encodeCall(&buffer, .{ .command = "git status --short", .timeout_ms = 5000 });
+    const decoded = try decodeCall(encoded);
+    try std.testing.expectEqualStrings("git status --short", decoded.command);
+    try std.testing.expectEqual(@as(u32, 5000), decoded.timeout_ms);
+    try std.testing.expect(descriptorDigest(encoded) != 0);
+    try std.testing.expectError(error.InvalidBashCall, decodeCall("not a call"));
+}
+
+test "bash runs in its workspace with a sanitized environment" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var result = try execute(
+        allocator,
+        io,
+        path,
+        .{ .command = "pwd; test -z \"$OPENAI_API_KEY\"; printf %s \"$ONEPAGE_SANITIZED\"", .timeout_ms = 5000 },
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expect(std.mem.endsWith(u8, result.stdout, "1"));
+}
+
+test "bash distinguishes nonzero, missing Bash, and timeout" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const cases = [_]struct { command: []const u8, timeout: u32, expected: Status }{
+        .{ .command = "exit 9", .timeout = 5000, .expected = .nonzero_exit },
+        .{ .command = "sleep 2", .timeout = 100, .expected = .timeout },
+    };
+    for (cases) |case| {
+        var result = try execute(allocator, io, path, .{ .command = case.command, .timeout_ms = case.timeout });
+        defer result.deinit();
+        try std.testing.expectEqual(case.expected, result.status);
+    }
+    var exit_127 = try execute(allocator, io, path, .{ .command = "exit 127", .timeout_ms = 5000 });
+    defer exit_127.deinit();
+    try std.testing.expectEqual(Status.nonzero_exit, exit_127.status);
+    var missing = try executeControlled(
+        allocator,
+        io,
+        path,
+        .{ .command = "true", .timeout_ms = 5000 },
+        .{ .bash_path = "/onepage/missing/bash" },
+    );
+    defer missing.deinit();
+    try std.testing.expectEqual(Status.missing_executable, missing.status);
+}
+
+test "permission ask is bound to the exact digest and call" {
+    const Subject = struct {
+        asked: bool = false,
+
+        fn classify(_: *anyopaque, _: u64, _: Call) anyerror!Decision {
+            return .ask;
+        }
+
+        fn ask(context: *anyopaque, digest: u64, call: Call) anyerror!bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (digest != 99 or !std.mem.eql(u8, call.command, "git diff")) {
+                return error.PermissionSubjectMismatch;
+            }
+            self.asked = true;
+            return true;
+        }
+    };
+    var subject: Subject = .{};
+    const policy: Policy = .{
+        .context = &subject,
+        .classify_fn = Subject.classify,
+        .ask_fn = Subject.ask,
+    };
+    try std.testing.expect(try policy.decide(99, .{ .command = "git diff", .timeout_ms = 5000 }));
+    try std.testing.expect(subject.asked);
+}
+
+test "truncation and cancellation are distinct typed results" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var truncated = try execute(
+        allocator,
+        io,
+        path,
+        .{ .command = "head -c 70000 /dev/zero", .timeout_ms = 5000 },
+    );
+    defer truncated.deinit();
+    try std.testing.expectEqual(Status.truncated, truncated.status);
+    const encoded_buffer = try allocator.alloc(u8, result_header_size + 2 * max_output_size);
+    defer allocator.free(encoded_buffer);
+    _ = try encodeResult(encoded_buffer, truncated);
+
+    var cancellation: std.atomic.Value(bool) = .init(false);
+    var cancel_future = io.async(cancelAfter, .{ io, &cancellation });
+    var cancelled = try executeControlled(
+        allocator,
+        io,
+        path,
+        .{ .command = "sleep 2", .timeout_ms = 5000 },
+        .{ .cancelled = &cancellation },
+    );
+    defer cancelled.deinit();
+    try cancel_future.await(io);
+    try std.testing.expectEqual(Status.cancelled, cancelled.status);
+}
+
+fn cancelAfter(io: std.Io, cancellation: *std.atomic.Value(bool)) !void {
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake);
+    cancellation.store(true, .release);
+}
+
+test "timeout kills Bash descendants and Bash syntax is supported" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var timeout = try execute(
+        allocator,
+        io,
+        path,
+        .{ .command = "(sleep 1; printf late > late.txt) & wait", .timeout_ms = 100 },
+    );
+    defer timeout.deinit();
+    try std.testing.expectEqual(Status.timeout, timeout.status);
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1100), .awake);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "late.txt", .{}));
+
+    var bash_only = try execute(
+        allocator,
+        io,
+        path,
+        .{ .command = "[[ -n onepage ]]", .timeout_ms = 5000 },
+    );
+    defer bash_only.deinit();
+    try std.testing.expectEqual(Status.success, bash_only.status);
+}
+
+test "timeout still applies after Bash closes its output pipes" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var result = try execute(
+        allocator,
+        io,
+        path,
+        .{ .command = "exec >/dev/null 2>&1; sleep 1; printf late > late-after-eof.txt", .timeout_ms = 100 },
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(Status.timeout, result.status);
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1100), .awake);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "late-after-eof.txt", .{}));
+}

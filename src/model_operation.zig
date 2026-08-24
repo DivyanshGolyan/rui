@@ -1,4 +1,5 @@
 const std = @import("std");
+const bash_tool = @import("bash_tool.zig");
 const model_protocol = @import("model_protocol.zig");
 const session_store = @import("session.zig");
 
@@ -226,6 +227,103 @@ pub const Fixture = struct {
         );
         try response.append(encoded);
         if (self.finish_response) try response.finish();
+    }
+};
+
+pub const ToolFixture = struct {
+    expected_task: []const u8,
+    tool_arguments: []const u8,
+    final_answer: []const u8,
+    expected_tool_status: bash_tool.Status = .success,
+    calls: u8 = 0,
+
+    pub fn provider(self: *ToolFixture) Provider {
+        return .{ .context = self, .dispatch = dispatch };
+    }
+
+    fn dispatch(
+        context: *anyopaque,
+        request: RequestReader,
+        response: ResponseWriter,
+    ) anyerror!void {
+        const self: *ToolFixture = @ptrCast(@alignCast(context));
+        var header: [request_header_size + entry_header_size]u8 = undefined;
+        const prefix = try request.readWindow(0, &header);
+        if (prefix.len != header.len or
+            !std.mem.eql(u8, prefix[0..request_magic.len], request_magic) or
+            read(u16, prefix, 8) != version or read(u16, prefix, 10) != request_header_size)
+        {
+            return error.UnexpectedFixtureRequest;
+        }
+        const entry_count = read(u32, prefix, 12);
+        var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
+        const encoded = switch (self.calls) {
+            0 => blk: {
+                if (entry_count != 1 or prefix[request_header_size] != @intFromEnum(session_store.EntryKind.user)) {
+                    return error.UnexpectedFixtureRequest;
+                }
+                const task_length = read(u64, prefix, request_header_size + 32);
+                if (task_length != self.expected_task.len or task_length > request_window_size) {
+                    return error.UnexpectedFixtureRequest;
+                }
+                var task_buffer: [request_window_size]u8 = undefined;
+                const task = try request.readWindow(header.len, task_buffer[0..@intCast(task_length)]);
+                if (!std.mem.eql(u8, task, self.expected_task)) return error.UnexpectedFixtureRequest;
+                break :blk try model_protocol.encodeTool(
+                    &encoded_buffer,
+                    .bash,
+                    self.tool_arguments,
+                );
+            },
+            1 => blk: {
+                if (entry_count != 3) return error.ToolResultMissingFromContext;
+                const task_length = read(u64, prefix, request_header_size + 32);
+                const second_header_offset = request_header_size + entry_header_size + task_length;
+                var second_header: [entry_header_size]u8 = undefined;
+                const second = try request.readWindow(second_header_offset, &second_header);
+                if (second.len != second_header.len or
+                    second[0] != @intFromEnum(session_store.EntryKind.assistant))
+                {
+                    return error.ToolCallMissingFromContext;
+                }
+                const call_length = read(u64, second, 32);
+                if (call_length != self.tool_arguments.len) return error.ToolCallMissingFromContext;
+                var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
+                const call_bytes = try request.readWindow(
+                    second_header_offset + entry_header_size,
+                    call_buffer[0..@intCast(call_length)],
+                );
+                if (!std.mem.eql(u8, call_bytes, self.tool_arguments)) return error.ToolCallMissingFromContext;
+                const third_header_offset = second_header_offset + entry_header_size + call_length;
+                var third_header: [entry_header_size]u8 = undefined;
+                const third = try request.readWindow(third_header_offset, &third_header);
+                if (third.len != third_header.len or
+                    third[0] != @intFromEnum(session_store.EntryKind.tool_result))
+                {
+                    return error.ToolResultMissingFromContext;
+                }
+                const result_length = read(u64, third, 32);
+                if (result_length < bash_tool.result_header_size or result_length > request_window_size) {
+                    return error.InvalidFixtureToolResult;
+                }
+                var result_buffer: [request_window_size]u8 = undefined;
+                const result = try request.readWindow(
+                    third_header_offset + entry_header_size,
+                    result_buffer[0..@intCast(result_length)],
+                );
+                const view = try bash_tool.decodeResult(result);
+                if (view.status != self.expected_tool_status) return error.UnexpectedFixtureToolStatus;
+                break :blk try model_protocol.encodeText(
+                    &encoded_buffer,
+                    .complete,
+                    self.final_answer,
+                );
+            },
+            else => return error.UnexpectedFixtureCall,
+        };
+        self.calls += 1;
+        try response.append(encoded);
+        try response.finish();
     }
 };
 

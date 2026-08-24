@@ -79,6 +79,7 @@ pub const Adapter = struct {
                     }
                     durable_result = record.result;
                 },
+                else => {},
             }
         }
         _ = accepted orelse return .stale;
@@ -113,6 +114,7 @@ pub const Adapter = struct {
                     accepted = record;
                 },
                 .completed => return error.OperationAlreadyCompleted,
+                else => {},
             }
         }
         const intent = accepted orelse return error.MissingAcceptedAttempt;

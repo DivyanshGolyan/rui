@@ -1166,6 +1166,7 @@ fn lifecycleRecover(io: std.Io, allocator: std.mem.Allocator, runtime: *const Ru
                 );
                 completed_count += 1;
             },
+            else => return error.UnexpectedLifecycleRecord,
         }
     }
 
@@ -1267,6 +1268,7 @@ fn hasAcceptedRecord(
         switch (record.kind) {
             .accepted => accepted = true,
             .completed => return error.DuplicateCompletion,
+            else => return error.UnexpectedLifecycleRecord,
         }
     }
     return accepted;

@@ -119,6 +119,14 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    const bash_tool_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bash_tool.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    bash_tool_tests.root_module.link_libc = true;
     const cli_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/cli.zig"),
@@ -149,6 +157,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(durable_transition_tests).step);
     test_step.dependOn(&b.addRunArtifact(session_tests).step);
     test_step.dependOn(&b.addRunArtifact(model_operation_tests).step);
+    test_step.dependOn(&b.addRunArtifact(bash_tool_tests).step);
     test_step.dependOn(&b.addRunArtifact(cli_tests).step);
     test_step.dependOn(&run_agent_integration.step);
 
@@ -171,6 +180,29 @@ pub fn build(b: *std.Build) void {
         "Explain this repository in one sentence.",
     });
     fixture_answer_step.dependOn(&run_fixture_answer.step);
+
+    const fixture_bash_step = b.step(
+        "fixture-bash",
+        "Run a permissioned Bash call and continue to a second-turn Final Answer",
+    );
+    const run_fixture_bash = b.addRunArtifact(cli);
+    run_fixture_bash.addArg("--core");
+    run_fixture_bash.addFileArg(core.getEmittedBin());
+    run_fixture_bash.addArgs(&.{
+        "--state",
+        ".zig-cache/onepage-bash-sessions",
+        "--repo",
+        ".",
+        "--model",
+        "fixture:bash",
+        "--fixture-response",
+        "Bash inspected the real worktree; its typed result became turn-two context.",
+        "--fixture-bash-command",
+        "grep -n '^# OnePage' README.md; test -f build.zig; git status --short",
+        "--allow-bash",
+        "Inspect this repository with Bash.",
+    });
+    fixture_bash_step.dependOn(&run_fixture_bash.step);
 
     const run_step = b.step("run", "Run the memory-model spike");
     const run_host = b.addRunArtifact(host);

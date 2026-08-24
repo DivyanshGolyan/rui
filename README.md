@@ -37,6 +37,15 @@ then committed as an immutable conversation entry and reproduced by exact Sessio
 zig build fixture-answer -Doptimize=ReleaseSmall
 ```
 
+The permissioned Bash slice validates one bounded call, records its exact digest and permission
+decision, syncs a consequential Attempt before execution, runs from the bound worktree with a
+sanitized environment, commits the typed Result to the conversation, and lets the core construct a
+second model turn. Ambiguous crash recovery records `possibly_executed` and never reruns Bash.
+
+```sh
+zig build fixture-bash -Doptimize=ReleaseSmall
+```
+
 The atomic checkpoint spike publishes through temporary write, file sync, same-directory rename,
 and parent-directory sync. Sixteen fresh child processes terminate at each boundary and recover only
 the old or new canonical page while keeping the journal unchanged.
@@ -66,6 +75,7 @@ See the spike notes for architecture, measurements, caveats, and next questions:
 - [`docs/spikes/0006-atomic-checkpoint-publication.md`](docs/spikes/0006-atomic-checkpoint-publication.md)
 - [`docs/spikes/0007-durable-session.md`](docs/spikes/0007-durable-session.md)
 - [`docs/spikes/0008-fixture-model-final-answer.md`](docs/spikes/0008-fixture-model-final-answer.md)
+- [`docs/spikes/0009-permissioned-bash.md`](docs/spikes/0009-permissioned-bash.md)
 
 Source audits that informed the architecture:
 

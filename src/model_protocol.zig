@@ -67,6 +67,22 @@ pub fn encodeText(out: []u8, status: Status, text: []const u8) ![]const u8 {
     return out[0..total];
 }
 
+pub fn encodeTool(out: []u8, tool: Tool, arguments: []const u8) ![]const u8 {
+    if (tool == .none or arguments.len == 0) return error.InvalidToolCall;
+    const total = header_size + item_header_size + arguments.len;
+    if (total > out.len or total > max_response_size) return error.ResponseTooLarge;
+    @memset(out[0..total], 0);
+    write(u32, out, 0, magic);
+    out[4] = version;
+    out[5] = @intFromEnum(Status.complete);
+    out[6] = 1;
+    out[header_size] = @intFromEnum(ItemKind.tool_call);
+    out[header_size + 1] = @intFromEnum(tool);
+    write(u32, out, header_size + 4, @intCast(arguments.len));
+    @memcpy(out[header_size + item_header_size .. total], arguments);
+    return out[0..total];
+}
+
 pub fn parse(bytes: []const u8) Parsed {
     if (bytes.len < header_size or bytes.len > max_response_size) return malformed();
     if (read(u32, bytes, 0) != magic or bytes[4] != version or bytes[7] != 0) {
@@ -114,9 +130,9 @@ pub fn parse(bytes: []const u8) Parsed {
         cursor += item_header_size;
         if (payload_length == 0 or payload_length > bytes.len - cursor) return malformed();
         const payload = bytes[cursor .. cursor + payload_length];
-        if (!utf8Valid(payload)) return malformed();
         switch (kind) {
             .text => {
+                if (!utf8Valid(payload)) return malformed();
                 if (item_tool != .none or text_count != 0) return malformed();
                 text_count = 1;
                 text_offset = @intCast(cursor);
@@ -159,6 +175,15 @@ test "malformed payload length cannot overflow the parser" {
     bytes[header_size] = @intFromEnum(ItemKind.text);
     write(u32, &bytes, header_size + 4, std.math.maxInt(u32));
     try std.testing.expectEqual(Failure.malformed, parse(&bytes).failure);
+}
+
+test "one binary tool call is accepted without becoming final text" {
+    var bytes: [128]u8 = undefined;
+    const encoded = try encodeTool(&bytes, .bash, "\x01\x00\xff");
+    const parsed = parse(encoded);
+    try std.testing.expectEqual(Disposition.tool_call, parsed.disposition);
+    try std.testing.expectEqual(Tool.bash, parsed.tool);
+    try std.testing.expectEqual(@as(u32, 3), parsed.arguments_length);
 }
 
 fn malformed() Parsed {

@@ -61,7 +61,8 @@ its response is rejected before a completed journal record is written.
 - request blobs: at most 1 MiB on disk; canonical response spools: at most 16 KiB;
 - checkpoint buffer: 65,600 bytes per active owner, outside the page;
 - operation journal records: 80 bytes each;
-- current ReleaseSmall core: 25 function exports and 127 data-section bytes;
+- current ReleaseSmall core after the Bash continuation slice: 29 function exports and 154
+  data-section bytes;
 - model calls in this slice: exactly one for creation and zero for finished resume.
 
 `zig build test -Doptimize=ReleaseSafe` runs the parser, bounded reconstruction, fixture-provider,

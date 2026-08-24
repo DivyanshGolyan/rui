@@ -1,5 +1,6 @@
 const std = @import("std");
 const agent = @import("agent.zig");
+const bash_tool = @import("bash_tool.zig");
 const core_contract = @import("core_contract.zig");
 const model_operation = @import("model_operation.zig");
 const session_store = @import("session.zig");
@@ -13,6 +14,9 @@ const Arguments = struct {
     repo_path: ?[]const u8 = null,
     model: ?[]const u8 = null,
     fixture_response: ?[]const u8 = null,
+    fixture_bash_command: ?[]const u8 = null,
+    bash_timeout_ms: u32 = 5000,
+    allow_bash: bool = false,
     task: ?[]const u8 = null,
     resume_id: ?u64 = null,
 };
@@ -70,11 +74,41 @@ pub fn main(init: std.process.Init) !void {
         const task = arguments.task orelse return error.MissingTask;
         const workspace_path = try resolveWorkspacePath(init.io, allocator, arguments.repo_path);
         defer allocator.free(workspace_path);
+        var output: Output = .{ .io = init.io };
+        if (arguments.fixture_bash_command) |command| {
+            var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
+            const encoded_call = try bash_tool.encodeCall(&call_buffer, .{
+                .command = command,
+                .timeout_ms = arguments.bash_timeout_ms,
+            });
+            var fixture: model_operation.ToolFixture = .{
+                .expected_task = task,
+                .tool_arguments = encoded_call,
+                .final_answer = response,
+            };
+            var permission: InteractivePolicy = .{
+                .io = init.io,
+                .automatic = arguments.allow_bash,
+            };
+            break :blk try agent.runNew(
+                sessions,
+                init.io,
+                allocator,
+                wasm,
+                .{
+                    .workspace_path = workspace_path,
+                    .model = model,
+                    .task = task,
+                    .bash_policy = permission.policy(),
+                },
+                fixture.provider(),
+                output.observer(),
+            );
+        }
         var fixture: model_operation.Fixture = .{
             .expected_task = task,
             .final_answer = response,
         };
-        var output: Output = .{ .io = init.io };
         break :blk try agent.runNew(
             sessions,
             init.io,
@@ -134,6 +168,16 @@ fn parseArguments(args: []const []const u8) !Arguments {
             index += 1;
             if (index == args.len) return error.InvalidArguments;
             parsed.fixture_response = args[index];
+        } else if (std.mem.eql(u8, argument, "--fixture-bash-command")) {
+            index += 1;
+            if (index == args.len) return error.InvalidArguments;
+            parsed.fixture_bash_command = args[index];
+        } else if (std.mem.eql(u8, argument, "--bash-timeout-ms")) {
+            index += 1;
+            if (index == args.len) return error.InvalidArguments;
+            parsed.bash_timeout_ms = try std.fmt.parseInt(u32, args[index], 10);
+        } else if (std.mem.eql(u8, argument, "--allow-bash")) {
+            parsed.allow_bash = true;
         } else if (std.mem.eql(u8, argument, "--resume")) {
             index += 1;
             if (index == args.len) return error.InvalidArguments;
@@ -148,12 +192,42 @@ fn parseArguments(args: []const []const u8) !Arguments {
     }
     if (parsed.resume_id != null and
         (parsed.task != null or parsed.model != null or parsed.fixture_response != null or
-            parsed.repo_path != null))
+            parsed.repo_path != null or parsed.fixture_bash_command != null or parsed.allow_bash))
     {
         return error.ResumeArgumentsConflict;
     }
     return parsed;
 }
+
+const InteractivePolicy = struct {
+    io: std.Io,
+    automatic: bool,
+
+    fn policy(self: *InteractivePolicy) bash_tool.Policy {
+        return .{ .context = self, .classify_fn = classify, .ask_fn = ask };
+    }
+
+    fn classify(context: *anyopaque, _: u64, _: bash_tool.Call) anyerror!bash_tool.Decision {
+        const self: *InteractivePolicy = @ptrCast(@alignCast(context));
+        return if (self.automatic) .allow else .ask;
+    }
+
+    fn ask(context: *anyopaque, digest: u64, call: bash_tool.Call) anyerror!bool {
+        const self: *InteractivePolicy = @ptrCast(@alignCast(context));
+        var header: [128]u8 = undefined;
+        const prompt = try std.fmt.bufPrint(
+            &header,
+            "Bash ({d} ms, digest {x:0>16}):\n",
+            .{ call.timeout_ms, digest },
+        );
+        try std.Io.File.stdout().writeStreamingAll(self.io, prompt);
+        try std.Io.File.stdout().writeStreamingAll(self.io, call.command);
+        try std.Io.File.stdout().writeStreamingAll(self.io, "\nAllow? [y/N] ");
+        var answer: [8]u8 = undefined;
+        const count = try std.Io.File.stdin().readStreaming(self.io, &.{&answer});
+        return count > 0 and (answer[0] == 'y' or answer[0] == 'Y');
+    }
+};
 
 fn resolveCorePath(
     io: std.Io,
