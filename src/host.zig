@@ -1,5 +1,6 @@
 const std = @import("std");
 const checkpoint = @import("checkpoint.zig");
+const checkpoint_store = @import("checkpoint_store.zig");
 const core_contract = @import("core_contract.zig");
 const durable_transition = @import("durable_transition.zig");
 const harness = @import("harness.zig");
@@ -17,12 +18,15 @@ const lifecycle_generation = 1;
 const lifecycle_journal_path = "snapshots/lifecycle.journal";
 const owner_journal_path = "snapshots/owner-crash.journal";
 const owner_checkpoint_path = "snapshots/owner-crash.page";
+const owner_checkpoint_name = "owner-crash.page";
+const owner_checkpoint_temp_name = "owner-crash.page.tmp";
 const owner_agent: u32 = 42;
 const owner_generation: u64 = 7;
 const owner_operation: u32 = 90_042;
 const owner_operation_generation: u32 = 1;
 const owner_result: u32 = 0xc0ffee;
 const crash_exit_status: u8 = 86;
+const checkpoint_crash_exit_base: u8 = 90;
 const interrupted_agent = 500;
 const unaccepted_agent = lifecycle_agents + 1;
 const framework_path = "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore";
@@ -225,7 +229,8 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print(
             "usage: {s} <onepage-core.wasm> [lifecycle-prepare|" ++
                 "lifecycle-complete|lifecycle-recover|owner-crash-suite|" ++
-                "owner-prepare|owner-crash-after-sync|owner-recover]\n",
+                "owner-prepare|owner-crash-after-sync|owner-recover|" ++
+                "checkpoint-crash-suite|checkpoint-crash-after-*]\n",
             .{args[0]},
         );
         return error.InvalidArguments;
@@ -233,6 +238,10 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len == 3 and std.mem.eql(u8, args[2], "owner-crash-suite")) {
         try ownerCrashSuite(init.io, args[0], args[1]);
+        return;
+    }
+    if (args.len == 3 and std.mem.eql(u8, args[2], "checkpoint-crash-suite")) {
+        try checkpointCrashSuite(init.io, args[0], args[1]);
         return;
     }
 
@@ -295,7 +304,19 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
         if (std.mem.eql(u8, args[2], "owner-recover")) {
-            try ownerRecover(init.io, allocator, &runtime);
+            try ownerRecover(init.io, allocator, &runtime, null);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "owner-recover-applied")) {
+            try ownerRecover(init.io, allocator, &runtime, .applied);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "owner-recover-duplicate")) {
+            try ownerRecover(init.io, allocator, &runtime, .duplicate);
+            return;
+        }
+        if (checkpointBoundary(args[2])) |boundary| {
+            try checkpointCrash(init.io, allocator, &runtime, boundary);
             return;
         }
         return error.InvalidArguments;
@@ -447,11 +468,13 @@ pub fn main(init: std.process.Init) !void {
 
 const OwnerSlot = struct {
     io: std.Io,
+    checkpoint_dir: std.Io.Dir,
     runtime: *const Runtime,
     inspect_function: JSObjectRef,
     reconcile_function: JSObjectRef,
     memory: []u8,
     checkpoint_buffer: []u8,
+    checkpoint_exit: ?*CheckpointExit = null,
 
     fn inspect(context: *anyopaque, completion: harness.Completion) anyerror!durable_transition.SlotState {
         const self: *OwnerSlot = @ptrCast(@alignCast(context));
@@ -470,22 +493,27 @@ const OwnerSlot = struct {
 
     fn apply(context: *anyopaque, completion: harness.Completion) anyerror!void {
         const self: *OwnerSlot = @ptrCast(@alignCast(context));
+        const fault: ?checkpoint_store.FaultHook = if (self.checkpoint_exit) |exit|
+            exit.hook()
+        else
+            null;
         try self.runtime.callThreeNumbers(
             self.reconcile_function,
             @intCast(completion.operation_id),
             completion.operation_generation,
             @intCast(completion.result),
         );
-        try checkpoint.encode(
+        try checkpoint_store.publish(
+            self.checkpoint_dir,
+            self.io,
+            owner_checkpoint_name,
+            owner_checkpoint_temp_name,
             self.checkpoint_buffer,
             completion.agent_id,
             completion.agent_generation,
             self.memory,
+            fault,
         );
-        try std.Io.Dir.cwd().writeFile(self.io, .{
-            .sub_path = owner_checkpoint_path,
-            .data = self.checkpoint_buffer,
-        });
     }
 
     fn interface(self: *OwnerSlot) durable_transition.Slot {
@@ -506,6 +534,56 @@ fn ownerCrashSuite(io: std.Io, executable: []const u8, wasm_path: []const u8) !v
             "first recovery        applied durable completion\n" ++
             "second recovery       duplicate, no mutation\n",
         .{crash_exit_status},
+    );
+}
+
+const RecoveryDisposition = enum {
+    applied,
+    duplicate,
+};
+
+const CheckpointCase = struct {
+    mode: []const u8,
+    boundary: checkpoint_store.Boundary,
+    first_recovery: RecoveryDisposition,
+};
+
+const checkpoint_cases = [_]CheckpointCase{
+    .{ .mode = "checkpoint-crash-after-write", .boundary = .after_write, .first_recovery = .applied },
+    .{ .mode = "checkpoint-crash-after-file-sync", .boundary = .after_file_sync, .first_recovery = .applied },
+    .{ .mode = "checkpoint-crash-after-rename", .boundary = .after_rename, .first_recovery = .duplicate },
+    .{ .mode = "checkpoint-crash-after-dir-sync", .boundary = .after_dir_sync, .first_recovery = .duplicate },
+};
+
+fn checkpointCrashSuite(io: std.Io, executable: []const u8, wasm_path: []const u8) !void {
+    for (checkpoint_cases) |case| {
+        try runOwnerChild(io, executable, wasm_path, "owner-prepare", 0);
+        try runOwnerChild(
+            io,
+            executable,
+            wasm_path,
+            case.mode,
+            checkpointExitStatus(case.boundary),
+        );
+        try runOwnerChild(
+            io,
+            executable,
+            wasm_path,
+            if (case.first_recovery == .applied)
+                "owner-recover-applied"
+            else
+                "owner-recover-duplicate",
+            0,
+        );
+        try runOwnerChild(io, executable, wasm_path, "owner-recover-duplicate", 0);
+    }
+    std.debug.print(
+        "atomic checkpoint crash suite\n" ++
+            "publication boundaries 4\n" ++
+            "fresh child processes  16\n" ++
+            "old/new canonical only pass\n" ++
+            "journal reappend         0\n",
+        .{},
     );
 }
 
@@ -572,6 +650,7 @@ fn ownerCrashAfterSync(io: std.Io, allocator: std.mem.Allocator, runtime: *const
     var journal = try operation_log.Writer.openAppend(io, owner_journal_path);
     defer journal.close(io);
     var slot = try openOwnerSlot(io, allocator, runtime);
+    defer slot.checkpoint_dir.close(io);
     defer allocator.free(slot.checkpoint_buffer);
     var adapter: durable_transition.Adapter = .{
         .io = io,
@@ -595,11 +674,17 @@ fn ownerCrashAfterSync(io: std.Io, allocator: std.mem.Allocator, runtime: *const
     return error.CrashInjectionDidNotExit;
 }
 
-fn ownerRecover(io: std.Io, allocator: std.mem.Allocator, runtime: *const Runtime) !void {
+fn ownerRecover(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    runtime: *const Runtime,
+    expected: ?RecoveryDisposition,
+) !void {
     var journal = try operation_log.Writer.openAppend(io, owner_journal_path);
     defer journal.close(io);
     const journal_bytes_before = journal.offset;
     var slot = try openOwnerSlot(io, allocator, runtime);
+    defer slot.checkpoint_dir.close(io);
     defer allocator.free(slot.checkpoint_buffer);
     var adapter: durable_transition.Adapter = .{
         .io = io,
@@ -630,16 +715,86 @@ fn ownerRecover(io: std.Io, allocator: std.mem.Allocator, runtime: *const Runtim
     if ((progress.applied == 1) == (progress.duplicate == 1)) {
         return error.InvalidRecoveryDisposition;
     }
+    const disposition: RecoveryDisposition = if (progress.applied == 1) .applied else .duplicate;
+    if (expected) |value| {
+        if (disposition != value) return error.UnexpectedRecoveryDisposition;
+    }
     std.debug.print(
         "owner recover          {s}; journal {d} B; control {d} B\n",
         .{
-            if (progress.applied == 1) "applied" else "duplicate",
+            @tagName(disposition),
             journal.offset,
             @sizeOf(harness.Harness) +
                 @sizeOf(durable_transition.Adapter) +
                 @sizeOf(OwnerSlot),
         },
     );
+}
+
+const CheckpointExit = struct {
+    boundary: checkpoint_store.Boundary,
+
+    fn reached(context: *anyopaque, boundary: checkpoint_store.Boundary) anyerror!void {
+        const self: *CheckpointExit = @ptrCast(@alignCast(context));
+        if (boundary == self.boundary) std.process.exit(checkpointExitStatus(boundary));
+    }
+
+    fn hook(self: *CheckpointExit) checkpoint_store.FaultHook {
+        return .{ .context = self, .reached = reached };
+    }
+};
+
+comptime {
+    std.debug.assert(
+        @sizeOf(harness.Harness) +
+            @sizeOf(durable_transition.Adapter) +
+            @sizeOf(OwnerSlot) <= 1536,
+    );
+}
+
+fn checkpointCrash(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    runtime: *const Runtime,
+    boundary: checkpoint_store.Boundary,
+) !void {
+    var journal = try operation_log.Writer.openAppend(io, owner_journal_path);
+    defer journal.close(io);
+    var slot = try openOwnerSlot(io, allocator, runtime);
+    defer slot.checkpoint_dir.close(io);
+    defer allocator.free(slot.checkpoint_buffer);
+    var exit: CheckpointExit = .{ .boundary = boundary };
+    slot.checkpoint_exit = &exit;
+    var adapter: durable_transition.Adapter = .{
+        .io = io,
+        .dir = std.Io.Dir.cwd(),
+        .journal_path = owner_journal_path,
+        .writer = &journal,
+        .agent_id = owner_agent,
+        .agent_generation = owner_generation,
+        .operation_id = owner_operation,
+        .operation_generation = owner_operation_generation,
+        .slot = slot.interface(),
+    };
+    var owner = try harness.Harness.open(.{
+        .completion_capacity = 1,
+        .drive_quantum = 1,
+        .transition = adapter.transition(),
+    });
+    if (owner.offer(ownerCompletion()) != .queued) return error.OwnerAdmissionFailed;
+    _ = try owner.drive();
+    return error.CheckpointCrashInjectionDidNotExit;
+}
+
+fn checkpointBoundary(mode: []const u8) ?checkpoint_store.Boundary {
+    for (checkpoint_cases) |case| {
+        if (std.mem.eql(u8, mode, case.mode)) return case.boundary;
+    }
+    return null;
+}
+
+fn checkpointExitStatus(boundary: checkpoint_store.Boundary) u8 {
+    return checkpoint_crash_exit_base + @intFromEnum(boundary);
 }
 
 fn openOwnerSlot(
@@ -650,6 +805,8 @@ fn openOwnerSlot(
     const memory = try runtime.memory(allocator);
     const checkpoint_buffer = try allocator.alloc(u8, checkpoint.encoded_size);
     errdefer allocator.free(checkpoint_buffer);
+    const checkpoint_dir = try std.Io.Dir.cwd().openDir(io, "snapshots", .{});
+    errdefer checkpoint_dir.close(io);
     try readOwnerCheckpoint(io, checkpoint_buffer, memory);
     const inspect_function = try runtime.function(
         allocator,
@@ -676,6 +833,7 @@ fn openOwnerSlot(
     );
     return .{
         .io = io,
+        .checkpoint_dir = checkpoint_dir,
         .runtime = runtime,
         .inspect_function = inspect_function,
         .reconcile_function = reconcile_function,
@@ -706,11 +864,19 @@ fn ensureSnapshotsDirectory(io: std.Io) !void {
 }
 
 fn writeOwnerCheckpoint(io: std.Io, buffer: []u8, memory: []const u8) !void {
-    try checkpoint.encode(buffer, owner_agent, owner_generation, memory);
-    try std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = owner_checkpoint_path,
-        .data = buffer,
-    });
+    var dir = try std.Io.Dir.cwd().openDir(io, "snapshots", .{});
+    defer dir.close(io);
+    try checkpoint_store.publish(
+        dir,
+        io,
+        owner_checkpoint_name,
+        owner_checkpoint_temp_name,
+        buffer,
+        owner_agent,
+        owner_generation,
+        memory,
+        null,
+    );
 }
 
 fn readOwnerCheckpoint(io: std.Io, buffer: []u8, memory: []u8) !void {

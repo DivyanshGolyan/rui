@@ -38,8 +38,8 @@ The passing run reports:
 
 ```text
 owner prepare          accepted operation durable
-owner recover          applied; journal 128 B; control 1512 B
-owner recover          duplicate; journal 128 B; control 1512 B
+owner recover          applied; journal 128 B; control 1528 B
+owner recover          duplicate; journal 128 B; control 1528 B
 fixed-credit owner crash suite
 fresh child processes 4
 crash boundary        completion fsync -> slot apply
@@ -48,7 +48,7 @@ first recovery        applied durable completion
 second recovery       duplicate, no mutation
 ```
 
-The 1,512-byte figure is fixed native control metadata: `Harness`, `durable_transition.Adapter`, and the JSC slot bridge. It excludes JavaScriptCore, the 64 KiB core linear-memory page, the 65,600-byte checkpoint encoding buffer, journal and checkpoint files, process runtime memory, and build machinery.
+The 1,528-byte figure is fixed native control metadata: `Harness`, `durable_transition.Adapter`, and the JSC slot bridge, including its open checkpoint-directory handle. It excludes JavaScriptCore, the 64 KiB core linear-memory page, the 65,600-byte checkpoint encoding buffer, journal and checkpoint files, process runtime memory, and build machinery.
 
 The durable journal remains exactly two canonical 64-byte records after both recoveries. No recovery appends another completion.
 
@@ -72,6 +72,6 @@ The result supports a narrow claim: logical agent count does not require residen
 
 ## Remaining boundary
 
-Checkpoint replacement still uses the existing direct file write. This spike does not inject termination between core mutation, checkpoint write, file sync, directory sync, and rename. Therefore it does not yet prove that a crash during checkpoint publication cannot leave a corrupt or missing checkpoint.
+Checkpoint replacement now uses the atomic publisher and crash matrix in [`0006-atomic-checkpoint-publication.md`](0006-atomic-checkpoint-publication.md). This spike's original direct-write limitation is retained there as a tested old-or-new checkpoint invariant.
 
-The next spike should add an atomic checkpoint writer with a fixed caller-owned buffer, then inject process exits after temporary-file write, file sync, rename, and parent-directory sync. Recovery must accept only the old or new canonical checkpoint and must reconcile the durable journal in either case.
+The remaining recovery limitation is manual reoffering of the known completion. A scheduler must eventually scan a durable journal cursor into fixed admission credits without constructing a resident agent catalogue.

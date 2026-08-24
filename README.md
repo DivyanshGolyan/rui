@@ -20,7 +20,11 @@ fixed at compile time and does not vary with logical-agent count.
 The owner crash-recovery spike connects that harness to the real operation journal and JavaScriptCore
 slot. A child process exits after the completion record is synced but before slot mutation; two fresh
 recovery processes then prove one application followed by one duplicate. The fixed native control
-metadata is 1,512 bytes, excluding the runtime, one-page core, and checkpoint staging buffer.
+metadata is 1,528 bytes, excluding the runtime, one-page core, and checkpoint staging buffer.
+
+The atomic checkpoint spike publishes through temporary write, file sync, same-directory rename,
+and parent-directory sync. Sixteen fresh child processes terminate at each boundary and recover only
+the old or new canonical page while keeping the journal unchanged.
 
 ## Requirements
 
@@ -44,6 +48,7 @@ See the spike notes for architecture, measurements, caveats, and next questions:
 - [`docs/spikes/0003-operation-lifecycle.md`](docs/spikes/0003-operation-lifecycle.md)
 - [`docs/spikes/0004-fixed-credit-harness.md`](docs/spikes/0004-fixed-credit-harness.md)
 - [`docs/spikes/0005-owner-crash-recovery.md`](docs/spikes/0005-owner-crash-recovery.md)
+- [`docs/spikes/0006-atomic-checkpoint-publication.md`](docs/spikes/0006-atomic-checkpoint-publication.md)
 
 Source audits that informed the architecture:
 

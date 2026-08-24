@@ -48,6 +48,13 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    const checkpoint_store_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/checkpoint_store.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
     const operation_log_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/operation_log.zig"),
@@ -90,6 +97,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the deterministic spike tests");
     test_step.dependOn(&b.addRunArtifact(inspector_tests).step);
     test_step.dependOn(&b.addRunArtifact(checkpoint_tests).step);
+    test_step.dependOn(&b.addRunArtifact(checkpoint_store_tests).step);
     test_step.dependOn(&b.addRunArtifact(operation_log_tests).step);
     test_step.dependOn(&b.addRunArtifact(core_contract_tests).step);
     test_step.dependOn(&run_core_contract_check.step);
@@ -127,4 +135,13 @@ pub fn build(b: *std.Build) void {
     run_owner_crash.addFileArg(core.getEmittedBin());
     run_owner_crash.addArg("owner-crash-suite");
     owner_crash_step.dependOn(&run_owner_crash.step);
+
+    const checkpoint_crash_step = b.step(
+        "checkpoint-crash",
+        "Crash at every atomic checkpoint publication boundary",
+    );
+    const run_checkpoint_crash = b.addRunArtifact(host);
+    run_checkpoint_crash.addFileArg(core.getEmittedBin());
+    run_checkpoint_crash.addArg("checkpoint-crash-suite");
+    checkpoint_crash_step.dependOn(&run_checkpoint_crash.step);
 }
