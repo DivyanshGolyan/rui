@@ -10,7 +10,8 @@ const owner_fence = @import("owner_fence.zig");
 pub const manifest_max_size = 2048;
 pub const manifest_header_size = 128;
 pub const conversation_record_size = 80;
-pub const version: u16 = 1;
+pub const manifest_version: u16 = 2;
+pub const conversation_version: u16 = 1;
 
 const manifest_magic = "ONESESS\x00";
 const conversation_magic = "ONECONV\x00";
@@ -676,7 +677,7 @@ fn encodeManifest(out: *[manifest_max_size]u8, view: ManifestView) ![]const u8 {
 
     @memset(out, 0);
     @memcpy(out[0..manifest_magic.len], manifest_magic);
-    write(u16, out, 8, version);
+    write(u16, out, 8, manifest_version);
     write(u16, out, 10, manifest_header_size);
     write(u32, out, 12, 0);
     write(u32, out, 16, @intCast(total));
@@ -706,7 +707,7 @@ fn decodeManifest(bytes: []const u8) !ManifestView {
     if (!std.mem.eql(u8, bytes[0..manifest_magic.len], manifest_magic)) {
         return error.InvalidManifestMagic;
     }
-    if (read(u16, bytes, 8) != version) return error.UnsupportedManifestVersion;
+    if (read(u16, bytes, 8) != manifest_version) return error.UnsupportedManifestVersion;
     if (read(u16, bytes, 10) != manifest_header_size) return error.InvalidManifestHeader;
     if (read(u32, bytes, 12) != 0) return error.UnsupportedManifestFlags;
     const total: usize = read(u32, bytes, 16);
@@ -775,7 +776,7 @@ fn encodeEntry(out: *[conversation_record_size]u8, entry: ConversationEntry) !vo
     }
     @memset(out, 0);
     @memcpy(out[0..conversation_magic.len], conversation_magic);
-    write(u16, out, 8, version);
+    write(u16, out, 8, conversation_version);
     out[10] = @intFromEnum(entry.kind);
     out[11] = 0;
     write(u64, out, 12, entry.session_id);
@@ -791,7 +792,7 @@ fn decodeEntry(bytes: *const [conversation_record_size]u8) !ConversationEntry {
     if (!std.mem.eql(u8, bytes[0..conversation_magic.len], conversation_magic)) {
         return error.InvalidConversationMagic;
     }
-    if (read(u16, bytes, 8) != version) return error.UnsupportedConversationVersion;
+    if (read(u16, bytes, 8) != conversation_version) return error.UnsupportedConversationVersion;
     if (bytes[11] != 0) return error.UnsupportedConversationFlags;
     for (bytes[64..]) |byte| {
         if (byte != 0) return error.NonzeroConversationReservedByte;
@@ -1166,6 +1167,36 @@ test "resume rejects a corrupted manifest before advancing ownership" {
         error.ManifestChecksumMismatch,
         Session.openExisting(layout.sessions, io, 80, &manifest_buffer),
     );
+}
+
+test "resume rejects a legacy session format before advancing ownership" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(layout.sessions, io, testConfig(layout.workspacePath(), 82));
+    created.close();
+
+    var name_buffer: [16]u8 = undefined;
+    var session_dir = try layout.sessions.openDir(io, sessionName(82, &name_buffer), .{});
+    defer session_dir.close(io);
+    var manifest = try session_dir.openFile(io, manifest_path, .{ .mode = .read_write });
+    defer manifest.close(io);
+    var bytes: [manifest_max_size]u8 = undefined;
+    const actual = try manifest.readPositionalAll(io, &bytes, 0);
+    write(u16, &bytes, 8, 1);
+    write(u32, &bytes, manifest_crc_offset, manifestCrc(bytes[0..actual]));
+    try manifest.writePositionalAll(io, bytes[0..actual], 0);
+    try manifest.sync(io);
+
+    var manifest_buffer: [manifest_max_size]u8 = undefined;
+    try std.testing.expectError(
+        error.UnsupportedManifestVersion,
+        Session.openExisting(layout.sessions, io, 82, &manifest_buffer),
+    );
+
+    var epoch_bytes: [8]u8 = undefined;
+    _ = try manifest.readPositionalAll(io, &epoch_bytes, 56);
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, &epoch_bytes, .little));
 }
 
 test "resume rejects a missing recorded workspace before advancing ownership" {

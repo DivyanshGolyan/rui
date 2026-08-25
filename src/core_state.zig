@@ -217,10 +217,17 @@ fn validateTask(state: State) !void {
 
 fn validateResponse(state: State) !void {
     if (state.response_ref == 0) {
-        if (state.response_failure != .none or state.response_tool != .none or
+        if (state.response_disposition != .failure or
+            state.response_failure != .none or state.response_tool != .none or
             state.response_text.length != 0 or state.response_arguments.length != 0)
         {
             return error.InvalidResponseState;
+        }
+        switch (state.task_phase) {
+            .idle, .ready, .awaiting_model => {},
+            .final_candidate, .awaiting_tool, .finished, .failed => {
+                return error.InvalidResponseState;
+            },
         }
         return;
     }
@@ -472,6 +479,16 @@ test "Core State rejects impossible task and response relationships" {
 
     try encode(&encoded, valid);
     write(u64, &encoded, 100, 4);
+    rewriteChecksum(&encoded);
+    try std.testing.expectError(error.InvalidResponseState, decode(&encoded));
+
+    try encode(&encoded, valid);
+    write(u64, &encoded, 100, 0);
+    writeWindow(&encoded, 116, .{});
+    rewriteChecksum(&encoded);
+    try std.testing.expectError(error.InvalidResponseState, decode(&encoded));
+
+    encoded[62] = @intFromEnum(model_protocol.Disposition.failure);
     rewriteChecksum(&encoded);
     try std.testing.expectError(error.InvalidResponseState, decode(&encoded));
 
