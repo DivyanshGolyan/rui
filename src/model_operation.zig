@@ -92,6 +92,20 @@ pub const ProviderIo = struct {
         if (self.response.open) return error.ProviderResponseIncomplete;
     }
 
+    pub fn publishProviderFailure(
+        self: *ProviderIo,
+        session: *session_store.Session,
+        token: session_store.OwnerToken,
+        response_ref: u64,
+    ) !u64 {
+        self.response.abort();
+        const failure_ref = (@as(u64, 1) << 56) | response_ref;
+        var buffer: [model_protocol.header_size]u8 = undefined;
+        const encoded = try model_protocol.encodeText(&buffer, .provider_error, "");
+        try session.storeBlob(token, failure_ref, encoded);
+        return failure_ref;
+    }
+
     fn requestLength(context: *anyopaque) u64 {
         const self: *ProviderIo = @ptrCast(@alignCast(context));
         return self.request.length();
@@ -186,7 +200,7 @@ fn appendHashed(
 }
 
 pub const Fixture = struct {
-    expected_task: []const u8,
+    expected_task: ?[]const u8,
     final_answer: []const u8,
     status: model_protocol.Status = .complete,
     finish_response: bool = true,
@@ -214,13 +228,15 @@ pub const Fixture = struct {
         {
             return error.UnexpectedFixtureRequest;
         }
-        const task_length = read(u64, prefix, request_header_size + 32);
-        if (task_length != self.expected_task.len or task_length > request_window_size) {
-            return error.UnexpectedFixtureRequest;
+        if (self.expected_task) |expected_task| {
+            const task_length = read(u64, prefix, request_header_size + 32);
+            if (task_length != expected_task.len or task_length > request_window_size) {
+                return error.UnexpectedFixtureRequest;
+            }
+            var task_buffer: [request_window_size]u8 = undefined;
+            const task = try request.readWindow(header.len, task_buffer[0..@intCast(task_length)]);
+            if (!std.mem.eql(u8, task, expected_task)) return error.UnexpectedFixtureRequest;
         }
-        var task_buffer: [request_window_size]u8 = undefined;
-        const task = try request.readWindow(header.len, task_buffer[0..@intCast(task_length)]);
-        if (!std.mem.eql(u8, task, self.expected_task)) return error.UnexpectedFixtureRequest;
 
         var response_buffer: [model_protocol.max_response_size]u8 = undefined;
         const encoded = try model_protocol.encodeText(

@@ -124,6 +124,16 @@ _Avoid_: Confirmation, blanket permission, Permission Mode
 A user's allow decision for one exact Action in `ask` mode.
 _Avoid_: Authorization, bypass, blanket permission
 
+**Approval Required**:
+The durable waiting state that identifies the exact validated Action for which `ask` mode still
+needs a Permission Decision. It is not an Authorization.
+_Avoid_: Authorization, Approval, prompt
+
+**Permission Decision**:
+The user's exact allow or deny input for an Approval Required state. Harness validates it before
+committing the corresponding Authorization.
+_Avoid_: Authorization, Permission Mode, blanket permission
+
 **Permission Mode**:
 The invocation-scoped rule that obtains Authorization either by asking the user or by explicit bypass.
 _Avoid_: Session authority, tool, Approval

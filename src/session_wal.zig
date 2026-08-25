@@ -24,6 +24,7 @@ pub const Kind = enum(u8) {
     cancellation = 9,
     shutdown = 10,
     result_applied = 11,
+    approval_required = 12,
 };
 
 pub const RecoveryClass = enum(u8) {

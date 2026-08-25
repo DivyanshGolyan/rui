@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(cli);
 
     const test_step = b.step("test", "Run the deterministic spike tests");
-    addTestGraph(b, test_step, native_target, optimize);
+    addTestGraph(b, test_step, cli, native_target, optimize);
 
     const check_step = b.step(
         "check",
@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
         b.pathFromRoot("src"),
     });
     check_step.dependOn(&format_check.step);
-    addTestGraph(b, check_step, native_target, .ReleaseSafe);
+    addTestGraph(b, check_step, cli, native_target, .ReleaseSafe);
 
     const release_small_cli = addNativeExecutable(
         b,
@@ -132,6 +132,7 @@ pub fn build(b: *std.Build) void {
 fn addTestGraph(
     b: *std.Build,
     parent: *std.Build.Step,
+    cli: *std.Build.Step.Compile,
     native_target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) void {
@@ -166,6 +167,19 @@ fn addTestGraph(
     );
     const run_agent_integration = b.addRunArtifact(agent_integration);
     parent.dependOn(&run_agent_integration.step);
+
+    const cli_resume_fixture = addNativeExecutable(
+        b,
+        "onepage-cli-resume-fixture",
+        "src/cli_resume_fixture.zig",
+        native_target,
+        optimize,
+    );
+    const run_cli_resume = b.addSystemCommand(&.{"sh"});
+    run_cli_resume.addFileArg(b.path("src/cli_resume_integration.sh"));
+    run_cli_resume.addArtifactArg(cli_resume_fixture);
+    run_cli_resume.addArtifactArg(cli);
+    parent.dependOn(&run_cli_resume.step);
 }
 
 fn addTestRun(
