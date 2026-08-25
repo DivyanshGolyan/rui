@@ -63,28 +63,6 @@ pub const Task = struct {
     final_entry_id: u64,
 };
 
-pub fn rejectionCode(err: anyerror) u32 {
-    return switch (err) {
-        error.InvalidAgentIdentity => 16,
-        error.InvalidAgentGeneration => 17,
-        error.StaleOperation => 2,
-        error.IllegalOperationTransition => 3,
-        error.InvalidOperationIdentity => 4,
-        error.InvalidConversationEntry => 5,
-        error.IllegalTaskTransition => 6,
-        error.IllegalModelTransition => 7,
-        error.InvalidResultReference => 8,
-        error.IllegalModelResponseTransition => 9,
-        error.ResponseCapacityExceeded => 10,
-        error.IllegalFinalAnswerTransition => 11,
-        error.OperationAlreadyActive => 12,
-        error.OperationGenerationExhausted => 13,
-        error.EmptyModelResponse => 14,
-        error.IllegalToolResultTransition => 15,
-        else => 255,
-    };
-}
-
 pub const SlotLease = struct {
     slot: *ActivationSlot,
     context: *anyopaque,
@@ -162,7 +140,7 @@ pub fn SlotPool(comptime capacity: usize) type {
 }
 
 pub const Core = struct {
-    native_slot: ?*ActivationSlot,
+    slot: *ActivationSlot,
     state: *State,
     response_scratch: *[response_scratch_size]u8,
     active: bool = true,
@@ -178,7 +156,7 @@ pub const Core = struct {
             .accumulator = identity_value.agent_id,
         };
         return .{
-            .native_slot = slot,
+            .slot = slot,
             .state = &slot.state,
             .response_scratch = &slot.response_scratch,
         };
@@ -189,50 +167,23 @@ pub const Core = struct {
         const restored = try core_state.decode(encoded);
         slot.state = restored;
         return .{
-            .native_slot = slot,
+            .slot = slot,
             .state = &slot.state,
             .response_scratch = &slot.response_scratch,
         };
     }
 
-    /// Wasm conformance uses a linker-selected in-memory workspace and never persists its layout.
-    pub fn attach(state: *State, response_scratch: *[response_scratch_size]u8) Core {
-        return .{
-            .native_slot = null,
-            .state = state,
-            .response_scratch = response_scratch,
-        };
-    }
-
-    pub fn initializeAttached(
-        state: *State,
-        response_scratch: *[response_scratch_size]u8,
-        identity_value: Identity,
-    ) !Core {
-        if (identity_value.agent_id == 0) return error.InvalidAgentIdentity;
-        if (identity_value.generation == 0) return error.InvalidAgentGeneration;
-        @memset(std.mem.asBytes(state), 0);
-        @memset(response_scratch, 0);
-        state.* = .{
-            .agent_id = identity_value.agent_id,
-            .agent_generation = identity_value.generation,
-            .accumulator = identity_value.agent_id,
-        };
-        return attach(state, response_scratch);
-    }
-
     pub fn suspendInto(self: *Core, encoded: []u8) !void {
         try self.requireActive();
-        const slot = self.native_slot orelse return error.NotNativeActivation;
         try core_state.encode(encoded, self.state.*);
-        scrub(slot);
+        scrub(self.slot);
         self.active = false;
         self.staged_response_length = 0;
     }
 
     pub fn abandon(self: *Core) void {
         if (!self.active) return;
-        if (self.native_slot) |slot| scrub(slot);
+        scrub(self.slot);
         self.active = false;
         self.staged_response_length = 0;
     }
@@ -504,6 +455,8 @@ pub fn scrub(slot: *ActivationSlot) void {
 }
 
 comptime {
+    @setEvalBranchQuota(100_000);
+    const VerificationPool = SlotPool(1);
     std.debug.assert(@sizeOf(ActivationSlot) == slot_size);
     std.debug.assert(@alignOf(ActivationSlot) == slot_alignment);
     std.debug.assert(@offsetOf(ActivationSlot, "parser_scratch") == @sizeOf(State));
@@ -515,20 +468,62 @@ comptime {
     assertNoAllocatorParameter(Core.activate);
     assertNoAllocatorParameter(Core.deliver);
     assertNoAllocatorParameter(Core.startTask);
+    assertNoAllocatorParameter(Core.submitOperation);
     assertNoAllocatorParameter(Core.beginModelOperation);
     assertNoAllocatorParameter(Core.acceptOperation);
     assertNoAllocatorParameter(Core.completeOperation);
     assertNoAllocatorParameter(Core.interpretModelResponse);
+    assertNoAllocatorParameter(Core.stageResponse);
+    assertNoAllocatorParameter(Core.copyResponseWindow);
+    assertNoAllocatorParameter(Core.commitFinalAnswer);
+    assertNoAllocatorParameter(Core.commitToolResult);
     assertNoAllocatorParameter(Core.suspendInto);
+    assertNoAllocatorParameter(Core.abandon);
+    assertNoAllocatorStorage(Core);
+    assertNoAllocatorParameter(VerificationPool.borrow);
+    assertNoAllocatorStorage(VerificationPool);
 }
 
 fn assertNoAllocatorParameter(comptime callable: anytype) void {
     const function_info = @typeInfo(@TypeOf(callable)).@"fn";
     for (function_info.params) |parameter| {
-        if (parameter.type == std.mem.Allocator) {
+        if (parameter.type != null and containsAllocator(parameter.type.?)) {
             @compileError("Core slot lifecycle cannot expose an allocator seam");
         }
     }
+}
+
+fn assertNoAllocatorStorage(comptime T: type) void {
+    if (containsAllocator(T)) {
+        @compileError("Core cannot retain an allocator capability");
+    }
+}
+
+fn containsAllocator(comptime T: type) bool {
+    if (T == std.mem.Allocator) return true;
+    return switch (@typeInfo(T)) {
+        .pointer => |pointer| containsAllocator(pointer.child),
+        .optional => |optional| containsAllocator(optional.child),
+        .array => |array| containsAllocator(array.child),
+        .vector => |vector| containsAllocator(vector.child),
+        .error_union => |error_union| containsAllocator(error_union.payload),
+        .@"struct", .@"union" => blk: {
+            for (std.meta.fields(T)) |field| {
+                if (containsAllocator(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .@"fn" => |function| blk: {
+            for (function.params) |parameter| {
+                if (parameter.type != null and containsAllocator(parameter.type.?)) break :blk true;
+            }
+            if (function.return_type) |return_type| {
+                if (containsAllocator(return_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
 }
 
 test "Activation Slot is exact and suspension encodes only Core State then scrubs every byte" {
@@ -542,6 +537,18 @@ test "Activation Slot is exact and suspension encodes only Core State then scrub
     const state = try core_state.decode(&encoded);
     try std.testing.expectEqual(@as(u64, 42), state.agent_id);
     try std.testing.expectEqual(@as(u64, 1), state.event_count);
+}
+
+test "Core initialization rejects invalid identity and generation" {
+    var slot: ActivationSlot = undefined;
+    try std.testing.expectError(
+        error.InvalidAgentIdentity,
+        Core.initialize(&slot, .{ .agent_id = 0, .generation = 1 }),
+    );
+    try std.testing.expectError(
+        error.InvalidAgentGeneration,
+        Core.initialize(&slot, .{ .agent_id = 1, .generation = 0 }),
+    );
 }
 
 test "poisoned slots restore to identical semantic outcomes and encodings" {

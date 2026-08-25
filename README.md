@@ -3,15 +3,14 @@
 A single-host coding-agent architecture in which every active Core borrows one exact 64 KiB
 Activation Slot from a fixed resident pool.
 
-The production CLI executes a target-neutral Zig reducer natively; it has no embedded language or
-WebAssembly runtime. The same reducer is also compiled to `wasm32-freestanding` as a conformance
-target. The target architecture separates compact, canonically encoded Core State from transient
+The production CLI executes a Zig reducer natively and has no embedded language or secondary runtime.
+The target architecture separates compact, canonically encoded Core State from transient
 Activation Slot scratch. Core State is currently 160 bytes and its rebuildable State Checkpoint is
 224 bytes; activation decodes that state into one caller-owned 65,536-byte slot, and suspension
 scrubs the complete slot. A fixed caller-owned pool returns closed capacity instead of allocating a
-fallback slot. The native/Wasm corpus compares typed outcomes, semantic intents, and canonical state
-encoding rather than slot bytes. Issue #15 will reconstruct complete Session semantics from one
-ordered Session WAL.
+fallback slot. Native invariant traces check typed outcomes, rejection-state preservation, semantic
+observations, and canonical restoration rather than slot bytes. Issue #15 will reconstruct complete
+Session semantics from one ordered Session WAL.
 
 [`PRODUCT.md`](PRODUCT.md), [`ARCHITECTURE.md`](ARCHITECTURE.md), and
 [`VERIFICATION.md`](VERIFICATION.md) are normative. Historical spikes and research remain evidence,
@@ -20,11 +19,10 @@ but they do not override those documents or accepted ADRs.
 [`docs/style.md`](docs/style.md) defines the scoped engineering rules and canonical compiler-backed
 check for implementation work.
 
-The fixed-credit harness spike extracts the compiled Wasm contract into one verifier and adds a
-1.5 KiB-bounded native owner with nonblocking task, completion, permission, cancellation, and
-shutdown admission; durable-before-apply ordering; committed projections; bounded drive quanta;
-and crash/replay tests. Its 32-entry maximum is fixed at compile time and does not vary with
-logical-agent count.
+The fixed-credit harness spike established a 1.5 KiB-bounded native owner with nonblocking task,
+completion, permission, cancellation, and shutdown admission; durable-before-apply ordering;
+committed projections; bounded drive quanta; and crash/replay tests. Its 32-entry maximum is fixed at
+compile time and does not vary with logical-agent count.
 
 The durable Session layer adds exact create and resume identities, a lifetime operating-system lock,
 durable ownership epochs, and an append-only parent-linked conversation. Resume publishes the new
@@ -79,8 +77,8 @@ zig build test -Doptimize=ReleaseSafe
 zig build native-core -Doptimize=ReleaseSafe
 ```
 
-`native-core` reports the exact slot, compact sleeping-state bytes, process RSS, and the independent
-native/Wasm semantic corpus.
+`native-core` reports the exact slot, compact sleeping-state bytes, process RSS, and 32 randomized
+native invariant traces through canonical suspend and poisoned-slot restore.
 
 See the spike notes for architecture, measurements, caveats, and next questions:
 

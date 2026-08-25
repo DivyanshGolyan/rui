@@ -55,7 +55,7 @@ deferred explicitly.
 ### Treat boundaries as hostile
 
 - Use fixed-width integers, explicit byte order, versioning, lengths, and checksums in durable,
-  cross-process, network, and Wasm formats. Do not persist `usize`, native enums, pointers, or struct
+  cross-process, and network formats. Do not persist `usize`, native enums, pointers, or struct
   layout.
 - Validate important records before writing and after reading. Validate consequential operations before
   admission and again before application.
@@ -97,8 +97,8 @@ for every development tool.
 ## Mechanical enforcement
 
 `zig build check` is the canonical local and CI gate. It performs formatting and AST validation, runs
-the complete test graph in `ReleaseSafe`, and compiles the native deliverables plus the Wasm conformance
-artifact in `ReleaseSmall`.
+the complete native test graph in `ReleaseSafe`, and compiles the native deliverables in
+`ReleaseSmall`.
 
 The Zig compiler is the primary linter and typechecker. A third-party analyzer is not a required V1
 dependency. Add one only through a reviewed issue that identifies unique defects it catches, classifies
