@@ -4,6 +4,7 @@ const checkpoint = @import("checkpoint.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const lifecycle = @import("lifecycle.zig");
 const model_operation = @import("model_operation.zig");
+const model_protocol = @import("model_protocol.zig");
 const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 const session_wal = @import("session_wal.zig");
@@ -159,7 +160,7 @@ pub const Harness = struct {
     final_ref: u64 = 0,
     checkpoint_buffer: [checkpoint.encoded_size]u8 = undefined,
     projection_generation: u64 = 0,
-    awaiting_approval: ?lifecycle.Approval = null,
+    awaiting_approval: ?lifecycle.ApprovalRequired = null,
     settling_control: ?lifecycle.Control = null,
     recovery_pending: bool = false,
     ingress_lock: std.Io.Mutex = .init,
@@ -289,7 +290,7 @@ pub const Harness = struct {
 
         const current_input = self.takePending();
         if (self.state == .cancelling and current_input == null) {
-            return .{ .state = .cancelling, .more = true };
+            return self.continueSettlingControl();
         }
         if (self.state == .finished and current_input == null) {
             if (self.final_ref != 0) return self.finish(.{ .state = .finished });
@@ -325,8 +326,11 @@ pub const Harness = struct {
                         .restore => null,
                     },
                     self.completionHook(),
-                ) catch |err| return self.classifyLifecycleError(err, progress);
-                self.setApproval(null);
+                ) catch |err| {
+                    try self.refreshApprovalRequired(session);
+                    return self.classifyLifecycleError(err, progress);
+                };
+                try self.refreshApprovalRequired(session);
                 // Continue below to publish the terminal projections.
             },
             .completion => |completion| {
@@ -368,22 +372,10 @@ pub const Harness = struct {
                     => true,
                     else => false,
                 }) 0 else return self.classifyLifecycleError(err, progress);
-                if (self.settlingControl()) |control| {
-                    try lifecycle.commitControl(session, control);
-                    self.setSettlingControl(null);
-                    const terminal_state: State = if (control == .cancel) .cancelled else .closed;
-                    self.setState(terminal_state);
-                    progress.state = terminal_state;
-                    progress.committed = 1;
-                    progress.projections[0] = .{
-                        .kind = if (control == .cancel) .cancelled else .closed,
-                        .session_id = session.session_id,
-                        .task_id = session.task_id,
-                        .session = session,
-                    };
-                    progress.projection_count = 1;
-                    return progress;
-                }
+                if (self.settlingControl() != null) return self.finishSettlingControl(
+                    session,
+                    progress,
+                );
             },
             else => {},
         };
@@ -508,6 +500,7 @@ pub const Harness = struct {
         switch (input) {
             .shutdown => {
                 const session = if (self.session) |*value| value else return error.SessionUnavailable;
+                try self.denyPendingApproval(session);
                 lifecycle.commitControl(session, .shutdown) catch |err| switch (err) {
                     error.AcceptedOperationUnsettled => {
                         self.setSettlingControl(.shutdown);
@@ -538,26 +531,7 @@ pub const Harness = struct {
             },
             .cancel => {
                 const session = if (self.session) |*value| value else return error.SessionUnavailable;
-                if (self.approvalSnapshot()) |approval| {
-                    _ = lifecycle.resolvePermission(
-                        self.config.host,
-                        self.config.allocator,
-                        session,
-                        &self.checkpoint_buffer,
-                        approval,
-                        false,
-                        null,
-                        switch (self.config.mode) {
-                            .create => |create| create.bash_cancelled,
-                            .restore => null,
-                        },
-                        self.completionHook(),
-                    ) catch |err| switch (err) {
-                        error.SessionNeedsModel => {},
-                        else => return err,
-                    };
-                    self.setApproval(null);
-                }
+                try self.denyPendingApproval(session);
                 lifecycle.commitControl(session, .cancel) catch |err| switch (err) {
                     error.AcceptedOperationUnsettled => {
                         self.setSettlingControl(.cancel);
@@ -591,8 +565,93 @@ pub const Harness = struct {
         return result;
     }
 
+    fn denyPendingApproval(self: *Harness, session: *session_store.Session) !void {
+        try self.refreshApprovalRequired(session);
+        const approval = self.approvalSnapshot() orelse return;
+        _ = lifecycle.resolvePermission(
+            self.config.host,
+            self.config.allocator,
+            session,
+            &self.checkpoint_buffer,
+            approval,
+            false,
+            null,
+            switch (self.config.mode) {
+                .create => |create| create.bash_cancelled,
+                .restore => null,
+            },
+            self.completionHook(),
+        ) catch |err| {
+            try self.refreshApprovalRequired(session);
+            switch (err) {
+                error.SessionNeedsModel => {},
+                else => return err,
+            }
+        };
+        try self.refreshApprovalRequired(session);
+    }
+
+    fn refreshApprovalRequired(self: *Harness, session: *session_store.Session) !void {
+        self.setApproval(try lifecycle.pendingApprovalRequired(session));
+    }
+
+    fn continueSettlingControl(self: *Harness) !Progress {
+        if (self.settlingControl() == null) return error.MissingSettlingControl;
+        const session = if (self.session) |*value| value else return error.SessionUnavailable;
+        _ = lifecycle.advanceRestored(
+            self.config.host,
+            self.config.allocator,
+            session,
+            &self.checkpoint_buffer,
+            self.runtimeConfig(),
+            null,
+        ) catch |err| switch (err) {
+            error.SessionOperationPending => return .{ .state = .cancelling, .more = true },
+            error.SessionNeedsModel,
+            error.ToolCallDeferred,
+            error.PatchExecutionDeferred,
+            error.PatchApprovalRequired,
+            error.BashPossiblyExecuted,
+            => {},
+            else => {
+                if (!isModelFailure(err)) {
+                    self.setState(.unavailable);
+                    return err;
+                }
+            },
+        };
+        return self.finishSettlingControl(session, .{ .state = .cancelling }) catch |err| switch (err) {
+            error.AcceptedOperationUnsettled => return .{ .state = .cancelling, .more = true },
+            else => return err,
+        };
+    }
+
+    fn finishSettlingControl(
+        self: *Harness,
+        session: *session_store.Session,
+        initial: Progress,
+    ) !Progress {
+        const control = self.settlingControl() orelse return error.MissingSettlingControl;
+        try lifecycle.commitControl(session, control);
+        self.setSettlingControl(null);
+        const terminal_state: State = if (control == .cancel) .cancelled else .closed;
+        self.setState(terminal_state);
+        var progress = initial;
+        progress.state = terminal_state;
+        progress.committed = 1;
+        progress.projections[0] = .{
+            .kind = if (control == .cancel) .cancelled else .closed,
+            .session_id = session.session_id,
+            .task_id = session.task_id,
+            .session = session,
+        };
+        progress.projection_count = 1;
+        return progress;
+    }
+
     fn classifyLifecycleError(self: *Harness, err: anyerror, progress: Progress) anyerror!Progress {
         var result = progress;
+        if (err == error.CompletionOffered) result.dispatched = 1;
         if (err == error.MissingWalCoreState) {
             self.setState(.ready);
             result.state = .ready;
@@ -610,6 +669,13 @@ pub const Harness = struct {
                 return result;
             },
             else => {},
+        }
+        if (isModelFailure(err)) {
+            self.setState(.failed);
+            result.state = .failed;
+            result.projections[0] = self.failureProjection();
+            result.projection_count = 1;
+            return result;
         }
         const kind: ProjectionKind, const state: State = switch (err) {
             error.PermissionInputRequired, error.PatchApprovalRequired => .{ .approval_required, .waiting },
@@ -632,7 +698,7 @@ pub const Harness = struct {
         result.state = state;
         const session = if (self.session) |*value| value else return error.SessionUnavailable;
         if (kind == .approval_required and self.approvalSnapshot() == null) {
-            self.setApproval(try lifecycle.pendingApproval(session));
+            self.setApproval(try lifecycle.pendingApprovalRequired(session));
         }
         var projection: Projection = .{
             .kind = kind,
@@ -653,6 +719,20 @@ pub const Harness = struct {
         return result;
     }
 
+    fn isModelFailure(err: anyerror) bool {
+        return switch (err) {
+            error.ModelResponseTruncated,
+            error.ModelResponseAborted,
+            error.ModelProviderFailed,
+            error.MalformedModelResponse,
+            error.EmptyModelResponse,
+            error.MultipleModelTools,
+            error.UnknownModelFailure,
+            => true,
+            else => false,
+        };
+    }
+
     fn failureProjection(self: *Harness) Projection {
         const session = &self.session.?;
         return .{
@@ -663,7 +743,7 @@ pub const Harness = struct {
         };
     }
 
-    fn approvalRequired(context: *anyopaque, approval: lifecycle.Approval) anyerror!void {
+    fn approvalRequired(context: *anyopaque, approval: lifecycle.ApprovalRequired) anyerror!void {
         const self: *Harness = @ptrCast(@alignCast(context));
         self.setApproval(approval);
     }
@@ -711,13 +791,13 @@ pub const Harness = struct {
                 .restore => null,
             },
             .patch_policy = self.patchPolicy(),
-            .approval_hook = self.approvalHook(),
+            .approval_required_hook = self.approvalRequiredHook(),
             .completion_hook = self.completionHook(),
             .settle_only = self.settlingControl() != null,
         };
     }
 
-    fn approvalHook(self: *Harness) lifecycle.ApprovalHook {
+    fn approvalRequiredHook(self: *Harness) lifecycle.ApprovalRequiredHook {
         return .{ .context = self, .required = approvalRequired };
     }
 
@@ -772,13 +852,13 @@ pub const Harness = struct {
         self.state = state;
     }
 
-    fn approvalSnapshot(self: *Harness) ?lifecycle.Approval {
+    fn approvalSnapshot(self: *Harness) ?lifecycle.ApprovalRequired {
         self.ingress_lock.lockUncancelable(self.config.io);
         defer self.ingress_lock.unlock(self.config.io);
         return self.awaiting_approval;
     }
 
-    fn setApproval(self: *Harness, approval: ?lifecycle.Approval) void {
+    fn setApproval(self: *Harness, approval: ?lifecycle.ApprovalRequired) void {
         self.ingress_lock.lockUncancelable(self.config.io);
         defer self.ingress_lock.unlock(self.config.io);
         self.awaiting_approval = approval;
@@ -1019,4 +1099,227 @@ test "failed recovery frame makes the live Harness unavailable" {
     defer restored.close();
     try std.testing.expectError(error.InvalidOperationHistory, restored.drive());
     try std.testing.expectError(error.HarnessUnavailable, restored.drive());
+}
+
+test "shutdown denies Approval Required before closing" {
+    const PermissionFacts = struct {
+        approval_required: u8 = 0,
+        undecided_authorization: u8 = 0,
+
+        fn apply(context: *anyopaque, transaction: session_wal.Transaction) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            for (transaction.factSlice()) |fact| switch (fact.kind) {
+                .approval_required => self.approval_required += 1,
+                .authorization => if (fact.flags == 0) {
+                    self.undecided_authorization += 1;
+                },
+                else => {},
+            };
+        }
+    };
+
+    var host: Host = .{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
+    const call = try bash_tool.encodeCall(&call_buffer, .{
+        .command = "printf forbidden",
+        .timeout_ms = 5000,
+    });
+    var fixture: model_operation.ToolFixture = .{
+        .expected_task = "task",
+        .tool_arguments = call,
+        .final_answer = "done",
+        .expected_tool_status = .denied,
+    };
+    var owner = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:shutdown-approval",
+            .task = "task",
+            .provider = fixture.provider(),
+        } },
+    });
+    _ = try owner.drive();
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    _ = try owner.drive();
+    const waiting = try owner.drive();
+    try std.testing.expectEqual(State.waiting, waiting.state);
+    try std.testing.expectEqual(ProjectionKind.approval_required, waiting.projections[0].kind);
+    var facts: PermissionFacts = .{};
+    _ = try owner.session.?.replaySemantic(
+        owner.session.?.ownerToken(),
+        &facts,
+        PermissionFacts.apply,
+    );
+    try std.testing.expectEqual(@as(u8, 1), facts.approval_required);
+    try std.testing.expectEqual(@as(u8, 0), facts.undecided_authorization);
+    const session_id = owner.session.?.session_id;
+    owner.close();
+
+    var restored = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .mode = .{ .restore = .{ .session_id = session_id } },
+    });
+    defer restored.close();
+    const identified = try restored.drive();
+    try std.testing.expectEqual(State.restoring, identified.state);
+    try std.testing.expectEqual(ProjectionKind.session, identified.projections[0].kind);
+    try std.testing.expectEqual(OfferResult.accepted, restored.offer(.shutdown));
+    const closed = try restored.drive();
+    try std.testing.expectEqual(State.closed, closed.state);
+    try std.testing.expectEqual(@as(u8, 1), closed.committed);
+    try std.testing.expectEqual(ProjectionKind.closed, closed.projections[0].kind);
+}
+
+test "cancellation reconciles Completion evidence that lost live ingress custody" {
+    const CancellingProvider = struct {
+        owner: ?*Harness = null,
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestReader,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var buffer: [64]u8 = undefined;
+            const encoded = try model_protocol.encodeText(
+                &buffer,
+                .complete,
+                "done",
+            );
+            try response.append(encoded);
+            try response.finish();
+            const owner = self.owner orelse return error.MissingHarness;
+            if (owner.offer(.cancel) != .accepted) return error.CancellationOfferRejected;
+        }
+    };
+
+    var host: Host = .{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var provider: CancellingProvider = .{};
+    var owner = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:cancellation-race",
+            .task = "task",
+            .provider = provider.provider(),
+        } },
+    });
+    defer owner.close();
+    provider.owner = &owner;
+    _ = try owner.drive();
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    _ = try owner.drive();
+    const cancelling = try owner.drive();
+    try std.testing.expectEqual(State.cancelling, cancelling.state);
+    const cancelled = try owner.drive();
+    try std.testing.expectEqual(State.cancelled, cancelled.state);
+    try std.testing.expectEqual(@as(u8, 1), cancelled.committed);
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+}
+
+test "known provider failure is one durable terminal Result" {
+    const FailingProvider = struct {
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestReader,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var buffer: [64]u8 = undefined;
+            const encoded = try model_protocol.encodeText(
+                &buffer,
+                .complete,
+                "must not win",
+            );
+            try response.append(encoded);
+            try response.finish();
+            return error.TestProviderUnavailable;
+        }
+    };
+    const ResultFacts = struct {
+        count: u8 = 0,
+
+        fn apply(context: *anyopaque, transaction: session_wal.Transaction) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            for (transaction.factSlice()) |fact| {
+                if (fact.kind == .result and fact.recovery_class == .model) self.count += 1;
+            }
+        }
+    };
+
+    var host: Host = .{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var provider: FailingProvider = .{};
+    var owner = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:provider-failure",
+            .task = "task",
+            .provider = provider.provider(),
+        } },
+    });
+    _ = try owner.drive();
+    const session_id = owner.session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    const waiting = try owner.drive();
+    try std.testing.expectEqual(State.waiting, waiting.state);
+    const failed = try owner.drive();
+    try std.testing.expectEqual(State.failed, failed.state);
+    try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
+    var facts: ResultFacts = .{};
+    _ = try owner.session.?.replaySemantic(
+        owner.session.?.ownerToken(),
+        &facts,
+        ResultFacts.apply,
+    );
+    try std.testing.expectEqual(@as(u8, 1), facts.count);
+    owner.close();
+
+    var restored = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .provider = provider.provider(),
+        } },
+    });
+    defer restored.close();
+    _ = try restored.drive();
+    const regenerated = try restored.drive();
+    try std.testing.expectEqual(State.failed, regenerated.state);
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }

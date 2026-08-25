@@ -17,6 +17,9 @@ This document maps each public architectural claim to required evidence. A claim
 | Prepare, commit, publish ordering | Failure injection at every semantic publication point with exactly one result: owner remains usable, fresh `open` reconstructs, or Session fails closed. |
 | One Storage Owner is the durable gateway | A host-level lifetime-lock test excludes a second process, and dependency plus runtime tests prove Core, Harness, adapters, workers, and CLI cannot open SQLite directly. |
 | Adapter evidence is not a second authority | Result content and immutable Completion Inbox evidence survive lost notifications and process termination; terminal commitment atomically sets `consumed_by_sequence`, and conflicting evidence fails closed. |
+| Approval Required is not Authorization | Ledger inspection and restore tests prove pending `ask` state has one exact Approval Required transition and no Authorization until a matching allow or deny Permission Decision commits. |
+| Control settlement cannot strand accepted work | Shutdown denies pending Approval Required state; cancellation and shutdown reconcile durable Completion Inbox evidence until every accepted Operation is terminal or indeterminate. |
+| Known provider failure is terminal | A dispatch error after Attempt admission produces one durable provider-failure Result; repeated restore regenerates failure without admitting a replacement Attempt. |
 | Ingress custody is not durable acknowledgement | Crash after `offer` acceptance but before Host Store commit loses no acknowledged fact: Completion is rediscovered, an `ask` decision is requested again, an uncommitted Task remains absent, and cancellation remains unapplied. |
 | No silent Bash replay | Process termination after possible command execution always produces an indeterminate Result without redispatch. |
 | Patch reconciliation is honest | Exact preimage, postimage, and divergent Workspace fixtures plus concurrent replacement, symlink, and stale-Authorization cases. |
@@ -31,7 +34,7 @@ This document maps each public architectural claim to required evidence. A claim
 
 ## Required test seams
 
-The highest product seam is the real CLI against a temporary Git repository and deterministic adapters. It proves that a user can create and resume a Session, select either Permission Mode, inspect exact Actions, observe typed Results, complete a repair, and receive the same terminal Outcome that durable state records.
+The highest product seam is the real CLI against a temporary Git repository and deterministic adapters. It proves that a user can create and resume a Session, supply a selected provider for model work required after resume, select either Permission Mode, inspect exact Actions, observe typed Results, complete a repair, and receive the same terminal Outcome that durable state records.
 
 The highest deterministic lifecycle seam is `Harness.open / offer / drive` with the production Core reducer, real SQLite Host Store and immutable blob store, fixed caller-owned pools, deterministic adapters, and semantic fault injection. Lifecycle tests assert durable behaviour, adapter admission, Conversation advancement, Projections, and Outcomes rather than private table names, SQL text, row identifiers, numeric Core fields, or helper calls.
 

@@ -25,24 +25,24 @@ pub const RuntimeConfig = struct {
     bash_policy: ?bash_tool.Policy = null,
     bash_cancelled: ?*const std.atomic.Value(bool) = null,
     patch_policy: ?patch_tool.Policy = null,
-    approval_hook: ?ApprovalHook = null,
+    approval_required_hook: ?ApprovalRequiredHook = null,
     completion_hook: ?CompletionHook = null,
     settle_only: bool = false,
 };
 
-pub const ApprovalKind = enum { bash, apply_patch };
+pub const ApprovalRequiredKind = enum { bash, apply_patch };
 
-pub const Approval = struct {
-    kind: ApprovalKind,
+pub const ApprovalRequired = struct {
+    kind: ApprovalRequiredKind,
     operation_id: u64,
     operation_generation: u32,
     descriptor_digest: u64,
     descriptor_ref: u64,
 };
 
-pub const ApprovalHook = struct {
+pub const ApprovalRequiredHook = struct {
     context: *anyopaque,
-    required: *const fn (*anyopaque, Approval) anyerror!void,
+    required: *const fn (*anyopaque, ApprovalRequired) anyerror!void,
 };
 
 pub const CompletionHook = struct {
@@ -117,6 +117,14 @@ const OperationIds = struct {
     request_ref: u64,
     response_ref: u32,
     final_ref: u64,
+};
+
+const ModelDispatch = struct {
+    request_ref: u64,
+    response_ref: u64,
+    operation_id: u64,
+    operation_generation: u32,
+    attempt_id: u64,
 };
 
 const ModelCompletion = struct {
@@ -334,38 +342,14 @@ fn performModelTurn(
     core.close();
     core_open.* = false;
 
-    var provider_io = try model_operation.ProviderIo.open(
-        session,
-        token,
-        descriptor.request_ref,
-        ids.response_ref,
-    );
-    defer provider_io.close();
-    try provider.dispatch(
-        provider.context,
-        provider_io.requestCapability(),
-        provider_io.responseCapability(),
-    );
-    try provider_io.ensureResponsePublished();
-    try reach(fault, .after_model_dispatch);
-
-    const result_digest = try blobDigest(session, token, ids.response_ref);
-    const evidence: completion_inbox.Envelope = .{
-        .kind = .model,
-        .session_id = session.session_id,
-        .ownership_epoch = token.epoch,
-        .agent_id = session.agent_id,
-        .agent_generation = agent_generation,
+    try dispatchModelAttempt(session, token, provider, .{
+        .request_ref = descriptor.request_ref,
+        .response_ref = ids.response_ref,
         .operation_id = ids.operation_id,
         .operation_generation = operation_generation,
         .attempt_id = ids.attempt_id,
-        .result_ref = ids.response_ref,
-        .result_digest = result_digest,
-    };
-    try session.publishCompletionEvidence(token, evidence);
-    try reach(fault, .after_completion_inbox);
-    if (completion_hook) |hook| try hook.offered(hook.context, evidence);
-    return error.CompletionOffered;
+    }, completion_hook, fault);
+    return error.CompletionExpected;
 }
 
 fn retryModelAttempt(
@@ -415,33 +399,62 @@ fn retryModelAttempt(
     core.close();
     core_open.* = false;
 
+    return dispatchModelAttempt(session, token, provider, .{
+        .request_ref = descriptor.reference,
+        .response_ref = response_ref,
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = attempt_id,
+    }, completion_hook, null);
+}
+
+fn dispatchModelAttempt(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    provider: model_operation.Provider,
+    dispatch: ModelDispatch,
+    completion_hook: ?CompletionHook,
+    fault: ?FaultHook,
+) !void {
     var provider_io = try model_operation.ProviderIo.open(
         session,
         token,
-        descriptor.reference,
-        response_ref,
+        dispatch.request_ref,
+        dispatch.response_ref,
     );
     defer provider_io.close();
-    try provider.dispatch(
+    var result_ref = dispatch.response_ref;
+    var provider_failed = false;
+    provider.dispatch(
         provider.context,
         provider_io.requestCapability(),
         provider_io.responseCapability(),
-    );
-    try provider_io.ensureResponsePublished();
-    const result_digest = try blobDigest(session, token, response_ref);
+    ) catch {
+        result_ref = try provider_io.publishProviderFailure(
+            session,
+            token,
+            dispatch.response_ref,
+        );
+        provider_failed = true;
+    };
+    if (!provider_failed) {
+        try provider_io.ensureResponsePublished();
+        try reach(fault, .after_model_dispatch);
+    }
     const evidence: completion_inbox.Envelope = .{
         .kind = .model,
         .session_id = session.session_id,
         .ownership_epoch = token.epoch,
         .agent_id = session.agent_id,
         .agent_generation = agent_generation,
-        .operation_id = operation.id,
-        .operation_generation = operation.generation,
-        .attempt_id = attempt_id,
-        .result_ref = response_ref,
-        .result_digest = result_digest,
+        .operation_id = dispatch.operation_id,
+        .operation_generation = dispatch.operation_generation,
+        .attempt_id = dispatch.attempt_id,
+        .result_ref = result_ref,
+        .result_digest = try blobDigest(session, token, result_ref),
     };
     try session.publishCompletionEvidence(token, evidence);
+    try reach(fault, .after_completion_inbox);
     if (completion_hook) |hook| try hook.offered(hook.context, evidence);
     return error.CompletionOffered;
 }
@@ -459,7 +472,7 @@ fn executeBashCall(
     workspace_path: []const u8,
     policy: bash_tool.Policy,
     cancellation: ?*const std.atomic.Value(bool),
-    approval_hook: ?ApprovalHook,
+    approval_required_hook: ?ApprovalRequiredHook,
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !void {
@@ -501,12 +514,13 @@ fn executeBashCall(
 
     const classification = try policy.classify_fn(policy.context, digest, call);
     if (classification == .ask) {
-        var approval = semanticFact(.authorization, session);
+        var approval = semanticFact(.approval_required, session);
         approval.operation_id = tool_operation_id;
         approval.generation = 1;
         approval.digest = digest;
+        approval.reference = descriptor_ref;
         try commitCoreFacts(session, token, checkpoint_buffer, core, &.{approval}, true);
-        if (approval_hook) |hook| try hook.required(hook.context, .{
+        if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .bash,
             .operation_id = tool_operation_id,
             .operation_generation = 1,
@@ -629,7 +643,7 @@ fn requestPatchPermission(
     ids: OperationIds,
     workspace_path: []const u8,
     policy: patch_tool.Policy,
-    approval_hook: ?ApprovalHook,
+    approval_required_hook: ?ApprovalRequiredHook,
     fault: ?FaultHook,
 ) !PatchPermissionOutcome {
     const response = try core.reducer.response();
@@ -680,11 +694,12 @@ fn requestPatchPermission(
             validation,
             patch_ref,
         );
-        var approval = semanticFact(.authorization, session);
+        var approval = semanticFact(.approval_required, session);
         approval.operation_id = tool_operation_id;
         approval.generation = 1;
         approval.digest = validation.patch_digest;
-        approval.reference = approval_ref;
+        approval.reference = patch_ref;
+        approval.subject = approval_ref;
         try commitCoreFacts(
             session,
             token,
@@ -693,7 +708,7 @@ fn requestPatchPermission(
             &.{approval},
             true,
         );
-        if (approval_hook) |hook| try hook.required(hook.context, .{
+        if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .apply_patch,
             .operation_id = tool_operation_id,
             .operation_generation = 1,
@@ -988,7 +1003,7 @@ pub fn advanceRestored(
                         config.workspace_path,
                         config.bash_policy orelse return error.ToolCallDeferred,
                         config.bash_cancelled,
-                        config.approval_hook,
+                        config.approval_required_hook,
                         config.completion_hook,
                         config.fault,
                     ),
@@ -1003,7 +1018,7 @@ pub fn advanceRestored(
                             ids,
                             config.workspace_path,
                             config.patch_policy orelse return error.ToolCallDeferred,
-                            config.approval_hook,
+                            config.approval_required_hook,
                             config.fault,
                         );
                         if (permission == .approved) return error.PatchExecutionDeferred;
@@ -1014,6 +1029,7 @@ pub fn advanceRestored(
             },
         }
     }
+    if (outcome == .failed) return modelFailure(@intFromEnum((try core.reducer.response()).failure));
     if (outcome != .ready) return error.SessionNotReadyForModel;
     if (config.settle_only) return error.SessionNeedsModel;
     _ = try performModelTurn(
@@ -1046,7 +1062,7 @@ pub fn resolvePermission(
     allocator: std.mem.Allocator,
     session: *session_store.Session,
     checkpoint_buffer: []u8,
-    decision: Approval,
+    decision: ApprovalRequired,
     allow: bool,
     provider: ?model_operation.Provider,
     cancellation: ?*const std.atomic.Value(bool),
@@ -1085,8 +1101,10 @@ pub fn resolvePermission(
         return error.StalePermissionDecision;
     }
     if (history.result != null or history.attempt != null) return error.PermissionNoLongerRequired;
-    const pending = history.authorization orelse return error.ApprovalNotCommitted;
-    if (pending.flags != 0 or pending.digest != descriptor.digest) return error.PermissionNoLongerRequired;
+    const pending = history.approval_required orelse return error.ApprovalNotCommitted;
+    if (history.authorization != null or pending.digest != descriptor.digest) {
+        return error.PermissionNoLongerRequired;
+    }
 
     switch (response.tool) {
         .bash => {
@@ -1179,7 +1197,7 @@ pub fn resolvePermission(
         },
         .apply_patch => {
             var binding_bytes: [patch_tool.binding_size]u8 = undefined;
-            var binding_reader = try session.openBlob(token, pending.reference);
+            var binding_reader = try session.openBlob(token, pending.subject);
             defer binding_reader.close();
             if (binding_reader.length() != binding_bytes.len or
                 (try binding_reader.readWindow(0, &binding_bytes)).len != binding_bytes.len)
@@ -1365,8 +1383,10 @@ fn reconcileBash(
             .ready;
     }
     const attempt = history.attempt orelse {
+        if (history.authorization == null and history.approval_required != null) {
+            return .approval_required;
+        }
         const authorization = history.authorization orelse return .none;
-        if (authorization.flags == 0) return .approval_required;
         if (authorization.flags != 2) return .none;
         const response_ref: u32 = @truncate(model_observation.result_ref);
         const result_ref = (@as(u64, 1) << 61) | response_ref;
@@ -1517,8 +1537,10 @@ fn reconcilePatch(
         );
         return .ready;
     }
+    if (history.authorization == null and history.approval_required != null) {
+        return .approval_required;
+    }
     const authorization = history.authorization orelse return .none;
-    if (authorization.flags == 0) return .approval_required;
     if (authorization.digest != validated.digest or authorization.reference == 0) {
         return error.InvalidPatchHistory;
     }
@@ -1791,6 +1813,7 @@ const FactSearch = struct {
     attempts: [max_attempts]?session_wal.Fact = @splat(null),
     attempt_count: u8 = 0,
     target_attempt_id: u64 = 0,
+    approval_required: ?session_wal.Fact = null,
     authorization: ?session_wal.Fact = null,
     result: ?session_wal.Fact = null,
 
@@ -1819,7 +1842,11 @@ const FactSearch = struct {
                         self.attempt = fact;
                     }
                 },
-                .authorization => self.authorization = fact,
+                .approval_required => self.approval_required = try uniqueFact(
+                    self.approval_required,
+                    fact,
+                ),
+                .authorization => self.authorization = try uniqueFact(self.authorization, fact),
                 .result => self.result = try uniqueFact(self.result, fact),
                 else => {},
             }
@@ -1838,7 +1865,7 @@ const FactSearch = struct {
     }
 };
 
-pub fn pendingApproval(session: *session_store.Session) !?Approval {
+pub fn pendingApprovalRequired(session: *session_store.Session) !?ApprovalRequired {
     var search: PendingApprovalSearch = .{};
     _ = try session.replaySemantic(
         session.ownerToken(),
@@ -1849,12 +1876,12 @@ pub fn pendingApproval(session: *session_store.Session) !?Approval {
 }
 
 const PendingApprovalSearch = struct {
-    approval: ?Approval = null,
+    approval: ?ApprovalRequired = null,
 
     fn applyTransaction(context: *anyopaque, transaction: session_wal.Transaction) anyerror!void {
         const self: *PendingApprovalSearch = @ptrCast(@alignCast(context));
         for (transaction.factSlice()) |fact| switch (fact.kind) {
-            .operation_submitted => if (fact.recovery_class == .consequential) {
+            .approval_required => {
                 self.approval = .{
                     .kind = if ((fact.operation_id >> 62) == 3) .apply_patch else .bash,
                     .operation_id = fact.operation_id,
@@ -1865,7 +1892,7 @@ const PendingApprovalSearch = struct {
             },
             .authorization => if (self.approval) |approval| {
                 if (approval.operation_id == fact.operation_id and
-                    approval.operation_generation == fact.generation and fact.flags != 0)
+                    approval.operation_generation == fact.generation)
                 {
                     self.approval = null;
                 }

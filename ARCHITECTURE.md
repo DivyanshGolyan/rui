@@ -33,7 +33,7 @@ OnePage is single-host. One **Host Runtime** process owns one **Host Store** at 
 
 ## Durable authority
 
-The Host Store is one host-wide SQLite database. Each Session owns one append-only **Session Ledger** within it. The complete ordered ledger is the sole order of semantic facts that create, advance, recover, cancel, or complete that Session. It includes task admission, accepted model and tool Operations, Attempts and their dispositions, Authorization, Results, Conversation advancement, reconciliation, cancellation, and Outcome.
+The Host Store is one host-wide SQLite database. Each Session owns one append-only **Session Ledger** within it. The complete ordered ledger is the sole order of semantic facts that create, advance, recover, cancel, or complete that Session. It includes task admission, accepted model and tool Operations, Attempts and their dispositions, Approval Required, Authorization, Results, Conversation advancement, reconciliation, cancellation, and Outcome.
 
 One prepared semantic transition has one canonical bounded payload with an explicit Session sequence, payload version, kind, length, and digest. The kind column is a validated projection of the canonical payload rather than a second authority. One SQLite transaction inserts the transition, advances the Session ledger head, and may update rebuildable checkpoints, indexes, Inbox associations, and Projections. No enclosed fact is visible unless the complete transaction commits. Every committed sequence is therefore a legal recoverable semantic state.
 
@@ -81,12 +81,12 @@ Core is a deterministic reducer. It owns task phases, legal semantic transitions
 `Harness.open / offer / drive` is the complete Session lifecycle interface. No alternate public run, resume, provider-assisted resume, or direct Core advancement path exists.
 
 - `open` acquires exclusive Session ownership through the Storage Owner and initializes fixed ledger and Inbox recovery cursors. A new Session returns ready immediately. A restored Session returns in `restoring`; it exposes no committed Projection or adapter work until `drive` has incrementally validated both snapshotted watermarks.
-- `offer` nonblockingly transfers bounded Task, Completion, Authorization, cancellation, or shutdown input into fixed live-process ingress. It performs no I/O, allocation, wait, or Core call. `full` or `busy` preserves producer ownership; `accepted` transfers custody only to the live Harness instance.
+- `offer` nonblockingly transfers bounded Task, Completion, Permission Decision, cancellation, or shutdown input into fixed live-process ingress. It performs no I/O, allocation, wait, or Core call. `full` or `busy` preserves producer ownership; `accepted` transfers custody only to the live Harness instance.
 - `drive` performs one bounded owner quantum. It borrows an Activation Slot only for that quantum, then encodes Core State, invalidates borrowed windows, scrubs the slot, and releases it before returning. It alone advances Core, publishes Session facts, admits immutable Attempts to adapters, applies durable Completions, and returns committed Projections and progress.
 
 While restoration is incomplete, each `drive` consumes at most the configured recovery-record quantum and returns `restoring` with `more = true` and no Projection. After the safe watermark is reached, Harness reconstructs the durable level state without dispatch, publishes Session identity first, and only a later `drive` may reconcile or admit external work. Recovery failure makes that live owner unavailable; a fresh `open` starts from durable bytes again.
 
-Harness hides Session Ledger ordering, checkpoint replay, page activation and scrubbing, adapter admission, reconciliation, cancellation settlement, and Projection regeneration. The CLI and tests use the same interface.
+Harness hides Session Ledger ordering, checkpoint replay, page activation and scrubbing, adapter admission, reconciliation, control settlement, and Projection regeneration. Cancellation and shutdown continue bounded Completion Inbox reconciliation while accepted Attempts settle; they publish a terminal Outcome only after no accepted Operation remains open. The CLI and tests use the same interface.
 
 `offer` acceptance is not durable semantic acknowledgement. Only a committed Host Store transaction acknowledges durable acceptance. Until that commit, a process crash may discard volatile ingress: Completion is rediscovered from its durable Completion Inbox evidence, an `ask` decision is requested again, an uncommitted Task remains unadmitted, and uncommitted cancellation has not taken effect. The CLI acknowledges these inputs to the user only through a committed Projection returned after `drive`.
 
@@ -102,13 +102,13 @@ The Host Store schema version and Session payload version are independent. Unsup
 
 ### Adapters
 
-Model, Bash, and `apply_patch` adapters receive only immutable admitted Attempts. They may perform external work and publish typed evidence through the Completion seam; they cannot choose policy, advance Core, append Session facts, retry themselves, or render terminal output. Deterministic and live adapters justify these internal seams.
+Model, Bash, and `apply_patch` adapters receive only immutable admitted Attempts. They may perform external work and publish typed evidence through the Completion seam; they cannot choose policy, advance Core, append Session facts, retry themselves, or render terminal output. A known provider dispatch failure is encoded as a durable terminal Result for its admitted Attempt; it is not recovered as missing evidence or retried. Deterministic and live adapters justify these internal seams.
 
 Adapter evidence uses a non-authoritative durable **Completion Inbox**. The adapter first publishes immutable Result content, then asks the Storage Owner to commit a bounded evidence envelope binding Session, ownership epoch, Agent generation, Operation and generation, Attempt, evidence kind, Result reference, and digest. Only after that acknowledgement may it offer the in-memory Completion notification. Lost notification is harmless: `open` and `drive` scan a bounded Inbox cursor and offer matching evidence through the normal owner path.
 
 Harness validates the complete identity and atomically associates the immutable evidence with the terminal Session transition through `consumed_by_sequence`; it does not delete the evidence on consumption. The unique Completion identity excludes Result reference and digest: the same identity and Result is idempotent, while the same identity with different Result evidence is a closed conflict. Missing, corrupt, or mismatched evidence never becomes authority and falls back to the Attempt's uncertainty rule. V1 retains evidence until its closed Session is explicitly removed.
 
-The CLI parses invocation, reserves host pools, chooses adapters and Permission Mode, supplies input, and renders sanitized committed Projections. It owns no Session lifecycle policy.
+The CLI parses invocation, reserves host pools, chooses adapters and Permission Mode, supplies input, and renders sanitized committed Projections. Creation and provider-assisted resume construct the selected adapter before `Harness.open` and use the same owner loop. It owns no Session lifecycle policy.
 
 ## Transition protocol
 
@@ -140,7 +140,7 @@ Recovery is effect-specific:
 
 | Effect | Recovery from uncertainty |
 | --- | --- |
-| Model inference | Admit a new Attempt under the same Operation; report possible duplicate work or billing. |
+| Model inference | If the admitted Attempt lacks terminal evidence, admit a new Attempt under the same Operation and report possible duplicate work or billing. A known provider failure is already a terminal Result and is not retried. |
 | Bash | Never replay automatically; commit an indeterminate Result because arbitrary effects may have occurred. |
 | One-file patch | Compare current content with exact preimage and postimage; accept postimage, require new Authorization before retrying preimage, and stop on divergence. |
 
@@ -150,9 +150,9 @@ Cancellation and shutdown stop new admission but settle or classify every accept
 
 V1 exposes only `bash` and `apply_patch`. Bash covers inspection and verification through one bounded Result path. OnePage makes no repository-confinement or sandbox claim for Bash and never classifies an apparently read-only command as automatically safe.
 
-Validation creates an immutable descriptor before Authorization. The descriptor binds tool kind, exact bytes, Workspace and working directory, relevant environment and timeout, Action identity and generation, and preimage state where applicable.
+Validation creates an immutable descriptor before Approval Required or Authorization. The descriptor binds tool kind, exact bytes, Workspace and working directory, relevant environment and timeout, Action identity and generation, and preimage state where applicable.
 
-`ask` is the default Permission Mode. The CLI renders the exact descriptor and offers the user's allow or deny decision. Explicit bypass creates Authorization for the same validated descriptor without prompting. Both modes commit the exact Authorization before Attempt admission and follow identical validation and recovery paths. Resume selects `ask` unless bypass is explicitly supplied again; a prior exact Authorization remains evidence, but no Session retains blanket future authority.
+`ask` is the default Permission Mode. It commits Approval Required for the exact descriptor before the CLI prompts, then the CLI offers a matching Permission Decision. Approval Required is a waiting state, never an undecided Authorization. An exact allow or deny decision commits Authorization; explicit bypass commits Authorization for the same descriptor without prompting. Both modes commit the exact Authorization before Attempt admission and follow identical validation and recovery paths. Shutdown and cancellation deny an outstanding Approval Required state before terminal control settlement. Resume selects `ask` unless bypass is explicitly supplied again; a prior exact Authorization remains evidence, but no Session retains blanket future authority.
 
 ## Capacity, scheduling, and topology
 

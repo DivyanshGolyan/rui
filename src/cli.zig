@@ -39,13 +39,22 @@ pub fn main(init: std.process.Init) !void {
     );
     defer sessions.close(init.io);
     if (arguments.resume_id) |session_id| {
+        var fixture: model_operation.Fixture = .{
+            .expected_task = null,
+            .final_answer = arguments.fixture_response orelse "",
+        };
+        const provider: ?model_operation.Provider = if (arguments.model) |model| provider: {
+            if (!std.mem.startsWith(u8, model, "fixture:")) return error.UnsupportedModel;
+            if (arguments.fixture_response == null) return error.MissingFixtureResponse;
+            break :provider fixture.provider();
+        } else null;
         var owner = try harness.Harness.open(.{
             .host = &host,
             .sessions = sessions,
             .io = init.io,
             .allocator = allocator,
             .permission_mode = if (arguments.dangerously_bypass_permissions) .bypass else .ask,
-            .mode = .{ .restore = .{ .session_id = session_id } },
+            .mode = .{ .restore = .{ .session_id = session_id, .provider = provider } },
         });
         defer owner.close();
         const identified = try owner.drive();
@@ -256,12 +265,15 @@ fn parseArguments(args: []const []const u8) !Arguments {
         }
         index += 1;
     }
-    if (parsed.resume_id != null and
-        (parsed.task != null or parsed.model != null or parsed.fixture_response != null or
-            parsed.repo_path != null or parsed.fixture_bash_command != null or
-            parsed.fixture_patch_path != null))
-    {
-        return error.ResumeArgumentsConflict;
+    if (parsed.resume_id != null) {
+        if (parsed.task != null or parsed.repo_path != null or
+            parsed.fixture_bash_command != null or parsed.fixture_patch_path != null)
+        {
+            return error.ResumeArgumentsConflict;
+        }
+        if ((parsed.model == null) != (parsed.fixture_response == null)) {
+            return error.ResumeProviderArgumentsIncomplete;
+        }
     }
     return parsed;
 }
@@ -378,6 +390,20 @@ test "CLI arguments distinguish create from exact resume" {
         "000000000000000a",
     });
     try std.testing.expectEqual(@as(u64, 10), resumed.resume_id.?);
+
+    const resumed_with_provider = try parseArguments(&.{
+        "onepage",
+        "--state",
+        "state",
+        "--resume",
+        "000000000000000a",
+        "--model",
+        "fixture:answer",
+        "--fixture-response",
+        "done",
+    });
+    try std.testing.expectEqualStrings("fixture:answer", resumed_with_provider.model.?);
+    try std.testing.expectEqualStrings("done", resumed_with_provider.fixture_response.?);
 
     const patch = try parseArguments(&.{
         "onepage",

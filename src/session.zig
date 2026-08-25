@@ -127,6 +127,7 @@ const OperationHistory = struct {
     attempt: ?session_wal.Fact = null,
     attempts: [max_attempts]?session_wal.Fact = @splat(null),
     attempt_count: u8 = 0,
+    approval_required: ?session_wal.Fact = null,
     authorization: ?session_wal.Fact = null,
     result: ?session_wal.Fact = null,
 
@@ -192,6 +193,10 @@ const SemanticIndex = struct {
                     if (!value.accepts(fact)) return error.InvalidOperationHistory;
                     try value.appendAttempt(fact);
                 },
+                .approval_required => if (history) |value| {
+                    if (!value.accepts(fact)) return error.InvalidOperationHistory;
+                    value.approval_required = try uniqueIndexedFact(value.approval_required, fact);
+                },
                 .authorization => if (history) |value| {
                     if (!value.accepts(fact)) return error.InvalidOperationHistory;
                     value.authorization = fact;
@@ -229,7 +234,11 @@ const SemanticIndex = struct {
         var sequence: u64 = 1;
         const histories = [_]OperationHistory{ self.model, self.consequential };
         for (histories) |history| {
-            const facts = [_]?session_wal.Fact{ history.descriptor, history.authorization };
+            const facts = [_]?session_wal.Fact{
+                history.descriptor,
+                history.approval_required,
+                history.authorization,
+            };
             for (facts) |maybe_fact| if (maybe_fact) |fact| {
                 try applyOne(context, apply_fn, sequence, fact);
                 sequence += 1;
