@@ -22,7 +22,7 @@ The terminal demonstrates durable Session identity, exact Action authority, cras
 - Every Activation Slot is exactly 65,536 bytes and comes from a startup-reserved pool.
 - Activating, advancing, suspending, and reusing a slot performs no general-purpose allocation inside Core.
 - Sleeping Sessions retain no resident Activation Slot or materialized Conversation graph.
-- Every acknowledged semantic transition is reconstructable from the Session WAL and immutable content.
+- Every acknowledged semantic transition is reconstructable from the Session WAL and immutable content. Live `offer` acceptance is not acknowledgement; the CLI acknowledges an input only after its WAL transaction commits.
 - Arbitrary Bash is never claimed to be exactly once or repository-confined. An uncertain Bash Attempt is not replayed automatically.
 - A one-file patch binds exact Workspace, path, preimage, patch, and Authorization identity and reconciles observed state before any retry.
 - Output and history larger than resident bounds are streamed or spooled outside the Activation Slot.

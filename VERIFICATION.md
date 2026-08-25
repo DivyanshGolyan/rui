@@ -16,6 +16,7 @@ This document maps each public architectural claim to required evidence. A claim
 | Immutable content is durable before reference | Crash injection before content sync, after content sync, before WAL sync, and after WAL sync; committed records never resolve to absent content. |
 | Prepare, commit, publish ordering | Failure injection at every semantic publication point with exactly one result: owner remains usable, fresh `open` reconstructs, or Session fails closed. |
 | Adapter evidence is not a second authority | Result content and Completion Inbox evidence survive lost notifications and process termination, but Session state advances only after Harness commits the matching terminal Result transaction. |
+| Ingress custody is not durable acknowledgement | Crash after `offer` acceptance but before WAL commit loses no acknowledged fact: Completion is rediscovered, an `ask` decision is requested again, an uncommitted Task remains absent, and cancellation remains unapplied. |
 | No silent Bash replay | Process termination after possible command execution always produces an indeterminate Result without redispatch. |
 | Patch reconciliation is honest | Exact preimage, postimage, and divergent Workspace fixtures plus concurrent replacement, symlink, and stale-Authorization cases. |
 | Authorization binds exact execution | Descriptor-digest tests cover tool kind, bytes, Workspace, working directory, environment authority, timeout, generation, and preimage. |
@@ -30,6 +31,8 @@ This document maps each public architectural claim to required evidence. A claim
 The highest product seam is the real CLI against a temporary Git repository and deterministic adapters. It proves that a user can create and resume a Session, select either Permission Mode, inspect exact Actions, observe typed Results, complete a repair, and receive the same terminal Outcome that durable state records.
 
 The highest deterministic lifecycle seam is `Harness.open / offer / drive` with the production Core reducer, real Session WAL and content store, fixed caller-owned pools, deterministic adapters, and semantic fault injection. Lifecycle tests assert durable behaviour, adapter admission, Conversation advancement, Projections, and Outcomes rather than private file paths, numeric Core fields, or helper calls.
+
+Ingress tests distinguish three outcomes: `full` or `busy` leaves ownership with the producer; `accepted` transfers volatile custody to the live Harness; a later committed Projection acknowledges durable acceptance. Tests fill ingress while every Activation Slot is occupied and prove bounded retry without an unbounded fallback queue.
 
 Core tests exercise the reducer and canonical codec without filesystem or provider behaviour. Native/Wasm differential tests consume the same semantic vector corpus. Narrow storage tests remain for WAL framing, checksums, torn-tail recovery, content addressing, sync and rename failures, ownership fencing, and codec corruption.
 
@@ -52,6 +55,8 @@ At minimum, fresh-process tests terminate before and after:
 13. State Checkpoint publication;
 14. durable Projection regeneration;
 15. slot scrub and release.
+
+The matrix separately crashes after volatile `offer` acceptance and before the corresponding WAL transaction for Task, Completion, `ask` decision, and cancellation. Completion recovers through the Completion Inbox; the Task is not partially admitted; the user is asked again; cancellation is not silently applied; and no CLI acknowledgement exists before the committed Projection.
 
 Every acknowledged fact must reappear after recovery. Mid-frame bytes never expose partial semantic facts. An admitted Attempt without a terminal WAL transaction is `possibly_executed` unless durable evidence completes it; absence of an inbox record never proves `definitely_unsent`. Lost Completion notifications are recovered from the inbox, and no accepted external effect may disappear, replay under the wrong policy, complete twice, or become model-visible without a committed Conversation Entry.
 

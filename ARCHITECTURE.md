@@ -81,10 +81,12 @@ Core is a deterministic reducer. It owns task phases, legal semantic transitions
 `Harness.open / offer / drive` is the complete Session lifecycle interface. No alternate public run, resume, provider-assisted resume, or direct Core advancement path exists.
 
 - `open` acquires exclusive Session ownership, validates durable inputs, and reconstructs through the safe WAL watermark using caller-owned fixed storage. It may borrow a slot while reconstructing but releases and scrubs it before returning.
-- `offer` nonblockingly transfers bounded task, Completion, Authorization, cancellation, or shutdown input. It performs no I/O, allocation, wait, or Core call; full or busy results preserve producer ownership.
+- `offer` nonblockingly transfers bounded Task, Completion, Authorization, cancellation, or shutdown input into fixed live-process ingress. It performs no I/O, allocation, wait, or Core call. `full` or `busy` preserves producer ownership; `accepted` transfers custody only to the live Harness instance.
 - `drive` performs one bounded owner quantum. It borrows an Activation Slot only for that quantum, then encodes Core State, invalidates borrowed windows, scrubs the slot, and releases it before returning. It alone advances Core, publishes Session facts, admits immutable Attempts to adapters, applies durable Completions, and returns committed Projections and progress.
 
 Harness hides WAL ordering, checkpoint replay, page activation and scrubbing, adapter admission, reconciliation, cancellation settlement, and Projection regeneration. The CLI and tests use the same interface.
+
+`offer` acceptance is not durable semantic acknowledgement. Only a committed Session WAL transaction acknowledges durable acceptance. Until that commit, a process crash may discard volatile ingress: Completion is rediscovered from its durable Completion Inbox envelope, an `ask` decision is requested again, an uncommitted Task remains unadmitted, and uncommitted cancellation has not taken effect. The CLI acknowledges these inputs to the user only through a committed Projection returned after `drive`.
 
 ### Session storage
 
