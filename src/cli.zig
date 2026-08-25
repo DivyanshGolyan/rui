@@ -41,6 +41,7 @@ const Output = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
+    var host: agent.Host = .{};
     const raw_args = try init.minimal.args.toSlice(allocator);
     const arguments = try parseArguments(raw_args);
 
@@ -57,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
     );
     defer sessions.close(init.io);
     var completed: agent.Completed = if (arguments.resume_id) |session_id|
-        try agent.resumeSession(sessions, init.io, allocator, session_id)
+        try agent.resumeSession(&host, sessions, init.io, allocator, session_id)
     else blk: {
         const model = arguments.model orelse return error.MissingModel;
         if (!std.mem.startsWith(u8, model, "fixture:")) return error.UnsupportedModel;
@@ -91,6 +92,7 @@ pub fn main(init: std.process.Init) !void {
                     .ask,
             };
             if (agent.runNew(
+                &host,
                 sessions,
                 init.io,
                 allocator,
@@ -131,6 +133,7 @@ pub fn main(init: std.process.Init) !void {
                 .automatic = arguments.allow_bash,
             };
             break :blk try agent.runNew(
+                &host,
                 sessions,
                 init.io,
                 allocator,
@@ -149,6 +152,7 @@ pub fn main(init: std.process.Init) !void {
             .final_answer = response,
         };
         break :blk try agent.runNew(
+            &host,
             sessions,
             init.io,
             allocator,

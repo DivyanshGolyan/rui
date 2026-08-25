@@ -1,7 +1,6 @@
 const std = @import("std");
 const agent = @import("agent.zig");
 const bash_tool = @import("bash_tool.zig");
-const core_contract = @import("core_contract.zig");
 const model_operation = @import("model_operation.zig");
 const patch_tool = @import("patch_tool.zig");
 
@@ -10,16 +9,9 @@ const answer = "The fixture contains a durable one-page agent.";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
+    var host: agent.Host = .{};
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len != 2) return error.InvalidArguments;
-    const wasm = try std.Io.Dir.cwd().readFileAlloc(
-        init.io,
-        args[1],
-        allocator,
-        .limited(1024 * 1024),
-    );
-    defer allocator.free(wasm);
-    try core_contract.verify(wasm);
+    if (args.len != 1) return error.InvalidArguments;
 
     var random: [8]u8 = undefined;
     init.io.random(&random);
@@ -75,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
         .final_answer = answer,
     };
     var completed = try agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -86,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
     try expectAnswer(&completed);
     completed.close();
 
-    var resumed = try agent.resumeSession(sessions, init.io, allocator, session_id);
+    var resumed = try agent.resumeSession(&host, sessions, init.io, allocator, session_id);
     defer resumed.close();
     if (resumed.session.ownership_epoch != 2) return error.ResumeEpochMismatch;
     try expectAnswer(&resumed);
@@ -104,6 +97,7 @@ pub fn main(init: std.process.Init) !void {
             .final_answer = answer,
         };
         if (agent.runNew(
+            &host,
             sessions,
             init.io,
             allocator,
@@ -124,6 +118,7 @@ pub fn main(init: std.process.Init) !void {
         }
         if (capture.session_id == 0) return error.SessionIdentityNotObserved;
         var recovered = try agent.resumeSession(
+            &host,
             sessions,
             init.io,
             allocator,
@@ -145,6 +140,7 @@ pub fn main(init: std.process.Init) !void {
     };
     var allow_policy: AllowPolicy = .{};
     var tool_completed = try agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -172,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
     );
     if (!std.mem.eql(u8, tool_answer, tool_fixture.final_answer)) return error.ToolFinalAnswerMismatch;
     tool_completed.close();
-    var tool_resumed = try agent.resumeSession(sessions, init.io, allocator, tool_session_id);
+    var tool_resumed = try agent.resumeSession(&host, sessions, init.io, allocator, tool_session_id);
     if (tool_resumed.session.ownership_epoch != 2) return error.ToolResumeEpochMismatch;
     tool_resumed.close();
 
@@ -189,6 +185,7 @@ pub fn main(init: std.process.Init) !void {
     };
     var deny_policy: DenyPolicy = .{};
     var denied_completed = try agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -222,6 +219,7 @@ pub fn main(init: std.process.Init) !void {
     var cancellation: std.atomic.Value(bool) = .init(false);
     var cancel_future = init.io.async(cancelAgentBash, .{ init.io, &cancellation });
     var cancelled_completed = try agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -257,6 +255,7 @@ pub fn main(init: std.process.Init) !void {
         var result_capture: SessionCapture = .{};
         var result_injection: CrashInjection = .{ .target = boundary };
         if (agent.runNew(
+            &host,
             sessions,
             init.io,
             allocator,
@@ -277,6 +276,7 @@ pub fn main(init: std.process.Init) !void {
             return err;
         }
         var result_recovered = try agent.resumeWithProvider(
+            &host,
             sessions,
             init.io,
             allocator,
@@ -306,6 +306,7 @@ pub fn main(init: std.process.Init) !void {
     var denied_recovery_capture: SessionCapture = .{};
     var denied_recovery_injection: CrashInjection = .{ .target = .after_bash_result };
     if (agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -326,6 +327,7 @@ pub fn main(init: std.process.Init) !void {
         return err;
     }
     var denied_recovered = try agent.resumeWithProvider(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -352,6 +354,7 @@ pub fn main(init: std.process.Init) !void {
     var uncertain_capture: SessionCapture = .{};
     var uncertain_injection: CrashInjection = .{ .target = .after_bash_execution };
     if (agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -371,14 +374,14 @@ pub fn main(init: std.process.Init) !void {
     } else |err| if (err != error.InjectedCrash) {
         return err;
     }
-    if (agent.resumeSession(sessions, init.io, allocator, uncertain_capture.session_id)) |unexpected| {
+    if (agent.resumeSession(&host, sessions, init.io, allocator, uncertain_capture.session_id)) |unexpected| {
         var value = unexpected;
         value.close();
         return error.UncertainBashResumed;
     } else |err| if (err != error.BashPossiblyExecuted) {
         return err;
     }
-    if (agent.resumeSession(sessions, init.io, allocator, uncertain_capture.session_id)) |unexpected| {
+    if (agent.resumeSession(&host, sessions, init.io, allocator, uncertain_capture.session_id)) |unexpected| {
         var value = unexpected;
         value.close();
         return error.IndeterminateBashResumed;
@@ -407,6 +410,7 @@ pub fn main(init: std.process.Init) !void {
     };
     var patch_deny: PatchDenyPolicy = .{};
     var patch_denied = try agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -431,6 +435,7 @@ pub fn main(init: std.process.Init) !void {
     };
     var patch_stale: PatchStalePolicy = .{ .io = init.io, .repo = repo };
     var patch_stale_completed = try agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -456,6 +461,7 @@ pub fn main(init: std.process.Init) !void {
     var patch_allow: PatchAllowPolicy = .{};
     var patch_allow_capture: SessionCapture = .{};
     if (agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -475,7 +481,7 @@ pub fn main(init: std.process.Init) !void {
         return err;
     }
     try expectRepoFile(repo, init.io, "note.txt", "old\n");
-    if (agent.resumeSession(sessions, init.io, allocator, patch_allow_capture.session_id)) |unexpected| {
+    if (agent.resumeSession(&host, sessions, init.io, allocator, patch_allow_capture.session_id)) |unexpected| {
         var value = unexpected;
         value.close();
         return error.AllowedPatchResumedPastPermissionStep;
@@ -492,6 +498,7 @@ pub fn main(init: std.process.Init) !void {
     var patch_ask: PatchAskCrashPolicy = .{};
     var patch_ask_capture: SessionCapture = .{};
     if (agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -511,7 +518,7 @@ pub fn main(init: std.process.Init) !void {
         return err;
     }
     for (0..2) |_| {
-        if (agent.resumeSession(sessions, init.io, allocator, patch_ask_capture.session_id)) |unexpected| {
+        if (agent.resumeSession(&host, sessions, init.io, allocator, patch_ask_capture.session_id)) |unexpected| {
             var value = unexpected;
             value.close();
             return error.PatchApprovalProjectionMissing;
@@ -546,6 +553,7 @@ pub fn main(init: std.process.Init) !void {
         var crash_capture: SessionCapture = .{};
         var permission_injection: CrashInjection = .{ .target = .after_patch_permission_binding };
         if (agent.runNew(
+            &host,
             sessions,
             init.io,
             allocator,
@@ -566,7 +574,7 @@ pub fn main(init: std.process.Init) !void {
             return err;
         }
         if (case.allowed) {
-            if (agent.resumeSession(sessions, init.io, allocator, crash_capture.session_id)) |unexpected| {
+            if (agent.resumeSession(&host, sessions, init.io, allocator, crash_capture.session_id)) |unexpected| {
                 var value = unexpected;
                 value.close();
                 return error.RecoveredPatchPermissionExecuted;
@@ -575,6 +583,7 @@ pub fn main(init: std.process.Init) !void {
             }
         } else {
             var recovered_permission = try agent.resumeWithProvider(
+                &host,
                 sessions,
                 init.io,
                 allocator,
@@ -593,6 +602,7 @@ pub fn main(init: std.process.Init) !void {
         .finish_response = false,
     };
     if (agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,
@@ -613,6 +623,7 @@ pub fn main(init: std.process.Init) !void {
         .status = .length_truncated,
     };
     if (agent.runNew(
+        &host,
         sessions,
         init.io,
         allocator,

@@ -8,8 +8,8 @@ This document maps each public architectural claim to required evidence. A claim
 | --- | --- |
 | One exact 64 KiB Activation Slot | Compile-time size and alignment assertions over the production slot type; startup pool accounting. |
 | Core State is independent of slot layout | Canonical codec vectors, unknown-version rejection, and restore into differently poisoned slots with identical semantic outcomes. |
-| No Core activation allocation | Failing-allocator instrumentation across activate, transition, suspend, restore, and slot reuse. |
-| Native/Wasm semantic parity | Shared accepted and rejected transition corpus plus randomized state-machine traces comparing outcomes, intents, and canonical Core State. |
+| No Core activation allocation | Compile-time rejection of allocator-bearing parameter and storage types across every lifecycle method, direct review of Core dependencies, plus complete activate, transition, suspend, restore, and reuse tests. |
+| Native semantic invariants | Randomized accepted and rejected transition traces with typed outcomes, rejection-state preservation, semantic observations, deterministic canonical encoding, and poisoned-slot restoration. |
 | Session WAL is sole semantic authority | Recovery from the valid WAL prefix with checkpoints and indexes absent, stale, corrupt, or behind. |
 | WAL transitions are atomic | Mid-frame termination, truncation, checksum failure, and multi-fact transaction cases expose either the previous complete sequence or the complete new sequence, never enclosed partial facts. |
 | Checkpoints never lead authority | Rejection of checkpoint sequence beyond the WAL tail and replay from every checkpoint-behind-WAL boundary. |
@@ -34,7 +34,7 @@ The highest deterministic lifecycle seam is `Harness.open / offer / drive` with 
 
 Ingress tests distinguish three outcomes: `full` or `busy` leaves ownership with the producer; `accepted` transfers volatile custody to the live Harness; a later committed Projection acknowledges durable acceptance. Tests fill ingress while every Activation Slot is occupied and prove bounded retry without an unbounded fallback queue.
 
-Core tests exercise the reducer and canonical codec without filesystem or provider behaviour. Native/Wasm differential tests consume the same semantic vector corpus. Narrow storage tests remain for WAL framing, checksums, torn-tail recovery, content addressing, sync and rename failures, ownership fencing, and codec corruption.
+Core tests exercise the reducer and canonical codec without filesystem or provider behaviour. Native invariant traces exercise valid and rejected paths through canonical suspend and restore after every step. Narrow storage tests remain for WAL framing, checksums, torn-tail recovery, content addressing, sync and rename failures, ownership fencing, and codec corruption.
 
 ## Crash matrix
 

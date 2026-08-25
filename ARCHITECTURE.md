@@ -68,7 +68,7 @@ The Workspace remains external truth because the user, Git, an editor, or anothe
 
 The host reserves a fixed pool of Activation Slots before admitting work. Activation borrows a slot, decodes or reconstructs Core State into it, and performs no general-purpose allocation inside Core. Suspension encodes Core State, commits required semantic facts, scrubs the complete slot, and returns it to the pool. Slot identity and generation fence stale borrowed windows and late Completions.
 
-Native Zig executes Core in production. The same reducer compiles to `wasm32-freestanding` as an independent conformance target. Native and Wasm tests compare accepted and rejected transition outcomes, produced intents, and canonical Core State encodings. Complete slot-byte equality is not a semantic requirement.
+Native Zig is the sole V1 Core executor. Native invariant traces cover accepted and rejected transition outcomes, rejection-state preservation, semantic observations, deterministic canonical encoding, and restoration through differently poisoned slots. Core State's fixed-width codec and the exact native Activation Slot are the portability and resident-memory contracts; V1 defines no secondary runtime or target ABI.
 
 ## Deep modules and interfaces
 

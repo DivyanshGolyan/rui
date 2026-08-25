@@ -2,6 +2,7 @@ const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
 const checkpoint = @import("checkpoint.zig");
 const core_image = @import("core_image.zig");
+const core_state = @import("core_state.zig");
 const durable_transition = @import("durable_transition.zig");
 const harness = @import("harness.zig");
 const model_operation = @import("model_operation.zig");
@@ -11,7 +12,13 @@ const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 
 const agent_generation: u32 = 1;
-const response_memory_offset: u32 = core_image.response_memory_offset;
+const ProductionSlotPool = core_image.SlotPool(1);
+
+/// Process-owned bounded activation capacity. Construct this once at host
+/// startup and pass it through every agent lifecycle entry point.
+pub const Host = struct {
+    slots: ProductionSlotPool = .{},
+};
 
 pub const NewConfig = struct {
     workspace_path: []const u8,
@@ -61,225 +68,78 @@ const OperationIds = struct {
     final_ref: u64,
 };
 
-fn finalReference(response_ref: u32) u64 {
+fn finalReference(response_ref: u64) u64 {
     return (@as(u64, 1) << 63) | response_ref;
 }
 
 const Core = struct {
-    image: *core_image.Image,
-    allocator: std.mem.Allocator,
-    initialize: Transition = .initialize,
-    deliver: Transition = .deliver,
-    agent_id: Value = .agent_id,
-    event_count: Value = .event_count,
-    accumulator: Value = .accumulator,
-    is_quiescent: Value = .is_quiescent,
-    submit: Transition = .submit,
-    start_task: Transition = .start_task,
-    begin_model: Transition = .begin_model,
-    accept: Transition = .accept,
-    complete: Transition = .complete,
-    interpret: Transition = .interpret,
-    commit_final: Transition = .commit_final,
-    commit_tool: Transition = .commit_tool,
-    operation_state: Value = .operation_state,
-    operation_id: Value = .operation_id,
-    operation_generation: Value = .operation_generation,
-    operation_result: Value = .operation_result,
-    context_first: Value = .context_first,
-    context_count: Value = .context_count,
-    response_disposition: Value = .response_disposition,
-    response_failure: Value = .response_failure,
-    response_text_offset: Value = .response_text_offset,
-    response_text_length: Value = .response_text_length,
-    response_tool: Value = .response_tool,
-    response_arguments_offset: Value = .response_arguments_offset,
-    response_arguments_length: Value = .response_arguments_length,
-    task_outcome: Value = .task_outcome,
-    final_entry_id: Value = .final_entry_id,
+    lease: core_image.SlotLease,
+    slot: *core_image.ActivationSlot,
+    reducer: core_image.Core = undefined,
+    encoded_state: [core_state.encoded_size]u8 = undefined,
+    active: bool = false,
 
-    const Transition = enum {
-        initialize,
-        deliver,
-        submit,
-        start_task,
-        begin_model,
-        accept,
-        complete,
-        interpret,
-        commit_final,
-        commit_tool,
-    };
+    fn open(pool: *ProductionSlotPool) !Core {
+        const lease = try pool.borrow();
+        return .{ .lease = lease, .slot = lease.slot };
+    }
 
-    const Value = enum {
-        agent_id,
-        event_count,
-        accumulator,
-        is_quiescent,
-        operation_state,
-        operation_id,
-        operation_generation,
-        operation_result,
-        context_first,
-        context_count,
-        response_disposition,
-        response_failure,
-        response_text_offset,
-        response_text_length,
-        response_tool,
-        response_arguments_offset,
-        response_arguments_length,
-        task_outcome,
-        final_entry_id,
-    };
+    fn initialize(self: *Core, agent_id: u64) !void {
+        self.reducer = try core_image.Core.initialize(self.slot, .{
+            .agent_id = agent_id,
+            .generation = agent_generation,
+        });
+        self.active = true;
+    }
 
-    fn open(allocator: std.mem.Allocator) !Core {
-        const image = try allocator.create(core_image.Image);
-        errdefer allocator.destroy(image);
-        var core: Core = .{ .image = image, .allocator = allocator };
-        try core.validateAbi();
-        return core;
+    fn activate(self: *Core) !void {
+        self.reducer = try core_image.Core.activate(self.slot, &self.encoded_state);
+        self.active = true;
+    }
+
+    fn suspendIntoState(self: *Core) !void {
+        try self.reducer.suspendInto(&self.encoded_state);
+        self.active = false;
     }
 
     fn close(self: *Core) void {
-        self.allocator.destroy(self.image);
-    }
-
-    fn page(self: *Core) []u8 {
-        return std.mem.asBytes(self.image);
-    }
-
-    fn call(self: *Core, transition: Transition, arguments: []const u32) !void {
-        const payload = &self.image.payload;
-        const accepted = switch (transition) {
-            .deliver => arguments.len == 1 and payload.deliver(arguments[0]),
-            .submit => arguments.len == 2 and payload.submitOperation(arguments[0], arguments[1]),
-            .start_task => arguments.len == 1 and payload.startTask(arguments[0]),
-            .begin_model => arguments.len == 2 and payload.beginModelOperation(arguments[0], arguments[1]),
-            .accept => arguments.len == 2 and payload.acceptOperation(arguments[0], arguments[1]),
-            .complete => arguments.len == 3 and payload.completeOperation(arguments[0], arguments[1], arguments[2]),
-            .interpret => arguments.len == 3 and payload.interpretStoredResponse(arguments[0], arguments[1], arguments[2]),
-            .commit_final => arguments.len == 1 and payload.commitFinalAnswer(arguments[0]),
-            .commit_tool => arguments.len == 2 and payload.commitToolResult(arguments[0], arguments[1]),
-            .initialize => false,
-        };
-        if (!accepted) return error.CoreTransitionRejected;
-    }
-
-    fn callVoid(self: *Core, transition: Transition, arguments: []const u32) !void {
-        if (transition != .initialize or arguments.len != 1) return error.InvalidCoreCall;
-        self.image.initialize(arguments[0]);
-    }
-
-    fn value(self: *Core, value_name: Value) !u32 {
-        const state = self.image.payload.state;
-        return switch (value_name) {
-            .agent_id => state.agent_id,
-            .event_count => std.math.cast(u32, state.event_count) orelse return error.CoreValueOverflow,
-            .accumulator => std.math.cast(u32, state.accumulator) orelse return error.CoreValueOverflow,
-            .is_quiescent => state.yielded,
-            .operation_state => @intFromEnum(state.operation_state),
-            .operation_id => std.math.cast(u32, state.operation_id) orelse return error.CoreValueOverflow,
-            .operation_generation => state.operation_generation,
-            .operation_result => std.math.cast(u32, state.operation_result) orelse return error.CoreValueOverflow,
-            .context_first => state.context_first,
-            .context_count => state.context_count,
-            .response_disposition => state.response_disposition,
-            .response_failure => state.response_failure,
-            .response_text_offset => state.response_text_offset,
-            .response_text_length => state.response_text_length,
-            .response_tool => state.response_tool,
-            .response_arguments_offset => state.response_arguments_offset,
-            .response_arguments_length => state.response_arguments_length,
-            .task_outcome => @intFromEnum(state.task_phase),
-            .final_entry_id => std.math.cast(u32, state.final_entry_id) orelse return error.CoreValueOverflow,
-        };
-    }
-
-    fn validateAbi(self: *Core) !void {
-        try self.callVoid(self.initialize, &.{7});
-        if (try self.value(self.agent_id) != 7 or
-            try self.value(self.event_count) != 0 or
-            try self.value(self.accumulator) != 7 or
-            try self.value(self.is_quiescent) != 1 or
-            try self.value(self.operation_state) != 0 or
-            try self.value(self.task_outcome) != 0)
-        {
-            return error.CoreAbiMismatch;
-        }
-        try self.call(self.deliver, &.{29});
-        if (try self.value(self.event_count) != 1 or
-            try self.value(self.accumulator) != ((7 * 16_777_619) ^ 29) or
-            try self.value(self.is_quiescent) != 1)
-        {
-            return error.CoreAbiMismatch;
-        }
-        try self.call(self.submit, &.{ 3, 1 });
-        if (try self.value(self.operation_id) != 3 or
-            try self.value(self.operation_generation) != 1 or
-            try self.value(self.operation_state) != 1)
-        {
-            return error.CoreAbiMismatch;
-        }
-        try self.call(self.accept, &.{ 3, 1 });
-        try self.call(self.complete, &.{ 3, 1, 5 });
-        if (try self.value(self.operation_result) != 5 or
-            try self.value(self.operation_state) != 3)
-        {
-            return error.CoreAbiMismatch;
-        }
-        try self.callVoid(self.initialize, &.{7});
-        try self.call(self.start_task, &.{7});
-        try self.call(self.begin_model, &.{ 11, 2 });
-        if (try self.value(self.operation_id) != 11 or
-            try self.value(self.operation_generation) != 1 or
-            try self.value(self.context_first) != 1 or
-            try self.value(self.context_count) != 7 or
-            try self.value(self.task_outcome) != 2)
-        {
-            return error.CoreAbiMismatch;
-        }
-        try self.call(self.accept, &.{ 11, 1 });
-        try self.call(self.complete, &.{ 11, 1, 17 });
-        var encoded_buffer: [model_protocol.header_size + model_protocol.item_header_size + 2]u8 = undefined;
-        const tool_encoded = try model_protocol.encodeTool(&encoded_buffer, .bash, "\x01\x02");
-        const memory = self.page();
-        @memcpy(memory[response_memory_offset..][0..tool_encoded.len], tool_encoded);
-        try self.call(self.interpret, &.{ response_memory_offset, @intCast(tool_encoded.len), 17 });
-        if (try self.value(self.response_disposition) != @intFromEnum(model_protocol.Disposition.tool_call) or
-            try self.value(self.response_tool) != @intFromEnum(model_protocol.Tool.bash) or
-            try self.value(self.response_arguments_offset) != response_memory_offset + model_protocol.header_size + model_protocol.item_header_size or
-            try self.value(self.response_arguments_length) != 2 or
-            try self.value(self.task_outcome) != 4)
-        {
-            return error.CoreAbiMismatch;
-        }
-        try self.call(self.commit_tool, &.{ 8, 9 });
-        try self.call(self.begin_model, &.{ 12, 3 });
-        if (try self.value(self.operation_generation) != 2 or
-            try self.value(self.context_count) != 9 or try self.value(self.task_outcome) != 2)
-        {
-            return error.CoreAbiMismatch;
-        }
-        try self.call(self.accept, &.{ 12, 2 });
-        try self.call(self.complete, &.{ 12, 2, 18 });
-        const encoded = try model_protocol.encodeText(&encoded_buffer, .complete, "ok");
-        @memcpy(memory[response_memory_offset..][0..encoded.len], encoded);
-        try self.call(self.interpret, &.{ response_memory_offset, @intCast(encoded.len), 18 });
-        if (try self.value(self.response_disposition) != @intFromEnum(model_protocol.Disposition.final_answer) or
-            try self.value(self.response_failure) != 0 or
-            try self.value(self.response_text_offset) != response_memory_offset + model_protocol.header_size + model_protocol.item_header_size or
-            try self.value(self.response_text_length) != 2 or
-            try self.value(self.task_outcome) != 3)
-        {
-            return error.CoreAbiMismatch;
-        }
-        try self.call(self.commit_final, &.{10});
-        if (try self.value(self.task_outcome) != 5 or try self.value(self.final_entry_id) != 10) {
-            return error.CoreAbiMismatch;
-        }
+        if (self.active) self.reducer.abandon();
+        self.lease.release() catch unreachable;
+        self.active = false;
     }
 };
+
+fn publishCoreCheckpoint(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    checkpoint_buffer: []u8,
+    core: *Core,
+    reactivate: bool,
+) !void {
+    try core.suspendIntoState();
+    try session.publishCheckpoint(
+        token,
+        agent_generation,
+        checkpoint_buffer,
+        &core.encoded_state,
+    );
+    if (reactivate) try core.activate();
+}
+
+fn restoreCoreCheckpoint(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    checkpoint_buffer: []u8,
+    core: *Core,
+) !void {
+    try session.restoreCheckpoint(
+        token,
+        agent_generation,
+        checkpoint_buffer,
+        &core.encoded_state,
+    );
+    try core.activate();
+}
 
 const ModelSlot = struct {
     core: *Core,
@@ -291,15 +151,16 @@ const ModelSlot = struct {
         completion: harness.Completion,
     ) anyerror!durable_transition.SlotState {
         const self: *ModelSlot = @ptrCast(@alignCast(context));
-        if (try self.core.value(self.core.operation_id) != completion.operation_id or
-            try self.core.value(self.core.operation_generation) != completion.operation_generation)
+        const operation = try self.core.reducer.operation();
+        if (operation.id != completion.operation_id or
+            operation.generation != completion.operation_generation)
         {
             return error.CoreOperationMismatch;
         }
-        return switch (try self.core.value(self.core.operation_state)) {
-            2 => .accepted,
-            3 => blk: {
-                if (try self.core.value(self.core.operation_result) != completion.result) {
+        return switch (operation.phase) {
+            .accepted => .accepted,
+            .completed => blk: {
+                if (operation.result_ref != completion.result) {
                     return error.CoreResultMismatch;
                 }
                 break :blk .completed;
@@ -310,26 +171,18 @@ const ModelSlot = struct {
 
     fn apply(context: *anyopaque, completion: harness.Completion) anyerror!void {
         const self: *ModelSlot = @ptrCast(@alignCast(context));
-        try self.core.call(self.core.complete, &.{
-            @intCast(completion.operation_id),
-            completion.operation_generation,
-            @intCast(completion.result),
-        });
+        try self.core.reducer.completeOperation(.{
+            .id = completion.operation_id,
+            .generation = completion.operation_generation,
+        }, completion.result);
         var response = try self.session.openBlob(self.token, completion.result);
         defer response.close();
         if (response.length() > model_protocol.max_response_size) return error.ResponseTooLarge;
-        const memory = self.core.page();
         const length: usize = @intCast(response.length());
-        const bytes = try response.readWindow(
-            0,
-            memory[response_memory_offset .. response_memory_offset + length],
-        );
+        var buffer: [model_protocol.max_response_size]u8 = undefined;
+        const bytes = try response.readWindow(0, buffer[0..length]);
         if (bytes.len != length) return error.TruncatedModelResponse;
-        try self.core.call(self.core.interpret, &.{
-            response_memory_offset,
-            @intCast(length),
-            @intCast(completion.result),
-        });
+        _ = try self.core.reducer.interpretModelResponse(bytes, completion.result);
     }
 
     fn interface(self: *ModelSlot) durable_transition.Slot {
@@ -347,6 +200,7 @@ const PersistFault = struct {
 };
 
 pub fn runNew(
+    host: *Host,
     sessions: std.Io.Dir,
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -354,7 +208,7 @@ pub fn runNew(
     provider: model_operation.Provider,
     observer: ?Observer,
 ) !Completed {
-    var core = try Core.open(allocator);
+    var core = try Core.open(&host.slots);
     var core_open = true;
     defer if (core_open) core.close();
     var session = try session_store.Session.create(sessions, io, .{
@@ -365,8 +219,8 @@ pub fn runNew(
     errdefer session.close();
     if (observer) |value| try value.session_created(value.context, session.session_id);
     const token = session.ownerToken();
-    try core.callVoid(core.initialize, &.{1});
-    try core.call(core.start_task, &.{@intCast(session.active_leaf_id)});
+    try core.initialize(session.agent_id);
+    try core.reducer.startTask(session.active_leaf_id);
     var journal = try session.openOperationJournal(token);
     defer journal.close(io);
     const checkpoint_buffer = try allocator.alloc(u8, checkpoint.encoded_size);
@@ -375,10 +229,10 @@ pub fn runNew(
     while (model_sequence <= 2) : (model_sequence += 1) {
         const ids = try performModelTurn(
             io,
-            allocator,
             &session,
             token,
             &core,
+            &host.slots,
             &core_open,
             checkpoint_buffer,
             &journal,
@@ -386,8 +240,8 @@ pub fn runNew(
             model_sequence,
             config.fault,
         );
-        const disposition = try core.value(core.response_disposition);
-        if (disposition == @intFromEnum(model_protocol.Disposition.final_answer)) {
+        const response = try core.reducer.response();
+        if (response.disposition == .final_answer) {
             const final_ref = try finalizeCandidate(
                 &session,
                 token,
@@ -397,12 +251,12 @@ pub fn runNew(
             );
             return .{ .session = session, .final_ref = final_ref };
         }
-        if (disposition != @intFromEnum(model_protocol.Disposition.tool_call)) {
-            return modelFailure(try core.value(core.response_failure));
+        if (response.disposition != .tool_call) {
+            return modelFailure(@intFromEnum(response.failure));
         }
         if (model_sequence != 1) return error.TooManyModelTurns;
-        switch (try core.value(core.response_tool)) {
-            @intFromEnum(model_protocol.Tool.bash) => {
+        switch (response.tool) {
+            .bash => {
                 const policy = config.bash_policy orelse return error.ToolCallDeferred;
                 try executeBashCall(
                     io,
@@ -410,6 +264,7 @@ pub fn runNew(
                     &session,
                     token,
                     &core,
+                    &host.slots,
                     checkpoint_buffer,
                     &journal,
                     ids,
@@ -420,7 +275,7 @@ pub fn runNew(
                     config.fault,
                 );
             },
-            @intFromEnum(model_protocol.Tool.apply_patch) => {
+            .apply_patch => {
                 const policy = config.patch_policy orelse return error.ToolCallDeferred;
                 const outcome = try requestPatchPermission(
                     io,
@@ -445,10 +300,10 @@ pub fn runNew(
 
 fn performModelTurn(
     io: std.Io,
-    allocator: std.mem.Allocator,
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
+    slot_pool: *ProductionSlotPool,
     core_open: *bool,
     checkpoint_buffer: []u8,
     journal: *operation_log.Writer,
@@ -457,14 +312,15 @@ fn performModelTurn(
     fault: ?FaultHook,
 ) !OperationIds {
     const ids = try allocateOperationIds(io, session);
-    try core.call(core.begin_model, &.{ ids.operation_id, model_sequence });
-    const operation_generation = try core.value(core.operation_generation);
+    const operation = try core.reducer.beginModelOperation(ids.operation_id, model_sequence);
+    const context = try core.reducer.modelContext();
+    const operation_generation = operation.generation;
     const descriptor = try model_operation.buildRequest(
         session,
         token,
         ids.request_ref,
-        try core.value(core.context_first),
-        try core.value(core.context_count),
+        context.first_entry,
+        context.entry_count,
     );
     try journal.appendDurable(io, .{
         .kind = .accepted,
@@ -479,13 +335,8 @@ fn performModelTurn(
         .descriptor_digest = descriptor.digest,
         .result = 0,
     });
-    try core.call(core.accept, &.{ ids.operation_id, operation_generation });
-    try session.publishCheckpoint(
-        token,
-        agent_generation,
-        checkpoint_buffer,
-        core.page(),
-    );
+    try core.reducer.acceptOperation(.{ .id = ids.operation_id, .generation = operation_generation });
+    try publishCoreCheckpoint(session, token, checkpoint_buffer, core, false);
     core.close();
     core_open.* = false;
 
@@ -503,14 +354,9 @@ fn performModelTurn(
     );
     try provider_io.ensureResponsePublished();
 
-    core.* = try Core.open(allocator);
+    core.* = try Core.open(slot_pool);
     core_open.* = true;
-    try session.restoreCheckpoint(
-        token,
-        agent_generation,
-        checkpoint_buffer,
-        core.page(),
-    );
+    try restoreCoreCheckpoint(session, token, checkpoint_buffer, core);
     var slot: ModelSlot = .{ .core = core, .session = session, .token = token };
     var persist_fault: PersistFault = undefined;
     if (fault) |hook| persist_fault = .{ .hook = hook };
@@ -550,6 +396,7 @@ fn executeBashCall(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
+    slot_pool: *ProductionSlotPool,
     checkpoint_buffer: []u8,
     journal: *operation_log.Writer,
     ids: OperationIds,
@@ -559,20 +406,21 @@ fn executeBashCall(
     cancellation: ?*const std.atomic.Value(bool),
     fault: ?FaultHook,
 ) !void {
-    if (try core.value(core.response_tool) != @intFromEnum(model_protocol.Tool.bash)) {
+    const response = try core.reducer.response();
+    if (response.tool != .bash) {
         return error.UnsupportedTool;
     }
-    const arguments_offset = try core.value(core.response_arguments_offset);
-    const arguments_length = try core.value(core.response_arguments_length);
-    var memory = core.page();
+    const arguments_length = response.arguments.length;
     if (arguments_length == 0 or arguments_length > bash_tool.call_header_size + bash_tool.max_command_size or
-        arguments_offset > memory.len or arguments_length > memory.len - arguments_offset)
+        arguments_length > model_protocol.max_response_size)
     {
         return error.InvalidBashCallRange;
     }
     var descriptor_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
-    @memcpy(descriptor_buffer[0..arguments_length], memory[arguments_offset..][0..arguments_length]);
-    const descriptor_bytes = descriptor_buffer[0..arguments_length];
+    const descriptor_bytes = try core.reducer.copyResponseWindow(
+        response.arguments,
+        &descriptor_buffer,
+    );
     const call = try bash_tool.decodeCall(descriptor_bytes);
     const digest = bash_tool.descriptorDigest(descriptor_bytes);
     const tool_operation_id = (@as(u64, 1) << 63) | ids.operation_id;
@@ -600,7 +448,7 @@ fn executeBashCall(
     if (allowed) {
         while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
         try appendToolRecord(journal, io, session, token, .attempt_started, tool_operation_id, attempt_id, digest, 0);
-        try session.publishCheckpoint(token, agent_generation, checkpoint_buffer, memory);
+        try publishCoreCheckpoint(session, token, checkpoint_buffer, core, false);
         core.close();
         core_open.* = false;
         execution = try bash_tool.executeControlled(
@@ -611,10 +459,9 @@ fn executeBashCall(
             .{ .cancelled = cancellation },
         );
         try reach(fault, .after_bash_execution);
-        core.* = try Core.open(allocator);
+        core.* = try Core.open(slot_pool);
         core_open.* = true;
-        memory = core.page();
-        try session.restoreCheckpoint(token, agent_generation, checkpoint_buffer, memory);
+        try restoreCoreCheckpoint(session, token, checkpoint_buffer, core);
     } else {
         execution = .{
             .allocator = allocator,
@@ -636,8 +483,8 @@ fn executeBashCall(
     try reach(fault, .after_bash_result);
     const result_entry = try session.appendConversation(token, .tool_result, result_ref, null);
     try reach(fault, .after_tool_result_entry);
-    try core.call(core.commit_tool, &.{ @intCast(call_entry.entry_id), @intCast(result_entry.entry_id) });
-    try session.publishCheckpoint(token, agent_generation, checkpoint_buffer, memory);
+    try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
+    try publishCoreCheckpoint(session, token, checkpoint_buffer, core, true);
     try reach(fault, .after_tool_checkpoint);
 }
 
@@ -656,17 +503,15 @@ fn requestPatchPermission(
     policy: patch_tool.Policy,
     fault: ?FaultHook,
 ) !PatchPermissionOutcome {
-    const arguments_offset = try core.value(core.response_arguments_offset);
-    const arguments_length = try core.value(core.response_arguments_length);
-    const memory = core.page();
+    const response = try core.reducer.response();
+    const arguments_length = response.arguments.length;
     if (arguments_length == 0 or arguments_length > patch_tool.max_patch_size or
-        arguments_offset > memory.len or arguments_length > memory.len - arguments_offset)
+        arguments_length > model_protocol.max_response_size)
     {
         return error.InvalidPatchRange;
     }
     var patch_buffer: [patch_tool.max_patch_size]u8 = undefined;
-    @memcpy(patch_buffer[0..arguments_length], memory[arguments_offset..][0..arguments_length]);
-    const patch = patch_buffer[0..arguments_length];
+    const patch = try core.reducer.copyResponseWindow(response.arguments, &patch_buffer);
     const validation = try patch_tool.validate(allocator, io, workspace_path, patch);
     const tool_operation_id = (@as(u64, 3) << 62) | ids.operation_id;
     const patch_ref = (@as(u64, 1) << 60) | ids.response_ref;
@@ -715,7 +560,7 @@ fn requestPatchPermission(
             validation.patch_digest,
             approval_ref,
         );
-        try session.publishCheckpoint(token, agent_generation, checkpoint_buffer, memory);
+        try publishCoreCheckpoint(session, token, checkpoint_buffer, core, true);
         allowed = try policy.ask(subject, patch);
     }
     const decision: patch_tool.Decision = if (allowed) .allow else .deny;
@@ -772,7 +617,7 @@ fn requestPatchPermission(
         if (observed) |current| {
             observed_workspace_digest = current.workspace_digest;
             if (patch_tool.sameWorkspace(validation, current)) {
-                try session.publishCheckpoint(token, agent_generation, checkpoint_buffer, memory);
+                try publishCoreCheckpoint(session, token, checkpoint_buffer, core, true);
                 return .approved;
             }
         } else {
@@ -801,8 +646,8 @@ fn requestPatchPermission(
         result_ref,
     );
     const result_entry = try session.appendConversation(token, .tool_result, result_ref, null);
-    try core.call(core.commit_tool, &.{ @intCast(call_entry.entry_id), @intCast(result_entry.entry_id) });
-    try session.publishCheckpoint(token, agent_generation, checkpoint_buffer, memory);
+    try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
+    try publishCoreCheckpoint(session, token, checkpoint_buffer, core, true);
     return .ready;
 }
 
@@ -858,12 +703,13 @@ fn appendToolRecord(
 }
 
 pub fn resumeSession(
+    host: *Host,
     sessions: std.Io.Dir,
     io: std.Io,
     allocator: std.mem.Allocator,
     session_id: u64,
 ) !Completed {
-    var core = try Core.open(allocator);
+    var core = try Core.open(&host.slots);
     defer core.close();
     var manifest_buffer: [session_store.manifest_max_size]u8 = undefined;
     var restored = try session_store.Session.openExisting(
@@ -876,20 +722,15 @@ pub fn resumeSession(
     const token = restored.session.ownerToken();
     const checkpoint_buffer = try allocator.alloc(u8, checkpoint.encoded_size);
     defer allocator.free(checkpoint_buffer);
-    try restored.session.restoreCheckpoint(
-        token,
-        agent_generation,
-        checkpoint_buffer,
-        core.page(),
-    );
-    var outcome = try core.value(core.task_outcome);
-    if (outcome == 2) {
+    try restoreCoreCheckpoint(&restored.session, token, checkpoint_buffer, &core);
+    var outcome = (try core.reducer.task()).phase;
+    if (outcome == .awaiting_model) {
         const completion = try durableCompletion(&restored.session, token, &core);
         var slot: ModelSlot = .{ .core = &core, .session = &restored.session, .token = token };
         try ModelSlot.apply(&slot, completion);
-        outcome = try core.value(core.task_outcome);
+        outcome = (try core.reducer.task()).phase;
     }
-    if (outcome == 3) {
+    if (outcome == .final_candidate) {
         const final_ref = try finalizeCandidate(
             &restored.session,
             token,
@@ -899,7 +740,7 @@ pub fn resumeSession(
         );
         return .{ .session = restored.session, .final_ref = final_ref };
     }
-    if (outcome == 4) {
+    if (outcome == .awaiting_tool) {
         switch (try reconcileToolCall(
             &restored.session,
             token,
@@ -915,10 +756,10 @@ pub fn resumeSession(
             .none => return error.ToolCallDeferred,
         }
     }
-    if (outcome == 6) return modelFailure(try core.value(core.response_failure));
-    if (outcome == 1) return error.SessionNeedsModel;
-    if (outcome != 5) return error.SessionNotFinished;
-    const entry_id = try core.value(core.final_entry_id);
+    if (outcome == .failed) return modelFailure(@intFromEnum((try core.reducer.response()).failure));
+    if (outcome == .ready) return error.SessionNeedsModel;
+    if (outcome != .finished) return error.SessionNotFinished;
+    const entry_id = (try core.reducer.task()).final_entry_id;
     if (entry_id != restored.session.active_leaf_id) return error.FinalEntryMismatch;
     const entry = try restored.session.readEntry(entry_id);
     if (entry.kind != .assistant) return error.InvalidFinalEntry;
@@ -926,13 +767,14 @@ pub fn resumeSession(
 }
 
 pub fn resumeWithProvider(
+    host: *Host,
     sessions: std.Io.Dir,
     io: std.Io,
     allocator: std.mem.Allocator,
     session_id: u64,
     provider: model_operation.Provider,
 ) !Completed {
-    var core = try Core.open(allocator);
+    var core = try Core.open(&host.slots);
     var core_open = true;
     defer if (core_open) core.close();
     var manifest_buffer: [session_store.manifest_max_size]u8 = undefined;
@@ -946,20 +788,15 @@ pub fn resumeWithProvider(
     const token = restored.session.ownerToken();
     const checkpoint_buffer = try allocator.alloc(u8, checkpoint.encoded_size);
     defer allocator.free(checkpoint_buffer);
-    try restored.session.restoreCheckpoint(
-        token,
-        agent_generation,
-        checkpoint_buffer,
-        core.page(),
-    );
-    var outcome = try core.value(core.task_outcome);
-    if (outcome == 2) {
+    try restoreCoreCheckpoint(&restored.session, token, checkpoint_buffer, &core);
+    var outcome = (try core.reducer.task()).phase;
+    if (outcome == .awaiting_model) {
         const completion = try durableCompletion(&restored.session, token, &core);
         var slot: ModelSlot = .{ .core = &core, .session = &restored.session, .token = token };
         try ModelSlot.apply(&slot, completion);
-        outcome = try core.value(core.task_outcome);
+        outcome = (try core.reducer.task()).phase;
     }
-    if (outcome == 4) {
+    if (outcome == .awaiting_tool) {
         switch (try reconcileToolCall(
             &restored.session,
             token,
@@ -969,21 +806,21 @@ pub fn resumeWithProvider(
             restored.manifest.workspace_path,
         )) {
             .indeterminate => return error.BashPossiblyExecuted,
-            .ready => outcome = 1,
+            .ready => outcome = .ready,
             .approval_required => return error.PatchApprovalRequired,
             .approved => return error.PatchExecutionDeferred,
             .none => return error.ToolCallDeferred,
         }
     }
-    if (outcome != 1) return error.SessionNotReadyForModel;
+    if (outcome != .ready) return error.SessionNotReadyForModel;
     var journal = try restored.session.openOperationJournal(token);
     defer journal.close(io);
     _ = try performModelTurn(
         io,
-        allocator,
         &restored.session,
         token,
         &core,
+        &host.slots,
         &core_open,
         checkpoint_buffer,
         &journal,
@@ -991,7 +828,7 @@ pub fn resumeWithProvider(
         2,
         null,
     );
-    if (try core.value(core.response_disposition) != @intFromEnum(model_protocol.Disposition.final_answer)) {
+    if ((try core.reducer.response()).disposition != .final_answer) {
         return error.ResumedModelDidNotFinish;
     }
     const final_ref = try finalizeCandidate(
@@ -1014,9 +851,9 @@ fn reconcileToolCall(
     allocator: std.mem.Allocator,
     workspace_path: []const u8,
 ) !ToolRecovery {
-    return switch (try core.value(core.response_tool)) {
-        @intFromEnum(model_protocol.Tool.bash) => reconcileBash(session, token, core, checkpoint_buffer),
-        @intFromEnum(model_protocol.Tool.apply_patch) => reconcilePatch(
+    return switch ((try core.reducer.response()).tool) {
+        .bash => reconcileBash(session, token, core, checkpoint_buffer),
+        .apply_patch => reconcilePatch(
             session,
             token,
             core,
@@ -1099,8 +936,9 @@ fn reconcilePatch(
     allocator: std.mem.Allocator,
     workspace_path: []const u8,
 ) !ToolRecovery {
-    const model_operation_id = try core.value(core.operation_id);
-    const response_ref: u32 = @truncate(try core.value(core.operation_result));
+    const operation_observation = try core.reducer.operation();
+    const model_operation_id = operation_observation.id;
+    const response_ref: u32 = @truncate(operation_observation.result_ref);
     const operation_id = (@as(u64, 3) << 62) | model_operation_id;
     const patch_ref = (@as(u64, 1) << 60) | response_ref;
     const result_ref = (@as(u64, 1) << 57) | response_ref;
@@ -1316,13 +1154,8 @@ fn reconcileToolResult(
     {
         return error.ToolConversationMismatch;
     }
-    try core.call(core.commit_tool, &.{ @intCast(call_entry.entry_id), @intCast(result_entry.entry_id) });
-    try session.publishCheckpoint(
-        token,
-        agent_generation,
-        checkpoint_buffer,
-        core.page(),
-    );
+    try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
+    try publishCoreCheckpoint(session, token, checkpoint_buffer, core, true);
 }
 
 fn durableCompletion(
@@ -1330,8 +1163,9 @@ fn durableCompletion(
     token: session_store.OwnerToken,
     core: *Core,
 ) !harness.Completion {
-    const operation_id = try core.value(core.operation_id);
-    const operation_generation = try core.value(core.operation_generation);
+    const operation = try core.reducer.operation();
+    const operation_id = operation.id;
+    const operation_generation = operation.generation;
     var reader = try session.openOperationReader(token);
     defer reader.close(session.io);
     var accepted: ?operation_log.Record = null;
@@ -1383,19 +1217,18 @@ fn finalizeCandidate(
     checkpoint_buffer: []u8,
     fault: ?FaultHook,
 ) !u64 {
-    if (try core.value(core.task_outcome) != 3 or
-        try core.value(core.response_disposition) != @intFromEnum(model_protocol.Disposition.final_answer))
-    {
+    const task = try core.reducer.task();
+    const response = try core.reducer.response();
+    if (task.phase != .final_candidate or response.disposition != .final_answer) {
         return error.FinalAnswerNotCandidate;
     }
-    const text_offset = try core.value(core.response_text_offset);
-    const text_length = try core.value(core.response_text_length);
-    const memory = core.page();
-    if (text_length == 0 or text_offset > memory.len or text_length > memory.len - text_offset) {
+    try stageDurableResponse(session, token, core, response);
+    var final_buffer: [model_protocol.max_response_size]u8 = undefined;
+    const expected = try core.reducer.copyResponseWindow(response.text, &final_buffer);
+    if (expected.len == 0) {
         return error.InvalidFinalAnswerRange;
     }
-    const expected = memory[text_offset..][0..text_length];
-    const response_ref = try core.value(core.operation_result);
+    const response_ref = response.content_ref;
     if (response_ref == 0) return error.InvalidModelResponseReference;
     const final_ref = finalReference(response_ref);
 
@@ -1415,9 +1248,27 @@ fn finalizeCandidate(
         entry = try session.appendConversation(token, .assistant, final_ref, null);
     }
     try reach(fault, .after_assistant_entry);
-    try core.call(core.commit_final, &.{@intCast(entry.entry_id)});
-    try session.publishCheckpoint(token, agent_generation, checkpoint_buffer, memory);
+    try core.reducer.commitFinalAnswer(entry.entry_id);
+    try publishCoreCheckpoint(session, token, checkpoint_buffer, core, true);
     return final_ref;
+}
+
+fn stageDurableResponse(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    core: *Core,
+    response: core_image.Response,
+) !void {
+    var blob = try session.openBlob(token, response.content_ref);
+    defer blob.close();
+    if (blob.length() == 0 or blob.length() > model_protocol.max_response_size) {
+        return error.ResponseTooLarge;
+    }
+    var buffer: [model_protocol.max_response_size]u8 = undefined;
+    const length: usize = @intCast(blob.length());
+    const bytes = try blob.readWindow(0, buffer[0..length]);
+    if (bytes.len != length) return error.TruncatedModelResponse;
+    try core.reducer.stageResponse(bytes, response.content_ref);
 }
 
 fn reach(fault: ?FaultHook, boundary: FaultBoundary) !void {
