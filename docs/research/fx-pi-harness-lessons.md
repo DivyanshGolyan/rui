@@ -69,7 +69,18 @@ fx's default permission rule is also a good conservative baseline: allow read-on
 
 fx's production runtime supports many providers, tools, permission modes, presentation sinks, recovery paths, subagents, hooks, dynamic tools, and secondary publications. That breadth is appropriate for fx, but its runtime dependency record exposes dozens of callbacks and optional capabilities ([source](https://github.com/vercel-labs/fx/blob/88cb3da8d5559a960fc3d08fbaed45e0ba6df863/src/core/agent/runtime/deps.zig#L167-L245)).
 
-For OnePage, copying that surface would make callers learn the implementation choreography. The initial harness should have fixed built-in tool kinds and only the adapters required by the deterministic fixture and OpenRouter path.
+For OnePage, copying that surface would make callers learn the implementation choreography. The initial harness should have fixed built-in tool kinds and only the adapters required by the deterministic fixture and first live provider.
+
+### 2026-08-25 follow-up: use Codex subscription access first
+
+At [`fff3f63e348dec846bb235332974226bd2feae26`](https://github.com/vercel-labs/fx/tree/fff3f63e348dec846bb235332974226bd2feae26), fx has a complete Codex subscription path that is a better first live-provider reference than OpenRouter for OnePage's audience:
+
+- `fx login codex` uses an OAuth authorization-code flow with PKCE, a random state value, a loopback callback, and a refresh token ([authorization](https://github.com/vercel-labs/fx/blob/fff3f63e348dec846bb235332974226bd2feae26/src/core/auth/chatgpt_oauth.zig), [callback](https://github.com/vercel-labs/fx/blob/fff3f63e348dec846bb235332974226bd2feae26/src/core/auth/browser_callback.zig)).
+- The refreshable session is stored outside agent state with private-directory, file-permission, locking, atomic-replacement, and secret-zeroing rules ([session storage](https://github.com/vercel-labs/fx/blob/fff3f63e348dec846bb235332974226bd2feae26/src/core/auth/chatgpt_session.zig)).
+- The access token's account claim binds requests to the matching ChatGPT account, and transport calls the Codex Responses endpoint directly rather than relaying the token through another provider ([transport](https://github.com/vercel-labs/fx/blob/fff3f63e348dec846bb235332974226bd2feae26/src/gateway/openai_codex.zig)).
+- Model selection comes from the authenticated Codex catalog rather than a hard-coded or cross-provider model list ([catalog](https://github.com/vercel-labs/fx/blob/fff3f63e348dec846bb235332974226bd2feae26/src/gateway/openai_codex_models.zig)).
+
+OnePage should adopt those boundaries, not fx's full provider system. OAuth login, credential refresh, model-catalog fetching, and wire transport remain host concerns outside Core State, the Activation Slot, Session WAL, Model Context, tool environments, and durable result content. The selected raw Codex model ID is fixed in the Session before the first model Attempt. Ordinary tests use deterministic fake authorization, token, catalog, and Responses endpoints; only an explicitly selected compatibility test uses a real ChatGPT subscription.
 
 ## Pi
 

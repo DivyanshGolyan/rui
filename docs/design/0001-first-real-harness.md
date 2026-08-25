@@ -198,7 +198,7 @@ Interactive example:
 ```sh
 onepage \
   --repo ./fixture \
-  --model openrouter:MODEL \
+  --model codex:MODEL \
   "Fix the failing parser test"
 ```
 
@@ -432,7 +432,7 @@ Dependency category: true external.
 
 Adapters:
 
-- OpenRouter for live inference.
+- Codex subscription access for live inference.
 - Fixture model that validates the exact model-visible history before returning each response.
 
 The adapter consumes one already-accepted typed request and finishes by publishing one durable result. It cannot call the core.
@@ -568,7 +568,7 @@ internal module test once the harness-seam tests cover it.
 5. Add one-file `apply_patch` validation and digest-bound permission.
 6. Add guarded patch application and preimage/postimage/divergent reconciliation.
 7. Compose Bash inspection, `apply_patch`, Bash verification, and the Final Answer into the deterministic repair.
-8. Add OpenRouter transport behind the same model port.
+8. Add ChatGPT browser authorization, refreshable local credentials, the authenticated Codex model catalog, and Codex transport behind the same model port.
 9. Add crash injection across the now-real model, permission, Bash, and patch boundaries.
 10. Package the honest one-page terminal demonstration; implement runtime-configurable active capacity separately in issue #3 after measuring the real loop.
 

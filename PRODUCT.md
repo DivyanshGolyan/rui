@@ -15,7 +15,7 @@ A complete non-empty assistant response with no tool call is the Final Answer. T
 
 The default `ask` permission mode requests a user decision for every exact tool descriptor. Explicit `--dangerously-bypass-permissions` authorizes validated descriptors without prompting for that invocation. Bypass never disables validation, fixed bounds, durable binding, patch preimage checks, Attempt admission, or effect-specific recovery, and it must be selected again after resume.
 
-The terminal demonstrates durable Session identity, exact Action authority, crash recovery, explicit uncertainty, patch reconciliation, executable verification, and honest resource accounting. Deterministic fixtures provide the reproducible repair and crash demonstration; live OpenRouter transport is an opt-in compatibility path using the user's credential.
+The terminal demonstrates durable Session identity, exact Action authority, crash recovery, explicit uncertainty, patch reconciliation, executable verification, and honest resource accounting. Deterministic fixtures provide the reproducible repair and crash demonstration; live Codex transport is an opt-in compatibility path using the user's ChatGPT subscription through browser authorization.
 
 ## Product guarantees
 
