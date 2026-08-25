@@ -1,6 +1,7 @@
 const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
 const harness = @import("harness.zig");
+const host_store = @import("host_store.zig");
 const model_operation = @import("model_operation.zig");
 
 const task = "Explain the fixture repository.";
@@ -20,6 +21,7 @@ pub fn main(init: std.process.Init) !void {
     };
     var owner = try harness.Harness.open(.{
         .host = &host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = init.io,
         .allocator = allocator,
@@ -51,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
 
     var restored = try harness.Harness.open(.{
         .host = &host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = init.io,
         .allocator = allocator,
@@ -80,6 +83,7 @@ fn uncommittedTaskCanBeReadmitted(
     var fixture: model_operation.Fixture = .{ .expected_task = task, .final_answer = answer };
     var owner = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -97,6 +101,7 @@ fn uncommittedTaskCanBeReadmitted(
 
     var restored = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -123,6 +128,7 @@ fn cancellationRegenerates(
     var fixture: model_operation.Fixture = .{ .expected_task = task, .final_answer = answer };
     var owner = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -146,6 +152,7 @@ fn cancellationRegenerates(
 
     var restored = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -178,6 +185,7 @@ fn offeredPermissionDenialContinues(
     };
     var owner = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -198,6 +206,7 @@ fn offeredPermissionDenialContinues(
 
     var restored = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -266,6 +275,7 @@ fn restoredPatchApprovalUsesExactDescriptor(
     };
     var owner = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -286,6 +296,7 @@ fn restoredPatchApprovalUsesExactDescriptor(
 
     var restored = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -352,6 +363,7 @@ fn approvedPatchThenShutdownEntersSettlement(
     };
     var owner = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -398,6 +410,7 @@ fn lostCompletionNotificationRecovers(
     var capture: Crash = .{ .target = .after_completion_inbox };
     var owner = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -417,6 +430,7 @@ fn lostCompletionNotificationRecovers(
 
     var restored = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -439,6 +453,7 @@ fn uncertainModelRetryUsesNewAttempt(
     var capture: Crash = .{ .target = .after_model_dispatch };
     var owner = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -458,6 +473,7 @@ fn uncertainModelRetryUsesNewAttempt(
 
     var restored = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -490,6 +506,7 @@ fn uncertainBashNeverReplays(
     var capture: Crash = .{ .target = .after_bash_execution };
     var owner = try harness.Harness.open(.{
         .host = host,
+        .storage = &layout.storage,
         .sessions = layout.sessions,
         .io = io,
         .allocator = allocator,
@@ -512,6 +529,7 @@ fn uncertainBashNeverReplays(
     inline for (0..2) |_| {
         var restored = try harness.Harness.open(.{
             .host = host,
+            .storage = &layout.storage,
             .sessions = layout.sessions,
             .io = io,
             .allocator = allocator,
@@ -586,6 +604,7 @@ const Crash = struct {
 const Layout = struct {
     root: std.Io.Dir,
     root_path: []u8,
+    storage: host_store.StorageOwner,
     sessions: std.Io.Dir,
     workspace: std.Io.Dir,
     workspace_path: []u8,
@@ -612,6 +631,10 @@ const Layout = struct {
         errdefer sessions.close(io);
         var workspace = try root.openDir(io, "repo", .{});
         errdefer workspace.close(io);
+        const database_path = try std.fs.path.join(allocator, &.{ root_path, "host.sqlite3" });
+        defer allocator.free(database_path);
+        var storage = try host_store.StorageOwner.open(io, database_path, .{});
+        errdefer storage.close();
         const workspace_path = try std.fs.path.join(allocator, &.{ root_path, "repo" });
         errdefer allocator.free(workspace_path);
         const initialized = try std.process.run(allocator, io, .{
@@ -628,6 +651,7 @@ const Layout = struct {
         return .{
             .root = root,
             .root_path = root_path,
+            .storage = storage,
             .sessions = sessions,
             .workspace = workspace,
             .workspace_path = workspace_path,
@@ -636,6 +660,7 @@ const Layout = struct {
     }
 
     fn deinit(self: *Layout, io: std.Io) void {
+        self.storage.close();
         self.sessions.close(io);
         self.workspace.close(io);
         self.allocator.free(self.workspace_path);

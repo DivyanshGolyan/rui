@@ -1,31 +1,19 @@
 const std = @import("std");
 const blob_store = @import("blob_store.zig");
 const checkpoint = @import("checkpoint.zig");
-const checkpoint_store = @import("checkpoint_store.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const core_state = @import("core_state.zig");
-const session_wal = @import("session_wal.zig");
+const host_store = @import("host_store.zig");
+const session_transition = @import("session_transition.zig");
 
-pub const manifest_max_size = 2048;
 pub const workspace_path_capacity = 1024;
-pub const manifest_header_size = 128;
 pub const conversation_record_size = 80;
-pub const manifest_version: u16 = 2;
 pub const conversation_version: u16 = 1;
 
-const manifest_magic = "ONESESS\x00";
 const conversation_magic = "ONECONV\x00";
-const manifest_path = "manifest";
-const manifest_temp_path = "manifest.tmp";
 const conversation_path = "conversation.log";
 const lock_path = "owner.lock";
 const blobs_path = "blobs";
-const wal_path = "session.wal";
-const inbox_path = "completion.inbox";
-const checkpoint_path = "core.state";
-const checkpoint_temp_path = "core.state.tmp";
-
-const manifest_crc_offset = 20;
 
 pub const Identities = struct {
     session_id: u64,
@@ -84,19 +72,8 @@ pub const ConversationEntry = struct {
     sequence: u64,
 };
 
-pub const ManifestView = struct {
-    identities: Identities,
-    ownership_epoch: u64,
-    active_leaf_id: u64,
-    entry_count: u64,
-    workspace_path: []const u8,
-    model: []const u8,
-    task: []const u8,
-};
-
 pub const Restored = struct {
     session: Session,
-    manifest: ManifestView,
 };
 
 pub const Projection = struct {
@@ -106,13 +83,13 @@ pub const Projection = struct {
     ownership_epoch: u64,
 };
 
-pub const WalView = struct {
+pub const LedgerView = struct {
     last_sequence: u64 = 0,
     last_core: ?[core_state.encoded_size]u8 = null,
-    facts: [session_wal.max_facts]session_wal.Fact = undefined,
+    facts: [session_transition.max_facts]session_transition.Fact = undefined,
     fact_count: u8 = 0,
 
-    pub fn factSlice(self: *const WalView) []const session_wal.Fact {
+    pub fn factSlice(self: *const LedgerView) []const session_transition.Fact {
         return self.facts[0..self.fact_count];
     }
 };
@@ -122,24 +99,24 @@ const OperationHistory = struct {
 
     operation_id: u64 = 0,
     generation: u32 = 0,
-    recovery_class: session_wal.RecoveryClass = .none,
-    descriptor: ?session_wal.Fact = null,
-    attempt: ?session_wal.Fact = null,
-    attempts: [max_attempts]?session_wal.Fact = @splat(null),
+    recovery_class: session_transition.RecoveryClass = .none,
+    descriptor: ?session_transition.Fact = null,
+    attempt: ?session_transition.Fact = null,
+    attempts: [max_attempts]?session_transition.Fact = @splat(null),
     attempt_count: u8 = 0,
-    approval_required: ?session_wal.Fact = null,
-    authorization: ?session_wal.Fact = null,
-    result: ?session_wal.Fact = null,
+    approval_required: ?session_transition.Fact = null,
+    authorization: ?session_transition.Fact = null,
+    result: ?session_transition.Fact = null,
 
-    fn accepts(self: OperationHistory, fact: session_wal.Fact) bool {
+    fn accepts(self: OperationHistory, fact: session_transition.Fact) bool {
         return self.operation_id == fact.operation_id and self.generation == fact.generation;
     }
 
-    fn appendAttempt(self: *OperationHistory, fact: session_wal.Fact) !void {
+    fn appendAttempt(self: *OperationHistory, fact: session_transition.Fact) !void {
         for (self.attempts[0..self.attempt_count]) |maybe_existing| {
             const existing = maybe_existing.?;
             if (existing.attempt_id != fact.attempt_id) continue;
-            if (!std.meta.eql(existing, fact)) return error.ConflictingWalFacts;
+            if (!std.meta.eql(existing, fact)) return error.ConflictingLedgerFacts;
             self.attempt = existing;
             return;
         }
@@ -162,11 +139,11 @@ const SemanticIndex = struct {
     last_core: ?[core_state.encoded_size]u8 = null,
     model: OperationHistory = .{},
     consequential: OperationHistory = .{},
-    open_operation: ?session_wal.Fact = null,
-    control: ?session_wal.Fact = null,
-    indeterminate: ?session_wal.Fact = null,
+    open_operation: ?session_transition.Fact = null,
+    control: ?session_transition.Fact = null,
+    indeterminate: ?session_transition.Fact = null,
 
-    fn apply(self: *SemanticIndex, transaction: session_wal.Transaction) !void {
+    fn apply(self: *SemanticIndex, transaction: session_transition.Transaction) !void {
         if (transaction.sequence != self.last_sequence + 1) return error.NonmonotonicSequence;
         for (transaction.factSlice()) |fact| {
             const history: ?*OperationHistory = switch (fact.recovery_class) {
@@ -229,12 +206,12 @@ const SemanticIndex = struct {
     fn emit(
         self: *const SemanticIndex,
         context: *anyopaque,
-        apply_fn: *const fn (*anyopaque, session_wal.Transaction) anyerror!void,
+        apply_fn: *const fn (*anyopaque, session_transition.Transaction) anyerror!void,
     ) !void {
         var sequence: u64 = 1;
         const histories = [_]OperationHistory{ self.model, self.consequential };
         for (histories) |history| {
-            const facts = [_]?session_wal.Fact{
+            const facts = [_]?session_transition.Fact{
                 history.descriptor,
                 history.approval_required,
                 history.authorization,
@@ -264,9 +241,9 @@ const SemanticIndex = struct {
     }
 };
 
-fn uniqueIndexedFact(existing: ?session_wal.Fact, fact: session_wal.Fact) !session_wal.Fact {
+fn uniqueIndexedFact(existing: ?session_transition.Fact, fact: session_transition.Fact) !session_transition.Fact {
     if (existing) |value| {
-        if (!std.meta.eql(value, fact)) return error.ConflictingWalFacts;
+        if (!std.meta.eql(value, fact)) return error.ConflictingLedgerFacts;
         return value;
     }
     return fact;
@@ -274,11 +251,11 @@ fn uniqueIndexedFact(existing: ?session_wal.Fact, fact: session_wal.Fact) !sessi
 
 fn applyOne(
     context: *anyopaque,
-    apply_fn: *const fn (*anyopaque, session_wal.Transaction) anyerror!void,
+    apply_fn: *const fn (*anyopaque, session_transition.Transaction) anyerror!void,
     sequence: u64,
-    fact: session_wal.Fact,
+    fact: session_transition.Fact,
 ) !void {
-    var transaction: session_wal.Transaction = .{ .sequence = sequence, .fact_count = 1 };
+    var transaction: session_transition.Transaction = .{ .sequence = sequence, .fact_count = 1 };
     transaction.facts[0] = fact;
     try apply_fn(context, transaction);
 }
@@ -464,6 +441,7 @@ pub const BlobReader = struct {
 pub const Session = struct {
     io: std.Io,
     dir: std.Io.Dir,
+    storage: *host_store.StorageOwner,
     lock_file: std.Io.File,
     session_id: u64,
     agent_id: u64,
@@ -472,24 +450,31 @@ pub const Session = struct {
     ownership_epoch: u64,
     active_leaf_id: u64,
     entry_count: u64,
-    wal_sequence: u64 = 0,
+    ledger_sequence: u64 = 0,
     semantic_index: SemanticIndex = .{},
-    recovery_reader: ?session_wal.Reader = null,
-    recovery_inbox_reader: ?completion_inbox.Reader = null,
+    recovery_sequence: u64 = 1,
+    recovery_ledger_head: u64 = 0,
+    recovery_inbox_sequence: u64 = 1,
+    recovery_inbox_head: u64 = 0,
+    recovery_started: bool = false,
     recovery_complete: bool = true,
-    wal_writer: ?session_wal.Writer = null,
     inbox_index: InboxIndex = .{},
     workspace_path: [workspace_path_capacity]u8 = undefined,
     workspace_path_length: u16,
     open: bool = true,
     failed: bool = false,
 
-    pub fn create(root: std.Io.Dir, io: std.Io, config: Config) !Session {
+    pub fn create(
+        root: std.Io.Dir,
+        storage: *host_store.StorageOwner,
+        io: std.Io,
+        config: Config,
+    ) !Session {
         for (0..8) |_| {
             var identities: Identities = undefined;
             io.random(std.mem.asBytes(&identities));
             identities.validate() catch continue;
-            return createExact(root, io, .{
+            return createExact(root, storage, io, .{
                 .identities = identities,
                 .workspace_path = config.workspace_path,
                 .model = config.model,
@@ -502,28 +487,22 @@ pub const Session = struct {
         return error.IdentityAllocationExhausted;
     }
 
-    fn createExact(root: std.Io.Dir, io: std.Io, config: CreateConfig) !Session {
+    fn createExact(
+        root: std.Io.Dir,
+        storage: *host_store.StorageOwner,
+        io: std.Io,
+        config: CreateConfig,
+    ) !Session {
         try config.identities.validate();
         if (config.workspace_path.len == 0 or config.model.len == 0 or config.task.len == 0) {
             return error.InvalidSessionMetadata;
         }
         try validateWorkspace(io, config.workspace_path);
 
-        const initial_view: ManifestView = .{
-            .identities = config.identities,
-            .ownership_epoch = 1,
-            .active_leaf_id = 1,
-            .entry_count = 1,
-            .workspace_path = config.workspace_path,
-            .model = config.model,
-            .task = config.task,
-        };
-        var validation_buffer: [manifest_max_size]u8 = undefined;
-        _ = try encodeManifest(&validation_buffer, initial_view);
-
         var name_buffer: [16]u8 = undefined;
         const name = sessionName(config.identities.session_id, &name_buffer);
         try root.createDir(io, name, .fromMode(0o700));
+        errdefer root.deleteTree(io, name) catch {};
         try syncDir(root, io);
         var dir = try root.openDir(io, name, .{});
         errdefer dir.close(io);
@@ -543,10 +522,6 @@ pub const Session = struct {
         var blobs = try dir.openDir(io, blobs_path, .{});
         defer blobs.close(io);
         try blob_store.put(blobs, io, config.identities.task_id, config.task);
-        var wal = try session_wal.Writer.createIn(dir, io, wal_path);
-        wal.close(io);
-        var inbox = try completion_inbox.Writer.createIn(dir, io, inbox_path);
-        inbox.close(io);
         try syncDir(dir, io);
 
         var conversation = try dir.createFile(io, conversation_path, .{ .exclusive = true });
@@ -560,16 +535,25 @@ pub const Session = struct {
             .content_ref = config.identities.task_id,
             .sequence = 1,
         });
-        try publishManifest(dir, io, initial_view);
+        try storage.createSessionWithMetadata(.{
+            .identities = .{
+                .session_id = config.identities.session_id,
+                .agent_id = config.identities.agent_id,
+                .task_id = config.identities.task_id,
+                .branch_id = config.identities.branch_id,
+            },
+            .workspace_path = config.workspace_path,
+            .model = config.model,
+        });
 
-        return fromManifest(io, dir, lock_file, initial_view, true);
+        return fromStored(io, storage, dir, lock_file, try storage.readSession(config.identities.session_id), true);
     }
 
     pub fn openExisting(
         root: std.Io.Dir,
+        storage: *host_store.StorageOwner,
         io: std.Io,
         session_id: u64,
-        manifest_buffer: *[manifest_max_size]u8,
     ) !Restored {
         if (session_id == 0) return error.InvalidIdentity;
         var name_buffer: [16]u8 = undefined;
@@ -589,44 +573,42 @@ pub const Session = struct {
             lock_file.close(io);
         }
 
-        var view = try readManifest(dir, io, manifest_buffer);
-        if (view.identities.session_id != session_id) return error.SessionIdentityMismatch;
-        try validateWorkspace(io, view.workspace_path);
-        if (view.ownership_epoch == std.math.maxInt(u64)) return error.OwnershipEpochExhausted;
-        view.ownership_epoch += 1;
-        try publishManifest(dir, io, view);
-
-        view = try reconcileConversation(dir, io, view);
-        const restored_view = try readManifest(dir, io, manifest_buffer);
+        var stored = try storage.readSession(session_id);
+        try validateWorkspace(io, stored.workspacePath());
+        stored.ownership_epoch = try storage.claimSession(session_id);
+        try validateConversationRoot(dir, io, stored.identities);
+        stored.active_leaf_id = 1;
+        stored.entry_count = 1;
         return .{
-            .session = fromManifest(io, dir, lock_file, view, false),
-            .manifest = restored_view,
+            .session = fromStored(io, storage, dir, lock_file, stored, false),
         };
     }
 
-    fn fromManifest(
+    fn fromStored(
         io: std.Io,
+        storage: *host_store.StorageOwner,
         dir: std.Io.Dir,
         lock_file: std.Io.File,
-        view: ManifestView,
+        stored: host_store.StoredSession,
         recovery_complete: bool,
     ) Session {
-        std.debug.assert(view.workspace_path.len <= workspace_path_capacity);
+        std.debug.assert(stored.workspacePath().len <= workspace_path_capacity);
         var session: Session = .{
             .io = io,
             .dir = dir,
+            .storage = storage,
             .lock_file = lock_file,
-            .session_id = view.identities.session_id,
-            .agent_id = view.identities.agent_id,
-            .task_id = view.identities.task_id,
-            .branch_id = view.identities.branch_id,
-            .ownership_epoch = view.ownership_epoch,
-            .active_leaf_id = view.active_leaf_id,
-            .entry_count = view.entry_count,
-            .workspace_path_length = @intCast(view.workspace_path.len),
+            .session_id = stored.identities.session_id,
+            .agent_id = stored.identities.agent_id,
+            .task_id = stored.identities.task_id,
+            .branch_id = stored.identities.branch_id,
+            .ownership_epoch = stored.ownership_epoch,
+            .active_leaf_id = stored.active_leaf_id,
+            .entry_count = stored.entry_count,
+            .workspace_path_length = stored.workspace_path_length,
             .recovery_complete = recovery_complete,
         };
-        @memcpy(session.workspace_path[0..view.workspace_path.len], view.workspace_path);
+        @memcpy(session.workspace_path[0..stored.workspace_path_length], stored.workspacePath());
         return session;
     }
 
@@ -640,12 +622,8 @@ pub const Session = struct {
 
     pub fn recoveryIsEmpty(self: *Session, token: OwnerToken) !bool {
         try self.authorize(token);
-        var wal = try self.dir.openFile(self.io, wal_path, .{});
-        defer wal.close(self.io);
-        if (try wal.length(self.io) != 0) return false;
-        var inbox = try self.dir.openFile(self.io, inbox_path, .{});
-        defer inbox.close(self.io);
-        return try inbox.length(self.io) == 0;
+        if (try self.storage.sessionHead(self.session_id) != 0) return false;
+        return try self.storage.completionHead(self.session_id) == 0;
     }
 
     pub fn projection(self: *const Session) Projection {
@@ -663,13 +641,10 @@ pub const Session = struct {
         if (token.session_id != self.session_id or token.epoch != self.ownership_epoch) {
             return error.StaleOwner;
         }
-        var manifest_buffer: [manifest_max_size]u8 = undefined;
-        const view = try readManifest(self.dir, self.io, &manifest_buffer);
-        if (view.identities.session_id != token.session_id or
-            view.ownership_epoch != token.epoch)
-        {
-            return error.StaleOwner;
-        }
+        try self.storage.authorizeSession(.{
+            .session_id = token.session_id,
+            .epoch = token.epoch,
+        });
     }
 
     pub fn appendConversation(
@@ -693,78 +668,85 @@ pub const Session = struct {
         content_ref: u64,
         fault: ?FaultHook,
     ) !ConversationEntry {
-        var manifest_buffer: [manifest_max_size]u8 = undefined;
-        var view = try readManifest(self.dir, self.io, &manifest_buffer);
-        view = try reconcileConversation(self.dir, self.io, view);
-        if (view.entry_count == std.math.maxInt(u64)) return error.EntryIdentityExhausted;
+        const stored = try self.storage.readSession(self.session_id);
+        try reconcileConversation(self.dir, self.io, stored.identities, stored.active_leaf_id, stored.entry_count);
+        if (stored.entry_count == std.math.maxInt(u64)) return error.EntryIdentityExhausted;
 
         const entry: ConversationEntry = .{
             .kind = kind,
             .session_id = self.session_id,
-            .entry_id = view.entry_count + 1,
-            .parent_id = view.active_leaf_id,
+            .entry_id = stored.entry_count + 1,
+            .parent_id = stored.active_leaf_id,
             .task_id = self.task_id,
             .content_ref = content_ref,
-            .sequence = view.entry_count + 1,
+            .sequence = stored.entry_count + 1,
         };
         var conversation = try self.dir.openFile(self.io, conversation_path, .{ .mode = .read_write });
         defer conversation.close(self.io);
         const actual_count = (try conversation.length(self.io)) / conversation_record_size;
-        if (actual_count == view.entry_count + 1) {
-            const prepared = try readEntryFile(conversation, self.io, view.entry_count);
+        if (actual_count == stored.entry_count + 1) {
+            const prepared = try readEntryFile(conversation, self.io, stored.entry_count);
             if (prepared.kind != kind or prepared.content_ref != content_ref or
-                prepared.parent_id != view.active_leaf_id)
+                prepared.parent_id != stored.active_leaf_id)
             {
                 return error.UncommittedConversationConflict;
             }
             return prepared;
         }
-        try appendEntryFile(conversation, self.io, view.entry_count, entry);
+        try appendEntryFile(conversation, self.io, stored.entry_count, entry);
         if (fault) |hook| try hook.reached(hook.context, .after_entry_sync);
         return entry;
     }
 
-    fn validatePreparedConversationEntry(self: *Session, fact: session_wal.Fact) !void {
-        var manifest_buffer: [manifest_max_size]u8 = undefined;
-        var view = try readManifest(self.dir, self.io, &manifest_buffer);
-        view = try reconcileConversation(self.dir, self.io, view);
-        if (fact.subject <= view.entry_count) {
+    fn validatePreparedConversationEntry(self: *Session, fact: session_transition.Fact) !void {
+        const stored = try self.storage.readSession(self.session_id);
+        try reconcileConversation(self.dir, self.io, stored.identities, stored.active_leaf_id, stored.entry_count);
+        if (fact.subject <= stored.entry_count) {
             const existing = try self.readEntry(fact.subject);
-            if (existing.content_ref != fact.reference) return error.ConversationWalMismatch;
+            if (existing.content_ref != fact.reference) return error.ConversationLedgerMismatch;
             return;
         }
-        if (fact.subject != view.entry_count + 1) return error.ConversationWalGap;
+        if (fact.subject != stored.entry_count + 1) return error.ConversationLedgerGap;
         var conversation = try self.dir.openFile(self.io, conversation_path, .{});
         defer conversation.close(self.io);
-        const entry = try readEntryFile(conversation, self.io, view.entry_count);
+        const entry = try readEntryFile(conversation, self.io, stored.entry_count);
         if (entry.entry_id != fact.subject or entry.sequence != fact.subject or
-            entry.parent_id != view.active_leaf_id or entry.content_ref != fact.reference or
+            entry.parent_id != stored.active_leaf_id or entry.content_ref != fact.reference or
             entry.session_id != self.session_id or entry.task_id != self.task_id)
         {
-            return error.ConversationWalMismatch;
+            return error.ConversationLedgerMismatch;
         }
     }
 
-    fn publishConversationEntry(self: *Session, fact: session_wal.Fact) !void {
+    fn publishConversationEntry(self: *Session, fact: session_transition.Fact) !void {
         if (fact.subject <= self.entry_count) return;
         std.debug.assert(fact.subject == self.entry_count + 1);
-        var manifest_buffer: [manifest_max_size]u8 = undefined;
-        var view = try readManifest(self.dir, self.io, &manifest_buffer);
-        if (fact.subject <= view.entry_count) {
-            self.active_leaf_id = view.active_leaf_id;
-            self.entry_count = view.entry_count;
-            return;
+        const stored = try self.storage.readSession(self.session_id);
+        if (stored.active_leaf_id != fact.subject or stored.entry_count != fact.subject) {
+            return error.ConversationProjectionMismatch;
         }
-        view.active_leaf_id = fact.subject;
-        view.entry_count = fact.subject;
-        try publishManifest(self.dir, self.io, view);
-        self.active_leaf_id = fact.subject;
-        self.entry_count = fact.subject;
+        self.active_leaf_id = stored.active_leaf_id;
+        self.entry_count = stored.entry_count;
     }
 
-    fn reconstructConversationEntry(self: *Session, fact: session_wal.Fact) !void {
-        try self.validatePreparedConversationEntry(fact);
-        try self.publishConversationEntry(fact);
+    fn reconstructConversationEntry(self: *Session, fact: session_transition.Fact) !void {
+        if (fact.subject <= self.entry_count) {
+            const existing = try self.readEntry(fact.subject);
+            if (existing.content_ref != fact.reference) return error.ConversationLedgerMismatch;
+            return;
+        }
+        if (fact.subject != self.entry_count + 1) return error.ConversationLedgerGap;
+        var conversation = try self.dir.openFile(self.io, conversation_path, .{});
+        defer conversation.close(self.io);
+        const entry = try readEntryFile(conversation, self.io, self.entry_count);
+        if (entry.entry_id != fact.subject or entry.sequence != fact.subject or
+            entry.parent_id != self.active_leaf_id or entry.content_ref != fact.reference or
+            entry.session_id != self.session_id or entry.task_id != self.task_id)
+        {
+            return error.ConversationLedgerMismatch;
+        }
+        self.active_leaf_id = fact.subject;
+        self.entry_count = fact.subject;
     }
 
     pub fn readEntry(self: *Session, sequence: u64) !ConversationEntry {
@@ -830,38 +812,64 @@ pub const Session = struct {
     pub fn commitSemantic(
         self: *Session,
         token: OwnerToken,
-        facts: []const session_wal.Fact,
+        facts: []const session_transition.Fact,
         encoded_core: ?[]const u8,
     ) !u64 {
         try self.authorize(token);
         if (!self.recovery_complete) return error.SessionRecoveryIncomplete;
-        if (facts.len == 0 or facts.len > session_wal.max_facts) {
+        if (facts.len == 0 or facts.len > session_transition.max_facts) {
             return error.InvalidSemanticFactCount;
         }
-        var transaction: session_wal.Transaction = .{
-            .sequence = self.wal_sequence + 1,
-            .fact_count = @intCast(facts.len),
-        };
-        @memcpy(transaction.facts[0..facts.len], facts);
+        if (self.ledger_sequence > std.math.maxInt(u64) - facts.len) {
+            return error.SessionSequenceExhausted;
+        }
         if (encoded_core) |bytes| {
             if (bytes.len != core_state.encoded_size) return error.InvalidCoreStateLength;
             _ = try core_state.decode(bytes);
-            transaction.core = bytes[0..core_state.encoded_size].*;
         }
-        for (transaction.factSlice()) |fact| {
+        for (facts) |fact| {
             if (fact.kind == .conversation_advanced) try self.validatePreparedConversationEntry(fact);
+            try self.validatePreparedBlobReferences(fact);
         }
+
         var prepared_index = self.semantic_index;
-        try prepared_index.apply(transaction);
-        if (self.wal_writer == null) {
-            self.wal_writer = try session_wal.Writer.openAppendIn(self.dir, self.io, wal_path);
+        var payload_buffers: [session_transition.max_facts][session_transition.max_payload_size]u8 = undefined;
+        var records: [session_transition.max_facts]host_store.PreparedRecord = undefined;
+        for (facts, 0..) |fact, index| {
+            const sequence = self.ledger_sequence + index + 1;
+            const core = if (index + 1 == facts.len) encoded_core else null;
+            const canonical_fact = fact;
+            const payload = try session_transition.encode(
+                &payload_buffers[index],
+                sequence,
+                canonical_fact,
+                core,
+            );
+            const digest = try session_transition.digest(payload);
+            records[index] = .{
+                .payload_version = session_transition.payload_version,
+                .kind = canonical_fact.kind,
+                .payload = payload,
+                .digest = digest,
+            };
+            var transaction: session_transition.Transaction = .{
+                .sequence = sequence,
+                .fact_count = 1,
+                .core = if (core) |bytes| bytes[0..core_state.encoded_size].* else null,
+            };
+            transaction.facts[0] = fact;
+            try prepared_index.apply(transaction);
         }
-        const writer = &self.wal_writer.?;
-        if (writer.last_sequence != self.wal_sequence) return error.WalSequenceMismatch;
-        try writer.append(self.io, transaction);
-        self.wal_sequence = transaction.sequence;
+
+        const final_sequence = try self.storage.appendBatch(.{
+            .session_id = self.session_id,
+            .expected_sequence = self.ledger_sequence,
+            .records = records[0..facts.len],
+        });
+        std.debug.assert(final_sequence == self.ledger_sequence + facts.len);
+        self.ledger_sequence = final_sequence;
         self.semantic_index = prepared_index;
-        for (transaction.factSlice()) |fact| {
+        for (facts) |fact| {
             if (fact.kind == .conversation_advanced) {
                 self.publishConversationEntry(fact) catch |err| {
                     self.failed = true;
@@ -869,23 +877,43 @@ pub const Session = struct {
                 };
             }
         }
-        return transaction.sequence;
+        return final_sequence;
+    }
+
+    fn validatePreparedBlobReferences(
+        self: *Session,
+        fact: session_transition.Fact,
+    ) !void {
+        var blobs = try self.dir.openDir(self.io, blobs_path, .{});
+        defer blobs.close(self.io);
+        if (fact.reference != 0) {
+            _ = blob_store.metadata(blobs, self.io, fact.reference) catch |err| switch (err) {
+                error.FileNotFound => return error.MissingBlobReference,
+                else => return err,
+            };
+        }
+        if (fact.kind == .approval_required and fact.subject != 0) {
+            _ = blob_store.metadata(blobs, self.io, fact.subject) catch |err| switch (err) {
+                error.FileNotFound => return error.MissingBlobReference,
+                else => return err,
+            };
+        }
     }
 
     pub fn replaySemantic(
         self: *Session,
         token: OwnerToken,
         context: *anyopaque,
-        apply: *const fn (*anyopaque, session_wal.Transaction) anyerror!void,
-    ) !WalView {
+        apply: *const fn (*anyopaque, session_transition.Transaction) anyerror!void,
+    ) !LedgerView {
         try self.authorize(token);
         if (!self.recovery_complete) return error.SessionRecoveryIncomplete;
         try self.semantic_index.emit(context, apply);
-        const view: WalView = .{
+        const view: LedgerView = .{
             .last_sequence = self.semantic_index.last_sequence,
             .last_core = self.semantic_index.last_core,
         };
-        self.wal_sequence = view.last_sequence;
+        self.ledger_sequence = view.last_sequence;
         return view;
     }
 
@@ -897,89 +925,101 @@ pub const Session = struct {
         try self.authorize(token);
         if (frame_budget == 0) return error.InvalidRecoveryQuantum;
         if (self.recovery_complete) return .{ .processed = 0, .more = false };
-        if (self.recovery_reader == null and self.recovery_inbox_reader == null) {
+        if (!self.recovery_started) {
             self.semantic_index = .{};
             self.inbox_index = .{};
-            self.recovery_reader = try session_wal.Reader.openIn(self.dir, self.io, wal_path);
+            self.recovery_sequence = 1;
+            self.recovery_ledger_head = try self.storage.sessionHead(self.session_id);
+            self.recovery_inbox_sequence = 1;
+            self.recovery_inbox_head = try self.storage.completionHead(self.session_id);
+            self.recovery_started = true;
         }
         var processed: u8 = 0;
         while (processed < frame_budget) {
-            if (self.recovery_reader) |*reader| {
-                const transaction = (try reader.next(self.io)) orelse {
-                    const last_sequence = reader.last_sequence;
-                    const valid_length = reader.cursor;
-                    const physical_length = reader.length;
-                    reader.close(self.io);
-                    self.recovery_reader = null;
-                    var writer = try session_wal.Writer.openValidatedIn(
-                        self.dir,
-                        self.io,
-                        wal_path,
-                        last_sequence,
-                        valid_length,
-                        physical_length,
-                    );
-                    self.validateCheckpointSequence(last_sequence) catch |err| {
-                        writer.close(self.io);
-                        return err;
-                    };
-                    self.wal_writer = writer;
-                    self.wal_sequence = last_sequence;
-                    self.recovery_inbox_reader = try completion_inbox.Reader.openIn(
-                        self.dir,
-                        self.io,
-                        inbox_path,
-                    );
-                    continue;
+            if (self.recovery_sequence <= self.recovery_ledger_head) {
+                var stored: host_store.StoredTransition = undefined;
+                try self.storage.readTransition(
+                    self.session_id,
+                    self.recovery_sequence,
+                    &stored,
+                );
+                if (stored.payload_version != session_transition.payload_version) {
+                    return error.UnsupportedTransitionPayloadVersion;
+                }
+                const decoded = try session_transition.decode(stored.payloadSlice());
+                var transaction: session_transition.Transaction = .{
+                    .sequence = stored.sequence,
+                    .fact_count = 1,
+                    .core = decoded.core,
                 };
+                transaction.facts[0] = decoded.fact;
                 var prepared_index = self.semantic_index;
                 try prepared_index.apply(transaction);
                 for (transaction.factSlice()) |fact| {
                     if (fact.kind == .conversation_advanced) try self.reconstructConversationEntry(fact);
                 }
                 self.semantic_index = prepared_index;
+                self.recovery_sequence += 1;
                 processed += 1;
                 continue;
             }
-            if (self.recovery_inbox_reader) |*reader| {
-                const record = (try reader.step(self.io)) orelse {
-                    reader.close(self.io);
-                    self.recovery_inbox_reader = null;
-                    self.recovery_complete = true;
-                    return .{ .processed = processed, .more = false };
-                };
-                switch (record) {
-                    .envelope => |envelope| try self.inbox_index.apply(
-                        &self.semantic_index,
-                        envelope,
-                        self.session_id,
-                        self.agent_id,
-                        self.ownership_epoch,
-                    ),
-                    .corrupt => {},
-                }
+            if (self.recovery_inbox_sequence == 1) {
+                try self.validateCheckpointSequence(self.recovery_ledger_head);
+                self.ledger_sequence = self.recovery_ledger_head;
+            }
+            if (self.recovery_inbox_sequence <= self.recovery_inbox_head) {
+                const stored_completion = try self.storage.readCompletion(
+                    self.session_id,
+                    self.recovery_inbox_sequence,
+                );
+                try self.inbox_index.apply(
+                    &self.semantic_index,
+                    stored_completion.envelope,
+                    self.session_id,
+                    self.agent_id,
+                    self.ownership_epoch,
+                );
+                self.recovery_inbox_sequence += 1;
                 processed += 1;
                 continue;
             }
-            return error.InvalidRecoveryState;
+            try self.storage.rebuildConversationProjection(
+                self.session_id,
+                self.active_leaf_id,
+                self.entry_count,
+            );
+            const stored = try self.storage.readSession(self.session_id);
+            try reconcileConversation(
+                self.dir,
+                self.io,
+                stored.identities,
+                self.active_leaf_id,
+                self.entry_count,
+            );
+            self.recovery_complete = true;
+            self.recovery_started = false;
+            return .{ .processed = processed, .more = false };
         }
         return .{ .processed = processed, .more = true };
     }
 
-    fn validateCheckpointSequence(self: *Session, wal_last_sequence: u64) !void {
+    fn validateCheckpointSequence(self: *Session, ledger_head: u64) !void {
         var checkpoint_bytes: [checkpoint.encoded_size]u8 = undefined;
-        var checkpoint_file = self.dir.openFile(self.io, checkpoint_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return,
+        const stored = self.storage.readCheckpoint(
+            self.session_id,
+            &checkpoint_bytes,
+        ) catch |err| switch (err) {
+            error.CheckpointNotFound => return,
+            error.CorruptCheckpoint, error.CheckpointDigestMismatch => return,
             else => return err,
         };
-        defer checkpoint_file.close(self.io);
-        const actual = try checkpoint_file.readPositionalAll(self.io, &checkpoint_bytes, 0);
-        if (actual != checkpoint_bytes.len) return; // A checkpoint is a rebuildable cache.
+        if (stored.payload_version != checkpoint.version) return error.UnsupportedCheckpointVersion;
+        if (stored.payload_length != checkpoint_bytes.len) return;
         const decoded = checkpoint.decode(&checkpoint_bytes, self.agent_id, 1) catch |err| switch (err) {
             error.UnsupportedVersion => return err,
-            else => return, // Corrupt cache bytes never override the WAL prefix.
+            else => return, // Corrupt cache bytes never override the Session Ledger.
         };
-        if (decoded.wal_sequence > wal_last_sequence) return error.CheckpointAheadOfWal;
+        if (decoded.ledger_sequence > ledger_head) return error.CheckpointAheadOfLedger;
     }
 
     pub fn publishCompletionEvidence(
@@ -993,9 +1033,7 @@ pub const Session = struct {
         }
         var result = try self.openBlob(token, envelope.result_ref);
         result.close();
-        var writer = try completion_inbox.Writer.openAppendIn(self.dir, self.io, inbox_path);
-        defer writer.close(self.io);
-        try writer.publish(self.io, envelope);
+        _ = try self.storage.publishCompletion(envelope);
         try self.inbox_index.apply(
             &self.semantic_index,
             envelope,
@@ -1027,18 +1065,16 @@ pub const Session = struct {
         state: []const u8,
     ) !void {
         try self.authorize(token);
-        try checkpoint_store.publish(
-            self.dir,
-            self.io,
-            checkpoint_path,
-            checkpoint_temp_path,
-            encoded,
-            self.agent_id,
-            generation,
-            self.wal_sequence,
-            state,
-            null,
-        );
+        try checkpoint.encode(encoded, self.agent_id, generation, self.ledger_sequence, state);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(encoded, &digest, .{});
+        try self.storage.putCheckpoint(.{
+            .session_id = self.session_id,
+            .sequence = self.ledger_sequence,
+            .payload_version = checkpoint.version,
+            .payload = encoded,
+            .digest = digest,
+        });
     }
 
     pub fn restoreCheckpoint(
@@ -1052,22 +1088,15 @@ pub const Session = struct {
         if (encoded.len != checkpoint.encoded_size or state.len != checkpoint.state_size) {
             return error.InvalidCheckpointBuffer;
         }
-        var file = try self.dir.openFile(self.io, checkpoint_path, .{});
-        defer file.close(self.io);
-        const actual = try file.readPositionalAll(self.io, encoded, 0);
-        if (actual != encoded.len) return error.TruncatedCheckpoint;
+        const stored = try self.storage.readCheckpoint(self.session_id, encoded);
+        if (stored.payload_version != checkpoint.version) return error.UnsupportedCheckpointVersion;
+        if (stored.payload_length != encoded.len) return error.TruncatedCheckpoint;
         const restored = try checkpoint.decode(encoded, self.agent_id, generation);
         @memcpy(state, restored.state);
     }
 
     pub fn close(self: *Session) void {
         if (!self.open) return;
-        if (self.recovery_reader) |*reader| reader.close(self.io);
-        self.recovery_reader = null;
-        if (self.recovery_inbox_reader) |*reader| reader.close(self.io);
-        self.recovery_inbox_reader = null;
-        if (self.wal_writer) |*writer| writer.close(self.io);
-        self.wal_writer = null;
         self.lock_file.unlock(self.io);
         self.lock_file.close(self.io);
         self.dir.close(self.io);
@@ -1169,149 +1198,6 @@ fn readSmallFile(dir: std.Io.Dir, io: std.Io, path: []const u8, buffer: []u8) ![
     return std.mem.trim(u8, buffer[0..length], " \t\r\n");
 }
 
-fn publishManifest(dir: std.Io.Dir, io: std.Io, view: ManifestView) !void {
-    var encoded: [manifest_max_size]u8 = undefined;
-    const bytes = try encodeManifest(&encoded, view);
-    var temp = try dir.createFile(io, manifest_temp_path, .{});
-    var temp_open = true;
-    defer if (temp_open) temp.close(io);
-    try temp.writePositionalAll(io, bytes, 0);
-    try temp.sync(io);
-    temp.close(io);
-    temp_open = false;
-    try dir.rename(manifest_temp_path, dir, manifest_path, io);
-    try syncDir(dir, io);
-}
-
-fn readManifest(
-    dir: std.Io.Dir,
-    io: std.Io,
-    buffer: *[manifest_max_size]u8,
-) !ManifestView {
-    var file = try dir.openFile(io, manifest_path, .{});
-    defer file.close(io);
-    const stat = try file.stat(io);
-    if (stat.size < manifest_header_size) return error.TruncatedManifest;
-    if (stat.size > manifest_max_size) return error.InvalidManifestLength;
-    const expected_size: usize = @intCast(stat.size);
-    const bytes_read = try file.readPositionalAll(io, buffer[0..expected_size], 0);
-    if (bytes_read != expected_size) return error.TruncatedManifest;
-    return decodeManifest(buffer[0..bytes_read]);
-}
-
-fn encodeManifest(out: *[manifest_max_size]u8, view: ManifestView) ![]const u8 {
-    try view.identities.validate();
-    if (view.ownership_epoch == 0) return error.InvalidOwnershipEpoch;
-    if (view.entry_count == 0 or view.active_leaf_id != view.entry_count) {
-        return error.InvalidActiveLeaf;
-    }
-    if (view.workspace_path.len == 0 or view.workspace_path.len > workspace_path_capacity or
-        view.model.len == 0 or view.task.len == 0)
-    {
-        return error.InvalidSessionMetadata;
-    }
-    const total = manifest_header_size +
-        view.workspace_path.len +
-        view.model.len +
-        view.task.len;
-    if (total > out.len or
-        view.workspace_path.len > std.math.maxInt(u16) or
-        view.model.len > std.math.maxInt(u16) or
-        view.task.len > std.math.maxInt(u16))
-    {
-        return error.SessionMetadataTooLarge;
-    }
-
-    @memset(out, 0);
-    @memcpy(out[0..manifest_magic.len], manifest_magic);
-    write(u16, out, 8, manifest_version);
-    write(u16, out, 10, manifest_header_size);
-    write(u32, out, 12, 0);
-    write(u32, out, 16, @intCast(total));
-    write(u64, out, 24, view.identities.session_id);
-    write(u64, out, 32, view.identities.agent_id);
-    write(u64, out, 40, view.identities.task_id);
-    write(u64, out, 48, view.identities.branch_id);
-    write(u64, out, 56, view.ownership_epoch);
-    write(u64, out, 64, view.active_leaf_id);
-    write(u64, out, 72, view.entry_count);
-    write(u16, out, 80, @intCast(view.workspace_path.len));
-    write(u16, out, 82, @intCast(view.model.len));
-    write(u16, out, 84, @intCast(view.task.len));
-    var cursor: usize = manifest_header_size;
-    @memcpy(out[cursor..][0..view.workspace_path.len], view.workspace_path);
-    cursor += view.workspace_path.len;
-    @memcpy(out[cursor..][0..view.model.len], view.model);
-    cursor += view.model.len;
-    @memcpy(out[cursor..][0..view.task.len], view.task);
-    const crc = manifestCrc(out[0..total]);
-    write(u32, out, manifest_crc_offset, crc);
-    return out[0..total];
-}
-
-fn decodeManifest(bytes: []const u8) !ManifestView {
-    if (bytes.len < manifest_header_size) return error.TruncatedManifest;
-    if (!std.mem.eql(u8, bytes[0..manifest_magic.len], manifest_magic)) {
-        return error.InvalidManifestMagic;
-    }
-    if (read(u16, bytes, 8) != manifest_version) return error.UnsupportedManifestVersion;
-    if (read(u16, bytes, 10) != manifest_header_size) return error.InvalidManifestHeader;
-    if (read(u32, bytes, 12) != 0) return error.UnsupportedManifestFlags;
-    const total: usize = read(u32, bytes, 16);
-    if (total != bytes.len or total > manifest_max_size) return error.InvalidManifestLength;
-    if (read(u32, bytes, manifest_crc_offset) != manifestCrc(bytes)) {
-        return error.ManifestChecksumMismatch;
-    }
-    for (bytes[86..manifest_header_size]) |byte| {
-        if (byte != 0) return error.NonzeroManifestReservedByte;
-    }
-
-    const workspace_len: usize = read(u16, bytes, 80);
-    if (workspace_len == 0 or workspace_len > workspace_path_capacity) {
-        return error.InvalidSessionMetadata;
-    }
-    const model_len: usize = read(u16, bytes, 82);
-    const task_len: usize = read(u16, bytes, 84);
-    if (manifest_header_size + workspace_len + model_len + task_len != total or
-        workspace_len == 0 or model_len == 0 or task_len == 0)
-    {
-        return error.InvalidSessionMetadata;
-    }
-    var cursor: usize = manifest_header_size;
-    const workspace = bytes[cursor..][0..workspace_len];
-    cursor += workspace_len;
-    const model = bytes[cursor..][0..model_len];
-    cursor += model_len;
-    const task = bytes[cursor..][0..task_len];
-    const view: ManifestView = .{
-        .identities = .{
-            .session_id = read(u64, bytes, 24),
-            .agent_id = read(u64, bytes, 32),
-            .task_id = read(u64, bytes, 40),
-            .branch_id = read(u64, bytes, 48),
-        },
-        .ownership_epoch = read(u64, bytes, 56),
-        .active_leaf_id = read(u64, bytes, 64),
-        .entry_count = read(u64, bytes, 72),
-        .workspace_path = workspace,
-        .model = model,
-        .task = task,
-    };
-    try view.identities.validate();
-    if (view.ownership_epoch == 0) return error.InvalidOwnershipEpoch;
-    if (view.entry_count == 0 or view.active_leaf_id != view.entry_count) {
-        return error.InvalidActiveLeaf;
-    }
-    return view;
-}
-
-fn manifestCrc(bytes: []const u8) u32 {
-    var crc: std.hash.Crc32 = .init();
-    crc.update(bytes[0..manifest_crc_offset]);
-    crc.update(bytes[manifest_crc_offset + @sizeOf(u32) ..]);
-    return crc.final();
-}
-
 fn encodeEntry(out: *[conversation_record_size]u8, entry: ConversationEntry) !void {
     if (entry.session_id == 0 or entry.entry_id == 0 or entry.task_id == 0 or
         entry.content_ref == 0 or entry.sequence == 0 or entry.entry_id != entry.sequence)
@@ -1402,30 +1288,50 @@ fn readEntryFile(file: std.Io.File, io: std.Io, zero_based_index: u64) !Conversa
 fn reconcileConversation(
     dir: std.Io.Dir,
     io: std.Io,
-    view: ManifestView,
-) !ManifestView {
+    identities: host_store.SessionIdentity,
+    active_leaf_id: u64,
+    entry_count: u64,
+) !void {
     var conversation = try dir.openFile(io, conversation_path, .{});
     defer conversation.close(io);
     const stat = try conversation.stat(io);
     if (stat.size % conversation_record_size != 0) return error.TruncatedConversationEntry;
     const actual_count = stat.size / conversation_record_size;
-    if (actual_count < view.entry_count or actual_count > view.entry_count + 1) {
+    if (actual_count < entry_count or actual_count > entry_count + 1) {
         return error.ConversationLengthMismatch;
     }
     if (actual_count == 0) return error.MissingConversationRoot;
     const last = try readEntryFile(conversation, io, actual_count - 1);
-    if (last.session_id != view.identities.session_id or
-        last.task_id != view.identities.task_id or
+    if (last.session_id != identities.session_id or
+        last.task_id != identities.task_id or
         last.sequence != actual_count)
     {
         return error.ConversationIdentityMismatch;
     }
-    if (actual_count == view.entry_count) {
-        if (last.entry_id != view.active_leaf_id) return error.ActiveLeafMismatch;
-        return view;
+    if (actual_count == entry_count) {
+        if (last.entry_id != active_leaf_id) return error.ActiveLeafMismatch;
+        return;
     }
-    if (last.parent_id != view.active_leaf_id) return error.ActiveLeafMismatch;
-    return view;
+    if (last.parent_id != active_leaf_id) return error.ActiveLeafMismatch;
+}
+
+fn validateConversationRoot(
+    dir: std.Io.Dir,
+    io: std.Io,
+    identities: host_store.SessionIdentity,
+) !void {
+    var conversation = try dir.openFile(io, conversation_path, .{});
+    defer conversation.close(io);
+    const stat = try conversation.stat(io);
+    if (stat.size < conversation_record_size or stat.size % conversation_record_size != 0) {
+        return error.TruncatedConversationEntry;
+    }
+    const root = try readEntryFile(conversation, io, 0);
+    if (root.session_id != identities.session_id or root.task_id != identities.task_id or
+        root.entry_id != 1 or root.sequence != 1 or root.parent_id != 0)
+    {
+        return error.ConversationIdentityMismatch;
+    }
 }
 
 fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
@@ -1466,6 +1372,7 @@ fn initTestGitWorktree(dir: std.Io.Dir, io: std.Io) !void {
 
 const TestLayout = struct {
     tmp: std.testing.TmpDir,
+    storage: host_store.StorageOwner,
     sessions: std.Io.Dir,
     workspace: std.Io.Dir,
     workspace_path: [128]u8,
@@ -1480,6 +1387,13 @@ const TestLayout = struct {
         errdefer workspace.close(io);
         try initTestGitWorktree(workspace, io);
         const sessions = try tmp.dir.openDir(io, "sessions", .{});
+        var database_path: [128]u8 = undefined;
+        const rendered_database_path = try std.fmt.bufPrint(
+            &database_path,
+            ".zig-cache/tmp/{s}/host.sqlite3",
+            .{tmp.sub_path},
+        );
+        const storage = try host_store.StorageOwner.open(io, rendered_database_path, .{});
         var workspace_path: [128]u8 = undefined;
         const rendered = try std.fmt.bufPrint(
             &workspace_path,
@@ -1488,6 +1402,7 @@ const TestLayout = struct {
         );
         return .{
             .tmp = tmp,
+            .storage = storage,
             .sessions = sessions,
             .workspace = workspace,
             .workspace_path = workspace_path,
@@ -1500,6 +1415,7 @@ const TestLayout = struct {
     }
 
     fn deinit(self: *TestLayout, io: std.Io) void {
+        self.storage.close();
         self.sessions.close(io);
         self.workspace.close(io);
         self.tmp.cleanup();
@@ -1511,7 +1427,7 @@ test "create and exact resume preserve distinct identities and one owner" {
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
 
-    var created = try Session.createExact(layout.sessions, io, testConfig(layout.workspacePath(), 10));
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 10));
     const first_token = created.ownerToken();
     var id_buffer: [16]u8 = undefined;
     try std.testing.expectEqualStrings("000000000000000a", try formatId(created.session_id, &id_buffer));
@@ -1519,21 +1435,16 @@ test "create and exact resume preserve distinct identities and one owner" {
     try std.testing.expectEqual(@as(u64, 1), created.active_leaf_id);
     try std.testing.expectEqual(@as(u64, 1), created.entry_count);
 
-    var busy_buffer: [manifest_max_size]u8 = undefined;
     try std.testing.expectError(
         error.SessionBusy,
-        Session.openExisting(layout.sessions, io, 10, &busy_buffer),
+        Session.openExisting(layout.sessions, &layout.storage, io, 10),
     );
     created.close();
 
-    var manifest_buffer: [manifest_max_size]u8 = undefined;
-    var restored = try Session.openExisting(layout.sessions, io, 10, &manifest_buffer);
+    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 10);
     defer restored.session.close();
-    try std.testing.expectEqual(@as(u64, 2), restored.manifest.ownership_epoch);
-    try std.testing.expectEqualStrings(layout.workspacePath(), restored.manifest.workspace_path);
-    try std.testing.expectEqualStrings("fixture:repair", restored.manifest.model);
-    try std.testing.expectEqualStrings("Fix the failing test", restored.manifest.task);
-    try std.testing.expectEqualDeep(testConfig(layout.workspacePath(), 10).identities, restored.manifest.identities);
+    try std.testing.expectEqual(@as(u64, 2), restored.session.ownership_epoch);
+    try std.testing.expectEqualStrings(layout.workspacePath(), restored.session.workspacePath());
     try std.testing.expectEqualDeep(Projection{
         .session_id = 10,
         .task_id = 12,
@@ -1559,47 +1470,73 @@ test "create and exact resume preserve distinct identities and one owner" {
     );
 }
 
-test "recovery advances only within the configured WAL frame quantum" {
+test "recovery advances only within the configured Session Ledger quantum" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, io, testConfig(layout.workspacePath(), 80));
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 80));
     for (0..5) |index| {
+        try created.storeBlob(created.ownerToken(), index + 1, "ledger fixture");
         _ = try created.commitSemantic(created.ownerToken(), &.{.{
             .kind = .task_admitted,
             .agent_id = created.agent_id,
             .agent_generation = 1,
             .ownership_epoch = created.ownership_epoch,
             .subject = index + 1,
+            .reference = index + 1,
         }}, null);
     }
     created.close();
 
-    var manifest_buffer: [manifest_max_size]u8 = undefined;
     var restored = (try Session.openExisting(
         layout.sessions,
+        &layout.storage,
         io,
         80,
-        &manifest_buffer,
     )).session;
     defer restored.close();
     const token = restored.ownerToken();
     const first = try restored.recoverSemanticWindow(token, 2);
     try std.testing.expectEqual(@as(u8, 2), first.processed);
     try std.testing.expect(first.more);
-    try std.testing.expectEqual(@as(u64, 0), restored.wal_sequence);
+    try std.testing.expectEqual(@as(u64, 0), restored.ledger_sequence);
     const second = try restored.recoverSemanticWindow(token, 2);
     try std.testing.expectEqual(@as(u8, 2), second.processed);
     try std.testing.expect(second.more);
     const last = try restored.recoverSemanticWindow(token, 2);
     try std.testing.expectEqual(@as(u8, 1), last.processed);
     try std.testing.expect(!last.more);
-    try std.testing.expectEqual(@as(u64, 5), restored.wal_sequence);
+    try std.testing.expectEqual(@as(u64, 5), restored.ledger_sequence);
+}
+
+test "semantic commits reject missing immutable blob references before advancing the Ledger" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 81));
+    defer created.close();
+
+    try std.testing.expectError(error.MissingBlobReference, created.commitSemantic(
+        created.ownerToken(),
+        &.{.{
+            .kind = .operation_submitted,
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .ownership_epoch = created.ownership_epoch,
+            .operation_id = 100,
+            .generation = 1,
+            .reference = 999,
+            .digest = 123,
+        }},
+        null,
+    ));
+    try std.testing.expectEqual(@as(u64, 0), created.ledger_sequence);
+    try std.testing.expectEqual(@as(u64, 0), try layout.storage.sessionHead(created.session_id));
 }
 
 test "irrelevant inbox records cannot displace admitted Attempt evidence" {
     var semantic: SemanticIndex = .{};
-    var admission: session_wal.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
     admission.facts[0] = .{
         .kind = .operation_submitted,
         .agent_id = 1,
@@ -1649,7 +1586,7 @@ test "irrelevant inbox records cannot displace admitted Attempt evidence" {
 
 test "late evidence for an earlier model Attempt survives a later admission" {
     var semantic: SemanticIndex = .{};
-    var first: session_wal.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    var first: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
     first.facts[0] = .{
         .kind = .operation_submitted,
         .agent_id = 1,
@@ -1665,7 +1602,7 @@ test "late evidence for an earlier model Attempt survives a later admission" {
     first.facts[1].attempt_id = 13;
     first.facts[1].recovery_class = .model;
     try semantic.apply(first);
-    var retry: session_wal.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    var retry: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
     retry.facts[0] = first.facts[1];
     retry.facts[0].attempt_id = 14;
     try semantic.apply(retry);
@@ -1690,7 +1627,7 @@ test "late evidence for an earlier model Attempt survives a later admission" {
 
 test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
     var semantic: SemanticIndex = .{};
-    var admission: session_wal.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
     admission.facts[0] = .{
         .kind = .operation_submitted,
         .agent_id = 1,
@@ -1730,7 +1667,7 @@ test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
 
 test "failed recovered frame leaves the published semantic index unchanged" {
     var index: SemanticIndex = .{};
-    var admission: session_wal.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
     admission.facts[0] = .{
         .kind = .operation_submitted,
         .agent_id = 1,
@@ -1743,7 +1680,7 @@ test "failed recovered frame leaves the published semantic index unchanged" {
     };
     try index.apply(admission);
 
-    var invalid: session_wal.Transaction = .{ .sequence = 2, .fact_count = 2 };
+    var invalid: session_transition.Transaction = .{ .sequence = 2, .fact_count = 2 };
     invalid.facts[0] = admission.facts[0];
     invalid.facts[0].kind = .authorization;
     invalid.facts[1] = admission.facts[0];
@@ -1757,11 +1694,11 @@ test "failed recovered frame leaves the published semantic index unchanged" {
     try std.testing.expect(index.model.authorization == null);
 }
 
-test "conversation advances only after its WAL fact commits" {
+test "conversation advances only after its Ledger fact commits" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, io, testConfig(layout.workspacePath(), 20));
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 20));
     defer created.close();
     const token = created.ownerToken();
 
@@ -1791,6 +1728,35 @@ test "conversation advances only after its WAL fact commits" {
     );
 }
 
+test "recovery rebuilds a stale Conversation projection from the Session Ledger" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 25));
+    const token = created.ownerToken();
+    try created.storeBlob(token, 900, "Rebuilt from authority.");
+    const assistant = try created.appendConversation(token, .assistant, 900, null);
+    _ = try created.commitSemantic(token, &.{.{
+        .kind = .conversation_advanced,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .ownership_epoch = created.ownership_epoch,
+        .subject = assistant.entry_id,
+        .reference = assistant.content_ref,
+    }}, null);
+    try layout.storage.rebuildConversationProjection(25, 1, 1);
+    created.close();
+
+    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 25);
+    defer restored.session.close();
+    while ((try restored.session.recoverSemanticWindow(restored.session.ownerToken(), 1)).more) {}
+    try std.testing.expectEqual(@as(u64, 2), restored.session.active_leaf_id);
+    try std.testing.expectEqualDeep(assistant, try restored.session.readEntry(2));
+    const rebuilt = try layout.storage.readSession(25);
+    try std.testing.expectEqual(@as(u64, 2), rebuilt.active_leaf_id);
+    try std.testing.expectEqual(@as(u64, 2), rebuilt.entry_count);
+}
+
 test "conversation records preserve parent links needed by future forks" {
     const entry: ConversationEntry = .{
         .kind = .assistant,
@@ -1817,7 +1783,7 @@ test "resume leaves an uncommitted conversation record invisible" {
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
     var marker: u8 = 0;
-    var created = try Session.createExact(layout.sessions, io, testConfig(layout.workspacePath(), 30));
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 30));
     try std.testing.expectError(
         error.InjectedCrash,
         created.appendConversation(created.ownerToken(), .tool_result, 901, .{
@@ -1829,11 +1795,10 @@ test "resume leaves an uncommitted conversation record invisible" {
     try std.testing.expectError(error.SessionUnavailable, created.authorize(created.ownerToken()));
     created.close();
 
-    var manifest_buffer: [manifest_max_size]u8 = undefined;
-    var restored = try Session.openExisting(layout.sessions, io, 30, &manifest_buffer);
+    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 30);
     defer restored.session.close();
-    try std.testing.expectEqual(@as(u64, 1), restored.manifest.active_leaf_id);
-    try std.testing.expectEqual(@as(u64, 1), restored.manifest.entry_count);
+    try std.testing.expectEqual(@as(u64, 1), restored.session.active_leaf_id);
+    try std.testing.expectEqual(@as(u64, 1), restored.session.entry_count);
     try std.testing.expectError(error.InvalidEntrySequence, restored.session.readEntry(2));
 }
 
@@ -1846,9 +1811,9 @@ test "repeating task text creates a distinct session" {
         .model = "fixture:repair",
         .task = "Fix the failing test",
     };
-    var first = try Session.create(layout.sessions, io, config);
+    var first = try Session.create(layout.sessions, &layout.storage, io, config);
     defer first.close();
-    var second = try Session.create(layout.sessions, io, config);
+    var second = try Session.create(layout.sessions, &layout.storage, io, config);
     defer second.close();
 
     try std.testing.expect(first.session_id != second.session_id);
@@ -1867,6 +1832,14 @@ test "creation rejects non Git workspaces and aliased identities" {
     defer sessions.close(io);
     var plain = try tmp.dir.openDir(io, "plain", .{});
     defer plain.close(io);
+    var database_path_buffer: [128]u8 = undefined;
+    const database_path = try std.fmt.bufPrint(
+        &database_path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var storage = try host_store.StorageOwner.open(io, database_path, .{});
+    defer storage.close();
 
     var plain_path_buffer: [128]u8 = undefined;
     const plain_path = try std.fmt.bufPrint(
@@ -1874,20 +1847,26 @@ test "creation rejects non Git workspaces and aliased identities" {
         ".zig-cache/tmp/{s}/plain",
         .{tmp.sub_path},
     );
-    try std.testing.expectError(error.NotGitWorktree, Session.createExact(sessions, io, testConfig(plain_path, 60)));
+    try std.testing.expectError(
+        error.NotGitWorktree,
+        Session.createExact(sessions, &storage, io, testConfig(plain_path, 60)),
+    );
 
     try initTestGitWorktree(plain, io);
     var invalid = testConfig(plain_path, 70);
     invalid.identities.agent_id = invalid.identities.session_id;
-    try std.testing.expectError(error.InvalidIdentity, Session.createExact(sessions, io, invalid));
+    try std.testing.expectError(
+        error.InvalidIdentity,
+        Session.createExact(sessions, &storage, io, invalid),
+    );
 
-    var oversized_bytes: [manifest_max_size]u8 = undefined;
+    var oversized_bytes: [host_store.max_model_bytes + 1]u8 = undefined;
     @memset(&oversized_bytes, 'x');
     var oversized = testConfig(plain_path, 75);
-    oversized.task = &oversized_bytes;
+    oversized.model = &oversized_bytes;
     try std.testing.expectError(
-        error.SessionMetadataTooLarge,
-        Session.createExact(sessions, io, oversized),
+        error.InvalidSessionMetadata,
+        Session.createExact(sessions, &storage, io, oversized),
     );
     var name_buffer: [16]u8 = undefined;
     try std.testing.expectError(
@@ -1896,89 +1875,45 @@ test "creation rejects non Git workspaces and aliased identities" {
     );
 }
 
-test "resume rejects a corrupted manifest before advancing ownership" {
+test "session metadata has no per-session manifest projection" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, io, testConfig(layout.workspacePath(), 80));
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 80));
     created.close();
 
     var name_buffer: [16]u8 = undefined;
     var session_dir = try layout.sessions.openDir(io, sessionName(80, &name_buffer), .{});
     defer session_dir.close(io);
-    var manifest = try session_dir.openFile(io, manifest_path, .{ .mode = .read_write });
-    defer manifest.close(io);
-    var byte: [1]u8 = undefined;
-    _ = try manifest.readPositionalAll(io, &byte, 24);
-    byte[0] ^= 1;
-    try manifest.writePositionalAll(io, &byte, 24);
-    try manifest.sync(io);
-
-    var manifest_buffer: [manifest_max_size]u8 = undefined;
-    try std.testing.expectError(
-        error.ManifestChecksumMismatch,
-        Session.openExisting(layout.sessions, io, 80, &manifest_buffer),
-    );
-}
-
-test "resume rejects a legacy session format before advancing ownership" {
-    const io = std.testing.io;
-    var layout = try TestLayout.init(io);
-    defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, io, testConfig(layout.workspacePath(), 82));
-    created.close();
-
-    var name_buffer: [16]u8 = undefined;
-    var session_dir = try layout.sessions.openDir(io, sessionName(82, &name_buffer), .{});
-    defer session_dir.close(io);
-    var manifest = try session_dir.openFile(io, manifest_path, .{ .mode = .read_write });
-    defer manifest.close(io);
-    var bytes: [manifest_max_size]u8 = undefined;
-    const actual = try manifest.readPositionalAll(io, &bytes, 0);
-    write(u16, &bytes, 8, 1);
-    write(u32, &bytes, manifest_crc_offset, manifestCrc(bytes[0..actual]));
-    try manifest.writePositionalAll(io, bytes[0..actual], 0);
-    try manifest.sync(io);
-
-    var manifest_buffer: [manifest_max_size]u8 = undefined;
-    try std.testing.expectError(
-        error.UnsupportedManifestVersion,
-        Session.openExisting(layout.sessions, io, 82, &manifest_buffer),
-    );
-
-    var epoch_bytes: [8]u8 = undefined;
-    _ = try manifest.readPositionalAll(io, &epoch_bytes, 56);
-    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, &epoch_bytes, .little));
+    try std.testing.expectError(error.FileNotFound, session_dir.access(io, "manifest", .{}));
+    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 80);
+    defer restored.session.close();
+    try std.testing.expectEqual(@as(u64, 2), restored.session.ownership_epoch);
 }
 
 test "resume rejects a missing recorded workspace before advancing ownership" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, io, testConfig(layout.workspacePath(), 85));
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 85));
     created.close();
     layout.workspace.close(io);
     try layout.tmp.dir.rename("repo", layout.tmp.dir, "moved", io);
     layout.workspace = try layout.tmp.dir.openDir(io, "moved", .{});
 
-    var manifest_buffer: [manifest_max_size]u8 = undefined;
     try std.testing.expectError(
         error.WorkspaceUnavailable,
-        Session.openExisting(layout.sessions, io, 85, &manifest_buffer),
+        Session.openExisting(layout.sessions, &layout.storage, io, 85),
     );
-
-    var name_buffer: [16]u8 = undefined;
-    var session_dir = try layout.sessions.openDir(io, sessionName(85, &name_buffer), .{});
-    defer session_dir.close(io);
-    const view = try readManifest(session_dir, io, &manifest_buffer);
-    try std.testing.expectEqual(@as(u64, 1), view.ownership_epoch);
+    const stored = try layout.storage.readSession(85);
+    try std.testing.expectEqual(@as(u64, 1), stored.ownership_epoch);
 }
 
 test "resume publishes the new epoch before conversation reconstruction" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, io, testConfig(layout.workspacePath(), 90));
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 90));
     created.close();
 
     var name_buffer: [16]u8 = undefined;
@@ -1992,11 +1927,10 @@ test "resume publishes the new epoch before conversation reconstruction" {
     try conversation.writePositionalAll(io, &byte, 20);
     try conversation.sync(io);
 
-    var manifest_buffer: [manifest_max_size]u8 = undefined;
     try std.testing.expectError(
         error.ConversationChecksumMismatch,
-        Session.openExisting(layout.sessions, io, 90, &manifest_buffer),
+        Session.openExisting(layout.sessions, &layout.storage, io, 90),
     );
-    const view = try readManifest(session_dir, io, &manifest_buffer);
-    try std.testing.expectEqual(@as(u64, 2), view.ownership_epoch);
+    const stored = try layout.storage.readSession(90);
+    try std.testing.expectEqual(@as(u64, 2), stored.ownership_epoch);
 }

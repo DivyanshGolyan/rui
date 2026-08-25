@@ -8,7 +8,7 @@ const model_operation = @import("model_operation.zig");
 const model_protocol = @import("model_protocol.zig");
 const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
-const session_wal = @import("session_wal.zig");
+const session_transition = @import("session_transition.zig");
 
 const agent_generation: u32 = 1;
 const ProductionSlotPool = core_image.SlotPool(1);
@@ -73,7 +73,7 @@ const ControlSearch = struct {
     generation: u32 = 0,
     control: ?Control = null,
 
-    fn applyTransaction(context: *anyopaque, transaction: session_wal.Transaction) anyerror!void {
+    fn applyTransaction(context: *anyopaque, transaction: session_transition.Transaction) anyerror!void {
         const self: *ControlSearch = @ptrCast(@alignCast(context));
         for (transaction.factSlice()) |fact| switch (fact.kind) {
             .operation_accepted => {
@@ -182,7 +182,7 @@ fn commitCoreFacts(
     token: session_store.OwnerToken,
     checkpoint_buffer: []u8,
     core: *Core,
-    facts: []const session_wal.Fact,
+    facts: []const session_transition.Fact,
     reactivate: bool,
 ) !void {
     try core.suspendIntoState();
@@ -197,9 +197,9 @@ fn commitCoreFacts(
 }
 
 fn semanticFact(
-    kind: session_wal.Kind,
+    kind: session_transition.Kind,
     session: *const session_store.Session,
-) session_wal.Fact {
+) session_transition.Fact {
     return .{
         .kind = kind,
         .agent_id = session.agent_id,
@@ -208,7 +208,7 @@ fn semanticFact(
     };
 }
 
-fn restoreCoreFromWal(
+fn restoreCoreFromLedger(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     checkpoint_buffer: []u8,
@@ -221,11 +221,11 @@ fn restoreCoreFromWal(
         &replay_context,
         ignoreTransaction,
     );
-    core.encoded_state = replay.last_core orelse return error.MissingWalCoreState;
+    core.encoded_state = replay.last_core orelse return error.MissingLedgerCoreState;
     try core.activate();
 }
 
-fn ignoreTransaction(_: *anyopaque, _: session_wal.Transaction) anyerror!void {}
+fn ignoreTransaction(_: *anyopaque, _: session_transition.Transaction) anyerror!void {}
 
 const ModelSlot = struct {
     core: *Core,
@@ -264,7 +264,7 @@ pub fn advanceCreated(
     try core.initialize(session.agent_id);
     try core.reducer.startTask(session.active_leaf_id);
     if (checkpoint_buffer.len != checkpoint.encoded_size) return error.InvalidCheckpointBuffer;
-    var task_facts: [2]session_wal.Fact = undefined;
+    var task_facts: [2]session_transition.Fact = undefined;
     task_facts[0] = semanticFact(.task_admitted, session);
     task_facts[0].subject = session.task_id;
     task_facts[0].reference = session.task_id;
@@ -318,7 +318,7 @@ fn performModelTurn(
         context.entry_count,
     );
     try core.reducer.acceptOperation(.{ .id = ids.operation_id, .generation = operation_generation });
-    var admission_facts: [3]session_wal.Fact = undefined;
+    var admission_facts: [3]session_transition.Fact = undefined;
     admission_facts[0] = semanticFact(.operation_submitted, session);
     admission_facts[0].operation_id = ids.operation_id;
     admission_facts[0].generation = operation_generation;
@@ -498,7 +498,7 @@ fn executeBashCall(
     const result_ref = (@as(u64, 1) << 61) | ids.response_ref;
     try session.storeBlob(token, descriptor_ref, descriptor_bytes);
     const call_entry = try session.appendConversation(token, .assistant, descriptor_ref, null);
-    var descriptor_facts: [3]session_wal.Fact = undefined;
+    var descriptor_facts: [3]session_transition.Fact = undefined;
     descriptor_facts[0] = semanticFact(.operation_submitted, session);
     descriptor_facts[0].operation_id = tool_operation_id;
     descriptor_facts[0].generation = 1;
@@ -571,7 +571,7 @@ fn executeBashCall(
         try reach(fault, .after_bash_execution);
         core.* = try Core.open(slot_pool);
         core_open.* = true;
-        try restoreCoreFromWal(session, token, checkpoint_buffer, core);
+        try restoreCoreFromLedger(session, token, checkpoint_buffer, core);
     } else {
         execution = .{
             .allocator = allocator,
@@ -607,11 +607,12 @@ fn executeBashCall(
     const result_entry = try session.appendConversation(token, .tool_result, result_ref, null);
     try reach(fault, .after_tool_result_entry);
     try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
-    var result_facts: [2]session_wal.Fact = undefined;
+    var result_facts: [2]session_transition.Fact = undefined;
     result_facts[0] = semanticFact(.result, session);
     result_facts[0].operation_id = tool_operation_id;
     result_facts[0].generation = 1;
     result_facts[0].attempt_id = attempt_id;
+    result_facts[0].evidence_kind = if (attempt_id == 0) 0 else @intFromEnum(completion_inbox.EvidenceKind.bash);
     result_facts[0].reference = result_ref;
     result_facts[0].digest = result_digest;
     result_facts[0].flags = @intFromEnum(execution.status);
@@ -663,7 +664,7 @@ fn requestPatchPermission(
     const result_ref = (@as(u64, 1) << 57) | ids.response_ref;
     try session.storeBlob(token, patch_ref, patch);
     const call_entry = try session.appendConversation(token, .assistant, patch_ref, null);
-    var descriptor_facts: [3]session_wal.Fact = undefined;
+    var descriptor_facts: [3]session_transition.Fact = undefined;
     descriptor_facts[0] = semanticFact(.operation_submitted, session);
     descriptor_facts[0].operation_id = tool_operation_id;
     descriptor_facts[0].generation = 1;
@@ -775,7 +776,7 @@ fn requestPatchPermission(
     const result_entry = try session.appendConversation(token, .tool_result, result_ref, null);
     try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
     const result_digest = try blobDigest(session, token, result_ref);
-    var result_facts: [2]session_wal.Fact = undefined;
+    var result_facts: [2]session_transition.Fact = undefined;
     result_facts[0] = semanticFact(.result, session);
     result_facts[0].operation_id = tool_operation_id;
     result_facts[0].generation = 1;
@@ -833,7 +834,7 @@ pub fn inspectRestored(
     defer core.close();
     const token = session.ownerToken();
     if (checkpoint_buffer.len != checkpoint.encoded_size) return error.InvalidCheckpointBuffer;
-    try restoreCoreFromWal(session, token, checkpoint_buffer, &core);
+    try restoreCoreFromLedger(session, token, checkpoint_buffer, &core);
     var outcome = (try core.reducer.task()).phase;
     if (outcome == .awaiting_model) {
         const completion = try durableCompletion(session, token, &core);
@@ -914,7 +915,7 @@ pub fn advanceRestored(
     defer if (core_open) core.close();
     const token = session.ownerToken();
     if (checkpoint_buffer.len != checkpoint.encoded_size) return error.InvalidCheckpointBuffer;
-    try restoreCoreFromWal(session, token, checkpoint_buffer, &core);
+    try restoreCoreFromLedger(session, token, checkpoint_buffer, &core);
     var outcome = (try core.reducer.task()).phase;
     if (outcome == .awaiting_model) {
         if (durableCompletion(session, token, &core)) |completion| {
@@ -1074,7 +1075,7 @@ pub fn resolvePermission(
     var core = try Core.open(&host.slots);
     var core_open = true;
     defer if (core_open) core.close();
-    try restoreCoreFromWal(session, token, checkpoint_buffer, &core);
+    try restoreCoreFromLedger(session, token, checkpoint_buffer, &core);
     if ((try core.reducer.task()).phase != .awaiting_tool) return error.PermissionNoLongerRequired;
     const response = try core.reducer.response();
     const observation = try core.reducer.operation();
@@ -1146,7 +1147,7 @@ pub fn resolvePermission(
                 );
                 core = try Core.open(&host.slots);
                 core_open = true;
-                try restoreCoreFromWal(session, token, checkpoint_buffer, &core);
+                try restoreCoreFromLedger(session, token, checkpoint_buffer, &core);
             } else {
                 execution = .{
                     .allocator = allocator,
@@ -1180,11 +1181,12 @@ pub fn resolvePermission(
             }
             const result_entry = try session.appendConversation(token, .tool_result, result_ref, null);
             try core.reducer.commitToolResult(session.active_leaf_id, result_entry.entry_id);
-            var facts: [2]session_wal.Fact = undefined;
+            var facts: [2]session_transition.Fact = undefined;
             facts[0] = semanticFact(.result, session);
             facts[0].operation_id = expected_operation_id;
             facts[0].generation = 1;
             facts[0].attempt_id = attempt_id;
+            facts[0].evidence_kind = if (attempt_id == 0) 0 else @intFromEnum(completion_inbox.EvidenceKind.bash);
             facts[0].reference = result_ref;
             facts[0].digest = result_digest;
             facts[0].flags = @intFromEnum(execution.status);
@@ -1248,7 +1250,7 @@ pub fn resolvePermission(
             try session.storeBlob(token, result_ref, &result_bytes);
             const result_entry = try session.appendConversation(token, .tool_result, result_ref, null);
             try core.reducer.commitToolResult(session.active_leaf_id, result_entry.entry_id);
-            var facts: [2]session_wal.Fact = undefined;
+            var facts: [2]session_transition.Fact = undefined;
             facts[0] = semanticFact(.result, session);
             facts[0].operation_id = expected_operation_id;
             facts[0].generation = 1;
@@ -1431,6 +1433,7 @@ fn reconcileBash(
     result.operation_id = operation_id;
     result.generation = 1;
     result.attempt_id = attempt.attempt_id;
+    result.evidence_kind = @intFromEnum(completion_inbox.EvidenceKind.bash);
     result.recovery_class = .consequential;
     result.disposition = .terminal;
     result.digest = descriptor.digest;
@@ -1457,6 +1460,18 @@ fn reconcileBash(
         try storeOrExpectBlob(session, token, result.reference, &encoded);
         result.digest = try blobDigest(session, token, result.reference);
         result.flags = @intFromEnum(bash_tool.Status.indeterminate);
+        try session.publishCompletionEvidence(token, .{
+            .kind = .bash,
+            .session_id = session.session_id,
+            .ownership_epoch = token.epoch,
+            .agent_id = session.agent_id,
+            .agent_generation = agent_generation,
+            .operation_id = operation_id,
+            .operation_generation = 1,
+            .attempt_id = attempt.attempt_id,
+            .result_ref = result.reference,
+            .result_digest = result.digest,
+        });
     }
     _ = try session.commitSemantic(token, &.{result}, null);
     try reconcileBashResult(
@@ -1486,7 +1501,7 @@ fn readBashStatus(
     return bash_tool.decodeResultHeader(&header, reader.length());
 }
 
-fn recordFromFact(fact: session_wal.Fact) ToolResult {
+fn recordFromFact(fact: session_transition.Fact) ToolResult {
     return .{
         .agent_id = fact.agent_id,
         .agent_generation = fact.agent_generation,
@@ -1704,7 +1719,7 @@ fn reconcileToolResult(
         return error.ToolConversationMismatch;
     }
     try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
-    var applied_facts: [2]session_wal.Fact = undefined;
+    var applied_facts: [2]session_transition.Fact = undefined;
     applied_facts[0] = semanticFact(.result_applied, session);
     applied_facts[0].operation_id = result.operation_id;
     applied_facts[0].generation = result.operation_generation;
@@ -1740,7 +1755,7 @@ fn durableCompletion(
     };
     _ = try session.replaySemantic(token, &history, FactSearch.applyTransaction);
     if (history.attempt_count == 0) return error.MissingAcceptedAttempt;
-    var intent: ?session_wal.Fact = null;
+    var intent: ?session_transition.Fact = null;
     var result = history.result;
     if (result) |completed| {
         for (history.attemptSlice()) |maybe_attempt| {
@@ -1777,6 +1792,7 @@ fn durableCompletion(
         terminal.operation_id = operation_id;
         terminal.generation = operation_generation;
         terminal.attempt_id = intent.?.attempt_id;
+        terminal.evidence_kind = @intFromEnum(completion_inbox.EvidenceKind.model);
         terminal.recovery_class = .model;
         terminal.disposition = .terminal;
         terminal.reference = envelope.result_ref;
@@ -1807,17 +1823,17 @@ const FactSearch = struct {
 
     operation_id: u64,
     generation: u32,
-    recovery_class: session_wal.RecoveryClass,
-    descriptor: ?session_wal.Fact = null,
-    attempt: ?session_wal.Fact = null,
-    attempts: [max_attempts]?session_wal.Fact = @splat(null),
+    recovery_class: session_transition.RecoveryClass,
+    descriptor: ?session_transition.Fact = null,
+    attempt: ?session_transition.Fact = null,
+    attempts: [max_attempts]?session_transition.Fact = @splat(null),
     attempt_count: u8 = 0,
     target_attempt_id: u64 = 0,
-    approval_required: ?session_wal.Fact = null,
-    authorization: ?session_wal.Fact = null,
-    result: ?session_wal.Fact = null,
+    approval_required: ?session_transition.Fact = null,
+    authorization: ?session_transition.Fact = null,
+    result: ?session_transition.Fact = null,
 
-    fn applyTransaction(context: *anyopaque, transaction: session_wal.Transaction) anyerror!void {
+    fn applyTransaction(context: *anyopaque, transaction: session_transition.Transaction) anyerror!void {
         const self: *FactSearch = @ptrCast(@alignCast(context));
         for (transaction.factSlice()) |fact| {
             if (fact.operation_id != self.operation_id or fact.generation != self.generation) continue;
@@ -1829,7 +1845,7 @@ const FactSearch = struct {
                     for (self.attempts[0..self.attempt_count]) |maybe_existing| {
                         const existing = maybe_existing.?;
                         if (existing.attempt_id != fact.attempt_id) continue;
-                        if (!std.meta.eql(existing, fact)) return error.ConflictingWalFacts;
+                        if (!std.meta.eql(existing, fact)) return error.ConflictingLedgerFacts;
                         found = true;
                         break;
                     }
@@ -1853,7 +1869,7 @@ const FactSearch = struct {
         }
     }
 
-    fn attemptSlice(self: *const FactSearch) []const ?session_wal.Fact {
+    fn attemptSlice(self: *const FactSearch) []const ?session_transition.Fact {
         return self.attempts[0..self.attempt_count];
     }
 
@@ -1878,7 +1894,7 @@ pub fn pendingApprovalRequired(session: *session_store.Session) !?ApprovalRequir
 const PendingApprovalSearch = struct {
     approval: ?ApprovalRequired = null,
 
-    fn applyTransaction(context: *anyopaque, transaction: session_wal.Transaction) anyerror!void {
+    fn applyTransaction(context: *anyopaque, transaction: session_transition.Transaction) anyerror!void {
         const self: *PendingApprovalSearch = @ptrCast(@alignCast(context));
         for (transaction.factSlice()) |fact| switch (fact.kind) {
             .approval_required => {
@@ -1936,9 +1952,9 @@ const InboxSearch = struct {
     }
 };
 
-fn uniqueFact(existing: ?session_wal.Fact, fact: session_wal.Fact) !session_wal.Fact {
+fn uniqueFact(existing: ?session_transition.Fact, fact: session_transition.Fact) !session_transition.Fact {
     if (existing) |value| {
-        if (!std.meta.eql(value, fact)) return error.ConflictingWalFacts;
+        if (!std.meta.eql(value, fact)) return error.ConflictingLedgerFacts;
         return value;
     }
     return fact;
@@ -1953,7 +1969,7 @@ fn hasIndeterminateBash(
     return found;
 }
 
-fn detectIndeterminate(context: *anyopaque, transaction: session_wal.Transaction) anyerror!void {
+fn detectIndeterminate(context: *anyopaque, transaction: session_transition.Transaction) anyerror!void {
     const found: *bool = @ptrCast(@alignCast(context));
     for (transaction.factSlice()) |fact| {
         if (fact.kind == .result and fact.recovery_class == .consequential and
@@ -2003,7 +2019,7 @@ fn finalizeCandidate(
     }
     try reach(fault, .after_assistant_entry);
     try core.reducer.commitFinalAnswer(entry.entry_id);
-    var final_facts: [2]session_wal.Fact = undefined;
+    var final_facts: [2]session_transition.Fact = undefined;
     final_facts[0] = semanticFact(.conversation_advanced, session);
     final_facts[0].subject = entry.entry_id;
     final_facts[0].reference = final_ref;

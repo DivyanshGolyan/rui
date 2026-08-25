@@ -43,7 +43,7 @@ The following are non-authoritative and cannot establish Session semantics:
 
 - encoded Core State checkpoints;
 - runnable and waiting indexes;
-- manifests and lookup accelerators;
+- lookup accelerators;
 - observer Projections;
 - same-build activation caches, if later measurement justifies them;
 - the durable Completion Inbox used to reconcile adapter evidence that has not yet entered the Session Ledger.
@@ -96,7 +96,7 @@ The Host Runtime acquires a lifetime operating-system lock before opening the Ho
 
 The Storage Owner owns one pinned SQLite connection, schema installation and validation, Session sequences, ownership epochs, canonical transitions, Completion Inbox evidence, State Checkpoints, rebuildable indexes, and bounded reads. It accepts bounded request envelopes through fixed credits, executes only indexed and bounded statements, and returns bounded results. Raw SQL, row identifiers, physical table shape, SQLite errors, and connection lifetime are not Session lifecycle interfaces.
 
-V1 configures 4 KiB pages, rollback-journal `DELETE`, `synchronous=EXTRA`, foreign keys, `busy_timeout=0`, `mmap_size=0`, and `temp_store=FILE`. Tables are `STRICT`; defensive mode is enabled; trusted schema, double-quoted string literals, extension loading, `ATTACH`, and SQLite worker threads are disabled; conservative runtime limits constrain lengths, columns, SQL text, variables, expression depth, and database pages. The SQLite version and compile options are pinned. The 32 KiB page-cache profile is a measured configuration point, not a production memory or performance promise.
+V1 configures 4 KiB pages, rollback-journal `DELETE`, `synchronous=EXTRA`, foreign keys, `busy_timeout=0`, `mmap_size=0`, and `temp_store=FILE`. Tables are `STRICT`; defensive mode is enabled; trusted schema, double-quoted string literals, extension loading, `ATTACH`, and SQLite worker threads are disabled; conservative runtime limits constrain lengths, columns, SQL text, variables, expression depth, and database pages. The SQLite version and compile options are pinned. The 32, 64, and 128 KiB page-cache profiles are measured configuration points, not total-memory or production-performance promises. The Storage Owner separately reports SQLite heap, page-cache, lookaside, and prepared-statement accounting against one explicit hard heap allowance.
 
 The Host Store schema version and Session payload version are independent. Unsupported versions fail clearly. Pre-release V1 does not implement downgrade compatibility or a general migration framework. Schema installation and any future migration identity commit transactionally rather than relying on database-file existence.
 

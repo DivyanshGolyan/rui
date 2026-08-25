@@ -1,5 +1,6 @@
 const std = @import("std");
 const harness = @import("harness.zig");
+const host_store = @import("host_store.zig");
 const bash_tool = @import("bash_tool.zig");
 const model_operation = @import("model_operation.zig");
 const patch_tool = @import("patch_tool.zig");
@@ -38,6 +39,10 @@ pub fn main(init: std.process.Init) !void {
         .{ .permissions = .fromMode(0o700) },
     );
     defer sessions.close(init.io);
+    const database_path = try std.fs.path.join(allocator, &.{ state_path, "host.sqlite3" });
+    defer allocator.free(database_path);
+    var storage = try host_store.StorageOwner.open(init.io, database_path, .{});
+    defer storage.close();
     if (arguments.resume_id) |session_id| {
         var fixture: model_operation.Fixture = .{
             .expected_task = null,
@@ -50,6 +55,7 @@ pub fn main(init: std.process.Init) !void {
         } else null;
         var owner = try harness.Harness.open(.{
             .host = &host,
+            .storage = &storage,
             .sessions = sessions,
             .io = init.io,
             .allocator = allocator,
@@ -84,7 +90,7 @@ pub fn main(init: std.process.Init) !void {
                 .final_answer = response,
                 .expected_patch_status = .denied,
             };
-            try runCreate(init.io, allocator, &host, sessions, arguments.dangerously_bypass_permissions, .{
+            try runCreate(init.io, allocator, &host, &storage, sessions, arguments.dangerously_bypass_permissions, .{
                 .workspace_path = workspace_path,
                 .model = model,
                 .task = task,
@@ -103,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
                 .tool_arguments = encoded_call,
                 .final_answer = response,
             };
-            try runCreate(init.io, allocator, &host, sessions, arguments.dangerously_bypass_permissions, .{
+            try runCreate(init.io, allocator, &host, &storage, sessions, arguments.dangerously_bypass_permissions, .{
                 .workspace_path = workspace_path,
                 .model = model,
                 .task = task,
@@ -115,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
             .expected_task = task,
             .final_answer = response,
         };
-        try runCreate(init.io, allocator, &host, sessions, arguments.dangerously_bypass_permissions, .{
+        try runCreate(init.io, allocator, &host, &storage, sessions, arguments.dangerously_bypass_permissions, .{
             .workspace_path = workspace_path,
             .model = model,
             .task = task,
@@ -128,12 +134,14 @@ fn runCreate(
     io: std.Io,
     allocator: std.mem.Allocator,
     host: *harness.Host,
+    storage: *host_store.StorageOwner,
     sessions: std.Io.Dir,
     bypass_permissions: bool,
     create: harness.Create,
 ) !void {
     var owner = try harness.Harness.open(.{
         .host = host,
+        .storage = storage,
         .sessions = sessions,
         .io = io,
         .allocator = allocator,

@@ -61,8 +61,11 @@ select it again.
 zig build fixture-patch-deny -Doptimize=ReleaseSmall
 ```
 
-State Checkpoint publication uses temporary write, file sync, same-directory rename, and
-parent-directory sync. Fault tests recover only the old or new compact canonical state.
+State Checkpoints, ownership epochs, Completion evidence, Session metadata, and canonical transitions
+now live behind the same Storage Owner. The SQLite transaction that publishes a terminal Result also
+associates its immutable Completion evidence; a corrupt checkpoint loses acceleration rather than
+ledger authority. Per-Session WAL, Inbox, checkpoint, and manifest files are no longer production
+storage paths.
 
 ## Requirements
 
@@ -102,6 +105,7 @@ Source audits that informed the architecture:
 - [`docs/research/codex-cli-session-lessons.md`](docs/research/codex-cli-session-lessons.md)
 - [`docs/research/cursor-origin-wal-lessons.md`](docs/research/cursor-origin-wal-lessons.md)
 - [`docs/research/opencode-sqlite-v2-lessons.md`](docs/research/opencode-sqlite-v2-lessons.md)
+- [`docs/research/sqlite-host-store-practices.md`](docs/research/sqlite-host-store-practices.md)
 - [`docs/research/linting-typechecking-setup.md`](docs/research/linting-typechecking-setup.md)
 
 Historical design records:

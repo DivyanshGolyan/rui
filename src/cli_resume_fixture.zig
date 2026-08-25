@@ -1,5 +1,6 @@
 const std = @import("std");
 const harness = @import("harness.zig");
+const host_store = @import("host_store.zig");
 const model_operation = @import("model_operation.zig");
 const session_store = @import("session.zig");
 
@@ -15,6 +16,10 @@ pub fn main(init: std.process.Init) !void {
         .{ .permissions = .fromMode(0o700) },
     );
     defer sessions.close(init.io);
+    const database_path = try std.fs.path.join(allocator, &.{ args[1], "host.sqlite3" });
+    defer allocator.free(database_path);
+    var storage = try host_store.StorageOwner.open(init.io, database_path, .{});
+    defer storage.close();
     var host: harness.Host = .{};
     var fixture: model_operation.Fixture = .{
         .expected_task = task,
@@ -23,6 +28,7 @@ pub fn main(init: std.process.Init) !void {
     var crash: Crash = .{};
     var owner = try harness.Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = sessions,
         .io = init.io,
         .allocator = allocator,

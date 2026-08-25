@@ -4,7 +4,7 @@ const core_state = @import("core_state.zig");
 pub const state_size = core_state.encoded_size;
 pub const header_size = 64;
 pub const encoded_size = header_size + state_size;
-pub const version: u16 = 3;
+pub const version: u16 = 4;
 
 const magic = "ONECKPT\x00";
 const offset_version = 8;
@@ -15,17 +15,23 @@ const offset_generation = 24;
 const offset_state_length = 32;
 const offset_state_crc = 36;
 const offset_header_crc = 40;
-const offset_wal_sequence = 44;
+const offset_ledger_sequence = 44;
 const offset_reserved = 52;
 
 pub const Decoded = struct {
     agent_id: u64,
     generation: u32,
-    wal_sequence: u64,
+    ledger_sequence: u64,
     state: []const u8,
 };
 
-pub fn encode(out: []u8, agent_id: u64, generation: u32, wal_sequence: u64, state: []const u8) !void {
+pub fn encode(
+    out: []u8,
+    agent_id: u64,
+    generation: u32,
+    ledger_sequence: u64,
+    state: []const u8,
+) !void {
     if (out.len != encoded_size) return error.InvalidOutputLength;
     if (state.len != state_size) return error.InvalidCoreStateLength;
     const decoded_state = try core_state.decode(state);
@@ -41,7 +47,7 @@ pub fn encode(out: []u8, agent_id: u64, generation: u32, wal_sequence: u64, stat
     write(u64, out, offset_generation, generation);
     write(u32, out, offset_state_length, state_size);
     write(u32, out, offset_state_crc, std.hash.Crc32.hash(state));
-    write(u64, out, offset_wal_sequence, wal_sequence);
+    write(u64, out, offset_ledger_sequence, ledger_sequence);
     write(u32, out, offset_header_crc, headerChecksum(out[0..header_size]));
     @memcpy(out[header_size..], state);
 }
@@ -78,7 +84,7 @@ pub fn decode(record: []const u8, expected_agent_id: u64, expected_generation: u
     return .{
         .agent_id = agent_id,
         .generation = generation,
-        .wal_sequence = read(u64, record, offset_wal_sequence),
+        .ledger_sequence = read(u64, record, offset_ledger_sequence),
         .state = state,
     };
 }
@@ -114,7 +120,7 @@ test "checkpoint contains compact canonical Core State" {
     try encode(&encoded, 42, 7, 9, &state);
     const decoded = try decode(&encoded, 42, 7);
     try std.testing.expectEqualSlices(u8, &state, decoded.state);
-    try std.testing.expectEqual(@as(u64, 9), decoded.wal_sequence);
+    try std.testing.expectEqual(@as(u64, 9), decoded.ledger_sequence);
     try std.testing.expectEqual(@as(usize, header_size + core_state.encoded_size), encoded.len);
 }
 

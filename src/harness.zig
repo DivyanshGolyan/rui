@@ -2,18 +2,19 @@ const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
 const checkpoint = @import("checkpoint.zig");
 const completion_inbox = @import("completion_inbox.zig");
+const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
 const model_operation = @import("model_operation.zig");
 const model_protocol = @import("model_protocol.zig");
 const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
-const session_wal = @import("session_wal.zig");
+const session_transition = @import("session_transition.zig");
 
 pub const Host = lifecycle.Host;
 pub const FaultBoundary = lifecycle.FaultBoundary;
 pub const FaultHook = lifecycle.FaultHook;
 pub const default_recovery_quantum: u8 = 32;
-pub const max_recovery_records: usize = session_wal.max_frames + completion_inbox.max_records;
+pub const max_recovery_records: usize = session_transition.max_transitions + completion_inbox.max_records;
 
 pub const PermissionMode = enum {
     ask,
@@ -41,6 +42,7 @@ pub const OpenMode = union(enum) {
 
 pub const Config = struct {
     host: *Host,
+    storage: *host_store.StorageOwner,
     sessions: std.Io.Dir,
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -188,6 +190,7 @@ pub const Harness = struct {
         switch (config.mode) {
             .create => |create| owner.session = try session_store.Session.create(
                 config.sessions,
+                config.storage,
                 config.io,
                 .{
                     .workspace_path = create.workspace_path,
@@ -196,12 +199,11 @@ pub const Harness = struct {
                 },
             ),
             .restore => |restore| {
-                var manifest_buffer: [session_store.manifest_max_size]u8 = undefined;
                 const restored = try session_store.Session.openExisting(
                     config.sessions,
+                    config.storage,
                     config.io,
                     restore.session_id,
-                    &manifest_buffer,
                 );
                 owner.session = restored.session;
                 owner.recovery_pending = true;
@@ -652,7 +654,7 @@ pub const Harness = struct {
     fn classifyLifecycleError(self: *Harness, err: anyerror, progress: Progress) anyerror!Progress {
         var result = progress;
         if (err == error.CompletionOffered) result.dispatched = 1;
-        if (err == error.MissingWalCoreState) {
+        if (err == error.MissingLedgerCoreState) {
             self.setState(.ready);
             result.state = .ready;
             return result;
@@ -885,16 +887,36 @@ pub const Harness = struct {
     }
 };
 
+fn openTestStorage(tmp: *const std.testing.TmpDir) !host_store.StorageOwner {
+    return openTestStorageConfigured(tmp, .{});
+}
+
+fn openTestStorageConfigured(
+    tmp: *const std.testing.TmpDir,
+    config: host_store.Config,
+) !host_store.StorageOwner {
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    return host_store.StorageOwner.open(std.testing.io, path, config);
+}
+
 test "open retains no Activation Slot and offer transfers one bounded input" {
     var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var storage = try openTestStorage(&tmp);
+    defer storage.close();
     var fixture: model_operation.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
     var owner = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -915,12 +937,15 @@ test "restore withholds projections until the configured recovery quantum reache
     var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var storage = try openTestStorage(&tmp);
+    defer storage.close();
     var fixture: model_operation.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
     var created = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -934,18 +959,21 @@ test "restore withholds projections until the configured recovery quantum reache
     const session = &created.session.?;
     const session_id = session.session_id;
     for (0..5) |index| {
+        try session.storeBlob(session.ownerToken(), index + 1, "ledger fixture");
         _ = try session.commitSemantic(session.ownerToken(), &.{.{
             .kind = .task_admitted,
             .agent_id = session.agent_id,
             .agent_generation = 1,
             .ownership_epoch = session.ownership_epoch,
             .subject = index + 1,
+            .reference = index + 1,
         }}, null);
     }
     created.close();
 
     var restored = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -974,18 +1002,21 @@ test "restore withholds projections until the configured recovery quantum reache
 
 test "restore publishes Session identity before reconciling Completion evidence" {
     const IgnoreReplay = struct {
-        fn apply(_: *anyopaque, _: session_wal.Transaction) !void {}
+        fn apply(_: *anyopaque, _: session_transition.Transaction) !void {}
     };
 
     var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var storage = try openTestStorage(&tmp);
+    defer storage.close();
     var fixture: model_operation.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
     var created = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -1011,6 +1042,7 @@ test "restore publishes Session identity before reconciling Completion evidence"
 
     var restored = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -1038,16 +1070,34 @@ test "restore publishes Session identity before reconciling Completion evidence"
     try std.testing.expect(after_reconcile.last_sequence > before_reconcile.last_sequence);
 }
 
-test "failed recovery frame makes the live Harness unavailable" {
+test "failed Host Store recovery makes the live Harness unavailable" {
+    const ReadFault = struct {
+        armed: bool = false,
+
+        fn reached(context: *anyopaque, boundary: host_store.FaultBoundary) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.armed and boundary == .before_transition_read) {
+                return error.InjectedStorageFailure;
+            }
+        }
+
+        fn hook(self: *@This()) host_store.FaultHook {
+            return .{ .context = self, .reached = reached };
+        }
+    };
     var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var read_fault: ReadFault = .{};
+    var storage = try openTestStorageConfigured(&tmp, .{ .fault = read_fault.hook() });
+    defer storage.close();
     var fixture: model_operation.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
     var created = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -1060,7 +1110,7 @@ test "failed recovery frame makes the live Harness unavailable" {
     });
     const session = &created.session.?;
     const session_id = session.session_id;
-    const descriptor: session_wal.Fact = .{
+    const descriptor: session_transition.Fact = .{
         .kind = .operation_submitted,
         .agent_id = session.agent_id,
         .agent_generation = 1,
@@ -1070,34 +1120,21 @@ test "failed recovery frame makes the live Harness unavailable" {
         .reference = 11,
         .digest = 12,
     };
+    try session.storeBlob(session.ownerToken(), descriptor.reference, "operation descriptor");
     _ = try session.commitSemantic(session.ownerToken(), &.{descriptor}, null);
     created.close();
-
-    var name_buffer: [16]u8 = undefined;
-    const name = try session_store.formatId(session_id, &name_buffer);
-    var session_dir = try tmp.dir.openDir(std.testing.io, name, .{});
-    defer session_dir.close(std.testing.io);
-    var writer = try session_wal.Writer.openAppendIn(session_dir, std.testing.io, "session.wal");
-    var invalid: session_wal.Transaction = .{ .sequence = 2, .fact_count = 2 };
-    invalid.facts[0] = descriptor;
-    invalid.facts[0].kind = .authorization;
-    invalid.facts[1] = descriptor;
-    invalid.facts[1].kind = .attempt_admitted;
-    invalid.facts[1].operation_id = 99;
-    invalid.facts[1].attempt_id = 13;
-    invalid.facts[1].recovery_class = .model;
-    try writer.append(std.testing.io, invalid);
-    writer.close(std.testing.io);
+    read_fault.armed = true;
 
     var restored = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .mode = .{ .restore = .{ .session_id = session_id } },
     });
     defer restored.close();
-    try std.testing.expectError(error.InvalidOperationHistory, restored.drive());
+    try std.testing.expectError(error.InjectedStorageFailure, restored.drive());
     try std.testing.expectError(error.HarnessUnavailable, restored.drive());
 }
 
@@ -1106,7 +1143,7 @@ test "shutdown denies Approval Required before closing" {
         approval_required: u8 = 0,
         undecided_authorization: u8 = 0,
 
-        fn apply(context: *anyopaque, transaction: session_wal.Transaction) !void {
+        fn apply(context: *anyopaque, transaction: session_transition.Transaction) !void {
             const self: *@This() = @ptrCast(@alignCast(context));
             for (transaction.factSlice()) |fact| switch (fact.kind) {
                 .approval_required => self.approval_required += 1,
@@ -1121,6 +1158,8 @@ test "shutdown denies Approval Required before closing" {
     var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var storage = try openTestStorage(&tmp);
+    defer storage.close();
     var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
     const call = try bash_tool.encodeCall(&call_buffer, .{
         .command = "printf forbidden",
@@ -1134,6 +1173,7 @@ test "shutdown denies Approval Required before closing" {
     };
     var owner = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -1163,6 +1203,7 @@ test "shutdown denies Approval Required before closing" {
 
     var restored = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -1211,9 +1252,12 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
     var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var storage = try openTestStorage(&tmp);
+    defer storage.close();
     var provider: CancellingProvider = .{};
     var owner = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -1266,7 +1310,7 @@ test "known provider failure is one durable terminal Result" {
     const ResultFacts = struct {
         count: u8 = 0,
 
-        fn apply(context: *anyopaque, transaction: session_wal.Transaction) !void {
+        fn apply(context: *anyopaque, transaction: session_transition.Transaction) !void {
             const self: *@This() = @ptrCast(@alignCast(context));
             for (transaction.factSlice()) |fact| {
                 if (fact.kind == .result and fact.recovery_class == .model) self.count += 1;
@@ -1277,9 +1321,12 @@ test "known provider failure is one durable terminal Result" {
     var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var storage = try openTestStorage(&tmp);
+    defer storage.close();
     var provider: FailingProvider = .{};
     var owner = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -1309,6 +1356,7 @@ test "known provider failure is one durable terminal Result" {
 
     var restored = try Harness.open(.{
         .host = &host,
+        .storage = &storage,
         .sessions = tmp.dir,
         .io = std.testing.io,
         .allocator = std.testing.allocator,

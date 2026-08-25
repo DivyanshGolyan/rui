@@ -1,4 +1,5 @@
 const std = @import("std");
+const host_store = @import("host_store.zig");
 const bash_tool = @import("bash_tool.zig");
 const model_protocol = @import("model_protocol.zig");
 const patch_tool = @import("patch_tool.zig");
@@ -396,7 +397,15 @@ test "request reconstruction walks durable entries through bounded windows" {
     );
     var sessions = try tmp.dir.openDir(io, "sessions", .{});
     defer sessions.close(io);
-    var session = try session_store.Session.create(sessions, io, .{
+    var database_path_buffer: [128]u8 = undefined;
+    const database_path = try std.fmt.bufPrint(
+        &database_path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var storage = try host_store.StorageOwner.open(io, database_path, .{});
+    defer storage.close();
+    var session = try session_store.Session.create(sessions, &storage, io, .{
         .workspace_path = repo_path,
         .model = "fixture:answer",
         .task = "Explain the repository",
