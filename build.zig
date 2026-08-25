@@ -43,138 +43,41 @@ pub fn build(b: *std.Build) void {
     cli.root_module.link_libc = true;
     b.installArtifact(cli);
 
-    const inspector_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/wasm_inspect.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    const checkpoint_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/checkpoint.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    const core_image_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/core_image.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    const checkpoint_store_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/checkpoint_store.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    const operation_log_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/operation_log.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    const core_contract_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/core_contract.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    const core_contract_check = b.addExecutable(.{
-        .name = "onepage-core-contract-check",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/core_contract_check.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    core_contract_check.root_module.link_libc = true;
-    const run_core_contract_check = b.addRunArtifact(core_contract_check);
-    run_core_contract_check.addFileArg(core.getEmittedBin());
-    const harness_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/harness.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    const durable_transition_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/durable_transition.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    const session_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/session.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    const model_operation_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/model_operation.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    const bash_tool_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bash_tool.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    bash_tool_tests.root_module.link_libc = true;
-    const patch_tool_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/patch_tool.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    patch_tool_tests.root_module.link_libc = true;
-    const cli_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/cli.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    cli_tests.root_module.link_libc = true;
-    const agent_integration = b.addExecutable(.{
-        .name = "onepage-agent-integration",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/agent_integration.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    agent_integration.root_module.link_libc = true;
-    const run_agent_integration = b.addRunArtifact(agent_integration);
-    run_agent_integration.addFileArg(core.getEmittedBin());
     const test_step = b.step("test", "Run the deterministic spike tests");
-    test_step.dependOn(&b.addRunArtifact(inspector_tests).step);
-    test_step.dependOn(&b.addRunArtifact(core_image_tests).step);
-    test_step.dependOn(&b.addRunArtifact(checkpoint_tests).step);
-    test_step.dependOn(&b.addRunArtifact(checkpoint_store_tests).step);
-    test_step.dependOn(&b.addRunArtifact(operation_log_tests).step);
-    test_step.dependOn(&b.addRunArtifact(core_contract_tests).step);
-    test_step.dependOn(&run_core_contract_check.step);
-    test_step.dependOn(&b.addRunArtifact(harness_tests).step);
-    test_step.dependOn(&b.addRunArtifact(durable_transition_tests).step);
-    test_step.dependOn(&b.addRunArtifact(session_tests).step);
-    test_step.dependOn(&b.addRunArtifact(model_operation_tests).step);
-    test_step.dependOn(&b.addRunArtifact(bash_tool_tests).step);
-    test_step.dependOn(&b.addRunArtifact(patch_tool_tests).step);
-    test_step.dependOn(&b.addRunArtifact(cli_tests).step);
-    test_step.dependOn(&run_agent_integration.step);
+    addTestGraph(b, test_step, core, native_target, optimize);
+
+    const check_step = b.step(
+        "check",
+        "Check formatting and run ReleaseSafe tests against ReleaseSmall artifacts",
+    );
+    const format_check = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "fmt",
+        "--check",
+        "--ast-check",
+        b.pathFromRoot("build.zig"),
+        b.pathFromRoot("src"),
+    });
+    check_step.dependOn(&format_check.step);
+    addTestGraph(b, check_step, core, native_target, .ReleaseSafe);
+
+    const release_small_host = addNativeExecutable(
+        b,
+        "onepage-spike-release-small-check",
+        "src/host.zig",
+        native_target,
+        .ReleaseSmall,
+    );
+    const release_small_cli = addNativeExecutable(
+        b,
+        "onepage-release-small-check",
+        "src/cli.zig",
+        native_target,
+        .ReleaseSmall,
+    );
+    check_step.dependOn(&core.step);
+    check_step.dependOn(&release_small_host.step);
+    check_step.dependOn(&release_small_cli.step);
 
     const fixture_answer_step = b.step(
         "fixture-answer",
@@ -293,4 +196,97 @@ pub fn build(b: *std.Build) void {
     run_checkpoint_crash.addFileArg(core.getEmittedBin());
     run_checkpoint_crash.addArg("checkpoint-crash-suite");
     checkpoint_crash_step.dependOn(&run_checkpoint_crash.step);
+}
+
+fn addTestGraph(
+    b: *std.Build,
+    parent: *std.Build.Step,
+    core: *std.Build.Step.Compile,
+    native_target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    const plain_test_roots = [_][]const u8{
+        "src/wasm_inspect.zig",
+        "src/checkpoint.zig",
+        "src/core_image.zig",
+        "src/checkpoint_store.zig",
+        "src/operation_log.zig",
+        "src/core_contract.zig",
+        "src/harness.zig",
+        "src/durable_transition.zig",
+        "src/session.zig",
+        "src/model_operation.zig",
+    };
+    for (plain_test_roots) |root| {
+        addTestRun(b, parent, root, native_target, optimize, false);
+    }
+
+    const libc_test_roots = [_][]const u8{
+        "src/bash_tool.zig",
+        "src/patch_tool.zig",
+        "src/cli.zig",
+    };
+    for (libc_test_roots) |root| {
+        addTestRun(b, parent, root, native_target, optimize, true);
+    }
+
+    const core_contract_check = addNativeExecutable(
+        b,
+        "onepage-core-contract-check",
+        "src/core_contract_check.zig",
+        native_target,
+        optimize,
+    );
+    const run_core_contract_check = b.addRunArtifact(core_contract_check);
+    run_core_contract_check.addFileArg(core.getEmittedBin());
+    parent.dependOn(&run_core_contract_check.step);
+
+    const agent_integration = addNativeExecutable(
+        b,
+        "onepage-agent-integration",
+        "src/agent_integration.zig",
+        native_target,
+        optimize,
+    );
+    const run_agent_integration = b.addRunArtifact(agent_integration);
+    run_agent_integration.addFileArg(core.getEmittedBin());
+    parent.dependOn(&run_agent_integration.step);
+}
+
+fn addTestRun(
+    b: *std.Build,
+    parent: *std.Build.Step,
+    root: []const u8,
+    native_target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    link_libc: bool,
+) void {
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(root),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    tests.root_module.link_libc = link_libc;
+    parent.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn addNativeExecutable(
+    b: *std.Build,
+    name: []const u8,
+    root: []const u8,
+    native_target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const executable = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(root),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    executable.root_module.link_libc = true;
+    return executable;
 }

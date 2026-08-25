@@ -14,6 +14,9 @@ issues #14 and #15 migrate those proofs to the normative semantic architecture.
 [`VERIFICATION.md`](VERIFICATION.md) are normative. Historical spikes and research remain evidence,
 but they do not override those documents or accepted ADRs.
 
+[`docs/style.md`](docs/style.md) defines the scoped engineering rules and canonical compiler-backed
+check for implementation work.
+
 The operation-lifecycle spike uses four separate host processes to submit, durably accept, complete,
 recover, and replay 1,000 operations while their agents are absent from memory. Both recovery
 processes restore every page through the same slot without building a resident per-agent index.
@@ -78,6 +81,7 @@ the old or new canonical page while keeping the journal unchanged.
 ## Run the spike
 
 ```sh
+zig build check
 zig build test -Doptimize=ReleaseSafe
 zig build native-core -Doptimize=ReleaseSafe
 zig build run -Doptimize=ReleaseSmall
@@ -107,6 +111,7 @@ Source audits that informed the architecture:
 - [`docs/research/fx-pi-harness-lessons.md`](docs/research/fx-pi-harness-lessons.md)
 - [`docs/research/codex-cli-session-lessons.md`](docs/research/codex-cli-session-lessons.md)
 - [`docs/research/cursor-origin-wal-lessons.md`](docs/research/cursor-origin-wal-lessons.md)
+- [`docs/research/linting-typechecking-setup.md`](docs/research/linting-typechecking-setup.md)
 
 Historical design records:
 
