@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0009
+---
+
 # Use one Session WAL as semantic authority
 
 Each Session has one append-only WAL that orders every semantic fact required to reconstruct its lifecycle, including task admission, model and tool Operations, Attempts, Authorization, Results, Conversation advancement, cancellation, and Outcome. Large immutable content is written first and referenced from the WAL; an unreferenced blob is garbage, while a WAL record never depends on content that was not made durable first. Core State checkpoints, runnable indexes, manifests, and observer Projections are rebuildable views at a named WAL sequence.

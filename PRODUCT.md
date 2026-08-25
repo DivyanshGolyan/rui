@@ -1,6 +1,6 @@
 # OnePage product contract
 
-OnePage is a terminal-first coding-agent harness for running many durable agents through a fixed resident pool on one host. Every active Core borrows one exact 64 KiB Activation Slot; sleeping agents retain compact Core State, immutable history, and durable effect facts without retaining an Activation Slot, thread, process, socket, or conversation object graph.
+OnePage is a terminal-first coding-agent harness for running many durable agents through a fixed resident pool on one host. Every active Core borrows one exact 64 KiB Activation Slot; sleeping agents retain compact Core State, immutable history, and durable effect facts in one host-wide Host Store without retaining an Activation Slot, thread, process, socket, database connection, or conversation object graph.
 
 The memorable claim is not that the complete process or a serialized agent consumes 64 KiB. OnePage reports the exact Activation Slot separately from native stacks, host pools, transport buffers, subprocesses, durable storage, and whole-process RSS. Its architectural claim is that resident memory follows the configured active working set rather than total Session count, Conversation length, or delegation topology.
 
@@ -22,7 +22,7 @@ The terminal demonstrates durable Session identity, exact Action authority, cras
 - Every Activation Slot is exactly 65,536 bytes and comes from a startup-reserved pool.
 - Activating, advancing, suspending, and reusing a slot performs no general-purpose allocation inside Core.
 - Sleeping Sessions retain no resident Activation Slot or materialized Conversation graph.
-- Every acknowledged semantic transition is reconstructable from the Session WAL and immutable content. Live `offer` acceptance is not acknowledgement; the CLI acknowledges an input only after its WAL transaction commits.
+- Every acknowledged semantic transition is reconstructable from its ordered Session Ledger and immutable content. Live `offer` acceptance is not acknowledgement; the CLI acknowledges an input only after the Host Store transaction commits.
 - Arbitrary Bash is never claimed to be exactly once or repository-confined. An uncertain Bash Attempt is not replayed automatically.
 - A one-file patch binds exact Workspace, path, preimage, patch, and Authorization identity and reconciles observed state before any retry.
 - Output and history larger than resident bounds are streamed or spooled outside the Activation Slot.
