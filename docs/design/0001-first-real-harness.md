@@ -1,6 +1,8 @@
 # First real harness design
 
-Status: accepted for the first coding-task loop
+Status: historical; superseded in part by `ARCHITECTURE.md`, ADR-0006, and ADR-0007
+
+`PRODUCT.md`, `ARCHITECTURE.md`, and `VERIFICATION.md` are normative. They supersede this document's raw Core image, effect-only operation journal, and checkpoint-authority details while retaining the accepted `Harness.open / offer / drive` interface, effect semantics, and two-tool product loop.
 
 Related specifications:
 

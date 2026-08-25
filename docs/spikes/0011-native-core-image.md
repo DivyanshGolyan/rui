@@ -1,5 +1,7 @@
 # Native Core image
 
+> Historical evidence. This spike established the native production path and exact 64 KiB resident allocation. ADR-0006 supersedes its decision to make the complete raw image persistent: the exact allocation is now the Activation Slot, while compact Core State has a canonical durable encoding.
+
 ## Question
 
 Can OnePage keep the one-page state invariant without paying for a WebAssembly runtime in the

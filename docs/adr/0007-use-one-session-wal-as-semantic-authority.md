@@ -1,0 +1,7 @@
+# Use one Session WAL as semantic authority
+
+Each Session has one append-only WAL that orders every semantic fact required to reconstruct its lifecycle, including task admission, model and tool Operations, Attempts, Authorization, Results, Conversation advancement, cancellation, and Outcome. Large immutable content is written first and referenced from the WAL; an unreferenced blob is garbage, while a WAL record never depends on content that was not made durable first. Core State checkpoints, runnable indexes, manifests, and observer Projections are rebuildable views at a named WAL sequence.
+
+The Session WAL replaces the effect-only operation journal as authority; it is not a third history and does not duplicate Conversation content. Conversation remains the immutable model-visible tree, while the WAL establishes when its entries become authoritative for a Session. Streaming deltas, terminal rendering, diagnostics, scheduler polling, and raw payload bytes are excluded because they are not semantic lifecycle facts.
+
+One prepared transition is one bounded checksummed WAL transaction frame, so a valid-prefix recovery never exposes only part of a semantic change. Adapters may leave immutable Result content and a bound envelope in the non-authoritative Completion Inbox before Harness receives the notification; Harness alone validates that evidence and commits the terminal Result transaction that advances the Session.

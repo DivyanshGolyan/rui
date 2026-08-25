@@ -1,5 +1,7 @@
 # Durable Session ownership and resume
 
+> Historical evidence. The ownership and exact-resume results remain useful, but ADR-0007 supersedes the separate Conversation-log and operation-journal authority model. Immutable Conversation content advances only through the single ordered Session WAL, which also owns effect and lifecycle facts.
+
 ## Question
 
 Can OnePage create and resume an exact durable Session without retaining conversation history or ownership state in a resident catalogue?

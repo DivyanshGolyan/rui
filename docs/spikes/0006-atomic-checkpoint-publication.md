@@ -1,5 +1,7 @@
 # Atomic checkpoint publication
 
+> Historical evidence. The old-or-new file publication and crash measurements remain valid, but ADR-0007 supersedes this spike's checkpoint-authority conclusion. A State Checkpoint is now a rebuildable view at one Session WAL sequence; the WAL's valid prefix is semantic authority.
+
 ## Question
 
 Can a process terminate at every checkpoint publication barrier without making the durable agent unrecoverable or causing a completed operation to append twice?

@@ -1,5 +1,7 @@
 # Checkpoint-format spike
 
+> Historical evidence. ADR-0006 and `ARCHITECTURE.md` supersede the raw 64 KiB image as the canonical State Checkpoint format. The fixed-image results remain useful as measurements and regression fixtures, not durable architecture.
+
 ## Question
 
 Can a logical agent's complete execution state be written and restored through a bounded,

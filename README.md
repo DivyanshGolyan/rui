@@ -1,13 +1,18 @@
 # OnePage
 
-A single-host coding-agent architecture whose persistent mutable agent state and core-owned buffers
-fit in one fixed 64 KiB native image.
+A single-host coding-agent architecture in which every active Core borrows one exact 64 KiB
+Activation Slot from a fixed resident pool.
 
-The production CLI executes a target-neutral Zig reducer directly over a caller-owned 64 KiB image;
-it has no embedded language or WebAssembly runtime. The same reducer is also compiled to
-`wasm32-freestanding` as a conformance target. A differential spike proves byte-equivalent native
-and Wasm payloads across a complete model, tool, second-model, and Final Answer trace. It also
-snapshots and restores 1,000 logical agents through one reused resident image.
+The production CLI executes a target-neutral Zig reducer natively; it has no embedded language or
+WebAssembly runtime. The same reducer is also compiled to `wasm32-freestanding` as a conformance
+target. The target architecture separates compact, canonically encoded Core State from transient
+Activation Slot scratch and reconstructs Session semantics from one ordered Session WAL. Historical
+spikes currently prove the native path, raw-image differential trace, and 1,000-agent slot reuse;
+issues #14 and #15 migrate those proofs to the normative semantic architecture.
+
+[`PRODUCT.md`](PRODUCT.md), [`ARCHITECTURE.md`](ARCHITECTURE.md), and
+[`VERIFICATION.md`](VERIFICATION.md) are normative. Historical spikes and research remain evidence,
+but they do not override those documents or accepted ADRs.
 
 The operation-lifecycle spike uses four separate host processes to submit, durably accept, complete,
 recover, and replay 1,000 operations while their agents are absent from memory. Both recovery
@@ -19,7 +24,7 @@ shutdown admission; durable-before-apply ordering; committed projections; bounde
 and crash/replay tests. Its 32-entry maximum is fixed at compile time and does not vary with
 logical-agent count.
 
-The owner crash-recovery spike connects that harness to the real operation journal and native Core
+The owner crash-recovery spike connects that harness to the historical operation journal and native Core
 image. A child process exits after the completion record is synced but before slot mutation; two fresh
 recovery processes then prove one application followed by one duplicate. The fixed native control
 metadata is 1,536 bytes, excluding the runtime, one-page core, and checkpoint staging buffer.
@@ -103,7 +108,7 @@ Source audits that informed the architecture:
 - [`docs/research/codex-cli-session-lessons.md`](docs/research/codex-cli-session-lessons.md)
 - [`docs/research/cursor-origin-wal-lessons.md`](docs/research/cursor-origin-wal-lessons.md)
 
-Accepted designs:
+Historical design records:
 
 - [`docs/design/0001-first-real-harness.md`](docs/design/0001-first-real-harness.md)
 
@@ -118,3 +123,5 @@ Architectural decisions:
 - [`docs/adr/0003-treat-user-worktrees-as-external-truth.md`](docs/adr/0003-treat-user-worktrees-as-external-truth.md)
 - [`docs/adr/0004-reconcile-uncertain-effect-attempts.md`](docs/adr/0004-reconcile-uncertain-effect-attempts.md)
 - [`docs/adr/0005-use-two-tools-and-final-assistant-text.md`](docs/adr/0005-use-two-tools-and-final-assistant-text.md)
+- [`docs/adr/0006-separate-core-state-from-activation-slot.md`](docs/adr/0006-separate-core-state-from-activation-slot.md)
+- [`docs/adr/0007-use-one-session-wal-as-semantic-authority.md`](docs/adr/0007-use-one-session-wal-as-semantic-authority.md)
