@@ -208,7 +208,7 @@ pub const Harness = struct {
                 if (try session.recoveryIsEmpty(session.ownerToken())) {
                     _ = try session.recoverSemanticWindow(session.ownerToken(), 1);
                     owner.recovery_pending = false;
-                    _ = try owner.completeRestore();
+                    owner.setState(.ready);
                 }
             },
         }
@@ -257,31 +257,21 @@ pub const Harness = struct {
                 .consumed = recovery.processed,
                 .more = true,
             };
+            if (self.session_projection_pending) {
+                return self.publishSessionIdentity(true);
+            }
             self.recovery_pending = false;
-            self.completeRestore() catch |err| {
+            const restored_control = lifecycle.restoredControl(session) catch |err| {
                 self.setState(.unavailable);
                 return err;
             };
+            if (restored_control) |control| {
+                self.setState(if (control == .cancel) .cancelled else .closed);
+            }
         }
 
         if (self.session_projection_pending) {
-            const session = &self.session.?;
-            self.session_projection_pending = false;
-            var identified: Progress = .{
-                .state = self.state,
-                .more = switch (self.config.mode) {
-                    .create => false,
-                    .restore => true,
-                },
-            };
-            identified.projections[0] = .{
-                .kind = .session,
-                .session_id = session.session_id,
-                .task_id = session.task_id,
-                .session = session,
-            };
-            identified.projection_count = 1;
-            return identified;
+            return self.publishSessionIdentity(false);
         }
 
         if (self.state == .closed or self.state == .cancelled) {
@@ -493,38 +483,24 @@ pub const Harness = struct {
         return progress;
     }
 
-    fn completeRestore(self: *Harness) !void {
+    fn publishSessionIdentity(self: *Harness, restoring: bool) Progress {
         const session = &self.session.?;
-        if (try lifecycle.restoredControl(session)) |control| {
-            self.setState(if (control == .cancel) .cancelled else .closed);
-            return;
-        }
-        self.final_ref = lifecycle.inspectRestored(
-            self.config.host,
-            self.config.allocator,
-            session,
-            &self.checkpoint_buffer,
-        ) catch |err| switch (err) {
-            error.MissingWalCoreState => unadmitted: {
-                self.setState(.ready);
-                break :unadmitted 0;
+        self.session_projection_pending = false;
+        var identified: Progress = .{
+            .state = if (restoring) .restoring else self.state,
+            .more = switch (self.config.mode) {
+                .create => false,
+                .restore => true,
             },
-            error.SessionOperationPending,
-            error.SessionNeedsModel,
-            error.ToolCallDeferred,
-            error.PatchExecutionDeferred,
-            error.PatchApprovalRequired,
-            error.BashPossiblyExecuted,
-            => waiting: {
-                self.setState(.waiting);
-                if (err == error.PatchApprovalRequired) {
-                    self.setApproval(try lifecycle.pendingApproval(session));
-                }
-                break :waiting 0;
-            },
-            else => return err,
         };
-        if (self.final_ref != 0) self.setState(.finished);
+        identified.projections[0] = .{
+            .kind = .session,
+            .session_id = session.session_id,
+            .task_id = session.task_id,
+            .session = session,
+        };
+        identified.projection_count = 1;
+        return identified;
     }
 
     fn consumeControl(self: *Harness, input: Input, progress: Progress) !Progress {
@@ -617,6 +593,11 @@ pub const Harness = struct {
 
     fn classifyLifecycleError(self: *Harness, err: anyerror, progress: Progress) anyerror!Progress {
         var result = progress;
+        if (err == error.MissingWalCoreState) {
+            self.setState(.ready);
+            result.state = .ready;
+            return result;
+        }
         switch (err) {
             error.StaleCompletion,
             error.FutureCompletionEpoch,
@@ -901,10 +882,80 @@ test "restore withholds projections until the configured recovery quantum reache
     try std.testing.expect(second.more);
     try std.testing.expectEqual(@as(u8, 0), second.projection_count);
     const safe = try restored.drive();
-    try std.testing.expectEqual(State.ready, safe.state);
+    try std.testing.expectEqual(State.restoring, safe.state);
     try std.testing.expect(safe.more);
     try std.testing.expectEqual(@as(u8, 1), safe.projection_count);
     try std.testing.expectEqual(ProjectionKind.session, safe.projections[0].kind);
+    const ready = try restored.drive();
+    try std.testing.expectEqual(State.ready, ready.state);
+    try std.testing.expect(!ready.more);
+    try std.testing.expectEqual(@as(u8, 0), ready.projection_count);
+}
+
+test "restore publishes Session identity before reconciling Completion evidence" {
+    const IgnoreReplay = struct {
+        fn apply(_: *anyopaque, _: session_wal.Transaction) !void {}
+    };
+
+    var host: Host = .{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: model_operation.Fixture = .{
+        .expected_task = "task",
+        .final_answer = "done",
+    };
+    var created = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:answer",
+            .task = "task",
+            .provider = fixture.provider(),
+        } },
+    });
+    _ = try created.drive();
+    try std.testing.expectEqual(OfferResult.accepted, created.offer(.task));
+    const waiting = try created.drive();
+    try std.testing.expectEqual(State.waiting, waiting.state);
+    var ignored: u8 = 0;
+    const before = try created.session.?.replaySemantic(
+        created.session.?.ownerToken(),
+        &ignored,
+        IgnoreReplay.apply,
+    );
+    const session_id = created.session.?.session_id;
+    created.close();
+
+    var restored = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .mode = .{ .restore = .{ .session_id = session_id } },
+    });
+    defer restored.close();
+    const identified = try restored.drive();
+    try std.testing.expectEqual(State.restoring, identified.state);
+    try std.testing.expectEqual(@as(u8, 1), identified.projection_count);
+    try std.testing.expectEqual(ProjectionKind.session, identified.projections[0].kind);
+    const before_reconcile = try restored.session.?.replaySemantic(
+        restored.session.?.ownerToken(),
+        &ignored,
+        IgnoreReplay.apply,
+    );
+    try std.testing.expectEqual(before.last_sequence, before_reconcile.last_sequence);
+
+    const reconciled = try restored.drive();
+    try std.testing.expectEqual(State.finished, reconciled.state);
+    const after_reconcile = try restored.session.?.replaySemantic(
+        restored.session.?.ownerToken(),
+        &ignored,
+        IgnoreReplay.apply,
+    );
+    try std.testing.expect(after_reconcile.last_sequence > before_reconcile.last_sequence);
 }
 
 test "failed recovery frame makes the live Harness unavailable" {

@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
         "Explain this repository in one sentence.",
     });
     fixture_answer_step.dependOn(&run_fixture_answer.step);
+    check_step.dependOn(&run_fixture_answer.step);
 
     const fixture_bash_step = b.step(
         "fixture-bash",
@@ -76,10 +77,11 @@ pub fn build(b: *std.Build) void {
         "Bash inspected the real worktree; its typed result became turn-two context.",
         "--fixture-bash-command",
         "grep -n '^# OnePage' README.md; test -f build.zig; git status --short",
-        "--allow-bash",
+        "--dangerously-bypass-permissions",
         "Inspect this repository with Bash.",
     });
     fixture_bash_step.dependOn(&run_fixture_bash.step);
+    check_step.dependOn(&run_fixture_bash.step);
 
     const fixture_patch_step = b.step(
         "fixture-patch-deny",
@@ -97,10 +99,11 @@ pub fn build(b: *std.Build) void {
         "The exact patch was denied; its typed result reached turn two without changing the worktree.",
         "--fixture-patch",
         "fixtures/one-file.patch",
-        "--deny-patch",
         "Validate this patch and request exact permission.",
     });
+    run_fixture_patch.setStdIn(.{ .bytes = "n\n" });
     fixture_patch_step.dependOn(&run_fixture_patch.step);
+    check_step.dependOn(&run_fixture_patch.step);
 
     const native_core_spike = addNativeExecutable(
         b,
