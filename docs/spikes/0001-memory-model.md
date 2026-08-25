@@ -1,5 +1,11 @@
 # Memory-model spike
 
+> Historical result: this spike established page reuse and durable sleeping agents using
+> JavaScriptCore. Production execution is now native Zig; see
+> [`0011-native-core-image.md`](0011-native-core-image.md). The Wasm build remains a conformance
+> target, so the measurements below are retained as the runtime-cost comparison that motivated the
+> change.
+
 ## Question
 
 Can one system JavaScriptCore process execute many durable logical agents while keeping resident core

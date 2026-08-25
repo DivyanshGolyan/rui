@@ -21,8 +21,6 @@ pub fn build(b: *std.Build) void {
     core.initial_memory = 64 * 1024;
     core.max_memory = 64 * 1024;
     core.stack_size = 4 * 1024;
-    b.installArtifact(core);
-
     const host = b.addExecutable(.{
         .name = "onepage-spike",
         .root_module = b.createModule(.{
@@ -55,6 +53,13 @@ pub fn build(b: *std.Build) void {
     const checkpoint_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/checkpoint.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    const core_image_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core_image.zig"),
             .target = native_target,
             .optimize = optimize,
         }),
@@ -156,6 +161,7 @@ pub fn build(b: *std.Build) void {
     run_agent_integration.addFileArg(core.getEmittedBin());
     const test_step = b.step("test", "Run the deterministic spike tests");
     test_step.dependOn(&b.addRunArtifact(inspector_tests).step);
+    test_step.dependOn(&b.addRunArtifact(core_image_tests).step);
     test_step.dependOn(&b.addRunArtifact(checkpoint_tests).step);
     test_step.dependOn(&b.addRunArtifact(checkpoint_store_tests).step);
     test_step.dependOn(&b.addRunArtifact(operation_log_tests).step);
@@ -175,8 +181,6 @@ pub fn build(b: *std.Build) void {
         "Run one durable fixture-model operation and print its Final Answer",
     );
     const run_fixture_answer = b.addRunArtifact(cli);
-    run_fixture_answer.addArg("--core");
-    run_fixture_answer.addFileArg(core.getEmittedBin());
     run_fixture_answer.addArgs(&.{
         "--state",
         ".zig-cache/onepage-fixture-sessions",
@@ -185,7 +189,7 @@ pub fn build(b: *std.Build) void {
         "--model",
         "fixture:answer",
         "--fixture-response",
-        "OnePage completed a durable model turn inside one fixed Wasm page.",
+        "OnePage completed a durable model turn inside one fixed native page.",
         "Explain this repository in one sentence.",
     });
     fixture_answer_step.dependOn(&run_fixture_answer.step);
@@ -195,8 +199,6 @@ pub fn build(b: *std.Build) void {
         "Run a permissioned Bash call and continue to a second-turn Final Answer",
     );
     const run_fixture_bash = b.addRunArtifact(cli);
-    run_fixture_bash.addArg("--core");
-    run_fixture_bash.addFileArg(core.getEmittedBin());
     run_fixture_bash.addArgs(&.{
         "--state",
         ".zig-cache/onepage-bash-sessions",
@@ -218,8 +220,6 @@ pub fn build(b: *std.Build) void {
         "Validate and deny one exact apply_patch call without changing the worktree",
     );
     const run_fixture_patch = b.addRunArtifact(cli);
-    run_fixture_patch.addArg("--core");
-    run_fixture_patch.addFileArg(core.getEmittedBin());
     run_fixture_patch.addArgs(&.{
         "--state",
         ".zig-cache/onepage-patch-sessions",
@@ -240,6 +240,23 @@ pub fn build(b: *std.Build) void {
     const run_host = b.addRunArtifact(host);
     run_host.addFileArg(core.getEmittedBin());
     run_step.dependOn(&run_host.step);
+
+    const native_core_spike = b.addExecutable(.{
+        .name = "onepage-native-core-spike",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/native_core_spike.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    native_core_spike.root_module.link_libc = true;
+    const run_native_core_spike = b.addRunArtifact(native_core_spike);
+    run_native_core_spike.addFileArg(core.getEmittedBin());
+    const native_core_step = b.step(
+        "native-core",
+        "Measure the native one-page Core and check it against the Wasm build",
+    );
+    native_core_step.dependOn(&run_native_core_spike.step);
 
     const lifecycle_step = b.step("lifecycle", "Run the durable operation lifecycle spike");
     const prepare_lifecycle = b.addRunArtifact(host);

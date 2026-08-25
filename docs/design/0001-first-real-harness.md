@@ -57,7 +57,9 @@ The CLI is the highest product test seam. `Harness` is the highest deterministic
 
 ## Constraints
 
-- The agent policy core has exactly one initial and maximum 64 KiB WebAssembly page.
+- The agent policy core is a target-neutral Zig reducer over exactly one caller-owned 64 KiB image.
+- The production executor is native Zig. A one-page `wasm32-freestanding` build is a mechanically
+  checked conformance target, not a production runtime dependency.
 - The core owns task phase, context selection, assistant-response interpretation, permission state, retry decisions, and termination.
 - The native host supplies bounded mechanisms and may not infer the next tool call or Final Answer.
 - One logical agent, one resident execution slot, one model operation, and one tool operation are sufficient for the first coding-task loop.
@@ -497,10 +499,11 @@ Adding a tool changes the closed vocabulary, versioned encoding, validation, pro
 ## Memory ownership
 
 - Core mutable state and core-owned scratch: exactly one 64 KiB page.
+- Native call stack and executable text: outside the page claim and measured separately.
 - Native harness metadata and queues: caller-owned fixed storage, measured separately.
 - Task text, conversation entries, request bodies, responses, patches, and command output: durable blobs and bounded windows.
 - Tool output: bounded resident tail plus complete durable spool.
-- JavaScriptCore, transport buffers, filesystem cache, subprocesses, and UI: outside the one-page claim and reported separately.
+- Transport buffers, filesystem cache, subprocesses, and UI: outside the one-page claim and reported separately.
 - Sleeping logical agents: durable identity, records, checkpoint, and blob references; no resident object graph.
 
 ## Testing strategy
@@ -542,7 +545,9 @@ Open `Harness` with the real one-page core, fixed storage, fault-injecting durab
 
 ### Narrow internal tests
 
-Keep mechanical tests for codecs, bounds, checksums, parsers, and the Wasm contract. Do not reproduce the complete lifecycle in every internal module test once the harness-seam tests cover it.
+Keep mechanical tests for codecs, bounds, checksums, parsers, the native image layout, the Wasm
+contract, and differential native/Wasm traces. Do not reproduce the complete lifecycle in every
+internal module test once the harness-seam tests cover it.
 
 ## Implementation order
 

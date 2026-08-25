@@ -1,4 +1,5 @@
 const std = @import("std");
+const core_image = @import("core_image.zig");
 const wasm_inspect = @import("wasm_inspect.zig");
 
 pub fn verify(wasm: []const u8) !void {
@@ -26,9 +27,11 @@ pub fn verify(wasm: []const u8) !void {
         report.global_reads != 0 or
         report.global_writes != 0 or
         report.memory_grows != 0 or
-        report.function_exports != 29 or
-        report.exports != 30 or
-        report.data_section_bytes > 1024)
+        report.function_exports != 32 or
+        report.exports != 33 or
+        report.data_section_bytes > 1024 or
+        report.passive_data_segments != 0 or
+        report.active_data_end > core_image.state_memory_offset)
     {
         return error.OnePageContractViolated;
     }

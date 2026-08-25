@@ -1,9 +1,9 @@
 const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
 const checkpoint = @import("checkpoint.zig");
+const core_image = @import("core_image.zig");
 const durable_transition = @import("durable_transition.zig");
 const harness = @import("harness.zig");
-const jsc = @import("jsc_runtime.zig");
 const model_operation = @import("model_operation.zig");
 const model_protocol = @import("model_protocol.zig");
 const operation_log = @import("operation_log.zig");
@@ -11,7 +11,7 @@ const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 
 const agent_generation: u32 = 1;
-const response_memory_offset: u32 = 8 * 1024;
+const response_memory_offset: u32 = core_image.response_memory_offset;
 
 pub const NewConfig = struct {
     workspace_path: []const u8,
@@ -66,93 +66,134 @@ fn finalReference(response_ref: u32) u64 {
 }
 
 const Core = struct {
-    runtime: jsc.Runtime,
+    image: *core_image.Image,
     allocator: std.mem.Allocator,
-    initialize: jsc.JSObjectRef,
-    deliver: jsc.JSObjectRef,
-    agent_id: jsc.JSObjectRef,
-    event_count: jsc.JSObjectRef,
-    accumulator: jsc.JSObjectRef,
-    is_quiescent: jsc.JSObjectRef,
-    submit: jsc.JSObjectRef,
-    start_task: jsc.JSObjectRef,
-    begin_model: jsc.JSObjectRef,
-    accept: jsc.JSObjectRef,
-    complete: jsc.JSObjectRef,
-    interpret: jsc.JSObjectRef,
-    commit_final: jsc.JSObjectRef,
-    commit_tool: jsc.JSObjectRef,
-    operation_state: jsc.JSObjectRef,
-    operation_id: jsc.JSObjectRef,
-    operation_generation: jsc.JSObjectRef,
-    operation_result: jsc.JSObjectRef,
-    context_first: jsc.JSObjectRef,
-    context_count: jsc.JSObjectRef,
-    response_disposition: jsc.JSObjectRef,
-    response_failure: jsc.JSObjectRef,
-    response_text_offset: jsc.JSObjectRef,
-    response_text_length: jsc.JSObjectRef,
-    response_tool: jsc.JSObjectRef,
-    response_arguments_offset: jsc.JSObjectRef,
-    response_arguments_length: jsc.JSObjectRef,
-    task_outcome: jsc.JSObjectRef,
-    final_entry_id: jsc.JSObjectRef,
+    initialize: Transition = .initialize,
+    deliver: Transition = .deliver,
+    agent_id: Value = .agent_id,
+    event_count: Value = .event_count,
+    accumulator: Value = .accumulator,
+    is_quiescent: Value = .is_quiescent,
+    submit: Transition = .submit,
+    start_task: Transition = .start_task,
+    begin_model: Transition = .begin_model,
+    accept: Transition = .accept,
+    complete: Transition = .complete,
+    interpret: Transition = .interpret,
+    commit_final: Transition = .commit_final,
+    commit_tool: Transition = .commit_tool,
+    operation_state: Value = .operation_state,
+    operation_id: Value = .operation_id,
+    operation_generation: Value = .operation_generation,
+    operation_result: Value = .operation_result,
+    context_first: Value = .context_first,
+    context_count: Value = .context_count,
+    response_disposition: Value = .response_disposition,
+    response_failure: Value = .response_failure,
+    response_text_offset: Value = .response_text_offset,
+    response_text_length: Value = .response_text_length,
+    response_tool: Value = .response_tool,
+    response_arguments_offset: Value = .response_arguments_offset,
+    response_arguments_length: Value = .response_arguments_length,
+    task_outcome: Value = .task_outcome,
+    final_entry_id: Value = .final_entry_id,
 
-    fn open(allocator: std.mem.Allocator, wasm: []const u8) !Core {
-        var runtime = try jsc.Runtime.open();
-        errdefer runtime.close();
-        try runtime.instantiate(allocator, wasm);
-        var core: Core = .{
-            .runtime = runtime,
-            .allocator = allocator,
-            .initialize = try runtime.function(allocator, "__onepage.instance.exports.initialize"),
-            .deliver = try runtime.function(allocator, "__onepage.instance.exports.deliver"),
-            .agent_id = try runtime.function(allocator, "__onepage.instance.exports.agentId"),
-            .event_count = try runtime.function(allocator, "__onepage.instance.exports.eventCount"),
-            .accumulator = try runtime.function(allocator, "__onepage.instance.exports.accumulator"),
-            .is_quiescent = try runtime.function(allocator, "__onepage.instance.exports.isQuiescent"),
-            .submit = try runtime.function(allocator, "__onepage.instance.exports.submitOperation"),
-            .start_task = try runtime.function(allocator, "__onepage.instance.exports.startTask"),
-            .begin_model = try runtime.function(allocator, "__onepage.instance.exports.beginModelOperation"),
-            .accept = try runtime.function(allocator, "__onepage.instance.exports.acceptOperation"),
-            .complete = try runtime.function(allocator, "__onepage.instance.exports.completeOperation"),
-            .interpret = try runtime.function(allocator, "__onepage.instance.exports.interpretModelResponse"),
-            .commit_final = try runtime.function(allocator, "__onepage.instance.exports.commitFinalAnswer"),
-            .commit_tool = try runtime.function(allocator, "__onepage.instance.exports.commitToolResult"),
-            .operation_state = try runtime.function(allocator, "__onepage.instance.exports.operationState"),
-            .operation_id = try runtime.function(allocator, "__onepage.instance.exports.operationId"),
-            .operation_generation = try runtime.function(allocator, "__onepage.instance.exports.operationGeneration"),
-            .operation_result = try runtime.function(allocator, "__onepage.instance.exports.operationResult"),
-            .context_first = try runtime.function(allocator, "__onepage.instance.exports.contextFirst"),
-            .context_count = try runtime.function(allocator, "__onepage.instance.exports.contextCount"),
-            .response_disposition = try runtime.function(allocator, "__onepage.instance.exports.responseDisposition"),
-            .response_failure = try runtime.function(allocator, "__onepage.instance.exports.responseFailure"),
-            .response_text_offset = try runtime.function(allocator, "__onepage.instance.exports.responseTextOffset"),
-            .response_text_length = try runtime.function(allocator, "__onepage.instance.exports.responseTextLength"),
-            .response_tool = try runtime.function(allocator, "__onepage.instance.exports.responseTool"),
-            .response_arguments_offset = try runtime.function(allocator, "__onepage.instance.exports.responseArgumentsOffset"),
-            .response_arguments_length = try runtime.function(allocator, "__onepage.instance.exports.responseArgumentsLength"),
-            .task_outcome = try runtime.function(allocator, "__onepage.instance.exports.taskOutcome"),
-            .final_entry_id = try runtime.function(allocator, "__onepage.instance.exports.finalEntryId"),
-        };
+    const Transition = enum {
+        initialize,
+        deliver,
+        submit,
+        start_task,
+        begin_model,
+        accept,
+        complete,
+        interpret,
+        commit_final,
+        commit_tool,
+    };
+
+    const Value = enum {
+        agent_id,
+        event_count,
+        accumulator,
+        is_quiescent,
+        operation_state,
+        operation_id,
+        operation_generation,
+        operation_result,
+        context_first,
+        context_count,
+        response_disposition,
+        response_failure,
+        response_text_offset,
+        response_text_length,
+        response_tool,
+        response_arguments_offset,
+        response_arguments_length,
+        task_outcome,
+        final_entry_id,
+    };
+
+    fn open(allocator: std.mem.Allocator) !Core {
+        const image = try allocator.create(core_image.Image);
+        errdefer allocator.destroy(image);
+        var core: Core = .{ .image = image, .allocator = allocator };
         try core.validateAbi();
         return core;
     }
 
     fn close(self: *Core) void {
-        self.runtime.close();
+        self.allocator.destroy(self.image);
     }
 
-    fn call(self: *Core, function: jsc.JSObjectRef, arguments: []const u32) !void {
-        if (try self.runtime.callNumber(function, arguments) != 1) return error.CoreTransitionRejected;
+    fn page(self: *Core) []u8 {
+        return std.mem.asBytes(self.image);
     }
 
-    fn callVoid(self: *Core, function: jsc.JSObjectRef, arguments: []const u32) !void {
-        try self.runtime.callNumbers(function, arguments);
+    fn call(self: *Core, transition: Transition, arguments: []const u32) !void {
+        const payload = &self.image.payload;
+        const accepted = switch (transition) {
+            .deliver => arguments.len == 1 and payload.deliver(arguments[0]),
+            .submit => arguments.len == 2 and payload.submitOperation(arguments[0], arguments[1]),
+            .start_task => arguments.len == 1 and payload.startTask(arguments[0]),
+            .begin_model => arguments.len == 2 and payload.beginModelOperation(arguments[0], arguments[1]),
+            .accept => arguments.len == 2 and payload.acceptOperation(arguments[0], arguments[1]),
+            .complete => arguments.len == 3 and payload.completeOperation(arguments[0], arguments[1], arguments[2]),
+            .interpret => arguments.len == 3 and payload.interpretStoredResponse(arguments[0], arguments[1], arguments[2]),
+            .commit_final => arguments.len == 1 and payload.commitFinalAnswer(arguments[0]),
+            .commit_tool => arguments.len == 2 and payload.commitToolResult(arguments[0], arguments[1]),
+            .initialize => false,
+        };
+        if (!accepted) return error.CoreTransitionRejected;
     }
 
-    fn value(self: *Core, function: jsc.JSObjectRef) !u32 {
-        return self.runtime.callNumber(function, &.{});
+    fn callVoid(self: *Core, transition: Transition, arguments: []const u32) !void {
+        if (transition != .initialize or arguments.len != 1) return error.InvalidCoreCall;
+        self.image.initialize(arguments[0]);
+    }
+
+    fn value(self: *Core, value_name: Value) !u32 {
+        const state = self.image.payload.state;
+        return switch (value_name) {
+            .agent_id => state.agent_id,
+            .event_count => std.math.cast(u32, state.event_count) orelse return error.CoreValueOverflow,
+            .accumulator => std.math.cast(u32, state.accumulator) orelse return error.CoreValueOverflow,
+            .is_quiescent => state.yielded,
+            .operation_state => @intFromEnum(state.operation_state),
+            .operation_id => std.math.cast(u32, state.operation_id) orelse return error.CoreValueOverflow,
+            .operation_generation => state.operation_generation,
+            .operation_result => std.math.cast(u32, state.operation_result) orelse return error.CoreValueOverflow,
+            .context_first => state.context_first,
+            .context_count => state.context_count,
+            .response_disposition => state.response_disposition,
+            .response_failure => state.response_failure,
+            .response_text_offset => state.response_text_offset,
+            .response_text_length => state.response_text_length,
+            .response_tool => state.response_tool,
+            .response_arguments_offset => state.response_arguments_offset,
+            .response_arguments_length => state.response_arguments_length,
+            .task_outcome => @intFromEnum(state.task_phase),
+            .final_entry_id => std.math.cast(u32, state.final_entry_id) orelse return error.CoreValueOverflow,
+        };
     }
 
     fn validateAbi(self: *Core) !void {
@@ -202,7 +243,7 @@ const Core = struct {
         try self.call(self.complete, &.{ 11, 1, 17 });
         var encoded_buffer: [model_protocol.header_size + model_protocol.item_header_size + 2]u8 = undefined;
         const tool_encoded = try model_protocol.encodeTool(&encoded_buffer, .bash, "\x01\x02");
-        const memory = try self.runtime.memory(self.allocator);
+        const memory = self.page();
         @memcpy(memory[response_memory_offset..][0..tool_encoded.len], tool_encoded);
         try self.call(self.interpret, &.{ response_memory_offset, @intCast(tool_encoded.len), 17 });
         if (try self.value(self.response_disposition) != @intFromEnum(model_protocol.Disposition.tool_call) or
@@ -277,7 +318,7 @@ const ModelSlot = struct {
         var response = try self.session.openBlob(self.token, completion.result);
         defer response.close();
         if (response.length() > model_protocol.max_response_size) return error.ResponseTooLarge;
-        const memory = try self.core.runtime.memory(self.core.allocator);
+        const memory = self.core.page();
         const length: usize = @intCast(response.length());
         const bytes = try response.readWindow(
             0,
@@ -309,14 +350,11 @@ pub fn runNew(
     sessions: std.Io.Dir,
     io: std.Io,
     allocator: std.mem.Allocator,
-    wasm: []const u8,
     config: NewConfig,
     provider: model_operation.Provider,
     observer: ?Observer,
 ) !Completed {
-    // Resolve the complete product ABI before publishing a Session identity or
-    // creating any durable state.
-    var core = try Core.open(allocator, wasm);
+    var core = try Core.open(allocator);
     var core_open = true;
     defer if (core_open) core.close();
     var session = try session_store.Session.create(sessions, io, .{
@@ -338,7 +376,6 @@ pub fn runNew(
         const ids = try performModelTurn(
             io,
             allocator,
-            wasm,
             &session,
             token,
             &core,
@@ -376,7 +413,6 @@ pub fn runNew(
                     checkpoint_buffer,
                     &journal,
                     ids,
-                    wasm,
                     &core_open,
                     config.workspace_path,
                     policy,
@@ -410,7 +446,6 @@ pub fn runNew(
 fn performModelTurn(
     io: std.Io,
     allocator: std.mem.Allocator,
-    wasm: []const u8,
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
@@ -449,7 +484,7 @@ fn performModelTurn(
         token,
         agent_generation,
         checkpoint_buffer,
-        try core.runtime.memory(allocator),
+        core.page(),
     );
     core.close();
     core_open.* = false;
@@ -468,13 +503,13 @@ fn performModelTurn(
     );
     try provider_io.ensureResponsePublished();
 
-    core.* = try Core.open(allocator, wasm);
+    core.* = try Core.open(allocator);
     core_open.* = true;
     try session.restoreCheckpoint(
         token,
         agent_generation,
         checkpoint_buffer,
-        try core.runtime.memory(allocator),
+        core.page(),
     );
     var slot: ModelSlot = .{ .core = core, .session = session, .token = token };
     var persist_fault: PersistFault = undefined;
@@ -518,7 +553,6 @@ fn executeBashCall(
     checkpoint_buffer: []u8,
     journal: *operation_log.Writer,
     ids: OperationIds,
-    wasm: []const u8,
     core_open: *bool,
     workspace_path: []const u8,
     policy: bash_tool.Policy,
@@ -530,7 +564,7 @@ fn executeBashCall(
     }
     const arguments_offset = try core.value(core.response_arguments_offset);
     const arguments_length = try core.value(core.response_arguments_length);
-    var memory = try core.runtime.memory(allocator);
+    var memory = core.page();
     if (arguments_length == 0 or arguments_length > bash_tool.call_header_size + bash_tool.max_command_size or
         arguments_offset > memory.len or arguments_length > memory.len - arguments_offset)
     {
@@ -577,9 +611,9 @@ fn executeBashCall(
             .{ .cancelled = cancellation },
         );
         try reach(fault, .after_bash_execution);
-        core.* = try Core.open(allocator, wasm);
+        core.* = try Core.open(allocator);
         core_open.* = true;
-        memory = try core.runtime.memory(allocator);
+        memory = core.page();
         try session.restoreCheckpoint(token, agent_generation, checkpoint_buffer, memory);
     } else {
         execution = .{
@@ -624,7 +658,7 @@ fn requestPatchPermission(
 ) !PatchPermissionOutcome {
     const arguments_offset = try core.value(core.response_arguments_offset);
     const arguments_length = try core.value(core.response_arguments_length);
-    const memory = try core.runtime.memory(allocator);
+    const memory = core.page();
     if (arguments_length == 0 or arguments_length > patch_tool.max_patch_size or
         arguments_offset > memory.len or arguments_length > memory.len - arguments_offset)
     {
@@ -827,12 +861,9 @@ pub fn resumeSession(
     sessions: std.Io.Dir,
     io: std.Io,
     allocator: std.mem.Allocator,
-    wasm: []const u8,
     session_id: u64,
 ) !Completed {
-    // Reject an incompatible artifact without taking ownership or advancing the
-    // durable Session epoch.
-    var core = try Core.open(allocator, wasm);
+    var core = try Core.open(allocator);
     defer core.close();
     var manifest_buffer: [session_store.manifest_max_size]u8 = undefined;
     var restored = try session_store.Session.openExisting(
@@ -849,7 +880,7 @@ pub fn resumeSession(
         token,
         agent_generation,
         checkpoint_buffer,
-        try core.runtime.memory(allocator),
+        core.page(),
     );
     var outcome = try core.value(core.task_outcome);
     if (outcome == 2) {
@@ -898,11 +929,10 @@ pub fn resumeWithProvider(
     sessions: std.Io.Dir,
     io: std.Io,
     allocator: std.mem.Allocator,
-    wasm: []const u8,
     session_id: u64,
     provider: model_operation.Provider,
 ) !Completed {
-    var core = try Core.open(allocator, wasm);
+    var core = try Core.open(allocator);
     var core_open = true;
     defer if (core_open) core.close();
     var manifest_buffer: [session_store.manifest_max_size]u8 = undefined;
@@ -920,7 +950,7 @@ pub fn resumeWithProvider(
         token,
         agent_generation,
         checkpoint_buffer,
-        try core.runtime.memory(allocator),
+        core.page(),
     );
     var outcome = try core.value(core.task_outcome);
     if (outcome == 2) {
@@ -951,7 +981,6 @@ pub fn resumeWithProvider(
     _ = try performModelTurn(
         io,
         allocator,
-        wasm,
         &restored.session,
         token,
         &core,
@@ -1292,7 +1321,7 @@ fn reconcileToolResult(
         token,
         agent_generation,
         checkpoint_buffer,
-        try core.runtime.memory(core.allocator),
+        core.page(),
     );
 }
 
@@ -1361,7 +1390,7 @@ fn finalizeCandidate(
     }
     const text_offset = try core.value(core.response_text_offset);
     const text_length = try core.value(core.response_text_length);
-    const memory = try core.runtime.memory(core.allocator);
+    const memory = core.page();
     if (text_length == 0 or text_offset > memory.len or text_length > memory.len - text_offset) {
         return error.InvalidFinalAnswerRange;
     }

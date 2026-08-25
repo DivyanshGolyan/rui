@@ -25,6 +25,9 @@ pub const Report = struct {
     indirect_calls: u32 = 0,
     memory_grows: u32 = 0,
     data_section_bytes: usize = 0,
+    data_segments: u32 = 0,
+    passive_data_segments: u32 = 0,
+    active_data_end: u64 = 0,
 };
 
 pub fn inspect(module: []const u8) !Report {
@@ -47,11 +50,40 @@ pub fn inspect(module: []const u8) !Report {
             6 => try inspectGlobals(&payload, &report),
             7 => try inspectExports(&payload, &report),
             10 => try inspectCode(&payload, &report),
-            11 => report.data_section_bytes = section.len,
+            11 => try inspectData(&payload, &report, section.len),
             else => {},
         }
     }
     return report;
+}
+
+fn inspectData(reader: *Reader, report: *Report, section_size: usize) !void {
+    report.data_section_bytes = section_size;
+    report.data_segments = try reader.uleb(u32);
+    var remaining = report.data_segments;
+    while (remaining > 0) : (remaining -= 1) {
+        const mode = try reader.uleb(u32);
+        switch (mode) {
+            0 => {
+                const offset = try readConstExpression(reader) orelse return error.UnsupportedDataOffset;
+                if (offset < 0) return error.InvalidDataOffset;
+                const bytes = try reader.take(try reader.uleb(u32));
+                report.active_data_end = @max(report.active_data_end, @as(u64, @intCast(offset)) + bytes.len);
+            },
+            1 => {
+                report.passive_data_segments += 1;
+                _ = try reader.take(try reader.uleb(u32));
+            },
+            2 => {
+                if (try reader.uleb(u32) != 0) return error.UnsupportedDataMemory;
+                const offset = try readConstExpression(reader) orelse return error.UnsupportedDataOffset;
+                if (offset < 0) return error.InvalidDataOffset;
+                const bytes = try reader.take(try reader.uleb(u32));
+                report.active_data_end = @max(report.active_data_end, @as(u64, @intCast(offset)) + bytes.len);
+            },
+            else => return error.UnsupportedDataMode,
+        }
+    }
 }
 
 fn inspectTable(reader: *Reader, report: *Report) !void {
@@ -336,6 +368,15 @@ test "inspect structured control flow" {
         "\x0a\x0f\x01\x0d\x00\x02\x40\x41\x01\x0d\x00\x0e\x01\x00\x00\x0b\x0b";
     const report = try inspect(module);
     try std.testing.expectEqual(@as(u32, 0), report.memory_grows);
+}
+
+test "reports the end of active data" {
+    const module = "\x00asm\x01\x00\x00\x00" ++
+        "\x0b\x09\x01\x00\x41\x80\x20\x0b\x02hi";
+    const report = try inspect(module);
+    try std.testing.expectEqual(@as(u32, 1), report.data_segments);
+    try std.testing.expectEqual(@as(u64, 4098), report.active_data_end);
+    try std.testing.expectEqual(@as(u32, 0), report.passive_data_segments);
 }
 
 test "inspect if else control flow" {

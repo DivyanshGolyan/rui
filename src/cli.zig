@@ -1,16 +1,13 @@
 const std = @import("std");
 const agent = @import("agent.zig");
 const bash_tool = @import("bash_tool.zig");
-const core_contract = @import("core_contract.zig");
 const model_operation = @import("model_operation.zig");
 const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 
-const max_core_size = 1024 * 1024;
 const output_window_size = 4096;
 
 const Arguments = struct {
-    core_path: ?[]const u8 = null,
     state_path: ?[]const u8 = null,
     repo_path: ?[]const u8 = null,
     model: ?[]const u8 = null,
@@ -46,16 +43,6 @@ pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const raw_args = try init.minimal.args.toSlice(allocator);
     const arguments = try parseArguments(raw_args);
-    const core_path = try resolveCorePath(init.io, allocator, arguments.core_path);
-    defer allocator.free(core_path);
-    const wasm = try std.Io.Dir.cwd().readFileAlloc(
-        init.io,
-        core_path,
-        allocator,
-        .limited(max_core_size),
-    );
-    defer allocator.free(wasm);
-    try core_contract.verify(wasm);
 
     const state_path = try resolveStatePath(
         init.minimal.environ,
@@ -70,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
     );
     defer sessions.close(init.io);
     var completed: agent.Completed = if (arguments.resume_id) |session_id|
-        try agent.resumeSession(sessions, init.io, allocator, wasm, session_id)
+        try agent.resumeSession(sessions, init.io, allocator, session_id)
     else blk: {
         const model = arguments.model orelse return error.MissingModel;
         if (!std.mem.startsWith(u8, model, "fixture:")) return error.UnsupportedModel;
@@ -107,7 +94,6 @@ pub fn main(init: std.process.Init) !void {
                 sessions,
                 init.io,
                 allocator,
-                wasm,
                 .{
                     .workspace_path = workspace_path,
                     .model = model,
@@ -148,7 +134,6 @@ pub fn main(init: std.process.Init) !void {
                 sessions,
                 init.io,
                 allocator,
-                wasm,
                 .{
                     .workspace_path = workspace_path,
                     .model = model,
@@ -167,7 +152,6 @@ pub fn main(init: std.process.Init) !void {
             sessions,
             init.io,
             allocator,
-            wasm,
             .{ .workspace_path = workspace_path, .model = model, .task = task },
             fixture.provider(),
             output.observer(),
@@ -202,11 +186,7 @@ fn parseArguments(args: []const []const u8) !Arguments {
     var index: usize = 1;
     while (index < args.len) {
         const argument = args[index];
-        if (std.mem.eql(u8, argument, "--core")) {
-            index += 1;
-            if (index == args.len) return error.InvalidArguments;
-            parsed.core_path = args[index];
-        } else if (std.mem.eql(u8, argument, "--state")) {
+        if (std.mem.eql(u8, argument, "--state")) {
             index += 1;
             if (index == args.len) return error.InvalidArguments;
             parsed.state_path = args[index];
@@ -366,18 +346,6 @@ fn escapePatch(allocator: std.mem.Allocator, patch: []const u8) ![]u8 {
     return allocator.realloc(out, cursor);
 }
 
-fn resolveCorePath(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    configured: ?[]const u8,
-) ![]u8 {
-    if (configured) |path| return allocator.dupe(u8, path);
-    const executable = try std.process.executablePathAlloc(io, allocator);
-    defer allocator.free(executable);
-    const directory = std.fs.path.dirname(executable) orelse return error.InvalidExecutablePath;
-    return std.fs.path.join(allocator, &.{ directory, "onepage-core.wasm" });
-}
-
 fn resolveWorkspacePath(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -414,8 +382,6 @@ fn writeFinalAnswer(io: std.Io, completed: *agent.Completed) !void {
 test "CLI arguments distinguish create from exact resume" {
     const create = try parseArguments(&.{
         "onepage",
-        "--core",
-        "core.wasm",
         "--state",
         "state",
         "--model",
@@ -427,8 +393,6 @@ test "CLI arguments distinguish create from exact resume" {
     try std.testing.expectEqualStrings("task", create.task.?);
     const resumed = try parseArguments(&.{
         "onepage",
-        "--core",
-        "core.wasm",
         "--state",
         "state",
         "--resume",

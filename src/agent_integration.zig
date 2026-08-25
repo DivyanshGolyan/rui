@@ -70,68 +70,6 @@ pub fn main(init: std.process.Init) !void {
         else => return error.GitAddFailed,
     }
 
-    var incompatible = try allocator.dupe(u8, wasm);
-    defer allocator.free(incompatible);
-    const initialize_offset = std.mem.indexOf(u8, incompatible, "initialize") orelse
-        return error.InitializeExportNotFound;
-    incompatible[initialize_offset + "initialize".len - 1] = 'f';
-    var rejected_capture: SessionCapture = .{};
-    var rejected_fixture: model_operation.Fixture = .{
-        .expected_task = task,
-        .final_answer = answer,
-    };
-    if (agent.runNew(
-        sessions,
-        init.io,
-        allocator,
-        incompatible,
-        .{ .workspace_path = repo_path, .model = "fixture:invalid", .task = task },
-        rejected_fixture.provider(),
-        rejected_capture.observer(),
-    )) |unexpected| {
-        var value = unexpected;
-        value.close();
-        return error.IncompatibleCoreAccepted;
-    } else |err| if (err != error.JavaScriptFunctionUnavailable) {
-        return err;
-    }
-    if (rejected_capture.session_id != 0) return error.InvalidCorePublishedSession;
-
-    var misbound = try allocator.dupe(u8, wasm);
-    defer allocator.free(misbound);
-    const final_name = "finalEntryId";
-    const context_name = "contextCount";
-    comptime std.debug.assert(final_name.len == context_name.len);
-    const final_offset = std.mem.indexOf(u8, misbound, final_name) orelse
-        return error.FinalEntryExportNotFound;
-    const context_offset = std.mem.indexOf(u8, misbound, context_name) orelse
-        return error.ContextCountExportNotFound;
-    var name_buffer: [final_name.len]u8 = undefined;
-    @memcpy(&name_buffer, misbound[final_offset..][0..final_name.len]);
-    @memcpy(misbound[final_offset..][0..final_name.len], misbound[context_offset..][0..context_name.len]);
-    @memcpy(misbound[context_offset..][0..context_name.len], &name_buffer);
-    var misbound_capture: SessionCapture = .{};
-    var misbound_fixture: model_operation.Fixture = .{
-        .expected_task = task,
-        .final_answer = answer,
-    };
-    if (agent.runNew(
-        sessions,
-        init.io,
-        allocator,
-        misbound,
-        .{ .workspace_path = repo_path, .model = "fixture:misbound", .task = task },
-        misbound_fixture.provider(),
-        misbound_capture.observer(),
-    )) |unexpected| {
-        var value = unexpected;
-        value.close();
-        return error.MisboundCoreAccepted;
-    } else |err| if (err != error.CoreAbiMismatch) {
-        return err;
-    }
-    if (misbound_capture.session_id != 0) return error.MisboundCorePublishedSession;
-
     var fixture: model_operation.Fixture = .{
         .expected_task = task,
         .final_answer = answer,
@@ -140,7 +78,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{ .workspace_path = repo_path, .model = "fixture:answer", .task = task },
         fixture.provider(),
         null,
@@ -149,15 +86,7 @@ pub fn main(init: std.process.Init) !void {
     try expectAnswer(&completed);
     completed.close();
 
-    if (agent.resumeSession(sessions, init.io, allocator, misbound, session_id)) |unexpected| {
-        var value = unexpected;
-        value.close();
-        return error.MisboundResumeAccepted;
-    } else |err| if (err != error.CoreAbiMismatch) {
-        return err;
-    }
-
-    var resumed = try agent.resumeSession(sessions, init.io, allocator, wasm, session_id);
+    var resumed = try agent.resumeSession(sessions, init.io, allocator, session_id);
     defer resumed.close();
     if (resumed.session.ownership_epoch != 2) return error.ResumeEpochMismatch;
     try expectAnswer(&resumed);
@@ -178,7 +107,6 @@ pub fn main(init: std.process.Init) !void {
             sessions,
             init.io,
             allocator,
-            wasm,
             .{
                 .workspace_path = repo_path,
                 .model = "fixture:crash",
@@ -199,7 +127,6 @@ pub fn main(init: std.process.Init) !void {
             sessions,
             init.io,
             allocator,
-            wasm,
             capture.session_id,
         );
         try expectAnswer(&recovered);
@@ -221,7 +148,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{
             .workspace_path = repo_path,
             .model = "fixture:bash",
@@ -246,7 +172,7 @@ pub fn main(init: std.process.Init) !void {
     );
     if (!std.mem.eql(u8, tool_answer, tool_fixture.final_answer)) return error.ToolFinalAnswerMismatch;
     tool_completed.close();
-    var tool_resumed = try agent.resumeSession(sessions, init.io, allocator, wasm, tool_session_id);
+    var tool_resumed = try agent.resumeSession(sessions, init.io, allocator, tool_session_id);
     if (tool_resumed.session.ownership_epoch != 2) return error.ToolResumeEpochMismatch;
     tool_resumed.close();
 
@@ -266,7 +192,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{
             .workspace_path = repo_path,
             .model = "fixture:denied-bash",
@@ -300,7 +225,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{
             .workspace_path = repo_path,
             .model = "fixture:cancelled-bash",
@@ -336,7 +260,6 @@ pub fn main(init: std.process.Init) !void {
             sessions,
             init.io,
             allocator,
-            wasm,
             .{
                 .workspace_path = repo_path,
                 .model = "fixture:recover-bash",
@@ -357,7 +280,6 @@ pub fn main(init: std.process.Init) !void {
             sessions,
             init.io,
             allocator,
-            wasm,
             result_capture.session_id,
             result_fixture.provider(),
         );
@@ -387,7 +309,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{
             .workspace_path = repo_path,
             .model = "fixture:recover-denial",
@@ -408,7 +329,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         denied_recovery_capture.session_id,
         denied_recovery_fixture.provider(),
     );
@@ -435,7 +355,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{
             .workspace_path = repo_path,
             .model = "fixture:uncertain-bash",
@@ -452,14 +371,14 @@ pub fn main(init: std.process.Init) !void {
     } else |err| if (err != error.InjectedCrash) {
         return err;
     }
-    if (agent.resumeSession(sessions, init.io, allocator, wasm, uncertain_capture.session_id)) |unexpected| {
+    if (agent.resumeSession(sessions, init.io, allocator, uncertain_capture.session_id)) |unexpected| {
         var value = unexpected;
         value.close();
         return error.UncertainBashResumed;
     } else |err| if (err != error.BashPossiblyExecuted) {
         return err;
     }
-    if (agent.resumeSession(sessions, init.io, allocator, wasm, uncertain_capture.session_id)) |unexpected| {
+    if (agent.resumeSession(sessions, init.io, allocator, uncertain_capture.session_id)) |unexpected| {
         var value = unexpected;
         value.close();
         return error.IndeterminateBashResumed;
@@ -491,7 +410,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{
             .workspace_path = repo_path,
             .model = "fixture:patch-denied",
@@ -516,7 +434,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{
             .workspace_path = repo_path,
             .model = "fixture:patch-stale",
@@ -542,7 +459,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{
             .workspace_path = repo_path,
             .model = "fixture:patch-allowed",
@@ -559,7 +475,7 @@ pub fn main(init: std.process.Init) !void {
         return err;
     }
     try expectRepoFile(repo, init.io, "note.txt", "old\n");
-    if (agent.resumeSession(sessions, init.io, allocator, wasm, patch_allow_capture.session_id)) |unexpected| {
+    if (agent.resumeSession(sessions, init.io, allocator, patch_allow_capture.session_id)) |unexpected| {
         var value = unexpected;
         value.close();
         return error.AllowedPatchResumedPastPermissionStep;
@@ -579,7 +495,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{
             .workspace_path = repo_path,
             .model = "fixture:patch-approval",
@@ -596,7 +511,7 @@ pub fn main(init: std.process.Init) !void {
         return err;
     }
     for (0..2) |_| {
-        if (agent.resumeSession(sessions, init.io, allocator, wasm, patch_ask_capture.session_id)) |unexpected| {
+        if (agent.resumeSession(sessions, init.io, allocator, patch_ask_capture.session_id)) |unexpected| {
             var value = unexpected;
             value.close();
             return error.PatchApprovalProjectionMissing;
@@ -634,7 +549,6 @@ pub fn main(init: std.process.Init) !void {
             sessions,
             init.io,
             allocator,
-            wasm,
             .{
                 .workspace_path = repo_path,
                 .model = "fixture:patch-permission-crash",
@@ -652,7 +566,7 @@ pub fn main(init: std.process.Init) !void {
             return err;
         }
         if (case.allowed) {
-            if (agent.resumeSession(sessions, init.io, allocator, wasm, crash_capture.session_id)) |unexpected| {
+            if (agent.resumeSession(sessions, init.io, allocator, crash_capture.session_id)) |unexpected| {
                 var value = unexpected;
                 value.close();
                 return error.RecoveredPatchPermissionExecuted;
@@ -664,7 +578,6 @@ pub fn main(init: std.process.Init) !void {
                 sessions,
                 init.io,
                 allocator,
-                wasm,
                 crash_capture.session_id,
                 crash_fixture.provider(),
             );
@@ -683,7 +596,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{ .workspace_path = repo_path, .model = "fixture:incomplete", .task = task },
         incomplete.provider(),
         null,
@@ -704,7 +616,6 @@ pub fn main(init: std.process.Init) !void {
         sessions,
         init.io,
         allocator,
-        wasm,
         .{ .workspace_path = repo_path, .model = "fixture:truncated", .task = task },
         truncated.provider(),
         null,

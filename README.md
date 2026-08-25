@@ -1,12 +1,13 @@
 # OnePage
 
 A single-host coding-agent architecture whose persistent mutable agent state and core-owned buffers
-fit in one fixed, non-growable 64 KiB WebAssembly linear-memory page.
+fit in one fixed 64 KiB native image.
 
-The first memory-model spike is now executable on macOS Apple Silicon. It compiles a Zig core to
-`wasm32-freestanding`, loads it through the system JavaScriptCore framework, mechanically verifies
-the one-page contract, snapshots and restores the complete page, scrubs reused slots, and multiplexes
-1,000 checksummed durable simulated agents through one resident execution slot.
+The production CLI executes a target-neutral Zig reducer directly over a caller-owned 64 KiB image;
+it has no embedded language or WebAssembly runtime. The same reducer is also compiled to
+`wasm32-freestanding` as a conformance target. A differential spike proves byte-equivalent native
+and Wasm payloads across a complete model, tool, second-model, and Final Answer trace. It also
+snapshots and restores 1,000 logical agents through one reused resident image.
 
 The operation-lifecycle spike uses four separate host processes to submit, durably accept, complete,
 recover, and replay 1,000 operations while their agents are absent from memory. Both recovery
@@ -18,8 +19,8 @@ shutdown admission; durable-before-apply ordering; committed projections; bounde
 and crash/replay tests. Its 32-entry maximum is fixed at compile time and does not vary with
 logical-agent count.
 
-The owner crash-recovery spike connects that harness to the real operation journal and JavaScriptCore
-slot. A child process exits after the completion record is synced but before slot mutation; two fresh
+The owner crash-recovery spike connects that harness to the real operation journal and native Core
+image. A child process exits after the completion record is synced but before slot mutation; two fresh
 recovery processes then prove one application followed by one duplicate. The fixed native control
 metadata is 1,536 bytes, excluding the runtime, one-page core, and checkpoint staging buffer.
 
@@ -68,6 +69,7 @@ the old or new canonical page while keeping the journal unchanged.
 
 ```sh
 zig build test -Doptimize=ReleaseSafe
+zig build native-core -Doptimize=ReleaseSafe
 zig build run -Doptimize=ReleaseSmall
 zig build lifecycle -Doptimize=ReleaseSmall
 ```
@@ -86,6 +88,7 @@ See the spike notes for architecture, measurements, caveats, and next questions:
 - [`docs/spikes/0008-fixture-model-final-answer.md`](docs/spikes/0008-fixture-model-final-answer.md)
 - [`docs/spikes/0009-permissioned-bash.md`](docs/spikes/0009-permissioned-bash.md)
 - [`docs/spikes/0010-apply-patch-permission.md`](docs/spikes/0010-apply-patch-permission.md)
+- [`docs/spikes/0011-native-core-image.md`](docs/spikes/0011-native-core-image.md)
 
 Source audits that informed the architecture:
 
