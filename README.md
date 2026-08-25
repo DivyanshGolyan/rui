@@ -52,6 +52,11 @@ permission evidence durably, and can regenerate an approval-required prompt afte
 deterministic fixture denies the call, gives the typed result to turn two, and leaves the worktree
 unchanged.
 
+V1 keeps only `bash` and `apply_patch`. The default `ask` permission mode prompts for every exact
+tool call. An explicit invocation-scoped bypass mode will admit validated calls without prompting;
+it does not bypass validation, durability, patch preimage checks, or recovery rules, and resume must
+select it again.
+
 ```sh
 zig build fixture-patch-deny -Doptimize=ReleaseSmall
 ```

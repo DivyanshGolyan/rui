@@ -106,7 +106,7 @@ Creating a session prints its stable identity before the first external effect. 
 
 Conversation reconstruction and workspace reconstruction are different claims. V1 operates on a user-owned Git worktree that may change outside OnePage, so the worktree remains external truth. The operation journal records the exact preimage identity, immutable mutation descriptor, observed postimage identity, and uncertainty disposition for each consequential repository operation; these are fields on the existing operation record, not a third history.
 
-V1 patch operations touch exactly one regular file. Patch application is reconcilable, not transactionally atomic with the worktree: recovery classifies the current file as the expected preimage, expected postimage, or divergent. The preimage permits a new attempt only after renewed approval, the postimage proves the intended mutation is already present, and divergence stops automatically with an indeterminate result. A later multi-file patch must define the same classification per file and may not claim all-or-nothing mutation without an isolated transactional mechanism.
+V1 patch operations touch exactly one regular file. Patch application is reconcilable, not transactionally atomic with the worktree: recovery classifies the current file as the expected preimage, expected postimage, or divergent. The preimage permits a new attempt only after authorization under the resumed invocation's selected permission mode, the postimage proves the intended mutation is already present, and divergence stops automatically with an indeterminate result. A later multi-file patch must define the same classification per file and may not claim all-or-nothing mutation without an isolated transactional mechanism.
 
 On resume or delayed application, the harness compares the current workspace state with the expected generation and fails closed for reconciliation on mismatch. It never treats transcript text, command output, or an accepted-but-unreconciled operation as proof of repository state.
 
@@ -378,7 +378,7 @@ Recovery depends on the effect class:
 | Effect | Recovery after `possibly_executed` |
 | --- | --- |
 | Model inference | A new attempt is permitted; duplicate provider work or billing is possible and reported. |
-| One-file patch | Classify the file as preimage, postimage, or divergent; retry from the preimage only after renewed approval, accept the observed postimage, and stop on divergence. |
+| One-file patch | Classify the file as preimage, postimage, or divergent; retry from the preimage only after authorization under the resumed invocation's selected permission mode, accept the observed postimage, and stop on divergence. |
 | Bash | Never retry automatically; complete with an indeterminate result because the command may have external effects. |
 
 Persistence ordering cannot make arbitrary external effects exactly once. Reconciliation and explicit uncertainty are part of the normal operation lifecycle, not exceptional telemetry.
@@ -488,7 +488,15 @@ apply_patch
 
 `apply_patch` accepts one unified diff for one regular file. The host stores the exact bytes, validates structure and confinement, checks applicability through controlled Git mechanisms, and submits the immutable call to the same permission gate as Bash. On permission, the host invokes `git apply` with controlled arguments and input; the model never supplies that host command.
 
-Permission is an independent `allow`, `ask`, or `deny` decision after validation and before Attempt creation. The default interactive policy asks for each exact Bash or `apply_patch` call; deterministic tests may inject a policy that allows named fixture calls. Permission changes admission, not the tool vocabulary.
+The user selects one permission mode for each invocation. `ask`, the default, renders each exact Bash
+or `apply_patch` descriptor and accepts an allow or deny decision. `bypass` durably auto-authorizes
+each validated descriptor without prompting. Bypass changes only interactive admission: validation,
+bounds, durable descriptor binding, patch preimage checks, and effect-recovery rules remain
+mandatory. The mode is invocation-scoped and must be selected again on resume; an authorization
+already committed for a specific Operation remains evidence, but the Session does not retain blanket
+authority for later Actions. OnePage never auto-allows a Bash command because it appears read-only.
+Deterministic tests inject exact decisions in `ask` mode and exercise the same descriptor path in
+`bypass` mode. Permission changes admission, not the two-tool vocabulary.
 
 A complete assistant response may contain at most one tool call. A valid tool call executes, its typed Result becomes a Conversation Entry, and the harness begins another model turn. Text accompanying a tool call is not final. A complete non-empty response with no tool call becomes the Final Answer and completes the Task turn.
 
