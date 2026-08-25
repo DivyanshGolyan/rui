@@ -1,324 +1,671 @@
 const std = @import("std");
+const core_state = @import("core_state.zig");
 const model_protocol = @import("model_protocol.zig");
 
-pub const page_size = 64 * 1024;
-pub const wasm_stack_size = 4 * 1024;
-pub const state_memory_offset = 8 * 1024;
-pub const response_memory_offset = 12 * 1024;
-pub const abi_version: u32 = 1;
-pub const abi_fingerprint: u64 = 0x4f4e4550_0001_0001;
+pub const slot_size = 64 * 1024;
+pub const slot_alignment = 8;
+pub const parser_scratch_size = 4 * 1024;
+pub const response_scratch_size = model_protocol.max_response_size;
+pub const transition_scratch_size = 4 * 1024;
 
-const magic: u32 = 0x4f4e4550;
-const payload_size = page_size - state_memory_offset;
-const response_offset_in_payload = response_memory_offset - state_memory_offset;
+pub const State = core_state.State;
+pub const ContentWindow = core_state.ContentWindow;
+pub const OperationPhase = core_state.OperationPhase;
+pub const TaskPhase = core_state.TaskPhase;
 
-pub const OperationState = enum(u32) {
-    idle = 0,
-    submitted = 1,
-    accepted = 2,
-    completed = 3,
+const reserved_size = slot_size - @sizeOf(State) -
+    parser_scratch_size - response_scratch_size - transition_scratch_size;
+
+/// Caller-owned working storage for one Activation. None of its layout is durable.
+pub const ActivationSlot = extern struct {
+    state: State,
+    parser_scratch: [parser_scratch_size]u8,
+    response_scratch: [response_scratch_size]u8,
+    transition_scratch: [transition_scratch_size]u8,
+    reserved: [reserved_size]u8,
 };
 
-pub const TaskPhase = enum(u32) {
-    idle = 0,
-    ready = 1,
-    awaiting_model = 2,
-    final_candidate = 3,
-    awaiting_tool = 4,
-    finished = 5,
-    failed = 6,
+pub const Identity = struct {
+    agent_id: u64,
+    generation: u32,
 };
 
-pub const State = extern struct {
-    magic: u32,
-    agent_id: u32,
-    event_count: u64,
-    accumulator: u64,
-    last_event: u32,
-    yielded: u32,
-    operation_id: u64,
-    operation_generation: u32,
-    operation_state: OperationState,
-    operation_result: u64,
-    operation_sequence: u64,
+pub const OperationIdentity = struct {
+    id: u64,
+    generation: u32,
+};
+
+pub const Operation = struct {
+    id: u64,
+    generation: u32,
+    phase: OperationPhase,
+    result_ref: u64,
+    sequence: u64,
+};
+
+pub const ModelContext = struct {
+    first_entry: u32,
+    entry_count: u32,
+};
+
+pub const Response = struct {
+    content_ref: u64,
+    disposition: model_protocol.Disposition,
+    failure: model_protocol.Failure,
+    tool: model_protocol.Tool,
+    text: ContentWindow,
+    arguments: ContentWindow,
+};
+
+pub const Task = struct {
+    phase: TaskPhase,
     active_leaf_id: u64,
     final_entry_id: u64,
-    response_ref: u64,
-    task_phase: TaskPhase,
-    response_disposition: u32,
-    response_failure: u32,
-    context_first: u32,
-    context_count: u32,
-    response_text_offset: u32,
-    response_text_length: u32,
-    response_tool: u32,
-    response_arguments_offset: u32,
-    response_arguments_length: u32,
 };
 
-const prefix_padding_size = response_offset_in_payload - @sizeOf(State);
-const reserved_size = payload_size - response_offset_in_payload - model_protocol.max_response_size;
+pub fn rejectionCode(err: anyerror) u32 {
+    return switch (err) {
+        error.InvalidAgentIdentity => 16,
+        error.InvalidAgentGeneration => 17,
+        error.StaleOperation => 2,
+        error.IllegalOperationTransition => 3,
+        error.InvalidOperationIdentity => 4,
+        error.InvalidConversationEntry => 5,
+        error.IllegalTaskTransition => 6,
+        error.IllegalModelTransition => 7,
+        error.InvalidResultReference => 8,
+        error.IllegalModelResponseTransition => 9,
+        error.ResponseCapacityExceeded => 10,
+        error.IllegalFinalAnswerTransition => 11,
+        error.OperationAlreadyActive => 12,
+        error.OperationGenerationExhausted => 13,
+        error.EmptyModelResponse => 14,
+        error.IllegalToolResultTransition => 15,
+        else => 255,
+    };
+}
 
-pub const Payload = extern struct {
-    state: State,
-    prefix_padding: [prefix_padding_size]u8,
-    response: [model_protocol.max_response_size]u8,
-    reserved: [reserved_size]u8,
+pub const SlotLease = struct {
+    slot: *ActivationSlot,
+    context: *anyopaque,
+    index: usize,
+    generation: u64,
+    release_fn: *const fn (*anyopaque, usize, u64, *ActivationSlot) error{StaleSlotLease}!void,
+    borrowed: bool = true,
 
-    pub fn initialize(self: *Payload, agent_id: u32) void {
-        @memset(std.mem.asBytes(self), 0);
-        self.state = initialState(agent_id);
+    pub fn release(self: *SlotLease) error{StaleSlotLease}!void {
+        if (!self.borrowed) return;
+        try self.release_fn(self.context, self.index, self.generation, self.slot);
+        self.borrowed = false;
+    }
+};
+
+pub fn SlotPool(comptime capacity: usize) type {
+    if (capacity == 0) @compileError("an Activation Slot pool cannot be empty");
+    return struct {
+        const Self = @This();
+
+        slots: [capacity]ActivationSlot = undefined,
+        occupied: [capacity]bool = @splat(false),
+        generations: [capacity]u64 = @splat(0),
+
+        pub fn borrow(self: *Self) !SlotLease {
+            for (&self.occupied, 0..) |*is_occupied, index| {
+                if (is_occupied.*) continue;
+                if (self.generations[index] == std.math.maxInt(u64)) continue;
+                is_occupied.* = true;
+                self.generations[index] += 1;
+                scrub(&self.slots[index]);
+                return .{
+                    .slot = &self.slots[index],
+                    .context = self,
+                    .index = index,
+                    .generation = self.generations[index],
+                    .release_fn = releaseLease,
+                };
+            }
+            return error.ActivationCapacityExhausted;
+        }
+
+        pub fn residentBytes(_: *const Self) usize {
+            return capacity * @sizeOf(ActivationSlot);
+        }
+
+        pub fn occupiedBytes(self: *const Self) usize {
+            var count: usize = 0;
+            for (self.occupied) |is_occupied| count += @intFromBool(is_occupied);
+            return count * @sizeOf(ActivationSlot);
+        }
+
+        pub fn hostOverheadBytes(_: *const Self) usize {
+            return @sizeOf(Self) - capacity * @sizeOf(ActivationSlot);
+        }
+
+        fn releaseLease(
+            context: *anyopaque,
+            index: usize,
+            generation: u64,
+            slot: *ActivationSlot,
+        ) error{StaleSlotLease}!void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (index >= capacity or
+                !self.occupied[index] or
+                self.generations[index] != generation or
+                slot != &self.slots[index])
+            {
+                return error.StaleSlotLease;
+            }
+            scrub(slot);
+            self.occupied[index] = false;
+        }
+    };
+}
+
+pub const Core = struct {
+    native_slot: ?*ActivationSlot,
+    state: *State,
+    response_scratch: *[response_scratch_size]u8,
+    active: bool = true,
+    staged_response_length: u32 = 0,
+
+    pub fn initialize(slot: *ActivationSlot, identity_value: Identity) !Core {
+        if (identity_value.agent_id == 0) return error.InvalidAgentIdentity;
+        if (identity_value.generation == 0) return error.InvalidAgentGeneration;
+        scrub(slot);
+        slot.state = .{
+            .agent_id = identity_value.agent_id,
+            .agent_generation = identity_value.generation,
+            .accumulator = identity_value.agent_id,
+        };
+        return .{
+            .native_slot = slot,
+            .state = &slot.state,
+            .response_scratch = &slot.response_scratch,
+        };
     }
 
-    pub fn deliver(self: *Payload, event: u32) bool {
-        if (!self.validAndQuiescent()) return false;
-        self.state.yielded = 0;
+    pub fn activate(slot: *ActivationSlot, encoded: []const u8) !Core {
+        scrub(slot);
+        const restored = try core_state.decode(encoded);
+        slot.state = restored;
+        return .{
+            .native_slot = slot,
+            .state = &slot.state,
+            .response_scratch = &slot.response_scratch,
+        };
+    }
+
+    /// Wasm conformance uses a linker-selected in-memory workspace and never persists its layout.
+    pub fn attach(state: *State, response_scratch: *[response_scratch_size]u8) Core {
+        return .{
+            .native_slot = null,
+            .state = state,
+            .response_scratch = response_scratch,
+        };
+    }
+
+    pub fn initializeAttached(
+        state: *State,
+        response_scratch: *[response_scratch_size]u8,
+        identity_value: Identity,
+    ) !Core {
+        if (identity_value.agent_id == 0) return error.InvalidAgentIdentity;
+        if (identity_value.generation == 0) return error.InvalidAgentGeneration;
+        @memset(std.mem.asBytes(state), 0);
+        @memset(response_scratch, 0);
+        state.* = .{
+            .agent_id = identity_value.agent_id,
+            .agent_generation = identity_value.generation,
+            .accumulator = identity_value.agent_id,
+        };
+        return attach(state, response_scratch);
+    }
+
+    pub fn suspendInto(self: *Core, encoded: []u8) !void {
+        try self.requireActive();
+        const slot = self.native_slot orelse return error.NotNativeActivation;
+        try core_state.encode(encoded, self.state.*);
+        scrub(slot);
+        self.active = false;
+        self.staged_response_length = 0;
+    }
+
+    pub fn abandon(self: *Core) void {
+        if (!self.active) return;
+        if (self.native_slot) |slot| scrub(slot);
+        self.active = false;
+        self.staged_response_length = 0;
+    }
+
+    pub fn identity(self: *const Core) !Identity {
+        try self.requireActive();
+        return .{
+            .agent_id = self.state.agent_id,
+            .generation = self.state.agent_generation,
+        };
+    }
+
+    pub fn operation(self: *const Core) !Operation {
+        try self.requireActive();
+        const state = self.state.*;
+        return .{
+            .id = state.operation_id,
+            .generation = state.operation_generation,
+            .phase = state.operation_phase,
+            .result_ref = state.operation_result,
+            .sequence = state.operation_sequence,
+        };
+    }
+
+    pub fn task(self: *const Core) !Task {
+        try self.requireActive();
+        const state = self.state.*;
+        return .{
+            .phase = state.task_phase,
+            .active_leaf_id = state.active_leaf_id,
+            .final_entry_id = state.final_entry_id,
+        };
+    }
+
+    pub fn response(self: *const Core) !Response {
+        try self.requireActive();
+        const state = self.state.*;
+        return .{
+            .content_ref = state.response_ref,
+            .disposition = state.response_disposition,
+            .failure = state.response_failure,
+            .tool = state.response_tool,
+            .text = state.response_text,
+            .arguments = state.response_arguments,
+        };
+    }
+
+    pub fn modelContext(self: *const Core) !ModelContext {
+        try self.requireActive();
+        return .{
+            .first_entry = self.state.context.offset,
+            .entry_count = self.state.context.length,
+        };
+    }
+
+    pub fn deliver(self: *Core, event: u32) !void {
+        try self.requireActive();
         self.state.event_count +%= 1;
         self.state.last_event = event;
         self.state.accumulator = (self.state.accumulator *% 16_777_619) ^ event;
-        self.state.yielded = 1;
-        return true;
     }
 
-    pub fn submitOperation(self: *Payload, operation_id: u32, sequence: u32) bool {
-        if (!self.validAndQuiescent() or operation_id == 0 or sequence == 0) return false;
-        if (self.state.operation_state != .idle and self.state.operation_state != .completed) return false;
-        if (self.state.operation_generation == std.math.maxInt(u32)) return false;
+    pub fn startTask(self: *Core, active_leaf_id: u64) !void {
+        try self.requireActive();
+        if (active_leaf_id == 0) return error.InvalidConversationEntry;
+        if (self.state.task_phase != .idle or
+            self.state.operation_phase != .idle)
+        {
+            return error.IllegalTaskTransition;
+        }
+        self.state.active_leaf_id = active_leaf_id;
+        self.state.task_phase = .ready;
+    }
 
-        self.state.yielded = 0;
+    pub fn submitOperation(self: *Core, operation_id: u64, sequence: u64) !Operation {
+        try self.requireActive();
+        if (operation_id == 0 or sequence == 0) return error.InvalidOperationIdentity;
+        const phase = self.state.operation_phase;
+        if (phase != .idle and phase != .completed) return error.OperationAlreadyActive;
+        if (self.state.operation_generation == std.math.maxInt(u32)) {
+            return error.OperationGenerationExhausted;
+        }
         self.state.operation_id = operation_id;
         self.state.operation_generation += 1;
-        self.state.operation_state = .submitted;
+        self.state.operation_phase = .submitted;
         self.state.operation_result = 0;
         self.state.operation_sequence = sequence;
-        self.state.yielded = 1;
-        return true;
+        return self.operation();
     }
 
-    pub fn acceptOperation(self: *Payload, operation_id: u32, operation_generation: u32) bool {
-        if (!self.validAndQuiescent()) return false;
-        if (self.state.operation_state != .submitted or
-            self.state.operation_id != operation_id or
-            self.state.operation_generation != operation_generation)
-        {
-            return false;
+    pub fn beginModelOperation(
+        self: *Core,
+        operation_id: u64,
+        sequence: u64,
+    ) !Operation {
+        try self.requireActive();
+        const active_leaf_id = self.state.active_leaf_id;
+        if (self.state.task_phase != .ready or active_leaf_id >= std.math.maxInt(u32)) {
+            return error.IllegalModelTransition;
         }
+        const prepared = try self.submitOperation(operation_id, sequence);
+        self.state.context = .{ .offset = 1, .length = @intCast(active_leaf_id) };
+        self.state.response_ref = 0;
+        self.state.response_disposition = .failure;
+        self.state.response_failure = .none;
+        self.state.response_tool = .none;
+        self.state.response_text = .{};
+        self.state.response_arguments = .{};
+        self.state.task_phase = .awaiting_model;
+        self.staged_response_length = 0;
+        return prepared;
+    }
 
-        self.state.yielded = 0;
-        self.state.operation_state = .accepted;
-        self.state.yielded = 1;
-        return true;
+    pub fn acceptOperation(self: *Core, identity_value: OperationIdentity) !void {
+        try self.requireOperation(identity_value, .submitted);
+        self.state.operation_phase = .accepted;
     }
 
     pub fn completeOperation(
-        self: *Payload,
-        operation_id: u32,
-        operation_generation: u32,
-        result: u32,
-    ) bool {
-        if (!self.validAndQuiescent()) return false;
-        if (self.state.operation_state != .accepted or
-            self.state.operation_id != operation_id or
-            self.state.operation_generation != operation_generation)
+        self: *Core,
+        identity_value: OperationIdentity,
+        result_ref: u64,
+    ) !void {
+        try self.requireOperation(identity_value, .accepted);
+        if (result_ref == 0) return error.InvalidResultReference;
+        self.state.operation_result = result_ref;
+        self.state.operation_phase = .completed;
+    }
+
+    pub fn interpretModelResponse(
+        self: *Core,
+        response_bytes: []const u8,
+        response_ref: u64,
+    ) !Response {
+        try self.requireActive();
+        if (response_bytes.len == 0) return error.EmptyModelResponse;
+        if (response_bytes.len > self.response_scratch.len) return error.ResponseCapacityExceeded;
+        const state = self.state.*;
+        if (state.task_phase != .awaiting_model or
+            state.operation_phase != .completed or
+            state.operation_result != response_ref or response_ref == 0)
         {
-            return false;
+            return error.IllegalModelResponseTransition;
         }
 
-        self.state.yielded = 0;
-        self.state.operation_result = result;
-        self.state.operation_state = .completed;
-        self.state.yielded = 1;
-        return true;
-    }
-
-    pub fn startTask(self: *Payload, active_leaf_id: u32) bool {
-        if (!self.validAndQuiescent() or active_leaf_id == 0) return false;
-        if (self.state.task_phase != .idle or self.state.operation_state != .idle) return false;
-        self.state.yielded = 0;
-        self.state.active_leaf_id = active_leaf_id;
-        self.state.task_phase = .ready;
-        self.state.yielded = 1;
-        return true;
-    }
-
-    pub fn beginModelOperation(self: *Payload, operation_id: u32, sequence: u32) bool {
-        if (self.state.task_phase != .ready or self.state.active_leaf_id > std.math.maxInt(u32)) {
-            return false;
-        }
-        if (!self.submitOperation(operation_id, sequence)) return false;
-        self.state.context_first = 1;
-        self.state.context_count = @intCast(self.state.active_leaf_id);
-        self.state.response_ref = 0;
-        self.state.response_disposition = 0;
-        self.state.response_failure = 0;
-        self.state.response_text_offset = 0;
-        self.state.response_text_length = 0;
-        self.state.response_tool = 0;
-        self.state.response_arguments_offset = 0;
-        self.state.response_arguments_length = 0;
-        self.state.task_phase = .awaiting_model;
-        return true;
-    }
-
-    pub fn interpretStoredResponse(
-        self: *Payload,
-        offset: u32,
-        length: u32,
-        response_ref: u32,
-    ) bool {
-        if (offset < response_memory_offset) return false;
-        const relative = offset - response_memory_offset;
-        if (relative > self.response.len or length > self.response.len - relative) return false;
-        return self.interpretResponseAt(offset, self.response[relative..][0..length], response_ref);
-    }
-
-    pub fn interpretResponse(self: *Payload, bytes: []const u8, response_ref: u32) bool {
-        if (bytes.len == 0 or bytes.len > self.response.len) return false;
-        @memcpy(self.response[0..bytes.len], bytes);
-        return self.interpretResponseAt(response_memory_offset, self.response[0..bytes.len], response_ref);
-    }
-
-    fn interpretResponseAt(
-        self: *Payload,
-        absolute_offset: u32,
-        bytes: []const u8,
-        response_ref: u32,
-    ) bool {
-        if (!self.validAndQuiescent() or response_ref == 0) return false;
-        if (self.state.task_phase != .awaiting_model or
-            self.state.operation_state != .completed or
-            self.state.operation_result != response_ref or
-            bytes.len == 0 or bytes.len > model_protocol.max_response_size)
-        {
-            return false;
-        }
-
-        self.state.yielded = 0;
-        const parsed = model_protocol.parse(bytes);
+        @memcpy(self.response_scratch[0..response_bytes.len], response_bytes);
+        const parsed = model_protocol.parse(self.response_scratch[0..response_bytes.len]);
+        self.staged_response_length = @intCast(response_bytes.len);
         self.state.response_ref = response_ref;
-        self.state.response_disposition = @intFromEnum(parsed.disposition);
-        self.state.response_failure = @intFromEnum(parsed.failure);
-        self.state.response_text_offset = absolute_offset + parsed.text_offset;
-        self.state.response_text_length = parsed.text_length;
-        self.state.response_tool = @intFromEnum(parsed.tool);
-        self.state.response_arguments_offset = absolute_offset + parsed.arguments_offset;
-        self.state.response_arguments_length = parsed.arguments_length;
+        self.state.response_disposition = parsed.disposition;
+        self.state.response_failure = parsed.failure;
+        self.state.response_tool = parsed.tool;
+        self.state.response_text = .{
+            .offset = parsed.text_offset,
+            .length = parsed.text_length,
+        };
+        self.state.response_arguments = .{
+            .offset = parsed.arguments_offset,
+            .length = parsed.arguments_length,
+        };
         self.state.task_phase = switch (parsed.disposition) {
             .final_answer => .final_candidate,
             .tool_call => .awaiting_tool,
             .failure => .failed,
         };
-        self.state.yielded = 1;
-        return true;
+        return self.response();
     }
 
-    pub fn commitFinalAnswer(self: *Payload, entry_id: u32) bool {
-        if (!self.validAndQuiescent() or entry_id == 0) return false;
-        if (self.state.task_phase != .final_candidate or entry_id != self.state.active_leaf_id + 1) {
-            return false;
+    /// Restages immutable response content after activation without changing Core State.
+    pub fn stageResponse(self: *Core, response_bytes: []const u8, response_ref: u64) !void {
+        try self.requireActive();
+        if (response_bytes.len == 0) return error.EmptyModelResponse;
+        if (response_bytes.len > self.response_scratch.len) return error.ResponseCapacityExceeded;
+        if (self.state.response_ref != response_ref or response_ref == 0) {
+            return error.ResponseIdentityMismatch;
         }
-        self.state.yielded = 0;
+        const parsed = model_protocol.parse(response_bytes);
+        const expected = try self.response();
+        if (parsed.disposition != expected.disposition or
+            parsed.failure != expected.failure or
+            parsed.tool != expected.tool or
+            parsed.text_offset != expected.text.offset or
+            parsed.text_length != expected.text.length or
+            parsed.arguments_offset != expected.arguments.offset or
+            parsed.arguments_length != expected.arguments.length)
+        {
+            return error.ResponseContentMismatch;
+        }
+        @memcpy(self.response_scratch[0..response_bytes.len], response_bytes);
+        self.staged_response_length = @intCast(response_bytes.len);
+    }
+
+    pub fn copyResponseWindow(
+        self: *const Core,
+        window: ContentWindow,
+        out: []u8,
+    ) ![]const u8 {
+        try self.requireActive();
+        if (window.length == 0) return "";
+        const start: usize = window.offset;
+        const length: usize = window.length;
+        if (length > out.len) return error.ResponseWindowCapacityExceeded;
+        if (start > self.staged_response_length or
+            length > self.staged_response_length - start)
+        {
+            return error.ResponseWindowUnavailable;
+        }
+        @memcpy(out[0..length], self.response_scratch[start..][0..length]);
+        return out[0..length];
+    }
+
+    pub fn commitFinalAnswer(self: *Core, entry_id: u64) !void {
+        try self.requireActive();
+        if (entry_id == 0 or self.state.active_leaf_id == std.math.maxInt(u64)) {
+            return error.InvalidConversationEntry;
+        }
+        if (self.state.task_phase != .final_candidate or
+            entry_id != self.state.active_leaf_id + 1)
+        {
+            return error.IllegalFinalAnswerTransition;
+        }
         self.state.active_leaf_id = entry_id;
         self.state.final_entry_id = entry_id;
         self.state.task_phase = .finished;
-        self.state.yielded = 1;
-        return true;
     }
 
-    pub fn commitToolResult(self: *Payload, call_entry_id: u32, result_entry_id: u32) bool {
-        if (!self.validAndQuiescent() or call_entry_id == 0 or result_entry_id == 0) return false;
+    pub fn commitToolResult(self: *Core, call_entry_id: u64, result_entry_id: u64) !void {
+        try self.requireActive();
+        if (call_entry_id == 0 or result_entry_id == 0 or
+            self.state.active_leaf_id == std.math.maxInt(u64) or
+            call_entry_id == std.math.maxInt(u64))
+        {
+            return error.InvalidConversationEntry;
+        }
         if (self.state.task_phase != .awaiting_tool or
             call_entry_id != self.state.active_leaf_id + 1 or
             result_entry_id != call_entry_id + 1)
         {
-            return false;
+            return error.IllegalToolResultTransition;
         }
-        self.state.yielded = 0;
         self.state.active_leaf_id = result_entry_id;
         self.state.task_phase = .ready;
-        self.state.yielded = 1;
-        return true;
     }
 
-    fn validAndQuiescent(self: *const Payload) bool {
-        return self.state.magic == magic and self.state.yielded == 1;
+    fn requireOperation(
+        self: *const Core,
+        identity_value: OperationIdentity,
+        phase: OperationPhase,
+    ) !void {
+        try self.requireActive();
+        if (identity_value.id == 0 or identity_value.generation == 0) {
+            return error.InvalidOperationIdentity;
+        }
+        if (self.state.operation_id != identity_value.id or
+            self.state.operation_generation != identity_value.generation)
+        {
+            return error.StaleOperation;
+        }
+        if (self.state.operation_phase != phase) return error.IllegalOperationTransition;
+    }
+
+    fn requireActive(self: *const Core) !void {
+        if (!self.active) return error.InactiveCore;
     }
 };
 
-pub const Image = extern struct {
-    wasm_stack_static_or_native_reserve: [state_memory_offset]u8,
-    payload: Payload,
-
-    pub fn initialize(self: *Image, agent_id: u32) void {
-        @memset(std.mem.asBytes(self), 0);
-        self.payload.state = initialState(agent_id);
-    }
-};
-
-fn initialState(agent_id: u32) State {
-    return .{
-        .magic = magic,
-        .agent_id = agent_id,
-        .event_count = 0,
-        .accumulator = agent_id,
-        .last_event = 0,
-        .yielded = 1,
-        .operation_id = 0,
-        .operation_generation = 0,
-        .operation_state = .idle,
-        .operation_result = 0,
-        .operation_sequence = 0,
-        .active_leaf_id = 0,
-        .final_entry_id = 0,
-        .response_ref = 0,
-        .task_phase = .idle,
-        .response_disposition = 0,
-        .response_failure = 0,
-        .context_first = 0,
-        .context_count = 0,
-        .response_text_offset = 0,
-        .response_text_length = 0,
-        .response_tool = 0,
-        .response_arguments_offset = 0,
-        .response_arguments_length = 0,
-    };
+pub fn scrub(slot: *ActivationSlot) void {
+    @memset(std.mem.asBytes(slot), 0);
 }
 
 comptime {
-    std.debug.assert(state_memory_offset >= wasm_stack_size);
-    std.debug.assert(response_memory_offset >= state_memory_offset + @sizeOf(State));
-    std.debug.assert(@sizeOf(State) <= 128);
-    std.debug.assert(@alignOf(State) <= 8);
-    std.debug.assert(@sizeOf(Payload) == payload_size);
-    std.debug.assert(@sizeOf(Image) == page_size);
-    std.debug.assert(@offsetOf(Image, "payload") == state_memory_offset);
-    std.debug.assert(@offsetOf(Payload, "response") == response_offset_in_payload);
+    std.debug.assert(@sizeOf(ActivationSlot) == slot_size);
+    std.debug.assert(@alignOf(ActivationSlot) == slot_alignment);
+    std.debug.assert(@offsetOf(ActivationSlot, "parser_scratch") == @sizeOf(State));
+    std.debug.assert(@offsetOf(ActivationSlot, "response_scratch") ==
+        @sizeOf(State) + parser_scratch_size);
+    std.debug.assert(@offsetOf(ActivationSlot, "transition_scratch") ==
+        @sizeOf(State) + parser_scratch_size + response_scratch_size);
+    assertNoAllocatorParameter(Core.initialize);
+    assertNoAllocatorParameter(Core.activate);
+    assertNoAllocatorParameter(Core.deliver);
+    assertNoAllocatorParameter(Core.startTask);
+    assertNoAllocatorParameter(Core.beginModelOperation);
+    assertNoAllocatorParameter(Core.acceptOperation);
+    assertNoAllocatorParameter(Core.completeOperation);
+    assertNoAllocatorParameter(Core.interpretModelResponse);
+    assertNoAllocatorParameter(Core.suspendInto);
 }
 
-test "native image is exactly one page and snapshots without pointers" {
-    var image: Image = undefined;
-    image.initialize(42);
-    try std.testing.expectEqual(page_size, @sizeOf(Image));
-    try std.testing.expectEqual(@as(u32, 42), image.payload.state.agent_id);
-    try std.testing.expect(image.payload.deliver(7));
-
-    var restored: Image = undefined;
-    @memcpy(std.mem.asBytes(&restored), std.mem.asBytes(&image));
-    try std.testing.expectEqual(image.payload.state, restored.payload.state);
-    try std.testing.expect(restored.payload.deliver(8));
+fn assertNoAllocatorParameter(comptime callable: anytype) void {
+    const function_info = @typeInfo(@TypeOf(callable)).@"fn";
+    for (function_info.params) |parameter| {
+        if (parameter.type == std.mem.Allocator) {
+            @compileError("Core slot lifecycle cannot expose an allocator seam");
+        }
+    }
 }
 
-test "model transition uses the same bounded response region" {
-    var image: Image = undefined;
-    image.initialize(7);
-    try std.testing.expect(image.payload.startTask(1));
-    try std.testing.expect(image.payload.beginModelOperation(11, 1));
-    try std.testing.expect(image.payload.acceptOperation(11, 1));
-    try std.testing.expect(image.payload.completeOperation(11, 1, 99));
+test "Activation Slot is exact and suspension encodes only Core State then scrubs every byte" {
+    var slot: ActivationSlot = undefined;
+    @memset(std.mem.asBytes(&slot), 0xa5);
+    var core = try Core.initialize(&slot, .{ .agent_id = 42, .generation = 7 });
+    try core.deliver(9);
+    var encoded: [core_state.encoded_size]u8 = undefined;
+    try core.suspendInto(&encoded);
+    for (std.mem.asBytes(&slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    const state = try core_state.decode(&encoded);
+    try std.testing.expectEqual(@as(u64, 42), state.agent_id);
+    try std.testing.expectEqual(@as(u64, 1), state.event_count);
+}
 
-    var encoded: [model_protocol.max_response_size]u8 = undefined;
-    const response = try model_protocol.encodeText(&encoded, .complete, "done");
-    try std.testing.expect(image.payload.interpretResponse(response, 99));
-    try std.testing.expectEqual(TaskPhase.final_candidate, image.payload.state.task_phase);
-    try std.testing.expectEqual(@as(u32, 4), image.payload.state.response_text_length);
+test "poisoned slots restore to identical semantic outcomes and encodings" {
+    var source: ActivationSlot = undefined;
+    var core = try Core.initialize(&source, .{ .agent_id = 7, .generation = 1 });
+    try core.startTask(1);
+    var initial: [core_state.encoded_size]u8 = undefined;
+    try core.suspendInto(&initial);
+
+    var first_slot: ActivationSlot = undefined;
+    var second_slot: ActivationSlot = undefined;
+    @memset(std.mem.asBytes(&first_slot), 0x11);
+    @memset(std.mem.asBytes(&second_slot), 0xee);
+    var first = try Core.activate(&first_slot, &initial);
+    var second = try Core.activate(&second_slot, &initial);
+    _ = try first.beginModelOperation(10, 2);
+    _ = try second.beginModelOperation(10, 2);
+    var first_encoded: [core_state.encoded_size]u8 = undefined;
+    var second_encoded: [core_state.encoded_size]u8 = undefined;
+    try first.suspendInto(&first_encoded);
+    try second.suspendInto(&second_encoded);
+    try std.testing.expectEqualSlices(u8, &first_encoded, &second_encoded);
+}
+
+test "failed activation leaves no prior slot bytes reachable" {
+    var slot: ActivationSlot = undefined;
+    @memset(std.mem.asBytes(&slot), 0xa5);
+    var corrupt: [core_state.encoded_size]u8 = @splat(0xff);
+    try std.testing.expectError(error.InvalidCoreStateMagic, Core.activate(&slot, &corrupt));
+    for (std.mem.asBytes(&slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
+
+test "capacity and stale generation rejections preserve prior Core State" {
+    var slot: ActivationSlot = undefined;
+    var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
+    try core.startTask(1);
+    const operation_value = try core.beginModelOperation(10, 1);
+    try std.testing.expectError(
+        error.StaleOperation,
+        core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation + 1 }),
+    );
+    try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
+    try core.completeOperation(
+        .{ .id = operation_value.id, .generation = operation_value.generation },
+        99,
+    );
+    const before = try core.operation();
+    var oversized: [response_scratch_size + 1]u8 = @splat(1);
+    try std.testing.expectError(
+        error.ResponseCapacityExceeded,
+        core.interpretModelResponse(&oversized, 99),
+    );
+    try std.testing.expectEqualDeep(before, try core.operation());
+}
+
+test "complete slot lifecycle is compiler checked to expose no allocator seam" {
+    var first_slot: ActivationSlot = undefined;
+    var core = try Core.initialize(&first_slot, .{ .agent_id = 9, .generation = 1 });
+    try core.startTask(1);
+    const operation_value = try core.beginModelOperation(2, 1);
+    try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
+    try core.completeOperation(
+        .{ .id = operation_value.id, .generation = operation_value.generation },
+        3,
+    );
+    var response_bytes: [model_protocol.max_response_size]u8 = undefined;
+    const response = try model_protocol.encodeText(&response_bytes, .complete, "done");
+    _ = try core.interpretModelResponse(response, 3);
+    var encoded: [core_state.encoded_size]u8 = undefined;
+    try core.suspendInto(&encoded);
+
+    var reused_slot: ActivationSlot = undefined;
+    @memset(std.mem.asBytes(&reused_slot), 0xff);
+    var restored = try Core.activate(&reused_slot, &encoded);
+    try restored.stageResponse(response, 3);
+    try restored.commitFinalAnswer(2);
+    try restored.suspendInto(&encoded);
+}
+
+test "generation exhaustion is a closed rejection" {
+    var slot: ActivationSlot = undefined;
+    var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
+    core.state.operation_generation = std.math.maxInt(u32);
+    try std.testing.expectError(
+        error.OperationGenerationExhausted,
+        core.submitOperation(1, 1),
+    );
+    try std.testing.expectEqual(OperationPhase.idle, (try core.operation()).phase);
+}
+
+test "fixed slot pool returns closed capacity and scrubs before reuse" {
+    var pool: SlotPool(1) = .{};
+    var lease = try pool.borrow();
+    @memset(std.mem.asBytes(lease.slot), 0xa5);
+    try std.testing.expectError(error.ActivationCapacityExhausted, pool.borrow());
+    try lease.release();
+
+    var reused = try pool.borrow();
+    defer reused.release() catch unreachable;
+    for (std.mem.asBytes(reused.slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    try std.testing.expectEqual(slot_size, pool.residentBytes());
+}
+
+test "stale copied lease cannot release a newly borrowed slot" {
+    var pool: SlotPool(1) = .{};
+    var original = try pool.borrow();
+    var stale_copy = original;
+    try original.release();
+
+    var current = try pool.borrow();
+    defer current.release() catch unreachable;
+    current.slot.state.agent_id = 99;
+    try std.testing.expectError(error.StaleSlotLease, stale_copy.release());
+
+    try std.testing.expectEqual(@as(u64, 99), current.slot.state.agent_id);
+    try std.testing.expectError(error.ActivationCapacityExhausted, pool.borrow());
+}
+
+test "maximum context window is rejected before operation mutation" {
+    var slot: ActivationSlot = undefined;
+    var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
+    core.state.active_leaf_id = std.math.maxInt(u32);
+    core.state.task_phase = .ready;
+    const before = try core.operation();
+    try std.testing.expectError(error.IllegalModelTransition, core.beginModelOperation(1, 1));
+    try std.testing.expectEqualDeep(before, try core.operation());
 }

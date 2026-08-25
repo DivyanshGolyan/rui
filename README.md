@@ -6,9 +6,12 @@ Activation Slot from a fixed resident pool.
 The production CLI executes a target-neutral Zig reducer natively; it has no embedded language or
 WebAssembly runtime. The same reducer is also compiled to `wasm32-freestanding` as a conformance
 target. The target architecture separates compact, canonically encoded Core State from transient
-Activation Slot scratch and reconstructs Session semantics from one ordered Session WAL. Historical
-spikes currently prove the native path, raw-image differential trace, and 1,000-agent slot reuse;
-issues #14 and #15 migrate those proofs to the normative semantic architecture.
+Activation Slot scratch. Core State is currently 160 bytes and its rebuildable State Checkpoint is
+224 bytes; activation decodes that state into one caller-owned 65,536-byte slot, and suspension
+scrubs the complete slot. A fixed caller-owned pool returns closed capacity instead of allocating a
+fallback slot. The native/Wasm corpus compares typed outcomes, semantic intents, and canonical state
+encoding rather than slot bytes. Issue #15 will reconstruct complete Session semantics from one
+ordered Session WAL.
 
 [`PRODUCT.md`](PRODUCT.md), [`ARCHITECTURE.md`](ARCHITECTURE.md), and
 [`VERIFICATION.md`](VERIFICATION.md) are normative. Historical spikes and research remain evidence,
@@ -17,20 +20,11 @@ but they do not override those documents or accepted ADRs.
 [`docs/style.md`](docs/style.md) defines the scoped engineering rules and canonical compiler-backed
 check for implementation work.
 
-The operation-lifecycle spike uses four separate host processes to submit, durably accept, complete,
-recover, and replay 1,000 operations while their agents are absent from memory. Both recovery
-processes restore every page through the same slot without building a resident per-agent index.
-
 The fixed-credit harness spike extracts the compiled Wasm contract into one verifier and adds a
 1.5 KiB-bounded native owner with nonblocking task, completion, permission, cancellation, and
 shutdown admission; durable-before-apply ordering; committed projections; bounded drive quanta;
 and crash/replay tests. Its 32-entry maximum is fixed at compile time and does not vary with
 logical-agent count.
-
-The owner crash-recovery spike connects that harness to the historical operation journal and native Core
-image. A child process exits after the completion record is synced but before slot mutation; two fresh
-recovery processes then prove one application followed by one duplicate. The fixed native control
-metadata is 1,536 bytes, excluding the runtime, one-page core, and checkpoint staging buffer.
 
 The durable Session layer adds exact create and resume identities, a lifetime operating-system lock,
 durable ownership epochs, and an append-only parent-linked conversation. Resume publishes the new
@@ -39,7 +33,7 @@ synced entry.
 
 The first agent slice now performs one real durable model turn through the product CLI. A fixture
 provider validates the request reconstructed from the conversation, writes a complete response spool,
-and wakes a restored one-page core. The core alone classifies the response as a Final Answer, which is
+and wakes a restored Core. Core alone classifies the response as a Final Answer, which is
 then committed as an immutable conversation entry and reproduced by exact Session resume.
 
 ```sh
@@ -69,9 +63,8 @@ select it again.
 zig build fixture-patch-deny -Doptimize=ReleaseSmall
 ```
 
-The atomic checkpoint spike publishes through temporary write, file sync, same-directory rename,
-and parent-directory sync. Sixteen fresh child processes terminate at each boundary and recover only
-the old or new canonical page while keeping the journal unchanged.
+State Checkpoint publication uses temporary write, file sync, same-directory rename, and
+parent-directory sync. Fault tests recover only the old or new compact canonical state.
 
 ## Requirements
 
@@ -84,11 +77,10 @@ the old or new canonical page while keeping the journal unchanged.
 zig build check
 zig build test -Doptimize=ReleaseSafe
 zig build native-core -Doptimize=ReleaseSafe
-zig build run -Doptimize=ReleaseSmall
-zig build lifecycle -Doptimize=ReleaseSmall
 ```
 
-Generated page snapshots are written under `snapshots/` and ignored by Git.
+`native-core` reports the exact slot, compact sleeping-state bytes, process RSS, and the independent
+native/Wasm semantic corpus.
 
 See the spike notes for architecture, measurements, caveats, and next questions:
 

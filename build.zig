@@ -21,17 +21,6 @@ pub fn build(b: *std.Build) void {
     core.initial_memory = 64 * 1024;
     core.max_memory = 64 * 1024;
     core.stack_size = 4 * 1024;
-    const host = b.addExecutable(.{
-        .name = "onepage-spike",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/host.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    host.root_module.link_libc = true;
-    b.installArtifact(host);
-
     const cli = b.addExecutable(.{
         .name = "onepage",
         .root_module = b.createModule(.{
@@ -61,13 +50,6 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&format_check.step);
     addTestGraph(b, check_step, core, native_target, .ReleaseSafe);
 
-    const release_small_host = addNativeExecutable(
-        b,
-        "onepage-spike-release-small-check",
-        "src/host.zig",
-        native_target,
-        .ReleaseSmall,
-    );
     const release_small_cli = addNativeExecutable(
         b,
         "onepage-release-small-check",
@@ -76,7 +58,6 @@ pub fn build(b: *std.Build) void {
         .ReleaseSmall,
     );
     check_step.dependOn(&core.step);
-    check_step.dependOn(&release_small_host.step);
     check_step.dependOn(&release_small_cli.step);
 
     const fixture_answer_step = b.step(
@@ -92,7 +73,7 @@ pub fn build(b: *std.Build) void {
         "--model",
         "fixture:answer",
         "--fixture-response",
-        "OnePage completed a durable model turn inside one fixed native page.",
+        "OnePage completed a durable model turn through one fixed Activation Slot.",
         "Explain this repository in one sentence.",
     });
     fixture_answer_step.dependOn(&run_fixture_answer.step);
@@ -139,11 +120,6 @@ pub fn build(b: *std.Build) void {
     });
     fixture_patch_step.dependOn(&run_fixture_patch.step);
 
-    const run_step = b.step("run", "Run the memory-model spike");
-    const run_host = b.addRunArtifact(host);
-    run_host.addFileArg(core.getEmittedBin());
-    run_step.dependOn(&run_host.step);
-
     const native_core_spike = b.addExecutable(.{
         .name = "onepage-native-core-spike",
         .root_module = b.createModule(.{
@@ -160,42 +136,7 @@ pub fn build(b: *std.Build) void {
         "Measure the native one-page Core and check it against the Wasm build",
     );
     native_core_step.dependOn(&run_native_core_spike.step);
-
-    const lifecycle_step = b.step("lifecycle", "Run the durable operation lifecycle spike");
-    const prepare_lifecycle = b.addRunArtifact(host);
-    prepare_lifecycle.addFileArg(core.getEmittedBin());
-    prepare_lifecycle.addArg("lifecycle-prepare");
-    const complete_lifecycle = b.addRunArtifact(host);
-    complete_lifecycle.addFileArg(core.getEmittedBin());
-    complete_lifecycle.addArg("lifecycle-complete");
-    complete_lifecycle.step.dependOn(&prepare_lifecycle.step);
-    const recover_lifecycle = b.addRunArtifact(host);
-    recover_lifecycle.addFileArg(core.getEmittedBin());
-    recover_lifecycle.addArg("lifecycle-recover");
-    recover_lifecycle.step.dependOn(&complete_lifecycle.step);
-    const replay_lifecycle = b.addRunArtifact(host);
-    replay_lifecycle.addFileArg(core.getEmittedBin());
-    replay_lifecycle.addArg("lifecycle-recover");
-    replay_lifecycle.step.dependOn(&recover_lifecycle.step);
-    lifecycle_step.dependOn(&replay_lifecycle.step);
-
-    const owner_crash_step = b.step(
-        "owner-crash",
-        "Crash after completion sync and recover through the fixed-credit owner",
-    );
-    const run_owner_crash = b.addRunArtifact(host);
-    run_owner_crash.addFileArg(core.getEmittedBin());
-    run_owner_crash.addArg("owner-crash-suite");
-    owner_crash_step.dependOn(&run_owner_crash.step);
-
-    const checkpoint_crash_step = b.step(
-        "checkpoint-crash",
-        "Crash at every atomic checkpoint publication boundary",
-    );
-    const run_checkpoint_crash = b.addRunArtifact(host);
-    run_checkpoint_crash.addFileArg(core.getEmittedBin());
-    run_checkpoint_crash.addArg("checkpoint-crash-suite");
-    checkpoint_crash_step.dependOn(&run_checkpoint_crash.step);
+    check_step.dependOn(&run_native_core_spike.step);
 }
 
 fn addTestGraph(
@@ -206,6 +147,7 @@ fn addTestGraph(
     optimize: std.builtin.OptimizeMode,
 ) void {
     const plain_test_roots = [_][]const u8{
+        "src/core_state.zig",
         "src/wasm_inspect.zig",
         "src/checkpoint.zig",
         "src/core_image.zig",

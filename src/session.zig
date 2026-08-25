@@ -20,8 +20,8 @@ const conversation_path = "conversation.log";
 const lock_path = "owner.lock";
 const blobs_path = "blobs";
 const operation_path = "operations.log";
-const checkpoint_path = "core.page";
-const checkpoint_temp_path = "core.page.tmp";
+const checkpoint_path = "core.state";
+const checkpoint_temp_path = "core.state.tmp";
 
 const manifest_crc_offset = 20;
 
@@ -485,7 +485,7 @@ pub const Session = struct {
         token: OwnerToken,
         generation: u32,
         encoded: []u8,
-        page: []const u8,
+        state: []const u8,
     ) !void {
         try self.authorize(token);
         try checkpoint_store.publish(
@@ -496,7 +496,7 @@ pub const Session = struct {
             encoded,
             self.agent_id,
             generation,
-            page,
+            state,
             null,
         );
     }
@@ -506,10 +506,10 @@ pub const Session = struct {
         token: OwnerToken,
         generation: u32,
         encoded: []u8,
-        page: []u8,
+        state: []u8,
     ) !void {
         try self.authorize(token);
-        if (encoded.len != checkpoint.encoded_size or page.len != checkpoint.page_size) {
+        if (encoded.len != checkpoint.encoded_size or state.len != checkpoint.state_size) {
             return error.InvalidCheckpointBuffer;
         }
         var file = try self.dir.openFile(self.io, checkpoint_path, .{});
@@ -517,7 +517,7 @@ pub const Session = struct {
         const actual = try file.readPositionalAll(self.io, encoded, 0);
         if (actual != encoded.len) return error.TruncatedCheckpoint;
         const restored = try checkpoint.decode(encoded, self.agent_id, generation);
-        @memcpy(page, restored.page);
+        @memcpy(state, restored.state);
     }
 
     pub fn close(self: *Session) void {
