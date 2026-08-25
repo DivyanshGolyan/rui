@@ -9,10 +9,10 @@ durable world
 
 immutable blobs and Conversation nodes
                     +
-            per-Session WAL
-       sole semantic lifecycle order
+       host-wide SQLite Host Store
+     per-Session ordered ledger rows
                     |
-             WAL sequence S
+          Session sequence S
                     v
        compact Core State checkpoint
               rebuildable view
@@ -29,32 +29,32 @@ immutable blobs and Conversation nodes
       model / Bash / apply_patch adapters
 ```
 
-OnePage is single-host. The Workspace is external mutable truth. Local durable storage is authoritative for Session semantics but cannot reconstruct or overwrite arbitrary external Workspace changes.
+OnePage is single-host. One **Host Runtime** process owns one **Host Store** at a time and routes all durable access through its sole **Storage Owner**. The Workspace is external mutable truth. Local durable storage is authoritative for Session semantics but cannot reconstruct or overwrite arbitrary external Workspace changes.
 
 ## Durable authority
 
-Each Session owns one append-only **Session WAL**. Its valid prefix is the sole order of semantic facts that create, advance, recover, cancel, or complete that Session. It includes task admission, accepted model and tool Operations, Attempts and their dispositions, Authorization, Results, Conversation advancement, reconciliation, cancellation, and Outcome.
+The Host Store is one host-wide SQLite database. Each Session owns one append-only **Session Ledger** within it. The complete ordered ledger is the sole order of semantic facts that create, advance, recover, cancel, or complete that Session. It includes task admission, accepted model and tool Operations, Attempts and their dispositions, Authorization, Results, Conversation advancement, reconciliation, cancellation, and Outcome.
 
-One prepared semantic transition commits as one bounded WAL transaction frame. A frame contains every typed fact in that transition under one length, schema, sequence, and checksum. No enclosed fact is visible unless the complete frame validates; an incomplete or corrupt tail frame is discarded. Every validated frame boundary is therefore a legal recoverable semantic state, and one WAL sequence identifies the whole transition.
+One prepared semantic transition has one canonical bounded payload with an explicit Session sequence, payload version, kind, length, and digest. The kind column is a validated projection of the canonical payload rather than a second authority. One SQLite transaction inserts the transition, advances the Session ledger head, and may update rebuildable checkpoints, indexes, Inbox associations, and Projections. No enclosed fact is visible unless the complete transaction commits. Every committed sequence is therefore a legal recoverable semantic state.
 
-Large or variable content is immutable and stored outside the WAL. A publisher writes and synchronizes content before appending a WAL fact that references it. Failure before the WAL append may leave an unreferenced blob, which is garbage; a committed WAL record may never reference absent or unverified content.
+Large or variable content is immutable and stored outside SQLite. A publisher writes and synchronizes content before committing a Session Ledger transition that references it. Failure before that commit may leave an unreferenced blob, which is garbage; a committed transition may never reference absent or unverified content.
 
-The following are non-authoritative and may lag the WAL:
+The following are non-authoritative and cannot establish Session semantics:
 
 - encoded Core State checkpoints;
 - runnable and waiting indexes;
 - manifests and lookup accelerators;
 - observer Projections;
-- same-build activation caches, if later measurement justifies them.
-- the durable Completion Inbox used to reconcile adapter evidence that has not yet entered the WAL.
+- same-build activation caches, if later measurement justifies them;
+- the durable Completion Inbox used to reconcile adapter evidence that has not yet entered the Session Ledger.
 
-They never advance semantic authority. Recovery rejects a checkpoint or index ahead of the valid WAL tail and replays records after a valid checkpoint's sequence. The implementation promises recovery from process termination and torn or incomplete application writes at named publication boundaries. Stronger operating-system crash and sudden-power-loss guarantees require separate evidence and must not be implied by process-crash tests.
+Derived views may lag the Session Ledger. Completion Inbox evidence may precede its terminal transition and remain after association. Neither advances semantic authority. Recovery ignores an invalid checkpoint, rejects a checkpoint or index ahead of the committed ledger head, and replays ordered transitions after a valid checkpoint's sequence. A sequence gap, duplicate, conflicting identity, invalid canonical payload, or missing referenced content fails the Session closed. SQLite owns physical transaction atomicity and journal recovery; OnePage owns semantic validation and does not claim protection from arbitrary faulty hardware or storage returning incorrect bytes.
 
-Streaming deltas, terminal frames, diagnostics, scheduler polling, and raw payload bytes are not Session WAL facts. They are volatile projections, debug evidence, or immutable content.
+Streaming deltas, terminal frames, diagnostics, scheduler polling, and raw provider payload bytes are not Session Ledger facts. They are volatile projections, debug evidence, or immutable content.
 
 ## Conversation and Workspace
 
-Conversation is the immutable parent-linked model-visible tree. Creating its content does not by itself advance a Session; a Session WAL fact establishes when a Conversation Entry becomes part of an authoritative Branch. Effect-recovery facts enter Model Context only through a committed typed Result Conversation Entry.
+Conversation is the immutable parent-linked model-visible tree. Creating its content does not by itself advance a Session; a Session Ledger transition establishes when a Conversation Entry becomes part of an authoritative Branch. Effect-recovery facts enter Model Context only through a committed typed Result Conversation Entry.
 
 A Context Checkpoint is an immutable Conversation Entry used by future compaction. It is distinct from a State Checkpoint, which accelerates Core State recovery.
 
@@ -80,23 +80,33 @@ Core is a deterministic reducer. It owns task phases, legal semantic transitions
 
 `Harness.open / offer / drive` is the complete Session lifecycle interface. No alternate public run, resume, provider-assisted resume, or direct Core advancement path exists.
 
-- `open` acquires exclusive Session ownership, validates durable inputs, and reconstructs through the safe WAL watermark using caller-owned fixed storage. It may borrow a slot while reconstructing but releases and scrubs it before returning.
+- `open` acquires exclusive Session ownership through the Storage Owner and initializes fixed ledger and Inbox recovery cursors. A new Session returns ready immediately. A restored Session returns in `restoring`; it exposes no committed Projection or adapter work until `drive` has incrementally validated both snapshotted watermarks.
 - `offer` nonblockingly transfers bounded Task, Completion, Authorization, cancellation, or shutdown input into fixed live-process ingress. It performs no I/O, allocation, wait, or Core call. `full` or `busy` preserves producer ownership; `accepted` transfers custody only to the live Harness instance.
 - `drive` performs one bounded owner quantum. It borrows an Activation Slot only for that quantum, then encodes Core State, invalidates borrowed windows, scrubs the slot, and releases it before returning. It alone advances Core, publishes Session facts, admits immutable Attempts to adapters, applies durable Completions, and returns committed Projections and progress.
 
-Harness hides WAL ordering, checkpoint replay, page activation and scrubbing, adapter admission, reconciliation, cancellation settlement, and Projection regeneration. The CLI and tests use the same interface.
+While restoration is incomplete, each `drive` consumes at most the configured recovery-record quantum and returns `restoring` with `more = true` and no Projection. After the safe watermark is reached, Harness reconstructs the durable level state without dispatch, publishes Session identity first, and only a later `drive` may reconcile or admit external work. Recovery failure makes that live owner unavailable; a fresh `open` starts from durable bytes again.
 
-`offer` acceptance is not durable semantic acknowledgement. Only a committed Session WAL transaction acknowledges durable acceptance. Until that commit, a process crash may discard volatile ingress: Completion is rediscovered from its durable Completion Inbox envelope, an `ask` decision is requested again, an uncommitted Task remains unadmitted, and uncommitted cancellation has not taken effect. The CLI acknowledges these inputs to the user only through a committed Projection returned after `drive`.
+Harness hides Session Ledger ordering, checkpoint replay, page activation and scrubbing, adapter admission, reconciliation, cancellation settlement, and Projection regeneration. The CLI and tests use the same interface.
+
+`offer` acceptance is not durable semantic acknowledgement. Only a committed Host Store transaction acknowledges durable acceptance. Until that commit, a process crash may discard volatile ingress: Completion is rediscovered from its durable Completion Inbox evidence, an `ask` decision is requested again, an uncommitted Task remains unadmitted, and uncommitted cancellation has not taken effect. The CLI acknowledges these inputs to the user only through a committed Projection returned after `drive`.
 
 ### Session storage
 
-Session storage is an internal concrete module behind Harness. It owns WAL framing and valid-prefix recovery, immutable content publication, State Checkpoint encoding, exclusive ownership and epochs, and bounded reads. Raw sequence allocation, file paths, checksums, and cross-record correlation are not lifecycle interfaces.
+The Host Runtime acquires a lifetime operating-system lock before opening the Host Store. A second process targeting that store receives `busy`; SQLite transaction locks do not replace this singleton guarantee. Within the runtime, the Storage Owner is the only code allowed to open or access SQLite. Core, Harness instances, adapters, workers, and the CLI issue bounded requests and never open their own connections. The foreground CLI may host the runtime in V1; a future daemon may expose the same interface over bounded IPC.
+
+The Storage Owner owns one pinned SQLite connection, schema installation and validation, Session sequences, ownership epochs, canonical transitions, Completion Inbox evidence, State Checkpoints, rebuildable indexes, and bounded reads. It accepts bounded request envelopes through fixed credits, executes only indexed and bounded statements, and returns bounded results. Raw SQL, row identifiers, physical table shape, SQLite errors, and connection lifetime are not Session lifecycle interfaces.
+
+V1 configures 4 KiB pages, rollback-journal `DELETE`, `synchronous=EXTRA`, foreign keys, `busy_timeout=0`, `mmap_size=0`, and `temp_store=FILE`. Tables are `STRICT`; defensive mode is enabled; trusted schema, double-quoted string literals, extension loading, `ATTACH`, and SQLite worker threads are disabled; conservative runtime limits constrain lengths, columns, SQL text, variables, expression depth, and database pages. The SQLite version and compile options are pinned. The 32 KiB page-cache profile is a measured configuration point, not a production memory or performance promise.
+
+The Host Store schema version and Session payload version are independent. Unsupported versions fail clearly. Pre-release V1 does not implement downgrade compatibility or a general migration framework. Schema installation and any future migration identity commit transactionally rather than relying on database-file existence.
 
 ### Adapters
 
 Model, Bash, and `apply_patch` adapters receive only immutable admitted Attempts. They may perform external work and publish typed evidence through the Completion seam; they cannot choose policy, advance Core, append Session facts, retry themselves, or render terminal output. Deterministic and live adapters justify these internal seams.
 
-Adapter evidence uses a non-authoritative durable **Completion Inbox**. The adapter first publishes immutable Result content, then a bounded inbox envelope binding Session, ownership epoch, Agent generation, Operation, Attempt, result digest, and evidence kind, and only then offers the in-memory Completion notification. Lost notification is harmless: `open` and `drive` scan the bounded inbox cursor and offer matching evidence through the normal owner path. Harness validates the binding and commits the terminal Result in one WAL transaction; only that commit advances the Session. Inbox cleanup may lag and duplicates are idempotent. Missing, corrupt, or mismatched evidence never becomes authority and falls back to the Attempt's uncertainty rule.
+Adapter evidence uses a non-authoritative durable **Completion Inbox**. The adapter first publishes immutable Result content, then asks the Storage Owner to commit a bounded evidence envelope binding Session, ownership epoch, Agent generation, Operation and generation, Attempt, evidence kind, Result reference, and digest. Only after that acknowledgement may it offer the in-memory Completion notification. Lost notification is harmless: `open` and `drive` scan a bounded Inbox cursor and offer matching evidence through the normal owner path.
+
+Harness validates the complete identity and atomically associates the immutable evidence with the terminal Session transition through `consumed_by_sequence`; it does not delete the evidence on consumption. The unique Completion identity excludes Result reference and digest: the same identity and Result is idempotent, while the same identity with different Result evidence is a closed conflict. Missing, corrupt, or mismatched evidence never becomes authority and falls back to the Attempt's uncertainty rule. V1 retains evidence until its closed Session is explicitly removed.
 
 The CLI parses invocation, reserves host pools, chooses adapters and Permission Mode, supplies input, and renders sanitized committed Projections. It owns no Session lifecycle policy.
 
@@ -108,21 +118,21 @@ Every authoritative state change follows:
 prepare -> commit -> publish
 ```
 
-Preparation uses fixed scratch to validate identity, generation, descriptor, Authorization, capacity, referenced immutable content, legal Core transition, and the complete bounded WAL transaction frame. It may reject without changing authoritative state.
+Preparation uses fixed scratch to validate identity, generation, descriptor, Authorization, capacity, referenced immutable content, legal Core transition, and the complete bounded canonical payload. It may reject without changing authoritative state.
 
-Commit appends and synchronizes one complete WAL transaction frame. It may fail while leaving the previous valid prefix authoritative. An external adapter cannot observe an Attempt until that Attempt's identity, descriptor digest, ownership epoch, and recovery class are committed.
+Commit asks the Storage Owner to publish one complete SQLite transaction. It may fail while leaving the previous Session sequence authoritative. An external adapter cannot observe an Attempt until that Attempt's identity, descriptor digest, ownership epoch, and recovery class are committed.
 
 Publish applies the already-prepared Core State and emits prepared Projections. It performs no new semantic validation or general-purpose allocation. If a platform operation after commit cannot complete, the live owner becomes unavailable and a fresh `open` reconstructs the committed transition. Committed facts are never rolled back to match an older checkpoint or live image.
 
 ## Operations, Attempts, and recovery
 
-An Action becomes one stable Operation. Operation acceptance and Attempt admission are separate WAL facts. Each Attempt has exactly one current disposition:
+An Action becomes one stable Operation. Operation acceptance and Attempt admission are separate Session Ledger facts. Each Attempt has exactly one current disposition:
 
 - `definitely_unsent` — the adapter did not observe the Attempt;
 - `possibly_executed` — the external effect may have occurred without a durable terminal Result;
 - `terminal(Result)` — immutable typed evidence completed the Attempt.
 
-Attempt admission is the conservative dispatch boundary. Once its WAL transaction commits, recovery treats an unterminated Attempt as `possibly_executed` unless durable adapter evidence proves a terminal Result. `definitely_unsent` applies only when no Attempt admission committed or when a committed terminal adapter Result proves that external dispatch did not occur. OnePage does not infer non-execution merely because the Completion Inbox is empty.
+Attempt admission is the conservative dispatch boundary. Once its Host Store transaction commits, recovery treats an unterminated Attempt as `possibly_executed` unless durable adapter evidence proves a terminal Result. `definitely_unsent` applies only when no Attempt admission committed or when a committed terminal adapter Result proves that external dispatch did not occur. OnePage does not infer non-execution merely because the Completion Inbox is empty.
 
 The first durable terminal Result completes an Operation. Duplicate or late evidence remains auditable but cannot advance Core, Conversation, Projection, or Outcome again.
 
@@ -146,14 +156,20 @@ Validation creates an immutable descriptor before Authorization. The descriptor 
 
 ## Capacity, scheduling, and topology
 
-The host resolves and reserves Activation Slot, Completion, model-request, tool-process, output-tail, and recovery-working storage at startup. Capacity is fixed until restart. Exhaustion returns explicit backpressure or preserves already-accepted durable work; allocator failure and the operating-system OOM killer are not flow control.
+The host resolves one resident-memory budget into fixed reservations for Activation Slots, Core workers, the Storage Owner, storage-request envelopes, scheduler frontier, Completion records, model requests, tool processes, output tails, recovery work, native stacks, runtime overhead, and a safety margin. The sum must fit before admission and remains fixed until restart. Exhaustion returns explicit backpressure or preserves already-accepted durable work; allocator failure and the operating-system OOM killer are not flow control.
 
-Logical Session population, runnable count, resident Activation count, and in-flight external work are separate quantities. Scheduler working memory is bounded independently of total historical population through bounded scans or rebuildable on-disk indexes plus a bounded ready frontier. A configured drive quantum guarantees bounded work and eventual scheduling opportunities under the selected fairness policy.
+The SQLite accounting allowance is distinct from its mechanically controlled page cache, lookaside, hard heap limit, statement bounds, and request/result bounds. Supported workloads must remain within a measured current and high-water envelope below the allowance. `SQLITE_NOMEM` or violation of the validated envelope is a Host Store fault, not ordinary backpressure. Page-cache size is selected from the host budget and may grow on larger hosts without changing Session semantics.
+
+Logical Session population, runnable count, resident Activation count, Core worker count, in-flight external work, storage-request credits, group-commit size, and SQLite memory are independent capacities. Ten thousand resident Activation Slots require exactly 625 MiB for slots; the single Storage Owner remains one host-level reservation. Scheduler working memory is bounded independently of historical population through paginated Host Store scans and a bounded ready frontier. Configured drive and recovery quanta guarantee bounded work and eventual scheduling opportunities.
+
+V1 has one SQLite writer. The Storage Owner may place a bounded, fair selection of independently prepared Session transitions in one group transaction for sync amortization. Count, byte, and elapsed-time limits bound a batch; failure acknowledges none of it, and group membership creates no cross-Session semantic dependency. No Session may monopolize batch admission or recovery scanning. Additional same-database writer connections and storage sharding are outside V1 and require new evidence and cross-Session atomicity rules.
 
 Delegation creates durable child identity and parent Operation references, not resident caller frames. Activation, suspension, Completion routing, and recovery never traverse or hydrate ancestry. Total descendants, fan-out, durable bytes, spend, tool effects, and deadlines remain configurable resource policies even though topology is not a resident-memory dimension.
 
 ## Failure and compatibility
 
-Disk exhaustion, short writes, sync failure, torn WAL tail, missing or corrupt referenced content, corrupt checkpoint, unsupported schema, stale ownership, and capacity exhaustion are normal closed outcomes with deterministic recovery rules. A pre-release schema or WAL version may fail clearly as unsupported; silent reinterpretation is forbidden.
+Disk exhaustion, SQLite full, busy, I/O, corrupt, and allocation failures, missing or corrupt referenced content, corrupt canonical payloads, unsupported versions, stale ownership, and capacity exhaustion are closed outcomes with deterministic recovery rules. A corrupt checkpoint is ignored when its Session Ledger remains valid. Physical Host Store corruption, failed SQLite recovery, storage exhaustion, and blocking maintenance may make every Session on the host unavailable; the host-wide failure domain is accepted and never reported as an isolated Session failure.
+
+The Host Store has an explicit maximum page count and reserves space before durable admission. Free pages may be reused, but foreground work never runs `VACUUM`. Backup and export use bounded consistent reads under the Storage Owner; shrinking and major maintenance run offline under the host lock. Removing data requires an explicitly selected closed Session and never prunes individual authoritative transitions from a retained Session. Blob garbage collection is bounded maintenance over durable references.
 
 State Checkpoints are replay accelerators. A same-build raw slot image may be added only as a measured cache, must be marked invalidatable, and can never be the only durable representation.

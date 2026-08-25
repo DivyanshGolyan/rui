@@ -18,9 +18,21 @@ _Avoid_: Run, worker
 The durable container for one agent's related tasks, conversation, and outcomes.
 _Avoid_: Conversation, task, process
 
-**Session WAL**:
-The single ordered authority for semantic facts that create, advance, recover, or complete a session.
-_Avoid_: Operation journal, event bus, transcript, debug log
+**Session Ledger**:
+The single ordered authority for semantic facts that create, advance, recover, or complete one session.
+_Avoid_: Session WAL, SQLite WAL, operation journal, event bus, transcript, debug log
+
+**Host Store**:
+The durable container for every Session Ledger and host-wide durable coordination state.
+_Avoid_: Session Ledger, blob store, Workspace
+
+**Host Runtime**:
+The sole live owner that coordinates agents and shared capacities for one Host Store.
+_Avoid_: Agent, Session, Storage Owner
+
+**Storage Owner**:
+The exclusive gateway through which a Host Runtime reads or changes its Host Store.
+_Avoid_: Host Runtime, Session owner, database connection
 
 **Conversation**:
 The immutable tree of context-relevant entries accumulated within a session.
@@ -59,7 +71,7 @@ The compact semantic state needed to continue one agent, independent of native l
 _Avoid_: Core image, Activation Slot, checkpoint bytes
 
 **State Checkpoint**:
-A rebuildable encoding of Core State after one Session WAL sequence, used to shorten recovery replay.
+A rebuildable encoding of Core State after one Session Ledger sequence, used to shorten recovery replay.
 _Avoid_: Authority, raw image, Context Checkpoint
 
 **Final Answer**:
@@ -98,7 +110,7 @@ _Avoid_: Result, event, callback
 
 **Completion Inbox**:
 A durable, non-authoritative collection of adapter evidence awaiting validation and commitment by Harness.
-_Avoid_: Session WAL, Result, queue authority
+_Avoid_: Session Ledger, Result, queue authority
 
 **Reconciliation**:
 The resolution of an uncertain operation by comparing durable intent with observed external state.

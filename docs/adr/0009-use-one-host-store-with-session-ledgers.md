@@ -1,0 +1,3 @@
+# Use one Host Store with per-Session ledgers
+
+OnePage stores every ordered Session Ledger and host-wide durable coordination record in one SQLite Host Store accessed only through a singleton Storage Owner. This replaces native per-Session WAL files: SQLite owns physical transactions, journaling, locking, and page layout, while OnePage retains canonical semantic transitions, effect uncertainty, durable-before-reference blobs, bounded recovery, and per-Session authority. The host-wide store amortizes resident database machinery and enables bounded group commit, at the accepted cost of a shared corruption, capacity, maintenance, and head-of-line-blocking failure domain.

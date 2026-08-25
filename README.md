@@ -9,8 +9,8 @@ Activation Slot scratch. Core State is currently 160 bytes and its rebuildable S
 224 bytes; activation decodes that state into one caller-owned 65,536-byte slot, and suspension
 scrubs the complete slot. A fixed caller-owned pool returns closed capacity instead of allocating a
 fallback slot. Native invariant traces check typed outcomes, rejection-state preservation, semantic
-observations, and canonical restoration rather than slot bytes. Issue #15 will reconstruct complete
-Session semantics from one ordered Session WAL.
+observations, and canonical restoration rather than slot bytes. Complete Session semantics reconstruct
+from one ordered Session Ledger inside a bounded host-wide SQLite Host Store.
 
 [`PRODUCT.md`](PRODUCT.md), [`ARCHITECTURE.md`](ARCHITECTURE.md), and
 [`VERIFICATION.md`](VERIFICATION.md) are normative. Historical spikes and research remain evidence,
@@ -24,10 +24,10 @@ completion, permission, cancellation, and shutdown admission; durable-before-app
 committed projections; bounded drive quanta; and crash/replay tests. Its 32-entry maximum is fixed at
 compile time and does not vary with logical-agent count.
 
-The durable Session layer adds exact create and resume identities, a lifetime operating-system lock,
-durable ownership epochs, and an append-only parent-linked conversation. Resume publishes the new
-epoch before bounded reconstruction and advances a manifest that may lag the conversation log by one
-synced entry.
+One Host Runtime holds a lifetime operating-system lock and routes every durable read and write through
+one bounded Storage Owner. Each Session retains exact create and resume identity, durable ownership
+epochs, an ordered semantic ledger, and an append-only parent-linked conversation. Sleeping Sessions
+retain rows and blob references rather than SQLite connections or resident object graphs.
 
 The first agent slice now performs one real durable model turn through the product CLI. A fixture
 provider validates the request reconstructed from the conversation, writes a complete response spool,
@@ -101,6 +101,7 @@ Source audits that informed the architecture:
 - [`docs/research/fx-pi-harness-lessons.md`](docs/research/fx-pi-harness-lessons.md)
 - [`docs/research/codex-cli-session-lessons.md`](docs/research/codex-cli-session-lessons.md)
 - [`docs/research/cursor-origin-wal-lessons.md`](docs/research/cursor-origin-wal-lessons.md)
+- [`docs/research/opencode-sqlite-v2-lessons.md`](docs/research/opencode-sqlite-v2-lessons.md)
 - [`docs/research/linting-typechecking-setup.md`](docs/research/linting-typechecking-setup.md)
 
 Historical design records:
@@ -120,3 +121,5 @@ Architectural decisions:
 - [`docs/adr/0005-use-two-tools-and-final-assistant-text.md`](docs/adr/0005-use-two-tools-and-final-assistant-text.md)
 - [`docs/adr/0006-separate-core-state-from-activation-slot.md`](docs/adr/0006-separate-core-state-from-activation-slot.md)
 - [`docs/adr/0007-use-one-session-wal-as-semantic-authority.md`](docs/adr/0007-use-one-session-wal-as-semantic-authority.md)
+- [`docs/adr/0008-keep-v1-core-native-only.md`](docs/adr/0008-keep-v1-core-native-only.md)
+- [`docs/adr/0009-use-one-host-store-with-session-ledgers.md`](docs/adr/0009-use-one-host-store-with-session-ledgers.md)

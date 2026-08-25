@@ -190,6 +190,7 @@ pub const Fixture = struct {
     final_answer: []const u8,
     status: model_protocol.Status = .complete,
     finish_response: bool = true,
+    calls: u32 = 0,
 
     pub fn provider(self: *Fixture) Provider {
         return .{ .context = self, .dispatch = dispatch };
@@ -201,6 +202,7 @@ pub const Fixture = struct {
         response: ResponseWriter,
     ) anyerror!void {
         const self: *Fixture = @ptrCast(@alignCast(context));
+        self.calls += 1;
         var header: [request_header_size + entry_header_size]u8 = undefined;
         const prefix = try request.readWindow(0, &header);
         if (prefix.len != header.len or

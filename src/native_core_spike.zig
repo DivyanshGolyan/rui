@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
         if (index == 0) first_slot_rss = try residentBytes();
         try core.deliver(@truncate(agent_id ^ 0x5a5a_5a5a));
         try core.suspendInto(&state_bytes);
-        try checkpoint.encode(&checkpoint_bytes, agent_id, 1, &state_bytes);
+        try checkpoint.encode(&checkpoint_bytes, agent_id, 1, 1, &state_bytes);
         try density_file.writePositionalAll(
             init.io,
             &checkpoint_bytes,

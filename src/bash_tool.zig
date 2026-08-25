@@ -324,6 +324,17 @@ pub fn encodeResult(out: []u8, execution: Execution) ![]const u8 {
 }
 
 pub fn decodeResult(bytes: []const u8) !ResultView {
+    const status = try decodeResultHeader(bytes, bytes.len);
+    const stdout_length: usize = read(u32, bytes, 16);
+    return .{
+        .status = status,
+        .exit_code = bytes[13],
+        .stdout = bytes[result_header_size..][0..stdout_length],
+        .stderr = bytes[result_header_size + stdout_length ..],
+    };
+}
+
+pub fn decodeResultHeader(bytes: []const u8, total_length: u64) !Status {
     if (bytes.len < result_header_size or
         !std.mem.eql(u8, bytes[0..result_magic.len], result_magic) or
         read(u16, bytes, 8) != version or read(u16, bytes, 10) != result_header_size or
@@ -343,20 +354,12 @@ pub fn decodeResult(bytes: []const u8) !ResultView {
         9 => .spawn_error,
         else => return error.InvalidBashResult,
     };
-    const stdout_length: usize = read(u32, bytes, 16);
-    const stderr_length: usize = read(u32, bytes, 20);
-    if (stdout_length > bytes.len - result_header_size or
-        stderr_length > bytes.len - result_header_size - stdout_length or
-        result_header_size + stdout_length + stderr_length != bytes.len)
-    {
+    const stdout_length: u64 = read(u32, bytes, 16);
+    const stderr_length: u64 = read(u32, bytes, 20);
+    if (result_header_size + stdout_length + stderr_length != total_length) {
         return error.InvalidBashResult;
     }
-    return .{
-        .status = status,
-        .exit_code = bytes[13],
-        .stdout = bytes[result_header_size..][0..stdout_length],
-        .stderr = bytes[result_header_size + stdout_length ..],
-    };
+    return status;
 }
 
 fn emptyExecution(allocator: std.mem.Allocator, status: Status) !Execution {

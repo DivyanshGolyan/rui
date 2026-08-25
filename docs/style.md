@@ -24,7 +24,7 @@ deferred explicitly.
 | --- | --- |
 | Core | No I/O, general-purpose allocation, recursion, or reentrant activation. Use one exact Activation Slot and bounded work. |
 | Harness | After `open`, use caller-owned bounded storage for owner-loop state. Only `drive` advances Core; `offer` remains nonblocking and allocation-free. |
-| Session storage | Treat every durable byte as hostile input. Use bounded records, fixed-width fields, prepare-commit-publish ordering, and valid-prefix recovery. |
+| Host Store | Route all access through the Storage Owner. Treat every durable value as hostile input; use bounded canonical payloads, indexed SQL, fixed-width identities, and prepare-commit-publish ordering. |
 | Adapters | Allocation is permitted only when bounded and fallible. External effects begin only after durable Attempt admission. |
 | CLI | Allocation is permitted only when bounded and fallible. Sanitize hostile output and keep Session policy inside Harness. |
 | Tests and tooling | May allocate freely within host limits, but must exercise production bounds and failure behavior rather than replacing them. |
@@ -46,11 +46,16 @@ deferred explicitly.
 
 - Never reenter Core from a callback. One `drive` quantum completes before another Activation begins.
 - Route external input through `offer` and apply it through `drive`.
-- Treat `offer` acceptance as volatile custody. Only a committed Session WAL transaction acknowledges a
+- Treat `offer` acceptance as volatile custody. Only a committed Host Store transaction acknowledges a
   semantic fact.
 - Prepare and validate complete transitions before commit. After commit, publish without new semantic
   validation or general-purpose allocation.
 - Make ownership, generation, identity, and capacity transitions explicit. Stale references fail closed.
+- Keep every production query indexed and bounded in input bytes, rows, result bytes, temporary work,
+  transaction work, and recovery work. Do not rely on an unbounded sort, aggregation, join, or temporary
+  result spilling to disk.
+- No module except the Storage Owner may open SQLite, issue SQL, or retain a prepared statement. Treat
+  page cache, lookaside, statement memory, request envelopes, and results as separate host reservations.
 
 ### Treat boundaries as hostile
 

@@ -13,8 +13,9 @@ immutable descriptor, computes its SHA-256-derived durable digest, and records
 `descriptor_validated` before consulting policy.
 
 Policy independently classifies the exact `{digest, command, timeout}` subject as `allow`, `ask`, or
-`deny`. The product CLI asks by default and prints those exact fields; `--allow-bash` exists for the
-deterministic demo. The decision is durable before an allowed Attempt is created. A denied call does
+`deny`. The product CLI asks by default and prints those exact fields;
+`--dangerously-bypass-permissions` exists for the deterministic demo. The decision is durable before
+an allowed Attempt is created. A denied call does
 not spawn a process and becomes a typed Result that the model can observe on turn two.
 
 ## Execution and result contract
