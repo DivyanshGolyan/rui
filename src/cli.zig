@@ -1,5 +1,5 @@
 const std = @import("std");
-const agent = @import("agent.zig");
+const harness = @import("harness.zig");
 const bash_tool = @import("bash_tool.zig");
 const model_operation = @import("model_operation.zig");
 const patch_tool = @import("patch_tool.zig");
@@ -15,33 +15,14 @@ const Arguments = struct {
     fixture_bash_command: ?[]const u8 = null,
     fixture_patch_path: ?[]const u8 = null,
     bash_timeout_ms: u32 = 5000,
-    allow_bash: bool = false,
-    allow_patch: bool = false,
-    deny_patch: bool = false,
+    dangerously_bypass_permissions: bool = false,
     task: ?[]const u8 = null,
     resume_id: ?u64 = null,
 };
 
-const Output = struct {
-    io: std.Io,
-
-    fn sessionCreated(context: *anyopaque, session_id: u64) anyerror!void {
-        const self: *Output = @ptrCast(@alignCast(context));
-        var id_buffer: [16]u8 = undefined;
-        const id = try session_store.formatId(session_id, &id_buffer);
-        var line_buffer: [32]u8 = undefined;
-        const line = try std.fmt.bufPrint(&line_buffer, "Session: {s}\n", .{id});
-        try std.Io.File.stdout().writeStreamingAll(self.io, line);
-    }
-
-    fn observer(self: *Output) agent.Observer {
-        return .{ .context = self, .session_created = sessionCreated };
-    }
-};
-
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
-    var host: agent.Host = .{};
+    var host: harness.Host = .{};
     const raw_args = try init.minimal.args.toSlice(allocator);
     const arguments = try parseArguments(raw_args);
 
@@ -57,16 +38,28 @@ pub fn main(init: std.process.Init) !void {
         .{ .permissions = .fromMode(0o700) },
     );
     defer sessions.close(init.io);
-    var completed: agent.Completed = if (arguments.resume_id) |session_id|
-        try agent.resumeSession(&host, sessions, init.io, allocator, session_id)
-    else blk: {
+    if (arguments.resume_id) |session_id| {
+        var owner = try harness.Harness.open(.{
+            .host = &host,
+            .sessions = sessions,
+            .io = init.io,
+            .allocator = allocator,
+            .permission_mode = if (arguments.dangerously_bypass_permissions) .bypass else .ask,
+            .mode = .{ .restore = .{ .session_id = session_id } },
+        });
+        defer owner.close();
+        const identified = try owner.drive();
+        try renderProgress(init.io, &identified);
+        try pumpOwner(init.io, &owner);
+        return;
+    }
+    {
         const model = arguments.model orelse return error.MissingModel;
         if (!std.mem.startsWith(u8, model, "fixture:")) return error.UnsupportedModel;
         const response = arguments.fixture_response orelse return error.MissingFixtureResponse;
         const task = arguments.task orelse return error.MissingTask;
         const workspace_path = try resolveWorkspacePath(init.io, allocator, arguments.repo_path);
         defer allocator.free(workspace_path);
-        var output: Output = .{ .io = init.io };
         if (arguments.fixture_patch_path) |patch_path| {
             const patch = try std.Io.Dir.cwd().readFileAlloc(
                 init.io,
@@ -82,40 +75,13 @@ pub fn main(init: std.process.Init) !void {
                 .final_answer = response,
                 .expected_patch_status = .denied,
             };
-            var permission: InteractivePatchPolicy = .{
-                .io = init.io,
-                .mode = if (arguments.allow_patch)
-                    .allow
-                else if (arguments.deny_patch)
-                    .deny
-                else
-                    .ask,
-            };
-            if (agent.runNew(
-                &host,
-                sessions,
-                init.io,
-                allocator,
-                .{
-                    .workspace_path = workspace_path,
-                    .model = model,
-                    .task = task,
-                    .patch_policy = permission.policy(),
-                },
-                fixture.provider(),
-                output.observer(),
-            )) |value| {
-                break :blk value;
-            } else |err| switch (err) {
-                error.PatchExecutionDeferred => {
-                    try std.Io.File.stdout().writeStreamingAll(
-                        init.io,
-                        "Patch approved and durably bound; application is deferred to the next implementation step.\n",
-                    );
-                    return;
-                },
-                else => return err,
-            }
+            try runCreate(init.io, allocator, &host, sessions, arguments.dangerously_bypass_permissions, .{
+                .workspace_path = workspace_path,
+                .model = model,
+                .task = task,
+                .provider = fixture.provider(),
+            });
+            return;
         }
         if (arguments.fixture_bash_command) |command| {
             var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
@@ -128,48 +94,106 @@ pub fn main(init: std.process.Init) !void {
                 .tool_arguments = encoded_call,
                 .final_answer = response,
             };
-            var permission: InteractivePolicy = .{
-                .io = init.io,
-                .automatic = arguments.allow_bash,
-            };
-            break :blk try agent.runNew(
-                &host,
-                sessions,
-                init.io,
-                allocator,
-                .{
-                    .workspace_path = workspace_path,
-                    .model = model,
-                    .task = task,
-                    .bash_policy = permission.policy(),
-                },
-                fixture.provider(),
-                output.observer(),
-            );
+            try runCreate(init.io, allocator, &host, sessions, arguments.dangerously_bypass_permissions, .{
+                .workspace_path = workspace_path,
+                .model = model,
+                .task = task,
+                .provider = fixture.provider(),
+            });
+            return;
         }
         var fixture: model_operation.Fixture = .{
             .expected_task = task,
             .final_answer = response,
         };
-        break :blk try agent.runNew(
-            &host,
-            sessions,
-            init.io,
-            allocator,
-            .{ .workspace_path = workspace_path, .model = model, .task = task },
-            fixture.provider(),
-            output.observer(),
-        );
-    };
-    defer completed.close();
-
-    if (arguments.resume_id != null) {
-        var output: Output = .{ .io = init.io };
-        try Output.sessionCreated(&output, completed.session.session_id);
+        try runCreate(init.io, allocator, &host, sessions, arguments.dangerously_bypass_permissions, .{
+            .workspace_path = workspace_path,
+            .model = model,
+            .task = task,
+            .provider = fixture.provider(),
+        });
     }
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Final Answer:\n");
-    try writeFinalAnswer(init.io, &completed);
-    try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+}
+
+fn runCreate(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: *harness.Host,
+    sessions: std.Io.Dir,
+    bypass_permissions: bool,
+    create: harness.Create,
+) !void {
+    var owner = try harness.Harness.open(.{
+        .host = host,
+        .sessions = sessions,
+        .io = io,
+        .allocator = allocator,
+        .permission_mode = if (bypass_permissions) .bypass else .ask,
+        .mode = .{ .create = create },
+    });
+    defer owner.close();
+    const identified = try owner.drive();
+    try renderProgress(io, &identified);
+    if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+    try pumpOwner(io, &owner);
+}
+
+fn pumpOwner(io: std.Io, owner: *harness.Harness) !void {
+    const recovery_drives = (harness.max_recovery_records +
+        harness.default_recovery_quantum - 1) / harness.default_recovery_quantum;
+    for (0..recovery_drives + 8) |_| {
+        const progress = try owner.drive();
+        try renderProgress(io, &progress);
+        if (approvalProjection(&progress)) |approval| {
+            const allow = try promptPermission(io, approval);
+            if (owner.offer(.{ .permission = .{
+                .operation_id = approval.operation_id,
+                .operation_generation = approval.operation_generation,
+                .descriptor_digest = approval.descriptor_digest,
+                .allow = allow,
+            } }) != .accepted) return error.PermissionOfferRejected;
+            continue;
+        }
+        switch (progress.state) {
+            .finished, .cancelled, .closed => return,
+            .failed, .unavailable => return error.SessionFailed,
+            else => {},
+        }
+        if (progress.consumed == 0 and progress.committed == 0 and
+            progress.dispatched == 0 and !progress.more)
+        {
+            return;
+        }
+    }
+    return error.DriveQuantumExceeded;
+}
+
+fn renderProgress(io: std.Io, progress: *const harness.Progress) !void {
+    for (progress.projectionSlice()) |projection| switch (projection.kind) {
+        .session => {
+            var id_buffer: [16]u8 = undefined;
+            const id = try session_store.formatId(projection.session_id, &id_buffer);
+            var line_buffer: [32]u8 = undefined;
+            const line = try std.fmt.bufPrint(&line_buffer, "Session: {s}\n", .{id});
+            try std.Io.File.stdout().writeStreamingAll(io, line);
+        },
+        .final_answer => {
+            try std.Io.File.stdout().writeStreamingAll(io, "Final Answer:\n");
+            try writeFinalAnswer(io, projection);
+            try std.Io.File.stdout().writeStreamingAll(io, "\n");
+        },
+        .approval_required => try std.Io.File.stdout().writeStreamingAll(
+            io,
+            "Approval required. Resume in ask mode to decide the exact Action.\n",
+        ),
+        .indeterminate => try std.Io.File.stdout().writeStreamingAll(
+            io,
+            "The Bash Attempt may have executed and will not be replayed.\n",
+        ),
+        .cancelled => try std.Io.File.stdout().writeStreamingAll(io, "Cancelled.\n"),
+        .failure => try std.Io.File.stdout().writeStreamingAll(io, "Session failed.\n"),
+        .task_admitted, .outcome, .closed => {},
+    };
 }
 
 fn resolveStatePath(
@@ -218,12 +242,8 @@ fn parseArguments(args: []const []const u8) !Arguments {
             index += 1;
             if (index == args.len) return error.InvalidArguments;
             parsed.bash_timeout_ms = try std.fmt.parseInt(u32, args[index], 10);
-        } else if (std.mem.eql(u8, argument, "--allow-bash")) {
-            parsed.allow_bash = true;
-        } else if (std.mem.eql(u8, argument, "--allow-patch")) {
-            parsed.allow_patch = true;
-        } else if (std.mem.eql(u8, argument, "--deny-patch")) {
-            parsed.deny_patch = true;
+        } else if (std.mem.eql(u8, argument, "--dangerously-bypass-permissions")) {
+            parsed.dangerously_bypass_permissions = true;
         } else if (std.mem.eql(u8, argument, "--resume")) {
             index += 1;
             if (index == args.len) return error.InvalidArguments;
@@ -238,90 +258,46 @@ fn parseArguments(args: []const []const u8) !Arguments {
     }
     if (parsed.resume_id != null and
         (parsed.task != null or parsed.model != null or parsed.fixture_response != null or
-            parsed.repo_path != null or parsed.fixture_bash_command != null or parsed.allow_bash or
-            parsed.fixture_patch_path != null or parsed.allow_patch or parsed.deny_patch))
+            parsed.repo_path != null or parsed.fixture_bash_command != null or
+            parsed.fixture_patch_path != null))
     {
         return error.ResumeArgumentsConflict;
-    }
-    if (parsed.allow_patch and parsed.deny_patch) return error.ConflictingPatchPolicy;
-    if ((parsed.allow_patch or parsed.deny_patch) and parsed.fixture_patch_path == null) {
-        return error.PatchPolicyWithoutPatch;
     }
     return parsed;
 }
 
-const InteractivePolicy = struct {
-    io: std.Io,
-    automatic: bool,
-
-    fn policy(self: *InteractivePolicy) bash_tool.Policy {
-        return .{ .context = self, .classify_fn = classify, .ask_fn = ask };
+fn approvalProjection(progress: *const harness.Progress) ?harness.Projection {
+    for (progress.projectionSlice()) |projection| {
+        if (projection.kind == .approval_required) return projection;
     }
+    return null;
+}
 
-    fn classify(context: *anyopaque, _: u64, _: bash_tool.Call) anyerror!bash_tool.Decision {
-        const self: *InteractivePolicy = @ptrCast(@alignCast(context));
-        return if (self.automatic) .allow else .ask;
-    }
-
-    fn ask(context: *anyopaque, digest: u64, call: bash_tool.Call) anyerror!bool {
-        const self: *InteractivePolicy = @ptrCast(@alignCast(context));
-        var header: [128]u8 = undefined;
-        const prompt = try std.fmt.bufPrint(
-            &header,
-            "Bash ({d} ms, digest {x:0>16}):\n",
-            .{ call.timeout_ms, digest },
-        );
-        try std.Io.File.stdout().writeStreamingAll(self.io, prompt);
-        try std.Io.File.stdout().writeStreamingAll(self.io, call.command);
-        try std.Io.File.stdout().writeStreamingAll(self.io, "\nAllow? [y/N] ");
-        var answer: [8]u8 = undefined;
-        const count = try std.Io.File.stdin().readStreaming(self.io, &.{&answer});
-        return count > 0 and (answer[0] == 'y' or answer[0] == 'Y');
-    }
-};
-
-const InteractivePatchPolicy = struct {
-    const Mode = enum { ask, allow, deny };
-
-    io: std.Io,
-    mode: Mode,
-
-    fn policy(self: *InteractivePatchPolicy) patch_tool.Policy {
-        return .{ .context = self, .classify_fn = classify, .ask_fn = ask };
-    }
-
-    fn classify(context: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!patch_tool.Decision {
-        const self: *InteractivePatchPolicy = @ptrCast(@alignCast(context));
-        return switch (self.mode) {
-            .ask => .ask,
-            .allow => .allow,
-            .deny => .deny,
-        };
-    }
-
-    fn ask(context: *anyopaque, subject: patch_tool.PermissionSubject, patch: []const u8) anyerror!bool {
-        const self: *InteractivePatchPolicy = @ptrCast(@alignCast(context));
-        var header: [256]u8 = undefined;
-        const prompt = try std.fmt.bufPrint(
-            &header,
-            "apply_patch (operation {x:0>16}/{d}, digest {x:0>16}, workspace {x:0>16}):\n",
-            .{
-                subject.operation_id,
-                subject.operation_generation,
-                subject.validation.patch_digest,
-                subject.validation.workspace_digest,
-            },
-        );
-        try std.Io.File.stdout().writeStreamingAll(self.io, prompt);
-        const escaped = try escapePatch(std.heap.page_allocator, patch);
+fn promptPermission(io: std.Io, approval: harness.Projection) !bool {
+    var header: [192]u8 = undefined;
+    const prompt = try std.fmt.bufPrint(
+        &header,
+        "Action (operation {x:0>16}/{d}, digest {x:0>16}):\n",
+        .{ approval.operation_id, approval.operation_generation, approval.descriptor_digest },
+    );
+    try std.Io.File.stdout().writeStreamingAll(io, prompt);
+    var reader = try approval.openContent();
+    defer reader.close();
+    var window: [output_window_size]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < reader.length()) {
+        const bytes = try reader.readWindow(offset, &window);
+        if (bytes.len == 0) return error.TruncatedActionDescriptor;
+        const escaped = try escapePatch(std.heap.page_allocator, bytes);
         defer std.heap.page_allocator.free(escaped);
-        try std.Io.File.stdout().writeStreamingAll(self.io, escaped);
-        try std.Io.File.stdout().writeStreamingAll(self.io, "Allow? [y/N] ");
-        var answer: [8]u8 = undefined;
-        const count = try std.Io.File.stdin().readStreaming(self.io, &.{&answer});
-        return count > 0 and (answer[0] == 'y' or answer[0] == 'Y');
+        try std.Io.File.stdout().writeStreamingAll(io, escaped);
+        offset += bytes.len;
     }
-};
+    try std.Io.File.stdout().writeStreamingAll(io, "\nAllow? [y/N] ");
+    var answer: [8]u8 = undefined;
+    const count = try std.Io.File.stdin().readStreaming(io, &.{&answer});
+    return count > 0 and (answer[0] == 'y' or answer[0] == 'Y');
+}
 
 fn escapePatch(allocator: std.mem.Allocator, patch: []const u8) ![]u8 {
     const capacity = try std.math.mul(usize, patch.len, 4);
@@ -362,9 +338,8 @@ fn resolveWorkspacePath(
     return std.fs.path.join(allocator, &.{ cwd, path });
 }
 
-fn writeFinalAnswer(io: std.Io, completed: *agent.Completed) !void {
-    const token = completed.session.ownerToken();
-    var reader = try completed.session.openBlob(token, completed.final_ref);
+fn writeFinalAnswer(io: std.Io, projection: harness.Projection) !void {
+    var reader = try projection.openContent();
     defer reader.close();
     var window: [output_window_size]u8 = undefined;
     var safe: [output_window_size]u8 = undefined;
@@ -408,19 +383,11 @@ test "CLI arguments distinguish create from exact resume" {
         "onepage",
         "--fixture-patch",
         "change.patch",
-        "--deny-patch",
+        "--dangerously-bypass-permissions",
         "task",
     });
     try std.testing.expectEqualStrings("change.patch", patch.fixture_patch_path.?);
-    try std.testing.expect(patch.deny_patch);
-    try std.testing.expectError(error.ConflictingPatchPolicy, parseArguments(&.{
-        "onepage",
-        "--fixture-patch",
-        "change.patch",
-        "--allow-patch",
-        "--deny-patch",
-        "task",
-    }));
+    try std.testing.expect(patch.dangerously_bypass_permissions);
 }
 
 test "patch display escapes terminal controls and backslashes losslessly" {

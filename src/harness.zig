@@ -1,54 +1,85 @@
 const std = @import("std");
-const owner_fence = @import("owner_fence.zig");
+const bash_tool = @import("bash_tool.zig");
+const checkpoint = @import("checkpoint.zig");
+const completion_inbox = @import("completion_inbox.zig");
+const lifecycle = @import("lifecycle.zig");
+const model_operation = @import("model_operation.zig");
+const patch_tool = @import("patch_tool.zig");
+const session_store = @import("session.zig");
+const session_wal = @import("session_wal.zig");
 
-pub const max_input_capacity = 32;
+pub const Host = lifecycle.Host;
+pub const FaultBoundary = lifecycle.FaultBoundary;
+pub const FaultHook = lifecycle.FaultHook;
+pub const default_recovery_quantum: u8 = 32;
+pub const max_recovery_records: usize = session_wal.max_frames + completion_inbox.max_records;
 
-/// A bounded value copied across the producer-to-owner boundary.
-pub const Completion = extern struct {
-    agent_id: u64,
-    operation_id: u64,
-    ownership_epoch: u64,
-    result: u64,
-    agent_generation: u32,
-    operation_generation: u32,
+pub const PermissionMode = enum {
+    ask,
+    bypass,
 };
 
-pub const TaskInput = extern struct {
-    task_id: u64,
-    agent_id: u64,
-    agent_generation: u32,
-    task_ref: u64,
+pub const Create = struct {
+    workspace_path: []const u8,
+    model: []const u8,
+    task: []const u8,
+    provider: model_operation.Provider,
+    bash_cancelled: ?*const std.atomic.Value(bool) = null,
+    fault: ?FaultHook = null,
 };
 
-pub const AgentIdentity = extern struct {
-    agent_id: u64,
-    agent_generation: u32,
+pub const Restore = struct {
+    session_id: u64,
+    provider: ?model_operation.Provider = null,
 };
 
-pub const Permission = enum(u8) {
-    allow,
-    deny,
+pub const OpenMode = union(enum) {
+    create: Create,
+    restore: Restore,
 };
 
-pub const PermissionDecision = extern struct {
-    agent_id: u64,
-    agent_generation: u32,
-    operation_id: u64,
-    operation_generation: u32,
-    decision: Permission,
-    descriptor_digest: u64,
+pub const Config = struct {
+    host: *Host,
+    sessions: std.Io.Dir,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    mode: OpenMode,
+    permission_mode: PermissionMode = .ask,
+    recovery_quantum: u8 = default_recovery_quantum,
 };
 
 pub const Input = union(enum) {
-    start_task: TaskInput,
-    completion: Completion,
+    task,
     permission: PermissionDecision,
-    cancel: AgentIdentity,
+    completion: Completion,
+    cancel,
     shutdown,
 };
 
+pub const PermissionDecision = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    descriptor_digest: u64,
+    allow: bool,
+};
+
+pub const Completion = struct {
+    kind: CompletionKind,
+    session_id: u64,
+    ownership_epoch: u64,
+    agent_id: u64,
+    agent_generation: u32,
+    operation_id: u64,
+    operation_generation: u32,
+    attempt_id: u64,
+    result_ref: u64,
+    result_digest: u64,
+};
+
+pub const CompletionKind = enum { model, bash, apply_patch };
+
 pub const OfferResult = enum {
-    queued,
+    accepted,
     full,
     busy,
     unavailable,
@@ -56,1028 +87,885 @@ pub const OfferResult = enum {
     invalid,
 };
 
-pub const InputState = enum {
-    applicable,
-    durable,
-    stale,
-    duplicate,
+pub const State = enum {
+    ready,
+    restoring,
+    running,
+    waiting,
+    cancelling,
+    finished,
+    cancelled,
+    failed,
+    closed,
+    unavailable,
 };
 
-pub const Transition = struct {
-    context: *anyopaque,
-    classify: *const fn (*anyopaque, Input) anyerror!InputState,
-    persist: *const fn (*anyopaque, Input) anyerror!void,
-    apply: *const fn (*anyopaque, Input) anyerror!void,
+pub const ProjectionKind = enum {
+    session,
+    task_admitted,
+    approval_required,
+    indeterminate,
+    final_answer,
+    cancelled,
+    failure,
+    outcome,
+    closed,
 };
 
-pub const Config = struct {
-    input_capacity: u8,
-    drive_quantum: u8,
-    transition: Transition,
-    owner_fence: ?owner_fence.Fence = null,
+pub const Projection = struct {
+    kind: ProjectionKind,
+    session_id: u64,
+    task_id: u64 = 0,
+    operation_id: u64 = 0,
+    operation_generation: u32 = 0,
+    descriptor_digest: u64 = 0,
+    content_ref: u64 = 0,
+    session: ?*session_store.Session = null,
+    owner_generation: ?*const u64 = null,
+    generation: u64 = 0,
+
+    pub fn openContent(self: Projection) !session_store.BlobReader {
+        const session = self.session orelse return error.ProjectionHasNoContent;
+        const owner_generation = self.owner_generation orelse return error.StaleProjection;
+        if (owner_generation.* != self.generation or self.content_ref == 0 or
+            self.session_id != session.session_id)
+        {
+            return error.StaleProjection;
+        }
+        return session.openBlob(session.ownerToken(), self.content_ref);
+    }
 };
 
 pub const Progress = struct {
-    consumed: u8,
-    committed: u8,
-    dispatched: u8,
-    applied: u8,
-    stale: u8,
-    duplicate: u8,
-    projections: [max_input_capacity + 1]Projection,
-    projection_count: u8,
     state: State,
-    more: bool,
+    consumed: u8 = 0,
+    committed: u8 = 0,
+    dispatched: u8 = 0,
+    projections: [4]Projection = undefined,
+    projection_count: u8 = 0,
+    more: bool = false,
 
     pub fn projectionSlice(self: *const Progress) []const Projection {
         return self.projections[0..self.projection_count];
     }
 };
 
-pub const State = enum {
-    running,
-    suspended,
-    finished,
-    closed,
-    failed,
-};
-
-pub const ProjectionKind = enum {
-    task_started,
-    completion_committed,
-    permission_committed,
-    cancelled,
-    closed,
-};
-
-pub const Projection = struct {
-    kind: ProjectionKind,
-    subject: u64,
-};
-
-const Phase = enum {
-    running,
-    cancelling,
-    finished,
-    closed,
-    failed,
-};
-
-const Entry = extern struct {
-    words: [5]u64,
-};
-
-fn tagBits(tag: std.meta.Tag(Input)) u64 {
-    return @as(u64, @intFromEnum(tag)) << 56;
-}
-
-fn entryTag(entry: Entry, is_completion: bool) std.meta.Tag(Input) {
-    if (is_completion) return .completion;
-    return @enumFromInt(@as(u8, @truncate(entry.words[3] >> 56)));
-}
-
-fn encode(input: Input) Entry {
-    return switch (input) {
-        .start_task => |task| .{ .words = .{
-            task.task_id,
-            task.agent_id,
-            task.agent_generation,
-            tagBits(.start_task),
-            task.task_ref,
-        } },
-        .completion => |completion| .{ .words = .{
-            completion.agent_id,
-            completion.operation_id,
-            completion.ownership_epoch,
-            @as(u64, completion.operation_generation) |
-                (@as(u64, completion.agent_generation) << 32),
-            completion.result,
-        } },
-        .permission => |permission| .{ .words = .{
-            permission.agent_id,
-            permission.agent_generation,
-            permission.operation_id,
-            tagBits(.permission) |
-                @as(u64, permission.operation_generation) |
-                (@as(u64, @intFromEnum(permission.decision)) << 32),
-            permission.descriptor_digest,
-        } },
-        .cancel => |identity| .{ .words = .{
-            identity.agent_id,
-            identity.agent_generation,
-            0,
-            tagBits(.cancel),
-            0,
-        } },
-        .shutdown => .{ .words = .{ 0, 0, 0, tagBits(.shutdown), 0 } },
-    };
-}
-
-fn decode(entry: Entry, is_completion: bool) Input {
-    return switch (entryTag(entry, is_completion)) {
-        .start_task => .{ .start_task = .{
-            .task_id = entry.words[0],
-            .agent_id = entry.words[1],
-            .agent_generation = @truncate(entry.words[2]),
-            .task_ref = entry.words[4],
-        } },
-        .completion => .{ .completion = .{
-            .agent_id = entry.words[0],
-            .operation_id = entry.words[1],
-            .ownership_epoch = entry.words[2],
-            .result = entry.words[4],
-            .agent_generation = @truncate(entry.words[3] >> 32),
-            .operation_generation = @truncate(entry.words[3]),
-        } },
-        .permission => .{ .permission = .{
-            .agent_id = entry.words[0],
-            .agent_generation = @truncate(entry.words[1]),
-            .operation_id = entry.words[2],
-            .operation_generation = @truncate(entry.words[3]),
-            .decision = @enumFromInt(@as(u8, @truncate(entry.words[3] >> 32))),
-            .descriptor_digest = entry.words[4],
-        } },
-        .cancel => .{ .cancel = .{
-            .agent_id = entry.words[0],
-            .agent_generation = @truncate(entry.words[1]),
-        } },
-        .shutdown => .shutdown,
-    };
-}
-
-fn structurallyValid(input: Input) bool {
-    return switch (input) {
-        .start_task => |task| task.task_id != 0 and
-            task.agent_id != 0 and
-            task.agent_generation != 0 and
-            task.task_ref != 0,
-        .completion => |completion| completion.agent_id != 0 and
-            completion.agent_generation != 0 and
-            completion.operation_id != 0 and
-            completion.operation_generation != 0 and
-            completion.ownership_epoch != 0,
-        .permission => |permission| permission.agent_id != 0 and
-            permission.agent_generation != 0 and
-            permission.operation_id != 0 and
-            permission.operation_generation != 0 and
-            permission.descriptor_digest != 0,
-        .cancel => |identity| identity.agent_id != 0 and identity.agent_generation != 0,
-        .shutdown => true,
-    };
-}
-
-fn projectionFor(input: Input) ?Projection {
-    return switch (input) {
-        .start_task => |task| .{ .kind = .task_started, .subject = task.task_id },
-        .completion => |completion| .{
-            .kind = .completion_committed,
-            .subject = completion.operation_id,
-        },
-        .permission => |permission| .{
-            .kind = .permission_committed,
-            .subject = permission.operation_id,
-        },
-        .cancel, .shutdown => null,
-    };
-}
-
 pub const Harness = struct {
-    capacity: u8,
-    quantum: u8,
-    transition: Transition,
-    entries: [max_input_capacity]Entry = undefined,
-    head: u8 = 0,
-    len: u8 = 0,
-    phase: Phase = .running,
-    task_admitted: bool = false,
-    cancel_admitted: bool = false,
-    shutdown_admitted: bool = false,
-    completion_slots: u32 = 0,
-    owner_context: *anyopaque = undefined,
-    authorize_owner: ?*const fn (*anyopaque) anyerror!void = null,
-    admission_lock: std.atomic.Mutex = .unlocked,
+    config: Config,
+    pending: ?Input = null,
+    state: State,
+    session: ?session_store.Session = null,
+    session_projection_pending: bool = false,
+    final_ref: u64 = 0,
+    checkpoint_buffer: [checkpoint.encoded_size]u8 = undefined,
+    projection_generation: u64 = 0,
+    awaiting_approval: ?lifecycle.Approval = null,
+    settling_control: ?lifecycle.Control = null,
+    recovery_pending: bool = false,
+    ingress_lock: std.Io.Mutex = .init,
+    drive_lock: std.Io.Mutex = .init,
 
-    /// Constructs one fixed-capacity owner. No allocation occurs here or later.
     pub fn open(config: Config) !Harness {
-        if (config.input_capacity == 0 or
-            config.input_capacity > max_input_capacity or
-            config.drive_quantum == 0)
-        {
-            return error.InvalidCapacity;
-        }
-        if (config.owner_fence) |fence| try fence.authorize(fence.context);
-        var harness: Harness = .{
-            .capacity = config.input_capacity,
-            .quantum = config.drive_quantum,
-            .transition = config.transition,
-        };
-        if (config.owner_fence) |fence| {
-            harness.owner_context = fence.context;
-            harness.authorize_owner = fence.authorize;
-        }
-        return harness;
-    }
-
-    /// Attempts to transfer one bounded input without waiting or performing I/O.
-    pub fn offer(self: *Harness, input: Input) OfferResult {
-        if (!self.admission_lock.tryLock()) return .busy;
-        defer self.admission_lock.unlock();
-        if (self.phase == .closed or self.shutdown_admitted) return .closed;
-        if (self.phase == .failed) return .unavailable;
-        if (!structurallyValid(input)) return .invalid;
-        if (self.phase == .finished and input != .shutdown) return .closed;
-        switch (input) {
-            .start_task => if (self.task_admitted or self.cancel_admitted) return .invalid,
-            .permission => if (self.cancel_admitted) return .invalid,
-            .cancel => if (self.cancel_admitted) return .invalid,
-            .completion, .shutdown => {},
-        }
-        if (self.len == self.capacity) return .full;
-        const tail = (self.head + self.len) % self.capacity;
-        self.entries[tail] = encode(input);
-        const mask = @as(u32, 1) << @intCast(tail);
-        if (input == .completion) {
-            self.completion_slots |= mask;
-        } else {
-            self.completion_slots &= ~mask;
-        }
-        self.len += 1;
-        switch (input) {
-            .start_task => self.task_admitted = true,
-            .cancel => self.cancel_admitted = true,
-            .shutdown => self.shutdown_admitted = true,
-            .completion, .permission => {},
-        }
-        return .queued;
-    }
-
-    /// Performs at most one configured quantum of owner-only transitions.
-    /// Transition callbacks must not reenter this harness.
-    pub fn drive(self: *Harness) !Progress {
-        if (!self.admission_lock.tryLock()) return error.HarnessBusy;
-        defer self.admission_lock.unlock();
-        if (self.phase == .closed) return error.HarnessClosed;
-        if (self.phase == .failed) return error.HarnessUnavailable;
-        if (self.phase == .finished and self.len == 0) return error.HarnessFinished;
-        if (self.authorize_owner) |authorize| {
-            authorize(self.owner_context) catch |err| {
-                self.phase = .failed;
-                return err;
-            };
-        }
-        var consumed: u8 = 0;
-        var committed: u8 = 0;
-        var applied: u8 = 0;
-        var stale_count: u8 = 0;
-        var duplicate_count: u8 = 0;
-        var projections: [max_input_capacity + 1]Projection = undefined;
-        var projection_count: u8 = 0;
-        while (consumed < self.quantum and self.len > 0) {
-            const head_mask = @as(u32, 1) << @intCast(self.head);
-            const input = decode(
-                self.entries[self.head],
-                self.completion_slots & head_mask != 0,
-            );
-            const state = self.transition.classify(self.transition.context, input) catch |err| {
-                self.phase = .failed;
-                return err;
-            };
-            switch (state) {
-                .applicable => {
-                    self.transition.persist(self.transition.context, input) catch |err| {
-                        self.phase = .failed;
-                        return err;
-                    };
-                    committed += 1;
-                    self.transition.apply(self.transition.context, input) catch |err| {
-                        self.phase = .failed;
-                        return err;
-                    };
-                    applied += 1;
-                },
-                .durable => {
-                    self.transition.apply(self.transition.context, input) catch |err| {
-                        self.phase = .failed;
-                        return err;
-                    };
-                    applied += 1;
-                },
-                .stale => stale_count += 1,
-                .duplicate => duplicate_count += 1,
-            }
-            self.head = (self.head + 1) % self.capacity;
-            self.len -= 1;
-            consumed += 1;
-            if (state == .applicable or state == .durable) {
-                if (projectionFor(input)) |projection| {
-                    projections[projection_count] = projection;
-                    projection_count += 1;
+        if (config.recovery_quantum == 0) return error.InvalidRecoveryQuantum;
+        switch (config.mode) {
+            .create => |create| {
+                if (create.workspace_path.len == 0 or create.model.len == 0 or
+                    create.task.len == 0)
+                {
+                    return error.InvalidCreateRequest;
                 }
-                switch (input) {
-                    .cancel => self.phase = .cancelling,
-                    .shutdown => self.phase = .closed,
-                    .start_task, .completion, .permission => {},
-                }
-            }
-            if (self.phase == .cancelling and
-                (self.len == 0 or
-                    (self.len == 1 and
-                        entryTag(
-                            self.entries[self.head],
-                            self.completion_slots & (@as(u32, 1) << @intCast(self.head)) != 0,
-                        ) == .shutdown)))
-            {
-                self.phase = .finished;
-                projections[projection_count] = .{
-                    .kind = .cancelled,
-                    .subject = 0,
-                };
-                projection_count += 1;
-            }
+            },
+            .restore => |restore| if (restore.session_id == 0) return error.InvalidSessionIdentity,
         }
-        if (self.phase == .closed) {
-            std.debug.assert(self.len == 0);
-            projections[projection_count] = .{ .kind = .closed, .subject = 0 };
-            projection_count += 1;
-            @memset(std.mem.asBytes(&self.entries), 0);
-            self.completion_slots = 0;
-            self.head = 0;
-        }
-        return .{
-            .consumed = consumed,
-            .committed = committed,
-            .dispatched = 0,
-            .applied = applied,
-            .stale = stale_count,
-            .duplicate = duplicate_count,
-            .projections = projections,
-            .projection_count = projection_count,
-            .state = self.publicState(),
-            .more = self.len > 0,
-        };
-    }
-
-    fn publicState(self: *const Harness) State {
-        return switch (self.phase) {
-            .running => if (self.len == 0) .suspended else .running,
-            .cancelling => .running,
-            .finished => .finished,
-            .closed => .closed,
-            .failed => .failed,
-        };
-    }
-};
-
-comptime {
-    std.debug.assert(@sizeOf(Completion) == 40);
-    std.debug.assert(@sizeOf(Entry) == 40);
-    std.debug.assert(@sizeOf(Harness) <= 1536);
-}
-
-fn applicable(_: *anyopaque, _: Input) anyerror!InputState {
-    return .applicable;
-}
-
-fn noOp(_: *anyopaque, _: Input) anyerror!void {}
-
-test "ingress encoding preserves every bounded field" {
-    const inputs = [_]Input{
-        .{ .start_task = .{
-            .task_id = std.math.maxInt(u64),
-            .agent_id = 2,
-            .agent_generation = 3,
-            .task_ref = 4,
-        } },
-        .{ .completion = .{
-            .agent_id = 5,
-            .agent_generation = 6,
-            .operation_id = 7,
-            .operation_generation = std.math.maxInt(u32),
-            .ownership_epoch = std.math.maxInt(u64),
-            .result = std.math.maxInt(u64),
-        } },
-        .{ .permission = .{
-            .agent_id = 8,
-            .agent_generation = 9,
-            .operation_id = 10,
-            .operation_generation = std.math.maxInt(u32),
-            .decision = .deny,
-            .descriptor_digest = std.math.maxInt(u64),
-        } },
-        .{ .cancel = .{
-            .agent_id = std.math.maxInt(u64),
-            .agent_generation = std.math.maxInt(u32),
-        } },
-        .shutdown,
-    };
-    for (inputs) |input| {
-        try std.testing.expectEqualDeep(input, decode(encode(input), input == .completion));
-    }
-}
-
-const InputTrace = struct {
-    kinds: [5]std.meta.Tag(Input) = undefined,
-    persisted: u8 = 0,
-    applied: u8 = 0,
-
-    fn persist(context: *anyopaque, input: Input) anyerror!void {
-        const self: *InputTrace = @ptrCast(@alignCast(context));
-        self.kinds[self.persisted] = std.meta.activeTag(input);
-        self.persisted += 1;
-    }
-
-    fn apply(context: *anyopaque, input: Input) anyerror!void {
-        const self: *InputTrace = @ptrCast(@alignCast(context));
-        if (self.applied >= self.persisted or
-            self.kinds[self.applied] != std.meta.activeTag(input))
-        {
-            return error.AppliedBeforeDurable;
-        }
-        self.applied += 1;
-    }
-
-    fn transition(self: *InputTrace) Transition {
-        return .{
-            .context = self,
-            .classify = applicable,
-            .persist = persist,
-            .apply = apply,
-        };
-    }
-};
-
-test "all input kinds share the bounded durable owner path" {
-    var trace: InputTrace = .{};
-    var harness = try Harness.open(.{
-        .input_capacity = 5,
-        .drive_quantum = 5,
-        .transition = trace.transition(),
-    });
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .start_task = .{
-        .task_id = 41,
-        .agent_id = 7,
-        .agent_generation = 3,
-        .task_ref = 91,
-    } }));
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = .{
-        .agent_id = 7,
-        .agent_generation = std.math.maxInt(u32),
-        .operation_id = 19,
-        .operation_generation = 2,
-        .ownership_epoch = 1,
-        .result = 101,
-    } }));
-    try std.testing.expectEqual(@as(u8, 0), trace.persisted);
-    try std.testing.expectEqual(@as(u8, 0), trace.applied);
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .permission = .{
-        .agent_id = 7,
-        .agent_generation = 3,
-        .operation_id = 20,
-        .operation_generation = 1,
-        .decision = .allow,
-        .descriptor_digest = 0xabc,
-    } }));
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .cancel = .{
-        .agent_id = 7,
-        .agent_generation = 3,
-    } }));
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.shutdown));
-
-    const progress = try harness.drive();
-
-    try std.testing.expectEqual(@as(u8, 5), progress.consumed);
-    try std.testing.expectEqual(@as(u8, 5), progress.committed);
-    try std.testing.expectEqual(@as(u8, 5), progress.applied);
-    try std.testing.expectEqual(State.closed, progress.state);
-    try std.testing.expectEqual(@as(u8, 5), trace.persisted);
-    try std.testing.expectEqual(@as(u8, 5), trace.applied);
-    try std.testing.expectEqualSlices(
-        std.meta.Tag(Input),
-        &.{ .start_task, .completion, .permission, .cancel, .shutdown },
-        &trace.kinds,
-    );
-    try std.testing.expectEqualSlices(
-        Projection,
-        &.{
-            .{ .kind = .task_started, .subject = 41 },
-            .{ .kind = .completion_committed, .subject = 19 },
-            .{ .kind = .permission_committed, .subject = 20 },
-            .{ .kind = .cancelled, .subject = 0 },
-            .{ .kind = .closed, .subject = 0 },
-        },
-        progress.projectionSlice(),
-    );
-}
-
-test "cancellation settles an already accepted completion before finishing" {
-    var trace: InputTrace = .{};
-    var harness = try Harness.open(.{
-        .input_capacity = 2,
-        .drive_quantum = 1,
-        .transition = trace.transition(),
-    });
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .cancel = .{
-        .agent_id = 7,
-        .agent_generation = 3,
-    } }));
-    try std.testing.expectEqual(OfferResult.invalid, harness.offer(.{ .start_task = .{
-        .task_id = 41,
-        .agent_id = 7,
-        .agent_generation = 3,
-        .task_ref = 91,
-    } }));
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = .{
-        .agent_id = 7,
-        .agent_generation = std.math.maxInt(u32),
-        .operation_id = 19,
-        .operation_generation = 2,
-        .ownership_epoch = 1,
-        .result = 101,
-    } }));
-
-    const cancelling = try harness.drive();
-    try std.testing.expectEqual(State.running, cancelling.state);
-    try std.testing.expect(cancelling.more);
-    try std.testing.expectEqual(@as(u8, 0), cancelling.projection_count);
-
-    const finished = try harness.drive();
-    try std.testing.expectEqual(State.finished, finished.state);
-    try std.testing.expect(!finished.more);
-    try std.testing.expectEqualSlices(
-        Projection,
-        &.{
-            .{ .kind = .completion_committed, .subject = 19 },
-            .{ .kind = .cancelled, .subject = 0 },
-        },
-        finished.projectionSlice(),
-    );
-
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.shutdown));
-    const closed = try harness.drive();
-    try std.testing.expectEqual(State.closed, closed.state);
-}
-
-test "offer consumes exactly the configured resident credits" {
-    var context: u8 = 0;
-    var harness = try Harness.open(.{
-        .input_capacity = 2,
-        .drive_quantum = 1,
-        .transition = .{
-            .context = &context,
-            .classify = applicable,
-            .persist = noOp,
-            .apply = noOp,
-        },
-    });
-
-    const first: Completion = .{
-        .agent_id = 1,
-        .agent_generation = 1,
-        .operation_id = 11,
-        .operation_generation = 1,
-        .ownership_epoch = 1,
-        .result = 101,
-    };
-    var second = first;
-    second.agent_id = 2;
-    var third = first;
-    third.agent_id = 3;
-
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = first }));
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = second }));
-    try std.testing.expectEqual(OfferResult.full, harness.offer(.{ .completion = third }));
-}
-
-const Trace = struct {
-    calls: [2]u8 = .{ 0, 0 },
-    len: u8 = 0,
-
-    fn persist(context: *anyopaque, _: Input) anyerror!void {
-        const self: *Trace = @ptrCast(@alignCast(context));
-        self.calls[self.len] = 1;
-        self.len += 1;
-    }
-
-    fn apply(context: *anyopaque, _: Input) anyerror!void {
-        const self: *Trace = @ptrCast(@alignCast(context));
-        if (self.len != 1 or self.calls[0] != 1) return error.AppliedBeforeDurable;
-        self.calls[self.len] = 2;
-        self.len += 1;
-    }
-};
-
-test "drive persists a completion before applying it" {
-    var trace: Trace = .{};
-    var harness = try Harness.open(.{
-        .input_capacity = 1,
-        .drive_quantum = 1,
-        .transition = .{
-            .context = &trace,
-            .classify = applicable,
-            .persist = Trace.persist,
-            .apply = Trace.apply,
-        },
-    });
-    const completion: Completion = .{
-        .agent_id = 7,
-        .agent_generation = 3,
-        .operation_id = 19,
-        .operation_generation = 2,
-        .ownership_epoch = 1,
-        .result = 101,
-    };
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = completion }));
-
-    const progress = try harness.drive();
-
-    try std.testing.expectEqual(@as(u8, 1), progress.consumed);
-    try std.testing.expectEqual(@as(u8, 1), progress.applied);
-    try std.testing.expect(!progress.more);
-    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, &trace.calls);
-}
-
-test "offer rejects structurally invalid completion identities" {
-    var context: u8 = 0;
-    var harness = try Harness.open(.{
-        .input_capacity = 1,
-        .drive_quantum = 1,
-        .transition = .{
-            .context = &context,
-            .classify = applicable,
-            .persist = noOp,
-            .apply = noOp,
-        },
-    });
-    const invalid: Completion = .{
-        .agent_id = 0,
-        .agent_generation = 1,
-        .operation_id = 11,
-        .operation_generation = 1,
-        .ownership_epoch = 1,
-        .result = 101,
-    };
-
-    try std.testing.expectEqual(OfferResult.invalid, harness.offer(.{ .completion = invalid }));
-}
-
-fn stale(_: *anyopaque, _: Input) anyerror!InputState {
-    return .stale;
-}
-
-fn unexpectedTransition(_: *anyopaque, _: Input) anyerror!void {
-    return error.UnexpectedTransition;
-}
-
-test "drive rejects a stale generation before persistence or mutation" {
-    var context: u8 = 0;
-    var harness = try Harness.open(.{
-        .input_capacity = 1,
-        .drive_quantum = 1,
-        .transition = .{
-            .context = &context,
-            .classify = stale,
-            .persist = unexpectedTransition,
-            .apply = unexpectedTransition,
-        },
-    });
-    const completion: Completion = .{
-        .agent_id = 7,
-        .agent_generation = 3,
-        .operation_id = 19,
-        .operation_generation = 2,
-        .ownership_epoch = 1,
-        .result = 101,
-    };
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = completion }));
-
-    const progress = try harness.drive();
-
-    try std.testing.expectEqual(@as(u8, 1), progress.consumed);
-    try std.testing.expectEqual(@as(u8, 0), progress.applied);
-    try std.testing.expectEqual(@as(u8, 1), progress.stale);
-    try std.testing.expect(!progress.more);
-}
-
-const RecoveryState = struct {
-    persisted: bool = false,
-    applied: bool = false,
-    fail_apply: bool = true,
-    persist_count: u8 = 0,
-    apply_count: u8 = 0,
-
-    fn classify(context: *anyopaque, _: Input) anyerror!InputState {
-        const self: *RecoveryState = @ptrCast(@alignCast(context));
-        if (self.applied) return .duplicate;
-        if (self.persisted) return .durable;
-        return .applicable;
-    }
-
-    fn persist(context: *anyopaque, _: Input) anyerror!void {
-        const self: *RecoveryState = @ptrCast(@alignCast(context));
-        self.persisted = true;
-        self.persist_count += 1;
-    }
-
-    fn apply(context: *anyopaque, _: Input) anyerror!void {
-        const self: *RecoveryState = @ptrCast(@alignCast(context));
-        if (self.fail_apply) return error.SimulatedCrash;
-        self.applied = true;
-        self.apply_count += 1;
-    }
-
-    fn config(self: *RecoveryState) Config {
-        return .{
-            .input_capacity = 1,
-            .drive_quantum = 1,
-            .transition = .{
-                .context = self,
-                .classify = classify,
-                .persist = persist,
-                .apply = apply,
+        var owner: Harness = .{
+            .config = config,
+            .state = switch (config.mode) {
+                .create => .ready,
+                .restore => .restoring,
             },
         };
+        switch (config.mode) {
+            .create => |create| owner.session = try session_store.Session.create(
+                config.sessions,
+                config.io,
+                .{
+                    .workspace_path = create.workspace_path,
+                    .model = create.model,
+                    .task = create.task,
+                },
+            ),
+            .restore => |restore| {
+                var manifest_buffer: [session_store.manifest_max_size]u8 = undefined;
+                const restored = try session_store.Session.openExisting(
+                    config.sessions,
+                    config.io,
+                    restore.session_id,
+                    &manifest_buffer,
+                );
+                owner.session = restored.session;
+                owner.recovery_pending = true;
+                const session = &owner.session.?;
+                if (try session.recoveryIsEmpty(session.ownerToken())) {
+                    _ = try session.recoverSemanticWindow(session.ownerToken(), 1);
+                    owner.recovery_pending = false;
+                    _ = try owner.completeRestore();
+                }
+            },
+        }
+        owner.session_projection_pending = true;
+        return owner;
     }
-};
 
-test "a replayed durable completion applies exactly once after owner restart" {
-    var state: RecoveryState = .{};
-    const completion: Completion = .{
-        .agent_id = 7,
-        .agent_generation = 3,
-        .operation_id = 19,
-        .operation_generation = 2,
-        .ownership_epoch = 1,
-        .result = 101,
-    };
+    pub fn offer(self: *Harness, input: Input) OfferResult {
+        if (!self.ingress_lock.tryLock()) return .busy;
+        defer self.ingress_lock.unlock(self.config.io);
+        if (self.state == .closed) return .closed;
+        if (self.state == .unavailable) return .unavailable;
+        if (self.pending != null) return .full;
+        if (!self.accepts(input)) return .invalid;
+        if (input == .permission) {
+            const decision = input.permission;
+            const expected = self.awaiting_approval orelse return .invalid;
+            if (decision.operation_id != expected.operation_id or
+                decision.operation_generation != expected.operation_generation or
+                decision.descriptor_digest != expected.descriptor_digest)
+            {
+                return .invalid;
+            }
+        }
+        self.pending = input;
+        return .accepted;
+    }
 
-    var interrupted = try Harness.open(state.config());
-    try std.testing.expectEqual(OfferResult.queued, interrupted.offer(.{ .completion = completion }));
-    try std.testing.expectError(error.SimulatedCrash, interrupted.drive());
-    try std.testing.expectEqual(@as(u8, 1), state.persist_count);
-    try std.testing.expectEqual(@as(u8, 0), state.apply_count);
-
-    state.fail_apply = false;
-    var recovered = try Harness.open(state.config());
-    try std.testing.expectEqual(OfferResult.queued, recovered.offer(.{ .completion = completion }));
-    const recovered_progress = try recovered.drive();
-    try std.testing.expectEqual(@as(u8, 1), recovered_progress.applied);
-    try std.testing.expectEqual(@as(u8, 1), state.persist_count);
-    try std.testing.expectEqual(@as(u8, 1), state.apply_count);
-
-    try std.testing.expectEqual(OfferResult.queued, recovered.offer(.{ .completion = completion }));
-    const duplicate_progress = try recovered.drive();
-    try std.testing.expectEqual(@as(u8, 1), duplicate_progress.duplicate);
-    try std.testing.expectEqual(@as(u8, 1), state.persist_count);
-    try std.testing.expectEqual(@as(u8, 1), state.apply_count);
-}
-
-fn persistenceFailure(_: *anyopaque, _: Input) anyerror!void {
-    return error.StorageUnavailable;
-}
-
-fn classificationFailure(_: *anyopaque, _: Input) anyerror!InputState {
-    return error.JournalUnreadable;
-}
-
-test "a classification failure makes the owner unavailable" {
-    var context: u8 = 0;
-    var harness = try Harness.open(.{
-        .input_capacity = 1,
-        .drive_quantum = 1,
-        .transition = .{
-            .context = &context,
-            .classify = classificationFailure,
-            .persist = noOp,
-            .apply = noOp,
-        },
-    });
-    const completion: Completion = .{
-        .agent_id = 7,
-        .agent_generation = 3,
-        .operation_id = 19,
-        .operation_generation = 2,
-        .ownership_epoch = 1,
-        .result = 101,
-    };
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = completion }));
-    try std.testing.expectError(error.JournalUnreadable, harness.drive());
-    try std.testing.expectEqual(OfferResult.unavailable, harness.offer(.{ .completion = completion }));
-}
-
-test "a transition failure makes the owner unavailable until reconstruction" {
-    var context: u8 = 0;
-    var harness = try Harness.open(.{
-        .input_capacity = 2,
-        .drive_quantum = 1,
-        .transition = .{
-            .context = &context,
-            .classify = applicable,
-            .persist = persistenceFailure,
-            .apply = noOp,
-        },
-    });
-    const completion: Completion = .{
-        .agent_id = 7,
-        .agent_generation = 3,
-        .operation_id = 19,
-        .operation_generation = 2,
-        .ownership_epoch = 1,
-        .result = 101,
-    };
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = completion }));
-    try std.testing.expectError(error.StorageUnavailable, harness.drive());
-
-    try std.testing.expectEqual(OfferResult.unavailable, harness.offer(.{ .completion = completion }));
-    try std.testing.expectError(error.HarnessUnavailable, harness.drive());
-}
-
-test "shutdown is offered and driven instead of bypassing the owner loop" {
-    var context: u8 = 0;
-    var harness = try Harness.open(.{
-        .input_capacity = 1,
-        .drive_quantum = 1,
-        .transition = .{
-            .context = &context,
-            .classify = applicable,
-            .persist = noOp,
-            .apply = noOp,
-        },
-    });
-    try std.testing.expectEqual(OfferResult.queued, harness.offer(.shutdown));
-    const progress = try harness.drive();
-    try std.testing.expectEqual(State.closed, progress.state);
-    try std.testing.expectEqualSlices(
-        Projection,
-        &.{.{ .kind = .closed, .subject = 0 }},
-        progress.projectionSlice(),
-    );
-    const completion: Completion = .{
-        .agent_id = 7,
-        .agent_generation = 3,
-        .operation_id = 19,
-        .operation_generation = 2,
-        .ownership_epoch = 1,
-        .result = 101,
-    };
-
-    try std.testing.expectEqual(OfferResult.closed, harness.offer(.{ .completion = completion }));
-    try std.testing.expectError(error.HarnessClosed, harness.drive());
-}
-
-const Producer = struct {
-    harness: *Harness,
-    start: *std.atomic.Value(bool),
-    ready: *std.atomic.Value(u8),
-    queued: *std.atomic.Value(u8),
-    failed: *std.atomic.Value(u8),
-    first_id: u64,
-
-    fn run(self: *Producer) void {
-        _ = self.ready.fetchAdd(1, .acq_rel);
-        while (!self.start.load(.acquire)) std.Thread.yield() catch {};
-        for (0..8) |offset| {
-            const id = self.first_id + offset;
-            const completion: Completion = .{
-                .agent_id = id,
-                .agent_generation = 1,
-                .operation_id = id + 100,
-                .operation_generation = 1,
-                .ownership_epoch = 1,
-                .result = id,
+    pub fn drive(self: *Harness) !Progress {
+        if (!self.drive_lock.tryLock()) return error.HarnessBusy;
+        defer self.drive_lock.unlock(self.config.io);
+        if (self.state == .unavailable) return error.HarnessUnavailable;
+        if (self.projection_generation == std.math.maxInt(u64)) return error.ProjectionGenerationExhausted;
+        self.projection_generation += 1;
+        if (self.recovery_pending) {
+            const session = &self.session.?;
+            const recovery = session.recoverSemanticWindow(
+                session.ownerToken(),
+                self.config.recovery_quantum,
+            ) catch |err| {
+                self.setState(.unavailable);
+                return err;
             };
-            while (true) switch (self.harness.offer(.{ .completion = completion })) {
-                .queued => {
-                    _ = self.queued.fetchAdd(1, .monotonic);
-                    break;
-                },
-                .busy => std.Thread.yield() catch {},
-                else => {
-                    _ = self.failed.fetchAdd(1, .monotonic);
-                    break;
-                },
+            if (recovery.more) return .{
+                .state = .restoring,
+                .consumed = recovery.processed,
+                .more = true,
+            };
+            self.recovery_pending = false;
+            self.completeRestore() catch |err| {
+                self.setState(.unavailable);
+                return err;
             };
         }
-    }
-};
 
-test "concurrent producers cannot exceed fixed admission credits" {
-    var context: u8 = 0;
-    var harness = try Harness.open(.{
-        .input_capacity = max_input_capacity,
-        .drive_quantum = 1,
-        .transition = .{
-            .context = &context,
-            .classify = applicable,
-            .persist = noOp,
-            .apply = noOp,
-        },
-    });
-    var start = std.atomic.Value(bool).init(false);
-    var ready = std.atomic.Value(u8).init(0);
-    var queued = std.atomic.Value(u8).init(0);
-    var failed = std.atomic.Value(u8).init(0);
-    var producers: [4]Producer = undefined;
-    var threads: [4]std.Thread = undefined;
-    for (&producers, &threads, 0..) |*producer, *thread, index| {
-        producer.* = .{
-            .harness = &harness,
-            .start = &start,
-            .ready = &ready,
-            .queued = &queued,
-            .failed = &failed,
-            .first_id = @as(u64, @intCast(index)) * 8 + 1,
+        if (self.session_projection_pending) {
+            const session = &self.session.?;
+            self.session_projection_pending = false;
+            var identified: Progress = .{
+                .state = self.state,
+                .more = switch (self.config.mode) {
+                    .create => false,
+                    .restore => true,
+                },
+            };
+            identified.projections[0] = .{
+                .kind = .session,
+                .session_id = session.session_id,
+                .task_id = session.task_id,
+                .session = session,
+            };
+            identified.projection_count = 1;
+            return identified;
+        }
+
+        if (self.state == .closed or self.state == .cancelled) {
+            const session = if (self.session) |*value| value else return error.SessionUnavailable;
+            var terminal: Progress = .{ .state = self.state };
+            terminal.projections[0] = .{
+                .kind = if (self.state == .closed) .closed else .cancelled,
+                .session_id = session.session_id,
+                .task_id = session.task_id,
+                .session = session,
+            };
+            terminal.projection_count = 1;
+            return terminal;
+        }
+
+        const current_input = self.takePending();
+        if (self.state == .cancelling and current_input == null) {
+            return .{ .state = .cancelling, .more = true };
+        }
+        if (self.state == .finished and current_input == null) {
+            if (self.final_ref != 0) return self.finish(.{ .state = .finished });
+            return .{ .state = .finished };
+        }
+        var progress: Progress = .{ .state = self.state };
+        if (current_input) |pending| switch (pending) {
+            .permission => |decision| {
+                progress.consumed = 1;
+                const expected = self.approvalSnapshot() orelse return error.PermissionNotRequested;
+                if (decision.operation_id != expected.operation_id or
+                    decision.operation_generation != expected.operation_generation or
+                    decision.descriptor_digest != expected.descriptor_digest)
+                {
+                    return error.StalePermissionDecision;
+                }
+                const session = if (self.session) |*value| value else return error.SessionUnavailable;
+                const provider = switch (self.config.mode) {
+                    .create => |create| @as(?model_operation.Provider, create.provider),
+                    .restore => |restore| restore.provider,
+                };
+                self.setState(.running);
+                self.final_ref = lifecycle.resolvePermission(
+                    self.config.host,
+                    self.config.allocator,
+                    session,
+                    &self.checkpoint_buffer,
+                    expected,
+                    decision.allow,
+                    provider,
+                    switch (self.config.mode) {
+                        .create => |create| create.bash_cancelled,
+                        .restore => null,
+                    },
+                    self.completionHook(),
+                ) catch |err| return self.classifyLifecycleError(err, progress);
+                self.setApproval(null);
+                // Continue below to publish the terminal projections.
+            },
+            .completion => |completion| {
+                progress.consumed = 1;
+                const session = if (self.session) |*value| value else return error.SessionUnavailable;
+                self.setState(.running);
+                self.final_ref = lifecycle.acceptCompletion(
+                    self.config.host,
+                    self.config.allocator,
+                    session,
+                    &self.checkpoint_buffer,
+                    .{
+                        .kind = switch (completion.kind) {
+                            .model => .model,
+                            .bash => .bash,
+                            .apply_patch => .apply_patch,
+                        },
+                        .session_id = completion.session_id,
+                        .ownership_epoch = completion.ownership_epoch,
+                        .agent_id = completion.agent_id,
+                        .agent_generation = completion.agent_generation,
+                        .operation_id = completion.operation_id,
+                        .operation_generation = completion.operation_generation,
+                        .attempt_id = completion.attempt_id,
+                        .result_ref = completion.result_ref,
+                        .result_digest = completion.result_digest,
+                    },
+                    self.runtimeConfig(),
+                    switch (self.config.mode) {
+                        .create => |create| @as(?model_operation.Provider, create.provider),
+                        .restore => |restore| restore.provider,
+                    },
+                ) catch |err| if (self.settlingControl() != null and switch (err) {
+                    error.ToolCallDeferred,
+                    error.SessionNeedsModel,
+                    error.PatchExecutionDeferred,
+                    error.PatchApprovalRequired,
+                    error.BashPossiblyExecuted,
+                    => true,
+                    else => false,
+                }) 0 else return self.classifyLifecycleError(err, progress);
+                if (self.settlingControl()) |control| {
+                    try lifecycle.commitControl(session, control);
+                    self.setSettlingControl(null);
+                    const terminal_state: State = if (control == .cancel) .cancelled else .closed;
+                    self.setState(terminal_state);
+                    progress.state = terminal_state;
+                    progress.committed = 1;
+                    progress.projections[0] = .{
+                        .kind = if (control == .cancel) .cancelled else .closed,
+                        .session_id = session.session_id,
+                        .task_id = session.task_id,
+                        .session = session,
+                    };
+                    progress.projection_count = 1;
+                    return progress;
+                }
+            },
+            else => {},
         };
-        thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+        if (self.final_ref != 0) return self.finish(progress);
+        switch (self.config.mode) {
+            .create => |create| {
+                const input = current_input orelse return .{ .state = .ready };
+                progress.consumed = 1;
+                if (input != .task) return self.consumeControl(input, progress);
+                self.setState(.running);
+                const session = if (self.session) |*value| value else return error.SessionUnavailable;
+                self.final_ref = lifecycle.advanceCreated(
+                    self.config.host,
+                    session,
+                    &self.checkpoint_buffer,
+                    self.runtimeConfig(),
+                    create.provider,
+                ) catch |err| return self.classifyLifecycleError(err, progress);
+            },
+            .restore => |restore| {
+                if (current_input) |input| {
+                    progress.consumed = 1;
+                    if (input == .shutdown or input == .cancel) {
+                        return self.consumeControl(input, progress);
+                    }
+                    if (input == .task and self.state == .ready) {
+                        const session = if (self.session) |*value| value else return error.SessionUnavailable;
+                        self.setState(.running);
+                        self.final_ref = lifecycle.advanceCreated(
+                            self.config.host,
+                            session,
+                            &self.checkpoint_buffer,
+                            self.runtimeConfig(),
+                            restore.provider orelse return error.SessionNeedsModel,
+                        ) catch |err| return self.classifyLifecycleError(err, progress);
+                        if (self.final_ref != 0) return self.finish(progress);
+                        return error.CompletionExpected;
+                    }
+                    return error.InvalidResumeInput;
+                }
+                self.setState(.running);
+                const session = if (self.session) |*value| value else return error.SessionUnavailable;
+                self.final_ref = if (restore.provider) |provider|
+                    lifecycle.advanceRestored(
+                        self.config.host,
+                        self.config.allocator,
+                        session,
+                        &self.checkpoint_buffer,
+                        self.runtimeConfig(),
+                        provider,
+                    ) catch |err| return self.classifyLifecycleError(err, progress)
+                else
+                    lifecycle.inspectRestored(
+                        self.config.host,
+                        self.config.allocator,
+                        session,
+                        &self.checkpoint_buffer,
+                    ) catch |err| return self.classifyLifecycleError(err, progress);
+            },
+        }
+        return self.finish(progress);
     }
-    while (ready.load(.acquire) != producers.len) std.Thread.yield() catch {};
-    start.store(true, .release);
-    for (&threads) |*thread| thread.join();
 
-    try std.testing.expectEqual(@as(u8, max_input_capacity), queued.load(.acquire));
-    try std.testing.expectEqual(@as(u8, 0), failed.load(.acquire));
-    const overflow: Completion = .{
-        .agent_id = 99,
-        .agent_generation = 1,
-        .operation_id = 199,
-        .operation_generation = 1,
-        .ownership_epoch = 1,
-        .result = 99,
-    };
-    try std.testing.expectEqual(OfferResult.full, harness.offer(.{ .completion = overflow }));
-}
-
-const CountState = struct {
-    persisted: u32 = 0,
-    applied: u32 = 0,
-
-    fn persist(context: *anyopaque, _: Input) anyerror!void {
-        const self: *CountState = @ptrCast(@alignCast(context));
-        self.persisted += 1;
+    fn finish(self: *Harness, initial: Progress) !Progress {
+        var progress = initial;
+        const session = if (self.session) |*value| value else return error.SessionUnavailable;
+        const final_ref = self.final_ref;
+        self.setState(.finished);
+        progress.state = .finished;
+        progress.committed = 1;
+        progress.dispatched = 1;
+        progress.projections[0] = .{
+            .kind = .session,
+            .session_id = session.session_id,
+            .task_id = session.task_id,
+            .session = session,
+        };
+        progress.projections[1] = .{
+            .kind = .final_answer,
+            .session_id = session.session_id,
+            .task_id = session.task_id,
+            .content_ref = final_ref,
+            .session = session,
+            .owner_generation = &self.projection_generation,
+            .generation = self.projection_generation,
+        };
+        progress.projections[2] = .{
+            .kind = .outcome,
+            .session_id = session.session_id,
+            .task_id = session.task_id,
+            .content_ref = final_ref,
+            .session = session,
+            .owner_generation = &self.projection_generation,
+            .generation = self.projection_generation,
+        };
+        progress.projection_count = 3;
+        return progress;
     }
 
-    fn apply(context: *anyopaque, _: Input) anyerror!void {
-        const self: *CountState = @ptrCast(@alignCast(context));
-        self.applied += 1;
+    fn completeRestore(self: *Harness) !void {
+        const session = &self.session.?;
+        if (try lifecycle.restoredControl(session)) |control| {
+            self.setState(if (control == .cancel) .cancelled else .closed);
+            return;
+        }
+        self.final_ref = lifecycle.inspectRestored(
+            self.config.host,
+            self.config.allocator,
+            session,
+            &self.checkpoint_buffer,
+        ) catch |err| switch (err) {
+            error.MissingWalCoreState => unadmitted: {
+                self.setState(.ready);
+                break :unadmitted 0;
+            },
+            error.SessionOperationPending,
+            error.SessionNeedsModel,
+            error.ToolCallDeferred,
+            error.PatchExecutionDeferred,
+            error.PatchApprovalRequired,
+            error.BashPossiblyExecuted,
+            => waiting: {
+                self.setState(.waiting);
+                if (err == error.PatchApprovalRequired) {
+                    self.setApproval(try lifecycle.pendingApproval(session));
+                }
+                break :waiting 0;
+            },
+            else => return err,
+        };
+        if (self.final_ref != 0) self.setState(.finished);
+    }
+
+    fn consumeControl(self: *Harness, input: Input, progress: Progress) !Progress {
+        var result = progress;
+        switch (input) {
+            .shutdown => {
+                const session = if (self.session) |*value| value else return error.SessionUnavailable;
+                lifecycle.commitControl(session, .shutdown) catch |err| switch (err) {
+                    error.AcceptedOperationUnsettled => {
+                        self.setSettlingControl(.shutdown);
+                        self.setState(.cancelling);
+                        result.state = .cancelling;
+                        result.more = true;
+                        result.projections[0] = .{
+                            .kind = .outcome,
+                            .session_id = session.session_id,
+                            .task_id = session.task_id,
+                            .session = session,
+                        };
+                        result.projection_count = 1;
+                        return result;
+                    },
+                    else => return err,
+                };
+                self.setState(.closed);
+                result.state = .closed;
+                result.committed = 1;
+                result.projections[0] = .{
+                    .kind = .closed,
+                    .session_id = session.session_id,
+                    .task_id = session.task_id,
+                    .session = session,
+                };
+                result.projection_count = 1;
+            },
+            .cancel => {
+                const session = if (self.session) |*value| value else return error.SessionUnavailable;
+                if (self.approvalSnapshot()) |approval| {
+                    _ = lifecycle.resolvePermission(
+                        self.config.host,
+                        self.config.allocator,
+                        session,
+                        &self.checkpoint_buffer,
+                        approval,
+                        false,
+                        null,
+                        switch (self.config.mode) {
+                            .create => |create| create.bash_cancelled,
+                            .restore => null,
+                        },
+                        self.completionHook(),
+                    ) catch |err| switch (err) {
+                        error.SessionNeedsModel => {},
+                        else => return err,
+                    };
+                    self.setApproval(null);
+                }
+                lifecycle.commitControl(session, .cancel) catch |err| switch (err) {
+                    error.AcceptedOperationUnsettled => {
+                        self.setSettlingControl(.cancel);
+                        self.setState(.cancelling);
+                        result.state = .cancelling;
+                        result.more = true;
+                        result.projections[0] = .{
+                            .kind = .outcome,
+                            .session_id = session.session_id,
+                            .task_id = session.task_id,
+                            .session = session,
+                        };
+                        result.projection_count = 1;
+                        return result;
+                    },
+                    else => return err,
+                };
+                self.setState(.cancelled);
+                result.state = .cancelled;
+                result.committed = 1;
+                result.projections[0] = .{
+                    .kind = .cancelled,
+                    .session_id = session.session_id,
+                    .task_id = session.task_id,
+                    .session = session,
+                };
+                result.projection_count = 1;
+            },
+            else => return error.InvalidControlInput,
+        }
+        return result;
+    }
+
+    fn classifyLifecycleError(self: *Harness, err: anyerror, progress: Progress) anyerror!Progress {
+        var result = progress;
+        switch (err) {
+            error.StaleCompletion,
+            error.FutureCompletionEpoch,
+            error.ConflictingCompletionEvidence,
+            error.CompletionEvidenceMissing,
+            => {
+                self.setState(progress.state);
+                result.projections[0] = self.failureProjection();
+                result.projection_count = 1;
+                return result;
+            },
+            else => {},
+        }
+        const kind: ProjectionKind, const state: State = switch (err) {
+            error.PermissionInputRequired, error.PatchApprovalRequired => .{ .approval_required, .waiting },
+            error.BashPossiblyExecuted => .{ .indeterminate, .waiting },
+            error.SessionNeedsModel,
+            error.ToolCallDeferred,
+            error.PatchExecutionDeferred,
+            error.CompletionOffered,
+            => .{ .outcome, .waiting },
+            error.InjectedCrash => return err,
+            else => {
+                self.setState(.unavailable);
+                result.state = .unavailable;
+                result.projections[0] = self.failureProjection();
+                result.projection_count = 1;
+                return result;
+            },
+        };
+        self.setState(state);
+        result.state = state;
+        const session = if (self.session) |*value| value else return error.SessionUnavailable;
+        if (kind == .approval_required and self.approvalSnapshot() == null) {
+            self.setApproval(try lifecycle.pendingApproval(session));
+        }
+        var projection: Projection = .{
+            .kind = kind,
+            .session_id = session.session_id,
+            .task_id = session.task_id,
+            .session = session,
+        };
+        if (self.approvalSnapshot()) |approval| {
+            projection.operation_id = approval.operation_id;
+            projection.operation_generation = approval.operation_generation;
+            projection.descriptor_digest = approval.descriptor_digest;
+            projection.content_ref = approval.descriptor_ref;
+            projection.owner_generation = &self.projection_generation;
+            projection.generation = self.projection_generation;
+        }
+        result.projections[0] = projection;
+        result.projection_count = 1;
+        return result;
+    }
+
+    fn failureProjection(self: *Harness) Projection {
+        const session = &self.session.?;
+        return .{
+            .kind = .failure,
+            .session_id = session.session_id,
+            .task_id = session.task_id,
+            .session = session,
+        };
+    }
+
+    fn approvalRequired(context: *anyopaque, approval: lifecycle.Approval) anyerror!void {
+        const self: *Harness = @ptrCast(@alignCast(context));
+        self.setApproval(approval);
+    }
+
+    fn adapterCompletionOffered(context: *anyopaque, evidence: completion_inbox.Envelope) anyerror!void {
+        const self: *Harness = @ptrCast(@alignCast(context));
+        const completion: Completion = .{
+            .kind = switch (evidence.kind) {
+                .model => .model,
+                .bash => .bash,
+                .apply_patch => .apply_patch,
+            },
+            .session_id = evidence.session_id,
+            .ownership_epoch = evidence.ownership_epoch,
+            .agent_id = evidence.agent_id,
+            .agent_generation = evidence.agent_generation,
+            .operation_id = evidence.operation_id,
+            .operation_generation = evidence.operation_generation,
+            .attempt_id = evidence.attempt_id,
+            .result_ref = evidence.result_ref,
+            .result_digest = evidence.result_digest,
+        };
+        switch (self.offer(.{ .completion = completion })) {
+            .accepted => {},
+            .full => {}, // Durable Inbox evidence preserves a notification that loses live custody.
+            else => return error.CompletionOfferRejected,
+        }
+    }
+
+    fn completionHook(self: *Harness) lifecycle.CompletionHook {
+        return .{ .context = self, .offered = adapterCompletionOffered };
+    }
+
+    fn runtimeConfig(self: *Harness) lifecycle.RuntimeConfig {
+        const session = &self.session.?;
+        return .{
+            .workspace_path = session.workspacePath(),
+            .fault = switch (self.config.mode) {
+                .create => |create| create.fault,
+                .restore => null,
+            },
+            .bash_policy = self.bashPolicy(),
+            .bash_cancelled = switch (self.config.mode) {
+                .create => |create| create.bash_cancelled,
+                .restore => null,
+            },
+            .patch_policy = self.patchPolicy(),
+            .approval_hook = self.approvalHook(),
+            .completion_hook = self.completionHook(),
+            .settle_only = self.settlingControl() != null,
+        };
+    }
+
+    fn approvalHook(self: *Harness) lifecycle.ApprovalHook {
+        return .{ .context = self, .required = approvalRequired };
+    }
+
+    fn classifyBash(context: *anyopaque, _: u64, _: bash_tool.Call) anyerror!bash_tool.Decision {
+        const self: *Harness = @ptrCast(@alignCast(context));
+        return if (self.config.permission_mode == .bypass) .allow else .ask;
+    }
+
+    fn requestBashPermission(_: *anyopaque, _: u64, _: bash_tool.Call) anyerror!bool {
+        return error.PermissionInputRequired;
+    }
+
+    fn bashPolicy(self: *Harness) bash_tool.Policy {
+        return .{ .context = self, .classify_fn = classifyBash, .ask_fn = requestBashPermission };
+    }
+
+    fn classifyPatch(context: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!patch_tool.Decision {
+        const self: *Harness = @ptrCast(@alignCast(context));
+        return if (self.config.permission_mode == .bypass) .allow else .ask;
+    }
+
+    fn requestPatchPermission(_: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!bool {
+        return error.PermissionInputRequired;
+    }
+
+    fn patchPolicy(self: *Harness) patch_tool.Policy {
+        return .{ .context = self, .classify_fn = classifyPatch, .ask_fn = requestPatchPermission };
+    }
+
+    fn accepts(self: *const Harness, input: Input) bool {
+        return switch (input) {
+            .task => self.state == .ready,
+            .permission => self.state == .waiting,
+            .completion => self.state == .restoring or self.state == .running or
+                self.state == .waiting or self.state == .cancelling,
+            .cancel => self.state != .finished and self.state != .cancelled and self.state != .cancelling,
+            .shutdown => self.state != .cancelling,
+        };
+    }
+
+    fn takePending(self: *Harness) ?Input {
+        self.ingress_lock.lockUncancelable(self.config.io);
+        defer self.ingress_lock.unlock(self.config.io);
+        const pending = self.pending;
+        self.pending = null;
+        return pending;
+    }
+
+    fn setState(self: *Harness, state: State) void {
+        self.ingress_lock.lockUncancelable(self.config.io);
+        defer self.ingress_lock.unlock(self.config.io);
+        self.state = state;
+    }
+
+    fn approvalSnapshot(self: *Harness) ?lifecycle.Approval {
+        self.ingress_lock.lockUncancelable(self.config.io);
+        defer self.ingress_lock.unlock(self.config.io);
+        return self.awaiting_approval;
+    }
+
+    fn setApproval(self: *Harness, approval: ?lifecycle.Approval) void {
+        self.ingress_lock.lockUncancelable(self.config.io);
+        defer self.ingress_lock.unlock(self.config.io);
+        self.awaiting_approval = approval;
+    }
+
+    fn settlingControl(self: *Harness) ?lifecycle.Control {
+        self.ingress_lock.lockUncancelable(self.config.io);
+        defer self.ingress_lock.unlock(self.config.io);
+        return self.settling_control;
+    }
+
+    fn setSettlingControl(self: *Harness, control: ?lifecycle.Control) void {
+        self.ingress_lock.lockUncancelable(self.config.io);
+        defer self.ingress_lock.unlock(self.config.io);
+        self.settling_control = control;
+    }
+
+    pub fn close(self: *Harness) void {
+        if (self.projection_generation != std.math.maxInt(u64)) self.projection_generation += 1;
+        if (self.session) |*session| session.close();
+        self.session = null;
+        self.pending = null;
+        self.setState(.closed);
     }
 };
 
-test "drive bounds each owner turn by the configured quantum" {
-    var state: CountState = .{};
-    var harness = try Harness.open(.{
-        .input_capacity = 3,
-        .drive_quantum = 2,
-        .transition = .{
-            .context = &state,
-            .classify = applicable,
-            .persist = CountState.persist,
-            .apply = CountState.apply,
-        },
+test "open retains no Activation Slot and offer transfers one bounded input" {
+    var host: Host = .{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: model_operation.Fixture = .{
+        .expected_task = "task",
+        .final_answer = "done",
+    };
+    var owner = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:answer",
+            .task = "task",
+            .provider = fixture.provider(),
+        } },
     });
-    for (1..4) |id| {
-        try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = .{
-            .agent_id = id,
-            .agent_generation = 1,
-            .operation_id = id + 100,
-            .operation_generation = 1,
-            .ownership_epoch = 1,
-            .result = id,
-        } }));
-    }
-
-    const first = try harness.drive();
-    try std.testing.expectEqual(@as(u8, 2), first.consumed);
-    try std.testing.expect(first.more);
-    const second = try harness.drive();
-    try std.testing.expectEqual(@as(u8, 1), second.consumed);
-    try std.testing.expect(!second.more);
+    defer owner.close();
+    try std.testing.expectEqual(@as(usize, 0), host.slots.occupiedBytes());
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    try std.testing.expectEqual(OfferResult.full, owner.offer(.task));
 }
 
-test "ten thousand reuse cycles keep the resident control budget fixed" {
-    var state: CountState = .{};
-    var harness = try Harness.open(.{
-        .input_capacity = 1,
-        .drive_quantum = 1,
-        .transition = .{
-            .context = &state,
-            .classify = applicable,
-            .persist = CountState.persist,
-            .apply = CountState.apply,
-        },
+test "restore withholds projections until the configured recovery quantum reaches safety" {
+    var host: Host = .{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: model_operation.Fixture = .{
+        .expected_task = "task",
+        .final_answer = "done",
+    };
+    var created = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:answer",
+            .task = "task",
+            .provider = fixture.provider(),
+        } },
     });
-    for (0..10_000) |index| {
-        const id = index + 1;
-        try std.testing.expectEqual(OfferResult.queued, harness.offer(.{ .completion = .{
-            .agent_id = id,
+    const session = &created.session.?;
+    const session_id = session.session_id;
+    for (0..5) |index| {
+        _ = try session.commitSemantic(session.ownerToken(), &.{.{
+            .kind = .task_admitted,
+            .agent_id = session.agent_id,
             .agent_generation = 1,
-            .operation_id = id,
-            .operation_generation = 1,
-            .ownership_epoch = 1,
-            .result = id,
-        } }));
-        const progress = try harness.drive();
-        try std.testing.expectEqual(@as(u8, 1), progress.applied);
-        try std.testing.expect(!progress.more);
+            .ownership_epoch = session.ownership_epoch,
+            .subject = index + 1,
+        }}, null);
     }
-    try std.testing.expectEqual(@as(u32, 10_000), state.persisted);
-    try std.testing.expectEqual(@as(u32, 10_000), state.applied);
+    created.close();
+
+    var restored = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .recovery_quantum = 2,
+        .mode = .{ .restore = .{ .session_id = session_id } },
+    });
+    defer restored.close();
+    const first = try restored.drive();
+    try std.testing.expectEqual(State.restoring, first.state);
+    try std.testing.expect(first.more);
+    try std.testing.expectEqual(@as(u8, 0), first.projection_count);
+    const second = try restored.drive();
+    try std.testing.expectEqual(State.restoring, second.state);
+    try std.testing.expect(second.more);
+    try std.testing.expectEqual(@as(u8, 0), second.projection_count);
+    const safe = try restored.drive();
+    try std.testing.expectEqual(State.ready, safe.state);
+    try std.testing.expect(safe.more);
+    try std.testing.expectEqual(@as(u8, 1), safe.projection_count);
+    try std.testing.expectEqual(ProjectionKind.session, safe.projections[0].kind);
+}
+
+test "failed recovery frame makes the live Harness unavailable" {
+    var host: Host = .{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: model_operation.Fixture = .{
+        .expected_task = "task",
+        .final_answer = "done",
+    };
+    var created = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:answer",
+            .task = "task",
+            .provider = fixture.provider(),
+        } },
+    });
+    const session = &created.session.?;
+    const session_id = session.session_id;
+    const descriptor: session_wal.Fact = .{
+        .kind = .operation_submitted,
+        .agent_id = session.agent_id,
+        .agent_generation = 1,
+        .ownership_epoch = session.ownership_epoch,
+        .operation_id = 10,
+        .generation = 1,
+        .reference = 11,
+        .digest = 12,
+    };
+    _ = try session.commitSemantic(session.ownerToken(), &.{descriptor}, null);
+    created.close();
+
+    var name_buffer: [16]u8 = undefined;
+    const name = try session_store.formatId(session_id, &name_buffer);
+    var session_dir = try tmp.dir.openDir(std.testing.io, name, .{});
+    defer session_dir.close(std.testing.io);
+    var writer = try session_wal.Writer.openAppendIn(session_dir, std.testing.io, "session.wal");
+    var invalid: session_wal.Transaction = .{ .sequence = 2, .fact_count = 2 };
+    invalid.facts[0] = descriptor;
+    invalid.facts[0].kind = .authorization;
+    invalid.facts[1] = descriptor;
+    invalid.facts[1].kind = .attempt_admitted;
+    invalid.facts[1].operation_id = 99;
+    invalid.facts[1].attempt_id = 13;
+    invalid.facts[1].recovery_class = .model;
+    try writer.append(std.testing.io, invalid);
+    writer.close(std.testing.io);
+
+    var restored = try Harness.open(.{
+        .host = &host,
+        .sessions = tmp.dir,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .mode = .{ .restore = .{ .session_id = session_id } },
+    });
+    defer restored.close();
+    try std.testing.expectError(error.InvalidOperationHistory, restored.drive());
+    try std.testing.expectError(error.HarnessUnavailable, restored.drive());
 }

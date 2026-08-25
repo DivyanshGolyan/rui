@@ -36,6 +36,8 @@ Ingress tests distinguish three outcomes: `full` or `busy` leaves ownership with
 
 Core tests exercise the reducer and canonical codec without filesystem or provider behaviour. Native invariant traces exercise valid and rejected paths through canonical suspend and restore after every step. Narrow storage tests remain for WAL framing, checksums, torn-tail recovery, content addressing, sync and rename failures, ownership fencing, and codec corruption.
 
+Incremental recovery tests restore histories larger than one configured quantum and prove that each `drive` consumes no more than that quantum, returns `restoring` with `more = true`, and exposes no Projection before the safe WAL and Completion Inbox watermark. They also prove that irrelevant inbox evidence cannot displace evidence for a currently admitted Attempt, and that a failed frame leaves the semantic index unpublished and the live Harness unavailable.
+
 ## Crash matrix
 
 At minimum, fresh-process tests terminate before and after:

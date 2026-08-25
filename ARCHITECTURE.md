@@ -80,9 +80,11 @@ Core is a deterministic reducer. It owns task phases, legal semantic transitions
 
 `Harness.open / offer / drive` is the complete Session lifecycle interface. No alternate public run, resume, provider-assisted resume, or direct Core advancement path exists.
 
-- `open` acquires exclusive Session ownership, validates durable inputs, and reconstructs through the safe WAL watermark using caller-owned fixed storage. It may borrow a slot while reconstructing but releases and scrubs it before returning.
+- `open` acquires exclusive Session ownership and initializes a fixed recovery cursor. A new Session returns ready immediately. A restored Session returns in `restoring`; it exposes no committed Projection or adapter work until `drive` has incrementally validated the snapshotted WAL and Completion Inbox through a safe watermark.
 - `offer` nonblockingly transfers bounded Task, Completion, Authorization, cancellation, or shutdown input into fixed live-process ingress. It performs no I/O, allocation, wait, or Core call. `full` or `busy` preserves producer ownership; `accepted` transfers custody only to the live Harness instance.
 - `drive` performs one bounded owner quantum. It borrows an Activation Slot only for that quantum, then encodes Core State, invalidates borrowed windows, scrubs the slot, and releases it before returning. It alone advances Core, publishes Session facts, admits immutable Attempts to adapters, applies durable Completions, and returns committed Projections and progress.
+
+While restoration is incomplete, each `drive` consumes at most the configured recovery-record quantum and returns `restoring` with `more = true` and no Projection. After the safe watermark is reached, Harness reconstructs the durable level state without dispatch, publishes Session identity first, and only a later `drive` may reconcile or admit external work. Recovery failure makes that live owner unavailable; a fresh `open` starts from durable bytes again.
 
 Harness hides WAL ordering, checkpoint replay, page activation and scrubbing, adapter admission, reconciliation, cancellation settlement, and Projection regeneration. The CLI and tests use the same interface.
 
@@ -90,7 +92,7 @@ Harness hides WAL ordering, checkpoint replay, page activation and scrubbing, ad
 
 ### Session storage
 
-Session storage is an internal concrete module behind Harness. It owns WAL framing and valid-prefix recovery, immutable content publication, State Checkpoint encoding, exclusive ownership and epochs, and bounded reads. Raw sequence allocation, file paths, checksums, and cross-record correlation are not lifecycle interfaces.
+Session storage is an internal concrete module behind Harness. It owns WAL framing and valid-prefix recovery, immutable content publication, State Checkpoint encoding, exclusive ownership and epochs, and bounded reads. A movable recovery cursor validates at most one physical record per step and updates a fixed rebuildable semantic index only after the complete record validates; live lifecycle lookups use that index rather than rescanning durable history. Raw sequence allocation, file paths, checksums, and cross-record correlation are not lifecycle interfaces.
 
 ### Adapters
 

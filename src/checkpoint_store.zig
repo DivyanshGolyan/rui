@@ -24,10 +24,11 @@ pub fn publish(
     encoded: []u8,
     agent_id: u64,
     generation: u32,
+    wal_sequence: u64,
     state: []const u8,
     fault: ?FaultHook,
 ) !void {
-    try checkpoint.encode(encoded, agent_id, generation, state);
+    try checkpoint.encode(encoded, agent_id, generation, wal_sequence, state);
 
     var temp = try dir.createFile(io, temp_path, .{});
     var temp_open = true;
@@ -100,9 +101,9 @@ test "atomic publication replaces a canonical checkpoint" {
     defer allocator.free(encoded);
 
     try encodeState(state, 0x11);
-    try publish(tmp.dir, io, "agent.page", "agent.page.tmp", encoded, 42, 7, state, null);
+    try publish(tmp.dir, io, "agent.page", "agent.page.tmp", encoded, 42, 7, 1, state, null);
     try encodeState(state, 0x22);
-    try publish(tmp.dir, io, "agent.page", "agent.page.tmp", encoded, 42, 7, state, null);
+    try publish(tmp.dir, io, "agent.page", "agent.page.tmp", encoded, 42, 7, 2, state, null);
     try expectFinal(tmp.dir, io, encoded, 0x22);
 }
 
@@ -118,7 +119,7 @@ test "every interrupted boundary leaves the old or new canonical checkpoint" {
         defer allocator.free(encoded);
 
         try encodeState(state, 0x11);
-        try publish(tmp.dir, io, "agent.page", "agent.page.tmp", encoded, 42, 7, state, null);
+        try publish(tmp.dir, io, "agent.page", "agent.page.tmp", encoded, 42, 7, 1, state, null);
         try encodeState(state, 0x22);
         var fault: InjectedFault = .{ .boundary = boundary };
         try std.testing.expectError(
@@ -131,6 +132,7 @@ test "every interrupted boundary leaves the old or new canonical checkpoint" {
                 encoded,
                 42,
                 7,
+                2,
                 state,
                 fault.hook(),
             ),

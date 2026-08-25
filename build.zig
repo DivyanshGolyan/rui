@@ -137,9 +137,7 @@ fn addTestGraph(
         "src/checkpoint.zig",
         "src/core_image.zig",
         "src/checkpoint_store.zig",
-        "src/operation_log.zig",
         "src/harness.zig",
-        "src/durable_transition.zig",
         "src/session.zig",
         "src/model_operation.zig",
     };
