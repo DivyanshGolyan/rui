@@ -1,7 +1,7 @@
 const std = @import("std");
 const core_state = @import("core_state.zig");
 
-pub const version: u16 = 1;
+pub const version: u16 = 2;
 pub const max_facts: usize = 8;
 pub const max_frames: u32 = 4096;
 pub const fact_size: usize = 72;
@@ -177,8 +177,9 @@ pub const Reader = struct {
             self.stopped_at_tail = true;
             return null;
         }
-        const transaction = decode(frame[0..frame_length]) catch |err| {
-            return self.handleInvalidTail(io, remaining, err);
+        const transaction = decode(frame[0..frame_length]) catch |err| switch (err) {
+            error.UnsupportedWalVersion, error.UnsupportedSchema => return err,
+            else => return self.handleInvalidTail(io, remaining, err),
         };
         if (transaction.sequence != self.last_sequence + 1) {
             return self.handleInvalidTail(io, remaining, error.NonmonotonicSequence);
@@ -249,7 +250,6 @@ pub fn decode(frame: []const u8) !Transaction {
     if (frame.len < header_size or !std.mem.eql(u8, frame[0..magic.len], magic)) {
         return error.InvalidWalFrame;
     }
-    if (read(u16, frame, 8) != version) return error.UnsupportedWalVersion;
     if (read(u16, frame, 10) != header_size or read(u32, frame, 12) != frame.len) {
         return error.InvalidWalFrame;
     }
@@ -266,6 +266,7 @@ pub fn decode(frame: []const u8) !Transaction {
     if (read(u32, frame, checksum_offset) != frameChecksum(frame)) {
         return error.WalChecksumMismatch;
     }
+    if (read(u16, frame, 8) != version) return error.UnsupportedWalVersion;
     var transaction: Transaction = .{
         .sequence = sequence,
         .fact_count = @intCast(fact_count),
@@ -378,6 +379,25 @@ test "transaction frame preserves several semantic facts and Core State" {
     try std.testing.expectEqual(@as(u64, 1), decoded.sequence);
     try std.testing.expectEqualSlices(Fact, transaction.factSlice(), decoded.factSlice());
     try std.testing.expectEqualSlices(u8, &state_bytes, &decoded.core.?);
+}
+
+test "previous WAL format versions fail closed" {
+    const previous_version: u16 = 1;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    var transaction: Transaction = .{ .sequence = 1, .fact_count = 1 };
+    transaction.facts[0] = testFact(.task_admitted);
+    var frame: [max_frame_size]u8 = undefined;
+    const encoded = try encode(&frame, transaction);
+    write(u16, &frame, 8, previous_version);
+    write(u32, &frame, checksum_offset, frameChecksum(encoded));
+    var file = try tmp.dir.createFile(io, "wal", .{});
+    try file.writeStreamingAll(io, encoded);
+    file.close(io);
+    var reader = try Reader.openIn(tmp.dir, io, "wal");
+    defer reader.close(io);
+    try std.testing.expectError(error.UnsupportedWalVersion, reader.next(io));
 }
 
 test "reader exposes only complete checksummed transaction frames" {

@@ -326,8 +326,11 @@ pub const Harness = struct {
                         .restore => null,
                     },
                     self.completionHook(),
-                ) catch |err| return self.classifyLifecycleError(err, progress);
-                self.setApproval(null);
+                ) catch |err| {
+                    try self.refreshApprovalRequired(session);
+                    return self.classifyLifecycleError(err, progress);
+                };
+                try self.refreshApprovalRequired(session);
                 // Continue below to publish the terminal projections.
             },
             .completion => |completion| {
@@ -563,9 +566,7 @@ pub const Harness = struct {
     }
 
     fn denyPendingApproval(self: *Harness, session: *session_store.Session) !void {
-        if (self.approvalSnapshot() == null) {
-            self.setApproval(try lifecycle.pendingApprovalRequired(session));
-        }
+        try self.refreshApprovalRequired(session);
         const approval = self.approvalSnapshot() orelse return;
         _ = lifecycle.resolvePermission(
             self.config.host,
@@ -580,11 +581,18 @@ pub const Harness = struct {
                 .restore => null,
             },
             self.completionHook(),
-        ) catch |err| switch (err) {
-            error.SessionNeedsModel => {},
-            else => return err,
+        ) catch |err| {
+            try self.refreshApprovalRequired(session);
+            switch (err) {
+                error.SessionNeedsModel => {},
+                else => return err,
+            }
         };
-        self.setApproval(null);
+        try self.refreshApprovalRequired(session);
+    }
+
+    fn refreshApprovalRequired(self: *Harness, session: *session_store.Session) !void {
+        self.setApproval(try lifecycle.pendingApprovalRequired(session));
     }
 
     fn continueSettlingControl(self: *Harness) !Progress {

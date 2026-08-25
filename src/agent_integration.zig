@@ -64,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
     try lostCompletionNotificationRecovers(&host, &layout, init.io, allocator);
     try offeredPermissionDenialContinues(&host, &layout, init.io, allocator);
     try restoredPatchApprovalUsesExactDescriptor(&host, &layout, init.io, allocator);
+    try approvedPatchThenShutdownEntersSettlement(&host, &layout, init.io, allocator);
     try cancellationRegenerates(&host, &layout, init.io, allocator);
     try uncommittedTaskCanBeReadmitted(&host, &layout, init.io, allocator);
     try uncertainModelRetryUsesNewAttempt(&host, &layout, init.io, allocator);
@@ -313,6 +314,71 @@ fn restoredPatchApprovalUsesExactDescriptor(
     _ = try restored.drive();
     const finished = try restored.drive();
     try expectFinal(&finished, answer);
+}
+
+fn approvedPatchThenShutdownEntersSettlement(
+    host: *harness.Host,
+    layout: *Layout,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+) !void {
+    const patch =
+        "diff --git a/shutdown-approval.txt b/shutdown-approval.txt\n" ++
+        "--- a/shutdown-approval.txt\n" ++
+        "+++ b/shutdown-approval.txt\n" ++
+        "@@ -1 +1 @@\n" ++
+        "-old\n" ++
+        "+new\n";
+    var file = try layout.workspace.createFile(io, "shutdown-approval.txt", .{});
+    try file.writeStreamingAll(io, "old\n");
+    file.close(io);
+    const added = try std.process.run(allocator, io, .{
+        .argv = &.{ "git", "-C", layout.workspace_path, "add", "shutdown-approval.txt" },
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(1024),
+    });
+    defer allocator.free(added.stdout);
+    defer allocator.free(added.stderr);
+    switch (added.term) {
+        .exited => |code| if (code != 0) return error.GitAddFailed,
+        else => return error.GitAddFailed,
+    }
+
+    var fixture: model_operation.ToolFixture = .{
+        .expected_task = task,
+        .tool = .apply_patch,
+        .tool_arguments = patch,
+        .final_answer = answer,
+    };
+    var owner = try harness.Harness.open(.{
+        .host = host,
+        .sessions = layout.sessions,
+        .io = io,
+        .allocator = allocator,
+        .mode = .{ .create = .{
+            .workspace_path = layout.workspace_path,
+            .model = "fixture:approved-patch-shutdown",
+            .task = task,
+            .provider = fixture.provider(),
+        } },
+    });
+    defer owner.close();
+    _ = try owner.drive();
+    if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+    _ = try owner.drive();
+    const waiting = try owner.drive();
+    const approval = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
+    if (owner.offer(.{ .permission = .{
+        .operation_id = approval.operation_id,
+        .operation_generation = approval.operation_generation,
+        .descriptor_digest = approval.descriptor_digest,
+        .allow = true,
+    } }) != .accepted) return error.PermissionOfferRejected;
+    const deferred = try owner.drive();
+    if (deferred.state != .waiting) return error.ApprovedPatchDidNotDefer;
+    if (owner.offer(.shutdown) != .accepted) return error.ShutdownOfferRejected;
+    const settling = try owner.drive();
+    if (settling.state != .cancelling) return error.ShutdownDidNotEnterSettlement;
 }
 
 fn approvalProjection(progress: *const harness.Progress) ?harness.Projection {
