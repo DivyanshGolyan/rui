@@ -80,8 +80,9 @@ Result, Completion, immutable-blob, and ledger-record bytes use distinct version
 types. Bash persists one descriptor binding its canonical Workspace and working directory, fixed
 environment authority, timeout, command, Operation identity, and generation. Patch validation uses Git
 in a private scratch copy to prepare the expected postimage without mutating the Workspace, then stores
-the complete intent binding before Authorization; patch application and reconciliation remain the
-separate durable effect slice. The all-zero value remains valid data; absence is represented separately.
+the complete intent binding before Authorization. Patch preparation admits a target and expected
+postimage of at most 1 MiB each; patch application and reconciliation remain the separate durable effect
+slice. The all-zero value remains valid data; absence is represented separately.
 These unkeyed bindings detect accidental corruption and resist collisions but do not make locally
 rewritable storage tamper-proof.
 

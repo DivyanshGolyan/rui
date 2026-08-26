@@ -811,6 +811,8 @@ fn requestPatchPermission(
             error.SymlinkEscape,
             error.PatchNotApplicable,
             error.NotTrackedRepositoryFile,
+            error.PatchTargetTooLarge,
+            error.PatchPostimageTooLarge,
             error.PreimageChangedDuringRead,
             error.PreimageChangedDuringValidation,
             => null,

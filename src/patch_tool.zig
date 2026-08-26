@@ -2,6 +2,7 @@ const std = @import("std");
 const binding_digest = @import("binding.zig");
 
 pub const max_patch_size = 16 * 1024;
+pub const max_file_size: u64 = 1024 * 1024;
 pub const max_path_size = 1024;
 pub const binding_size = 224;
 pub const result_size = 112;
@@ -223,6 +224,7 @@ pub fn validate(
     defer target.close(io);
     const stat = try target.stat(io);
     if (stat.kind != .file or stat.nlink != 1) return error.UnsupportedSpecialFile;
+    if (stat.size > max_file_size) return error.PatchTargetTooLarge;
     const preimage_digest = try hashFile(io, target, stat.size);
 
     try gitTracked(io, workspace_path, target_path);
@@ -230,8 +232,8 @@ pub fn validate(
     const postimage_digest = try expectedPostimage(
         allocator,
         io,
-        workspace,
-        workspace_path,
+        target,
+        stat.size,
         target_path,
         patch,
     );
@@ -239,6 +241,7 @@ pub fn validate(
     defer confirmed_target.close(io);
     const confirmed_stat = try confirmed_target.stat(io);
     if (confirmed_stat.kind != .file or confirmed_stat.nlink != 1) return error.UnsupportedSpecialFile;
+    if (confirmed_stat.size > max_file_size) return error.PatchTargetTooLarge;
     const confirmed_digest = try hashFile(io, confirmed_target, confirmed_stat.size);
     if (confirmed_stat.inode != stat.inode or confirmed_stat.size != stat.size or
         !binding_digest.eql(binding_digest.Preimage, confirmed_digest, preimage_digest))
@@ -444,13 +447,12 @@ fn hashFileAs(comptime T: type, io: std.Io, file: std.Io.File, size: u64) !T {
 fn expectedPostimage(
     allocator: std.mem.Allocator,
     io: std.Io,
-    workspace: std.Io.Dir,
-    workspace_path: []const u8,
+    source: std.Io.File,
+    source_size: u64,
     target_path: []const u8,
     patch: []const u8,
 ) !binding_digest.Postimage {
     _ = allocator;
-    _ = workspace_path;
     var temporary_root = try std.Io.Dir.cwd().openDir(io, "/private/tmp", .{});
     defer temporary_root.close(io);
     var random: [16]u8 = undefined;
@@ -476,7 +478,7 @@ fn expectedPostimage(
             // This non-authoritative private copy is garbage if cleanup fails.
         };
     }
-    try workspace.copyFile(target_path, temporary, target_path, io, .{ .make_path = true });
+    try copyExactTarget(io, source, source_size, temporary, target_path);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "/private/tmp/{s}", .{name});
     const term = try runGit(
@@ -490,7 +492,33 @@ fn expectedPostimage(
     defer target.close(io);
     const stat = try target.stat(io);
     if (stat.kind != .file or stat.nlink != 1) return error.UnsupportedSpecialFile;
+    if (stat.size > max_file_size) return error.PatchPostimageTooLarge;
     return hashFileAs(binding_digest.Postimage, io, target, stat.size);
+}
+
+fn copyExactTarget(
+    io: std.Io,
+    source: std.Io.File,
+    source_size: u64,
+    destination_dir: std.Io.Dir,
+    target_path: []const u8,
+) !void {
+    std.debug.assert(source_size <= max_file_size);
+    if (std.mem.lastIndexOfScalar(u8, target_path, '/')) |separator| {
+        try destination_dir.createDirPath(io, target_path[0..separator]);
+    }
+    var destination = try destination_dir.createFile(io, target_path, .{ .exclusive = true });
+    defer destination.close(io);
+    var buffer: [4096]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < source_size) {
+        const remaining: usize = @intCast(@min(source_size - offset, buffer.len));
+        const count = try source.readPositionalAll(io, buffer[0..remaining], offset);
+        if (count == 0) return error.PreimageChangedDuringRead;
+        try destination.writeStreamingAll(io, buffer[0..count]);
+        offset += count;
+    }
+    if (try source.length(io) != source_size) return error.PreimageChangedDuringRead;
 }
 
 fn gitTracked(io: std.Io, workspace_path: []const u8, target_path: []const u8) !void {
@@ -665,6 +693,53 @@ test "one exact tracked regular-file patch validates without mutation" {
     try std.testing.expectEqualStrings("old\n", &actual);
 }
 
+test "patch preparation bounds both target and expected postimage bytes" {
+    const io = std.testing.io;
+    const cases = [_]struct {
+        target_size: u64,
+        replacement: []const u8,
+        expected_error: ?anyerror,
+    }{
+        .{ .target_size = max_file_size, .replacement = "new", .expected_error = null },
+        .{ .target_size = max_file_size + 1, .replacement = "new", .expected_error = error.PatchTargetTooLarge },
+        .{ .target_size = max_file_size, .replacement = "new!", .expected_error = error.PatchPostimageTooLarge },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try writeSizedTestFile(tmp.dir, io, "bounded.txt", case.target_size);
+        var relative_buffer: [128]u8 = undefined;
+        const relative = try std.fmt.bufPrint(&relative_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path_length = try std.Io.Dir.cwd().realPathFile(io, relative, &path_buffer);
+        const path = path_buffer[0..path_length];
+        try expectGit(io, path, &.{ "init", "-q" });
+        try expectGit(io, path, &.{ "add", "bounded.txt" });
+        var patch_buffer: [256]u8 = undefined;
+        const patch = try std.fmt.bufPrint(
+            &patch_buffer,
+            "diff --git a/bounded.txt b/bounded.txt\n" ++
+                "--- a/bounded.txt\n" ++
+                "+++ b/bounded.txt\n" ++
+                "@@ -1,2 +1,2 @@\n" ++
+                "-old\n" ++
+                "+{s}\n" ++
+                " x\n",
+            .{case.replacement},
+        );
+        if (case.expected_error) |expected_error| {
+            try std.testing.expectError(
+                expected_error,
+                validate(std.testing.allocator, io, path, patch, testAction()),
+            );
+        } else {
+            const validated = try validate(std.testing.allocator, io, path, patch, testAction());
+            try std.testing.expectEqual(max_file_size, validated.preimage_size);
+        }
+        try expectSizedTestFileUnchanged(tmp.dir, io, "bounded.txt", case.target_size);
+    }
+}
+
 test "permission binding and typed result are canonical" {
     const preimage = binding_digest.hash(binding_digest.Preimage, "preimage-7");
     const expected: Binding = .{
@@ -799,6 +874,34 @@ fn writeTestFile(dir: std.Io.Dir, io: std.Io, path: []const u8, bytes: []const u
     var file = try dir.createFile(io, path, .{});
     defer file.close(io);
     try file.writeStreamingAll(io, bytes);
+}
+
+fn writeSizedTestFile(dir: std.Io.Dir, io: std.Io, path: []const u8, size: u64) !void {
+    std.debug.assert(size >= 4);
+    var file = try dir.createFile(io, path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, "old\n");
+    const filler = "x\n" ** 2048;
+    var remaining = size - 4;
+    while (remaining > 0) {
+        const count: usize = @intCast(@min(remaining, filler.len));
+        try file.writeStreamingAll(io, filler[0..count]);
+        remaining -= count;
+    }
+}
+
+fn expectSizedTestFileUnchanged(
+    dir: std.Io.Dir,
+    io: std.Io,
+    path: []const u8,
+    size: u64,
+) !void {
+    var file = try dir.openFile(io, path, .{});
+    defer file.close(io);
+    try std.testing.expectEqual(size, try file.length(io));
+    var prefix: [4]u8 = undefined;
+    try std.testing.expectEqual(prefix.len, try file.readPositionalAll(io, &prefix, 0));
+    try std.testing.expectEqualStrings("old\n", &prefix);
 }
 
 fn expectTestFile(dir: std.Io.Dir, io: std.Io, path: []const u8, expected: []const u8) !void {
