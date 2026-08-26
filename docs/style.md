@@ -49,8 +49,13 @@ deferred explicitly.
 - Treat `offer` acceptance as volatile custody. Only a committed Host Store transaction acknowledges a
   semantic fact.
 - Prepare and validate complete transitions before commit. After commit, publish without new semantic
-  validation or general-purpose allocation.
+  validation, fallible capacity checks, or general-purpose allocation. Anything that can reject the
+  prepared transition is resolved before commit; publication is an infallible assignment of prepared
+  live state. If a platform operation still fails after commit, make the live owner unavailable and
+  reconstruct from durable state.
 - Make ownership, generation, identity, and capacity transitions explicit. Stale references fail closed.
+- Serialize acquisition against destruction for top-level owning handles. A retained-child count protects
+  existing children; it does not turn an unretained raw pointer into a concurrent weak reference.
 - Keep every production query indexed and bounded in input bytes, rows, result bytes, temporary work,
   transaction work, and recovery work. Do not rely on an unbounded sort, aggregation, join, or temporary
   result spilling to disk.
@@ -62,6 +67,9 @@ deferred explicitly.
 - Use fixed-width integers, explicit byte order, versioning, lengths, and checksums in durable,
   cross-process, and network formats. Do not persist `usize`, native enums, pointers, or struct
   layout.
+- Represent semantic facts as typed variants whose payload exposes only fields valid for that kind.
+  Keep flat tagged records private to the canonical wire codec, and validate them before constructing
+  a typed fact.
 - Validate important records before writing and after reading. Validate consequential operations before
   admission and again before application.
 - Initialize buffers deliberately before observation and scrub reusable storage before transfer to a new
@@ -73,8 +81,8 @@ deferred explicitly.
 
 - Assert programmer errors and impossible states. Return typed errors or Results for expected I/O,
   capacity, permission, corruption, timeout, and external-process failures.
-- Handle every error. An intentionally ignored cleanup error needs a local explanation and the narrowest
-  possible suppression.
+- Handle every error. An intentionally ignored cleanup error needs an explanation at the narrowest
+  shared wrapper that establishes why suppression is safe; callers of that wrapper need not repeat it.
 - Test both positive and negative space: malformed records, stale generations, truncated input, capacity
   exhaustion, duplicates, replay, and every correctness-sensitive crash boundary.
 - Never infer that an uncertain external effect did not happen because evidence is absent.
@@ -85,8 +93,9 @@ deferred explicitly.
   possible.
 - Keep values and validation near their use. Prefer small scopes and deep modules that hide mechanics
   behind semantic interfaces.
-- Use named option or descriptor structures when multiple arguments share a type or represent identities,
-  lengths, offsets, generations, or optional values.
+- Use a named descriptor when a call carries independently optional fields or coupled choices. A typed
+  context followed by a short canonical sequence of required fields is acceptable when their roles are
+  unambiguous at the call site.
 - Explain invariants and non-obvious safety arguments. Do not narrate syntax or restate the implementation.
 
 ## Review triggers, not gates

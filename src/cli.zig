@@ -1,6 +1,5 @@
 const std = @import("std");
 const harness = @import("harness.zig");
-const host_store = @import("host_store.zig");
 const bash_tool = @import("bash_tool.zig");
 const model_operation = @import("model_operation.zig");
 const patch_tool = @import("patch_tool.zig");
@@ -23,7 +22,6 @@ const Arguments = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
-    var host: harness.Host = .{};
     const raw_args = try init.minimal.args.toSlice(allocator);
     const arguments = try parseArguments(raw_args);
 
@@ -33,16 +31,8 @@ pub fn main(init: std.process.Init) !void {
         arguments.state_path,
     );
     defer allocator.free(state_path);
-    var sessions = try std.Io.Dir.cwd().createDirPathOpen(
-        init.io,
-        state_path,
-        .{ .permissions = .fromMode(0o700) },
-    );
-    defer sessions.close(init.io);
-    const database_path = try std.fs.path.join(allocator, &.{ state_path, "host.sqlite3" });
-    defer allocator.free(database_path);
-    var storage = try host_store.StorageOwner.open(init.io, database_path, .{});
-    defer storage.close();
+    const runtime = try harness.HostRuntime.open(init.io, allocator, state_path, .{});
+    defer runtime.close() catch unreachable;
     if (arguments.resume_id) |session_id| {
         var fixture: model_operation.Fixture = .{
             .expected_task = null,
@@ -54,11 +44,7 @@ pub fn main(init: std.process.Init) !void {
             break :provider fixture.provider();
         } else null;
         var owner = try harness.Harness.open(.{
-            .host = &host,
-            .storage = &storage,
-            .sessions = sessions,
-            .io = init.io,
-            .allocator = allocator,
+            .runtime = runtime,
             .permission_mode = if (arguments.dangerously_bypass_permissions) .bypass else .ask,
             .mode = .{ .restore = .{ .session_id = session_id, .provider = provider } },
         });
@@ -90,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
                 .final_answer = response,
                 .expected_patch_status = .denied,
             };
-            try runCreate(init.io, allocator, &host, &storage, sessions, arguments.dangerously_bypass_permissions, .{
+            try runCreate(init.io, runtime, arguments.dangerously_bypass_permissions, .{
                 .workspace_path = workspace_path,
                 .model = model,
                 .task = task,
@@ -109,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
                 .tool_arguments = encoded_call,
                 .final_answer = response,
             };
-            try runCreate(init.io, allocator, &host, &storage, sessions, arguments.dangerously_bypass_permissions, .{
+            try runCreate(init.io, runtime, arguments.dangerously_bypass_permissions, .{
                 .workspace_path = workspace_path,
                 .model = model,
                 .task = task,
@@ -121,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
             .expected_task = task,
             .final_answer = response,
         };
-        try runCreate(init.io, allocator, &host, &storage, sessions, arguments.dangerously_bypass_permissions, .{
+        try runCreate(init.io, runtime, arguments.dangerously_bypass_permissions, .{
             .workspace_path = workspace_path,
             .model = model,
             .task = task,
@@ -132,19 +118,12 @@ pub fn main(init: std.process.Init) !void {
 
 fn runCreate(
     io: std.Io,
-    allocator: std.mem.Allocator,
-    host: *harness.Host,
-    storage: *host_store.StorageOwner,
-    sessions: std.Io.Dir,
+    runtime: *harness.HostRuntime,
     bypass_permissions: bool,
     create: harness.Create,
 ) !void {
     var owner = try harness.Harness.open(.{
-        .host = host,
-        .storage = storage,
-        .sessions = sessions,
-        .io = io,
-        .allocator = allocator,
+        .runtime = runtime,
         .permission_mode = if (bypass_permissions) .bypass else .ask,
         .mode = .{ .create = create },
     });

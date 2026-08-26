@@ -24,9 +24,14 @@ test "one semantic commit occupies one ledger sequence" {
     var owner = try host_store.StorageOwner.open(std.testing.io, try pathFor(&tmp, &path_buffer), .{});
     defer owner.close();
     try create(&owner, 11);
+    const agent: transition.AgentContext = .{
+        .agent_id = 12,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
     const facts = [_]transition.Fact{
-        .{ .kind = .task_admitted, .agent_id = 12, .agent_generation = 1, .ownership_epoch = 1, .subject = 13, .reference = 13 },
-        .{ .kind = .conversation_advanced, .agent_id = 12, .agent_generation = 1, .ownership_epoch = 1, .subject = 1, .reference = 13 },
+        transition.taskAdmitted(agent, 13, 13),
+        transition.conversationAdvanced(agent, 1, 13),
     };
     var buffer: [transition.max_payload_size]u8 = undefined;
     const payload = try encode(&buffer, 1, &facts);
@@ -52,7 +57,11 @@ test "epoch and head are fenced by the same commit" {
     try create(&owner, 21);
     _ = try owner.claimSession(21);
     var buffer: [transition.max_payload_size]u8 = undefined;
-    const payload = try encode(&buffer, 1, &.{.{ .kind = .cancellation, .agent_id = 22, .agent_generation = 1, .ownership_epoch = 1 }});
+    const payload = try encode(&buffer, 1, &.{transition.cancellation(.{
+        .agent_id = 22,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    })});
     try std.testing.expectError(error.StaleOwnerOrSequenceConflict, owner.commit(.{
         .token = .{ .session_id = 21, .epoch = 1 },
         .expected_sequence = 0,
@@ -69,7 +78,11 @@ test "Conversation metadata and ledger publication are atomic" {
     defer owner.close();
     try create(&owner, 31);
     var buffer: [transition.max_payload_size]u8 = undefined;
-    const payload = try encode(&buffer, 1, &.{.{ .kind = .conversation_advanced, .agent_id = 32, .agent_generation = 1, .ownership_epoch = 1, .subject = 2, .reference = 39 }});
+    const payload = try encode(&buffer, 1, &.{transition.conversationAdvanced(.{
+        .agent_id = 32,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    }, 2, 39)});
     _ = try owner.commit(.{
         .token = .{ .session_id = 31, .epoch = 1 },
         .expected_sequence = 0,
@@ -96,9 +109,26 @@ test "multiple Completion rows can be consumed by one semantic commit" {
     second.result_digest = 81;
     _ = try owner.publishCompletion(first);
     _ = try owner.publishCompletion(second);
+    const agent: transition.AgentContext = .{
+        .agent_id = 42,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
     const facts = [_]transition.Fact{
-        .{ .kind = .result, .agent_id = 42, .agent_generation = 1, .ownership_epoch = 1, .operation_id = 50, .generation = 1, .attempt_id = 60, .reference = 70, .digest = 80, .recovery_class = .model, .disposition = .terminal, .evidence_kind = 1 },
-        .{ .kind = .result, .agent_id = 42, .agent_generation = 1, .ownership_epoch = 1, .operation_id = 51, .generation = 1, .attempt_id = 61, .reference = 71, .digest = 81, .recovery_class = .model, .disposition = .terminal, .evidence_kind = 1 },
+        transition.result(.{
+            .operation = .{ .agent = agent, .operation_id = 50, .generation = 1 },
+            .result_ref = 70,
+            .result_digest = 80,
+            .class = .ordinary,
+            .evidence = .{ .durable = .{ .model = 60 } },
+        }),
+        transition.result(.{
+            .operation = .{ .agent = agent, .operation_id = 51, .generation = 1 },
+            .result_ref = 71,
+            .result_digest = 81,
+            .class = .ordinary,
+            .evidence = .{ .durable = .{ .model = 61 } },
+        }),
     };
     var buffer: [transition.max_payload_size]u8 = undefined;
     const payload = try encode(&buffer, 1, &facts);
@@ -115,16 +145,41 @@ test "multiple Completion rows can be consumed by one semantic commit" {
     try std.testing.expectEqual(@as(?u64, 1), (try owner.readCompletion(41, 2)).consumed_by_sequence);
 }
 
-test "the Host Store lock and memory envelope are host scoped" {
+test "the Host Store lock is host scoped" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [256]u8 = undefined;
     const path = try pathFor(&tmp, &path_buffer);
     var first = try host_store.StorageOwner.open(std.testing.io, path, .{});
     try std.testing.expectError(error.HostStoreBusy, host_store.StorageOwner.open(std.testing.io, path, .{}));
-    const accounting = try first.memoryAccounting(false);
-    try std.testing.expect(accounting.heap_current_bytes <= accounting.allowance_bytes);
     first.close();
     var next = try host_store.StorageOwner.open(std.testing.io, path, .{});
     next.close();
+}
+
+test "host memory remains bounded across cache profiles and Session populations" {
+    inline for (.{ @as(u16, 32), @as(u16, 64), @as(u16, 128) }) |profile| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path_buffer: [256]u8 = undefined;
+        var owner = try host_store.StorageOwner.open(
+            std.testing.io,
+            try pathFor(&tmp, &path_buffer),
+            .{ .page_cache_kib = profile },
+        );
+        defer owner.close();
+        _ = try owner.memoryAccounting(true);
+
+        inline for (.{ @as(u64, 32), @as(u64, 128) }) |population| {
+            var next_id: u64 = if (population == 32) 1 else 33;
+            while (next_id <= population) : (next_id += 1) try create(&owner, next_id * 4);
+            const accounting = try owner.memoryAccounting(false);
+            try std.testing.expect(accounting.heap_current_bytes <= accounting.allowance_bytes);
+            try std.testing.expect(accounting.heap_highwater_bytes <= accounting.allowance_bytes);
+            try std.testing.expect(accounting.page_cache_current_bytes > 0);
+            try std.testing.expect(accounting.page_cache_current_bytes <= @as(u64, profile) * 2048);
+            try std.testing.expect(accounting.lookaside_current_slots <= accounting.lookaside_highwater_slots);
+            try std.testing.expectEqual(@as(u64, 0), accounting.statements_current_bytes);
+        }
+    }
 }

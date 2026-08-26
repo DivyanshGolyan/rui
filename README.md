@@ -24,8 +24,10 @@ completion, permission, cancellation, and shutdown admission; durable-before-app
 committed projections; bounded drive quanta; and crash/replay tests. Its 32-entry maximum is fixed at
 compile time and does not vary with logical-agent count.
 
-One Host Runtime holds a lifetime operating-system lock and routes every durable read and write through
-one bounded Storage Owner. Each Session retains exact create and resume identity, durable ownership
+Applications open one `HostRuntime` from a state path and pass only that runtime to
+`Harness.open`. It owns the state directory, Activation Slot pool, lifetime operating-system lock,
+SQLite connection, and bounded Storage Owner; lifecycle callers do not assemble or retain those
+mechanics separately. The runtime outlives every Harness opened from it. Each Session retains exact create and resume identity, durable ownership
 epochs, an ordered semantic ledger, and an append-only parent-linked conversation. Sleeping Sessions
 retain rows and blob references rather than SQLite connections or resident object graphs.
 

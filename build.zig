@@ -181,6 +181,18 @@ fn addTestGraph(
     run_cli_resume.addArtifactArg(cli_resume_fixture);
     run_cli_resume.addArtifactArg(cli);
     parent.dependOn(&run_cli_resume.step);
+
+    const host_lock_fixture = addNativeExecutable(
+        b,
+        "onepage-host-runtime-lock-fixture",
+        "src/host_runtime_lock_fixture.zig",
+        native_target,
+        optimize,
+    );
+    const run_host_lock = b.addSystemCommand(&.{"sh"});
+    run_host_lock.addFileArg(b.path("src/host_runtime_lock_integration.sh"));
+    run_host_lock.addArtifactArg(host_lock_fixture);
+    parent.dependOn(&run_host_lock.step);
 }
 
 fn addTestRun(
@@ -253,6 +265,7 @@ fn usesHostStore(root: []const u8) bool {
         "src/cli.zig",
         "src/cli_resume_fixture.zig",
         "src/harness.zig",
+        "src/host_runtime_lock_fixture.zig",
         "src/host_store_test.zig",
         "src/model_operation.zig",
         "src/session.zig",

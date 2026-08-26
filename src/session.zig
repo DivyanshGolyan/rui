@@ -103,13 +103,13 @@ const OperationHistory = struct {
     result: ?session_transition.Fact = null,
 
     fn accepts(self: OperationHistory, fact: session_transition.Fact) bool {
-        return self.operation_id == fact.operation_id and self.generation == fact.generation;
+        return self.operation_id == fact.operationId() and self.generation == fact.generation();
     }
 
     fn appendAttempt(self: *OperationHistory, fact: session_transition.Fact) !void {
         for (self.attempts[0..self.attempt_count]) |maybe_existing| {
             const existing = maybe_existing.?;
-            if (existing.attempt_id != fact.attempt_id) continue;
+            if (existing.attemptId() != fact.attemptId()) continue;
             if (!std.meta.eql(existing, fact)) return error.ConflictingLedgerFacts;
             self.attempt = existing;
             return;
@@ -122,7 +122,7 @@ const OperationHistory = struct {
 
     fn containsAttempt(self: OperationHistory, attempt_id: u64) bool {
         for (self.attempts[0..self.attempt_count]) |maybe_attempt| {
-            if (maybe_attempt.?.attempt_id == attempt_id) return true;
+            if (maybe_attempt.?.attemptId() == attempt_id) return true;
         }
         return false;
     }
@@ -140,22 +140,22 @@ const SemanticIndex = struct {
     fn apply(self: *SemanticIndex, transaction: session_transition.Transaction) !void {
         if (transaction.sequence != self.last_sequence + 1) return error.NonmonotonicSequence;
         for (transaction.factSlice()) |fact| {
-            const history: ?*OperationHistory = switch (fact.recovery_class) {
+            const history: ?*OperationHistory = switch (fact.recoveryClass()) {
                 .model => &self.model,
                 .consequential => &self.consequential,
-                .none => if (fact.operation_id == 0)
+                .none => if (fact.operationId() == 0)
                     null
-                else if (fact.operation_id >> 63 == 0)
+                else if (fact.operationId() >> 63 == 0)
                     &self.model
                 else
                     &self.consequential,
             };
-            switch (fact.kind) {
+            switch (fact.kind()) {
                 .operation_submitted => if (history) |value| {
                     if (!value.accepts(fact)) value.* = .{
-                        .operation_id = fact.operation_id,
-                        .generation = fact.generation,
-                        .recovery_class = fact.recovery_class,
+                        .operation_id = fact.operationId(),
+                        .generation = fact.generation(),
+                        .recovery_class = fact.recoveryClass(),
                     };
                     value.descriptor = try uniqueIndexedFact(value.descriptor, fact);
                 },
@@ -178,14 +178,14 @@ const SemanticIndex = struct {
                         value.result = try uniqueIndexedFact(value.result, fact);
                     }
                     if (self.open_operation) |open_fact| {
-                        if (open_fact.operation_id == fact.operation_id and
-                            open_fact.generation == fact.generation)
+                        if (open_fact.operationId() == fact.operationId() and
+                            open_fact.generation() == fact.generation())
                         {
                             self.open_operation = null;
                         }
                     }
                     // Bash status 8 is the durable indeterminate disposition.
-                    if (fact.recovery_class == .consequential and fact.flags == 8) {
+                    if (fact.recoveryClass() == .consequential and fact.isIndeterminate()) {
                         self.indeterminate = fact;
                     }
                 },
@@ -655,15 +655,15 @@ pub const Session = struct {
     }
 
     fn validatePreparedConversationEntry(self: *Session, fact: session_transition.Fact) !void {
-        if (fact.subject <= self.entry_count) {
-            const existing = try self.readEntry(fact.subject);
-            if (existing.content_ref != fact.reference) return error.ConversationLedgerMismatch;
+        if (fact.subject() <= self.entry_count) {
+            const existing = try self.readEntry(fact.subject());
+            if (existing.content_ref != fact.reference()) return error.ConversationLedgerMismatch;
             return;
         }
-        if (fact.subject != self.entry_count + 1) return error.ConversationLedgerGap;
+        if (fact.subject() != self.entry_count + 1) return error.ConversationLedgerGap;
         const entry = self.pending_conversation orelse return error.MissingPreparedConversationEntry;
-        if (entry.entry_id != fact.subject or entry.sequence != fact.subject or
-            entry.parent_id != self.active_leaf_id or entry.content_ref != fact.reference or
+        if (entry.entry_id != fact.subject() or entry.sequence != fact.subject() or
+            entry.parent_id != self.active_leaf_id or entry.content_ref != fact.reference() or
             entry.session_id != self.session_id or entry.task_id != self.task_id)
         {
             return error.ConversationLedgerMismatch;
@@ -671,29 +671,29 @@ pub const Session = struct {
     }
 
     fn publishConversationEntry(self: *Session, fact: session_transition.Fact) void {
-        if (fact.subject <= self.entry_count) return;
-        std.debug.assert(fact.subject == self.entry_count + 1);
-        self.active_leaf_id = fact.subject;
-        self.entry_count = fact.subject;
+        if (fact.subject() <= self.entry_count) return;
+        std.debug.assert(fact.subject() == self.entry_count + 1);
+        self.active_leaf_id = fact.subject();
+        self.entry_count = fact.subject();
         self.pending_conversation = null;
     }
 
     fn reconstructConversationEntry(self: *Session, fact: session_transition.Fact) !void {
-        if (fact.subject <= self.entry_count) {
-            const existing = try self.readEntry(fact.subject);
-            if (existing.content_ref != fact.reference) return error.ConversationLedgerMismatch;
+        if (fact.subject() <= self.entry_count) {
+            const existing = try self.readEntry(fact.subject());
+            if (existing.content_ref != fact.reference()) return error.ConversationLedgerMismatch;
             return;
         }
-        if (fact.subject != self.entry_count + 1) return error.ConversationLedgerGap;
-        const entry = try self.loadEntry(fact.subject);
-        if (entry.entry_id != fact.subject or entry.sequence != fact.subject or
-            entry.parent_id != self.active_leaf_id or entry.content_ref != fact.reference or
+        if (fact.subject() != self.entry_count + 1) return error.ConversationLedgerGap;
+        const entry = try self.loadEntry(fact.subject());
+        if (entry.entry_id != fact.subject() or entry.sequence != fact.subject() or
+            entry.parent_id != self.active_leaf_id or entry.content_ref != fact.reference() or
             entry.session_id != self.session_id or entry.task_id != self.task_id)
         {
             return error.ConversationLedgerMismatch;
         }
-        self.active_leaf_id = fact.subject;
-        self.entry_count = fact.subject;
+        self.active_leaf_id = fact.subject();
+        self.entry_count = fact.subject();
     }
 
     pub fn readEntry(self: *Session, sequence: u64) !ConversationEntry {
@@ -790,7 +790,7 @@ pub const Session = struct {
             _ = try core_state.decode(bytes);
         }
         for (facts) |fact| {
-            if (fact.kind == .conversation_advanced) try self.validatePreparedConversationEntry(fact);
+            if (fact.kind() == .conversation_advanced) try self.validatePreparedConversationEntry(fact);
             try self.validatePreparedBlobReferences(fact);
         }
 
@@ -809,10 +809,10 @@ pub const Session = struct {
         var completion_count: usize = 0;
         var capacity_class: host_store.CapacityClass = .closure;
         for (facts) |fact| {
-            if (fact.kind == .task_admitted or fact.kind == .operation_submitted or
-                fact.kind == .attempt_admitted) capacity_class = .admission;
-            if (fact.kind == .conversation_advanced) {
-                const entry = if (fact.subject == 1) ConversationEntry{
+            if (fact.kind() == .task_admitted or fact.kind() == .operation_submitted or
+                fact.kind() == .attempt_admitted) capacity_class = .admission;
+            if (fact.kind() == .conversation_advanced) {
+                const entry = if (fact.subject() == 1) ConversationEntry{
                     .kind = .user,
                     .session_id = self.session_id,
                     .entry_id = 1,
@@ -829,17 +829,17 @@ pub const Session = struct {
                 };
                 conversation_count += 1;
             }
-            if (fact.kind == .result and fact.attempt_id != 0) {
+            if (fact.evidenceKind()) |evidence_kind| {
                 completions[completion_count] = .{
-                    .ownership_epoch = fact.ownership_epoch,
-                    .agent_id = fact.agent_id,
-                    .agent_generation = fact.agent_generation,
-                    .operation_id = fact.operation_id,
-                    .operation_generation = fact.generation,
-                    .attempt_id = fact.attempt_id,
-                    .evidence_kind = fact.evidence_kind,
-                    .result_reference = fact.reference,
-                    .result_digest = fact.digest,
+                    .ownership_epoch = fact.ownershipEpoch(),
+                    .agent_id = fact.agentId(),
+                    .agent_generation = fact.agentGeneration(),
+                    .operation_id = fact.operationId(),
+                    .operation_generation = fact.generation(),
+                    .attempt_id = fact.attemptId(),
+                    .evidence_kind = @intFromEnum(evidence_kind),
+                    .result_reference = fact.reference(),
+                    .result_digest = fact.digest(),
                 };
                 completion_count += 1;
             }
@@ -858,7 +858,7 @@ pub const Session = struct {
         self.ledger_sequence = final_sequence;
         self.semantic_index = prepared_index;
         for (facts) |fact| {
-            if (fact.kind == .conversation_advanced) self.publishConversationEntry(fact);
+            if (fact.kind() == .conversation_advanced) self.publishConversationEntry(fact);
         }
         return final_sequence;
     }
@@ -869,14 +869,14 @@ pub const Session = struct {
     ) !void {
         var blobs = try self.dir.openDir(self.io, blobs_path, .{});
         defer blobs.close(self.io);
-        if (fact.reference != 0) {
-            _ = blob_store.metadata(blobs, self.io, fact.reference) catch |err| switch (err) {
+        if (fact.reference() != 0) {
+            _ = blob_store.metadata(blobs, self.io, fact.reference()) catch |err| switch (err) {
                 error.FileNotFound => return error.MissingBlobReference,
                 else => return err,
             };
         }
-        if (fact.kind == .approval_required and fact.subject != 0) {
-            _ = blob_store.metadata(blobs, self.io, fact.subject) catch |err| switch (err) {
+        if (fact.kind() == .approval_required and fact.subject() != 0) {
+            _ = blob_store.metadata(blobs, self.io, fact.subject()) catch |err| switch (err) {
                 error.FileNotFound => return error.MissingBlobReference,
                 else => return err,
             };
@@ -933,7 +933,7 @@ pub const Session = struct {
                 var prepared_index = self.semantic_index;
                 try prepared_index.apply(transaction);
                 for (transaction.factSlice()) |fact| {
-                    if (fact.kind == .conversation_advanced) try self.reconstructConversationEntry(fact);
+                    if (fact.kind() == .conversation_advanced) try self.reconstructConversationEntry(fact);
                 }
                 self.semantic_index = prepared_index;
                 self.recovery_sequence += 1;
@@ -978,14 +978,16 @@ pub const Session = struct {
         if (envelope.ownership_epoch > token.epoch) return error.FutureCompletionEpoch;
         var result = try self.openBlob(token, envelope.result_ref);
         result.close();
-        _ = try self.storage.publishCompletion(envelope);
-        try self.inbox_index.apply(
+        var prepared_inbox = self.inbox_index;
+        try prepared_inbox.apply(
             &self.semantic_index,
             envelope,
             self.session_id,
             self.agent_id,
             self.ownership_epoch,
         );
+        _ = try self.storage.publishCompletion(envelope);
+        self.inbox_index = prepared_inbox;
     }
 
     pub fn scanCompletionEvidence(
@@ -1257,6 +1259,67 @@ test "future ownership epochs never enter the durable Completion Inbox" {
     try std.testing.expectEqual(@as(u64, 0), try layout.storage.completionHead(created.session_id));
 }
 
+test "fallible Inbox publication is prepared before durable Completion commit" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 16));
+    defer created.close();
+    const token = created.ownerToken();
+    const agent: session_transition.AgentContext = .{
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .ownership_epoch = token.epoch,
+    };
+    const operation: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 100,
+        .generation = 1,
+    };
+    var semantic: session_transition.Transaction = .{ .sequence = 1, .fact_count = 3 };
+    semantic.facts[0] = session_transition.operationSubmitted(operation, 101, 102, .model);
+    semantic.facts[1] = session_transition.attemptAdmitted(operation, 103, 101, 102, .model);
+    semantic.facts[2] = session_transition.attemptAdmitted(operation, 108, 101, 102, .model);
+    try created.semantic_index.apply(semantic);
+
+    const existing: completion_inbox.Envelope = .{
+        .kind = .model,
+        .session_id = created.session_id,
+        .ownership_epoch = token.epoch,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = 100,
+        .operation_generation = 1,
+        .attempt_id = 103,
+        .result_ref = 104,
+        .result_digest = 105,
+    };
+    try created.inbox_index.apply(
+        &created.semantic_index,
+        existing,
+        created.session_id,
+        created.agent_id,
+        token.epoch,
+    );
+    var other_attempt = existing;
+    other_attempt.attempt_id = 108;
+    for (&created.inbox_index.ambiguous) |*slot| {
+        slot.* = InboxIndex.AttemptKey.fromEnvelope(other_attempt);
+    }
+
+    var conflicting = existing;
+    conflicting.result_ref = 106;
+    conflicting.result_digest = 107;
+    try created.storeBlob(token, conflicting.result_ref, "conflicting result");
+    try std.testing.expectError(
+        error.InboxSemanticCapacityExceeded,
+        created.publishCompletionEvidence(token, conflicting),
+    );
+    try std.testing.expectEqual(@as(u64, 0), try layout.storage.completionHead(created.session_id));
+    try std.testing.expectEqualDeep(existing, created.inbox_index.entries[0].?);
+}
+
 test "recovery advances only within the configured Session Ledger quantum" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
@@ -1264,14 +1327,11 @@ test "recovery advances only within the configured Session Ledger quantum" {
     var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 80));
     for (0..5) |index| {
         try created.storeBlob(created.ownerToken(), index + 1, "ledger fixture");
-        _ = try created.commitSemantic(created.ownerToken(), &.{.{
-            .kind = .task_admitted,
+        _ = try created.commitSemantic(created.ownerToken(), &.{session_transition.taskAdmitted(.{
             .agent_id = created.agent_id,
             .agent_generation = 1,
             .ownership_epoch = created.ownership_epoch,
-            .subject = index + 1,
-            .reference = index + 1,
-        }}, null);
+        }, index + 1, index + 1)}, null);
     }
     created.close();
 
@@ -1305,16 +1365,15 @@ test "semantic commits reject missing immutable blob references before advancing
 
     try std.testing.expectError(error.MissingBlobReference, created.commitSemantic(
         created.ownerToken(),
-        &.{.{
-            .kind = .operation_submitted,
-            .agent_id = created.agent_id,
-            .agent_generation = 1,
-            .ownership_epoch = created.ownership_epoch,
+        &.{session_transition.operationSubmitted(.{
+            .agent = .{
+                .agent_id = created.agent_id,
+                .agent_generation = 1,
+                .ownership_epoch = created.ownership_epoch,
+            },
             .operation_id = 100,
             .generation = 1,
-            .reference = 999,
-            .digest = 123,
-        }},
+        }, 999, 123, .none)},
         null,
     ));
     try std.testing.expectEqual(@as(u64, 0), created.ledger_sequence);
@@ -1322,22 +1381,20 @@ test "semantic commits reject missing immutable blob references before advancing
 }
 
 test "irrelevant inbox records cannot displace admitted Attempt evidence" {
-    var semantic: SemanticIndex = .{};
-    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    admission.facts[0] = .{
-        .kind = .operation_submitted,
+    const agent: session_transition.AgentContext = .{
         .agent_id = 1,
         .agent_generation = 1,
         .ownership_epoch = 1,
+    };
+    const operation: session_transition.OperationContext = .{
+        .agent = agent,
         .operation_id = 10,
         .generation = 1,
-        .reference = 11,
-        .digest = 12,
     };
-    admission.facts[1] = admission.facts[0];
-    admission.facts[1].kind = .attempt_admitted;
-    admission.facts[1].attempt_id = 13;
-    admission.facts[1].recovery_class = .model;
+    var semantic: SemanticIndex = .{};
+    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    admission.facts[0] = session_transition.operationSubmitted(operation, 11, 12, .none);
+    admission.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, 12, .model);
     try semantic.apply(admission);
 
     var inbox: InboxIndex = .{};
@@ -1372,26 +1429,23 @@ test "irrelevant inbox records cannot displace admitted Attempt evidence" {
 }
 
 test "late evidence for an earlier model Attempt survives a later admission" {
-    var semantic: SemanticIndex = .{};
-    var first: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    first.facts[0] = .{
-        .kind = .operation_submitted,
+    const agent: session_transition.AgentContext = .{
         .agent_id = 1,
         .agent_generation = 1,
         .ownership_epoch = 1,
+    };
+    const operation: session_transition.OperationContext = .{
+        .agent = agent,
         .operation_id = 10,
         .generation = 1,
-        .reference = 11,
-        .digest = 12,
     };
-    first.facts[1] = first.facts[0];
-    first.facts[1].kind = .attempt_admitted;
-    first.facts[1].attempt_id = 13;
-    first.facts[1].recovery_class = .model;
+    var semantic: SemanticIndex = .{};
+    var first: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    first.facts[0] = session_transition.operationSubmitted(operation, 11, 12, .none);
+    first.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, 12, .model);
     try semantic.apply(first);
     var retry: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    retry.facts[0] = first.facts[1];
-    retry.facts[0].attempt_id = 14;
+    retry.facts[0] = session_transition.attemptAdmitted(operation, 14, 11, 12, .model);
     try semantic.apply(retry);
 
     var inbox: InboxIndex = .{};
@@ -1413,22 +1467,20 @@ test "late evidence for an earlier model Attempt survives a later admission" {
 }
 
 test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
-    var semantic: SemanticIndex = .{};
-    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    admission.facts[0] = .{
-        .kind = .operation_submitted,
+    const agent: session_transition.AgentContext = .{
         .agent_id = 1,
         .agent_generation = 1,
         .ownership_epoch = 1,
+    };
+    const operation: session_transition.OperationContext = .{
+        .agent = agent,
         .operation_id = 10,
         .generation = 1,
-        .reference = 11,
-        .digest = 12,
     };
-    admission.facts[1] = admission.facts[0];
-    admission.facts[1].kind = .attempt_admitted;
-    admission.facts[1].attempt_id = 13;
-    admission.facts[1].recovery_class = .model;
+    var semantic: SemanticIndex = .{};
+    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    admission.facts[0] = session_transition.operationSubmitted(operation, 11, 12, .none);
+    admission.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, 12, .model);
     try semantic.apply(admission);
     var inbox: InboxIndex = .{};
     const first: completion_inbox.Envelope = .{
@@ -1453,28 +1505,28 @@ test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
 }
 
 test "failed recovered frame leaves the published semantic index unchanged" {
-    var index: SemanticIndex = .{};
-    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
-    admission.facts[0] = .{
-        .kind = .operation_submitted,
+    const agent: session_transition.AgentContext = .{
         .agent_id = 1,
         .agent_generation = 1,
         .ownership_epoch = 1,
+    };
+    const operation: session_transition.OperationContext = .{
+        .agent = agent,
         .operation_id = 10,
         .generation = 1,
-        .reference = 11,
-        .digest = 12,
     };
+    var index: SemanticIndex = .{};
+    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    admission.facts[0] = session_transition.operationSubmitted(operation, 11, 12, .none);
     try index.apply(admission);
 
     var invalid: session_transition.Transaction = .{ .sequence = 2, .fact_count = 2 };
-    invalid.facts[0] = admission.facts[0];
-    invalid.facts[0].kind = .authorization;
-    invalid.facts[1] = admission.facts[0];
-    invalid.facts[1].kind = .attempt_admitted;
-    invalid.facts[1].operation_id = 99;
-    invalid.facts[1].attempt_id = 13;
-    invalid.facts[1].recovery_class = .model;
+    invalid.facts[0] = session_transition.authorization(operation, 11, 12, true);
+    invalid.facts[1] = session_transition.attemptAdmitted(.{
+        .agent = agent,
+        .operation_id = 99,
+        .generation = 1,
+    }, 13, 11, 12, .model);
     var prepared = index;
     try std.testing.expectError(error.InvalidOperationHistory, prepared.apply(invalid));
     try std.testing.expectEqual(@as(u64, 1), index.last_sequence);
@@ -1496,14 +1548,11 @@ test "conversation advances only after its Ledger fact commits" {
     try std.testing.expectEqual(@as(u64, 1), assistant.parent_id);
     try std.testing.expectEqual(@as(u64, 1), created.active_leaf_id);
     try std.testing.expectError(error.InvalidEntrySequence, created.readEntry(2));
-    _ = try created.commitSemantic(token, &.{.{
-        .kind = .conversation_advanced,
+    _ = try created.commitSemantic(token, &.{session_transition.conversationAdvanced(.{
         .agent_id = created.agent_id,
         .agent_generation = 1,
         .ownership_epoch = created.ownership_epoch,
-        .subject = assistant.entry_id,
-        .reference = assistant.content_ref,
-    }}, null);
+    }, assistant.entry_id, assistant.content_ref)}, null);
     try std.testing.expectEqual(@as(u64, 2), created.active_leaf_id);
     const stored = try created.readEntry(2);
     try std.testing.expectEqualDeep(assistant, stored);

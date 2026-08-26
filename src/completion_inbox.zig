@@ -1,12 +1,9 @@
 const std = @import("std");
+const session_transition = @import("session_transition.zig");
 
 pub const max_records: u32 = 4096;
 
-pub const EvidenceKind = enum(u8) {
-    model = 1,
-    bash = 2,
-    apply_patch = 3,
-};
+pub const EvidenceKind = session_transition.EvidenceKind;
 
 pub const Envelope = struct {
     kind: EvidenceKind,

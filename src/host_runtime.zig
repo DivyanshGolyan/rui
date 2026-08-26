@@ -1,0 +1,114 @@
+const std = @import("std");
+const host_store = @import("host_store.zig");
+const lifecycle = @import("lifecycle.zig");
+
+pub const Config = struct {
+    storage: host_store.Config = .{},
+};
+
+const State = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    state_root: std.Io.Dir,
+    storage: host_store.StorageOwner,
+    execution: lifecycle.Host = .{},
+    harness_owners: std.atomic.Value(usize) = .init(0),
+};
+
+pub const HostRuntime = opaque {
+    pub fn open(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        state_path: []const u8,
+        config: Config,
+    ) !*HostRuntime {
+        if (state_path.len == 0) return error.InvalidStatePath;
+        var state_root = try std.Io.Dir.cwd().createDirPathOpen(
+            io,
+            state_path,
+            .{ .permissions = .fromMode(0o700) },
+        );
+        errdefer state_root.close(io);
+        const database_path = try std.fs.path.join(allocator, &.{ state_path, "host.sqlite3" });
+        defer allocator.free(database_path);
+        var storage = try host_store.StorageOwner.open(io, database_path, config.storage);
+        errdefer storage.close();
+        const runtime = try allocator.create(State);
+        runtime.* = .{
+            .io = io,
+            .allocator = allocator,
+            .state_root = state_root,
+            .storage = storage,
+        };
+        return @ptrCast(runtime);
+    }
+
+    /// The application owner serializes this call against Harness.open. The
+    /// retained-owner count rejects close while an opened Harness is live; it
+    /// does not make an unretained raw pointer safe to acquire during teardown.
+    pub fn close(self: *HostRuntime) !void {
+        const runtime = state(self);
+        const closing = std.math.maxInt(usize);
+        if (runtime.harness_owners.cmpxchgStrong(0, closing, .acq_rel, .acquire)) |owners| {
+            if (owners == closing) return error.HostRuntimeClosed;
+            return error.HostRuntimeBusy;
+        }
+        runtime.storage.close();
+        runtime.state_root.close(runtime.io);
+        const allocator = runtime.allocator;
+        allocator.destroy(runtime);
+    }
+
+    pub fn occupiedActivationBytes(self: *const HostRuntime) usize {
+        return state(self).execution.slots.occupiedBytes();
+    }
+};
+
+pub fn retainHarness(runtime: *HostRuntime) !void {
+    // Harness.open is serialized against HostRuntime.close by the application
+    // owner. Atomic retention supports concurrent Harness opens and closes once
+    // each caller already owns a valid runtime reference.
+    const value = state(runtime);
+    const closing = std.math.maxInt(usize);
+    var owners = value.harness_owners.load(.acquire);
+    while (true) {
+        if (owners == closing) return error.HostRuntimeClosed;
+        if (owners == closing - 1) return error.HostRuntimeOwnerCapacityExceeded;
+        owners = value.harness_owners.cmpxchgWeak(
+            owners,
+            owners + 1,
+            .acq_rel,
+            .acquire,
+        ) orelse return;
+    }
+}
+
+pub fn releaseHarness(runtime: *HostRuntime) void {
+    const value = state(runtime);
+    const previous = value.harness_owners.fetchSub(1, .release);
+    std.debug.assert(previous > 0 and previous != std.math.maxInt(usize));
+}
+
+pub fn getIo(runtime: *const HostRuntime) std.Io {
+    return state(runtime).io;
+}
+
+pub fn getAllocator(runtime: *const HostRuntime) std.mem.Allocator {
+    return state(runtime).allocator;
+}
+
+pub fn stateRoot(runtime: *const HostRuntime) std.Io.Dir {
+    return state(runtime).state_root;
+}
+
+pub fn storageOwner(runtime: *HostRuntime) *host_store.StorageOwner {
+    return &state(runtime).storage;
+}
+
+pub fn executionHost(runtime: *HostRuntime) *lifecycle.Host {
+    return &state(runtime).execution;
+}
+
+fn state(runtime: *const HostRuntime) *State {
+    return @ptrCast(@alignCast(@constCast(runtime)));
+}

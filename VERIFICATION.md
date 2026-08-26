@@ -13,8 +13,8 @@ This document maps each public architectural claim to required evidence. A claim
 | Session Ledger is sole semantic authority | Recovery from complete ordered canonical transactions with rebuildable indexes absent, stale, corrupt, or behind. |
 | Host Store transitions are atomic | Termination and injected SQLite failures around multi-table transactions expose either the previous complete Session sequence or the complete new sequence, never enclosed partial facts. |
 | Immutable content is durable before reference | Crash injection before content sync, after content sync, before Host Store commit, and after commit; committed transitions never resolve to absent content. |
-| Prepare, commit, publish ordering | Failure injection at every semantic publication point with exactly one result: owner remains usable, fresh `open` reconstructs, or Session fails closed. |
-| One Storage Owner is the durable gateway | A host-level lifetime-lock test excludes a second process, and dependency plus runtime tests prove Core, Harness, adapters, workers, and CLI cannot open SQLite directly. |
+| Prepare, commit, publish ordering | Failure injection at every semantic publication point, including semantic-index capacity, proves that every rejection precedes commit and post-commit publication is infallible assignment; otherwise the owner becomes unavailable and fresh `open` reconstructs. |
+| One Storage Owner is the durable gateway | A host-level lifetime-lock test excludes a second process; application composition supplies only one `HostRuntime` to Harness; dependency plus runtime tests prove Core, Harness, adapters, workers, and CLI cannot open SQLite directly. |
 | Adapter evidence is not a second authority | Result content and immutable Completion Inbox evidence survive lost notifications and process termination; terminal commitment atomically sets `consumed_by_sequence`, and conflicting evidence fails closed. |
 | Approval Required is not Authorization | Ledger inspection and restore tests prove pending `ask` state has one exact Approval Required transition and no Authorization until a matching allow or deny Permission Decision commits. |
 | Control settlement cannot strand accepted work | Shutdown denies pending Approval Required state; cancellation and shutdown reconcile durable Completion Inbox evidence until every accepted Operation is terminal or indeterminate. |
@@ -24,8 +24,8 @@ This document maps each public architectural claim to required evidence. A claim
 | Patch reconciliation is honest | Exact preimage, postimage, and divergent Workspace fixtures plus concurrent replacement, symlink, and stale-Authorization cases. |
 | Authorization binds exact execution | Descriptor-digest tests cover tool kind, bytes, Workspace, working directory, environment authority, timeout, generation, and preimage. |
 | Sleeping population does not scale active memory | Increase durable Sessions while holding every resident pool fixed; report RSS tolerance and disk growth separately. |
-| SQLite remains within its host allowance | Current and high-water heap, page-cache, lookaside, statement, request, and result measurements stay within the validated envelope for every supported cache and workload profile. |
-| Storage work is bounded and fair | Indexed-query plans, bounded result tests, group-commit limits, and adversarial multi-Session scheduling prove no request, recovery scan, or Session monopolizes the Storage Owner. |
+| SQLite remains within its host allowance | Current and high-water heap, page-cache, lookaside, statement, request, and result measurements stay within the validated envelope for the 32, 64, and 128 KiB cache profiles at increasing Session populations. |
+| Storage work is bounded | Indexed-query plans and worst-case admitted inputs prove each Host Store statement and result remains bounded. Issue #3 owns request-credit and cross-Session fairness evidence. |
 | Topology does not scale activation memory | Flat, deep, wide, and balanced synthetic delegation shapes with equal runnable work and fixed pool capacity. |
 | Output remains bounded in RAM | Adversarial model and command outputs larger than memory tails, exact durable spool recovery, and steady resident-memory measurements. |
 | Ownership and slot reuse are fenced | Late, duplicate, prior-epoch, future-epoch, stale-window, and generation-exhaustion tests across scrubbed slot reuse. |
@@ -39,13 +39,13 @@ The highest deterministic lifecycle seam is `Harness.open / offer / drive` with 
 
 Ingress tests distinguish three outcomes: `full` or `busy` leaves ownership with the producer; `accepted` transfers volatile custody to the live Harness; a later committed Projection acknowledges durable acceptance. Tests fill ingress while every Activation Slot is occupied and prove bounded retry without an unbounded fallback queue.
 
-Core tests exercise the reducer and canonical codec without filesystem or provider behaviour. Native invariant traces exercise valid and rejected paths through canonical suspend and restore after every step. Narrow storage tests cover schema and payload versions, multi-fact canonical payloads, transaction rollback, epoch-and-head fencing, content addressing, Conversation attachment, Completion association, SQLite failure mapping, Inbox conflicts, and bounded query plans.
+Core tests exercise the reducer and canonical codec without filesystem or provider behaviour. Native invariant traces exercise valid and rejected paths through canonical suspend and restore after every step. Codec tests prove that only kind-specific typed facts cross the semantic interface, that immediate and durable Result evidence cannot be mixed or assigned an inconsistent recovery class, and that malformed flat wire records fail before construction. Narrow storage tests cover schema and payload versions, interrupted empty-schema initialization, rejection of foreign schema, exact V1 schema constraints, multi-fact canonical payloads, transaction rollback, epoch-and-head fencing, content addressing, Conversation attachment, Completion association, SQLite failure mapping, Inbox conflicts, closure-reserve preservation, and bounded query plans.
 
 Incremental recovery tests restore histories larger than one configured quantum and prove that each `drive` consumes no more than that quantum, returns `restoring` with `more = true`, and exposes no Projection before the snapshotted Session Ledger and Completion Inbox watermarks. They also prove that irrelevant Inbox evidence cannot displace evidence for a currently admitted Attempt, and that a failed Host Store transaction leaves the semantic index unpublished and the live Harness unavailable.
 
 Storage topology tests start two fresh processes against one Host Store and prove that exactly one holds the lifetime lock. Every adapter publication passes through bounded Storage Owner requests; a Completion becomes durable only after the Inbox transaction acknowledgement. The production dependency graph contains exactly one SQLite opener and one connection owner.
 
-SQL tests use `EXPLAIN QUERY PLAN`, worst-case admitted inputs, and populated fixtures to reject full scans or temporary materialization on lifecycle paths. Limits cover request count and bytes, statement parameters, returned rows and bytes, transaction work, group size, recovery work, database pages, and immutable blob references. The 32, 64, and 128 KiB page-cache profiles are test points; larger host-derived profiles use the same semantics.
+SQL tests use `EXPLAIN QUERY PLAN` over the exact production reads and fenced updates on populated fixtures to reject full scans or temporary materialization. Limits cover request count and bytes, statement parameters, returned rows and bytes, transaction work, group size, recovery work, database pages, and immutable blob references. The 32, 64, and 128 KiB page-cache profiles are test points; larger host-derived profiles use the same semantics.
 
 ## Crash matrix
 
@@ -74,7 +74,7 @@ Every acknowledged fact must reappear after recovery. A failed transaction never
 
 Tests cover disk exhaustion during immutable content and SQLite writes; `SQLITE_FULL`, `BUSY`, `IOERR`, `CORRUPT`, `NOTADB`, and `NOMEM`; failed sync; invalid canonical payloads; sequence gaps and conflicts; missing content; unsupported Host Store and payload versions; and recovery with every rebuildable view removed. Physical Host Store corruption may make every Session unavailable, and tests must not misreport it as an isolated Session failure.
 
-Operational tests enforce maximum page count and admission reserve and reuse free pages without foreground `VACUUM`. A later host-snapshot test must cover one consistent SQLite snapshot plus its exact immutable-blob closure before claiming recoverable backup. Major shrinking or recovery maintenance requires the Host Store to be offline under its lifetime lock.
+Operational tests enforce maximum page count by filling a transaction until admission rolls back, then prove the configured closure reserve remains available. They also reuse free pages without foreground `VACUUM`. Schema tests open a valid, non-empty but schema-empty SQLite file to prove bootstrap is based on transactional identity rather than file existence. A later host-snapshot test must cover one consistent SQLite snapshot plus its exact immutable-blob closure before claiming recoverable backup. Major shrinking or recovery maintenance requires the Host Store to be offline under its lifetime lock.
 
 ## Resource ledger
 
@@ -102,7 +102,6 @@ Before the live repair demonstration is considered credible:
 - the Session reconstructs from canonical transactions with rebuildable indexes deleted;
 - the Host Runtime exclusively owns the Host Store and every durable path traverses the Storage Owner;
 - SQLite allocation remains within the validated host allowance across supported cache profiles and increasing Session population;
-- bounded group commits remain fair and create no cross-Session semantic dependency;
 - arbitrary Bash uncertainty is visibly indeterminate and never silently replayed;
 - one-file patch reconciliation passes all three Workspace states;
 - both Permission Modes exercise the same validation, Session Ledger, Attempt, and recovery paths;

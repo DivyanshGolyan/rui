@@ -83,6 +83,68 @@ const completion_index_schema =
     \\ON completion_inbox (session_id, consumed_by_sequence, inbox_sequence)
 ;
 
+const read_session_sql: [:0]const u8 =
+    \\SELECT agent_id, task_id, branch_id, ownership_epoch, active_leaf_id,
+    \\       entry_count, workspace_path, model
+    \\FROM session WHERE session_id = ?1
+;
+const session_head_sql: [:0]const u8 =
+    "SELECT head_sequence FROM session WHERE session_id = ?1";
+const claim_ownership_sql: [:0]const u8 =
+    \\UPDATE session SET ownership_epoch = ownership_epoch + 1
+    \\WHERE session_id = ?1 AND ownership_epoch < 9223372036854775807
+    \\RETURNING ownership_epoch
+;
+const current_ownership_sql: [:0]const u8 =
+    "SELECT ownership_epoch FROM session WHERE session_id = ?1";
+const completion_head_sql: [:0]const u8 =
+    "SELECT inbox_head FROM session WHERE session_id = ?1";
+const find_completion_sql: [:0]const u8 =
+    \\SELECT c.inbox_sequence, c.result_reference, c.result_digest
+    \\FROM completion_inbox AS c
+    \\JOIN session AS s ON s.session_id = c.session_id
+    \\WHERE c.session_id = ?1 AND c.ownership_epoch = ?2
+    \\  AND s.agent_id = ?3 AND c.agent_generation = ?4
+    \\  AND c.operation_id = ?5 AND c.operation_generation = ?6
+    \\  AND c.attempt_id = ?7 AND c.evidence_kind = ?8
+;
+const advance_inbox_head_sql: [:0]const u8 =
+    "UPDATE session SET inbox_head = ?2 WHERE session_id = ?1 AND inbox_head = ?3";
+const read_completion_sql: [:0]const u8 =
+    \\SELECT c.evidence_kind, c.ownership_epoch, s.agent_id, c.agent_generation,
+    \\       c.operation_id, c.operation_generation, c.attempt_id,
+    \\       c.result_reference, c.result_digest, c.consumed_by_sequence
+    \\FROM completion_inbox AS c
+    \\JOIN session AS s ON s.session_id = c.session_id
+    \\WHERE c.session_id = ?1 AND c.inbox_sequence = ?2
+;
+const advance_session_head_sql: [:0]const u8 =
+    \\UPDATE session SET head_sequence = ?2
+    \\WHERE session_id = ?1 AND ownership_epoch = ?3 AND head_sequence = ?4
+;
+const associate_completion_sql: [:0]const u8 =
+    \\UPDATE completion_inbox SET consumed_by_sequence = ?2
+    \\WHERE session_id = ?1 AND consumed_by_sequence IS NULL
+    \\  AND ownership_epoch = ?3 AND agent_generation = ?4
+    \\  AND operation_id = ?5 AND operation_generation = ?6
+    \\  AND attempt_id = ?7 AND evidence_kind = ?8
+    \\  AND result_reference = ?9 AND result_digest = ?10
+    \\  AND session_id IN (SELECT session_id FROM session WHERE agent_id = ?11)
+;
+const advance_conversation_sql: [:0]const u8 =
+    \\UPDATE session SET active_leaf_id = ?2, entry_count = ?3
+    \\WHERE session_id = ?1 AND entry_count + 1 = ?3
+;
+const read_transition_sql: [:0]const u8 =
+    \\SELECT payload, record_digest
+    \\FROM session_transition
+    \\WHERE session_id = ?1 AND sequence = ?2
+;
+const read_conversation_sql: [:0]const u8 =
+    \\SELECT parent_id, kind, content_ref, committed_by_sequence
+    \\FROM conversation_entry WHERE session_id = ?1 AND entry_id = ?2
+;
+
 pub const CapacityClass = enum { closure, admission };
 
 pub const ConversationInsert = struct {
@@ -245,8 +307,6 @@ pub const StorageOwner = struct {
         var terminated_path: [max_path_bytes:0]u8 = undefined;
         @memcpy(terminated_path[0..path.len], path);
         terminated_path[path.len] = 0;
-        const existing_store = try fileHasContent(io, path);
-
         if (config.sqlite_heap_limit_bytes > std.math.maxInt(i64)) {
             return error.InvalidSqliteHeapLimit;
         }
@@ -257,11 +317,11 @@ pub const StorageOwner = struct {
             c.SQLITE_OPEN_NOMUTEX | c.SQLITE_OPEN_PRIVATECACHE;
         const open_result = c.sqlite3_open_v2(&terminated_path, &maybe_database, flags, null);
         if (open_result != c.SQLITE_OK) {
-            if (maybe_database) |database| _ = c.sqlite3_close_v2(database);
+            if (maybe_database) |database| closeDatabase(database);
             return mapSqliteError(open_result);
         }
         const database = maybe_database orelse return error.HostStoreOpenFailed;
-        errdefer _ = c.sqlite3_close_v2(database);
+        errdefer closeDatabase(database);
 
         var owner: StorageOwner = .{
             .io = io,
@@ -271,9 +331,16 @@ pub const StorageOwner = struct {
             .admission_reserve_pages = config.admission_reserve_pages,
             .sqlite_heap_limit_bytes = config.sqlite_heap_limit_bytes,
         };
-        if (existing_store) try owner.verifySchemaIdentity();
+        const stored_application_id = try owner.pragmaU64("PRAGMA application_id");
+        const stored_schema_version = try owner.pragmaU64("PRAGMA user_version");
+        const install = stored_application_id == 0 and stored_schema_version == 0 and
+            try owner.schemaIsEmpty();
+        if (!install) {
+            if (stored_application_id != application_id) return error.InvalidHostStoreIdentity;
+            if (stored_schema_version != schema_version) return error.UnsupportedHostStoreVersion;
+        }
         try owner.harden(config);
-        if (!existing_store) try owner.installSchema();
+        if (install) try owner.installSchema();
         try owner.verifySchemaIdentity();
         try owner.validateSchemaShape();
         return owner;
@@ -308,7 +375,6 @@ pub const StorageOwner = struct {
         {
             return error.InvalidSessionMetadata;
         }
-        try self.ensureAdmissionCapacity();
         try self.execute("BEGIN IMMEDIATE");
         errdefer self.rollbackOrPoison();
         const statement = try self.prepare(
@@ -316,7 +382,7 @@ pub const StorageOwner = struct {
             \\    session_id, agent_id, task_id, branch_id, workspace_path, model, active_leaf_id
             \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         );
-        defer _ = c.sqlite3_finalize(statement);
+        defer finalize(statement);
         var encoded_identities: [5][8]u8 = undefined;
         try bindIdentity(statement, 1, descriptor.identities.session_id, &encoded_identities[0]);
         try bindIdentity(statement, 2, descriptor.identities.agent_id, &encoded_identities[1]);
@@ -332,11 +398,12 @@ pub const StorageOwner = struct {
             \\    session_id, entry_id, parent_id, kind, content_ref, committed_by_sequence
             \\) VALUES (?1, ?2, NULL, 1, ?3, NULL)
         );
-        defer _ = c.sqlite3_finalize(root);
+        defer finalize(root);
         try bindIdentity(root, 1, descriptor.identities.session_id, &encoded_identities[0]);
         try bindIdentity(root, 2, 1, &encoded_identities[4]);
         try bindIdentity(root, 3, descriptor.identities.task_id, &encoded_identities[2]);
         try expectDone(c.sqlite3_step(root));
+        try self.ensureAdmissionCapacity();
         try self.execute("COMMIT");
     }
 
@@ -367,12 +434,8 @@ pub const StorageOwner = struct {
     pub fn readSession(self: *StorageOwner, session_id: u64) !StoredSession {
         try self.ensureOpen();
         if (session_id == 0) return error.InvalidIdentity;
-        const statement = try self.prepare(
-            \\SELECT agent_id, task_id, branch_id, ownership_epoch, active_leaf_id,
-            \\       entry_count, workspace_path, model
-            \\FROM session WHERE session_id = ?1
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.prepare(read_session_sql);
+        defer finalize(statement);
         var encoded_session_id: [8]u8 = undefined;
         try bindIdentity(statement, 1, session_id, &encoded_session_id);
         const result = c.sqlite3_step(statement);
@@ -422,10 +485,8 @@ pub const StorageOwner = struct {
     pub fn sessionHead(self: *StorageOwner, session_id: u64) !u64 {
         try self.ensureOpen();
         if (session_id == 0) return error.InvalidIdentity;
-        const statement = try self.prepare(
-            "SELECT head_sequence FROM session WHERE session_id = ?1",
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.prepare(session_head_sql);
+        defer finalize(statement);
         var encoded_session_id: [8]u8 = undefined;
         try bindIdentity(statement, 1, session_id, &encoded_session_id);
         const step_result = c.sqlite3_step(statement);
@@ -440,12 +501,8 @@ pub const StorageOwner = struct {
     pub fn claimSession(self: *StorageOwner, session_id: u64) !u64 {
         try self.ensureOpen();
         if (session_id == 0) return error.InvalidIdentity;
-        const statement = try self.prepare(
-            \\UPDATE session SET ownership_epoch = ownership_epoch + 1
-            \\WHERE session_id = ?1 AND ownership_epoch < 9223372036854775807
-            \\RETURNING ownership_epoch
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.prepare(claim_ownership_sql);
+        defer finalize(statement);
         var encoded_session_id: [8]u8 = undefined;
         try bindIdentity(statement, 1, session_id, &encoded_session_id);
         const result = c.sqlite3_step(statement);
@@ -462,10 +519,8 @@ pub const StorageOwner = struct {
         if (token.session_id == 0 or token.epoch == 0 or token.epoch > std.math.maxInt(i64)) {
             return error.StaleOwner;
         }
-        const statement = try self.prepare(
-            "SELECT ownership_epoch FROM session WHERE session_id = ?1",
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.prepare(current_ownership_sql);
+        defer finalize(statement);
         var encoded_session_id: [8]u8 = undefined;
         try bindIdentity(statement, 1, token.session_id, &encoded_session_id);
         const result = c.sqlite3_step(statement);
@@ -478,10 +533,8 @@ pub const StorageOwner = struct {
     pub fn completionHead(self: *StorageOwner, session_id: u64) !u64 {
         try self.ensureOpen();
         if (session_id == 0) return error.InvalidIdentity;
-        const statement = try self.prepare(
-            "SELECT inbox_head FROM session WHERE session_id = ?1",
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.prepare(completion_head_sql);
+        defer finalize(statement);
         var encoded_session_id: [8]u8 = undefined;
         try bindIdentity(statement, 1, session_id, &encoded_session_id);
         const step_result = c.sqlite3_step(statement);
@@ -501,16 +554,8 @@ pub const StorageOwner = struct {
         try completion_inbox.validate(envelope);
 
         var identities: [7][8]u8 = undefined;
-        const existing = try self.prepare(
-            \\SELECT c.inbox_sequence, c.result_reference, c.result_digest
-            \\FROM completion_inbox AS c
-            \\JOIN session AS s ON s.session_id = c.session_id
-            \\WHERE c.session_id = ?1 AND c.ownership_epoch = ?2
-            \\  AND s.agent_id = ?3 AND c.agent_generation = ?4
-            \\  AND c.operation_id = ?5 AND c.operation_generation = ?6
-            \\  AND c.attempt_id = ?7 AND c.evidence_kind = ?8
-        );
-        defer _ = c.sqlite3_finalize(existing);
+        const existing = try self.prepare(find_completion_sql);
+        defer finalize(existing);
         try bindIdentity(existing, 1, envelope.session_id, &identities[0]);
         try bindIdentity(existing, 2, envelope.ownership_epoch, &identities[1]);
         try bindIdentity(existing, 3, envelope.agent_id, &identities[2]);
@@ -539,10 +584,8 @@ pub const StorageOwner = struct {
         try self.execute("BEGIN IMMEDIATE");
         errdefer self.rollbackOrPoison();
 
-        const advance = try self.prepare(
-            "UPDATE session SET inbox_head = ?2 WHERE session_id = ?1 AND inbox_head = ?3",
-        );
-        defer _ = c.sqlite3_finalize(advance);
+        const advance = try self.prepare(advance_inbox_head_sql);
+        defer finalize(advance);
         try bindIdentity(advance, 1, envelope.session_id, &identities[0]);
         try bindU64(advance, 2, sequence);
         try bindU64(advance, 3, current_head);
@@ -557,7 +600,7 @@ pub const StorageOwner = struct {
             \\    result_reference, result_digest
             \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         );
-        defer _ = c.sqlite3_finalize(insert);
+        defer finalize(insert);
         try bindIdentity(insert, 1, envelope.session_id, &identities[0]);
         try bindU64(insert, 2, sequence);
         try bindIdentity(insert, 3, envelope.ownership_epoch, &identities[1]);
@@ -582,15 +625,8 @@ pub const StorageOwner = struct {
         try self.ensureOpen();
         if (session_id == 0) return error.InvalidIdentity;
         if (sequence == 0 or sequence > std.math.maxInt(i64)) return error.InvalidSequence;
-        const statement = try self.prepare(
-            \\SELECT c.evidence_kind, c.ownership_epoch, s.agent_id, c.agent_generation,
-            \\       c.operation_id, c.operation_generation, c.attempt_id,
-            \\       c.result_reference, c.result_digest, c.consumed_by_sequence
-            \\FROM completion_inbox AS c
-            \\JOIN session AS s ON s.session_id = c.session_id
-            \\WHERE c.session_id = ?1 AND c.inbox_sequence = ?2
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.prepare(read_completion_sql);
+        defer finalize(statement);
         var encoded_session_id: [8]u8 = undefined;
         try bindIdentity(statement, 1, session_id, &encoded_session_id);
         try bindU64(statement, 2, sequence);
@@ -642,18 +678,14 @@ pub const StorageOwner = struct {
         {
             return error.InvalidTransitionCount;
         }
-        if (request.capacity_class == .admission) try self.ensureAdmissionCapacity();
         const sequence = request.expected_sequence + 1;
         var digest: [32]u8 = undefined;
         recordDigest(request.token.session_id, sequence, request.payload, &digest);
 
         try self.execute("BEGIN IMMEDIATE");
         errdefer self.rollbackOrPoison();
-        const advance = try self.prepare(
-            \\UPDATE session SET head_sequence = ?2
-            \\WHERE session_id = ?1 AND ownership_epoch = ?3 AND head_sequence = ?4
-        );
-        defer _ = c.sqlite3_finalize(advance);
+        const advance = try self.prepare(advance_session_head_sql);
+        defer finalize(advance);
         var identities: [10][8]u8 = undefined;
         try bindIdentity(advance, 1, request.token.session_id, &identities[0]);
         try bindU64(advance, 2, sequence);
@@ -667,7 +699,7 @@ pub const StorageOwner = struct {
             \\INSERT INTO session_transition (session_id, sequence, payload, record_digest)
             \\VALUES (?1, ?2, ?3, ?4)
         );
-        defer _ = c.sqlite3_finalize(insert);
+        defer finalize(insert);
         try bindIdentity(insert, 1, request.token.session_id, &identities[0]);
         try bindU64(insert, 2, sequence);
         try bindBlob(insert, 3, request.payload);
@@ -685,6 +717,7 @@ pub const StorageOwner = struct {
             sequence,
             association,
         );
+        if (request.capacity_class == .admission) try self.ensureAdmissionCapacity();
         try self.reach(.before_commit);
         try self.execute("COMMIT");
         return sequence;
@@ -697,16 +730,8 @@ pub const StorageOwner = struct {
         association: CompletionAssociation,
     ) !void {
         var ids: [7][8]u8 = undefined;
-        const statement = try self.prepare(
-            \\UPDATE completion_inbox SET consumed_by_sequence = ?2
-            \\WHERE session_id = ?1 AND consumed_by_sequence IS NULL
-            \\  AND ownership_epoch = ?3 AND agent_generation = ?4
-            \\  AND operation_id = ?5 AND operation_generation = ?6
-            \\  AND attempt_id = ?7 AND evidence_kind = ?8
-            \\  AND result_reference = ?9 AND result_digest = ?10
-            \\  AND session_id IN (SELECT session_id FROM session WHERE agent_id = ?11)
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.prepare(associate_completion_sql);
+        defer finalize(statement);
         try bindIdentity(statement, 1, session_id, &ids[0]);
         try bindU64(statement, 2, sequence);
         try bindIdentity(statement, 3, association.ownership_epoch, &ids[1]);
@@ -743,7 +768,7 @@ pub const StorageOwner = struct {
             \\  AND conversation_entry.content_ref = excluded.content_ref
             \\  AND conversation_entry.committed_by_sequence IS NULL
         );
-        defer _ = c.sqlite3_finalize(insert);
+        defer finalize(insert);
         try bindIdentity(insert, 1, session_id, &ids[0]);
         try bindIdentity(insert, 2, entry.entry_id, &ids[1]);
         if (entry.parent_id == 0) try expectOk(c.sqlite3_bind_null(insert, 3)) else try bindIdentity(insert, 3, entry.parent_id, &ids[2]);
@@ -753,11 +778,8 @@ pub const StorageOwner = struct {
         try expectDone(c.sqlite3_step(insert));
         if (c.sqlite3_changes(self.database) != 1) return error.ConversationProjectionConflict;
 
-        const advance = try self.prepare(
-            \\UPDATE session SET active_leaf_id = ?2, entry_count = ?3
-            \\WHERE session_id = ?1 AND entry_count + 1 = ?3
-        );
-        defer _ = c.sqlite3_finalize(advance);
+        const advance = try self.prepare(advance_conversation_sql);
+        defer finalize(advance);
         try bindIdentity(advance, 1, session_id, &ids[0]);
         try bindIdentity(advance, 2, entry.entry_id, &ids[1]);
         try bindU64(advance, 3, entry.entry_id);
@@ -778,12 +800,8 @@ pub const StorageOwner = struct {
         if (session_id == 0) return error.InvalidIdentity;
         if (sequence == 0 or sequence > std.math.maxInt(i64)) return error.InvalidSequence;
 
-        const statement = try self.prepare(
-            \\SELECT payload, record_digest
-            \\FROM session_transition
-            \\WHERE session_id = ?1 AND sequence = ?2
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.prepare(read_transition_sql);
+        defer finalize(statement);
         var encoded_session_id: [8]u8 = undefined;
         try bindIdentity(statement, 1, session_id, &encoded_session_id);
         try bindU64(statement, 2, sequence);
@@ -825,11 +843,8 @@ pub const StorageOwner = struct {
         entry_id: u64,
     ) !StoredConversationEntry {
         try self.ensureOpen();
-        const statement = try self.prepare(
-            \\SELECT parent_id, kind, content_ref, committed_by_sequence
-            \\FROM conversation_entry WHERE session_id = ?1 AND entry_id = ?2
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.prepare(read_conversation_sql);
+        defer finalize(statement);
         var ids: [2][8]u8 = undefined;
         try bindIdentity(statement, 1, session_id, &ids[0]);
         try bindIdentity(statement, 2, entry_id, &ids[1]);
@@ -861,7 +876,7 @@ pub const StorageOwner = struct {
     }
 
     fn harden(self: *StorageOwner, config: Config) !void {
-        _ = c.sqlite3_extended_result_codes(self.database, 1);
+        try expectOk(c.sqlite3_extended_result_codes(self.database, 1));
         try dbConfig(self.database, c.SQLITE_DBCONFIG_DEFENSIVE, 1);
         try dbConfig(self.database, c.SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0);
         try dbConfig(self.database, c.SQLITE_DBCONFIG_DQS_DDL, 0);
@@ -911,12 +926,12 @@ pub const StorageOwner = struct {
     fn installSchema(self: *StorageOwner) !void {
         self.execute("BEGIN IMMEDIATE") catch |err| return err;
         errdefer self.rollbackOrPoison();
-        self.execute("PRAGMA application_id=1330532423") catch |err| return err;
-        self.execute("PRAGMA user_version=1") catch |err| return err;
         inline for (.{ session_schema, transition_schema, conversation_schema, completion_schema }) |sql| {
             self.execute(sql) catch |err| return err;
         }
         self.execute(completion_index_schema) catch |err| return err;
+        self.execute("PRAGMA application_id=1330532423") catch |err| return err;
+        self.execute("PRAGMA user_version=1") catch |err| return err;
         self.execute("COMMIT") catch |err| {
             self.rollbackOrPoison();
             return err;
@@ -932,7 +947,20 @@ pub const StorageOwner = struct {
         }
     }
 
+    fn schemaIsEmpty(self: *StorageOwner) !bool {
+        const statement = try self.prepare(
+            "SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1",
+        );
+        defer finalize(statement);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => true,
+            c.SQLITE_ROW => false,
+            else => |result| mapSqliteError(result),
+        };
+    }
+
     fn validateSchemaShape(self: *StorageOwner) !void {
+        try self.validateSchemaMetadata();
         const queries = [_][:0]const u8{
             "SELECT session_id, agent_id, task_id, branch_id, workspace_path, model, ownership_epoch, active_leaf_id, entry_count, head_sequence, inbox_head FROM session LIMIT 0",
             "SELECT session_id, sequence, payload, record_digest FROM session_transition LIMIT 0",
@@ -944,7 +972,102 @@ pub const StorageOwner = struct {
                 error.HostStoreFailure => return error.InvalidHostStoreSchema,
                 else => return err,
             };
-            defer _ = c.sqlite3_finalize(statement);
+            defer finalize(statement);
+        }
+        const lifecycle_statements = [_][:0]const u8{
+            read_session_sql,
+            session_head_sql,
+            claim_ownership_sql,
+            current_ownership_sql,
+            completion_head_sql,
+            find_completion_sql,
+            advance_inbox_head_sql,
+            read_completion_sql,
+            advance_session_head_sql,
+            associate_completion_sql,
+            advance_conversation_sql,
+            read_transition_sql,
+            read_conversation_sql,
+        };
+        for (lifecycle_statements) |sql| {
+            const statement = self.prepare(sql) catch |err| switch (err) {
+                error.HostStoreFailure => return error.InvalidHostStoreSchema,
+                else => return err,
+            };
+            defer finalize(statement);
+        }
+    }
+
+    fn validateSchemaMetadata(self: *StorageOwner) !void {
+        const tables = [_]struct { name: []const u8, without_rowid: u8 }{
+            .{ .name = "session", .without_rowid = 0 },
+            .{ .name = "session_transition", .without_rowid = 1 },
+            .{ .name = "conversation_entry", .without_rowid = 0 },
+            .{ .name = "completion_inbox", .without_rowid = 1 },
+        };
+        const metadata = try self.prepare(
+            "SELECT type, wr, strict FROM pragma_table_list WHERE schema = 'main' AND name = ?1",
+        );
+        defer finalize(metadata);
+        for (tables) |table| {
+            try expectOk(c.sqlite3_reset(metadata));
+            try expectOk(c.sqlite3_clear_bindings(metadata));
+            try bindText(metadata, 1, table.name);
+            if (c.sqlite3_step(metadata) != c.SQLITE_ROW or
+                !columnTextEquals(metadata, 0, "table") or
+                c.sqlite3_column_int(metadata, 1) != table.without_rowid or
+                c.sqlite3_column_int(metadata, 2) != 1 or
+                c.sqlite3_step(metadata) != c.SQLITE_DONE)
+            {
+                return error.InvalidHostStoreSchema;
+            }
+        }
+        try self.expectSchemaSql("table", "session", session_schema);
+        try self.expectSchemaSql("table", "session_transition", transition_schema);
+        try self.expectSchemaSql("table", "conversation_entry", conversation_schema);
+        try self.expectSchemaSql("table", "completion_inbox", completion_schema);
+        try self.expectSchemaSql("index", "completion_inbox_unconsumed", completion_index_schema);
+        try self.expectSchemaCount(
+            "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+            5,
+        );
+        try self.expectSchemaCount(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'completion_inbox_unconsumed' AND tbl_name = 'completion_inbox'",
+            1,
+        );
+        try self.expectSchemaCount("SELECT count(*) FROM pragma_foreign_key_list('session_transition')", 1);
+        try self.expectSchemaCount("SELECT count(*) FROM pragma_foreign_key_list('conversation_entry')", 3);
+        try self.expectSchemaCount("SELECT count(*) FROM pragma_foreign_key_list('completion_inbox')", 3);
+    }
+
+    fn expectSchemaSql(
+        self: *StorageOwner,
+        object_type: []const u8,
+        name: []const u8,
+        expected: []const u8,
+    ) !void {
+        const statement = try self.prepare(
+            "SELECT sql FROM sqlite_schema WHERE type = ?1 AND name = ?2",
+        );
+        defer finalize(statement);
+        try bindText(statement, 1, object_type);
+        try bindText(statement, 2, name);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW or
+            !columnTextEquals(statement, 0, expected) or
+            c.sqlite3_step(statement) != c.SQLITE_DONE)
+        {
+            return error.InvalidHostStoreSchema;
+        }
+    }
+
+    fn expectSchemaCount(self: *StorageOwner, sql: [:0]const u8, expected: u8) !void {
+        const statement = try self.prepare(sql);
+        defer finalize(statement);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW or
+            c.sqlite3_column_int64(statement, 0) != expected or
+            c.sqlite3_step(statement) != c.SQLITE_DONE)
+        {
+            return error.InvalidHostStoreSchema;
         }
     }
 
@@ -961,7 +1084,7 @@ pub const StorageOwner = struct {
 
     fn pragmaU64(self: *StorageOwner, sql: [:0]const u8) !u64 {
         const statement = try self.prepare(sql);
-        defer _ = c.sqlite3_finalize(statement);
+        defer finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptHostStore;
         const value = c.sqlite3_column_int64(statement, 0);
         if (value < 0) return error.CorruptHostStore;
@@ -1038,15 +1161,6 @@ fn validateConfig(path: []const u8, config: Config) !void {
     {
         return error.InvalidSqliteHeapLimit;
     }
-}
-
-fn fileHasContent(io: std.Io, path: []const u8) !bool {
-    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    defer file.close(io);
-    return (try file.length(io)) != 0;
 }
 
 fn openHostLock(io: std.Io, path: []const u8) !std.Io.File {
@@ -1137,6 +1251,13 @@ fn readIdentityColumn(statement: *c.sqlite3_stmt, index: c_int) !u64 {
     return value;
 }
 
+fn columnTextEquals(statement: *c.sqlite3_stmt, index: c_int, expected: []const u8) bool {
+    const length = c.sqlite3_column_bytes(statement, index);
+    if (length < 0 or length != expected.len) return false;
+    const pointer = c.sqlite3_column_text(statement, index) orelse return false;
+    return std.mem.eql(u8, pointer[0..@intCast(length)], expected);
+}
+
 fn readPositiveU32Column(statement: *c.sqlite3_stmt, index: c_int) !u32 {
     const value = c.sqlite3_column_int64(statement, index);
     if (value <= 0 or value > std.math.maxInt(u32)) return error.CorruptHostStore;
@@ -1149,6 +1270,19 @@ fn expectDone(result: c_int) !void {
 
 fn expectOk(result: c_int) !void {
     if (result != c.SQLITE_OK) return mapSqliteError(result);
+}
+
+fn finalize(statement: *c.sqlite3_stmt) void {
+    // sqlite3_finalize repeats the statement's last evaluation error. Every
+    // evaluation result is handled at its step call, so finalization has no
+    // independent failure to publish during deferred cleanup.
+    _ = c.sqlite3_finalize(statement);
+}
+
+fn closeDatabase(database: *c.sqlite3) void {
+    // Opening owns no outstanding statements at this cleanup boundary, so a
+    // close failure is an internal lifetime defect rather than a recoverable result.
+    std.debug.assert(c.sqlite3_close_v2(database) == c.SQLITE_OK);
 }
 
 fn nonnegative(value: anytype) !u64 {
@@ -1187,4 +1321,245 @@ test "SQLite primary failure classes map to explicit Host Store outcomes" {
     try std.testing.expectEqual(error.CorruptHostStore, mapSqliteError(c.SQLITE_CORRUPT));
     try std.testing.expectEqual(error.NotAHostStore, mapSqliteError(c.SQLITE_NOTADB));
     try std.testing.expectEqual(error.HostStoreNoMemory, mapSqliteError(c.SQLITE_NOMEM));
+}
+
+test "an empty SQLite database left before schema publication can be initialized" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var terminated_path: [max_path_bytes:0]u8 = undefined;
+    @memcpy(terminated_path[0..path.len], path);
+    terminated_path[path.len] = 0;
+
+    var maybe_database: ?*c.sqlite3 = null;
+    try expectOk(c.sqlite3_open_v2(
+        &terminated_path,
+        &maybe_database,
+        c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
+        null,
+    ));
+    const database = maybe_database orelse return error.HostStoreOpenFailed;
+    try expectOk(c.sqlite3_exec(database, "VACUUM", null, null, null));
+    try expectOk(c.sqlite3_close_v2(database));
+
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+    try std.testing.expectEqual(@as(u64, application_id), try owner.pragmaU64("PRAGMA application_id"));
+    try std.testing.expectEqual(@as(u64, schema_version), try owner.pragmaU64("PRAGMA user_version"));
+}
+
+test "an unowned non-empty SQLite schema is rejected" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var terminated_path: [max_path_bytes:0]u8 = undefined;
+    @memcpy(terminated_path[0..path.len], path);
+    terminated_path[path.len] = 0;
+
+    var maybe_database: ?*c.sqlite3 = null;
+    try expectOk(c.sqlite3_open_v2(
+        &terminated_path,
+        &maybe_database,
+        c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
+        null,
+    ));
+    const database = maybe_database orelse return error.HostStoreOpenFailed;
+    try expectOk(c.sqlite3_exec(database, "CREATE TABLE foreign_data (value INTEGER)", null, null, null));
+    try expectOk(c.sqlite3_close_v2(database));
+
+    try std.testing.expectError(
+        error.InvalidHostStoreIdentity,
+        StorageOwner.open(std.testing.io, path, .{}),
+    );
+}
+
+test "matching identity cannot hide an incomplete or unhardened schema" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var terminated_path: [max_path_bytes:0]u8 = undefined;
+    @memcpy(terminated_path[0..path.len], path);
+    terminated_path[path.len] = 0;
+
+    var maybe_database: ?*c.sqlite3 = null;
+    try expectOk(c.sqlite3_open_v2(
+        &terminated_path,
+        &maybe_database,
+        c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
+        null,
+    ));
+    const database = maybe_database orelse return error.HostStoreOpenFailed;
+    try expectOk(c.sqlite3_exec(
+        database,
+        "CREATE TABLE session (session_id BLOB); PRAGMA application_id=1330532423; PRAGMA user_version=1",
+        null,
+        null,
+        null,
+    ));
+    try expectOk(c.sqlite3_close_v2(database));
+
+    try std.testing.expectError(
+        error.InvalidHostStoreSchema,
+        StorageOwner.open(std.testing.io, path, .{}),
+    );
+}
+
+test "installed schema retains the exact V1 keys constraints and completion index" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+
+    try owner.expectSchemaSql("table", "session", session_schema);
+    try owner.expectSchemaSql("table", "session_transition", transition_schema);
+    try owner.expectSchemaSql("table", "conversation_entry", conversation_schema);
+    try owner.expectSchemaSql("table", "completion_inbox", completion_schema);
+    try owner.expectSchemaSql("index", "completion_inbox_unconsumed", completion_index_schema);
+}
+
+test "admission rolls back before consuming the closure reserve" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    const reserve: u16 = 8;
+    var owner = try StorageOwner.open(std.testing.io, path, .{
+        .maximum_page_count = 32,
+        .admission_reserve_pages = reserve,
+    });
+    defer owner.close();
+
+    var rejected = false;
+    for (1..10_001) |index| {
+        const id: u64 = @intCast(index * 4);
+        owner.createSession(.{
+            .session_id = id,
+            .agent_id = id + 1,
+            .task_id = id + 2,
+            .branch_id = id + 3,
+        }) catch |err| switch (err) {
+            error.HostStoreCapacityReserved => {
+                rejected = true;
+                break;
+            },
+            else => return err,
+        };
+    }
+    try std.testing.expect(rejected);
+    const page_count = try owner.pragmaU64("PRAGMA page_count");
+    const freelist_count = try owner.pragmaU64("PRAGMA freelist_count");
+    const maximum_page_count = try owner.pragmaU64("PRAGMA max_page_count");
+    try std.testing.expect(freelist_count + maximum_page_count - page_count >= reserve);
+}
+
+test "populated lifecycle statements use indexes without scans or temporary materialization" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+
+    for (1..129) |index| {
+        const base: u64 = @intCast(index * 8);
+        try owner.createSession(.{
+            .session_id = base,
+            .agent_id = base + 1,
+            .task_id = base + 2,
+            .branch_id = base + 3,
+        });
+    }
+    _ = try owner.publishCompletion(.{
+        .kind = .model,
+        .session_id = 8,
+        .ownership_epoch = 1,
+        .agent_id = 9,
+        .agent_generation = 1,
+        .operation_id = 101,
+        .operation_generation = 1,
+        .attempt_id = 102,
+        .result_ref = 103,
+        .result_digest = 104,
+    });
+    _ = try owner.commit(.{
+        .token = .{ .session_id = 8, .epoch = 1 },
+        .expected_sequence = 0,
+        .payload = "populated-plan",
+        .conversations = &.{.{
+            .entry_id = 2,
+            .parent_id = 1,
+            .kind = 2,
+            .content_ref = 105,
+        }},
+    });
+    try owner.execute("ANALYZE");
+
+    const plans = [_][:0]const u8{
+        "EXPLAIN QUERY PLAN " ++ read_session_sql,
+        "EXPLAIN QUERY PLAN " ++ session_head_sql,
+        "EXPLAIN QUERY PLAN " ++ claim_ownership_sql,
+        "EXPLAIN QUERY PLAN " ++ current_ownership_sql,
+        "EXPLAIN QUERY PLAN " ++ completion_head_sql,
+        "EXPLAIN QUERY PLAN " ++ find_completion_sql,
+        "EXPLAIN QUERY PLAN " ++ advance_inbox_head_sql,
+        "EXPLAIN QUERY PLAN " ++ read_completion_sql,
+        "EXPLAIN QUERY PLAN " ++ advance_session_head_sql,
+        "EXPLAIN QUERY PLAN " ++ associate_completion_sql,
+        "EXPLAIN QUERY PLAN " ++ advance_conversation_sql,
+        "EXPLAIN QUERY PLAN " ++ read_transition_sql,
+        "EXPLAIN QUERY PLAN " ++ read_conversation_sql,
+    };
+    for (plans) |sql| try expectIndexedPlan(&owner, sql);
+}
+
+fn expectIndexedPlan(owner: *StorageOwner, sql: [:0]const u8) !void {
+    const statement = try owner.prepare(sql);
+    defer finalize(statement);
+    var saw_search = false;
+    while (true) switch (c.sqlite3_step(statement)) {
+        c.SQLITE_ROW => {
+            const length = c.sqlite3_column_bytes(statement, 3);
+            if (length <= 0) return error.InvalidQueryPlan;
+            const pointer = c.sqlite3_column_text(statement, 3) orelse return error.InvalidQueryPlan;
+            const detail = pointer[0..@intCast(length)];
+            if (std.mem.startsWith(u8, detail, "SCAN ") or
+                std.mem.indexOf(u8, detail, "USE TEMP B-TREE") != null)
+            {
+                return error.UnboundedQueryPlan;
+            }
+            if (std.mem.startsWith(u8, detail, "SEARCH ")) saw_search = true;
+        },
+        c.SQLITE_DONE => break,
+        else => |result| return mapSqliteError(result),
+    };
+    if (!saw_search) return error.UnindexedQueryPlan;
 }

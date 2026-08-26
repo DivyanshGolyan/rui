@@ -2,6 +2,7 @@ const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
 const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
+const host_runtime = @import("host_runtime.zig");
 const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
 const model_operation = @import("model_operation.zig");
@@ -10,7 +11,8 @@ const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 const session_transition = @import("session_transition.zig");
 
-pub const Host = lifecycle.Host;
+pub const HostRuntime = host_runtime.HostRuntime;
+pub const HostRuntimeConfig = host_runtime.Config;
 pub const FaultBoundary = lifecycle.FaultBoundary;
 pub const FaultHook = lifecycle.FaultHook;
 pub const default_recovery_quantum: u8 = 32;
@@ -41,11 +43,7 @@ pub const OpenMode = union(enum) {
 };
 
 pub const Config = struct {
-    host: *Host,
-    storage: *host_store.StorageOwner,
-    sessions: std.Io.Dir,
-    io: std.Io,
-    allocator: std.mem.Allocator,
+    runtime: *HostRuntime,
     mode: OpenMode,
     permission_mode: PermissionMode = .ask,
     recovery_quantum: u8 = default_recovery_quantum,
@@ -165,6 +163,7 @@ pub const Harness = struct {
     awaiting_approval: ?lifecycle.ApprovalRequired = null,
     settling_control: ?lifecycle.Control = null,
     recovery_pending: bool = false,
+    runtime_retained: bool = false,
     ingress_lock: std.Io.Mutex = .init,
     drive_lock: std.Io.Mutex = .init,
 
@@ -180,18 +179,22 @@ pub const Harness = struct {
             },
             .restore => |restore| if (restore.session_id == 0) return error.InvalidSessionIdentity,
         }
+        try host_runtime.retainHarness(config.runtime);
+        errdefer host_runtime.releaseHarness(config.runtime);
         var owner: Harness = .{
             .config = config,
             .state = switch (config.mode) {
                 .create => .ready,
                 .restore => .restoring,
             },
+            .runtime_retained = true,
         };
+        errdefer if (owner.session) |*session| session.close();
         switch (config.mode) {
             .create => |create| owner.session = try session_store.Session.create(
-                config.sessions,
-                config.storage,
-                config.io,
+                host_runtime.stateRoot(config.runtime),
+                host_runtime.storageOwner(config.runtime),
+                host_runtime.getIo(config.runtime),
                 .{
                     .workspace_path = create.workspace_path,
                     .model = create.model,
@@ -200,9 +203,9 @@ pub const Harness = struct {
             ),
             .restore => |restore| {
                 const restored = try session_store.Session.openExisting(
-                    config.sessions,
-                    config.storage,
-                    config.io,
+                    host_runtime.stateRoot(config.runtime),
+                    host_runtime.storageOwner(config.runtime),
+                    host_runtime.getIo(config.runtime),
                     restore.session_id,
                 );
                 owner.session = restored.session;
@@ -221,7 +224,7 @@ pub const Harness = struct {
 
     pub fn offer(self: *Harness, input: Input) OfferResult {
         if (!self.ingress_lock.tryLock()) return .busy;
-        defer self.ingress_lock.unlock(self.config.io);
+        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
         if (self.state == .closed) return .closed;
         if (self.state == .unavailable) return .unavailable;
         if (self.pending != null) return .full;
@@ -242,7 +245,7 @@ pub const Harness = struct {
 
     pub fn drive(self: *Harness) !Progress {
         if (!self.drive_lock.tryLock()) return error.HarnessBusy;
-        defer self.drive_lock.unlock(self.config.io);
+        defer self.drive_lock.unlock(host_runtime.getIo(self.config.runtime));
         if (self.state == .unavailable) return error.HarnessUnavailable;
         if (self.projection_generation == std.math.maxInt(u64)) return error.ProjectionGenerationExhausted;
         self.projection_generation += 1;
@@ -316,8 +319,8 @@ pub const Harness = struct {
                 };
                 self.setState(.running);
                 self.final_ref = lifecycle.resolvePermission(
-                    self.config.host,
-                    self.config.allocator,
+                    host_runtime.executionHost(self.config.runtime),
+                    host_runtime.getAllocator(self.config.runtime),
                     session,
                     &self.core_state_buffer,
                     expected,
@@ -340,8 +343,8 @@ pub const Harness = struct {
                 const session = if (self.session) |*value| value else return error.SessionUnavailable;
                 self.setState(.running);
                 self.final_ref = lifecycle.acceptCompletion(
-                    self.config.host,
-                    self.config.allocator,
+                    host_runtime.executionHost(self.config.runtime),
+                    host_runtime.getAllocator(self.config.runtime),
                     session,
                     &self.core_state_buffer,
                     .{
@@ -390,7 +393,7 @@ pub const Harness = struct {
                 self.setState(.running);
                 const session = if (self.session) |*value| value else return error.SessionUnavailable;
                 self.final_ref = lifecycle.advanceCreated(
-                    self.config.host,
+                    host_runtime.executionHost(self.config.runtime),
                     session,
                     &self.core_state_buffer,
                     self.runtimeConfig(),
@@ -407,7 +410,7 @@ pub const Harness = struct {
                         const session = if (self.session) |*value| value else return error.SessionUnavailable;
                         self.setState(.running);
                         self.final_ref = lifecycle.advanceCreated(
-                            self.config.host,
+                            host_runtime.executionHost(self.config.runtime),
                             session,
                             &self.core_state_buffer,
                             self.runtimeConfig(),
@@ -422,8 +425,8 @@ pub const Harness = struct {
                 const session = if (self.session) |*value| value else return error.SessionUnavailable;
                 self.final_ref = if (restore.provider) |provider|
                     lifecycle.advanceRestored(
-                        self.config.host,
-                        self.config.allocator,
+                        host_runtime.executionHost(self.config.runtime),
+                        host_runtime.getAllocator(self.config.runtime),
                         session,
                         &self.core_state_buffer,
                         self.runtimeConfig(),
@@ -431,8 +434,8 @@ pub const Harness = struct {
                     ) catch |err| return self.classifyLifecycleError(err, progress)
                 else
                     lifecycle.inspectRestored(
-                        self.config.host,
-                        self.config.allocator,
+                        host_runtime.executionHost(self.config.runtime),
+                        host_runtime.getAllocator(self.config.runtime),
                         session,
                         &self.core_state_buffer,
                     ) catch |err| return self.classifyLifecycleError(err, progress);
@@ -571,8 +574,8 @@ pub const Harness = struct {
         try self.refreshApprovalRequired(session);
         const approval = self.approvalSnapshot() orelse return;
         _ = lifecycle.resolvePermission(
-            self.config.host,
-            self.config.allocator,
+            host_runtime.executionHost(self.config.runtime),
+            host_runtime.getAllocator(self.config.runtime),
             session,
             &self.core_state_buffer,
             approval,
@@ -601,8 +604,8 @@ pub const Harness = struct {
         if (self.settlingControl() == null) return error.MissingSettlingControl;
         const session = if (self.session) |*value| value else return error.SessionUnavailable;
         _ = lifecycle.advanceRestored(
-            self.config.host,
-            self.config.allocator,
+            host_runtime.executionHost(self.config.runtime),
+            host_runtime.getAllocator(self.config.runtime),
             session,
             &self.core_state_buffer,
             self.runtimeConfig(),
@@ -841,40 +844,40 @@ pub const Harness = struct {
     }
 
     fn takePending(self: *Harness) ?Input {
-        self.ingress_lock.lockUncancelable(self.config.io);
-        defer self.ingress_lock.unlock(self.config.io);
+        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
+        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
         const pending = self.pending;
         self.pending = null;
         return pending;
     }
 
     fn setState(self: *Harness, state: State) void {
-        self.ingress_lock.lockUncancelable(self.config.io);
-        defer self.ingress_lock.unlock(self.config.io);
+        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
+        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
         self.state = state;
     }
 
     fn approvalSnapshot(self: *Harness) ?lifecycle.ApprovalRequired {
-        self.ingress_lock.lockUncancelable(self.config.io);
-        defer self.ingress_lock.unlock(self.config.io);
+        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
+        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
         return self.awaiting_approval;
     }
 
     fn setApproval(self: *Harness, approval: ?lifecycle.ApprovalRequired) void {
-        self.ingress_lock.lockUncancelable(self.config.io);
-        defer self.ingress_lock.unlock(self.config.io);
+        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
+        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
         self.awaiting_approval = approval;
     }
 
     fn settlingControl(self: *Harness) ?lifecycle.Control {
-        self.ingress_lock.lockUncancelable(self.config.io);
-        defer self.ingress_lock.unlock(self.config.io);
+        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
+        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
         return self.settling_control;
     }
 
     fn setSettlingControl(self: *Harness, control: ?lifecycle.Control) void {
-        self.ingress_lock.lockUncancelable(self.config.io);
-        defer self.ingress_lock.unlock(self.config.io);
+        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
+        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
         self.settling_control = control;
     }
 
@@ -884,42 +887,46 @@ pub const Harness = struct {
         self.session = null;
         self.pending = null;
         self.setState(.closed);
+        if (self.runtime_retained) {
+            host_runtime.releaseHarness(self.config.runtime);
+            self.runtime_retained = false;
+        }
     }
 };
 
-fn openTestStorage(tmp: *const std.testing.TmpDir) !host_store.StorageOwner {
-    return openTestStorageConfigured(tmp, .{});
+fn openTestRuntime(tmp: *const std.testing.TmpDir) !*HostRuntime {
+    return openTestRuntimeConfigured(tmp, .{});
 }
 
-fn openTestStorageConfigured(
+fn openTestRuntimeConfigured(
     tmp: *const std.testing.TmpDir,
     config: host_store.Config,
-) !host_store.StorageOwner {
+) !*HostRuntime {
     var path_buffer: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(
         &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
+        ".zig-cache/tmp/{s}",
         .{tmp.sub_path},
     );
-    return host_store.StorageOwner.open(std.testing.io, path, config);
+    return HostRuntime.open(
+        std.testing.io,
+        std.testing.allocator,
+        path,
+        .{ .storage = config },
+    );
 }
 
 test "open retains no Activation Slot and offer transfers one bounded input" {
-    var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try openTestStorage(&tmp);
-    defer storage.close();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
     var fixture: model_operation.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
     var owner = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
             .model = "fixture:answer",
@@ -928,27 +935,23 @@ test "open retains no Activation Slot and offer transfers one bounded input" {
         } },
     });
     defer owner.close();
-    try std.testing.expectEqual(@as(usize, 0), host.slots.occupiedBytes());
+    try std.testing.expectError(error.HostRuntimeBusy, runtime.close());
+    try std.testing.expectEqual(@as(usize, 0), runtime.occupiedActivationBytes());
     try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
     try std.testing.expectEqual(OfferResult.full, owner.offer(.task));
 }
 
 test "restore withholds projections until the configured recovery quantum reaches safety" {
-    var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try openTestStorage(&tmp);
-    defer storage.close();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
     var fixture: model_operation.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
     var created = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
             .model = "fixture:answer",
@@ -960,23 +963,16 @@ test "restore withholds projections until the configured recovery quantum reache
     const session_id = session.session_id;
     for (0..5) |index| {
         try session.storeBlob(session.ownerToken(), index + 1, "ledger fixture");
-        _ = try session.commitSemantic(session.ownerToken(), &.{.{
-            .kind = .task_admitted,
+        _ = try session.commitSemantic(session.ownerToken(), &.{session_transition.taskAdmitted(.{
             .agent_id = session.agent_id,
             .agent_generation = 1,
             .ownership_epoch = session.ownership_epoch,
-            .subject = index + 1,
-            .reference = index + 1,
-        }}, null);
+        }, index + 1, index + 1)}, null);
     }
     created.close();
 
     var restored = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .recovery_quantum = 2,
         .mode = .{ .restore = .{ .session_id = session_id } },
     });
@@ -1005,21 +1001,16 @@ test "restore publishes Session identity before reconciling Completion evidence"
         fn apply(_: *anyopaque, _: session_transition.Fact) !void {}
     };
 
-    var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try openTestStorage(&tmp);
-    defer storage.close();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
     var fixture: model_operation.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
     var created = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
             .model = "fixture:answer",
@@ -1041,11 +1032,7 @@ test "restore publishes Session identity before reconciling Completion evidence"
     created.close();
 
     var restored = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .mode = .{ .restore = .{ .session_id = session_id } },
     });
     defer restored.close();
@@ -1085,22 +1072,17 @@ test "failed Host Store recovery makes the live Harness unavailable" {
             return .{ .context = self, .reached = reached };
         }
     };
-    var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var read_fault: ReadFault = .{};
-    var storage = try openTestStorageConfigured(&tmp, .{ .fault = read_fault.hook() });
-    defer storage.close();
+    const runtime = try openTestRuntimeConfigured(&tmp, .{ .fault = read_fault.hook() });
+    defer runtime.close() catch unreachable;
     var fixture: model_operation.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
     var created = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
             .model = "fixture:answer",
@@ -1110,27 +1092,22 @@ test "failed Host Store recovery makes the live Harness unavailable" {
     });
     const session = &created.session.?;
     const session_id = session.session_id;
-    const descriptor: session_transition.Fact = .{
-        .kind = .operation_submitted,
-        .agent_id = session.agent_id,
-        .agent_generation = 1,
-        .ownership_epoch = session.ownership_epoch,
+    const descriptor = session_transition.operationSubmitted(.{
+        .agent = .{
+            .agent_id = session.agent_id,
+            .agent_generation = 1,
+            .ownership_epoch = session.ownership_epoch,
+        },
         .operation_id = 10,
         .generation = 1,
-        .reference = 11,
-        .digest = 12,
-    };
-    try session.storeBlob(session.ownerToken(), descriptor.reference, "operation descriptor");
+    }, 11, 12, .none);
+    try session.storeBlob(session.ownerToken(), descriptor.reference(), "operation descriptor");
     _ = try session.commitSemantic(session.ownerToken(), &.{descriptor}, null);
     created.close();
     read_fault.armed = true;
 
     var restored = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .mode = .{ .restore = .{ .session_id = session_id } },
     });
     defer restored.close();
@@ -1145,9 +1122,9 @@ test "shutdown denies Approval Required before closing" {
 
         fn apply(context: *anyopaque, fact: session_transition.Fact) !void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            switch (fact.kind) {
+            switch (fact.kind()) {
                 .approval_required => self.approval_required += 1,
-                .authorization => if (fact.flags == 0) {
+                .authorization => if (fact.flags() == 0) {
                     self.undecided_authorization += 1;
                 },
                 else => {},
@@ -1155,11 +1132,10 @@ test "shutdown denies Approval Required before closing" {
         }
     };
 
-    var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try openTestStorage(&tmp);
-    defer storage.close();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
     var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
     const call = try bash_tool.encodeCall(&call_buffer, .{
         .command = "printf forbidden",
@@ -1172,11 +1148,7 @@ test "shutdown denies Approval Required before closing" {
         .expected_tool_status = .denied,
     };
     var owner = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
             .model = "fixture:shutdown-approval",
@@ -1202,11 +1174,7 @@ test "shutdown denies Approval Required before closing" {
     owner.close();
 
     var restored = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .mode = .{ .restore = .{ .session_id = session_id } },
     });
     defer restored.close();
@@ -1249,18 +1217,13 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
         }
     };
 
-    var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try openTestStorage(&tmp);
-    defer storage.close();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
     var provider: CancellingProvider = .{};
     var owner = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
             .model = "fixture:cancellation-race",
@@ -1312,22 +1275,17 @@ test "known provider failure is one durable terminal Result" {
 
         fn apply(context: *anyopaque, fact: session_transition.Fact) !void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            if (fact.kind == .result and fact.recovery_class == .model) self.count += 1;
+            if (fact.kind() == .result and fact.recoveryClass() == .model) self.count += 1;
         }
     };
 
-    var host: Host = .{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var storage = try openTestStorage(&tmp);
-    defer storage.close();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
     var provider: FailingProvider = .{};
     var owner = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
             .model = "fixture:provider-failure",
@@ -1353,11 +1311,7 @@ test "known provider failure is one durable terminal Result" {
     owner.close();
 
     var restored = try Harness.open(.{
-        .host = &host,
-        .storage = &storage,
-        .sessions = tmp.dir,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
+        .runtime = runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
             .provider = provider.provider(),
