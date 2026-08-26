@@ -10,13 +10,14 @@ This document maps each public architectural claim to required evidence. A claim
 | Core State is independent of slot layout | Canonical codec vectors, unknown-version rejection, and restore into differently poisoned slots with identical semantic outcomes. |
 | No Core activation allocation | Compile-time rejection of allocator-bearing parameter and storage types across every lifecycle method, direct review of Core dependencies, plus complete activate, transition, suspend, restore, and reuse tests. |
 | Native semantic invariants | Randomized accepted and rejected transition traces with typed outcomes, rejection-state preservation, semantic observations, deterministic canonical encoding, and poisoned-slot restoration. |
-| Session Ledger is sole semantic authority | Recovery from ordered canonical transitions with checkpoints and indexes absent, stale, corrupt, or behind. |
+| Session Ledger is sole semantic authority | Recovery from complete ordered canonical transactions with rebuildable indexes absent, stale, corrupt, or behind. |
 | Host Store transitions are atomic | Termination and injected SQLite failures around multi-table transactions expose either the previous complete Session sequence or the complete new sequence, never enclosed partial facts. |
-| Checkpoints never lead authority | Ignoring a corrupt checkpoint, rejecting one ahead of the ledger head, and replaying from every checkpoint-behind-ledger boundary. |
 | Immutable content is durable before reference | Crash injection before content sync, after content sync, before Host Store commit, and after commit; committed transitions never resolve to absent content. |
-| Prepare, commit, publish ordering | Failure injection at every semantic publication point with exactly one result: owner remains usable, fresh `open` reconstructs, or Session fails closed. |
-| One Storage Owner is the durable gateway | A host-level lifetime-lock test excludes a second process, and dependency plus runtime tests prove Core, Harness, adapters, workers, and CLI cannot open SQLite directly. |
-| Adapter evidence is not a second authority | Result content and immutable Completion Inbox evidence survive lost notifications and process termination; terminal commitment atomically sets `consumed_by_sequence`, and conflicting evidence fails closed. |
+| Prepare, commit, publish ordering | Failure injection at every semantic publication point, including semantic-index capacity, proves that every rejection precedes commit and post-commit publication is infallible assignment; otherwise the owner becomes unavailable and fresh `open` reconstructs. |
+| One Storage Owner is the durable gateway | A host-level lifetime-lock test excludes a second process; a process-level test excludes a second SQLite-owning `HostRuntime`; dependency plus runtime tests prove Core, Harness, adapters, workers, and CLI cannot open SQLite directly. A request-serialization test proves two Harnesses cannot interleave one connection transaction. |
+| Adapter evidence is not a second authority | Result content and immutable Completion Inbox evidence survive lost notifications and process termination; terminal commitment atomically sets `consumed_by_sequence`, recovery scans only pending rows, irrelevant evidence is not persisted, the 4,096-row pending bound is enforced at insertion, and conflicting evidence fails closed. |
+| Session publication has one replayable value | Applying the same canonical transaction live and after decode produces equal `ResidentState`; post-commit publication is one assignment and Conversation has no second reconstruction reducer. |
+| Harness lifetime is structural | `Harness.open` returns an opaque stable handle; duplicate close is non-destructive, runtime close remains busy while any lease is live, and data-only Projections can open content only through their originating live Harness generation. |
 | Approval Required is not Authorization | Ledger inspection and restore tests prove pending `ask` state has one exact Approval Required transition and no Authorization until a matching allow or deny Permission Decision commits. |
 | Control settlement cannot strand accepted work | Shutdown denies pending Approval Required state; cancellation and shutdown reconcile durable Completion Inbox evidence until every accepted Operation is terminal or indeterminate. |
 | Known provider failure is terminal | A dispatch error after Attempt admission produces one durable provider-failure Result; repeated restore regenerates failure without admitting a replacement Attempt. |
@@ -25,8 +26,8 @@ This document maps each public architectural claim to required evidence. A claim
 | Patch reconciliation is honest | Exact preimage, postimage, and divergent Workspace fixtures plus concurrent replacement, symlink, and stale-Authorization cases. |
 | Authorization binds exact execution | Descriptor-digest tests cover tool kind, bytes, Workspace, working directory, environment authority, timeout, generation, and preimage. |
 | Sleeping population does not scale active memory | Increase durable Sessions while holding every resident pool fixed; report RSS tolerance and disk growth separately. |
-| SQLite remains within its host allowance | Current and high-water heap, page-cache, lookaside, statement, request, and result measurements stay within the validated envelope for every supported cache and workload profile. |
-| Storage work is bounded and fair | Indexed-query plans, bounded result tests, group-commit limits, and adversarial multi-Session scheduling prove no request, recovery scan, or Session monopolizes the Storage Owner. |
+| SQLite remains within its host allowance | Process-global current and high-water heap stay below the Host Runtime hard limit for the 32, 64, and 128 KiB cache profiles at increasing Session populations. Page-cache, lookaside, and statement counters are reported as overlapping diagnostics; request and result reservations are reported separately. |
+| Storage work is bounded | Indexed-query plans and worst-case admitted inputs prove each Host Store statement and result remains bounded. Issue #3 owns request-credit and cross-Session fairness evidence. |
 | Topology does not scale activation memory | Flat, deep, wide, and balanced synthetic delegation shapes with equal runnable work and fixed pool capacity. |
 | Output remains bounded in RAM | Adversarial model and command outputs larger than memory tails, exact durable spool recovery, and steady resident-memory measurements. |
 | Ownership and slot reuse are fenced | Late, duplicate, prior-epoch, future-epoch, stale-window, and generation-exhaustion tests across scrubbed slot reuse. |
@@ -40,13 +41,13 @@ The highest deterministic lifecycle seam is `Harness.open / offer / drive` with 
 
 Ingress tests distinguish three outcomes: `full` or `busy` leaves ownership with the producer; `accepted` transfers volatile custody to the live Harness; a later committed Projection acknowledges durable acceptance. Tests fill ingress while every Activation Slot is occupied and prove bounded retry without an unbounded fallback queue.
 
-Core tests exercise the reducer and canonical codec without filesystem or provider behaviour. Native invariant traces exercise valid and rejected paths through canonical suspend and restore after every step. Narrow storage tests cover schema and payload versions, canonical payloads, transaction rollback, sequence conflicts, hardened configuration, SQLite failure mapping, content addressing, sync failures, ownership fencing, Inbox conflicts, bounded query plans, and checkpoint corruption.
+Core tests exercise the reducer and canonical codec without filesystem or provider behaviour. Native invariant traces exercise valid and rejected paths through canonical suspend and restore after every step. Codec tests prove that only kind-specific typed facts cross the semantic interface, that immediate and durable Result evidence cannot be mixed or assigned an inconsistent recovery class, and that malformed flat wire records fail before construction. Narrow storage tests cover schema and payload versions, interrupted empty-schema initialization, rejection of foreign schema, exact V1 DDL, self-projecting typed transactions, committed-only Conversation attachment, SQLite-assigned Inbox identity, Completion association, insertion-side pending capacity, consumed-row exclusion, SQLite failure mapping, Inbox conflicts, low-water reserve preservation, and bounded critical range reads.
 
-Incremental recovery tests restore histories larger than one configured quantum and prove that each `drive` consumes no more than that quantum, returns `restoring` with `more = true`, and exposes no Projection before the snapshotted Session Ledger and Completion Inbox watermarks. They also prove that irrelevant Inbox evidence cannot displace evidence for a currently admitted Attempt, and that a failed Host Store transaction leaves the semantic index unpublished and the live Harness unavailable.
+Incremental recovery tests restore histories larger than one configured quantum and prove that each `drive` consumes no more than that quantum, returns `restoring` with `more = true`, and exposes no Projection before the snapshotted Session Ledger and pending Completion Inbox watermarks. They compare the recovered and live `ResidentState`, prove that consumed or irrelevant evidence cannot re-enter it, and prove that a failed Host Store transaction leaves the prior resident value published and the live Harness unavailable.
 
-Storage topology tests start two fresh processes against one Host Store and prove that exactly one holds the lifetime lock. Every adapter publication passes through bounded Storage Owner requests; a Completion becomes durable only after the Inbox transaction acknowledgement. The production dependency graph contains exactly one SQLite opener and one connection owner.
+Storage topology tests start two fresh processes against one Host Store and prove that exactly one holds the lifetime lock. In-process tests prove that exactly one Host Runtime controls SQLite's process-global heap allowance and that the Storage Owner request mutex covers each complete operation. Every adapter publication passes through the Storage Owner; a Completion becomes durable only after its single-row Inbox acknowledgement. The production dependency graph contains exactly one SQLite opener and one connection owner.
 
-SQL tests use `EXPLAIN QUERY PLAN`, worst-case admitted inputs, and populated fixtures to reject full scans or temporary materialization on lifecycle paths. Limits cover request count and bytes, statement parameters, returned rows and bytes, transaction work, group size, recovery work, database pages, and immutable blob references. The 32, 64, and 128 KiB page-cache profiles are test points; larger host-derived profiles use the same semantics.
+Point lookups are bounded structurally by primary or unique-key equality. Populated critical range tests execute the exact production statement and reject nonzero `SQLITE_STMTSTATUS_FULLSCAN_STEP`, `SORT`, or `AUTOINDEX`; they do not depend on unstable planner prose. Limits cover request count and bytes, statement parameters, returned rows and bytes, transaction work, recovery work, database pages, and immutable blob references. The 32, 64, and 128 KiB page-cache profiles are test points; larger host-derived profiles use the same semantics.
 
 ## Crash matrix
 
@@ -63,10 +64,9 @@ At minimum, fresh-process tests terminate before and after:
 9. in-memory Completion offer;
 10. terminal Result Host Store transaction and Inbox evidence association;
 11. Conversation Entry content publication and Session Ledger attachment;
-12. prepared Core State publication;
-13. State Checkpoint publication;
-14. durable Projection regeneration;
-15. slot scrub and release.
+12. prepared Core State publication in the semantic transaction;
+13. durable Projection regeneration;
+14. slot scrub and release.
 
 The matrix separately crashes after volatile `offer` acceptance and before the corresponding Host Store transaction for Task, Completion, `ask` decision, and cancellation. Completion recovers through the Completion Inbox; the Task is not partially admitted; the user is asked again; cancellation is not silently applied; and no CLI acknowledgement exists before the committed Projection.
 
@@ -74,9 +74,11 @@ Every acknowledged fact must reappear after recovery. A failed transaction never
 
 ## Durable-store failures
 
-Tests cover disk exhaustion during immutable content and SQLite writes; `SQLITE_FULL`, `BUSY`, `IOERR`, `CORRUPT`, `NOTADB`, and `NOMEM`; failed sync; invalid canonical payloads; sequence gaps and conflicts; missing content; corrupt checkpoints; unsupported Host Store and payload versions; and recovery with every rebuildable view removed. A corrupt checkpoint loses only acceleration. Physical Host Store corruption may make every Session unavailable, and tests must not misreport it as an isolated Session failure.
+Tests cover disk exhaustion during immutable content and SQLite writes; `SQLITE_FULL`, `BUSY`, `IOERR`, `CORRUPT`, `NOTADB`, and `NOMEM`; failed sync; invalid canonical payloads; sequence gaps and conflicts; missing content; unsupported Host Store and payload versions; and recovery with every rebuildable view removed. Physical Host Store corruption may make every Session unavailable, and tests must not misreport it as an isolated Session failure.
 
-Operational tests enforce maximum page count and admission reserve, reuse free pages without foreground `VACUUM`, take a bounded consistent backup, export one Session with its referenced blobs, delete only an explicitly selected closed Session, and perform bounded blob garbage collection. Major shrinking or recovery maintenance requires the Host Store to be offline under its lifetime lock.
+Model-retry recovery repeatedly terminates the process after dispatch but before Completion publication. At the fixed Attempt-history limit, the next restore must publish and apply one durable provider-failure Result without dispatching a ninth Attempt or making the Session unavailable.
+
+Operational tests enforce maximum page count by filling a transaction until admission rolls back, then prove the configured low-water page margin remains available. This evidence does not claim per-Attempt closure capacity; issue #3 must test admission credits against measured worst-case SQLite pages, immutable-blob bytes, and filesystem metadata before scaling in-flight concurrency. Tests also reuse free pages without foreground `VACUUM`. Schema tests open a valid, non-empty but schema-empty SQLite file to prove bootstrap is based on transactional identity rather than file existence. A later host-snapshot test must cover one consistent SQLite snapshot plus its exact immutable-blob closure before claiming recoverable backup. Major shrinking or recovery maintenance requires the Host Store to be offline under its lifetime lock.
 
 ## Resource ledger
 
@@ -85,11 +87,11 @@ Every density and product run reports these categories separately:
 - exact configured and occupied Activation Slot bytes;
 - native executor stack and thread count;
 - Harness ingress, Completion, adapter-record, and recovery buffers;
-- SQLite accounting allowance, hard heap limit, page-cache setting and high-water, lookaside use, prepared-statement use, and Storage Owner request/result bytes;
+- process-wide SQLite hard heap allowance and current/high-water total; overlapping page-cache, lookaside, and prepared-statement diagnostics; separate Storage Owner request/result bytes;
 - model transport and bounded output tails;
 - whole-process RSS and measurement conditions;
 - subprocess RSS where available;
-- Host Store, immutable content, State Checkpoint, free-page, index, and spool disk bytes;
+- Host Store, immutable content, free-page, index, and spool disk bytes;
 - logical, runnable, resident, waiting, and in-flight counts;
 - model Attempts, possible duplicate billing, tool Attempts, and indeterminate effects.
 
@@ -101,10 +103,9 @@ Before the live repair demonstration is considered credible:
 
 - the deterministic repair passes through the real CLI and Harness interfaces;
 - the complete crash matrix passes in fresh processes;
-- the Session reconstructs with checkpoints and indexes deleted;
+- the Session reconstructs from canonical transactions with rebuildable indexes deleted;
 - the Host Runtime exclusively owns the Host Store and every durable path traverses the Storage Owner;
 - SQLite allocation remains within the validated host allowance across supported cache profiles and increasing Session population;
-- bounded group commits remain fair and create no cross-Session semantic dependency;
 - arbitrary Bash uncertainty is visibly indeterminate and never silently replayed;
 - one-file patch reconciliation passes all three Workspace states;
 - both Permission Modes exercise the same validation, Session Ledger, Attempt, and recovery paths;

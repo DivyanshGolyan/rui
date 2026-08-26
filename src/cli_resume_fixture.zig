@@ -9,23 +9,15 @@ pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len != 2) return error.InvalidArguments;
-    var sessions = try std.Io.Dir.cwd().createDirPathOpen(
-        init.io,
-        args[1],
-        .{ .permissions = .fromMode(0o700) },
-    );
-    defer sessions.close(init.io);
-    var host: harness.Host = .{};
+    const runtime = try harness.HostRuntime.open(init.io, allocator, args[1], .{});
+    defer runtime.close() catch unreachable;
     var fixture: model_operation.Fixture = .{
         .expected_task = task,
         .final_answer = "must be retried",
     };
     var crash: Crash = .{};
     var owner = try harness.Harness.open(.{
-        .host = &host,
-        .sessions = sessions,
-        .io = init.io,
-        .allocator = allocator,
+        .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
             .model = "fixture:interrupted",

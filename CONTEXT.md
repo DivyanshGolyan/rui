@@ -70,10 +70,6 @@ _Avoid_: Session, conversation, repository history
 The compact semantic state needed to continue one agent, independent of native layout and temporary execution storage.
 _Avoid_: Core image, Activation Slot, checkpoint bytes
 
-**State Checkpoint**:
-A rebuildable encoding of Core State after one Session Ledger sequence, used to shorten recovery replay.
-_Avoid_: Authority, raw image, Context Checkpoint
-
 **Final Answer**:
 A non-empty assistant response with no tool call that completes the current task turn and is shown to the user.
 _Avoid_: Finish action, stop action, terminal tool

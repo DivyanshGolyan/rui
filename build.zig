@@ -13,9 +13,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     cli.root_module.link_libc = true;
+    configureSqlite(b, cli);
     b.installArtifact(cli);
 
-    const test_step = b.step("test", "Run the deterministic spike tests");
+    const test_step = b.step("test", "Run the deterministic product and storage tests");
     addTestGraph(b, test_step, cli, native_target, optimize);
 
     const check_step = b.step(
@@ -49,7 +50,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_answer = b.addRunArtifact(cli);
     run_fixture_answer.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-fixture-sessions",
+        ".zig-cache/onepage-resident-state-fixture-sessions",
         "--repo",
         ".",
         "--model",
@@ -68,7 +69,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_bash = b.addRunArtifact(cli);
     run_fixture_bash.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-bash-sessions",
+        ".zig-cache/onepage-resident-state-bash-sessions",
         "--repo",
         ".",
         "--model",
@@ -90,7 +91,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_patch = b.addRunArtifact(cli);
     run_fixture_patch.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-patch-sessions",
+        ".zig-cache/onepage-resident-state-patch-sessions",
         "--repo",
         ".",
         "--model",
@@ -138,11 +139,10 @@ fn addTestGraph(
 ) void {
     const plain_test_roots = [_][]const u8{
         "src/core_state.zig",
-        "src/checkpoint.zig",
         "src/core_image.zig",
-        "src/checkpoint_store.zig",
         "src/harness.zig",
         "src/session.zig",
+        "src/session_transition_test.zig",
         "src/model_operation.zig",
     };
     for (plain_test_roots) |root| {
@@ -151,6 +151,7 @@ fn addTestGraph(
 
     const libc_test_roots = [_][]const u8{
         "src/bash_tool.zig",
+        "src/host_store_test.zig",
         "src/patch_tool.zig",
         "src/cli.zig",
     };
@@ -180,6 +181,18 @@ fn addTestGraph(
     run_cli_resume.addArtifactArg(cli_resume_fixture);
     run_cli_resume.addArtifactArg(cli);
     parent.dependOn(&run_cli_resume.step);
+
+    const host_lock_fixture = addNativeExecutable(
+        b,
+        "onepage-host-runtime-lock-fixture",
+        "src/host_runtime_lock_fixture.zig",
+        native_target,
+        optimize,
+    );
+    const run_host_lock = b.addSystemCommand(&.{"sh"});
+    run_host_lock.addFileArg(b.path("src/host_runtime_lock_integration.sh"));
+    run_host_lock.addArtifactArg(host_lock_fixture);
+    parent.dependOn(&run_host_lock.step);
 }
 
 fn addTestRun(
@@ -198,7 +211,32 @@ fn addTestRun(
         }),
     });
     tests.root_module.link_libc = link_libc;
+    if (usesHostStore(root)) configureSqlite(b, tests);
     parent.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    const module = compile.root_module;
+    const sqlite = b.dependency("sqlite", .{});
+    module.link_libc = true;
+    module.addIncludePath(sqlite.path("."));
+    module.addCSourceFile(.{
+        .file = sqlite.path("sqlite3.c"),
+        .flags = &.{ "-std=c99", "-fno-strict-aliasing" },
+    });
+    module.addCMacro("SQLITE_THREADSAFE", "0");
+    module.addCMacro("SQLITE_DEFAULT_PAGE_SIZE", "4096");
+    module.addCMacro("SQLITE_MAX_DEFAULT_PAGE_SIZE", "4096");
+    module.addCMacro("SQLITE_DEFAULT_FOREIGN_KEYS", "1");
+    module.addCMacro("SQLITE_DEFAULT_MMAP_SIZE", "0");
+    module.addCMacro("SQLITE_MAX_MMAP_SIZE", "0");
+    module.addCMacro("SQLITE_DEFAULT_SYNCHRONOUS", "3");
+    module.addCMacro("SQLITE_DQS", "0");
+    module.addCMacro("SQLITE_OMIT_LOAD_EXTENSION", "1");
+    module.addCMacro("SQLITE_OMIT_SHARED_CACHE", "1");
+    module.addCMacro("SQLITE_TEMP_STORE", "1");
+    module.addCMacro("SQLITE_USE_URI", "0");
+    module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
 }
 
 fn addNativeExecutable(
@@ -217,5 +255,23 @@ fn addNativeExecutable(
         }),
     });
     executable.root_module.link_libc = true;
+    if (usesHostStore(root)) configureSqlite(b, executable);
     return executable;
+}
+
+fn usesHostStore(root: []const u8) bool {
+    const roots = [_][]const u8{
+        "src/agent_integration.zig",
+        "src/cli.zig",
+        "src/cli_resume_fixture.zig",
+        "src/harness.zig",
+        "src/host_runtime_lock_fixture.zig",
+        "src/host_store_test.zig",
+        "src/model_operation.zig",
+        "src/session.zig",
+    };
+    for (roots) |candidate| {
+        if (std.mem.eql(u8, root, candidate)) return true;
+    }
+    return false;
 }

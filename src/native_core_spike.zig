@@ -1,5 +1,4 @@
 const std = @import("std");
-const checkpoint = @import("checkpoint.zig");
 const core_image = @import("core_image.zig");
 const core_state = @import("core_state.zig");
 const model_protocol = @import("model_protocol.zig");
@@ -47,7 +46,6 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var state_bytes: [core_state.encoded_size]u8 = undefined;
-    var checkpoint_bytes: [checkpoint.encoded_size]u8 = undefined;
     var first_slot_rss: u64 = 0;
     for (0..density_agents) |index| {
         const agent_id: u64 = index + 1;
@@ -59,11 +57,10 @@ pub fn main(init: std.process.Init) !void {
         if (index == 0) first_slot_rss = try residentBytes();
         try core.deliver(@truncate(agent_id ^ 0x5a5a_5a5a));
         try core.suspendInto(&state_bytes);
-        try checkpoint.encode(&checkpoint_bytes, agent_id, 1, 1, &state_bytes);
         try density_file.writePositionalAll(
             init.io,
-            &checkpoint_bytes,
-            index * checkpoint.encoded_size,
+            &state_bytes,
+            index * core_state.encoded_size,
         );
         try lease.release();
     }
@@ -72,14 +69,17 @@ pub fn main(init: std.process.Init) !void {
     for (0..density_agents) |index| {
         const actual = try density_file.readPositionalAll(
             init.io,
-            &checkpoint_bytes,
-            index * checkpoint.encoded_size,
+            &state_bytes,
+            index * core_state.encoded_size,
         );
-        if (actual != checkpoint.encoded_size) return error.TruncatedDensityCheckpoint;
+        if (actual != core_state.encoded_size) return error.TruncatedDensityState;
         const agent_id: u64 = index + 1;
-        const decoded = try checkpoint.decode(&checkpoint_bytes, agent_id, 1);
+        const decoded = try core_state.decode(&state_bytes);
+        if (decoded.agent_id != agent_id or decoded.agent_generation != 1) {
+            return error.DensityIdentityMismatch;
+        }
         var lease = try pool.borrow();
-        var core = try core_image.Core.activate(lease.slot, decoded.state);
+        var core = try core_image.Core.activate(lease.slot, &state_bytes);
         const identity = try core.identity();
         if (identity.agent_id != agent_id) return error.DensityIdentityMismatch;
         try core.suspendInto(&state_bytes);
@@ -99,8 +99,8 @@ pub fn main(init: std.process.Init) !void {
             "slot-pool host overhead   {d} B\n" ++
             "logical sleeping agents   {d}\n" ++
             "Core State per agent       {d} B\n" ++
-            "State Checkpoint per agent {d} B\n" ++
-            "sleeping checkpoint bytes  {d} B\n" ++
+            "durable Core State per agent {d} B\n" ++
+            "sleeping Core State bytes  {d} B\n" ++
             "native invariant corpus    {d} randomized traces: outcomes, rejection preservation, canonical restore\n" ++
             "RSS baseline               {d} B\n" ++
             "RSS with first slot        {d} B\n" ++
@@ -112,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
             pool.hostOverheadBytes(),
             density_agents,
             core_state.encoded_size,
-            checkpoint.encoded_size,
+            core_state.encoded_size,
             durable_density_bytes,
             trace_count,
             baseline_rss,
