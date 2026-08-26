@@ -35,6 +35,20 @@ pub const ActionContext = struct {
     patch_ref: u64,
 };
 
+const ValidationTestPhase = enum {
+    after_first_snapshot_chunk,
+    before_git,
+};
+
+const ValidationTestHook = struct {
+    context: *anyopaque,
+    call_fn: *const fn (*anyopaque, ValidationTestPhase) anyerror!void,
+
+    fn call(self: ValidationTestHook, phase: ValidationTestPhase) !void {
+        try self.call_fn(self.context, phase);
+    }
+};
+
 pub const Policy = struct {
     context: *anyopaque,
     classify_fn: *const fn (*anyopaque, PermissionSubject, []const u8) anyerror!Decision,
@@ -203,6 +217,18 @@ pub fn validate(
     patch: []const u8,
     action: ActionContext,
 ) !Validation {
+    return validateWithTestHook(allocator, io, workspace_path, patch, action, null);
+}
+
+fn validateWithTestHook(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    workspace_path: []const u8,
+    patch: []const u8,
+    action: ActionContext,
+    test_hook: ?ValidationTestHook,
+) !Validation {
+    _ = allocator;
     if (action.operation_id == 0 or action.operation_generation == 0 or action.patch_ref == 0) {
         return error.InvalidPatchIntent;
     }
@@ -225,17 +251,15 @@ pub fn validate(
     const stat = try target.stat(io);
     if (stat.kind != .file or stat.nlink != 1) return error.UnsupportedSpecialFile;
     if (stat.size > max_file_size) return error.PatchTargetTooLarge;
-    const preimage_digest = try hashFile(io, target, stat.size);
 
     try gitTracked(io, workspace_path, target_path);
-    try gitApplicable(io, workspace_path, patch);
-    const postimage_digest = try expectedPostimage(
-        allocator,
+    const prepared = try prepareSnapshot(
         io,
         target,
         stat.size,
         target_path,
         patch,
+        test_hook,
     );
     var confirmed_target = try openRegularTarget(workspace, io, target_path);
     defer confirmed_target.close(io);
@@ -244,7 +268,7 @@ pub fn validate(
     if (confirmed_stat.size > max_file_size) return error.PatchTargetTooLarge;
     const confirmed_digest = try hashFile(io, confirmed_target, confirmed_stat.size);
     if (confirmed_stat.inode != stat.inode or confirmed_stat.size != stat.size or
-        !binding_digest.eql(binding_digest.Preimage, confirmed_digest, preimage_digest))
+        !binding_digest.eql(binding_digest.Preimage, confirmed_digest, prepared.preimage_digest))
     {
         return error.PreimageChangedDuringValidation;
     }
@@ -252,7 +276,7 @@ pub fn validate(
     const workspace_digest = workspaceDigest(
         workspace_path,
         target_path,
-        preimage_digest,
+        prepared.preimage_digest,
         stat.size,
         stat.inode,
     );
@@ -265,13 +289,13 @@ pub fn validate(
             workspace_path,
             target_path,
             patch_digest,
-            preimage_digest,
-            postimage_digest,
+            prepared.preimage_digest,
+            prepared.postimage_digest,
             stat.size,
             stat.inode,
         ),
-        .preimage_digest = preimage_digest,
-        .postimage_digest = postimage_digest,
+        .preimage_digest = prepared.preimage_digest,
+        .postimage_digest = prepared.postimage_digest,
         .workspace_digest = workspace_digest,
         .preimage_size = stat.size,
         .preimage_inode = stat.inode,
@@ -444,15 +468,19 @@ fn hashFileAs(comptime T: type, io: std.Io, file: std.Io.File, size: u64) !T {
     return hasher.final();
 }
 
-fn expectedPostimage(
-    allocator: std.mem.Allocator,
+const PreparedSnapshot = struct {
+    preimage_digest: binding_digest.Preimage,
+    postimage_digest: binding_digest.Postimage,
+};
+
+fn prepareSnapshot(
     io: std.Io,
     source: std.Io.File,
     source_size: u64,
     target_path: []const u8,
     patch: []const u8,
-) !binding_digest.Postimage {
-    _ = allocator;
+    test_hook: ?ValidationTestHook,
+) !PreparedSnapshot {
     var temporary_root = try std.Io.Dir.cwd().openDir(io, "/private/tmp", .{});
     defer temporary_root.close(io);
     var random: [16]u8 = undefined;
@@ -478,7 +506,14 @@ fn expectedPostimage(
             // This non-authoritative private copy is garbage if cleanup fails.
         };
     }
-    try copyExactTarget(io, source, source_size, temporary, target_path);
+    try copyExactTarget(io, source, source_size, temporary, target_path, test_hook);
+    var preimage = try openRegularTarget(temporary, io, target_path);
+    defer preimage.close(io);
+    const preimage_stat = try preimage.stat(io);
+    if (preimage_stat.kind != .file or preimage_stat.nlink != 1) return error.UnsupportedSpecialFile;
+    if (preimage_stat.size != source_size) return error.PreimageChangedDuringRead;
+    const preimage_digest = try hashFile(io, preimage, preimage_stat.size);
+    if (test_hook) |hook| try hook.call(.before_git);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "/private/tmp/{s}", .{name});
     const term = try runGit(
@@ -493,7 +528,10 @@ fn expectedPostimage(
     const stat = try target.stat(io);
     if (stat.kind != .file or stat.nlink != 1) return error.UnsupportedSpecialFile;
     if (stat.size > max_file_size) return error.PatchPostimageTooLarge;
-    return hashFileAs(binding_digest.Postimage, io, target, stat.size);
+    return .{
+        .preimage_digest = preimage_digest,
+        .postimage_digest = try hashFileAs(binding_digest.Postimage, io, target, stat.size),
+    };
 }
 
 fn copyExactTarget(
@@ -502,6 +540,7 @@ fn copyExactTarget(
     source_size: u64,
     destination_dir: std.Io.Dir,
     target_path: []const u8,
+    test_hook: ?ValidationTestHook,
 ) !void {
     std.debug.assert(source_size <= max_file_size);
     if (std.mem.lastIndexOfScalar(u8, target_path, '/')) |separator| {
@@ -517,6 +556,9 @@ fn copyExactTarget(
         if (count == 0) return error.PreimageChangedDuringRead;
         try destination.writeStreamingAll(io, buffer[0..count]);
         offset += count;
+        if (offset == count) {
+            if (test_hook) |hook| try hook.call(.after_first_snapshot_chunk);
+        }
     }
     if (try source.length(io) != source_size) return error.PreimageChangedDuringRead;
 }
@@ -524,11 +566,6 @@ fn copyExactTarget(
 fn gitTracked(io: std.Io, workspace_path: []const u8, target_path: []const u8) !void {
     const term = try runGit(io, workspace_path, &.{ "ls-files", "--error-unmatch", "--", target_path }, null);
     if (term != 0) return error.NotTrackedRepositoryFile;
-}
-
-fn gitApplicable(io: std.Io, workspace_path: []const u8, patch: []const u8) !void {
-    const term = try runGit(io, workspace_path, &.{ "apply", "--check", "--whitespace=nowarn", "-" }, patch);
-    if (term != 0) return error.PatchNotApplicable;
 }
 
 fn runGit(
@@ -740,6 +777,91 @@ test "patch preparation bounds both target and expected postimage bytes" {
     }
 }
 
+test "patch preparation binds the exact bounded snapshot used by git" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeSizedTestFile(tmp.dir, io, "stable.txt", 8192);
+    var relative_buffer: [128]u8 = undefined;
+    const relative = try std.fmt.bufPrint(&relative_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_length = try std.Io.Dir.cwd().realPathFile(io, relative, &path_buffer);
+    const path = path_buffer[0..path_length];
+    try expectGit(io, path, &.{ "init", "-q" });
+    try expectGit(io, path, &.{ "add", "stable.txt" });
+    var state = SnapshotRaceTestState{
+        .dir = tmp.dir,
+        .io = io,
+        .mode = .same_size_restore,
+    };
+    const patch =
+        "diff --git a/stable.txt b/stable.txt\n" ++
+        "--- a/stable.txt\n" ++
+        "+++ b/stable.txt\n" ++
+        "@@ -1,2 +1,2 @@\n" ++
+        "-old\n" ++
+        "+new\n" ++
+        " x\n";
+    try std.testing.expectError(
+        error.PreimageChangedDuringValidation,
+        validateWithTestHook(
+            std.testing.allocator,
+            io,
+            path,
+            patch,
+            testAction(),
+            state.hook(),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), state.before_git_count);
+    try expectSizedTestFileUnchanged(tmp.dir, io, "stable.txt", 8192);
+    var file = try tmp.dir.openFile(io, "stable.txt", .{});
+    defer file.close(io);
+    var restored: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try file.readPositionalAll(io, &restored, 4096));
+    try std.testing.expectEqualStrings("x", &restored);
+}
+
+test "patch preparation rejects concurrent growth before git sees the snapshot" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeSizedTestFile(tmp.dir, io, "growing.txt", max_file_size);
+    var relative_buffer: [128]u8 = undefined;
+    const relative = try std.fmt.bufPrint(&relative_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_length = try std.Io.Dir.cwd().realPathFile(io, relative, &path_buffer);
+    const path = path_buffer[0..path_length];
+    try expectGit(io, path, &.{ "init", "-q" });
+    try expectGit(io, path, &.{ "add", "growing.txt" });
+    var state = SnapshotRaceTestState{
+        .dir = tmp.dir,
+        .io = io,
+        .mode = .grow,
+    };
+    const patch =
+        "diff --git a/growing.txt b/growing.txt\n" ++
+        "--- a/growing.txt\n" ++
+        "+++ b/growing.txt\n" ++
+        "@@ -1,2 +1,2 @@\n" ++
+        "-old\n" ++
+        "+new\n" ++
+        " x\n";
+    try std.testing.expectError(
+        error.PreimageChangedDuringRead,
+        validateWithTestHook(
+            std.testing.allocator,
+            io,
+            path,
+            patch,
+            testAction(),
+            state.hook(),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), state.before_git_count);
+    try expectSizedTestFileUnchanged(tmp.dir, io, "growing.txt", max_file_size + 1);
+}
+
 test "permission binding and typed result are canonical" {
     const preimage = binding_digest.hash(binding_digest.Preimage, "preimage-7");
     const expected: Binding = .{
@@ -889,6 +1011,40 @@ fn writeSizedTestFile(dir: std.Io.Dir, io: std.Io, path: []const u8, size: u64) 
         remaining -= count;
     }
 }
+
+const SnapshotRaceTestState = struct {
+    const Mode = enum { same_size_restore, grow };
+
+    dir: std.Io.Dir,
+    io: std.Io,
+    mode: Mode,
+    before_git_count: usize = 0,
+
+    fn hook(self: *SnapshotRaceTestState) ValidationTestHook {
+        return .{ .context = self, .call_fn = call };
+    }
+
+    fn call(context: *anyopaque, phase: ValidationTestPhase) !void {
+        const self: *SnapshotRaceTestState = @ptrCast(@alignCast(context));
+        var file = try self.dir.openFile(self.io, switch (self.mode) {
+            .same_size_restore => "stable.txt",
+            .grow => "growing.txt",
+        }, .{ .mode = .read_write });
+        defer file.close(self.io);
+        switch (phase) {
+            .after_first_snapshot_chunk => switch (self.mode) {
+                .same_size_restore => try file.writePositionalAll(self.io, "y", 4096),
+                .grow => try file.writePositionalAll(self.io, "x", max_file_size),
+            },
+            .before_git => {
+                self.before_git_count += 1;
+                if (self.mode == .same_size_restore) {
+                    try file.writePositionalAll(self.io, "x", 4096);
+                }
+            },
+        }
+    }
+};
 
 fn expectSizedTestFileUnchanged(
     dir: std.Io.Dir,
