@@ -23,7 +23,7 @@ deferred explicitly.
 
 | Area | Required discipline |
 | --- | --- |
-| Core | No I/O, general-purpose allocation, recursion, or reentrant activation. Use one exact Activation Slot and bounded work. |
+| Core | No I/O, general-purpose allocation, recursion, or reentrant activation. Use one compile-time-bounded Activation Slot and bounded work. |
 | Harness | After `open`, use caller-owned bounded storage for owner-loop state. Only `drive` advances Core; `offer` remains nonblocking and allocation-free. |
 | Host Store | Route all access through the Storage Owner. Treat every durable value as hostile input; use bounded canonical payloads, indexed SQL, fixed-width identities, and prepare-commit-publish ordering. |
 | Adapters | Allocation is permitted only when bounded and fallible. External effects begin only after durable Attempt admission. |

@@ -19,7 +19,7 @@ immutable blobs and Conversation nodes
                     |
                  activate
                     v
-       exact 64 KiB Activation Slot
+      bounded native Activation Slot
      decoded Core State + transient scratch
                     |
           semantic transition intent
@@ -79,11 +79,11 @@ Git owns patch parsing and application semantics. The patch adapter prepares the
 
 **Core State** contains only compact semantic facts needed to continue one agent. It has an explicit schema version and canonical encoding with fixed widths, explicit enum values, defined byte order, length, and checksum. Unknown versions, states, enum values, identities, generations, or out-of-range fields fail closed. Native ABI fingerprints and struct layout are not durable compatibility rules.
 
-**Activation Slot** is one exact 65,536-byte, caller-owned resident workspace. It contains decoded Core State plus bounded parser, response, and transition scratch. Core State never contains a native pointer or an offset into transient scratch. Large model responses, patches, command output, and Conversation content remain immutable blobs addressed by bounded handles and ranges.
+**Activation Slot** is one caller-owned resident workspace whose actual size is derived at compile time from decoded Core State and named bounded parser, response, and transition scratch. It contains no filler for a page-size headline and must remain at or below the 32 KiB V1 ceiling. Core State never contains a native pointer or an offset into transient scratch. Large model responses, patches, command output, and Conversation content remain immutable blobs addressed by bounded handles and ranges.
 
 At startup the Host Runtime resolves one explicit `active_capacity` and allocates that many Activation Slots plus fixed occupancy and generation metadata. Activation borrows a slot, decodes or reconstructs Core State into it, and performs no general-purpose allocation inside Core. Suspension encodes Core State, commits required semantic facts, scrubs the complete slot, and returns it to the pool. Slot identity and generation fence stale borrowed windows and late Completions. V1 adds no scheduler object around this pool.
 
-Native Zig is the sole V1 Core executor. Native invariant traces cover accepted and rejected transition outcomes, rejection-state preservation, semantic observations, deterministic canonical encoding, and restoration through differently poisoned slots. Core State's fixed-width codec and the exact native Activation Slot are the portability and resident-memory contracts; V1 defines no secondary runtime or target ABI.
+Native Zig is the sole V1 Core executor. Native invariant traces cover accepted and rejected transition outcomes, rejection-state preservation, semantic observations, deterministic canonical encoding, and restoration through differently poisoned slots. Core State's fixed-width codec and the compile-time-bounded native Activation Slot are the portability and resident-memory contracts; V1 defines no secondary runtime or target ABI.
 
 ## Deep modules and interfaces
 
@@ -171,7 +171,9 @@ Cancellation and shutdown stop new admission but settle or classify every accept
 
 ## Tools and Authorization
 
-V1 exposes only `bash` and `apply_patch`. Bash covers inspection and verification through one bounded Result path. OnePage makes no repository-confinement or sandbox claim for Bash and never classifies an apparently read-only command as automatically safe.
+V1 exposes only the closed typed `bash` and `apply_patch` Actions. They are capabilities behind the existing adapter boundary, not runtime plugins: Core selects an Action, Harness owns validation, Authorization, Attempt admission, durable ordering, and recovery, and a leaf adapter executes only an immutable admitted Attempt. Tool visibility never grants authority. Bash covers inspection and verification through one bounded Result path. OnePage makes no repository-confinement or sandbox claim for Bash and never classifies an apparently read-only command as automatically safe.
+
+A future out-of-tree tool requirement may justify a host-resolved definition table with stable input, output, and capability contracts. It must leave approval and durable recovery outside executors. V1 adds no dynamic registry, discovery format, unload lifecycle, dependency graph, event waterfall, or per-Session tool shadowing for two built-in Actions.
 
 Validation creates an immutable descriptor before Approval Required or Authorization. The descriptor binds tool kind, exact bytes, Workspace and working directory, relevant environment and timeout, Action identity and generation, and preimage state where applicable.
 
@@ -187,7 +189,7 @@ The process-wide SQLite hard heap limit is the authoritative SQLite allowance. P
 
 SQLite's low-water page reserve protects only SQLite closure writes. Before admitting an external effect, OnePage durably prepares the immutable descriptor and any closure evidence that can be known in advance, then ensures the remaining bounded terminal representation can use the configured SQLite reserve and bounded blob policy. V1 does not claim that byte credits can guarantee writes on an arbitrarily failing or full filesystem. Failure to prepare evidence prevents dispatch; exhaustion after a possible effect fails closed and is reported as an unsupported storage failure rather than concealed by a scheduler.
 
-The density proof has two axes. It increases Dormant Sessions while holding `active_capacity` fixed, then increases `active_capacity` while holding dormant population fixed. It reports exact reserved and occupied slot bytes, open Harness count, compact state, fixed host metadata, SQLite memory, blob and database bytes, subprocess memory, and RSS separately. V1 claims only that Activation Slot reservation is `65,536 * active_capacity` and does not scale with dormant Session count.
+The density proof has two axes. It increases Dormant Sessions while holding `active_capacity` fixed, then increases `active_capacity` while holding dormant population fixed. It reports actual slot size and named components, reserved and occupied high-water slot bytes, open Harness count, compact state, fixed host metadata, SQLite memory, virtual size, physical resident memory, blob and database bytes, and subprocess memory separately. Tests dirty and release slots before measurement. V1 claims only that Activation Slot reservation is `@sizeOf(ActivationSlot) * active_capacity` and does not scale with dormant Session count.
 
 V1 has one SQLite writer and commits one whole Session request at a time. It has no fair queue, group commit, dynamic RSS feedback, pressure-triggered cancellation, topology experiment, or production scheduler. Additional writers, storage sharding, and scheduling policy require measured demand after V1.
 
@@ -200,3 +202,9 @@ The Host Store has an explicit maximum page count and protects a configured low-
 V1 makes no backup or long-term retention promise. The state directory is experimental, may be copied only while OnePage is closed, and may be deleted as a whole to reset. Recoverable snapshots, export, Session removal, blob garbage collection, integrity tooling, shrinking, and migration are post-V1 responsibilities. A future backup must bind one SQLite snapshot to its exact immutable-blob closure before it may claim recoverability.
 
 A same-build raw slot image may be added later only as a measured invalidatable cache; it can never be the only durable representation.
+
+## Future deployment and recursive workloads
+
+V1 ships one native Host Runtime. Its semantic boundaries deliberately avoid native layout, SQLite handles, file paths, and process mechanics outside their owners, but portability is not a second implementation requirement. A Cloudflare deployment is post-V1: a Workerd profile would need a Wasm Core, a Storage Owner over Durable Object transactions, and non-process tool capabilities, while a Durable Object-managed Container could retain the native executable but would still need an explicit Workspace and storage topology. Neither path justifies restoring Wasm conformance or a platform framework to V1.
+
+The architecture may later host Recursive Language Model workloads without retaining recursive call stacks. External context remains immutable range-addressed content; each child model call becomes a durable Operation or child Session; and depth, fan-out, token, cost, time, and active-work budgets belong to the Host Runtime. A REPL, delegation, child-result aggregation, persistent environment, and scheduling policy remain post-V1 capabilities and must not enter Session authority implicitly.
