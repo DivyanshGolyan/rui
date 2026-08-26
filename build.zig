@@ -206,9 +206,11 @@ fn addTestRun(
 
 fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     const module = compile.root_module;
-    module.addIncludePath(b.path("vendor/sqlite"));
+    const sqlite = b.dependency("sqlite", .{});
+    module.link_libc = true;
+    module.addIncludePath(sqlite.path("."));
     module.addCSourceFile(.{
-        .file = b.path("vendor/sqlite/sqlite3.c"),
+        .file = sqlite.path("sqlite3.c"),
         .flags = &.{ "-std=c99", "-fno-strict-aliasing" },
     });
     module.addCMacro("SQLITE_THREADSAFE", "0");
