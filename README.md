@@ -75,11 +75,15 @@ Completion Inbox identity, and the transaction that publishes a terminal Result 
 immutable evidence. Only pending relevant evidence consumes the enforced 4,096-row per-Session Inbox bound; consumed evidence is excluded from recovery. Per-Session WAL,
 Inbox, Conversation, checkpoint, and manifest files are no longer production storage paths.
 
-Implemented authoritative descriptor, preimage, Workspace-state, Result, Completion, immutable-blob,
-and ledger-record bytes use distinct versioned SHA-256 binding types. Patch Intent and postimage have
-separate domains for the later durable patch format. The all-zero value remains valid data; absence is
-represented separately. These unkeyed bindings detect accidental corruption and resist collisions but
-do not make locally rewritable storage tamper-proof.
+Implemented authoritative descriptor, Patch Intent, preimage, expected-postimage, Workspace-state,
+Result, Completion, immutable-blob, and ledger-record bytes use distinct versioned SHA-256 binding
+types. Bash persists one descriptor binding its canonical Workspace and working directory, fixed
+environment authority, timeout, command, Operation identity, and generation. Patch validation uses Git
+in a private scratch copy to prepare the expected postimage without mutating the Workspace, then stores
+the complete intent binding before Authorization; patch application and reconciliation remain the
+separate durable effect slice. The all-zero value remains valid data; absence is represented separately.
+These unkeyed bindings detect accidental corruption and resist collisions but do not make locally
+rewritable storage tamper-proof.
 
 ## Requirements
 

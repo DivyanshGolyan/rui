@@ -575,6 +575,16 @@ pub const Session = struct {
             return error.InvalidSessionMetadata;
         }
         try validateWorkspace(io, config.workspace_path);
+        var canonical_workspace_buffer: [workspace_path_capacity]u8 = undefined;
+        const canonical_workspace_length = try std.Io.Dir.cwd().realPathFile(
+            io,
+            config.workspace_path,
+            &canonical_workspace_buffer,
+        );
+        if (canonical_workspace_length == 0 or canonical_workspace_length > workspace_path_capacity) {
+            return error.InvalidSessionMetadata;
+        }
+        const canonical_workspace = canonical_workspace_buffer[0..canonical_workspace_length];
 
         var name_buffer: [16]u8 = undefined;
         const name = sessionName(config.identities.session_id, &name_buffer);
@@ -629,9 +639,9 @@ pub const Session = struct {
             .task_id = config.identities.task_id,
             .branch_id = config.identities.branch_id,
             .ownership_epoch = 1,
-            .workspace_path_length = @intCast(config.workspace_path.len),
+            .workspace_path_length = @intCast(canonical_workspace.len),
         };
-        @memcpy(created.workspace_path[0..config.workspace_path.len], config.workspace_path);
+        @memcpy(created.workspace_path[0..canonical_workspace.len], canonical_workspace);
         created.resident = try created.resident.applyingLedger(initial, created.agent_id, created.ownership_epoch);
 
         try storage.createSessionWithMetadata(.{
@@ -641,7 +651,7 @@ pub const Session = struct {
                 .task_id = config.identities.task_id,
                 .branch_id = config.identities.branch_id,
             },
-            .workspace_path = config.workspace_path,
+            .workspace_path = canonical_workspace,
             .model = config.model,
         }, initial);
         return created;
@@ -1372,7 +1382,16 @@ test "create and exact resume preserve distinct identities and one owner" {
     var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 10);
     defer restored.session.close();
     try std.testing.expectEqual(@as(u64, 2), restored.session.ownership_epoch);
-    try std.testing.expectEqualStrings(layout.workspacePath(), restored.session.workspacePath());
+    var expected_workspace: [workspace_path_capacity]u8 = undefined;
+    const expected_workspace_length = try std.Io.Dir.cwd().realPathFile(
+        io,
+        layout.workspacePath(),
+        &expected_workspace,
+    );
+    try std.testing.expectEqualStrings(
+        expected_workspace[0..expected_workspace_length],
+        restored.session.workspacePath(),
+    );
     try std.testing.expectEqualDeep(Projection{
         .session_id = 10,
         .task_id = 12,

@@ -506,18 +506,29 @@ fn executeBashCall(
     {
         return error.InvalidBashCallRange;
     }
-    var descriptor_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
-    const descriptor_bytes = try core.reducer.copyResponseWindow(
+    var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
+    const call_bytes = try core.reducer.copyResponseWindow(
         response.arguments,
-        &descriptor_buffer,
+        &call_buffer,
     );
-    const call = try bash_tool.decodeCall(descriptor_bytes);
-    const digest = bash_tool.descriptorDigest(descriptor_bytes);
+    const call = try bash_tool.decodeCall(call_bytes);
     const tool_operation_id = (@as(u64, 1) << 63) | ids.operation_id;
+    const descriptor: bash_tool.Descriptor = .{
+        .operation_id = tool_operation_id,
+        .operation_generation = 1,
+        .workspace_path = workspace_path,
+        .working_directory = workspace_path,
+        .call = call,
+    };
+    var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
+    const descriptor_bytes = try bash_tool.encodeDescriptor(&descriptor_buffer, descriptor);
+    const digest = bash_tool.descriptorDigest(descriptor_bytes);
+    const call_ref = (@as(u64, 1) << 59) | ids.response_ref;
     const descriptor_ref = (@as(u64, 1) << 62) | ids.response_ref;
     const result_ref = (@as(u64, 1) << 61) | ids.response_ref;
+    try session.storeBlob(call_ref, call_bytes);
     try session.storeBlob(descriptor_ref, descriptor_bytes);
-    const call_entry = try session.appendConversation(.assistant, descriptor_ref, null);
+    const call_entry = try session.appendConversation(.assistant, call_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
     const descriptor_facts = [_]session_transition.Fact{
         session_transition.operationSubmitted(
@@ -537,7 +548,7 @@ fn executeBashCall(
             .entry_id = call_entry.entry_id,
             .parent_id = call_entry.parent_id,
             .kind = call_entry.kind,
-            .content_ref = descriptor_ref,
+            .content_ref = call_ref,
         }),
     };
     _ = try session.commitSemantic(&descriptor_facts, null);
@@ -592,11 +603,10 @@ fn executeBashCall(
         );
         core.close();
         core_open.* = false;
-        execution = try bash_tool.executeControlled(
+        execution = try bash_tool.executeDescriptor(
             allocator,
             io,
-            workspace_path,
-            call,
+            descriptor,
             .{ .cancelled = cancellation },
         );
         try reach(fault, .after_bash_execution);
@@ -691,12 +701,16 @@ fn requestPatchPermission(
     }
     var patch_buffer: [patch_tool.max_patch_size]u8 = undefined;
     const patch = try core.reducer.copyResponseWindow(response.arguments, &patch_buffer);
-    const validation = try patch_tool.validate(allocator, io, workspace_path, patch);
     const tool_operation_id = (@as(u64, 3) << 62) | ids.operation_id;
     const patch_ref = (@as(u64, 1) << 60) | ids.response_ref;
     const approval_ref = (@as(u64, 1) << 59) | ids.response_ref;
     const permission_ref = (@as(u64, 1) << 58) | ids.response_ref;
     const result_ref = (@as(u64, 1) << 57) | ids.response_ref;
+    const validation = try patch_tool.validate(allocator, io, workspace_path, patch, .{
+        .operation_id = tool_operation_id,
+        .operation_generation = 1,
+        .patch_ref = patch_ref,
+    });
     try session.storeBlob(patch_ref, patch);
     const call_entry = try session.appendConversation(.assistant, patch_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
@@ -704,13 +718,13 @@ fn requestPatchPermission(
         session_transition.operationSubmitted(
             operation_context,
             patch_ref,
-            .{ .apply_patch = validation.patch_digest },
+            .{ .apply_patch = validation.intent_digest },
             .consequential,
         ),
         session_transition.operationAccepted(
             operation_context,
             patch_ref,
-            .{ .apply_patch = validation.patch_digest },
+            .{ .apply_patch = validation.intent_digest },
             .consequential,
         ),
         session_transition.conversationAdvanced(.{
@@ -744,7 +758,7 @@ fn requestPatchPermission(
             .operation = operation_context,
             .binding_ref = approval_ref,
             .descriptor_ref = patch_ref,
-            .descriptor_digest = .{ .apply_patch = validation.patch_digest },
+            .descriptor_digest = .{ .apply_patch = validation.intent_digest },
         });
         try commitCoreFacts(
             session,
@@ -757,7 +771,7 @@ fn requestPatchPermission(
             .kind = .apply_patch,
             .operation_id = tool_operation_id,
             .operation_generation = 1,
-            .descriptor_digest = .{ .apply_patch = validation.patch_digest },
+            .descriptor_digest = .{ .apply_patch = validation.intent_digest },
             .descriptor_ref = patch_ref,
         });
         allowed = try policy.ask(subject, patch);
@@ -775,7 +789,7 @@ fn requestPatchPermission(
     const authorization = session_transition.authorization(.{
         .operation = operation_context,
         .permission_ref = permission_ref,
-        .descriptor_digest = .{ .apply_patch = validation.patch_digest },
+        .descriptor_digest = .{ .apply_patch = validation.intent_digest },
         .allowed = allowed,
     });
     _ = try session.commitSemantic(&.{authorization}, null);
@@ -784,7 +798,11 @@ fn requestPatchPermission(
     var status: patch_tool.ResultStatus = .denied;
     var observed_workspace_digest: ?binding.WorkspaceState = null;
     if (allowed) {
-        const observed = patch_tool.validate(allocator, io, workspace_path, patch) catch |err| switch (err) {
+        const observed = patch_tool.validate(allocator, io, workspace_path, patch, .{
+            .operation_id = tool_operation_id,
+            .operation_generation = 1,
+            .patch_ref = patch_ref,
+        }) catch |err| switch (err) {
             error.FileNotFound,
             error.NotDir,
             error.SymLinkLoop,
@@ -810,7 +828,7 @@ fn requestPatchPermission(
     var result_bytes: [patch_tool.result_size]u8 = undefined;
     try patch_tool.encodeResult(&result_bytes, .{
         .status = status,
-        .patch_digest = validation.patch_digest,
+        .intent_digest = validation.intent_digest,
         .expected_workspace_digest = validation.workspace_digest,
         .observed_workspace_digest = observed_workspace_digest,
     });
@@ -861,10 +879,12 @@ fn storePatchBinding(
         .ownership_epoch = token.epoch,
         .patch_ref = patch_ref,
         .patch_digest = validation.patch_digest,
+        .intent_digest = validation.intent_digest,
         .workspace_digest = validation.workspace_digest,
         .preimage_size = validation.preimage_size,
         .preimage_inode = @intCast(validation.preimage_inode),
         .preimage_digest = validation.preimage_digest,
+        .postimage_digest = validation.postimage_digest,
     });
     try session.storeBlob(binding_ref, &bytes);
 }
@@ -1087,6 +1107,29 @@ pub fn resolvePermission(
     switch (response.tool) {
         .bash => {
             const operation_context = operationContext(session, expected_operation_id, 1);
+            var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
+            var reader = try session.openBlob(descriptor.descriptor_ref);
+            defer reader.close();
+            if (reader.length() > descriptor_buffer.len) return error.InvalidBashCallRange;
+            const descriptor_length: usize = @intCast(reader.length());
+            const descriptor_bytes = try reader.readWindow(0, descriptor_buffer[0..descriptor_length]);
+            if (descriptor_bytes.len != descriptor_length) return error.TruncatedBashDescriptor;
+            const bash_descriptor = try bash_tool.decodeDescriptor(descriptor_bytes);
+            const expected_bash_digest = switch (descriptor.descriptor_digest) {
+                .bash => |value| value,
+                else => return error.StalePermissionDecision,
+            };
+            if (bash_descriptor.operation_id != expected_operation_id or
+                bash_descriptor.operation_generation != 1 or
+                !std.mem.eql(u8, bash_descriptor.workspace_path, session.workspacePath()) or
+                !binding.eql(
+                    binding.BashDescriptor,
+                    bash_tool.descriptorDigest(descriptor_bytes),
+                    expected_bash_digest,
+                ))
+            {
+                return error.StalePermissionDecision;
+            }
             const authorization = session_transition.authorization(.{
                 .operation = operation_context,
                 .permission_ref = 0,
@@ -1094,14 +1137,6 @@ pub fn resolvePermission(
                 .allowed = allow,
             });
             _ = try session.commitSemantic(&.{authorization}, null);
-            var descriptor_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
-            var reader = try session.openBlob(descriptor.descriptor_ref);
-            defer reader.close();
-            if (reader.length() > descriptor_buffer.len) return error.InvalidBashCallRange;
-            const descriptor_length: usize = @intCast(reader.length());
-            const descriptor_bytes = try reader.readWindow(0, descriptor_buffer[0..descriptor_length]);
-            if (descriptor_bytes.len != descriptor_length) return error.TruncatedBashDescriptor;
-            const call = try bash_tool.decodeCall(descriptor_bytes);
             const result_ref = (@as(u64, 1) << 61) | @as(u32, @truncate(observation.result_ref));
             var attempt_id: u64 = 0;
             var execution: bash_tool.Execution = undefined;
@@ -1117,11 +1152,10 @@ pub fn resolvePermission(
                 try commitCoreFacts(session, core_state_buffer, &core, &.{attempt}, false);
                 core.close();
                 core_open = false;
-                execution = try bash_tool.executeControlled(
+                execution = try bash_tool.executeDescriptor(
                     allocator,
                     io,
-                    session.workspacePath(),
-                    call,
+                    bash_descriptor,
                     .{ .cancelled = cancellation },
                 );
                 core = try Core.open(&host.slots);
@@ -1198,7 +1232,7 @@ pub fn resolvePermission(
             if (patch_binding.operation_id != expected_operation_id or
                 patch_binding.operation_generation != 1 or
                 patch_binding.patch_ref != descriptor.descriptor_ref or
-                !binding.eql(binding.PatchDescriptor, patch_binding.patch_digest, patch_descriptor))
+                !binding.eql(binding.PatchIntent, patch_binding.intent_digest, patch_descriptor))
             {
                 return error.StalePermissionDecision;
             }
@@ -1210,9 +1244,12 @@ pub fn resolvePermission(
                 if (allow) .allow else .deny,
                 expected_operation_id,
                 .{
+                    .workspace_path = session.workspacePath(),
                     .target_path = "",
                     .patch_digest = patch_binding.patch_digest,
+                    .intent_digest = patch_binding.intent_digest,
                     .preimage_digest = patch_binding.preimage_digest,
+                    .postimage_digest = patch_binding.postimage_digest,
                     .workspace_digest = patch_binding.workspace_digest,
                     .preimage_size = patch_binding.preimage_size,
                     .preimage_inode = @intCast(patch_binding.preimage_inode),
@@ -1232,7 +1269,7 @@ pub fn resolvePermission(
             var result_bytes: [patch_tool.result_size]u8 = undefined;
             try patch_tool.encodeResult(&result_bytes, .{
                 .status = .denied,
-                .patch_digest = patch_descriptor,
+                .intent_digest = patch_descriptor,
                 .expected_workspace_digest = patch_binding.workspace_digest,
                 .observed_workspace_digest = null,
             });
@@ -1575,7 +1612,7 @@ fn reconcilePatch(
     const patch_binding = try patch_tool.decodeBinding(&binding_bytes);
     if (patch_binding.operation_id != operation_id or patch_binding.operation_generation != 1 or
         patch_binding.patch_ref != patch_ref or
-        !binding.eql(binding.PatchDescriptor, patch_binding.patch_digest, patch_descriptor))
+        !binding.eql(binding.PatchIntent, patch_binding.intent_digest, patch_descriptor))
     {
         return error.InvalidPatchPermissionBinding;
     }
@@ -1589,14 +1626,21 @@ fn reconcilePatch(
         const patch = try readBoundedBlob(session, patch_ref, &patch_buffer);
         const target_path = try patch_tool.validateStructure(patch);
         const expected: patch_tool.Validation = .{
+            .workspace_path = workspace_path,
             .target_path = target_path,
             .patch_digest = patch_binding.patch_digest,
+            .intent_digest = patch_binding.intent_digest,
             .preimage_digest = patch_binding.preimage_digest,
+            .postimage_digest = patch_binding.postimage_digest,
             .workspace_digest = patch_binding.workspace_digest,
             .preimage_size = patch_binding.preimage_size,
             .preimage_inode = @intCast(patch_binding.preimage_inode),
         };
-        const observed = patch_tool.validate(allocator, session.io, workspace_path, patch) catch null;
+        const observed = patch_tool.validate(allocator, session.io, workspace_path, patch, .{
+            .operation_id = operation_id,
+            .operation_generation = 1,
+            .patch_ref = patch_ref,
+        }) catch null;
         if (observed) |current| {
             if (patch_tool.sameWorkspace(expected, current)) return .approved;
         }
@@ -1653,7 +1697,7 @@ fn persistPatchPreflightResult(
     operation_id: u64,
     patch_ref: u64,
     result_ref: u64,
-    descriptor_digest: binding.PatchDescriptor,
+    descriptor_digest: binding.PatchIntent,
     status: patch_tool.ResultStatus,
     expected_workspace_digest: binding.WorkspaceState,
     observed_workspace_digest: ?binding.WorkspaceState,
@@ -1661,7 +1705,7 @@ fn persistPatchPreflightResult(
     var result_bytes: [patch_tool.result_size]u8 = undefined;
     try patch_tool.encodeResult(&result_bytes, .{
         .status = status,
-        .patch_digest = descriptor_digest,
+        .intent_digest = descriptor_digest,
         .expected_workspace_digest = expected_workspace_digest,
         .observed_workspace_digest = observed_workspace_digest,
     });
@@ -1699,8 +1743,8 @@ fn reconcileBashResult(
 ) !void {
     const response_ref: u32 = @truncate(result.result);
     if (result.result != ((@as(u64, 1) << 61) | response_ref)) return error.InvalidToolResultReference;
-    const descriptor_ref = (@as(u64, 1) << 62) | response_ref;
-    try reconcileToolResult(session, core, core_state_buffer, descriptor_ref, result);
+    const call_ref = (@as(u64, 1) << 59) | response_ref;
+    try reconcileToolResult(session, core, core_state_buffer, call_ref, result);
 }
 
 fn reconcileToolResult(

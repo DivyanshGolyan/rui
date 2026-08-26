@@ -3,18 +3,37 @@ const binding = @import("binding.zig");
 
 pub const version: u16 = 1;
 pub const call_header_size = 16;
+pub const descriptor_version: u16 = 1;
+pub const descriptor_header_size = 32;
 pub const result_header_size = 32;
 pub const max_command_size = 2048;
+pub const max_workspace_path_size = 1024;
+pub const max_descriptor_size = descriptor_header_size + 2 * max_workspace_path_size +
+    environment_authority.len + max_command_size;
 pub const max_output_size = 64 * 1024;
 pub const min_timeout_ms = 100;
 pub const max_timeout_ms = 120_000;
 
 const call_magic = "ONEBASH\x00";
+const descriptor_magic = "ONEBDSC\x00";
 const result_magic = "ONERES\x00\x00";
+const environment_path = "/usr/bin:/bin";
+const environment_locale = "C";
+const environment_sanitized = "1";
+pub const environment_authority = "PATH=" ++ environment_path ++ "\x00LC_ALL=" ++
+    environment_locale ++ "\x00ONEPAGE_SANITIZED=" ++ environment_sanitized ++ "\x00";
 
 pub const Call = struct {
     command: []const u8,
     timeout_ms: u32,
+};
+
+pub const Descriptor = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    workspace_path: []const u8,
+    working_directory: []const u8,
+    call: Call,
 };
 
 pub const Decision = enum(u8) {
@@ -104,8 +123,80 @@ pub fn decodeCall(bytes: []const u8) !Call {
     return call;
 }
 
+pub fn encodeDescriptor(out: []u8, descriptor: Descriptor) ![]const u8 {
+    try validateDescriptor(descriptor);
+    const total = descriptor_header_size + descriptor.workspace_path.len +
+        descriptor.working_directory.len + environment_authority.len + descriptor.call.command.len;
+    if (total > out.len) return error.DescriptorBufferTooSmall;
+    @memset(out[0..total], 0);
+    @memcpy(out[0..descriptor_magic.len], descriptor_magic);
+    write(u16, out, 8, descriptor_version);
+    write(u16, out, 10, descriptor_header_size);
+    write(u64, out, 12, descriptor.operation_id);
+    write(u32, out, 20, descriptor.operation_generation);
+    write(u32, out, 24, descriptor.call.timeout_ms);
+    write(u16, out, 28, @intCast(descriptor.workspace_path.len));
+    write(u16, out, 30, @intCast(descriptor.working_directory.len));
+    var cursor: usize = descriptor_header_size;
+    @memcpy(out[cursor..][0..descriptor.workspace_path.len], descriptor.workspace_path);
+    cursor += descriptor.workspace_path.len;
+    @memcpy(out[cursor..][0..descriptor.working_directory.len], descriptor.working_directory);
+    cursor += descriptor.working_directory.len;
+    @memcpy(out[cursor..][0..environment_authority.len], environment_authority);
+    cursor += environment_authority.len;
+    @memcpy(out[cursor..][0..descriptor.call.command.len], descriptor.call.command);
+    return out[0..total];
+}
+
+pub fn decodeDescriptor(bytes: []const u8) !Descriptor {
+    if (bytes.len < descriptor_header_size + environment_authority.len + 1 or
+        bytes.len > max_descriptor_size or
+        !std.mem.eql(u8, bytes[0..descriptor_magic.len], descriptor_magic) or
+        read(u16, bytes, 8) != descriptor_version or
+        read(u16, bytes, 10) != descriptor_header_size)
+    {
+        return error.InvalidBashDescriptor;
+    }
+    const workspace_length: usize = read(u16, bytes, 28);
+    const working_directory_length: usize = read(u16, bytes, 30);
+    const authority_offset = descriptor_header_size + workspace_length + working_directory_length;
+    const command_offset = authority_offset + environment_authority.len;
+    if (workspace_length == 0 or workspace_length > max_workspace_path_size or
+        working_directory_length == 0 or working_directory_length > max_workspace_path_size or
+        command_offset >= bytes.len or
+        !std.mem.eql(u8, bytes[authority_offset..command_offset], environment_authority))
+    {
+        return error.InvalidBashDescriptor;
+    }
+    const descriptor: Descriptor = .{
+        .operation_id = read(u64, bytes, 12),
+        .operation_generation = read(u32, bytes, 20),
+        .workspace_path = bytes[descriptor_header_size..][0..workspace_length],
+        .working_directory = bytes[descriptor_header_size + workspace_length .. authority_offset],
+        .call = .{
+            .timeout_ms = read(u32, bytes, 24),
+            .command = bytes[command_offset..],
+        },
+    };
+    try validateDescriptor(descriptor);
+    var canonical: [max_descriptor_size]u8 = undefined;
+    const encoded = try encodeDescriptor(&canonical, descriptor);
+    if (!std.mem.eql(u8, encoded, bytes)) return error.InvalidBashDescriptor;
+    return descriptor;
+}
+
 pub fn descriptorDigest(bytes: []const u8) binding.BashDescriptor {
     return binding.hash(binding.BashDescriptor, bytes);
+}
+
+pub fn executeDescriptor(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    descriptor: Descriptor,
+    control: Control,
+) !Execution {
+    try validateDescriptor(descriptor);
+    return executeControlled(allocator, io, descriptor.working_directory, descriptor.call, control);
 }
 
 pub fn execute(
@@ -130,9 +221,9 @@ pub fn executeControlled(
     }
     var environment = std.process.Environ.Map.init(allocator);
     defer environment.deinit();
-    try environment.put("PATH", "/usr/bin:/bin");
-    try environment.put("LC_ALL", "C");
-    try environment.put("ONEPAGE_SANITIZED", "1");
+    try environment.put("PATH", environment_path);
+    try environment.put("LC_ALL", environment_locale);
+    try environment.put("ONEPAGE_SANITIZED", environment_sanitized);
 
     const run = runBounded(allocator, io, .{
         .argv = &.{ control.bash_path, "--noprofile", "--norc", "-c", call.command },
@@ -377,6 +468,22 @@ fn validate(call: Call) !void {
     }
 }
 
+fn validateDescriptor(descriptor: Descriptor) !void {
+    try validate(descriptor.call);
+    if (descriptor.operation_id == 0 or descriptor.operation_generation == 0 or
+        descriptor.workspace_path.len == 0 or
+        descriptor.workspace_path.len > max_workspace_path_size or
+        descriptor.working_directory.len == 0 or
+        descriptor.working_directory.len > max_workspace_path_size or
+        descriptor.workspace_path[0] != '/' or descriptor.working_directory[0] != '/' or
+        !std.mem.eql(u8, descriptor.workspace_path, descriptor.working_directory) or
+        std.mem.indexOfScalar(u8, descriptor.workspace_path, 0) != null or
+        std.mem.indexOfScalar(u8, descriptor.working_directory, 0) != null)
+    {
+        return error.InvalidBashDescriptor;
+    }
+}
+
 fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
     std.mem.writeInt(T, out[offset..][0..@sizeOf(T)], value, .little);
 }
@@ -393,6 +500,42 @@ test "bash call is canonical, bounded, and digest bound" {
     try std.testing.expectEqual(@as(u32, 5000), decoded.timeout_ms);
     try std.testing.expectEqual(@as(usize, 32), descriptorDigest(encoded).bytes.len);
     try std.testing.expectError(error.InvalidBashCall, decodeCall("not a call"));
+}
+
+test "Bash descriptor binds complete execution authority canonically" {
+    const expected: Descriptor = .{
+        .operation_id = 17,
+        .operation_generation = 3,
+        .workspace_path = "/work/onepage",
+        .working_directory = "/work/onepage",
+        .call = .{ .command = "git status --short", .timeout_ms = 5000 },
+    };
+    var bytes: [max_descriptor_size]u8 = undefined;
+    const encoded = try encodeDescriptor(&bytes, expected);
+    const decoded = try decodeDescriptor(encoded);
+    try std.testing.expectEqualDeep(expected, decoded);
+    const expected_digest = descriptorDigest(encoded);
+    const environment_offset = descriptor_header_size + expected.workspace_path.len +
+        expected.working_directory.len;
+    bytes[environment_offset] ^= 1;
+    try std.testing.expectError(error.InvalidBashDescriptor, decodeDescriptor(encoded));
+    bytes[environment_offset] ^= 1;
+
+    const mismatches = [_]Descriptor{
+        .{ .operation_id = 19, .operation_generation = 3, .workspace_path = "/work/onepage", .working_directory = "/work/onepage", .call = expected.call },
+        .{ .operation_id = 17, .operation_generation = 4, .workspace_path = "/work/onepage", .working_directory = "/work/onepage", .call = expected.call },
+        .{ .operation_id = 17, .operation_generation = 3, .workspace_path = "/work/other", .working_directory = "/work/other", .call = expected.call },
+        .{ .operation_id = 17, .operation_generation = 3, .workspace_path = "/work/onepage", .working_directory = "/work/onepage", .call = .{ .command = expected.call.command, .timeout_ms = 6000 } },
+        .{ .operation_id = 17, .operation_generation = 3, .workspace_path = "/work/onepage", .working_directory = "/work/onepage", .call = .{ .command = "git diff", .timeout_ms = 5000 } },
+    };
+    for (mismatches) |mismatch| {
+        const mismatch_bytes = try encodeDescriptor(&bytes, mismatch);
+        try std.testing.expect(!binding.eql(
+            binding.BashDescriptor,
+            expected_digest,
+            descriptorDigest(mismatch_bytes),
+        ));
+    }
 }
 
 test "bash runs in its workspace with a sanitized environment" {

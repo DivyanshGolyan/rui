@@ -87,6 +87,29 @@ test "a malformed flat wire record never becomes a typed fact" {
     );
 }
 
+test "unused flags are rejected for task admission and Outcome" {
+    const agent: transition.AgentContext = .{
+        .agent_id = 7,
+        .agent_generation = 1,
+        .ownership_epoch = 2,
+    };
+    const facts = [_]transition.Fact{
+        transition.taskAdmitted(agent, 31, 37),
+        transition.outcome(agent, 41, 43),
+    };
+    for (facts) |fact| {
+        var buffer: [transition.max_payload_size]u8 = undefined;
+        var transaction: transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+        transaction.facts[0] = fact;
+        const encoded = try transition.encode(&buffer, transaction);
+        buffer[4 + 3] = 1;
+        try std.testing.expectError(
+            error.InvalidKindSpecificPayload,
+            transition.decode(1, encoded),
+        );
+    }
+}
+
 test "Result evidence round trips as immediate or durable typed choices" {
     const operation: transition.OperationContext = .{
         .agent = .{ .agent_id = 7, .agent_generation = 1, .ownership_epoch = 2 },

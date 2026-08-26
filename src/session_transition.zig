@@ -366,7 +366,7 @@ fn validateRawFact(fact: RawFact) !void {
         .task_admitted, .outcome => {
             if (fact.subject == 0 or fact.reference == 0 or fact.operation_id != 0 or
                 fact.attempt_id != 0 or fact.auxiliary != 0 or fact.digest_kind != 0 or
-                fact.recovery_class != .none or fact.evidence_kind != 0)
+                fact.recovery_class != .none or fact.flags != 0 or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
