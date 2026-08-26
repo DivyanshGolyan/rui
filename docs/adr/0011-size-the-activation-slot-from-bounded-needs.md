@@ -1,0 +1,7 @@
+# Size the Activation Slot from bounded needs
+
+OnePage reserves each Activation Slot at its actual compile-time size and carries no filler to reach a memorable page boundary. The slot contains only decoded Core State and named bounded scratch required by the production Core. V1 fails the build when `@sizeOf(ActivationSlot) > 32 * 1024`; this ceiling is a guardrail, not a target allocation or permission to fall back to the heap.
+
+The Host Runtime reserves `@sizeOf(ActivationSlot) * active_capacity` bytes for the slot pool at startup. Verification reports the actual slot size, named component sizes, occupied high-water bytes, pool reservation, virtual size, physical resident memory, SQLite memory, adapter buffers, subprocesses, and durable bytes separately. Density measurements dirty and release slots before measuring so zero-filled or untouched virtual mappings cannot masquerade as physical savings.
+
+ADR-0006 remains accepted for the separation between canonical Core State and transient Activation Slot storage. This decision supersedes its exact 64 KiB constraint. Historical 64 KiB images and measurements remain research evidence only.

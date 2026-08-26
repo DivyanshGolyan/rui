@@ -1,8 +1,8 @@
 # OnePage product contract
 
-OnePage is a terminal-first coding-agent harness for running many durable agents through a fixed resident pool on one host. Every active Core borrows one exact 64 KiB Activation Slot; Dormant Sessions retain compact Core State, immutable history, and durable effect facts in one host-wide Host Store without retaining an Activation Slot, thread, process, socket, database connection, or conversation object graph.
+OnePage is a terminal-first coding-agent harness for running many durable agents through a fixed resident pool on one host. Every active Core borrows one compile-time-sized Activation Slot; Dormant Sessions retain compact Core State, immutable history, and durable effect facts in one host-wide Host Store without retaining an Activation Slot, thread, process, socket, database connection, or conversation object graph.
 
-The memorable claim is not that the complete process or a serialized agent consumes 64 KiB. OnePage reports the exact Activation Slot separately from native stacks, host pools, transport buffers, subprocesses, durable storage, and whole-process RSS. Its architectural claim is that resident memory follows the configured active working set rather than total Session count or Conversation length.
+The memory claim is not that the complete process or a serialized agent fits in the Activation Slot. OnePage reports the actual slot separately from native stacks, host pools, transport buffers, subprocesses, durable storage, and whole-process RSS. Its architectural claim is that resident memory follows the configured active working set rather than total Session count or Conversation length.
 
 ## V1 experience
 
@@ -19,7 +19,7 @@ The terminal demonstrates durable Session identity, exact Action authority, cras
 
 ## Product guarantees
 
-- Every Activation Slot is exactly 65,536 bytes and comes from a startup-reserved pool.
+- Every Activation Slot contains only named bounded Core State and scratch, carries no sizing filler, and comes from a startup-reserved pool. Its actual compile-time size must not exceed 32 KiB in V1.
 - One startup-fixed `active_capacity` bounds open Harness owners, Activation Slots, and in-flight external Attempts for V1. Capacity never grows after startup.
 - Activating, advancing, suspending, and reusing a slot performs no general-purpose allocation inside Core.
 - Dormant Sessions retain no resident Activation Slot or materialized Conversation graph.
@@ -36,7 +36,7 @@ The terminal demonstrates durable Session identity, exact Action authority, cras
 - Automatic replay of an arbitrary command whose execution is uncertain.
 - Multi-host scheduling, remote Session migration, distributed coordination, or external-effect exactly-once claims.
 - Production delegation, Conversation navigation, compaction behaviour, or branching UI.
-- A promise that total RSS, disk usage, model cost, subprocess memory, or dormant-agent storage is 64 KiB.
+- A promise that total RSS, disk usage, model cost, subprocess memory, or dormant-agent storage equals the Activation Slot size.
 - A generalized scheduler, independent model/tool/completion pools, dynamic RSS controller, fairness framework, group commit, or hot capacity resizing.
 - A provider registry, generalized OAuth framework, model catalog requirement, automatic model fallback, or streaming UI.
 - A custom SQLite VFS campaign or a claim that OnePage re-proves SQLite pager durability.
