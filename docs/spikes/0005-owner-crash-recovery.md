@@ -1,5 +1,9 @@
 # Fixed-credit owner crash recovery
 
+> Historical evidence. The process-crash measurements remain useful, but ADR-0008 removed
+> JavaScriptCore and Wasm, while ADR-0009 replaced the operation journal and checkpoint files with
+> the Host Store. Current crash obligations are defined by `VERIFICATION.md` and their owning issues.
+
 ## Question
 
 Does the fixed-credit harness still preserve durable-before-apply ordering when it drives the real operation journal and the real JavaScriptCore execution slot, and when the process actually exits at the boundary?

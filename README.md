@@ -17,7 +17,9 @@ from one ordered Session Ledger inside a bounded host-wide SQLite Host Store.
 but they do not override those documents or accepted ADRs.
 
 [`docs/style.md`](docs/style.md) defines the scoped engineering rules and canonical compiler-backed
-check for implementation work.
+check for implementation work. [ADR-0010](docs/adr/0010-make-simplicity-a-v1-requirement.md)
+makes architectural simplicity a V1 correctness constraint: new surfaces require a current product
+obligation and may not generalize a single consumer.
 
 The fixed-credit harness spike established a 1.5 KiB-bounded native owner with nonblocking task,
 completion, permission, cancellation, and shutdown admission; durable-before-apply ordering;
@@ -29,7 +31,7 @@ that runtime to `Harness.open`. It owns the process-wide SQLite allowance, state
 Slot pool, lifetime operating-system lock, SQLite connection, and bounded Storage Owner; lifecycle callers do not assemble or retain those
 mechanics separately. `Harness.open` returns an opaque pointer-stable owner backed by one retained runtime lease. Projections are data-only and
 reopen content through that live Harness rather than retaining internal pointers. Each Session retains exact create and resume identity, durable ownership
-epochs, one replayable resident value reduced from its ordered semantic ledger, and a linear V1 conversation. Sleeping Sessions
+epochs, one replayable resident value reduced from its ordered semantic ledger, and a linear V1 conversation. Dormant Sessions
 retain rows and blob references rather than SQLite connections or resident object graphs.
 
 The first agent slice now performs one real durable model turn through the product CLI. A fixture
@@ -84,7 +86,7 @@ zig build test -Doptimize=ReleaseSafe
 zig build native-core -Doptimize=ReleaseSafe
 ```
 
-`native-core` reports the exact slot, compact sleeping-state bytes, process RSS, and 32 randomized
+`native-core` reports the exact slot, compact Dormant Session state bytes, process RSS, and 32 randomized
 native invariant traces through canonical suspend and poisoned-slot restore.
 
 See the spike notes for architecture, measurements, caveats, and next questions:
@@ -131,3 +133,4 @@ Architectural decisions:
 - [`docs/adr/0007-use-one-session-wal-as-semantic-authority.md`](docs/adr/0007-use-one-session-wal-as-semantic-authority.md)
 - [`docs/adr/0008-keep-v1-core-native-only.md`](docs/adr/0008-keep-v1-core-native-only.md)
 - [`docs/adr/0009-use-one-host-store-with-session-ledgers.md`](docs/adr/0009-use-one-host-store-with-session-ledgers.md)
+- [`docs/adr/0010-make-simplicity-a-v1-requirement.md`](docs/adr/0010-make-simplicity-a-v1-requirement.md)

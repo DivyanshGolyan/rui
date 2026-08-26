@@ -1,5 +1,9 @@
 # Compose agents through durable delegation
 
-OnePage models delegation as an asynchronous Operation that creates a child Agent, Session, and Task through the same Harness used for a root Agent. After the parent-child link and Operation are durable, the parent can release its Activation Slot and later receive the child's Outcome as a typed Result; no recursive call stack or resident ancestry is retained. V1 does not expose delegation, but Agent identity, scheduling, recovery, and capacity must remain independent of delegation depth and topology.
+> Post-V1 direction. Delegation is excluded from V1 and imposes no V1 implementation, schema,
+> capacity, or verification requirement. Reconsider this decision against measured product demand
+> before implementation.
 
-For one selected agent, activation, suspension, resume, admission, and completion routing must perform bounded work and retain bounded memory independent of ancestor depth, descendant count, and sibling count. These paths address durable records directly and never traverse or hydrate the delegation tree. The system has no product-level nesting-depth limit; shared active-slot and storage limits remain host policy. Topology can still change total work, disk consumption, and critical-path latency, so OnePage does not claim those quantities are constant.
+If a post-V1 product requires delegation, OnePage may model it as an asynchronous Operation that creates a child Agent, Session, and Task through the same Harness used for a root Agent. After the parent-child link and Operation are durable, the parent could release its Activation Slot and later receive the child's Outcome as a typed Result; no recursive call stack or resident ancestry would be retained.
+
+That future design would require activation, suspension, resume, admission, and completion routing for one selected agent to remain bounded independently of ancestor depth, descendant count, and sibling count. It would address durable records directly rather than traverse or hydrate a delegation tree. None of these prospective topology rules constrains V1.

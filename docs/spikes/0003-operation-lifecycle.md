@@ -1,5 +1,9 @@
 # Operation-lifecycle spike
 
+> Historical evidence. ADR-0009 replaces this spike's operation journal and checkpoint authority
+> with one Host Store and per-Session Ledger. Retain the measured lifecycle evidence; do not use the
+> obsolete persistence or runtime mechanics as current scope.
+
 ## Question
 
 How can a logical agent submit an external operation, release its 64 KiB execution slot, and later

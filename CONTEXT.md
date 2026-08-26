@@ -18,6 +18,10 @@ _Avoid_: Run, worker
 The durable container for one agent's related tasks, conversation, and outcomes.
 _Avoid_: Conversation, task, process
 
+**Dormant Session**:
+A durable, resumable Session with no live Harness owner and no borrowed Activation Slot.
+_Avoid_: Sleeping agent, closed Session, inactive process
+
 **Session Ledger**:
 The single ordered authority for semantic facts that create, advance, recover, or complete one session.
 _Avoid_: Session WAL, SQLite WAL, operation journal, event bus, transcript, debug log
@@ -66,6 +70,10 @@ _Avoid_: Agent call, recursive call, subroutine
 The repository checkout whose state a session observes and may be authorized to change.
 _Avoid_: Session, conversation, repository history
 
+**Patch Intent**:
+The immutable one-file mutation description that binds the Workspace, canonical target, permitted file properties, exact patch, exact preimage, and expected postimage before Authorization.
+_Avoid_: Patch result, approval, workspace snapshot
+
 **Core State**:
 The compact semantic state needed to continue one agent, independent of native layout and temporary execution storage.
 _Avoid_: Core image, Activation Slot, checkpoint bytes
@@ -84,6 +92,10 @@ _Avoid_: Agent, session, process, checkpoint
 One reusable, fixed-capacity resident workspace containing decoded Core State and transient scratch for an Activation.
 _Avoid_: Agent, Core State, execution page, checkpoint
 
+**Active Capacity**:
+The startup-fixed number of open Harness owners, Activation Slots, and per-Harness in-flight external Attempts supported by the V1 Host Runtime.
+_Avoid_: Session population, scheduler, dynamic concurrency
+
 **Action**:
 One policy-valid request by the agent for external work. A V1 tool call selects an action; a Final Answer does not.
 _Avoid_: Tool call, command, Final Answer, event
@@ -99,6 +111,10 @@ _Avoid_: Operation, retry, request
 **Result**:
 The durable, typed outcome of a completed operation that the agent can use in a later decision.
 _Avoid_: Completion, output, response
+
+**Binding Digest**:
+A typed, domain-separated SHA-256 value that binds exact authoritative bytes for one semantic role. Different roles share a width but are not interchangeable.
+_Avoid_: Identifier, authentication tag, tamper proof, optional sentinel
 
 **Completion**:
 A bounded notification that an operation's durable result is ready to apply to agent state.

@@ -68,7 +68,7 @@ Tradeoff: maintaining an explicit import list creates one small update obligatio
 
 ### 3. Enforce the contract in pinned macOS CI
 
-Use a single macOS ARM64 job initially because the repository explicitly supports Apple Silicon and dynamically loads Apple's JavaScriptCore framework. GitHub currently documents `macos-14`, `macos-15`, and `macos-latest` as ARM64 hosted-runner labels ([GitHub-hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)). Prefer a fixed label such as `macos-15`, not `macos-latest`.
+Use a single macOS ARM64 job initially because V1's supported platform contract is Apple Silicon macOS and the Core executor is native Zig. GitHub currently documents `macos-14`, `macos-15`, and `macos-latest` as ARM64 hosted-runner labels ([GitHub-hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)). Prefer a fixed label such as `macos-15`, not `macos-latest`.
 
 The job should:
 

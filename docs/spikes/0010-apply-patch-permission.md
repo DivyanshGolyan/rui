@@ -1,5 +1,8 @@
 # Durable one-file patch permission
 
+> Historical evidence. The exact patch-permission boundary remains relevant, but ADR-0009 replaces
+> the persistence mechanics and issue #9 owns the current Patch Intent and reconciliation slice.
+
 Issue #8 stops before mutation. The host accepts exact unified-diff bytes from the model, validates
 one tracked regular file, captures its opened preimage, and binds any permission decision to that
 immutable subject. Issue #9 owns the controlled mutation and reconciliation path.

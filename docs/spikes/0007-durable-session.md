@@ -1,6 +1,9 @@
 # Durable Session ownership and resume
 
-> Historical evidence. The ownership and exact-resume results remain useful, but ADR-0007 supersedes the separate Conversation-log and operation-journal authority model. Immutable Conversation content advances only through the single ordered Session WAL, which also owns effect and lifecycle facts.
+> Historical evidence. The ownership and exact-resume results remain useful. ADR-0007 first
+> superseded the separate Conversation-log and operation-journal authority model; ADR-0009
+> subsequently placed the ordered Session Ledger and immutable Conversation metadata in one Host
+> Store and removed the physical Session WAL and State Checkpoint design.
 
 ## Question
 

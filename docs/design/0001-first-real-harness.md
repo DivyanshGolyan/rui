@@ -1,8 +1,8 @@
 # First real harness design
 
-Status: historical; superseded in part by `ARCHITECTURE.md`, ADR-0006, and ADR-0007
+Status: historical; superseded in part by `ARCHITECTURE.md`, ADR-0006, ADR-0008, and ADR-0009. ADR-0007 records the historical semantic precursor to ADR-0009.
 
-`PRODUCT.md`, `ARCHITECTURE.md`, and `VERIFICATION.md` are normative. They supersede this document's raw Core image, effect-only operation journal, and checkpoint-authority details while retaining the accepted `Harness.open / offer / drive` interface, effect semantics, and two-tool product loop.
+`PRODUCT.md`, `ARCHITECTURE.md`, and `VERIFICATION.md` are normative. They supersede this document's raw Core image, effect-only operation journal, checkpoint-authority, Wasm, and delegation-scope details while retaining the accepted `Harness.open / offer / drive` interface, effect semantics, and two-tool product loop. Delegation is post-V1 and imposes no current implementation or verification requirement.
 
 Related specifications:
 
@@ -108,7 +108,7 @@ Creating a session prints its stable identity before the first external effect. 
 
 Conversation reconstruction and workspace reconstruction are different claims. V1 operates on a user-owned Git worktree that may change outside OnePage, so the worktree remains external truth. The operation journal records the exact preimage identity, immutable mutation descriptor, observed postimage identity, and uncertainty disposition for each consequential repository operation; these are fields on the existing operation record, not a third history.
 
-V1 patch operations touch exactly one regular file. Patch application is reconcilable, not transactionally atomic with the worktree: recovery classifies the current file as the expected preimage, expected postimage, or divergent. The preimage permits a new attempt only after authorization under the resumed invocation's selected permission mode, the postimage proves the intended mutation is already present, and divergence stops automatically with an indeterminate result. A later multi-file patch must define the same classification per file and may not claim all-or-nothing mutation without an isolated transactional mechanism.
+V1 patch operations touch exactly one regular file. One immutable Patch Intent binds the exact patch, preimage, and expected postimage before Authorization. Patch application is reconcilable, not transactionally atomic with the worktree: recovery classifies the current file as the expected preimage, expected postimage, or divergent. The preimage permits application only under the current Authorization and the V1 quiescent-target assumption, the postimage proves the intended mutation is already present, and divergence stops automatically with an indeterminate result. A later multi-file patch must define the same classification per file and may not claim all-or-nothing mutation without an isolated transactional mechanism.
 
 On resume or delayed application, the harness compares the current workspace state with the expected generation and fails closed for reconciliation on mismatch. It never treats transcript text, command output, or an accepted-but-unreconciled operation as proof of repository state.
 
@@ -126,7 +126,7 @@ Topology independence is a measurable invariant: for one selected agent, activat
 
 The V1 compatibility constraints are to avoid root-only identities, resident caller frames, synchronous reentry, and capacity accounting based on ancestry depth. V1 does not include a `delegate` action or child scheduler.
 
-The future scheduler requirements are bounded per-agent advancement independent of topology and no product-level nesting-depth limit. A later closed-union `delegate` action can reuse submitted → accepted → completed, quiescent suspension, and typed results without changing the three-entry harness interface.
+Any post-V1 execution policy must keep per-agent advancement independent of topology and avoid a product-level nesting-depth limit. A later closed-union `delegate` action can reuse submitted → accepted → completed, quiescent suspension, and typed results without changing the three-entry harness interface.
 
 A child receives a bounded delegation packet selected by its parent, not a copied parent conversation. Resuming an agent restores only that agent; it never walks, hydrates, or awakens descendants. Direct durable runnable and completion records make each logical agent independently schedulable regardless of its position in the delegation tree.
 
@@ -158,7 +158,7 @@ AgentRuntime.readBlob(blob, offset, out) !BlobRead
 AgentRuntime.close() !void
 ```
 
-This is attractive for several simultaneous clients: terminal, structured JSON, editor, and a future scheduler. It also gives clients durable cursors and explicit blob reads.
+This is attractive if several simultaneous clients eventually exist, such as terminal, structured JSON, and editor integrations. It also gives clients durable cursors and explicit blob reads.
 
 It is premature for the first task. No second real client currently needs the event and blob protocol, and exposing it would make callers understand five lifecycle concepts before the core loop has proved useful. A convenience facade would then be required for the common case.
 
@@ -555,22 +555,20 @@ Open `Harness` with the real one-page core, fixed storage, fault-injecting durab
 
 ### Narrow internal tests
 
-Keep mechanical tests for codecs, bounds, checksums, parsers, the native image layout, the Wasm
-contract, and differential native/Wasm traces. Do not reproduce the complete lifecycle in every
+Keep mechanical tests for codecs, bounds, checksums, parsers, and the native image layout. Do not reproduce the complete lifecycle in every
 internal module test once the harness-seam tests cover it.
 
 ## Implementation order
 
-1. Deepen the current harness and durable transition adapter into the accepted `open` / `offer` / `drive` owner loop over the closed task/tool-call state machine.
-2. Add exclusive session creation, ownership, explicit resume identity, parent-linked conversation entries, and journal-forward checkpoint reconciliation.
-3. Add the fixture model and CLI for one model request and Final Answer through the durable model seam.
-4. Add permissioned Bash, bounded output spooling, indeterminate recovery, and a second model turn.
-5. Add one-file `apply_patch` validation and digest-bound permission.
-6. Add guarded patch application and preimage/postimage/divergent reconciliation.
-7. Compose Bash inspection, `apply_patch`, Bash verification, and the Final Answer into the deterministic repair.
-8. Add ChatGPT browser authorization, refreshable local credentials, the authenticated Codex model catalog, and Codex transport behind the same model port.
-9. Add crash injection across the now-real model, permission, Bash, and patch boundaries.
-10. Package the honest one-page terminal demonstration; implement runtime-configurable active capacity separately in issue #3 after measuring the real loop.
+The foundation through the Host Store cutover is complete. Remaining V1 work is organized as vertical workstreams with small review units:
+
+1. Reset authoritative bindings to typed, domain-separated SHA-256 and persist one immutable Patch Intent.
+2. Apply and reconcile that intent, then compose Bash inspection, patch, Bash verification, and Final Answer into one deterministic repair.
+3. Prove or reject a safe transport-only Codex dependency before implementing one narrow live Provider adapter.
+4. Replace the compile-time one-slot production pool with one startup-fixed `active_capacity` and produce the two-axis density evidence.
+5. Add conservative line output, documentation, the residual semantic recovery audit, and compiler declaration coverage as release gates.
+
+Host Store maintenance, generalized scheduling, provider and OAuth frameworks, custom SQLite VFS testing, and terminal infrastructure are post-V1 or rejected until a concrete consumer exists.
 
 Every stage must leave a vertically executable command or test. Avoid horizontal registries, plugin frameworks, and unused protocol variants.
 
