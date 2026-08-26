@@ -59,8 +59,12 @@ deferred explicitly.
 - Keep every production query indexed and bounded in input bytes, rows, result bytes, temporary work,
   transaction work, and recovery work. Do not rely on an unbounded sort, aggregation, join, or temporary
   result spilling to disk.
-- No module except the Storage Owner may open SQLite, issue SQL, or retain a prepared statement. Treat
-  page cache, lookaside, statement memory, request envelopes, and results as separate host reservations.
+- Serialize every complete Storage Owner request across the one SQLite connection; a transaction is the
+  concurrency unit, not an individual SQLite call.
+- No module except the Storage Owner may open SQLite, issue SQL, or retain a prepared statement. Host
+  Runtime owns SQLite's process-global hard heap allowance. Treat page cache, lookaside, and statement
+  memory as overlapping diagnostics within that total, and request envelopes and results as separate
+  host reservations.
 
 ### Treat boundaries as hostile
 

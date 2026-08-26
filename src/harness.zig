@@ -35,6 +35,7 @@ pub const Create = struct {
 pub const Restore = struct {
     session_id: u64,
     provider: ?model_operation.Provider = null,
+    fault: ?FaultHook = null,
 };
 
 pub const OpenMode = union(enum) {
@@ -423,22 +424,14 @@ pub const Harness = struct {
                 }
                 self.setState(.running);
                 const session = if (self.session) |*value| value else return error.SessionUnavailable;
-                self.final_ref = if (restore.provider) |provider|
-                    lifecycle.advanceRestored(
-                        host_runtime.executionHost(self.config.runtime),
-                        host_runtime.getAllocator(self.config.runtime),
-                        session,
-                        &self.core_state_buffer,
-                        self.runtimeConfig(),
-                        provider,
-                    ) catch |err| return self.classifyLifecycleError(err, progress)
-                else
-                    lifecycle.inspectRestored(
-                        host_runtime.executionHost(self.config.runtime),
-                        host_runtime.getAllocator(self.config.runtime),
-                        session,
-                        &self.core_state_buffer,
-                    ) catch |err| return self.classifyLifecycleError(err, progress);
+                self.final_ref = lifecycle.advanceRestored(
+                    host_runtime.executionHost(self.config.runtime),
+                    host_runtime.getAllocator(self.config.runtime),
+                    session,
+                    &self.core_state_buffer,
+                    self.runtimeConfig(),
+                    restore.provider,
+                ) catch |err| return self.classifyLifecycleError(err, progress);
             },
         }
         return self.finish(progress);
@@ -788,7 +781,7 @@ pub const Harness = struct {
             .workspace_path = session.workspacePath(),
             .fault = switch (self.config.mode) {
                 .create => |create| create.fault,
-                .restore => null,
+                .restore => |restore| restore.fault,
             },
             .bash_policy = self.bashPolicy(),
             .bash_cancelled = switch (self.config.mode) {
@@ -939,6 +932,19 @@ test "open retains no Activation Slot and offer transfers one bounded input" {
     try std.testing.expectEqual(@as(usize, 0), runtime.occupiedActivationBytes());
     try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
     try std.testing.expectEqual(OfferResult.full, owner.offer(.task));
+}
+
+test "one process owns one SQLite Host Runtime budget" {
+    var first_tmp = std.testing.tmpDir(.{});
+    defer first_tmp.cleanup();
+    var second_tmp = std.testing.tmpDir(.{});
+    defer second_tmp.cleanup();
+    const runtime = try openTestRuntime(&first_tmp);
+    defer runtime.close() catch unreachable;
+    try std.testing.expectError(
+        error.HostRuntimeAlreadyOpen,
+        openTestRuntime(&second_tmp),
+    );
 }
 
 test "restore withholds projections until the configured recovery quantum reaches safety" {
@@ -1101,7 +1107,11 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         .operation_id = 10,
         .generation = 1,
     }, 11, 12, .none);
-    try session.storeBlob(session.ownerToken(), descriptor.reference(), "operation descriptor");
+    try session.storeBlob(
+        session.ownerToken(),
+        descriptor.operation_submitted.descriptor_ref,
+        "operation descriptor",
+    );
     _ = try session.commitSemantic(session.ownerToken(), &.{descriptor}, null);
     created.close();
     read_fault.armed = true;
@@ -1124,9 +1134,7 @@ test "shutdown denies Approval Required before closing" {
             const self: *@This() = @ptrCast(@alignCast(context));
             switch (fact.kind()) {
                 .approval_required => self.approval_required += 1,
-                .authorization => if (fact.flags() == 0) {
-                    self.undecided_authorization += 1;
-                },
+                .authorization => {},
                 else => {},
             }
         }
@@ -1275,7 +1283,17 @@ test "known provider failure is one durable terminal Result" {
 
         fn apply(context: *anyopaque, fact: session_transition.Fact) !void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            if (fact.kind() == .result and fact.recoveryClass() == .model) self.count += 1;
+            switch (fact) {
+                .result => |result| switch (result.evidence) {
+                    .immediate => |recovery_class| if (recovery_class == .model) {
+                        self.count += 1;
+                    },
+                    .durable => |evidence| if (evidence == .model) {
+                        self.count += 1;
+                    },
+                },
+                else => {},
+            }
         }
     };
 

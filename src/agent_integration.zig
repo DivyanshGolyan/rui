@@ -49,10 +49,10 @@ pub fn main(init: std.process.Init) !void {
         .runtime = layout.runtime,
         .mode = .{ .restore = .{ .session_id = session_id } },
     });
+    defer restored.close();
     _ = try restored.drive();
     const regenerated = try restored.drive();
     try expectFinal(&regenerated, answer);
-    restored.close();
 
     try lostCompletionNotificationRecovers(&layout, init.io, allocator);
     try offeredPermissionDenialContinues(&layout, init.io, allocator);
@@ -61,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
     try cancellationRegenerates(&layout, init.io, allocator);
     try uncommittedTaskCanBeReadmitted(&layout, init.io, allocator);
     try uncertainModelRetryUsesNewAttempt(&layout, init.io, allocator);
+    try exhaustedModelRetriesBecomeFailure(&layout, init.io, allocator);
     try uncertainBashNeverReplays(&layout, init.io, allocator);
 }
 
@@ -93,7 +94,9 @@ fn uncommittedTaskCanBeReadmitted(
     });
     defer restored.close();
     const identity = try restored.drive();
-    if (identity.state != .ready) return error.UncommittedTaskWasAcknowledged;
+    if (identity.state != .restoring) return error.SessionRecoveryNotStarted;
+    const ready = try restored.drive();
+    if (ready.state != .ready) return error.UncommittedTaskWasAcknowledged;
     if (restored.offer(.task) != .accepted) return error.TaskReadmissionRejected;
     _ = try restored.drive();
     const finished = try restored.drive();
@@ -416,6 +419,63 @@ fn uncertainModelRetryUsesNewAttempt(
     const recovered = try restored.drive();
     try expectFinal(&recovered, answer);
     if (fixture.calls != 2) return error.ModelRetryDidNotUseSecondAttempt;
+}
+
+fn exhaustedModelRetriesBecomeFailure(
+    layout: *Layout,
+    _: std.Io,
+    _: std.mem.Allocator,
+) !void {
+    var fixture: model_operation.Fixture = .{ .expected_task = task, .final_answer = answer };
+    var capture: Crash = .{ .target = .after_model_dispatch };
+    const session_id = initial: {
+        var owner = try harness.Harness.open(.{
+            .runtime = layout.runtime,
+            .mode = .{ .create = .{
+                .workspace_path = layout.workspace_path,
+                .model = "fixture:model-retry-exhaustion",
+                .task = task,
+                .provider = fixture.provider(),
+                .fault = capture.hook(),
+            } },
+        });
+        defer owner.close();
+        const first = try owner.drive();
+        const id = try sessionProjection(&first);
+        if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+        try expectInjectedCrash(&owner);
+        break :initial id;
+    };
+
+    for (0..7) |_| {
+        var retry = try harness.Harness.open(.{
+            .runtime = layout.runtime,
+            .mode = .{ .restore = .{
+                .session_id = session_id,
+                .provider = fixture.provider(),
+                .fault = capture.hook(),
+            } },
+        });
+        defer retry.close();
+        _ = try retry.drive();
+        try expectInjectedCrash(&retry);
+    }
+
+    var restored = try harness.Harness.open(.{
+        .runtime = layout.runtime,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+        } },
+    });
+    defer restored.close();
+    _ = try restored.drive();
+    const waiting = try restored.drive();
+    if (waiting.state != .waiting) return error.ModelRetryExhaustionNotPublished;
+    const failed = try restored.drive();
+    if (failed.state != .failed or failed.projectionSlice()[0].kind != .failure) {
+        return error.ModelRetryExhaustionNotTerminal;
+    }
+    if (fixture.calls != 8) return error.ModelRetryExceededCapacity;
 }
 
 fn uncertainBashNeverReplays(

@@ -78,14 +78,15 @@ const ControlSearch = struct {
 
     fn applyFact(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
         const self: *ControlSearch = @ptrCast(@alignCast(context));
-        switch (fact.kind()) {
-            .operation_accepted => {
+        switch (fact) {
+            .operation_accepted => |record| {
                 self.open_operation = true;
-                self.operation_id = fact.operationId();
-                self.generation = fact.generation();
+                self.operation_id = record.operation.operation_id;
+                self.generation = record.operation.generation;
             },
-            .result => if (self.open_operation and self.operation_id == fact.operationId() and
-                self.generation == fact.generation())
+            .result => |record| if (self.open_operation and
+                self.operation_id == record.operation.operation_id and
+                self.generation == record.operation.generation)
             {
                 self.open_operation = false;
             },
@@ -256,7 +257,7 @@ pub fn advanceCreated(
     session: *session_store.Session,
     core_state_buffer: []u8,
     config: RuntimeConfig,
-    provider: model_operation.Provider,
+    provider: ?model_operation.Provider,
 ) !u64 {
     const io = session.io;
     var core = try Core.open(&host.slots);
@@ -266,20 +267,16 @@ pub fn advanceCreated(
     try core.initialize(session.agent_id);
     try core.reducer.startTask(session.active_leaf_id);
     if (core_state_buffer.len != core_state.encoded_size) return error.InvalidCoreStateBuffer;
-    const task_facts = [_]session_transition.Fact{
-        session_transition.taskAdmitted(agentContext(session), session.task_id, session.task_id),
-        session_transition.conversationAdvanced(
-            agentContext(session),
-            session.active_leaf_id,
-            session.task_id,
-        ),
-    };
     try commitCoreFacts(
         session,
         token,
         core_state_buffer,
         &core,
-        &task_facts,
+        &.{session_transition.taskAdmitted(
+            agentContext(session),
+            session.task_id,
+            session.task_id,
+        )},
         true,
     );
     _ = try performModelTurn(
@@ -304,11 +301,12 @@ fn performModelTurn(
     core: *Core,
     core_open: *bool,
     core_state_buffer: []u8,
-    provider: model_operation.Provider,
+    provider: ?model_operation.Provider,
     model_sequence: u32,
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !OperationIds {
+    const next_provider = provider orelse return error.SessionOperationPending;
     const ids = try allocateOperationIds(io, session);
     const operation = try core.reducer.beginModelOperation(ids.operation_id, model_sequence);
     const context = try core.reducer.modelContext();
@@ -354,7 +352,7 @@ fn performModelTurn(
     core.close();
     core_open.* = false;
 
-    try dispatchModelAttempt(session, token, provider, .{
+    try dispatchModelAttempt(session, token, next_provider, .{
         .request_ref = descriptor.request_ref,
         .response_ref = ids.response_ref,
         .operation_id = ids.operation_id,
@@ -371,8 +369,9 @@ fn retryModelAttempt(
     core: *Core,
     core_open: *bool,
     core_state_buffer: []u8,
-    provider: model_operation.Provider,
+    provider: ?model_operation.Provider,
     completion_hook: ?CompletionHook,
+    fault: ?FaultHook,
 ) !void {
     const operation = try core.reducer.operation();
     var history: FactSearch = .{
@@ -382,6 +381,30 @@ fn retryModelAttempt(
     };
     _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
     const descriptor = history.descriptor orelse return error.MissingModelDescriptor;
+    if (history.attempt_count == FactSearch.max_attempts) {
+        const attempt = history.attempts[history.attempt_count - 1].?;
+        const result_ref = try model_operation.publishFailureResult(
+            session,
+            token,
+            attempt.attempt_id,
+        );
+        const evidence: completion_inbox.Envelope = .{
+            .kind = .model,
+            .session_id = session.session_id,
+            .ownership_epoch = attempt.operation.agent.ownership_epoch,
+            .agent_id = session.agent_id,
+            .agent_generation = agent_generation,
+            .operation_id = operation.id,
+            .operation_generation = operation.generation,
+            .attempt_id = attempt.attempt_id,
+            .result_ref = result_ref,
+            .result_digest = try blobDigest(session, token, result_ref),
+        };
+        try session.publishCompletionEvidence(token, evidence);
+        if (completion_hook) |hook| try hook.offered(hook.context, evidence);
+        return error.CompletionOffered;
+    }
+    const next_provider = provider orelse return error.SessionOperationPending;
     var attempt_id: u64 = 0;
     var response_ref: u32 = 0;
     for (0..8) |_| {
@@ -395,8 +418,8 @@ fn retryModelAttempt(
     const attempt = session_transition.attemptAdmitted(
         operationContext(session, operation.id, operation.generation),
         attempt_id,
-        descriptor.reference(),
-        descriptor.digest(),
+        descriptor.descriptor_ref,
+        descriptor.descriptor_digest,
         .model,
     );
     try commitCoreFacts(
@@ -410,13 +433,13 @@ fn retryModelAttempt(
     core.close();
     core_open.* = false;
 
-    return dispatchModelAttempt(session, token, provider, .{
-        .request_ref = descriptor.reference(),
+    return dispatchModelAttempt(session, token, next_provider, .{
+        .request_ref = descriptor.descriptor_ref,
         .response_ref = response_ref,
         .operation_id = operation.id,
         .operation_generation = operation.generation,
         .attempt_id = attempt_id,
-    }, completion_hook, null);
+    }, completion_hook, fault);
 }
 
 fn dispatchModelAttempt(
@@ -513,22 +536,24 @@ fn executeBashCall(
     const descriptor_facts = [_]session_transition.Fact{
         session_transition.operationSubmitted(operation_context, descriptor_ref, digest, .consequential),
         session_transition.operationAccepted(operation_context, descriptor_ref, digest, .consequential),
-        session_transition.conversationAdvanced(
-            agentContext(session),
-            call_entry.entry_id,
-            descriptor_ref,
-        ),
+        session_transition.conversationAdvanced(.{
+            .agent = agentContext(session),
+            .entry_id = call_entry.entry_id,
+            .parent_id = call_entry.parent_id,
+            .kind = call_entry.kind,
+            .content_ref = descriptor_ref,
+        }),
     };
     _ = try session.commitSemantic(token, &descriptor_facts, null);
 
     const classification = try policy.classify_fn(policy.context, digest, call);
     if (classification == .ask) {
-        const approval = session_transition.approvalRequired(
-            operation_context,
-            0,
-            descriptor_ref,
-            digest,
-        );
+        const approval = session_transition.approvalRequired(.{
+            .operation = operation_context,
+            .binding_ref = 0,
+            .descriptor_ref = descriptor_ref,
+            .descriptor_digest = digest,
+        });
         try commitCoreFacts(session, token, core_state_buffer, core, &.{approval}, true);
         if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .bash,
@@ -543,7 +568,12 @@ fn executeBashCall(
         .deny => false,
         .ask => try policy.ask_fn(policy.context, digest, call),
     };
-    const authorization = session_transition.authorization(operation_context, 0, digest, allowed);
+    const authorization = session_transition.authorization(.{
+        .operation = operation_context,
+        .permission_ref = 0,
+        .descriptor_digest = digest,
+        .allowed = allowed,
+    });
     _ = try session.commitSemantic(token, &.{authorization}, null);
 
     var attempt_id: u64 = 0;
@@ -624,11 +654,13 @@ fn executeBashCall(
             else
                 .{ .durable = .{ .bash = attempt_id } },
         }),
-        session_transition.conversationAdvanced(
-            agentContext(session),
-            result_entry.entry_id,
-            result_ref,
-        ),
+        session_transition.conversationAdvanced(.{
+            .agent = agentContext(session),
+            .entry_id = result_entry.entry_id,
+            .parent_id = result_entry.parent_id,
+            .kind = result_entry.kind,
+            .content_ref = result_ref,
+        }),
     };
     try commitCoreFacts(
         session,
@@ -687,7 +719,13 @@ fn requestPatchPermission(
             validation.patch_digest,
             .consequential,
         ),
-        session_transition.conversationAdvanced(agentContext(session), call_entry.entry_id, patch_ref),
+        session_transition.conversationAdvanced(.{
+            .agent = agentContext(session),
+            .entry_id = call_entry.entry_id,
+            .parent_id = call_entry.parent_id,
+            .kind = call_entry.kind,
+            .content_ref = patch_ref,
+        }),
     };
     _ = try session.commitSemantic(token, &descriptor_facts, null);
 
@@ -708,12 +746,12 @@ fn requestPatchPermission(
             validation,
             patch_ref,
         );
-        const approval = session_transition.approvalRequired(
-            operation_context,
-            approval_ref,
-            patch_ref,
-            validation.patch_digest,
-        );
+        const approval = session_transition.approvalRequired(.{
+            .operation = operation_context,
+            .binding_ref = approval_ref,
+            .descriptor_ref = patch_ref,
+            .descriptor_digest = validation.patch_digest,
+        });
         try commitCoreFacts(
             session,
             token,
@@ -741,12 +779,12 @@ fn requestPatchPermission(
         validation,
         patch_ref,
     );
-    const authorization = session_transition.authorization(
-        operation_context,
-        permission_ref,
-        validation.patch_digest,
-        allowed,
-    );
+    const authorization = session_transition.authorization(.{
+        .operation = operation_context,
+        .permission_ref = permission_ref,
+        .descriptor_digest = validation.patch_digest,
+        .allowed = allowed,
+    });
     _ = try session.commitSemantic(token, &.{authorization}, null);
     try reach(fault, .after_patch_permission_binding);
 
@@ -797,11 +835,13 @@ fn requestPatchPermission(
             .class = .ordinary,
             .evidence = .{ .immediate = .consequential },
         }),
-        session_transition.conversationAdvanced(
-            agentContext(session),
-            result_entry.entry_id,
-            result_ref,
-        ),
+        session_transition.conversationAdvanced(.{
+            .agent = agentContext(session),
+            .entry_id = result_entry.entry_id,
+            .parent_id = result_entry.parent_id,
+            .kind = result_entry.kind,
+            .content_ref = result_ref,
+        }),
     };
     try commitCoreFacts(
         session,
@@ -839,86 +879,6 @@ fn storePatchBinding(
     try session.storeBlob(token, binding_ref, &bytes);
 }
 
-pub fn inspectRestored(
-    host: *Host,
-    allocator: std.mem.Allocator,
-    session: *session_store.Session,
-    core_state_buffer: []u8,
-) !u64 {
-    var core = try Core.open(&host.slots);
-    defer core.close();
-    const token = session.ownerToken();
-    if (core_state_buffer.len != core_state.encoded_size) return error.InvalidCoreStateBuffer;
-    try restoreCoreFromLedger(session, token, core_state_buffer, &core);
-    var outcome = (try core.reducer.task()).phase;
-    if (outcome == .awaiting_model) {
-        const completion = try durableCompletion(session, token, &core);
-        var slot: ModelSlot = .{ .core = &core, .session = session, .token = token };
-        try ModelSlot.apply(&slot, completion);
-        const applied = session_transition.resultApplied(
-            operationContext(session, completion.operation_id, completion.operation_generation),
-            0,
-            completion.result,
-            0,
-            .none,
-        );
-        try commitCoreFacts(
-            session,
-            token,
-            core_state_buffer,
-            &core,
-            &.{applied},
-            true,
-        );
-        try stageDurableResponse(
-            session,
-            token,
-            &core,
-            try core.reducer.response(),
-        );
-        outcome = (try core.reducer.task()).phase;
-    }
-    if (outcome == .final_candidate) {
-        const final_ref = try finalizeCandidate(
-            session,
-            token,
-            &core,
-            core_state_buffer,
-            null,
-        );
-        return final_ref;
-    }
-    if (outcome == .awaiting_tool) {
-        switch (try reconcileToolCall(
-            session,
-            token,
-            &core,
-            core_state_buffer,
-            allocator,
-            session.workspacePath(),
-        )) {
-            .indeterminate => return error.BashPossiblyExecuted,
-            .ready => return error.SessionNeedsModel,
-            .approval_required => return error.PatchApprovalRequired,
-            .approved => return error.PatchExecutionDeferred,
-            .none => return error.ToolCallDeferred,
-        }
-    }
-    if (outcome == .failed) return modelFailure(@intFromEnum((try core.reducer.response()).failure));
-    if (outcome == .ready) {
-        if (try hasIndeterminateBash(session, token)) {
-            return error.BashPossiblyExecuted;
-        }
-        return error.SessionNeedsModel;
-    }
-    if (outcome != .finished) return error.SessionNotFinished;
-    const entry_id = (try core.reducer.task()).final_entry_id;
-    if (entry_id != session.active_leaf_id) return error.FinalEntryMismatch;
-    const entry = try session.readEntry(entry_id);
-    if (entry.kind != .assistant) return error.InvalidFinalEntry;
-    return entry.content_ref;
-}
-
 pub fn advanceRestored(
     host: *Host,
     allocator: std.mem.Allocator,
@@ -943,13 +903,13 @@ pub fn advanceRestored(
                 .token = token,
             };
             try ModelSlot.apply(&slot, completion);
-            const applied = session_transition.resultApplied(
-                operationContext(session, completion.operation_id, completion.operation_generation),
-                0,
-                completion.result,
-                0,
-                .none,
-            );
+            const applied = session_transition.resultApplied(.{
+                .operation = operationContext(session, completion.operation_id, completion.operation_generation),
+                .attempt_id = 0,
+                .result_ref = completion.result,
+                .result_digest = 0,
+                .recovery_class = .none,
+            });
             try commitCoreFacts(
                 session,
                 token,
@@ -972,8 +932,9 @@ pub fn advanceRestored(
                 &core,
                 &core_open,
                 core_state_buffer,
-                provider orelse return error.SessionOperationPending,
+                provider,
                 config.completion_hook,
+                config.fault,
             ),
             else => return err,
         }
@@ -1052,7 +1013,15 @@ pub fn advanceRestored(
         }
     }
     if (outcome == .failed) return modelFailure(@intFromEnum((try core.reducer.response()).failure));
+    if (outcome == .finished) {
+        const entry_id = (try core.reducer.task()).final_entry_id;
+        if (entry_id != session.active_leaf_id) return error.FinalEntryMismatch;
+        const entry = try session.readEntry(entry_id);
+        if (entry.kind != .assistant) return error.InvalidFinalEntry;
+        return entry.content_ref;
+    }
     if (outcome != .ready) return error.SessionNotReadyForModel;
+    if (try hasIndeterminateBash(session, token)) return error.BashPossiblyExecuted;
     if (config.settle_only) return error.SessionNeedsModel;
     _ = try performModelTurn(
         io,
@@ -1117,29 +1086,31 @@ pub fn resolvePermission(
     };
     _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
     const descriptor = history.descriptor orelse return error.MissingActionDescriptor;
-    if (descriptor.digest() != decision.descriptor_digest or
-        descriptor.reference() != decision.descriptor_ref)
+    if (descriptor.descriptor_digest != decision.descriptor_digest or
+        descriptor.descriptor_ref != decision.descriptor_ref)
     {
         return error.StalePermissionDecision;
     }
     if (history.result != null or history.attempt != null) return error.PermissionNoLongerRequired;
     const pending = history.approval_required orelse return error.ApprovalNotCommitted;
-    if (history.authorization != null or pending.digest() != descriptor.digest()) {
+    if (history.authorization != null or
+        pending.descriptor_digest != descriptor.descriptor_digest)
+    {
         return error.PermissionNoLongerRequired;
     }
 
     switch (response.tool) {
         .bash => {
             const operation_context = operationContext(session, expected_operation_id, 1);
-            const authorization = session_transition.authorization(
-                operation_context,
-                0,
-                descriptor.digest(),
-                allow,
-            );
+            const authorization = session_transition.authorization(.{
+                .operation = operation_context,
+                .permission_ref = 0,
+                .descriptor_digest = descriptor.descriptor_digest,
+                .allowed = allow,
+            });
             _ = try session.commitSemantic(token, &.{authorization}, null);
             var descriptor_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
-            var reader = try session.openBlob(token, descriptor.reference());
+            var reader = try session.openBlob(token, descriptor.descriptor_ref);
             defer reader.close();
             if (reader.length() > descriptor_buffer.len) return error.InvalidBashCallRange;
             const descriptor_length: usize = @intCast(reader.length());
@@ -1154,8 +1125,8 @@ pub fn resolvePermission(
                 const attempt = session_transition.attemptAdmitted(
                     operation_context,
                     attempt_id,
-                    descriptor.reference(),
-                    descriptor.digest(),
+                    descriptor.descriptor_ref,
+                    descriptor.descriptor_digest,
                     .consequential,
                 );
                 try commitCoreFacts(session, token, core_state_buffer, &core, &.{attempt}, false);
@@ -1215,17 +1186,19 @@ pub fn resolvePermission(
                     else
                         .{ .durable = .{ .bash = attempt_id } },
                 }),
-                session_transition.conversationAdvanced(
-                    agentContext(session),
-                    result_entry.entry_id,
-                    result_ref,
-                ),
+                session_transition.conversationAdvanced(.{
+                    .agent = agentContext(session),
+                    .entry_id = result_entry.entry_id,
+                    .parent_id = result_entry.parent_id,
+                    .kind = result_entry.kind,
+                    .content_ref = result_ref,
+                }),
             };
             try commitCoreFacts(session, token, core_state_buffer, &core, &facts, false);
         },
         .apply_patch => {
             var binding_bytes: [patch_tool.binding_size]u8 = undefined;
-            var binding_reader = try session.openBlob(token, pending.subject());
+            var binding_reader = try session.openBlob(token, pending.binding_ref);
             defer binding_reader.close();
             if (binding_reader.length() != binding_bytes.len or
                 (try binding_reader.readWindow(0, &binding_bytes)).len != binding_bytes.len)
@@ -1235,8 +1208,8 @@ pub fn resolvePermission(
             const binding = try patch_tool.decodeBinding(&binding_bytes);
             if (binding.operation_id != expected_operation_id or
                 binding.operation_generation != 1 or
-                binding.patch_ref != descriptor.reference() or
-                binding.patch_digest != descriptor.digest())
+                binding.patch_ref != descriptor.descriptor_ref or
+                binding.patch_digest != descriptor.descriptor_digest)
             {
                 return error.StalePermissionDecision;
             }
@@ -1258,19 +1231,19 @@ pub fn resolvePermission(
                 binding.patch_ref,
             );
             const operation_context = operationContext(session, expected_operation_id, 1);
-            const authorization = session_transition.authorization(
-                operation_context,
-                permission_ref,
-                descriptor.digest(),
-                allow,
-            );
+            const authorization = session_transition.authorization(.{
+                .operation = operation_context,
+                .permission_ref = permission_ref,
+                .descriptor_digest = descriptor.descriptor_digest,
+                .allowed = allow,
+            });
             _ = try session.commitSemantic(token, &.{authorization}, null);
             if (allow) return error.PatchExecutionDeferred;
             const result_ref = (@as(u64, 1) << 57) | @as(u32, @truncate(observation.result_ref));
             var result_bytes: [patch_tool.result_size]u8 = undefined;
             try patch_tool.encodeResult(&result_bytes, .{
                 .status = .denied,
-                .patch_digest = descriptor.digest(),
+                .patch_digest = descriptor.descriptor_digest,
                 .expected_workspace_digest = binding.workspace_digest,
                 .observed_workspace_digest = 0,
             });
@@ -1285,11 +1258,13 @@ pub fn resolvePermission(
                     .class = .ordinary,
                     .evidence = .{ .immediate = .consequential },
                 }),
-                session_transition.conversationAdvanced(
-                    agentContext(session),
-                    result_entry.entry_id,
-                    result_ref,
-                ),
+                session_transition.conversationAdvanced(.{
+                    .agent = agentContext(session),
+                    .entry_id = result_entry.entry_id,
+                    .parent_id = result_entry.parent_id,
+                    .kind = result_entry.kind,
+                    .content_ref = result_ref,
+                }),
             };
             try commitCoreFacts(session, token, core_state_buffer, &core, &facts, false);
         },
@@ -1339,9 +1314,9 @@ pub fn acceptCompletion(
     };
     _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
     const attempt = history.attempt orelse return error.StaleCompletion;
-    if (attempt.attemptId() != offered.attempt_id) return error.StaleCompletion;
+    if (attempt.attempt_id != offered.attempt_id) return error.StaleCompletion;
     if (history.result) |result| {
-        if (result.reference() != offered.result_ref or result.digest() != offered.result_digest) {
+        if (result.result_ref != offered.result_ref or result.result_digest != offered.result_digest) {
             return error.ConflictingCompletionEvidence;
         }
     }
@@ -1406,9 +1381,9 @@ fn reconcileBash(
             token,
             core,
             core_state_buffer,
-            recordFromFact(result),
+            toolResultFromRecord(result),
         );
-        return if (result.isIndeterminate())
+        return if (result.class == .indeterminate)
             .indeterminate
         else
             .ready;
@@ -1418,7 +1393,7 @@ fn reconcileBash(
             return .approval_required;
         }
         const authorization = history.authorization orelse return .none;
-        if (authorization.flags() != 2) return .none;
+        if (authorization.allowed) return .none;
         const response_ref: u32 = @truncate(model_observation.result_ref);
         const result_ref = (@as(u64, 1) << 61) | response_ref;
         var empty: [0]u8 = .{};
@@ -1444,7 +1419,7 @@ fn reconcileBash(
             token,
             core,
             core_state_buffer,
-            recordFromFact(denied),
+            toolResultFromRecord(denied.result),
         );
         return .ready;
     };
@@ -1453,13 +1428,13 @@ fn reconcileBash(
         .agent_id = session.agent_id,
         .operation_id = operation_id,
         .operation_generation = 1,
-        .attempt_id = attempt.attemptId(),
+        .attempt_id = attempt.attempt_id,
         .maximum_epoch = token.epoch,
     };
     _ = try session.scanCompletionEvidence(token, &inbox, InboxSearch.apply);
     var evidence_agent = agentContext(session);
     var result_ref: u64 = undefined;
-    var result_digest: u64 = descriptor.digest();
+    var result_digest: u64 = descriptor.descriptor_digest;
     var status: bash_tool.Status = undefined;
     if (inbox.match) |envelope| {
         if (try blobDigest(session, token, envelope.result_ref) != envelope.result_digest) {
@@ -1492,7 +1467,7 @@ fn reconcileBash(
             .agent_generation = agent_generation,
             .operation_id = operation_id,
             .operation_generation = 1,
-            .attempt_id = attempt.attemptId(),
+            .attempt_id = attempt.attempt_id,
             .result_ref = result_ref,
             .result_digest = result_digest,
         });
@@ -1502,7 +1477,7 @@ fn reconcileBash(
         .result_ref = result_ref,
         .result_digest = result_digest,
         .class = if (status == .indeterminate) .indeterminate else .ordinary,
-        .evidence = .{ .durable = .{ .bash = attempt.attemptId() } },
+        .evidence = .{ .durable = .{ .bash = attempt.attempt_id } },
     });
     _ = try session.commitSemantic(token, &.{result}, null);
     try reconcileBashResult(
@@ -1510,9 +1485,9 @@ fn reconcileBash(
         token,
         core,
         core_state_buffer,
-        recordFromFact(result),
+        toolResultFromRecord(result.result),
     );
-    return if (result.isIndeterminate())
+    return if (result.result.class == .indeterminate)
         .indeterminate
     else
         .ready;
@@ -1532,16 +1507,22 @@ fn readBashStatus(
     return bash_tool.decodeResultHeader(&header, reader.length());
 }
 
-fn recordFromFact(fact: session_transition.Fact) ToolResult {
+fn toolResultFromRecord(result: session_transition.ResultRecord) ToolResult {
+    const attempt_id: u64 = switch (result.evidence) {
+        .immediate => 0,
+        .durable => |evidence| switch (evidence) {
+            inline else => |value| value,
+        },
+    };
     return .{
-        .agent_id = fact.agentId(),
-        .agent_generation = fact.agentGeneration(),
-        .operation_id = fact.operationId(),
-        .operation_generation = fact.generation(),
-        .attempt_id = fact.attemptId(),
-        .ownership_epoch = fact.ownershipEpoch(),
-        .descriptor_digest = fact.digest(),
-        .result = fact.reference(),
+        .agent_id = result.operation.agent.agent_id,
+        .agent_generation = result.operation.agent.agent_generation,
+        .operation_id = result.operation.operation_id,
+        .operation_generation = result.operation.generation,
+        .attempt_id = attempt_id,
+        .ownership_epoch = result.operation.agent.ownership_epoch,
+        .descriptor_digest = result.result_digest,
+        .result = result.result_ref,
     };
 }
 
@@ -1566,11 +1547,11 @@ fn reconcilePatch(
     };
     _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
     const validated = history.descriptor orelse return .none;
-    if (validated.digest() == 0 or validated.reference() != patch_ref) {
+    if (validated.descriptor_digest == 0 or validated.descriptor_ref != patch_ref) {
         return error.InvalidPatchHistory;
     }
     if (history.result) |settled| {
-        if (settled.reference() != result_ref) {
+        if (settled.result_ref != result_ref) {
             return error.InvalidPatchHistory;
         }
         try reconcileToolResult(
@@ -1579,7 +1560,7 @@ fn reconcilePatch(
             core,
             core_state_buffer,
             patch_ref,
-            recordFromFact(settled),
+            toolResultFromRecord(settled),
         );
         return .ready;
     }
@@ -1587,19 +1568,21 @@ fn reconcilePatch(
         return .approval_required;
     }
     const authorization = history.authorization orelse return .none;
-    if (authorization.digest() != validated.digest() or authorization.reference() == 0) {
+    if (authorization.descriptor_digest != validated.descriptor_digest or
+        authorization.permission_ref == 0)
+    {
         return error.InvalidPatchHistory;
     }
     var binding_bytes: [patch_tool.binding_size]u8 = undefined;
-    try readExactBlob(session, token, authorization.reference(), &binding_bytes);
+    try readExactBlob(session, token, authorization.permission_ref, &binding_bytes);
     const binding = try patch_tool.decodeBinding(&binding_bytes);
     if (binding.operation_id != operation_id or binding.operation_generation != 1 or
-        binding.patch_ref != patch_ref or binding.patch_digest != validated.digest())
+        binding.patch_ref != patch_ref or binding.patch_digest != validated.descriptor_digest)
     {
         return error.InvalidPatchPermissionBinding;
     }
-    if ((authorization.flags() == 1 and binding.decision != .allow) or
-        (authorization.flags() == 2 and binding.decision != .deny))
+    if ((authorization.allowed and binding.decision != .allow) or
+        (!authorization.allowed and binding.decision != .deny))
     {
         return error.InvalidPatchHistory;
     }
@@ -1628,7 +1611,7 @@ fn reconcilePatch(
             operation_id,
             patch_ref,
             result_ref,
-            validated.digest(),
+            validated.descriptor_digest,
             .stale,
             binding.workspace_digest,
             observed_digest,
@@ -1643,7 +1626,7 @@ fn reconcilePatch(
         operation_id,
         patch_ref,
         result_ref,
-        validated.digest(),
+        validated.descriptor_digest,
         .denied,
         binding.workspace_digest,
         0,
@@ -1750,18 +1733,20 @@ fn reconcileToolResult(
     }
     try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
     const applied_facts = [_]session_transition.Fact{
-        session_transition.resultApplied(
-            operationContext(session, result.operation_id, result.operation_generation),
-            result.attempt_id,
-            result.result,
-            try blobDigest(session, token, result.result),
-            .consequential,
-        ),
-        session_transition.conversationAdvanced(
-            agentContext(session),
-            result_entry.entry_id,
-            result.result,
-        ),
+        session_transition.resultApplied(.{
+            .operation = operationContext(session, result.operation_id, result.operation_generation),
+            .attempt_id = result.attempt_id,
+            .result_ref = result.result,
+            .result_digest = try blobDigest(session, token, result.result),
+            .recovery_class = .consequential,
+        }),
+        session_transition.conversationAdvanced(.{
+            .agent = agentContext(session),
+            .entry_id = result_entry.entry_id,
+            .parent_id = result_entry.parent_id,
+            .kind = result_entry.kind,
+            .content_ref = result.result,
+        }),
     };
     try commitCoreFacts(
         session,
@@ -1788,12 +1773,12 @@ fn durableCompletion(
     };
     _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
     if (history.attempt_count == 0) return error.MissingAcceptedAttempt;
-    var intent: ?session_transition.Fact = null;
+    var intent: ?session_transition.AttemptRecord = null;
     var result = history.result;
     if (result) |completed| {
         for (history.attemptSlice()) |maybe_attempt| {
             const attempt = maybe_attempt.?;
-            if (attempt.attemptId() == completed.attemptId()) {
+            if (attempt.attempt_id == resultAttemptId(completed)) {
                 intent = attempt;
                 break;
             }
@@ -1807,7 +1792,7 @@ fn durableCompletion(
                 .agent_id = session.agent_id,
                 .operation_id = operation_id,
                 .operation_generation = operation_generation,
-                .attempt_id = attempt.attemptId(),
+                .attempt_id = attempt.attempt_id,
                 .maximum_epoch = token.epoch,
             };
             _ = try session.scanCompletionEvidence(token, &inbox, InboxSearch.apply);
@@ -1832,15 +1817,15 @@ fn durableCompletion(
             .result_ref = envelope.result_ref,
             .result_digest = envelope.result_digest,
             .class = .ordinary,
-            .evidence = .{ .durable = .{ .model = intent.?.attemptId() } },
+            .evidence = .{ .durable = .{ .model = intent.?.attempt_id } },
         });
         _ = try session.commitSemantic(token, &.{terminal}, null);
-        result = terminal;
+        result = terminal.result;
     }
     const accepted = intent orelse return error.InvalidOperationHistory;
     const completed = result.?;
-    if (completed.attemptId() != accepted.attemptId() or
-        completed.digest() == 0 or completed.reference() == 0)
+    if (resultAttemptId(completed) != accepted.attempt_id or
+        completed.result_digest == 0 or completed.result_ref == 0)
     {
         return error.InvalidOperationHistory;
     }
@@ -1849,67 +1834,100 @@ fn durableCompletion(
         .agent_generation = agent_generation,
         .operation_id = operation_id,
         .operation_generation = operation_generation,
-        .ownership_epoch = accepted.ownershipEpoch(),
-        .result = completed.reference(),
+        .ownership_epoch = accepted.operation.agent.ownership_epoch,
+        .result = completed.result_ref,
     };
 }
 
 const FactSearch = struct {
-    const max_attempts = 8;
+    const max_attempts = session_transition.max_operation_attempts;
 
     operation_id: u64,
     generation: u32,
     recovery_class: session_transition.RecoveryClass,
-    descriptor: ?session_transition.Fact = null,
-    attempt: ?session_transition.Fact = null,
-    attempts: [max_attempts]?session_transition.Fact = @splat(null),
+    descriptor: ?session_transition.OperationRecord = null,
+    attempt: ?session_transition.AttemptRecord = null,
+    attempts: [max_attempts]?session_transition.AttemptRecord = @splat(null),
     attempt_count: u8 = 0,
     target_attempt_id: u64 = 0,
-    approval_required: ?session_transition.Fact = null,
-    authorization: ?session_transition.Fact = null,
-    result: ?session_transition.Fact = null,
+    approval_required: ?session_transition.ApprovalRequiredRecord = null,
+    authorization: ?session_transition.AuthorizationRecord = null,
+    result: ?session_transition.ResultRecord = null,
 
     fn applyFact(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
         const self: *FactSearch = @ptrCast(@alignCast(context));
-        if (fact.operationId() != self.operation_id or fact.generation() != self.generation) return;
-        if (fact.recoveryClass() != .none and fact.recoveryClass() != self.recovery_class) return;
-        switch (fact.kind()) {
-            .operation_submitted => self.descriptor = try uniqueFact(self.descriptor, fact),
-            .attempt_admitted => {
+        switch (fact) {
+            .operation_submitted => |record| {
+                if (!self.accepts(record.operation) or !self.acceptsClass(record.recovery_class)) return;
+                self.descriptor = try uniqueRecord(
+                    session_transition.OperationRecord,
+                    self.descriptor,
+                    record,
+                );
+            },
+            .attempt_admitted => |record| {
+                if (!self.accepts(record.operation) or record.recovery_class != self.recovery_class) return;
                 var found = false;
                 for (self.attempts[0..self.attempt_count]) |maybe_existing| {
                     const existing = maybe_existing.?;
-                    if (existing.attemptId() != fact.attemptId()) continue;
-                    if (!std.meta.eql(existing, fact)) return error.ConflictingLedgerFacts;
+                    if (existing.attempt_id != record.attempt_id) continue;
+                    if (!std.meta.eql(existing, record)) return error.ConflictingLedgerFacts;
                     found = true;
                     break;
                 }
                 if (!found) {
                     if (self.attempt_count == max_attempts) return error.AttemptCapacityExceeded;
-                    self.attempts[self.attempt_count] = fact;
+                    self.attempts[self.attempt_count] = record;
                     self.attempt_count += 1;
                 }
-                if (self.target_attempt_id == 0 or self.target_attempt_id == fact.attemptId()) {
-                    self.attempt = fact;
+                if (self.target_attempt_id == 0 or self.target_attempt_id == record.attempt_id) {
+                    self.attempt = record;
                 }
             },
-            .approval_required => self.approval_required = try uniqueFact(
-                self.approval_required,
-                fact,
-            ),
-            .authorization => self.authorization = try uniqueFact(self.authorization, fact),
-            .result => self.result = try uniqueFact(self.result, fact),
+            .approval_required => |record| {
+                if (!self.accepts(record.operation)) return;
+                self.approval_required = try uniqueRecord(
+                    session_transition.ApprovalRequiredRecord,
+                    self.approval_required,
+                    record,
+                );
+            },
+            .authorization => |record| {
+                if (!self.accepts(record.operation)) return;
+                self.authorization = try uniqueRecord(
+                    session_transition.AuthorizationRecord,
+                    self.authorization,
+                    record,
+                );
+            },
+            .result => |record| {
+                if (!self.accepts(record.operation) or
+                    !self.acceptsClass(resultRecoveryClass(record))) return;
+                self.result = try uniqueRecord(
+                    session_transition.ResultRecord,
+                    self.result,
+                    record,
+                );
+            },
             else => {},
         }
     }
 
-    fn attemptSlice(self: *const FactSearch) []const ?session_transition.Fact {
+    fn accepts(self: *const FactSearch, operation: session_transition.OperationContext) bool {
+        return operation.operation_id == self.operation_id and operation.generation == self.generation;
+    }
+
+    fn acceptsClass(self: *const FactSearch, recovery_class: session_transition.RecoveryClass) bool {
+        return recovery_class == .none or recovery_class == self.recovery_class;
+    }
+
+    fn attemptSlice(self: *const FactSearch) []const ?session_transition.AttemptRecord {
         return self.attempts[0..self.attempt_count];
     }
 
     fn containsAttempt(self: *const FactSearch, attempt_id: u64) bool {
         for (self.attemptSlice()) |maybe_attempt| {
-            if (maybe_attempt.?.attemptId() == attempt_id) return true;
+            if (maybe_attempt.?.attempt_id == attempt_id) return true;
         }
         return false;
     }
@@ -1930,26 +1948,33 @@ const PendingApprovalSearch = struct {
 
     fn applyFact(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
         const self: *PendingApprovalSearch = @ptrCast(@alignCast(context));
-        switch (fact.kind()) {
-            .approval_required => {
+        switch (fact) {
+            .approval_required => |record| {
                 self.approval = .{
-                    .kind = if ((fact.operationId() >> 62) == 3) .apply_patch else .bash,
-                    .operation_id = fact.operationId(),
-                    .operation_generation = fact.generation(),
-                    .descriptor_digest = fact.digest(),
-                    .descriptor_ref = fact.reference(),
+                    .kind = if ((record.operation.operation_id >> 62) == 3) .apply_patch else .bash,
+                    .operation_id = record.operation.operation_id,
+                    .operation_generation = record.operation.generation,
+                    .descriptor_digest = record.descriptor_digest,
+                    .descriptor_ref = record.descriptor_ref,
                 };
             },
-            .authorization => if (self.approval) |approval| {
-                if (approval.operation_id == fact.operationId() and
-                    approval.operation_generation == fact.generation())
+            .authorization => |record| if (self.approval) |approval| {
+                if (approval.operation_id == record.operation.operation_id and
+                    approval.operation_generation == record.operation.generation)
                 {
                     self.approval = null;
                 }
             },
-            .attempt_admitted, .result => if (self.approval) |approval| {
-                if (approval.operation_id == fact.operationId() and
-                    approval.operation_generation == fact.generation())
+            .attempt_admitted => |record| if (self.approval) |approval| {
+                if (approval.operation_id == record.operation.operation_id and
+                    approval.operation_generation == record.operation.generation)
+                {
+                    self.approval = null;
+                }
+            },
+            .result => |record| if (self.approval) |approval| {
+                if (approval.operation_id == record.operation.operation_id and
+                    approval.operation_generation == record.operation.generation)
                 {
                     self.approval = null;
                 }
@@ -1986,12 +2011,31 @@ const InboxSearch = struct {
     }
 };
 
-fn uniqueFact(existing: ?session_transition.Fact, fact: session_transition.Fact) !session_transition.Fact {
+fn uniqueRecord(comptime T: type, existing: ?T, candidate: T) !T {
     if (existing) |value| {
-        if (!std.meta.eql(value, fact)) return error.ConflictingLedgerFacts;
+        if (!std.meta.eql(value, candidate)) return error.ConflictingLedgerFacts;
         return value;
     }
-    return fact;
+    return candidate;
+}
+
+fn resultRecoveryClass(result: session_transition.ResultRecord) session_transition.RecoveryClass {
+    return switch (result.evidence) {
+        .immediate => |recovery_class| recovery_class,
+        .durable => |evidence| switch (evidence) {
+            .model => .model,
+            .bash, .apply_patch => .consequential,
+        },
+    };
+}
+
+fn resultAttemptId(result: session_transition.ResultRecord) u64 {
+    return switch (result.evidence) {
+        .immediate => 0,
+        .durable => |evidence| switch (evidence) {
+            inline else => |attempt_id| attempt_id,
+        },
+    };
 }
 
 fn hasIndeterminateBash(
@@ -2005,10 +2049,13 @@ fn hasIndeterminateBash(
 
 fn detectIndeterminate(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
     const found: *bool = @ptrCast(@alignCast(context));
-    if (fact.kind() == .result and fact.recoveryClass() == .consequential and
-        fact.isIndeterminate())
-    {
-        found.* = true;
+    switch (fact) {
+        .result => |result| if (resultRecoveryClass(result) == .consequential and
+            result.class == .indeterminate)
+        {
+            found.* = true;
+        },
+        else => {},
     }
 }
 
@@ -2052,7 +2099,13 @@ fn finalizeCandidate(
     try reach(fault, .after_assistant_entry);
     try core.reducer.commitFinalAnswer(entry.entry_id);
     const final_facts = [_]session_transition.Fact{
-        session_transition.conversationAdvanced(agentContext(session), entry.entry_id, final_ref),
+        session_transition.conversationAdvanced(.{
+            .agent = agentContext(session),
+            .entry_id = entry.entry_id,
+            .parent_id = entry.parent_id,
+            .kind = entry.kind,
+            .content_ref = final_ref,
+        }),
         session_transition.outcome(agentContext(session), session.task_id, final_ref),
     };
     try commitCoreFacts(

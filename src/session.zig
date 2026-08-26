@@ -49,12 +49,7 @@ pub const OwnerToken = struct {
     epoch: u64,
 };
 
-pub const EntryKind = enum(u8) {
-    user = 1,
-    assistant = 2,
-    tool_result = 3,
-    context_checkpoint = 4,
-};
+pub const EntryKind = session_transition.ConversationKind;
 
 pub const ConversationEntry = struct {
     kind: EntryKind,
@@ -89,40 +84,40 @@ pub const LedgerView = struct {
 };
 
 const OperationHistory = struct {
-    const max_attempts = 8;
+    const max_attempts = session_transition.max_operation_attempts;
 
     operation_id: u64 = 0,
     generation: u32 = 0,
     recovery_class: session_transition.RecoveryClass = .none,
-    descriptor: ?session_transition.Fact = null,
-    attempt: ?session_transition.Fact = null,
-    attempts: [max_attempts]?session_transition.Fact = @splat(null),
+    descriptor: ?session_transition.OperationRecord = null,
+    attempt: ?session_transition.AttemptRecord = null,
+    attempts: [max_attempts]?session_transition.AttemptRecord = @splat(null),
     attempt_count: u8 = 0,
-    approval_required: ?session_transition.Fact = null,
-    authorization: ?session_transition.Fact = null,
-    result: ?session_transition.Fact = null,
+    approval_required: ?session_transition.ApprovalRequiredRecord = null,
+    authorization: ?session_transition.AuthorizationRecord = null,
+    result: ?session_transition.ResultRecord = null,
 
-    fn accepts(self: OperationHistory, fact: session_transition.Fact) bool {
-        return self.operation_id == fact.operationId() and self.generation == fact.generation();
+    fn accepts(self: OperationHistory, operation: session_transition.OperationContext) bool {
+        return self.operation_id == operation.operation_id and self.generation == operation.generation;
     }
 
-    fn appendAttempt(self: *OperationHistory, fact: session_transition.Fact) !void {
+    fn appendAttempt(self: *OperationHistory, attempt: session_transition.AttemptRecord) !void {
         for (self.attempts[0..self.attempt_count]) |maybe_existing| {
             const existing = maybe_existing.?;
-            if (existing.attemptId() != fact.attemptId()) continue;
-            if (!std.meta.eql(existing, fact)) return error.ConflictingLedgerFacts;
+            if (existing.attempt_id != attempt.attempt_id) continue;
+            if (!std.meta.eql(existing, attempt)) return error.ConflictingLedgerFacts;
             self.attempt = existing;
             return;
         }
         if (self.attempt_count == max_attempts) return error.AttemptCapacityExceeded;
-        self.attempts[self.attempt_count] = fact;
+        self.attempts[self.attempt_count] = attempt;
         self.attempt_count += 1;
-        self.attempt = fact;
+        self.attempt = attempt;
     }
 
     fn containsAttempt(self: OperationHistory, attempt_id: u64) bool {
         for (self.attempts[0..self.attempt_count]) |maybe_attempt| {
-            if (maybe_attempt.?.attemptId() == attempt_id) return true;
+            if (maybe_attempt.?.attempt_id == attempt_id) return true;
         }
         return false;
     }
@@ -133,60 +128,66 @@ const SemanticIndex = struct {
     last_core: ?[core_state.encoded_size]u8 = null,
     model: OperationHistory = .{},
     consequential: OperationHistory = .{},
-    open_operation: ?session_transition.Fact = null,
+    open_operation: ?session_transition.OperationRecord = null,
     control: ?session_transition.Fact = null,
-    indeterminate: ?session_transition.Fact = null,
+    indeterminate: ?session_transition.ResultRecord = null,
 
     fn apply(self: *SemanticIndex, transaction: session_transition.Transaction) !void {
         if (transaction.sequence != self.last_sequence + 1) return error.NonmonotonicSequence;
         for (transaction.factSlice()) |fact| {
-            const history: ?*OperationHistory = switch (fact.recoveryClass()) {
-                .model => &self.model,
-                .consequential => &self.consequential,
-                .none => if (fact.operationId() == 0)
-                    null
-                else if (fact.operationId() >> 63 == 0)
-                    &self.model
-                else
-                    &self.consequential,
-            };
-            switch (fact.kind()) {
-                .operation_submitted => if (history) |value| {
-                    if (!value.accepts(fact)) value.* = .{
-                        .operation_id = fact.operationId(),
-                        .generation = fact.generation(),
-                        .recovery_class = fact.recoveryClass(),
+            switch (fact) {
+                .operation_submitted => |record| {
+                    const history = historyFor(self, record.operation, record.recovery_class);
+                    if (!history.accepts(record.operation)) history.* = .{
+                        .operation_id = record.operation.operation_id,
+                        .generation = record.operation.generation,
+                        .recovery_class = record.recovery_class,
                     };
-                    value.descriptor = try uniqueIndexedFact(value.descriptor, fact);
+                    history.descriptor = try uniqueValue(
+                        session_transition.OperationRecord,
+                        history.descriptor,
+                        record,
+                    );
                 },
-                .operation_accepted => self.open_operation = fact,
-                .attempt_admitted => if (history) |value| {
-                    if (!value.accepts(fact)) return error.InvalidOperationHistory;
-                    try value.appendAttempt(fact);
+                .operation_accepted => |record| self.open_operation = record,
+                .attempt_admitted => |record| {
+                    const history = historyFor(self, record.operation, record.recovery_class);
+                    if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    try history.appendAttempt(record);
                 },
-                .approval_required => if (history) |value| {
-                    if (!value.accepts(fact)) return error.InvalidOperationHistory;
-                    value.approval_required = try uniqueIndexedFact(value.approval_required, fact);
+                .approval_required => |record| {
+                    const history = historyFor(self, record.operation, .none);
+                    if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    history.approval_required = try uniqueValue(
+                        session_transition.ApprovalRequiredRecord,
+                        history.approval_required,
+                        record,
+                    );
                 },
-                .authorization => if (history) |value| {
-                    if (!value.accepts(fact)) return error.InvalidOperationHistory;
-                    value.authorization = fact;
+                .authorization => |record| {
+                    const history = historyFor(self, record.operation, .none);
+                    if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    history.authorization = record;
                 },
-                .result => {
-                    if (history) |value| {
-                        if (!value.accepts(fact)) return error.InvalidOperationHistory;
-                        value.result = try uniqueIndexedFact(value.result, fact);
-                    }
+                .result => |record| {
+                    const history = historyFor(self, record.operation, resultRecoveryClass(record));
+                    if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    history.result = try uniqueValue(
+                        session_transition.ResultRecord,
+                        history.result,
+                        record,
+                    );
                     if (self.open_operation) |open_fact| {
-                        if (open_fact.operationId() == fact.operationId() and
-                            open_fact.generation() == fact.generation())
+                        if (open_fact.operation.operation_id == record.operation.operation_id and
+                            open_fact.operation.generation == record.operation.generation)
                         {
                             self.open_operation = null;
                         }
                     }
-                    // Bash status 8 is the durable indeterminate disposition.
-                    if (fact.recoveryClass() == .consequential and fact.isIndeterminate()) {
-                        self.indeterminate = fact;
+                    if (resultRecoveryClass(record) == .consequential and
+                        record.class == .indeterminate)
+                    {
+                        self.indeterminate = record;
                     }
                 },
                 .cancellation, .shutdown => self.control = fact,
@@ -204,37 +205,48 @@ const SemanticIndex = struct {
     ) !void {
         const histories = [_]OperationHistory{ self.model, self.consequential };
         for (histories) |history| {
-            const facts = [_]?session_transition.Fact{
-                history.descriptor,
-                history.approval_required,
-                history.authorization,
-            };
-            for (facts) |maybe_fact| if (maybe_fact) |fact| {
-                try apply_fn(context, fact);
-            };
+            if (history.descriptor) |record| try apply_fn(context, .{ .operation_submitted = record });
+            if (history.approval_required) |record| try apply_fn(context, .{ .approval_required = record });
+            if (history.authorization) |record| try apply_fn(context, .{ .authorization = record });
             for (history.attempts[0..history.attempt_count]) |maybe_attempt| {
-                try apply_fn(context, maybe_attempt.?);
+                try apply_fn(context, .{ .attempt_admitted = maybe_attempt.? });
             }
-            if (history.result) |fact| {
-                try apply_fn(context, fact);
-            }
+            if (history.result) |record| try apply_fn(context, .{ .result = record });
         }
-        if (self.open_operation) |fact| {
-            try apply_fn(context, fact);
-        }
-        if (self.indeterminate) |fact| {
-            try apply_fn(context, fact);
-        }
+        if (self.open_operation) |record| try apply_fn(context, .{ .operation_accepted = record });
+        if (self.indeterminate) |record| try apply_fn(context, .{ .result = record });
         if (self.control) |fact| try apply_fn(context, fact);
     }
 };
 
-fn uniqueIndexedFact(existing: ?session_transition.Fact, fact: session_transition.Fact) !session_transition.Fact {
+fn historyFor(
+    index: *SemanticIndex,
+    operation: session_transition.OperationContext,
+    recovery_class: session_transition.RecoveryClass,
+) *OperationHistory {
+    return switch (recovery_class) {
+        .model => &index.model,
+        .consequential => &index.consequential,
+        .none => if (operation.operation_id >> 63 == 0) &index.model else &index.consequential,
+    };
+}
+
+fn resultRecoveryClass(result: session_transition.ResultRecord) session_transition.RecoveryClass {
+    return switch (result.evidence) {
+        .immediate => |recovery_class| recovery_class,
+        .durable => |evidence| switch (evidence) {
+            .model => .model,
+            .bash, .apply_patch => .consequential,
+        },
+    };
+}
+
+fn uniqueValue(comptime T: type, existing: ?T, candidate: T) !T {
     if (existing) |value| {
-        if (!std.meta.eql(value, fact)) return error.ConflictingLedgerFacts;
+        if (!std.meta.eql(value, candidate)) return error.ConflictingLedgerFacts;
         return value;
     }
-    return fact;
+    return candidate;
 }
 
 pub const RecoveryProgress = struct {
@@ -425,15 +437,15 @@ pub const Session = struct {
     task_id: u64,
     branch_id: u64,
     ownership_epoch: u64,
-    active_leaf_id: u64,
-    entry_count: u64,
+    active_leaf_id: u64 = 0,
+    entry_count: u64 = 0,
     pending_conversation: ?ConversationEntry = null,
     ledger_sequence: u64 = 0,
     semantic_index: SemanticIndex = .{},
     recovery_sequence: u64 = 1,
     recovery_ledger_head: u64 = 0,
-    recovery_inbox_sequence: u64 = 1,
-    recovery_inbox_head: u64 = 0,
+    recovery_inbox_id: u64 = 1,
+    recovery_inbox_watermark: u64 = 0,
     recovery_started: bool = false,
     recovery_complete: bool = true,
     inbox_index: InboxIndex = .{},
@@ -472,7 +484,9 @@ pub const Session = struct {
         config: CreateConfig,
     ) !Session {
         try config.identities.validate();
-        if (config.workspace_path.len == 0 or config.model.len == 0 or config.task.len == 0) {
+        if (config.workspace_path.len == 0 or config.workspace_path.len > workspace_path_capacity or
+            config.model.len == 0 or config.task.len == 0)
+        {
             return error.InvalidSessionMetadata;
         }
         try validateWorkspace(io, config.workspace_path);
@@ -504,6 +518,40 @@ pub const Session = struct {
         try blob_store.put(blobs, io, config.identities.task_id, config.task);
         try syncDir(dir, io);
 
+        const agent: session_transition.AgentContext = .{
+            .agent_id = config.identities.agent_id,
+            .agent_generation = 1,
+            .ownership_epoch = 1,
+        };
+        var initial: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+        initial.facts[0] = session_transition.conversationAdvanced(
+            .{
+                .agent = agent,
+                .entry_id = 1,
+                .parent_id = 0,
+                .kind = .user,
+                .content_ref = config.identities.task_id,
+            },
+        );
+
+        var created: Session = .{
+            .io = io,
+            .dir = dir,
+            .storage = storage,
+            .lock_file = lock_file,
+            .session_id = config.identities.session_id,
+            .agent_id = config.identities.agent_id,
+            .task_id = config.identities.task_id,
+            .branch_id = config.identities.branch_id,
+            .ownership_epoch = 1,
+            .workspace_path_length = @intCast(config.workspace_path.len),
+        };
+        @memcpy(created.workspace_path[0..config.workspace_path.len], config.workspace_path);
+        try created.semantic_index.apply(initial);
+        created.ledger_sequence = 1;
+        created.active_leaf_id = 1;
+        created.entry_count = 1;
+
         try storage.createSessionWithMetadata(.{
             .identities = .{
                 .session_id = config.identities.session_id,
@@ -513,9 +561,8 @@ pub const Session = struct {
             },
             .workspace_path = config.workspace_path,
             .model = config.model,
-        });
-
-        return fromStored(io, storage, dir, lock_file, try storage.readSession(config.identities.session_id), true);
+        }, initial);
+        return created;
     }
 
     pub fn openExisting(
@@ -569,8 +616,6 @@ pub const Session = struct {
             .task_id = stored.identities.task_id,
             .branch_id = stored.identities.branch_id,
             .ownership_epoch = stored.ownership_epoch,
-            .active_leaf_id = stored.active_leaf_id,
-            .entry_count = stored.entry_count,
             .workspace_path_length = stored.workspace_path_length,
             .recovery_complete = recovery_complete,
         };
@@ -655,15 +700,21 @@ pub const Session = struct {
     }
 
     fn validatePreparedConversationEntry(self: *Session, fact: session_transition.Fact) !void {
-        if (fact.subject() <= self.entry_count) {
-            const existing = try self.readEntry(fact.subject());
-            if (existing.content_ref != fact.reference()) return error.ConversationLedgerMismatch;
+        const advanced = fact.conversation_advanced;
+        if (advanced.entry_id <= self.entry_count) {
+            const existing = try self.readEntry(advanced.entry_id);
+            if (existing.content_ref != advanced.content_ref or
+                existing.parent_id != advanced.parent_id or existing.kind != advanced.kind)
+            {
+                return error.ConversationLedgerMismatch;
+            }
             return;
         }
-        if (fact.subject() != self.entry_count + 1) return error.ConversationLedgerGap;
+        if (advanced.entry_id != self.entry_count + 1) return error.ConversationLedgerGap;
         const entry = self.pending_conversation orelse return error.MissingPreparedConversationEntry;
-        if (entry.entry_id != fact.subject() or entry.sequence != fact.subject() or
-            entry.parent_id != self.active_leaf_id or entry.content_ref != fact.reference() or
+        if (entry.entry_id != advanced.entry_id or entry.sequence != advanced.entry_id or
+            entry.parent_id != advanced.parent_id or entry.kind != advanced.kind or
+            entry.parent_id != self.active_leaf_id or entry.content_ref != advanced.content_ref or
             entry.session_id != self.session_id or entry.task_id != self.task_id)
         {
             return error.ConversationLedgerMismatch;
@@ -671,29 +722,36 @@ pub const Session = struct {
     }
 
     fn publishConversationEntry(self: *Session, fact: session_transition.Fact) void {
-        if (fact.subject() <= self.entry_count) return;
-        std.debug.assert(fact.subject() == self.entry_count + 1);
-        self.active_leaf_id = fact.subject();
-        self.entry_count = fact.subject();
+        const advanced = fact.conversation_advanced;
+        if (advanced.entry_id <= self.entry_count) return;
+        std.debug.assert(advanced.entry_id == self.entry_count + 1);
+        self.active_leaf_id = advanced.entry_id;
+        self.entry_count = advanced.entry_id;
         self.pending_conversation = null;
     }
 
     fn reconstructConversationEntry(self: *Session, fact: session_transition.Fact) !void {
-        if (fact.subject() <= self.entry_count) {
-            const existing = try self.readEntry(fact.subject());
-            if (existing.content_ref != fact.reference()) return error.ConversationLedgerMismatch;
+        const advanced = fact.conversation_advanced;
+        if (advanced.entry_id <= self.entry_count) {
+            const existing = try self.readEntry(advanced.entry_id);
+            if (existing.content_ref != advanced.content_ref or
+                existing.parent_id != advanced.parent_id or existing.kind != advanced.kind)
+            {
+                return error.ConversationLedgerMismatch;
+            }
             return;
         }
-        if (fact.subject() != self.entry_count + 1) return error.ConversationLedgerGap;
-        const entry = try self.loadEntry(fact.subject());
-        if (entry.entry_id != fact.subject() or entry.sequence != fact.subject() or
-            entry.parent_id != self.active_leaf_id or entry.content_ref != fact.reference() or
+        if (advanced.entry_id != self.entry_count + 1) return error.ConversationLedgerGap;
+        const entry = try self.loadEntry(advanced.entry_id);
+        if (entry.entry_id != advanced.entry_id or entry.sequence != advanced.entry_id or
+            entry.parent_id != advanced.parent_id or entry.kind != advanced.kind or
+            entry.parent_id != self.active_leaf_id or entry.content_ref != advanced.content_ref or
             entry.session_id != self.session_id or entry.task_id != self.task_id)
         {
             return error.ConversationLedgerMismatch;
         }
-        self.active_leaf_id = fact.subject();
-        self.entry_count = fact.subject();
+        self.active_leaf_id = advanced.entry_id;
+        self.entry_count = advanced.entry_id;
     }
 
     pub fn readEntry(self: *Session, sequence: u64) !ConversationEntry {
@@ -704,9 +762,6 @@ pub const Session = struct {
 
     fn loadEntry(self: *Session, sequence: u64) !ConversationEntry {
         const stored = try self.storage.readConversationEntry(self.session_id, sequence);
-        if (stored.committed_by_sequence == null and self.ledger_sequence != 0) {
-            return error.InvalidEntrySequence;
-        }
         const kind = std.enums.fromInt(EntryKind, stored.kind) orelse return error.UnsupportedConversationKind;
         return .{
             .kind = kind,
@@ -803,57 +858,10 @@ pub const Session = struct {
         var prepared_index = self.semantic_index;
         try prepared_index.apply(transaction);
 
-        var conversations: [session_transition.max_facts]host_store.ConversationInsert = undefined;
-        var conversation_count: usize = 0;
-        var completions: [session_transition.max_facts]host_store.CompletionAssociation = undefined;
-        var completion_count: usize = 0;
-        var capacity_class: host_store.CapacityClass = .closure;
-        for (facts) |fact| {
-            if (fact.kind() == .task_admitted or fact.kind() == .operation_submitted or
-                fact.kind() == .attempt_admitted) capacity_class = .admission;
-            if (fact.kind() == .conversation_advanced) {
-                const entry = if (fact.subject() == 1) ConversationEntry{
-                    .kind = .user,
-                    .session_id = self.session_id,
-                    .entry_id = 1,
-                    .parent_id = 0,
-                    .task_id = self.task_id,
-                    .content_ref = self.task_id,
-                    .sequence = 1,
-                } else self.pending_conversation orelse return error.MissingPreparedConversationEntry;
-                conversations[conversation_count] = .{
-                    .entry_id = entry.entry_id,
-                    .parent_id = entry.parent_id,
-                    .kind = @intFromEnum(entry.kind),
-                    .content_ref = entry.content_ref,
-                };
-                conversation_count += 1;
-            }
-            if (fact.evidenceKind()) |evidence_kind| {
-                completions[completion_count] = .{
-                    .ownership_epoch = fact.ownershipEpoch(),
-                    .agent_id = fact.agentId(),
-                    .agent_generation = fact.agentGeneration(),
-                    .operation_id = fact.operationId(),
-                    .operation_generation = fact.generation(),
-                    .attempt_id = fact.attemptId(),
-                    .evidence_kind = @intFromEnum(evidence_kind),
-                    .result_reference = fact.reference(),
-                    .result_digest = fact.digest(),
-                };
-                completion_count += 1;
-            }
-        }
-        var payload_buffer: [session_transition.max_payload_size]u8 = undefined;
-        const payload = try session_transition.encode(&payload_buffer, transaction);
-        const final_sequence = try self.storage.commit(.{
-            .token = .{ .session_id = self.session_id, .epoch = self.ownership_epoch },
-            .expected_sequence = self.ledger_sequence,
-            .payload = payload,
-            .conversations = conversations[0..conversation_count],
-            .completions = completions[0..completion_count],
-            .capacity_class = capacity_class,
-        });
+        const final_sequence = try self.storage.commit(
+            .{ .session_id = self.session_id, .epoch = self.ownership_epoch },
+            transaction,
+        );
         std.debug.assert(final_sequence == transaction.sequence);
         self.ledger_sequence = final_sequence;
         self.semantic_index = prepared_index;
@@ -869,17 +877,24 @@ pub const Session = struct {
     ) !void {
         var blobs = try self.dir.openDir(self.io, blobs_path, .{});
         defer blobs.close(self.io);
-        if (fact.reference() != 0) {
-            _ = blob_store.metadata(blobs, self.io, fact.reference()) catch |err| switch (err) {
-                error.FileNotFound => return error.MissingBlobReference,
-                else => return err,
-            };
-        }
-        if (fact.kind() == .approval_required and fact.subject() != 0) {
-            _ = blob_store.metadata(blobs, self.io, fact.subject()) catch |err| switch (err) {
-                error.FileNotFound => return error.MissingBlobReference,
-                else => return err,
-            };
+        switch (fact) {
+            .task_admitted => |value| try validateBlob(blobs, self.io, value.content_ref),
+            .operation_submitted, .operation_accepted => |value| try validateBlob(
+                blobs,
+                self.io,
+                value.descriptor_ref,
+            ),
+            .attempt_admitted => |value| try validateBlob(blobs, self.io, value.descriptor_ref),
+            .authorization => |value| try validateBlob(blobs, self.io, value.permission_ref),
+            .result => |value| try validateBlob(blobs, self.io, value.result_ref),
+            .conversation_advanced => |value| try validateBlob(blobs, self.io, value.content_ref),
+            .outcome => |value| try validateBlob(blobs, self.io, value.content_ref),
+            .result_applied => |value| try validateBlob(blobs, self.io, value.result_ref),
+            .approval_required => |value| {
+                try validateBlob(blobs, self.io, value.binding_ref);
+                try validateBlob(blobs, self.io, value.descriptor_ref);
+            },
+            .cancellation, .shutdown => {},
         }
     }
 
@@ -913,8 +928,8 @@ pub const Session = struct {
             self.inbox_index = .{};
             self.recovery_sequence = 1;
             self.recovery_ledger_head = try self.storage.sessionHead(self.session_id);
-            self.recovery_inbox_sequence = 1;
-            self.recovery_inbox_head = try self.storage.completionHead(self.session_id);
+            self.recovery_inbox_id = 0;
+            self.recovery_inbox_watermark = try self.storage.completionHead(self.session_id);
             self.recovery_started = true;
         }
         var processed: u8 = 0;
@@ -940,14 +955,18 @@ pub const Session = struct {
                 processed += 1;
                 continue;
             }
-            if (self.recovery_inbox_sequence == 1) {
+            if (self.recovery_inbox_id == 0) {
                 self.ledger_sequence = self.recovery_ledger_head;
             }
-            if (self.recovery_inbox_sequence <= self.recovery_inbox_head) {
-                const stored_completion = try self.storage.readCompletion(
+            if (self.recovery_inbox_id < self.recovery_inbox_watermark) {
+                const stored_completion = (try self.storage.readCompletionAfter(
                     self.session_id,
-                    self.recovery_inbox_sequence,
-                );
+                    self.recovery_inbox_id,
+                    self.recovery_inbox_watermark,
+                )) orelse {
+                    self.recovery_inbox_id = self.recovery_inbox_watermark;
+                    continue;
+                };
                 try self.inbox_index.apply(
                     &self.semantic_index,
                     stored_completion.envelope,
@@ -955,10 +974,18 @@ pub const Session = struct {
                     self.agent_id,
                     self.ownership_epoch,
                 );
-                self.recovery_inbox_sequence += 1;
+                self.recovery_inbox_id = stored_completion.inbox_id;
                 processed += 1;
                 continue;
             }
+            self.recovery_complete = true;
+            self.recovery_started = false;
+            return .{ .processed = processed, .more = false };
+        }
+        if (self.recovery_sequence > self.recovery_ledger_head and
+            self.recovery_inbox_id >= self.recovery_inbox_watermark)
+        {
+            self.ledger_sequence = self.recovery_ledger_head;
             self.recovery_complete = true;
             self.recovery_started = false;
             return .{ .processed = processed, .more = false };
@@ -1028,6 +1055,14 @@ fn syncDir(dir: std.Io.Dir, io: std.Io) !void {
         .flags = .{ .nonblocking = false },
     };
     try directory_file.sync(io);
+}
+
+fn validateBlob(blobs: std.Io.Dir, io: std.Io, reference: u64) !void {
+    if (reference == 0) return;
+    _ = blob_store.metadata(blobs, io, reference) catch |err| switch (err) {
+        error.FileNotFound => return error.MissingBlobReference,
+        else => return err,
+    };
 }
 
 fn validateWorkspace(io: std.Io, path: []const u8) !void {
@@ -1213,11 +1248,13 @@ test "create and exact resume preserve distinct identities and one owner" {
     try std.testing.expectEqualDeep(Projection{
         .session_id = 10,
         .task_id = 12,
-        .active_leaf_id = 1,
+        .active_leaf_id = 0,
         .ownership_epoch = 2,
     }, restored.session.projection());
     try std.testing.expectError(error.StaleOwner, restored.session.authorize(first_token));
     try restored.session.authorize(restored.session.ownerToken());
+    const recovered = try restored.session.recoverSemanticWindow(restored.session.ownerToken(), 8);
+    try std.testing.expect(!recovered.more);
 
     const root = try restored.session.readEntry(1);
     try std.testing.expectEqual(EntryKind.user, root.kind);
@@ -1277,7 +1314,7 @@ test "fallible Inbox publication is prepared before durable Completion commit" {
         .operation_id = 100,
         .generation = 1,
     };
-    var semantic: session_transition.Transaction = .{ .sequence = 1, .fact_count = 3 };
+    var semantic: session_transition.Transaction = .{ .sequence = 2, .fact_count = 3 };
     semantic.facts[0] = session_transition.operationSubmitted(operation, 101, 102, .model);
     semantic.facts[1] = session_transition.attemptAdmitted(operation, 103, 101, 102, .model);
     semantic.facts[2] = session_transition.attemptAdmitted(operation, 108, 101, 102, .model);
@@ -1351,9 +1388,9 @@ test "recovery advances only within the configured Session Ledger quantum" {
     try std.testing.expectEqual(@as(u8, 2), second.processed);
     try std.testing.expect(second.more);
     const last = try restored.recoverSemanticWindow(token, 2);
-    try std.testing.expectEqual(@as(u8, 1), last.processed);
+    try std.testing.expectEqual(@as(u8, 2), last.processed);
     try std.testing.expect(!last.more);
-    try std.testing.expectEqual(@as(u64, 5), restored.ledger_sequence);
+    try std.testing.expectEqual(@as(u64, 6), restored.ledger_sequence);
 }
 
 test "semantic commits reject missing immutable blob references before advancing the Ledger" {
@@ -1376,8 +1413,8 @@ test "semantic commits reject missing immutable blob references before advancing
         }, 999, 123, .none)},
         null,
     ));
-    try std.testing.expectEqual(@as(u64, 0), created.ledger_sequence);
-    try std.testing.expectEqual(@as(u64, 0), try layout.storage.sessionHead(created.session_id));
+    try std.testing.expectEqual(@as(u64, 1), created.ledger_sequence);
+    try std.testing.expectEqual(@as(u64, 1), try layout.storage.sessionHead(created.session_id));
 }
 
 test "irrelevant inbox records cannot displace admitted Attempt evidence" {
@@ -1521,7 +1558,12 @@ test "failed recovered frame leaves the published semantic index unchanged" {
     try index.apply(admission);
 
     var invalid: session_transition.Transaction = .{ .sequence = 2, .fact_count = 2 };
-    invalid.facts[0] = session_transition.authorization(operation, 11, 12, true);
+    invalid.facts[0] = session_transition.authorization(.{
+        .operation = operation,
+        .permission_ref = 11,
+        .descriptor_digest = 12,
+        .allowed = true,
+    });
     invalid.facts[1] = session_transition.attemptAdmitted(.{
         .agent = agent,
         .operation_id = 99,
@@ -1549,10 +1591,16 @@ test "conversation advances only after its Ledger fact commits" {
     try std.testing.expectEqual(@as(u64, 1), created.active_leaf_id);
     try std.testing.expectError(error.InvalidEntrySequence, created.readEntry(2));
     _ = try created.commitSemantic(token, &.{session_transition.conversationAdvanced(.{
-        .agent_id = created.agent_id,
-        .agent_generation = 1,
-        .ownership_epoch = created.ownership_epoch,
-    }, assistant.entry_id, assistant.content_ref)}, null);
+        .agent = .{
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .ownership_epoch = created.ownership_epoch,
+        },
+        .entry_id = assistant.entry_id,
+        .parent_id = assistant.parent_id,
+        .kind = assistant.kind,
+        .content_ref = assistant.content_ref,
+    })}, null);
     try std.testing.expectEqual(@as(u64, 2), created.active_leaf_id);
     const stored = try created.readEntry(2);
     try std.testing.expectEqualDeep(assistant, stored);
@@ -1589,6 +1637,8 @@ test "resume leaves an uncommitted conversation record invisible" {
 
     var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 30);
     defer restored.session.close();
+    try std.testing.expectEqual(@as(u64, 0), restored.session.active_leaf_id);
+    _ = try restored.session.recoverSemanticWindow(restored.session.ownerToken(), 8);
     try std.testing.expectEqual(@as(u64, 1), restored.session.active_leaf_id);
     try std.testing.expectEqual(@as(u64, 1), restored.session.entry_count);
     try std.testing.expectError(error.InvalidEntrySequence, restored.session.readEntry(2));

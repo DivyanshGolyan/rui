@@ -24,9 +24,9 @@ completion, permission, cancellation, and shutdown admission; durable-before-app
 committed projections; bounded drive quanta; and crash/replay tests. Its 32-entry maximum is fixed at
 compile time and does not vary with logical-agent count.
 
-Applications open one `HostRuntime` from a state path and pass only that runtime to
-`Harness.open`. It owns the state directory, Activation Slot pool, lifetime operating-system lock,
-SQLite connection, and bounded Storage Owner; lifecycle callers do not assemble or retain those
+Applications open exactly one SQLite-owning `HostRuntime` per process from a state path and pass only
+that runtime to `Harness.open`. It owns the process-wide SQLite allowance, state directory, Activation
+Slot pool, lifetime operating-system lock, SQLite connection, and bounded Storage Owner; lifecycle callers do not assemble or retain those
 mechanics separately. The runtime outlives every Harness opened from it. Each Session retains exact create and resume identity, durable ownership
 epochs, an ordered semantic ledger, and an append-only parent-linked conversation. Sleeping Sessions
 retain rows and blob references rather than SQLite connections or resident object graphs.
@@ -64,8 +64,10 @@ zig build fixture-patch-deny -Doptimize=ReleaseSmall
 ```
 
 Ownership epochs, Completion evidence, Session metadata, Conversation metadata, and canonical
-multi-fact transactions now live behind the same Storage Owner. The SQLite transaction that
-publishes a terminal Result also associates its immutable Completion evidence. Per-Session WAL,
+multi-fact transactions now live behind the same serialized Storage Owner. Session supplies only a
+typed transaction; storage canonically encodes it and derives every relational write. SQLite assigns
+Completion Inbox identity, and the transaction that publishes a terminal Result associates its
+immutable evidence. Per-Session WAL,
 Inbox, Conversation, checkpoint, and manifest files are no longer production storage paths.
 
 ## Requirements

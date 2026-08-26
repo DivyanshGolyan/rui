@@ -3,8 +3,11 @@ const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
 
 pub const Config = struct {
+    sqlite_heap_limit_bytes: u64 = 8 * 1024 * 1024,
     storage: host_store.Config = .{},
 };
+
+var runtime_open: std.atomic.Value(bool) = .init(false);
 
 const State = struct {
     io: std.Io,
@@ -23,6 +26,12 @@ pub const HostRuntime = opaque {
         config: Config,
     ) !*HostRuntime {
         if (state_path.len == 0) return error.InvalidStatePath;
+        if (runtime_open.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
+            return error.HostRuntimeAlreadyOpen;
+        }
+        errdefer runtime_open.store(false, .release);
+        try host_store.configureProcessHeapLimit(config.sqlite_heap_limit_bytes);
+        errdefer host_store.disableProcessHeapLimit();
         var state_root = try std.Io.Dir.cwd().createDirPathOpen(
             io,
             state_path,
@@ -54,9 +63,11 @@ pub const HostRuntime = opaque {
             return error.HostRuntimeBusy;
         }
         runtime.storage.close();
+        host_store.disableProcessHeapLimit();
         runtime.state_root.close(runtime.io);
         const allocator = runtime.allocator;
         allocator.destroy(runtime);
+        runtime_open.store(false, .release);
     }
 
     pub fn occupiedActivationBytes(self: *const HostRuntime) usize {

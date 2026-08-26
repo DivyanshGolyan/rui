@@ -22,10 +22,7 @@ const session_schema =
     \\    workspace_path TEXT NOT NULL CHECK (length(workspace_path) BETWEEN 1 AND 1024),
     \\    model TEXT NOT NULL CHECK (length(model) BETWEEN 1 AND 128),
     \\    ownership_epoch INTEGER NOT NULL DEFAULT 1 CHECK (ownership_epoch > 0),
-    \\    active_leaf_id BLOB NOT NULL CHECK (length(active_leaf_id) = 8),
-    \\    entry_count INTEGER NOT NULL DEFAULT 1 CHECK (entry_count > 0),
     \\    head_sequence INTEGER NOT NULL DEFAULT 0 CHECK (head_sequence >= 0),
-    \\    inbox_head INTEGER NOT NULL DEFAULT 0 CHECK (inbox_head >= 0),
     \\    UNIQUE (agent_id),
     \\    UNIQUE (task_id),
     \\    UNIQUE (branch_id)
@@ -48,7 +45,7 @@ const conversation_schema =
     \\    parent_id BLOB CHECK (parent_id IS NULL OR length(parent_id) = 8),
     \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 1 AND 4),
     \\    content_ref BLOB NOT NULL CHECK (length(content_ref) = 8),
-    \\    committed_by_sequence INTEGER,
+    \\    committed_by_sequence INTEGER NOT NULL,
     \\    PRIMARY KEY (session_id, entry_id),
     \\    FOREIGN KEY (session_id) REFERENCES session (session_id),
     \\    FOREIGN KEY (session_id, committed_by_sequence)
@@ -57,8 +54,8 @@ const conversation_schema =
 ;
 const completion_schema =
     \\CREATE TABLE completion_inbox (
+    \\    inbox_id INTEGER PRIMARY KEY,
     \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
-    \\    inbox_sequence INTEGER NOT NULL CHECK (inbox_sequence > 0),
     \\    ownership_epoch BLOB NOT NULL CHECK (length(ownership_epoch) = 8),
     \\    agent_generation INTEGER NOT NULL CHECK (agent_generation > 0),
     \\    operation_id BLOB NOT NULL CHECK (length(operation_id) = 8),
@@ -68,24 +65,22 @@ const completion_schema =
     \\    result_reference BLOB NOT NULL CHECK (length(result_reference) = 8),
     \\    result_digest BLOB NOT NULL CHECK (length(result_digest) = 8),
     \\    consumed_by_sequence INTEGER,
-    \\    PRIMARY KEY (
+    \\    UNIQUE (
     \\        session_id, ownership_epoch, agent_generation, operation_id,
     \\        operation_generation, attempt_id, evidence_kind
     \\    ),
-    \\    UNIQUE (session_id, inbox_sequence),
     \\    FOREIGN KEY (session_id) REFERENCES session (session_id),
     \\    FOREIGN KEY (session_id, consumed_by_sequence)
     \\        REFERENCES session_transition (session_id, sequence)
-    \\) STRICT, WITHOUT ROWID
+    \\) STRICT
 ;
 const completion_index_schema =
-    \\CREATE INDEX completion_inbox_unconsumed
-    \\ON completion_inbox (session_id, consumed_by_sequence, inbox_sequence)
+    \\CREATE INDEX completion_inbox_by_session
+    \\ON completion_inbox (session_id, inbox_id)
 ;
 
 const read_session_sql: [:0]const u8 =
-    \\SELECT agent_id, task_id, branch_id, ownership_epoch, active_leaf_id,
-    \\       entry_count, workspace_path, model
+    \\SELECT agent_id, task_id, branch_id, ownership_epoch, workspace_path, model
     \\FROM session WHERE session_id = ?1
 ;
 const session_head_sql: [:0]const u8 =
@@ -98,9 +93,9 @@ const claim_ownership_sql: [:0]const u8 =
 const current_ownership_sql: [:0]const u8 =
     "SELECT ownership_epoch FROM session WHERE session_id = ?1";
 const completion_head_sql: [:0]const u8 =
-    "SELECT inbox_head FROM session WHERE session_id = ?1";
+    "SELECT inbox_id FROM completion_inbox WHERE session_id = ?1 ORDER BY inbox_id DESC LIMIT 1";
 const find_completion_sql: [:0]const u8 =
-    \\SELECT c.inbox_sequence, c.result_reference, c.result_digest
+    \\SELECT c.inbox_id, c.result_reference, c.result_digest
     \\FROM completion_inbox AS c
     \\JOIN session AS s ON s.session_id = c.session_id
     \\WHERE c.session_id = ?1 AND c.ownership_epoch = ?2
@@ -108,19 +103,27 @@ const find_completion_sql: [:0]const u8 =
     \\  AND c.operation_id = ?5 AND c.operation_generation = ?6
     \\  AND c.attempt_id = ?7 AND c.evidence_kind = ?8
 ;
-const advance_inbox_head_sql: [:0]const u8 =
-    "UPDATE session SET inbox_head = ?2 WHERE session_id = ?1 AND inbox_head = ?3";
 const read_completion_sql: [:0]const u8 =
     \\SELECT c.evidence_kind, c.ownership_epoch, s.agent_id, c.agent_generation,
     \\       c.operation_id, c.operation_generation, c.attempt_id,
     \\       c.result_reference, c.result_digest, c.consumed_by_sequence
     \\FROM completion_inbox AS c
     \\JOIN session AS s ON s.session_id = c.session_id
-    \\WHERE c.session_id = ?1 AND c.inbox_sequence = ?2
+    \\WHERE c.session_id = ?1 AND c.inbox_id = ?2
+;
+const read_completion_after_sql: [:0]const u8 =
+    \\SELECT c.inbox_id, c.evidence_kind, c.ownership_epoch, s.agent_id,
+    \\       c.agent_generation, c.operation_id, c.operation_generation,
+    \\       c.attempt_id, c.result_reference, c.result_digest, c.consumed_by_sequence
+    \\FROM completion_inbox AS c
+    \\JOIN session AS s ON s.session_id = c.session_id
+    \\WHERE c.session_id = ?1 AND c.inbox_id > ?2 AND c.inbox_id <= ?3
+    \\ORDER BY c.inbox_id
+    \\LIMIT 1
 ;
 const advance_session_head_sql: [:0]const u8 =
     \\UPDATE session SET head_sequence = ?2
-    \\WHERE session_id = ?1 AND ownership_epoch = ?3 AND head_sequence = ?4
+    \\WHERE session_id = ?1 AND ownership_epoch = ?3 AND head_sequence = ?4 AND agent_id = ?5
 ;
 const associate_completion_sql: [:0]const u8 =
     \\UPDATE completion_inbox SET consumed_by_sequence = ?2
@@ -131,10 +134,6 @@ const associate_completion_sql: [:0]const u8 =
     \\  AND result_reference = ?9 AND result_digest = ?10
     \\  AND session_id IN (SELECT session_id FROM session WHERE agent_id = ?11)
 ;
-const advance_conversation_sql: [:0]const u8 =
-    \\UPDATE session SET active_leaf_id = ?2, entry_count = ?3
-    \\WHERE session_id = ?1 AND entry_count + 1 = ?3
-;
 const read_transition_sql: [:0]const u8 =
     \\SELECT payload, record_digest
     \\FROM session_transition
@@ -144,36 +143,6 @@ const read_conversation_sql: [:0]const u8 =
     \\SELECT parent_id, kind, content_ref, committed_by_sequence
     \\FROM conversation_entry WHERE session_id = ?1 AND entry_id = ?2
 ;
-
-pub const CapacityClass = enum { closure, admission };
-
-pub const ConversationInsert = struct {
-    entry_id: u64,
-    parent_id: u64,
-    kind: u8,
-    content_ref: u64,
-};
-
-pub const CompletionAssociation = struct {
-    ownership_epoch: u64,
-    agent_id: u64,
-    agent_generation: u32,
-    operation_id: u64,
-    operation_generation: u32,
-    attempt_id: u64,
-    evidence_kind: u8,
-    result_reference: u64,
-    result_digest: u64,
-};
-
-pub const CommitRequest = struct {
-    token: OwnerToken,
-    expected_sequence: u64,
-    payload: []const u8,
-    conversations: []const ConversationInsert = &.{},
-    completions: []const CompletionAssociation = &.{},
-    capacity_class: CapacityClass = .closure,
-};
 
 pub const StoredTransition = struct {
     session_id: u64,
@@ -188,6 +157,7 @@ pub const StoredTransition = struct {
 };
 
 pub const StoredCompletion = struct {
+    inbox_id: u64,
     envelope: completion_inbox.Envelope,
     consumed_by_sequence: ?u64,
 };
@@ -197,14 +167,13 @@ pub const StoredConversationEntry = struct {
     parent_id: u64,
     kind: u8,
     content_ref: u64,
-    committed_by_sequence: ?u64,
+    committed_by_sequence: u64,
 };
 
 pub const Config = struct {
     page_cache_kib: u16 = 64,
     maximum_page_count: u32 = 262_144,
     admission_reserve_pages: u16 = 16,
-    sqlite_heap_limit_bytes: u64 = 8 * 1024 * 1024,
     fault: ?FaultHook = null,
 };
 
@@ -220,7 +189,6 @@ pub const MemoryAccounting = struct {
 
 pub const FaultBoundary = enum {
     before_transition_read,
-    after_completion_head_advance,
     after_transition_head_advance,
     after_transition_insert,
     before_commit,
@@ -262,8 +230,6 @@ pub const SessionDescriptor = struct {
 pub const StoredSession = struct {
     identities: SessionIdentity,
     ownership_epoch: u64,
-    active_leaf_id: u64,
-    entry_count: u64,
     workspace_path: [max_workspace_path_bytes]u8,
     workspace_path_length: u16,
     model: [max_model_bytes]u8,
@@ -285,11 +251,11 @@ pub const OwnerToken = struct {
 
 pub const StorageOwner = struct {
     io: std.Io,
+    request_lock: std.Io.Mutex = .init,
     lock_file: std.Io.File,
     database: *c.sqlite3,
     fault: ?FaultHook,
     admission_reserve_pages: u16,
-    sqlite_heap_limit_bytes: u64,
     open_: bool = true,
     failed_: bool = false,
 
@@ -307,11 +273,6 @@ pub const StorageOwner = struct {
         var terminated_path: [max_path_bytes:0]u8 = undefined;
         @memcpy(terminated_path[0..path.len], path);
         terminated_path[path.len] = 0;
-        if (config.sqlite_heap_limit_bytes > std.math.maxInt(i64)) {
-            return error.InvalidSqliteHeapLimit;
-        }
-        _ = c.sqlite3_hard_heap_limit64(@intCast(config.sqlite_heap_limit_bytes));
-
         var maybe_database: ?*c.sqlite3 = null;
         const flags = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE |
             c.SQLITE_OPEN_NOMUTEX | c.SQLITE_OPEN_PRIVATECACHE;
@@ -329,7 +290,6 @@ pub const StorageOwner = struct {
             .database = database,
             .fault = config.fault,
             .admission_reserve_pages = config.admission_reserve_pages,
-            .sqlite_heap_limit_bytes = config.sqlite_heap_limit_bytes,
         };
         const stored_application_id = try owner.pragmaU64("PRAGMA application_id");
         const stored_schema_version = try owner.pragmaU64("PRAGMA user_version");
@@ -347,6 +307,8 @@ pub const StorageOwner = struct {
     }
 
     pub fn close(self: *StorageOwner) void {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         if (!self.open_) return;
         const close_result = c.sqlite3_close_v2(self.database);
         std.debug.assert(close_result == c.SQLITE_OK);
@@ -360,13 +322,16 @@ pub const StorageOwner = struct {
             .identities = identity,
             .workspace_path = ".",
             .model = "fixture:test",
-        });
+        }, initialTransaction(identity));
     }
 
     pub fn createSessionWithMetadata(
         self: *StorageOwner,
         descriptor: SessionDescriptor,
+        transaction: session_transition.Transaction,
     ) !void {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         try descriptor.identities.validate();
         if (descriptor.workspace_path.len == 0 or
@@ -375,39 +340,35 @@ pub const StorageOwner = struct {
         {
             return error.InvalidSessionMetadata;
         }
+        if (transaction.sequence != 1) return error.InvalidTransitionSequence;
+        try validateTransactionIdentity(descriptor.identities, transaction);
+        var payload_buffer: [session_transition.max_payload_size]u8 = undefined;
+        const payload = try session_transition.encode(&payload_buffer, transaction);
+
         try self.execute("BEGIN IMMEDIATE");
         errdefer self.rollbackOrPoison();
         const statement = try self.prepare(
             \\INSERT INTO session (
-            \\    session_id, agent_id, task_id, branch_id, workspace_path, model, active_leaf_id
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            \\    session_id, agent_id, task_id, branch_id, workspace_path, model, head_sequence
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
         );
         defer finalize(statement);
-        var encoded_identities: [5][8]u8 = undefined;
+        var encoded_identities: [4][8]u8 = undefined;
         try bindIdentity(statement, 1, descriptor.identities.session_id, &encoded_identities[0]);
         try bindIdentity(statement, 2, descriptor.identities.agent_id, &encoded_identities[1]);
         try bindIdentity(statement, 3, descriptor.identities.task_id, &encoded_identities[2]);
         try bindIdentity(statement, 4, descriptor.identities.branch_id, &encoded_identities[3]);
         try bindText(statement, 5, descriptor.workspace_path);
         try bindText(statement, 6, descriptor.model);
-        try bindIdentity(statement, 7, 1, &encoded_identities[4]);
         try expectDone(c.sqlite3_step(statement));
-
-        const root = try self.prepare(
-            \\INSERT INTO conversation_entry (
-            \\    session_id, entry_id, parent_id, kind, content_ref, committed_by_sequence
-            \\) VALUES (?1, ?2, NULL, 1, ?3, NULL)
-        );
-        defer finalize(root);
-        try bindIdentity(root, 1, descriptor.identities.session_id, &encoded_identities[0]);
-        try bindIdentity(root, 2, 1, &encoded_identities[4]);
-        try bindIdentity(root, 3, descriptor.identities.task_id, &encoded_identities[2]);
-        try expectDone(c.sqlite3_step(root));
+        try self.insertTransaction(descriptor.identities.session_id, transaction, payload);
         try self.ensureAdmissionCapacity();
         try self.execute("COMMIT");
     }
 
     pub fn memoryAccounting(self: *StorageOwner, reset_highwater: bool) !MemoryAccounting {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         var heap_current: c.sqlite3_int64 = 0;
         var heap_highwater: c.sqlite3_int64 = 0;
@@ -421,7 +382,7 @@ pub const StorageOwner = struct {
         const lookaside = try self.databaseStatus(c.SQLITE_DBSTATUS_LOOKASIDE_USED, reset_highwater);
         const statements = try self.databaseStatus(c.SQLITE_DBSTATUS_STMT_USED, reset_highwater);
         return .{
-            .allowance_bytes = self.sqlite_heap_limit_bytes,
+            .allowance_bytes = try processHeapLimit(),
             .heap_current_bytes = try nonnegative(heap_current),
             .heap_highwater_bytes = try nonnegative(heap_highwater),
             .page_cache_current_bytes = cache.current,
@@ -432,6 +393,8 @@ pub const StorageOwner = struct {
     }
 
     pub fn readSession(self: *StorageOwner, session_id: u64) !StoredSession {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         if (session_id == 0) return error.InvalidIdentity;
         const statement = try self.prepare(read_session_sql);
@@ -442,11 +405,9 @@ pub const StorageOwner = struct {
         if (result == c.SQLITE_DONE) return error.SessionNotFound;
         if (result != c.SQLITE_ROW) return mapSqliteError(result);
         const ownership_epoch = c.sqlite3_column_int64(statement, 3);
-        const entry_count = c.sqlite3_column_int64(statement, 5);
-        const workspace_length = c.sqlite3_column_bytes(statement, 6);
-        const model_length = c.sqlite3_column_bytes(statement, 7);
-        if (ownership_epoch <= 0 or entry_count <= 0 or
-            workspace_length <= 0 or workspace_length > max_workspace_path_bytes or
+        const workspace_length = c.sqlite3_column_bytes(statement, 4);
+        const model_length = c.sqlite3_column_bytes(statement, 5);
+        if (ownership_epoch <= 0 or workspace_length <= 0 or workspace_length > max_workspace_path_bytes or
             model_length <= 0 or model_length > max_model_bytes)
         {
             return error.CorruptHostStore;
@@ -459,18 +420,16 @@ pub const StorageOwner = struct {
                 .branch_id = try readIdentityColumn(statement, 2),
             },
             .ownership_epoch = @intCast(ownership_epoch),
-            .active_leaf_id = try readIdentityColumn(statement, 4),
-            .entry_count = @intCast(entry_count),
             .workspace_path = undefined,
             .workspace_path_length = @intCast(workspace_length),
             .model = undefined,
             .model_length = @intCast(model_length),
         };
         try stored.identities.validate();
-        const workspace_pointer = c.sqlite3_column_text(statement, 6) orelse {
+        const workspace_pointer = c.sqlite3_column_text(statement, 4) orelse {
             return error.CorruptHostStore;
         };
-        const model_pointer = c.sqlite3_column_text(statement, 7) orelse {
+        const model_pointer = c.sqlite3_column_text(statement, 5) orelse {
             return error.CorruptHostStore;
         };
         @memcpy(
@@ -483,6 +442,8 @@ pub const StorageOwner = struct {
     }
 
     pub fn sessionHead(self: *StorageOwner, session_id: u64) !u64 {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         if (session_id == 0) return error.InvalidIdentity;
         const statement = try self.prepare(session_head_sql);
@@ -490,7 +451,7 @@ pub const StorageOwner = struct {
         var encoded_session_id: [8]u8 = undefined;
         try bindIdentity(statement, 1, session_id, &encoded_session_id);
         const step_result = c.sqlite3_step(statement);
-        if (step_result == c.SQLITE_DONE) return error.SessionNotFound;
+        if (step_result == c.SQLITE_DONE) return 0;
         if (step_result != c.SQLITE_ROW) return mapSqliteError(step_result);
         const value = c.sqlite3_column_int64(statement, 0);
         if (value < 0) return error.CorruptHostStore;
@@ -499,6 +460,8 @@ pub const StorageOwner = struct {
     }
 
     pub fn claimSession(self: *StorageOwner, session_id: u64) !u64 {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         if (session_id == 0) return error.InvalidIdentity;
         const statement = try self.prepare(claim_ownership_sql);
@@ -515,6 +478,8 @@ pub const StorageOwner = struct {
     }
 
     pub fn authorizeSession(self: *StorageOwner, token: OwnerToken) !void {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         if (token.session_id == 0 or token.epoch == 0 or token.epoch > std.math.maxInt(i64)) {
             return error.StaleOwner;
@@ -531,6 +496,8 @@ pub const StorageOwner = struct {
     }
 
     pub fn completionHead(self: *StorageOwner, session_id: u64) !u64 {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         if (session_id == 0) return error.InvalidIdentity;
         const statement = try self.prepare(completion_head_sql);
@@ -538,7 +505,7 @@ pub const StorageOwner = struct {
         var encoded_session_id: [8]u8 = undefined;
         try bindIdentity(statement, 1, session_id, &encoded_session_id);
         const step_result = c.sqlite3_step(statement);
-        if (step_result == c.SQLITE_DONE) return error.SessionNotFound;
+        if (step_result == c.SQLITE_DONE) return 0;
         if (step_result != c.SQLITE_ROW) return mapSqliteError(step_result);
         const value = c.sqlite3_column_int64(statement, 0);
         if (value < 0) return error.CorruptHostStore;
@@ -550,6 +517,8 @@ pub const StorageOwner = struct {
         self: *StorageOwner,
         envelope: completion_inbox.Envelope,
     ) !u64 {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         try completion_inbox.validate(envelope);
 
@@ -578,43 +547,33 @@ pub const StorageOwner = struct {
         }
         if (existing_result != c.SQLITE_DONE) return mapSqliteError(existing_result);
 
-        const current_head = try self.completionHead(envelope.session_id);
-        if (current_head >= completion_inbox.max_records) return error.CompletionSequenceExhausted;
-        const sequence = current_head + 1;
-        try self.execute("BEGIN IMMEDIATE");
-        errdefer self.rollbackOrPoison();
-
-        const advance = try self.prepare(advance_inbox_head_sql);
-        defer finalize(advance);
-        try bindIdentity(advance, 1, envelope.session_id, &identities[0]);
-        try bindU64(advance, 2, sequence);
-        try bindU64(advance, 3, current_head);
-        try expectDone(c.sqlite3_step(advance));
-        if (c.sqlite3_changes(self.database) != 1) return error.CompletionSequenceConflict;
-        try self.reach(.after_completion_head_advance);
-
         const insert = try self.prepare(
             \\INSERT INTO completion_inbox (
-            \\    session_id, inbox_sequence, ownership_epoch, agent_generation,
+            \\    session_id, ownership_epoch, agent_generation,
             \\    operation_id, operation_generation, attempt_id, evidence_kind,
             \\    result_reference, result_digest
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            \\) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
+            \\  FROM session WHERE session_id = ?1 AND agent_id = ?10
+            \\RETURNING inbox_id
         );
         defer finalize(insert);
         try bindIdentity(insert, 1, envelope.session_id, &identities[0]);
-        try bindU64(insert, 2, sequence);
-        try bindIdentity(insert, 3, envelope.ownership_epoch, &identities[1]);
-        try bindU64(insert, 4, envelope.agent_generation);
-        try bindIdentity(insert, 5, envelope.operation_id, &identities[3]);
-        try bindU64(insert, 6, envelope.operation_generation);
-        try bindIdentity(insert, 7, envelope.attempt_id, &identities[4]);
-        try bindU64(insert, 8, @intFromEnum(envelope.kind));
-        try bindIdentity(insert, 9, envelope.result_ref, &identities[5]);
-        try bindIdentity(insert, 10, envelope.result_digest, &identities[6]);
-        try expectDone(c.sqlite3_step(insert));
-        try self.reach(.before_commit);
-        try self.execute("COMMIT");
-        return sequence;
+        try bindIdentity(insert, 2, envelope.ownership_epoch, &identities[1]);
+        try bindU64(insert, 3, envelope.agent_generation);
+        try bindIdentity(insert, 4, envelope.operation_id, &identities[3]);
+        try bindU64(insert, 5, envelope.operation_generation);
+        try bindIdentity(insert, 6, envelope.attempt_id, &identities[4]);
+        try bindU64(insert, 7, @intFromEnum(envelope.kind));
+        try bindIdentity(insert, 8, envelope.result_ref, &identities[5]);
+        try bindIdentity(insert, 9, envelope.result_digest, &identities[6]);
+        try bindIdentity(insert, 10, envelope.agent_id, &identities[2]);
+        const insert_result = c.sqlite3_step(insert);
+        if (insert_result == c.SQLITE_DONE) return error.InvalidCompletionIdentity;
+        if (insert_result != c.SQLITE_ROW) return mapSqliteError(insert_result);
+        const inbox_id = c.sqlite3_column_int64(insert, 0);
+        if (inbox_id <= 0) return error.CorruptHostStore;
+        if (c.sqlite3_step(insert) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return @intCast(inbox_id);
     }
 
     pub fn readCompletion(
@@ -622,6 +581,8 @@ pub const StorageOwner = struct {
         session_id: u64,
         sequence: u64,
     ) !StoredCompletion {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         if (session_id == 0) return error.InvalidIdentity;
         if (sequence == 0 or sequence > std.math.maxInt(i64)) return error.InvalidSequence;
@@ -661,88 +622,173 @@ pub const StorageOwner = struct {
             else => return error.CorruptHostStore,
         };
         if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-        return .{ .envelope = envelope, .consumed_by_sequence = consumed_by_sequence };
+        return .{ .inbox_id = sequence, .envelope = envelope, .consumed_by_sequence = consumed_by_sequence };
     }
 
-    pub fn commit(self: *StorageOwner, request: CommitRequest) !u64 {
+    pub fn readCompletionAfter(
+        self: *StorageOwner,
+        session_id: u64,
+        after_id: u64,
+        through_id: u64,
+    ) !?StoredCompletion {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
-        if (request.token.session_id == 0 or request.token.epoch == 0) return error.StaleOwner;
-        if (request.payload.len == 0 or request.payload.len > max_transition_payload) {
-            return error.InvalidTransitionPayload;
+        if (session_id == 0 or after_id > through_id or through_id > std.math.maxInt(i64)) {
+            return error.InvalidSequence;
         }
-        if (request.expected_sequence >= session_transition.max_transitions) {
+        const statement = try self.prepare(read_completion_after_sql);
+        defer finalize(statement);
+        var encoded_session_id: [8]u8 = undefined;
+        try bindIdentity(statement, 1, session_id, &encoded_session_id);
+        try bindU64(statement, 2, after_id);
+        try bindU64(statement, 3, through_id);
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return null;
+        if (result != c.SQLITE_ROW) return mapSqliteError(result);
+        const inbox_id_value = c.sqlite3_column_int64(statement, 0);
+        const kind_value = c.sqlite3_column_int64(statement, 1);
+        if (inbox_id_value <= 0 or kind_value <= 0 or kind_value > std.math.maxInt(u8)) {
+            return error.CorruptHostStore;
+        }
+        const stored: StoredCompletion = .{
+            .inbox_id = @intCast(inbox_id_value),
+            .envelope = .{
+                .kind = std.enums.fromInt(
+                    completion_inbox.EvidenceKind,
+                    @as(u8, @intCast(kind_value)),
+                ) orelse return error.UnsupportedCompletionKind,
+                .session_id = session_id,
+                .ownership_epoch = try readIdentityColumn(statement, 2),
+                .agent_id = try readIdentityColumn(statement, 3),
+                .agent_generation = try readPositiveU32Column(statement, 4),
+                .operation_id = try readIdentityColumn(statement, 5),
+                .operation_generation = try readPositiveU32Column(statement, 6),
+                .attempt_id = try readIdentityColumn(statement, 7),
+                .result_ref = try readIdentityColumn(statement, 8),
+                .result_digest = try readIdentityColumn(statement, 9),
+            },
+            .consumed_by_sequence = switch (c.sqlite3_column_type(statement, 10)) {
+                c.SQLITE_NULL => null,
+                c.SQLITE_INTEGER => consumed: {
+                    const value = c.sqlite3_column_int64(statement, 10);
+                    if (value <= 0) return error.CorruptHostStore;
+                    break :consumed @intCast(value);
+                },
+                else => return error.CorruptHostStore,
+            },
+        };
+        try completion_inbox.validate(stored.envelope);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return stored;
+    }
+
+    pub fn commit(
+        self: *StorageOwner,
+        token: OwnerToken,
+        transaction: session_transition.Transaction,
+    ) !u64 {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
+        try self.ensureOpen();
+        if (token.session_id == 0 or token.epoch == 0) return error.StaleOwner;
+        if (transaction.sequence == 0 or transaction.sequence > session_transition.max_transitions) {
             return error.SessionSequenceExhausted;
         }
-        if (request.conversations.len > session_transition.max_facts or
-            request.completions.len > session_transition.max_facts)
-        {
-            return error.InvalidTransitionCount;
-        }
-        const sequence = request.expected_sequence + 1;
-        var digest: [32]u8 = undefined;
-        recordDigest(request.token.session_id, sequence, request.payload, &digest);
+        var payload_buffer: [session_transition.max_payload_size]u8 = undefined;
+        const payload = try session_transition.encode(&payload_buffer, transaction);
+        const agent_id = try validateCommitIdentity(token, transaction);
+        const expected_sequence = transaction.sequence - 1;
 
         try self.execute("BEGIN IMMEDIATE");
         errdefer self.rollbackOrPoison();
         const advance = try self.prepare(advance_session_head_sql);
         defer finalize(advance);
-        var identities: [10][8]u8 = undefined;
-        try bindIdentity(advance, 1, request.token.session_id, &identities[0]);
-        try bindU64(advance, 2, sequence);
-        try bindU64(advance, 3, request.token.epoch);
-        try bindU64(advance, 4, request.expected_sequence);
+        var identities: [2][8]u8 = undefined;
+        try bindIdentity(advance, 1, token.session_id, &identities[0]);
+        try bindU64(advance, 2, transaction.sequence);
+        try bindU64(advance, 3, token.epoch);
+        try bindU64(advance, 4, expected_sequence);
+        try bindIdentity(advance, 5, agent_id, &identities[1]);
         try expectDone(c.sqlite3_step(advance));
         if (c.sqlite3_changes(self.database) != 1) return error.StaleOwnerOrSequenceConflict;
         try self.reach(.after_transition_head_advance);
+        try self.insertTransaction(token.session_id, transaction, payload);
+        if (isAdmission(transaction)) try self.ensureAdmissionCapacity();
+        try self.reach(.before_commit);
+        try self.execute("COMMIT");
+        return transaction.sequence;
+    }
 
+    fn insertTransaction(
+        self: *StorageOwner,
+        session_id: u64,
+        transaction: session_transition.Transaction,
+        payload: []const u8,
+    ) !void {
+        var digest: [32]u8 = undefined;
+        recordDigest(session_id, transaction.sequence, payload, &digest);
         const insert = try self.prepare(
             \\INSERT INTO session_transition (session_id, sequence, payload, record_digest)
             \\VALUES (?1, ?2, ?3, ?4)
         );
         defer finalize(insert);
-        try bindIdentity(insert, 1, request.token.session_id, &identities[0]);
-        try bindU64(insert, 2, sequence);
-        try bindBlob(insert, 3, request.payload);
+        var encoded_session_id: [8]u8 = undefined;
+        try bindIdentity(insert, 1, session_id, &encoded_session_id);
+        try bindU64(insert, 2, transaction.sequence);
+        try bindBlob(insert, 3, payload);
         try bindBlob(insert, 4, &digest);
         try expectDone(c.sqlite3_step(insert));
         try self.reach(.after_transition_insert);
 
-        for (request.conversations) |entry| try self.commitConversation(
-            request.token.session_id,
-            sequence,
-            entry,
-        );
-        for (request.completions) |association| try self.associateCompletion(
-            request.token.session_id,
-            sequence,
-            association,
-        );
-        if (request.capacity_class == .admission) try self.ensureAdmissionCapacity();
-        try self.reach(.before_commit);
-        try self.execute("COMMIT");
-        return sequence;
+        for (transaction.factSlice()) |fact| switch (fact) {
+            .conversation_advanced => |advanced| try self.commitConversation(
+                session_id,
+                transaction.sequence,
+                advanced.entry_id,
+                advanced.parent_id,
+                advanced.kind,
+                advanced.content_ref,
+            ),
+            .result => |result| switch (result.evidence) {
+                .immediate => {},
+                .durable => |evidence| try self.associateCompletion(
+                    session_id,
+                    transaction.sequence,
+                    result,
+                    evidence,
+                ),
+            },
+            else => {},
+        };
     }
 
     fn associateCompletion(
         self: *StorageOwner,
         session_id: u64,
         sequence: u64,
-        association: CompletionAssociation,
+        result: session_transition.ResultRecord,
+        evidence: session_transition.DurableResultEvidence,
     ) !void {
+        const operation = result.operation;
+        const attempt_id: u64 = switch (evidence) {
+            inline else => |value| value,
+        };
+        const evidence_kind = std.meta.activeTag(evidence);
         var ids: [7][8]u8 = undefined;
         const statement = try self.prepare(associate_completion_sql);
         defer finalize(statement);
         try bindIdentity(statement, 1, session_id, &ids[0]);
         try bindU64(statement, 2, sequence);
-        try bindIdentity(statement, 3, association.ownership_epoch, &ids[1]);
-        try bindU64(statement, 4, association.agent_generation);
-        try bindIdentity(statement, 5, association.operation_id, &ids[2]);
-        try bindU64(statement, 6, association.operation_generation);
-        try bindIdentity(statement, 7, association.attempt_id, &ids[3]);
-        try bindU64(statement, 8, association.evidence_kind);
-        try bindIdentity(statement, 9, association.result_reference, &ids[4]);
-        try bindIdentity(statement, 10, association.result_digest, &ids[5]);
-        try bindIdentity(statement, 11, association.agent_id, &ids[6]);
+        try bindIdentity(statement, 3, operation.agent.ownership_epoch, &ids[1]);
+        try bindU64(statement, 4, operation.agent.agent_generation);
+        try bindIdentity(statement, 5, operation.operation_id, &ids[2]);
+        try bindU64(statement, 6, operation.generation);
+        try bindIdentity(statement, 7, attempt_id, &ids[3]);
+        try bindU64(statement, 8, @intFromEnum(evidence_kind));
+        try bindIdentity(statement, 9, result.result_ref, &ids[4]);
+        try bindIdentity(statement, 10, result.result_digest, &ids[5]);
+        try bindIdentity(statement, 11, operation.agent.agent_id, &ids[6]);
         try expectDone(c.sqlite3_step(statement));
         if (c.sqlite3_changes(self.database) != 1) return error.CompletionEvidenceMissing;
     }
@@ -751,42 +797,25 @@ pub const StorageOwner = struct {
         self: *StorageOwner,
         session_id: u64,
         sequence: u64,
-        entry: ConversationInsert,
+        entry_id: u64,
+        parent_id: u64,
+        kind: session_transition.ConversationKind,
+        content_ref: u64,
     ) !void {
-        if (entry.entry_id == 0 or entry.content_ref == 0 or entry.kind < 1 or entry.kind > 4) {
-            return error.InvalidConversationEntry;
-        }
         var ids: [4][8]u8 = undefined;
         const insert = try self.prepare(
             \\INSERT INTO conversation_entry (
             \\    session_id, entry_id, parent_id, kind, content_ref, committed_by_sequence
             \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            \\ON CONFLICT(session_id, entry_id) DO UPDATE SET
-            \\    committed_by_sequence = excluded.committed_by_sequence
-            \\WHERE conversation_entry.parent_id IS excluded.parent_id
-            \\  AND conversation_entry.kind = excluded.kind
-            \\  AND conversation_entry.content_ref = excluded.content_ref
-            \\  AND conversation_entry.committed_by_sequence IS NULL
         );
         defer finalize(insert);
         try bindIdentity(insert, 1, session_id, &ids[0]);
-        try bindIdentity(insert, 2, entry.entry_id, &ids[1]);
-        if (entry.parent_id == 0) try expectOk(c.sqlite3_bind_null(insert, 3)) else try bindIdentity(insert, 3, entry.parent_id, &ids[2]);
-        try bindU64(insert, 4, entry.kind);
-        try bindIdentity(insert, 5, entry.content_ref, &ids[3]);
+        try bindIdentity(insert, 2, entry_id, &ids[1]);
+        if (parent_id == 0) try expectOk(c.sqlite3_bind_null(insert, 3)) else try bindIdentity(insert, 3, parent_id, &ids[2]);
+        try bindU64(insert, 4, @intFromEnum(kind));
+        try bindIdentity(insert, 5, content_ref, &ids[3]);
         try bindU64(insert, 6, sequence);
         try expectDone(c.sqlite3_step(insert));
-        if (c.sqlite3_changes(self.database) != 1) return error.ConversationProjectionConflict;
-
-        const advance = try self.prepare(advance_conversation_sql);
-        defer finalize(advance);
-        try bindIdentity(advance, 1, session_id, &ids[0]);
-        try bindIdentity(advance, 2, entry.entry_id, &ids[1]);
-        try bindU64(advance, 3, entry.entry_id);
-        try expectDone(c.sqlite3_step(advance));
-        if (entry.entry_id != 1 and c.sqlite3_changes(self.database) != 1) {
-            return error.ConversationProjectionConflict;
-        }
     }
 
     pub fn readTransition(
@@ -795,6 +824,8 @@ pub const StorageOwner = struct {
         sequence: u64,
         out: *StoredTransition,
     ) !void {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         if (self.fault) |hook| try hook.reached(hook.context, .before_transition_read);
         if (session_id == 0) return error.InvalidIdentity;
@@ -842,6 +873,8 @@ pub const StorageOwner = struct {
         session_id: u64,
         entry_id: u64,
     ) !StoredConversationEntry {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         const statement = try self.prepare(read_conversation_sql);
         defer finalize(statement);
@@ -857,13 +890,10 @@ pub const StorageOwner = struct {
             try readIdentityColumn(statement, 0);
         const kind = c.sqlite3_column_int64(statement, 1);
         if (kind < 1 or kind > 4) return error.CorruptHostStore;
-        const committed: ?u64 = if (c.sqlite3_column_type(statement, 3) == c.SQLITE_NULL)
-            null
-        else blk: {
-            const value = c.sqlite3_column_int64(statement, 3);
-            if (value <= 0) return error.CorruptHostStore;
-            break :blk @intCast(value);
-        };
+        if (c.sqlite3_column_type(statement, 3) != c.SQLITE_INTEGER) return error.CorruptHostStore;
+        const committed_value = c.sqlite3_column_int64(statement, 3);
+        if (committed_value <= 0) return error.CorruptHostStore;
+        const committed: u64 = @intCast(committed_value);
         const stored: StoredConversationEntry = .{
             .entry_id = entry_id,
             .parent_id = parent_id,
@@ -960,84 +990,15 @@ pub const StorageOwner = struct {
     }
 
     fn validateSchemaShape(self: *StorageOwner) !void {
-        try self.validateSchemaMetadata();
-        const queries = [_][:0]const u8{
-            "SELECT session_id, agent_id, task_id, branch_id, workspace_path, model, ownership_epoch, active_leaf_id, entry_count, head_sequence, inbox_head FROM session LIMIT 0",
-            "SELECT session_id, sequence, payload, record_digest FROM session_transition LIMIT 0",
-            "SELECT session_id, entry_id, parent_id, kind, content_ref, committed_by_sequence FROM conversation_entry LIMIT 0",
-            "SELECT session_id, inbox_sequence, ownership_epoch, agent_generation, operation_id, operation_generation, attempt_id, evidence_kind, result_reference, result_digest, consumed_by_sequence FROM completion_inbox LIMIT 0",
-        };
-        for (queries) |query| {
-            const statement = self.prepare(query) catch |err| switch (err) {
-                error.HostStoreFailure => return error.InvalidHostStoreSchema,
-                else => return err,
-            };
-            defer finalize(statement);
-        }
-        const lifecycle_statements = [_][:0]const u8{
-            read_session_sql,
-            session_head_sql,
-            claim_ownership_sql,
-            current_ownership_sql,
-            completion_head_sql,
-            find_completion_sql,
-            advance_inbox_head_sql,
-            read_completion_sql,
-            advance_session_head_sql,
-            associate_completion_sql,
-            advance_conversation_sql,
-            read_transition_sql,
-            read_conversation_sql,
-        };
-        for (lifecycle_statements) |sql| {
-            const statement = self.prepare(sql) catch |err| switch (err) {
-                error.HostStoreFailure => return error.InvalidHostStoreSchema,
-                else => return err,
-            };
-            defer finalize(statement);
-        }
-    }
-
-    fn validateSchemaMetadata(self: *StorageOwner) !void {
-        const tables = [_]struct { name: []const u8, without_rowid: u8 }{
-            .{ .name = "session", .without_rowid = 0 },
-            .{ .name = "session_transition", .without_rowid = 1 },
-            .{ .name = "conversation_entry", .without_rowid = 0 },
-            .{ .name = "completion_inbox", .without_rowid = 1 },
-        };
-        const metadata = try self.prepare(
-            "SELECT type, wr, strict FROM pragma_table_list WHERE schema = 'main' AND name = ?1",
-        );
-        defer finalize(metadata);
-        for (tables) |table| {
-            try expectOk(c.sqlite3_reset(metadata));
-            try expectOk(c.sqlite3_clear_bindings(metadata));
-            try bindText(metadata, 1, table.name);
-            if (c.sqlite3_step(metadata) != c.SQLITE_ROW or
-                !columnTextEquals(metadata, 0, "table") or
-                c.sqlite3_column_int(metadata, 1) != table.without_rowid or
-                c.sqlite3_column_int(metadata, 2) != 1 or
-                c.sqlite3_step(metadata) != c.SQLITE_DONE)
-            {
-                return error.InvalidHostStoreSchema;
-            }
-        }
         try self.expectSchemaSql("table", "session", session_schema);
         try self.expectSchemaSql("table", "session_transition", transition_schema);
         try self.expectSchemaSql("table", "conversation_entry", conversation_schema);
         try self.expectSchemaSql("table", "completion_inbox", completion_schema);
-        try self.expectSchemaSql("index", "completion_inbox_unconsumed", completion_index_schema);
+        try self.expectSchemaSql("index", "completion_inbox_by_session", completion_index_schema);
         try self.expectSchemaCount(
             "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
             5,
         );
-        try self.expectSchemaCount(
-            "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'completion_inbox_unconsumed' AND tbl_name = 'completion_inbox'",
-            1,
-        );
-        try self.expectSchemaCount("SELECT count(*) FROM pragma_foreign_key_list('session_transition')", 1);
-        try self.expectSchemaCount("SELECT count(*) FROM pragma_foreign_key_list('conversation_entry')", 3);
-        try self.expectSchemaCount("SELECT count(*) FROM pragma_foreign_key_list('completion_inbox')", 3);
     }
 
     fn expectSchemaSql(
@@ -1143,6 +1104,78 @@ pub const StorageOwner = struct {
     }
 };
 
+fn initialTransaction(identity: SessionIdentity) session_transition.Transaction {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = identity.agent_id,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    var transaction: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    transaction.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = agent,
+        .entry_id = 1,
+        .parent_id = 0,
+        .kind = .user,
+        .content_ref = identity.task_id,
+    });
+    return transaction;
+}
+
+fn validateTransactionIdentity(
+    identity: SessionIdentity,
+    transaction: session_transition.Transaction,
+) !void {
+    for (transaction.factSlice()) |fact| {
+        const agent = fact.agent();
+        if (agent.agent_id != identity.agent_id or agent.ownership_epoch != 1) {
+            return error.InvalidTransitionIdentity;
+        }
+    }
+    if (transaction.fact_count != 1 or
+        std.meta.activeTag(transaction.facts[0]) != .conversation_advanced)
+    {
+        return error.InvalidInitialTransition;
+    }
+    const root = transaction.facts[0].conversation_advanced;
+    if (root.entry_id != 1 or root.parent_id != 0 or root.kind != .user or
+        root.content_ref != identity.task_id)
+    {
+        return error.InvalidInitialTransition;
+    }
+}
+
+fn validateCommitIdentity(
+    token: OwnerToken,
+    transaction: session_transition.Transaction,
+) !u64 {
+    const first = transaction.facts[0].agent();
+    if (first.agent_generation != 1) return error.InvalidTransitionIdentity;
+    for (transaction.factSlice()) |fact| {
+        const agent = fact.agent();
+        if (agent.agent_id != first.agent_id or agent.agent_generation != first.agent_generation) {
+            return error.InvalidTransitionIdentity;
+        }
+        const may_use_earlier_epoch = switch (fact) {
+            .result => |result| result.evidence == .durable,
+            else => false,
+        };
+        if (agent.ownership_epoch > token.epoch or
+            (!may_use_earlier_epoch and agent.ownership_epoch != token.epoch))
+        {
+            return error.StaleOwner;
+        }
+    }
+    return first.agent_id;
+}
+
+fn isAdmission(transaction: session_transition.Transaction) bool {
+    for (transaction.factSlice()) |fact| switch (fact) {
+        .task_admitted, .operation_submitted, .attempt_admitted => return true,
+        else => {},
+    };
+    return false;
+}
+
 fn validateConfig(path: []const u8, config: Config) !void {
     if (path.len == 0 or path.len > max_path_bytes) return error.InvalidHostStorePath;
     if (config.page_cache_kib != 32 and config.page_cache_kib != 64 and
@@ -1156,11 +1189,25 @@ fn validateConfig(path: []const u8, config: Config) !void {
     {
         return error.InvalidAdmissionReserve;
     }
-    if (config.sqlite_heap_limit_bytes < 1024 * 1024 or
-        config.sqlite_heap_limit_bytes > std.math.maxInt(i64))
-    {
+}
+
+pub fn configureProcessHeapLimit(limit_bytes: u64) !void {
+    if (limit_bytes < 1024 * 1024 or limit_bytes > std.math.maxInt(i64)) {
         return error.InvalidSqliteHeapLimit;
     }
+    if (c.sqlite3_hard_heap_limit64(@intCast(limit_bytes)) < 0) {
+        return error.SqliteHeapLimitConfigurationFailed;
+    }
+}
+
+pub fn disableProcessHeapLimit() void {
+    _ = c.sqlite3_hard_heap_limit64(0);
+}
+
+fn processHeapLimit() !u64 {
+    const value = c.sqlite3_hard_heap_limit64(-1);
+    if (value < 0) return error.SqliteHeapLimitQueryFailed;
+    return @intCast(value);
 }
 
 fn openHostLock(io: std.Io, path: []const u8) !std.Io.File {
@@ -1435,7 +1482,7 @@ test "installed schema retains the exact V1 keys constraints and completion inde
     try owner.expectSchemaSql("table", "session_transition", transition_schema);
     try owner.expectSchemaSql("table", "conversation_entry", conversation_schema);
     try owner.expectSchemaSql("table", "completion_inbox", completion_schema);
-    try owner.expectSchemaSql("index", "completion_inbox_unconsumed", completion_index_schema);
+    try owner.expectSchemaSql("index", "completion_inbox_by_session", completion_index_schema);
 }
 
 test "admission rolls back before consuming the closure reserve" {
@@ -1477,7 +1524,7 @@ test "admission rolls back before consuming the closure reserve" {
     try std.testing.expect(freelist_count + maximum_page_count - page_count >= reserve);
 }
 
-test "populated lifecycle statements use indexes without scans or temporary materialization" {
+test "Completion recovery range is bounded by its Session index" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [256]u8 = undefined;
@@ -1510,56 +1557,28 @@ test "populated lifecycle statements use indexes without scans or temporary mate
         .result_ref = 103,
         .result_digest = 104,
     });
-    _ = try owner.commit(.{
-        .token = .{ .session_id = 8, .epoch = 1 },
-        .expected_sequence = 0,
-        .payload = "populated-plan",
-        .conversations = &.{.{
-            .entry_id = 2,
-            .parent_id = 1,
-            .kind = 2,
-            .content_ref = 105,
-        }},
-    });
     try owner.execute("ANALYZE");
-
-    const plans = [_][:0]const u8{
-        "EXPLAIN QUERY PLAN " ++ read_session_sql,
-        "EXPLAIN QUERY PLAN " ++ session_head_sql,
-        "EXPLAIN QUERY PLAN " ++ claim_ownership_sql,
-        "EXPLAIN QUERY PLAN " ++ current_ownership_sql,
-        "EXPLAIN QUERY PLAN " ++ completion_head_sql,
-        "EXPLAIN QUERY PLAN " ++ find_completion_sql,
-        "EXPLAIN QUERY PLAN " ++ advance_inbox_head_sql,
-        "EXPLAIN QUERY PLAN " ++ read_completion_sql,
-        "EXPLAIN QUERY PLAN " ++ advance_session_head_sql,
-        "EXPLAIN QUERY PLAN " ++ associate_completion_sql,
-        "EXPLAIN QUERY PLAN " ++ advance_conversation_sql,
-        "EXPLAIN QUERY PLAN " ++ read_transition_sql,
-        "EXPLAIN QUERY PLAN " ++ read_conversation_sql,
-    };
-    for (plans) |sql| try expectIndexedPlan(&owner, sql);
-}
-
-fn expectIndexedPlan(owner: *StorageOwner, sql: [:0]const u8) !void {
-    const statement = try owner.prepare(sql);
+    const statement = try owner.prepare(read_completion_after_sql);
     defer finalize(statement);
-    var saw_search = false;
-    while (true) switch (c.sqlite3_step(statement)) {
-        c.SQLITE_ROW => {
-            const length = c.sqlite3_column_bytes(statement, 3);
-            if (length <= 0) return error.InvalidQueryPlan;
-            const pointer = c.sqlite3_column_text(statement, 3) orelse return error.InvalidQueryPlan;
-            const detail = pointer[0..@intCast(length)];
-            if (std.mem.startsWith(u8, detail, "SCAN ") or
-                std.mem.indexOf(u8, detail, "USE TEMP B-TREE") != null)
-            {
-                return error.UnboundedQueryPlan;
-            }
-            if (std.mem.startsWith(u8, detail, "SEARCH ")) saw_search = true;
-        },
-        c.SQLITE_DONE => break,
-        else => |result| return mapSqliteError(result),
-    };
-    if (!saw_search) return error.UnindexedQueryPlan;
+    var encoded_session_id: [8]u8 = undefined;
+    try bindIdentity(statement, 1, 8, &encoded_session_id);
+    try bindU64(statement, 2, 0);
+    try bindU64(statement, 3, std.math.maxInt(i64));
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CompletionNotFound;
+    if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
+        statement,
+        c.SQLITE_STMTSTATUS_FULLSCAN_STEP,
+        0,
+    ));
+    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
+        statement,
+        c.SQLITE_STMTSTATUS_SORT,
+        0,
+    ));
+    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
+        statement,
+        c.SQLITE_STMTSTATUS_AUTOINDEX,
+        0,
+    ));
 }

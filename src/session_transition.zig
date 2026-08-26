@@ -1,9 +1,10 @@
 const std = @import("std");
 const core_state = @import("core_state.zig");
 
-pub const payload_version: u16 = 1;
+pub const payload_version: u16 = 2;
 pub const max_facts: usize = 8;
 pub const max_transitions: u32 = 32_768;
+pub const max_operation_attempts: usize = 8;
 
 const header_size: usize = 4;
 const fact_size: usize = 72;
@@ -30,13 +31,6 @@ pub const RecoveryClass = enum(u8) {
     consequential = 2,
 };
 
-pub const Disposition = enum(u8) {
-    none = 0,
-    definitely_unsent = 1,
-    possibly_executed = 2,
-    terminal = 3,
-};
-
 pub const EvidenceKind = enum(u8) {
     model = 1,
     bash = 2,
@@ -46,6 +40,13 @@ pub const EvidenceKind = enum(u8) {
 pub const ResultClass = enum(u8) {
     ordinary = 0,
     indeterminate = 1,
+};
+
+pub const ConversationKind = enum(u8) {
+    user = 1,
+    assistant = 2,
+    tool_result = 3,
+    context_checkpoint = 4,
 };
 
 pub const DurableResultEvidence = union(EvidenceKind) {
@@ -78,6 +79,27 @@ pub const OperationRecord = struct {
     recovery_class: RecoveryClass,
 };
 
+pub const TaskRecord = struct {
+    agent: AgentContext,
+    task_id: u64,
+    content_ref: u64,
+};
+
+pub const AttemptRecord = struct {
+    operation: OperationContext,
+    attempt_id: u64,
+    descriptor_ref: u64,
+    descriptor_digest: u64,
+    recovery_class: RecoveryClass,
+};
+
+pub const AuthorizationRecord = struct {
+    operation: OperationContext,
+    permission_ref: u64,
+    descriptor_digest: u64,
+    allowed: bool,
+};
+
 pub const ResultRecord = struct {
     operation: OperationContext,
     result_ref: u64,
@@ -86,41 +108,48 @@ pub const ResultRecord = struct {
     evidence: ResultEvidence,
 };
 
+pub const ConversationRecord = struct {
+    agent: AgentContext,
+    entry_id: u64,
+    parent_id: u64,
+    kind: ConversationKind,
+    content_ref: u64,
+};
+
+pub const OutcomeRecord = struct {
+    agent: AgentContext,
+    outcome_id: u64,
+    content_ref: u64,
+};
+
+pub const ResultAppliedRecord = struct {
+    operation: OperationContext,
+    attempt_id: u64,
+    result_ref: u64,
+    result_digest: u64,
+    recovery_class: RecoveryClass,
+};
+
+pub const ApprovalRequiredRecord = struct {
+    operation: OperationContext,
+    binding_ref: u64,
+    descriptor_ref: u64,
+    descriptor_digest: u64,
+};
+
 pub const Fact = union(Kind) {
-    task_admitted: struct { agent: AgentContext, task_id: u64, content_ref: u64 },
+    task_admitted: TaskRecord,
     operation_submitted: OperationRecord,
     operation_accepted: OperationRecord,
-    attempt_admitted: struct {
-        operation: OperationContext,
-        attempt_id: u64,
-        descriptor_ref: u64,
-        descriptor_digest: u64,
-        recovery_class: RecoveryClass,
-    },
-    authorization: struct {
-        operation: OperationContext,
-        permission_ref: u64,
-        descriptor_digest: u64,
-        allowed: bool,
-    },
+    attempt_admitted: AttemptRecord,
+    authorization: AuthorizationRecord,
     result: ResultRecord,
-    conversation_advanced: struct { agent: AgentContext, entry_id: u64, content_ref: u64 },
-    outcome: struct { agent: AgentContext, outcome_id: u64, content_ref: u64 },
+    conversation_advanced: ConversationRecord,
+    outcome: OutcomeRecord,
     cancellation: AgentContext,
     shutdown: AgentContext,
-    result_applied: struct {
-        operation: OperationContext,
-        attempt_id: u64,
-        result_ref: u64,
-        result_digest: u64,
-        recovery_class: RecoveryClass,
-    },
-    approval_required: struct {
-        operation: OperationContext,
-        binding_ref: u64,
-        descriptor_ref: u64,
-        descriptor_digest: u64,
-    },
+    result_applied: ResultAppliedRecord,
+    approval_required: ApprovalRequiredRecord,
 
     pub fn kind(self: Fact) Kind {
         return std.meta.activeTag(self);
@@ -140,144 +169,11 @@ pub const Fact = union(Kind) {
             .approval_required => |value| value.operation.agent,
         };
     }
-
-    pub fn operation(self: Fact) ?OperationContext {
-        return switch (self) {
-            .operation_submitted, .operation_accepted => |value| value.operation,
-            .attempt_admitted => |value| value.operation,
-            .authorization => |value| value.operation,
-            .result => |value| value.operation,
-            .result_applied => |value| value.operation,
-            .approval_required => |value| value.operation,
-            else => null,
-        };
-    }
-
-    pub fn agentId(self: Fact) u64 {
-        return self.agent().agent_id;
-    }
-
-    pub fn agentGeneration(self: Fact) u32 {
-        return self.agent().agent_generation;
-    }
-
-    pub fn ownershipEpoch(self: Fact) u64 {
-        return self.agent().ownership_epoch;
-    }
-
-    pub fn operationId(self: Fact) u64 {
-        return if (self.operation()) |value| value.operation_id else 0;
-    }
-
-    pub fn generation(self: Fact) u32 {
-        return if (self.operation()) |value| value.generation else 0;
-    }
-
-    pub fn recoveryClass(self: Fact) RecoveryClass {
-        return switch (self) {
-            .operation_submitted, .operation_accepted => |value| value.recovery_class,
-            .attempt_admitted => |value| value.recovery_class,
-            .result => |value| switch (value.evidence) {
-                .immediate => |recovery_class| recovery_class,
-                .durable => |evidence| switch (evidence) {
-                    .model => .model,
-                    .bash, .apply_patch => .consequential,
-                },
-            },
-            .result_applied => |value| value.recovery_class,
-            else => .none,
-        };
-    }
-
-    pub fn disposition(self: Fact) Disposition {
-        return switch (self) {
-            .attempt_admitted => .possibly_executed,
-            .result => .terminal,
-            else => .none,
-        };
-    }
-
-    pub fn attemptId(self: Fact) u64 {
-        return switch (self) {
-            .attempt_admitted => |value| value.attempt_id,
-            .result => |value| switch (value.evidence) {
-                .immediate => 0,
-                .durable => |evidence| switch (evidence) {
-                    inline else => |attempt_id| attempt_id,
-                },
-            },
-            .result_applied => |value| value.attempt_id,
-            else => 0,
-        };
-    }
-
-    pub fn subject(self: Fact) u64 {
-        return switch (self) {
-            .task_admitted => |value| value.task_id,
-            .conversation_advanced => |value| value.entry_id,
-            .outcome => |value| value.outcome_id,
-            .approval_required => |value| value.binding_ref,
-            else => 0,
-        };
-    }
-
-    pub fn reference(self: Fact) u64 {
-        return switch (self) {
-            .task_admitted => |value| value.content_ref,
-            .operation_submitted, .operation_accepted => |value| value.descriptor_ref,
-            .attempt_admitted => |value| value.descriptor_ref,
-            .authorization => |value| value.permission_ref,
-            .result => |value| value.result_ref,
-            .conversation_advanced => |value| value.content_ref,
-            .outcome => |value| value.content_ref,
-            .result_applied => |value| value.result_ref,
-            .approval_required => |value| value.descriptor_ref,
-            else => 0,
-        };
-    }
-
-    pub fn digest(self: Fact) u64 {
-        return switch (self) {
-            .operation_submitted, .operation_accepted => |value| value.descriptor_digest,
-            .attempt_admitted => |value| value.descriptor_digest,
-            .authorization => |value| value.descriptor_digest,
-            .result => |value| value.result_digest,
-            .result_applied => |value| value.result_digest,
-            .approval_required => |value| value.descriptor_digest,
-            else => 0,
-        };
-    }
-
-    pub fn flags(self: Fact) u8 {
-        return switch (self) {
-            .authorization => |value| if (value.allowed) 1 else 2,
-            .result => |value| @intFromEnum(value.class),
-            else => 0,
-        };
-    }
-
-    pub fn evidenceKind(self: Fact) ?EvidenceKind {
-        return switch (self) {
-            .result => |value| switch (value.evidence) {
-                .immediate => null,
-                .durable => |evidence| std.meta.activeTag(evidence),
-            },
-            else => null,
-        };
-    }
-
-    pub fn isIndeterminate(self: Fact) bool {
-        return switch (self) {
-            .result => |value| value.class == .indeterminate,
-            else => false,
-        };
-    }
 };
 
 const RawFact = struct {
     kind: Kind,
     recovery_class: RecoveryClass,
-    disposition: Disposition,
     flags: u8,
     agent_id: u64,
     operation_id: u64,
@@ -339,30 +235,16 @@ pub fn attemptAdmitted(
     } };
 }
 
-pub fn authorization(
-    operation: OperationContext,
-    permission_ref: u64,
-    descriptor_digest: u64,
-    allowed: bool,
-) Fact {
-    return .{ .authorization = .{
-        .operation = operation,
-        .permission_ref = permission_ref,
-        .descriptor_digest = descriptor_digest,
-        .allowed = allowed,
-    } };
+pub fn authorization(record: AuthorizationRecord) Fact {
+    return .{ .authorization = record };
 }
 
 pub fn result(record: ResultRecord) Fact {
     return .{ .result = record };
 }
 
-pub fn conversationAdvanced(agent: AgentContext, entry_id: u64, content_ref: u64) Fact {
-    return .{ .conversation_advanced = .{
-        .agent = agent,
-        .entry_id = entry_id,
-        .content_ref = content_ref,
-    } };
+pub fn conversationAdvanced(record: ConversationRecord) Fact {
+    return .{ .conversation_advanced = record };
 }
 
 pub fn outcome(agent: AgentContext, outcome_id: u64, content_ref: u64) Fact {
@@ -377,34 +259,12 @@ pub fn shutdown(agent: AgentContext) Fact {
     return .{ .shutdown = agent };
 }
 
-pub fn resultApplied(
-    operation: OperationContext,
-    attempt_id: u64,
-    result_ref: u64,
-    result_digest: u64,
-    recovery_class: RecoveryClass,
-) Fact {
-    return .{ .result_applied = .{
-        .operation = operation,
-        .attempt_id = attempt_id,
-        .result_ref = result_ref,
-        .result_digest = result_digest,
-        .recovery_class = recovery_class,
-    } };
+pub fn resultApplied(record: ResultAppliedRecord) Fact {
+    return .{ .result_applied = record };
 }
 
-pub fn approvalRequired(
-    operation: OperationContext,
-    binding_ref: u64,
-    descriptor_ref: u64,
-    descriptor_digest: u64,
-) Fact {
-    return .{ .approval_required = .{
-        .operation = operation,
-        .binding_ref = binding_ref,
-        .descriptor_ref = descriptor_ref,
-        .descriptor_digest = descriptor_digest,
-    } };
+pub fn approvalRequired(record: ApprovalRequiredRecord) Fact {
+    return .{ .approval_required = record };
 }
 
 pub const Transaction = struct {
@@ -496,11 +356,19 @@ fn validateRawFact(fact: RawFact) !void {
         return error.InvalidOperationIdentity;
     }
     switch (fact.kind) {
-        .task_admitted, .conversation_advanced, .outcome => {
+        .task_admitted, .outcome => {
             if (fact.subject == 0 or fact.reference == 0 or fact.operation_id != 0 or
                 fact.attempt_id != 0 or fact.digest != 0 or fact.flags != 0 or
-                fact.recovery_class != .none or fact.disposition != .none or
-                fact.evidence_kind != 0)
+                fact.recovery_class != .none or fact.evidence_kind != 0)
+            {
+                return error.InvalidKindSpecificPayload;
+            }
+        },
+        .conversation_advanced => {
+            if (fact.subject == 0 or fact.reference == 0 or fact.operation_id != 0 or
+                fact.attempt_id != 0 or fact.recovery_class != .none or fact.evidence_kind != 0 or
+                std.enums.fromInt(ConversationKind, fact.flags) == null or
+                (fact.subject == 1) != (fact.digest == 0))
             {
                 return error.InvalidKindSpecificPayload;
             }
@@ -508,32 +376,28 @@ fn validateRawFact(fact: RawFact) !void {
         .cancellation, .shutdown => {
             if (fact.operation_id != 0 or fact.attempt_id != 0 or fact.subject != 0 or
                 fact.reference != 0 or fact.digest != 0 or fact.flags != 0 or
-                fact.recovery_class != .none or fact.disposition != .none or
-                fact.evidence_kind != 0)
+                fact.recovery_class != .none or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .operation_submitted, .operation_accepted => {
             if (fact.attempt_id != 0 or fact.subject != 0 or fact.reference == 0 or
-                fact.digest == 0 or fact.flags != 0 or fact.disposition != .none or
-                fact.evidence_kind != 0)
+                fact.digest == 0 or fact.flags != 0 or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .attempt_admitted => {
             if (fact.attempt_id == 0 or fact.subject != 0 or fact.digest == 0 or fact.flags != 0 or
-                fact.recovery_class == .none or fact.disposition != .possibly_executed or
-                fact.evidence_kind != 0)
+                fact.recovery_class == .none or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .approval_required => {
             if (fact.reference == 0 or fact.digest == 0 or fact.flags != 0 or
-                fact.attempt_id != 0 or fact.recovery_class != .none or fact.disposition != .none or
-                fact.evidence_kind != 0)
+                fact.attempt_id != 0 or fact.recovery_class != .none or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
@@ -541,14 +405,14 @@ fn validateRawFact(fact: RawFact) !void {
         .authorization => {
             if (fact.digest == 0 or (fact.flags != 1 and fact.flags != 2) or
                 fact.attempt_id != 0 or fact.subject != 0 or fact.recovery_class != .none or
-                fact.disposition != .none or fact.evidence_kind != 0)
+                fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .result => {
             if (fact.reference == 0 or fact.digest == 0 or fact.subject != 0 or
-                fact.recovery_class == .none or fact.disposition != .terminal or
+                fact.recovery_class == .none or
                 fact.flags > @intFromEnum(ResultClass.indeterminate) or
                 (fact.attempt_id == 0) != (fact.evidence_kind == 0) or
                 fact.evidence_kind > @intFromEnum(EvidenceKind.apply_patch) or
@@ -563,7 +427,7 @@ fn validateRawFact(fact: RawFact) !void {
         },
         .result_applied => {
             if (fact.reference == 0 or fact.subject != 0 or fact.flags != 0 or
-                fact.disposition != .none or fact.evidence_kind != 0)
+                fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
@@ -577,7 +441,7 @@ fn encodeFact(out: []u8, fact: Fact) !void {
     @memset(out, 0);
     out[0] = @intFromEnum(raw.kind);
     out[1] = @intFromEnum(raw.recovery_class);
-    out[2] = @intFromEnum(raw.disposition);
+    out[2] = 0;
     out[3] = raw.flags;
     write(u32, out, 4, raw.generation);
     write(u32, out, 8, raw.agent_generation);
@@ -592,15 +456,13 @@ fn encodeFact(out: []u8, fact: Fact) !void {
 }
 
 fn decodeFact(input: []const u8) !Fact {
-    if (input[69] != 0 or input[70] != 0 or input[71] != 0) {
+    if (input[2] != 0 or input[69] != 0 or input[70] != 0 or input[71] != 0) {
         return error.NonzeroReservedByte;
     }
     const raw: RawFact = .{
         .kind = std.enums.fromInt(Kind, input[0]) orelse return error.UnsupportedTransitionKind,
         .recovery_class = std.enums.fromInt(RecoveryClass, input[1]) orelse
             return error.InvalidRecoveryClass,
-        .disposition = std.enums.fromInt(Disposition, input[2]) orelse
-            return error.InvalidDisposition,
         .flags = input[3],
         .generation = read(u32, input, 4),
         .agent_generation = read(u32, input, 8),
@@ -618,24 +480,99 @@ fn decodeFact(input: []const u8) !Fact {
 }
 
 fn rawFact(fact: Fact) RawFact {
-    const agent = fact.agent();
-    const operation = fact.operation();
+    var raw = emptyRaw(fact.kind(), fact.agent());
+    switch (fact) {
+        .task_admitted => |value| {
+            raw.subject = value.task_id;
+            raw.reference = value.content_ref;
+        },
+        .operation_submitted, .operation_accepted => |value| {
+            setOperation(&raw, value.operation);
+            raw.reference = value.descriptor_ref;
+            raw.digest = value.descriptor_digest;
+            raw.recovery_class = value.recovery_class;
+        },
+        .attempt_admitted => |value| {
+            setOperation(&raw, value.operation);
+            raw.attempt_id = value.attempt_id;
+            raw.reference = value.descriptor_ref;
+            raw.digest = value.descriptor_digest;
+            raw.recovery_class = value.recovery_class;
+        },
+        .authorization => |value| {
+            setOperation(&raw, value.operation);
+            raw.reference = value.permission_ref;
+            raw.digest = value.descriptor_digest;
+            raw.flags = if (value.allowed) 1 else 2;
+        },
+        .result => |value| {
+            setOperation(&raw, value.operation);
+            raw.reference = value.result_ref;
+            raw.digest = value.result_digest;
+            raw.flags = @intFromEnum(value.class);
+            switch (value.evidence) {
+                .immediate => |recovery_class| raw.recovery_class = recovery_class,
+                .durable => |evidence| {
+                    raw.evidence_kind = @intFromEnum(std.meta.activeTag(evidence));
+                    raw.attempt_id = switch (evidence) {
+                        inline else => |attempt_id| attempt_id,
+                    };
+                    raw.recovery_class = switch (evidence) {
+                        .model => .model,
+                        .bash, .apply_patch => .consequential,
+                    };
+                },
+            }
+        },
+        .conversation_advanced => |value| {
+            raw.subject = value.entry_id;
+            raw.reference = value.content_ref;
+            raw.digest = value.parent_id;
+            raw.flags = @intFromEnum(value.kind);
+        },
+        .outcome => |value| {
+            raw.subject = value.outcome_id;
+            raw.reference = value.content_ref;
+        },
+        .cancellation, .shutdown => {},
+        .result_applied => |value| {
+            setOperation(&raw, value.operation);
+            raw.attempt_id = value.attempt_id;
+            raw.reference = value.result_ref;
+            raw.digest = value.result_digest;
+            raw.recovery_class = value.recovery_class;
+        },
+        .approval_required => |value| {
+            setOperation(&raw, value.operation);
+            raw.subject = value.binding_ref;
+            raw.reference = value.descriptor_ref;
+            raw.digest = value.descriptor_digest;
+        },
+    }
+    return raw;
+}
+
+fn emptyRaw(kind: Kind, agent: AgentContext) RawFact {
     return .{
-        .kind = fact.kind(),
-        .recovery_class = fact.recoveryClass(),
-        .disposition = fact.disposition(),
-        .flags = fact.flags(),
+        .kind = kind,
+        .recovery_class = .none,
+        .flags = 0,
         .agent_id = agent.agent_id,
-        .operation_id = if (operation) |value| value.operation_id else 0,
-        .attempt_id = fact.attemptId(),
-        .subject = fact.subject(),
-        .reference = fact.reference(),
-        .digest = fact.digest(),
+        .operation_id = 0,
+        .attempt_id = 0,
+        .subject = 0,
+        .reference = 0,
+        .digest = 0,
         .ownership_epoch = agent.ownership_epoch,
-        .generation = if (operation) |value| value.generation else 0,
+        .generation = 0,
         .agent_generation = agent.agent_generation,
-        .evidence_kind = if (fact.evidenceKind()) |kind| @intFromEnum(kind) else 0,
+        .evidence_kind = 0,
     };
+}
+
+fn setOperation(raw: *RawFact, operation: OperationContext) void {
+    raw.operation_id = operation.operation_id;
+    raw.generation = operation.generation;
 }
 
 fn factFromRaw(raw: RawFact) Fact {
@@ -697,6 +634,8 @@ fn factFromRaw(raw: RawFact) Fact {
         .conversation_advanced => .{ .conversation_advanced = .{
             .agent = agent,
             .entry_id = raw.subject,
+            .parent_id = raw.digest,
+            .kind = std.enums.fromInt(ConversationKind, raw.flags) orelse unreachable,
             .content_ref = raw.reference,
         } },
         .outcome => .{ .outcome = .{

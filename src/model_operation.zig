@@ -100,11 +100,7 @@ pub const ProviderIo = struct {
         response_ref: u64,
     ) !u64 {
         self.response.abort();
-        const failure_ref = (@as(u64, 1) << 56) | response_ref;
-        var buffer: [model_protocol.header_size]u8 = undefined;
-        const encoded = try model_protocol.encodeText(&buffer, .provider_error, "");
-        try session.storeBlob(token, failure_ref, encoded);
-        return failure_ref;
+        return publishFailureResult(session, token, response_ref);
     }
 
     fn requestLength(context: *anyopaque) u64 {
@@ -127,6 +123,18 @@ pub const ProviderIo = struct {
         try self.response.finish();
     }
 };
+
+pub fn publishFailureResult(
+    session: *session_store.Session,
+    token: session_store.OwnerToken,
+    identity: u64,
+) !u64 {
+    const failure_ref = (@as(u64, 1) << 56) | (identity & ((@as(u64, 1) << 56) - 1));
+    var buffer: [model_protocol.header_size]u8 = undefined;
+    const encoded = try model_protocol.encodeText(&buffer, .provider_error, "");
+    try session.storeBlob(token, failure_ref, encoded);
+    return failure_ref;
+}
 
 pub fn buildRequest(
     session: *session_store.Session,

@@ -13,8 +13,18 @@ test "Approval Required and Authorization have distinct canonical payloads" {
         .operation_id = 11,
         .generation = 3,
     };
-    const approval = transition.approvalRequired(operation, 13, 17, 19);
-    const authorization = transition.authorization(operation, 23, 19, true);
+    const approval = transition.approvalRequired(.{
+        .operation = operation,
+        .binding_ref = 13,
+        .descriptor_ref = 17,
+        .descriptor_digest = 19,
+    });
+    const authorization = transition.authorization(.{
+        .operation = operation,
+        .permission_ref = 23,
+        .descriptor_digest = 19,
+        .allowed = true,
+    });
     var approval_buffer: [transition.max_payload_size]u8 = undefined;
     var authorization_buffer: [transition.max_payload_size]u8 = undefined;
     var approval_transaction: transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
@@ -104,6 +114,7 @@ test "Result evidence round trips as immediate or durable typed choices" {
     const decoded = try transition.decode(1, try transition.encode(&buffer, transaction));
     try std.testing.expectEqual(facts[0], decoded.facts[0]);
     try std.testing.expectEqual(facts[1], decoded.facts[1]);
-    try std.testing.expectEqual(@as(?transition.EvidenceKind, null), decoded.facts[0].evidenceKind());
-    try std.testing.expectEqual(transition.EvidenceKind.model, decoded.facts[1].evidenceKind().?);
+    try std.testing.expect(decoded.facts[0].result.evidence == .immediate);
+    try std.testing.expect(decoded.facts[1].result.evidence == .durable);
+    try std.testing.expect(decoded.facts[1].result.evidence.durable == .model);
 }
