@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_answer = b.addRunArtifact(cli);
     run_fixture_answer.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-v4-fixture-sessions",
+        ".zig-cache/onepage-resident-state-fixture-sessions",
         "--repo",
         ".",
         "--model",
@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_bash = b.addRunArtifact(cli);
     run_fixture_bash.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-v4-bash-sessions",
+        ".zig-cache/onepage-resident-state-bash-sessions",
         "--repo",
         ".",
         "--model",
@@ -91,7 +91,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_patch = b.addRunArtifact(cli);
     run_fixture_patch.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-v4-patch-sessions",
+        ".zig-cache/onepage-resident-state-patch-sessions",
         "--repo",
         ".",
         "--model",

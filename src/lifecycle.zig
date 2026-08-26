@@ -52,21 +52,20 @@ pub const CompletionHook = struct {
 pub const Control = enum { cancel, shutdown };
 
 pub fn commitControl(session: *session_store.Session, control: Control) !void {
-    const token = session.ownerToken();
     var state: ControlSearch = .{};
-    _ = try session.inspectSemantic(token, &state, ControlSearch.applyFact);
+    _ = try session.inspectSemantic(&state, ControlSearch.applyFact);
     if (state.open_operation) return error.AcceptedOperationUnsettled;
     const agent = agentContext(session);
     const fact = if (control == .cancel)
         session_transition.cancellation(agent)
     else
         session_transition.shutdown(agent);
-    _ = try session.commitSemantic(token, &.{fact}, null);
+    _ = try session.commitSemantic(&.{fact}, null);
 }
 
 pub fn restoredControl(session: *session_store.Session) !?Control {
     var state: ControlSearch = .{};
-    _ = try session.inspectSemantic(session.ownerToken(), &state, ControlSearch.applyFact);
+    _ = try session.inspectSemantic(&state, ControlSearch.applyFact);
     return state.control;
 }
 
@@ -183,7 +182,6 @@ const Core = struct {
 
 fn commitCoreFacts(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     core_state_buffer: []u8,
     core: *Core,
     facts: []const session_transition.Fact,
@@ -191,7 +189,7 @@ fn commitCoreFacts(
 ) !void {
     _ = core_state_buffer;
     try core.suspendIntoState();
-    _ = try session.commitSemantic(token, facts, &core.encoded_state);
+    _ = try session.commitSemantic(facts, &core.encoded_state);
     if (reactivate) try core.activate();
 }
 
@@ -213,17 +211,12 @@ fn operationContext(
 
 fn restoreCoreFromLedger(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     core_state_buffer: []u8,
     core: *Core,
 ) !void {
     _ = core_state_buffer;
     var replay_context: u8 = 0;
-    const replay = try session.inspectSemantic(
-        token,
-        &replay_context,
-        ignoreFact,
-    );
+    const replay = try session.inspectSemantic(&replay_context, ignoreFact);
     core.encoded_state = replay.last_core orelse return error.MissingLedgerCoreState;
     try core.activate();
 }
@@ -233,7 +226,6 @@ fn ignoreFact(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
 const ModelSlot = struct {
     core: *Core,
     session: *session_store.Session,
-    token: session_store.OwnerToken,
 
     fn apply(context: *anyopaque, completion: ModelCompletion) anyerror!void {
         const self: *ModelSlot = @ptrCast(@alignCast(context));
@@ -241,7 +233,7 @@ const ModelSlot = struct {
             .id = completion.operation_id,
             .generation = completion.operation_generation,
         }, completion.result);
-        var response = try self.session.openBlob(self.token, completion.result);
+        var response = try self.session.openBlob(completion.result);
         defer response.close();
         if (response.length() > model_protocol.max_response_size) return error.ResponseTooLarge;
         const length: usize = @intCast(response.length());
@@ -265,11 +257,10 @@ pub fn advanceCreated(
     defer if (core_open) core.close();
     const token = session.ownerToken();
     try core.initialize(session.agent_id);
-    try core.reducer.startTask(session.active_leaf_id);
+    try core.reducer.startTask(session.activeLeafId());
     if (core_state_buffer.len != core_state.encoded_size) return error.InvalidCoreStateBuffer;
     try commitCoreFacts(
         session,
-        token,
         core_state_buffer,
         &core,
         &.{session_transition.taskAdmitted(
@@ -313,7 +304,6 @@ fn performModelTurn(
     const operation_generation = operation.generation;
     const descriptor = try model_operation.buildRequest(
         session,
-        token,
         ids.request_ref,
         context.first_entry,
         context.entry_count,
@@ -343,7 +333,6 @@ fn performModelTurn(
     };
     try commitCoreFacts(
         session,
-        token,
         core_state_buffer,
         core,
         &admission_facts,
@@ -379,13 +368,12 @@ fn retryModelAttempt(
         .generation = operation.generation,
         .recovery_class = .model,
     };
-    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
+    _ = try session.inspectSemantic(&history, FactSearch.applyFact);
     const descriptor = history.descriptor orelse return error.MissingModelDescriptor;
     if (history.attempt_count == FactSearch.max_attempts) {
         const attempt = history.attempts[history.attempt_count - 1].?;
         const result_ref = try model_operation.publishFailureResult(
             session,
-            token,
             attempt.attempt_id,
         );
         const evidence: completion_inbox.Envelope = .{
@@ -398,9 +386,9 @@ fn retryModelAttempt(
             .operation_generation = operation.generation,
             .attempt_id = attempt.attempt_id,
             .result_ref = result_ref,
-            .result_digest = try blobDigest(session, token, result_ref),
+            .result_digest = try blobDigest(session, result_ref),
         };
-        try session.publishCompletionEvidence(token, evidence);
+        try session.publishCompletionEvidence(evidence);
         if (completion_hook) |hook| try hook.offered(hook.context, evidence);
         return error.CompletionOffered;
     }
@@ -424,7 +412,6 @@ fn retryModelAttempt(
     );
     try commitCoreFacts(
         session,
-        token,
         core_state_buffer,
         core,
         &.{attempt},
@@ -452,7 +439,6 @@ fn dispatchModelAttempt(
 ) !void {
     var provider_io = try model_operation.ProviderIo.open(
         session,
-        token,
         dispatch.request_ref,
         dispatch.response_ref,
     );
@@ -466,7 +452,6 @@ fn dispatchModelAttempt(
     ) catch {
         result_ref = try provider_io.publishProviderFailure(
             session,
-            token,
             dispatch.response_ref,
         );
         provider_failed = true;
@@ -485,9 +470,9 @@ fn dispatchModelAttempt(
         .operation_generation = dispatch.operation_generation,
         .attempt_id = dispatch.attempt_id,
         .result_ref = result_ref,
-        .result_digest = try blobDigest(session, token, result_ref),
+        .result_digest = try blobDigest(session, result_ref),
     };
-    try session.publishCompletionEvidence(token, evidence);
+    try session.publishCompletionEvidence(evidence);
     try reach(fault, .after_completion_inbox);
     if (completion_hook) |hook| try hook.offered(hook.context, evidence);
     return error.CompletionOffered;
@@ -530,8 +515,8 @@ fn executeBashCall(
     const tool_operation_id = (@as(u64, 1) << 63) | ids.operation_id;
     const descriptor_ref = (@as(u64, 1) << 62) | ids.response_ref;
     const result_ref = (@as(u64, 1) << 61) | ids.response_ref;
-    try session.storeBlob(token, descriptor_ref, descriptor_bytes);
-    const call_entry = try session.appendConversation(token, .assistant, descriptor_ref, null);
+    try session.storeBlob(descriptor_ref, descriptor_bytes);
+    const call_entry = try session.appendConversation(.assistant, descriptor_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
     const descriptor_facts = [_]session_transition.Fact{
         session_transition.operationSubmitted(operation_context, descriptor_ref, digest, .consequential),
@@ -544,7 +529,7 @@ fn executeBashCall(
             .content_ref = descriptor_ref,
         }),
     };
-    _ = try session.commitSemantic(token, &descriptor_facts, null);
+    _ = try session.commitSemantic(&descriptor_facts, null);
 
     const classification = try policy.classify_fn(policy.context, digest, call);
     if (classification == .ask) {
@@ -554,7 +539,7 @@ fn executeBashCall(
             .descriptor_ref = descriptor_ref,
             .descriptor_digest = digest,
         });
-        try commitCoreFacts(session, token, core_state_buffer, core, &.{approval}, true);
+        try commitCoreFacts(session, core_state_buffer, core, &.{approval}, true);
         if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .bash,
             .operation_id = tool_operation_id,
@@ -574,7 +559,7 @@ fn executeBashCall(
         .descriptor_digest = digest,
         .allowed = allowed,
     });
-    _ = try session.commitSemantic(token, &.{authorization}, null);
+    _ = try session.commitSemantic(&.{authorization}, null);
 
     var attempt_id: u64 = 0;
     var execution: bash_tool.Execution = undefined;
@@ -589,7 +574,6 @@ fn executeBashCall(
         );
         try commitCoreFacts(
             session,
-            token,
             core_state_buffer,
             core,
             &.{attempt},
@@ -607,7 +591,7 @@ fn executeBashCall(
         try reach(fault, .after_bash_execution);
         core.* = try Core.open(slot_pool);
         core_open.* = true;
-        try restoreCoreFromLedger(session, token, core_state_buffer, core);
+        try restoreCoreFromLedger(session, core_state_buffer, core);
     } else {
         execution = .{
             .allocator = allocator,
@@ -620,8 +604,8 @@ fn executeBashCall(
     const result_buffer = try allocator.alloc(u8, bash_tool.result_header_size + 2 * bash_tool.max_output_size);
     defer allocator.free(result_buffer);
     const encoded_result = try bash_tool.encodeResult(result_buffer, execution);
-    try session.storeBlob(token, result_ref, encoded_result);
-    const result_digest = try blobDigest(session, token, result_ref);
+    try session.storeBlob(result_ref, encoded_result);
+    const result_digest = try blobDigest(session, result_ref);
     if (allowed) {
         const evidence: completion_inbox.Envelope = .{
             .kind = .bash,
@@ -635,12 +619,12 @@ fn executeBashCall(
             .result_ref = result_ref,
             .result_digest = result_digest,
         };
-        try session.publishCompletionEvidence(token, evidence);
+        try session.publishCompletionEvidence(evidence);
         if (completion_hook) |hook| try hook.offered(hook.context, evidence);
         return error.CompletionOffered;
     }
     try reach(fault, .after_bash_result);
-    const result_entry = try session.appendConversation(token, .tool_result, result_ref, null);
+    const result_entry = try session.appendConversation(.tool_result, result_ref, null);
     try reach(fault, .after_tool_result_entry);
     try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
     const result_facts = [_]session_transition.Fact{
@@ -664,7 +648,6 @@ fn executeBashCall(
     };
     try commitCoreFacts(
         session,
-        token,
         core_state_buffer,
         core,
         &result_facts,
@@ -703,8 +686,8 @@ fn requestPatchPermission(
     const approval_ref = (@as(u64, 1) << 59) | ids.response_ref;
     const permission_ref = (@as(u64, 1) << 58) | ids.response_ref;
     const result_ref = (@as(u64, 1) << 57) | ids.response_ref;
-    try session.storeBlob(token, patch_ref, patch);
-    const call_entry = try session.appendConversation(token, .assistant, patch_ref, null);
+    try session.storeBlob(patch_ref, patch);
+    const call_entry = try session.appendConversation(.assistant, patch_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
     const descriptor_facts = [_]session_transition.Fact{
         session_transition.operationSubmitted(
@@ -727,7 +710,7 @@ fn requestPatchPermission(
             .content_ref = patch_ref,
         }),
     };
-    _ = try session.commitSemantic(token, &descriptor_facts, null);
+    _ = try session.commitSemantic(&descriptor_facts, null);
 
     const subject: patch_tool.PermissionSubject = .{
         .operation_id = tool_operation_id,
@@ -754,7 +737,6 @@ fn requestPatchPermission(
         });
         try commitCoreFacts(
             session,
-            token,
             core_state_buffer,
             core,
             &.{approval},
@@ -785,7 +767,7 @@ fn requestPatchPermission(
         .descriptor_digest = validation.patch_digest,
         .allowed = allowed,
     });
-    _ = try session.commitSemantic(token, &.{authorization}, null);
+    _ = try session.commitSemantic(&.{authorization}, null);
     try reach(fault, .after_patch_permission_binding);
 
     var status: patch_tool.ResultStatus = .denied;
@@ -823,10 +805,10 @@ fn requestPatchPermission(
         .expected_workspace_digest = validation.workspace_digest,
         .observed_workspace_digest = observed_workspace_digest,
     });
-    try session.storeBlob(token, result_ref, &result_bytes);
-    const result_entry = try session.appendConversation(token, .tool_result, result_ref, null);
+    try session.storeBlob(result_ref, &result_bytes);
+    const result_entry = try session.appendConversation(.tool_result, result_ref, null);
     try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
-    const result_digest = try blobDigest(session, token, result_ref);
+    const result_digest = try blobDigest(session, result_ref);
     const result_facts = [_]session_transition.Fact{
         session_transition.result(.{
             .operation = operation_context,
@@ -845,7 +827,6 @@ fn requestPatchPermission(
     };
     try commitCoreFacts(
         session,
-        token,
         core_state_buffer,
         core,
         &result_facts,
@@ -876,7 +857,7 @@ fn storePatchBinding(
         .preimage_inode = @intCast(validation.preimage_inode),
         .preimage_digest = validation.preimage_digest,
     });
-    try session.storeBlob(token, binding_ref, &bytes);
+    try session.storeBlob(binding_ref, &bytes);
 }
 
 pub fn advanceRestored(
@@ -893,14 +874,13 @@ pub fn advanceRestored(
     defer if (core_open) core.close();
     const token = session.ownerToken();
     if (core_state_buffer.len != core_state.encoded_size) return error.InvalidCoreStateBuffer;
-    try restoreCoreFromLedger(session, token, core_state_buffer, &core);
+    try restoreCoreFromLedger(session, core_state_buffer, &core);
     var outcome = (try core.reducer.task()).phase;
     if (outcome == .awaiting_model) {
         if (durableCompletion(session, token, &core)) |completion| {
             var slot: ModelSlot = .{
                 .core = &core,
                 .session = session,
-                .token = token,
             };
             try ModelSlot.apply(&slot, completion);
             const applied = session_transition.resultApplied(.{
@@ -912,7 +892,6 @@ pub fn advanceRestored(
             });
             try commitCoreFacts(
                 session,
-                token,
                 core_state_buffer,
                 &core,
                 &.{applied},
@@ -920,7 +899,6 @@ pub fn advanceRestored(
             );
             try stageDurableResponse(
                 session,
-                token,
                 &core,
                 try core.reducer.response(),
             );
@@ -943,7 +921,6 @@ pub fn advanceRestored(
     if (outcome == .final_candidate) {
         return finalizeCandidate(
             session,
-            token,
             &core,
             core_state_buffer,
             null,
@@ -1015,13 +992,13 @@ pub fn advanceRestored(
     if (outcome == .failed) return modelFailure(@intFromEnum((try core.reducer.response()).failure));
     if (outcome == .finished) {
         const entry_id = (try core.reducer.task()).final_entry_id;
-        if (entry_id != session.active_leaf_id) return error.FinalEntryMismatch;
+        if (entry_id != session.activeLeafId()) return error.FinalEntryMismatch;
         const entry = try session.readEntry(entry_id);
         if (entry.kind != .assistant) return error.InvalidFinalEntry;
         return entry.content_ref;
     }
     if (outcome != .ready) return error.SessionNotReadyForModel;
-    if (try hasIndeterminateBash(session, token)) return error.BashPossiblyExecuted;
+    if (try hasIndeterminateBash(session)) return error.BashPossiblyExecuted;
     if (config.settle_only) return error.SessionNeedsModel;
     _ = try performModelTurn(
         io,
@@ -1040,7 +1017,6 @@ pub fn advanceRestored(
     }
     const final_ref = try finalizeCandidate(
         session,
-        token,
         &core,
         core_state_buffer,
         null,
@@ -1065,7 +1041,7 @@ pub fn resolvePermission(
     var core = try Core.open(&host.slots);
     var core_open = true;
     defer if (core_open) core.close();
-    try restoreCoreFromLedger(session, token, core_state_buffer, &core);
+    try restoreCoreFromLedger(session, core_state_buffer, &core);
     if ((try core.reducer.task()).phase != .awaiting_tool) return error.PermissionNoLongerRequired;
     const response = try core.reducer.response();
     const observation = try core.reducer.operation();
@@ -1084,7 +1060,7 @@ pub fn resolvePermission(
         .generation = 1,
         .recovery_class = .consequential,
     };
-    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
+    _ = try session.inspectSemantic(&history, FactSearch.applyFact);
     const descriptor = history.descriptor orelse return error.MissingActionDescriptor;
     if (descriptor.descriptor_digest != decision.descriptor_digest or
         descriptor.descriptor_ref != decision.descriptor_ref)
@@ -1108,9 +1084,9 @@ pub fn resolvePermission(
                 .descriptor_digest = descriptor.descriptor_digest,
                 .allowed = allow,
             });
-            _ = try session.commitSemantic(token, &.{authorization}, null);
+            _ = try session.commitSemantic(&.{authorization}, null);
             var descriptor_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
-            var reader = try session.openBlob(token, descriptor.descriptor_ref);
+            var reader = try session.openBlob(descriptor.descriptor_ref);
             defer reader.close();
             if (reader.length() > descriptor_buffer.len) return error.InvalidBashCallRange;
             const descriptor_length: usize = @intCast(reader.length());
@@ -1129,7 +1105,7 @@ pub fn resolvePermission(
                     descriptor.descriptor_digest,
                     .consequential,
                 );
-                try commitCoreFacts(session, token, core_state_buffer, &core, &.{attempt}, false);
+                try commitCoreFacts(session, core_state_buffer, &core, &.{attempt}, false);
                 core.close();
                 core_open = false;
                 execution = try bash_tool.executeControlled(
@@ -1141,7 +1117,7 @@ pub fn resolvePermission(
                 );
                 core = try Core.open(&host.slots);
                 core_open = true;
-                try restoreCoreFromLedger(session, token, core_state_buffer, &core);
+                try restoreCoreFromLedger(session, core_state_buffer, &core);
             } else {
                 execution = .{
                     .allocator = allocator,
@@ -1154,8 +1130,8 @@ pub fn resolvePermission(
             const result_buffer = try allocator.alloc(u8, bash_tool.result_header_size + 2 * bash_tool.max_output_size);
             defer allocator.free(result_buffer);
             const encoded = try bash_tool.encodeResult(result_buffer, execution);
-            try session.storeBlob(token, result_ref, encoded);
-            const result_digest = try blobDigest(session, token, result_ref);
+            try session.storeBlob(result_ref, encoded);
+            const result_digest = try blobDigest(session, result_ref);
             if (allow) {
                 const evidence: completion_inbox.Envelope = .{
                     .kind = .bash,
@@ -1169,12 +1145,12 @@ pub fn resolvePermission(
                     .result_ref = result_ref,
                     .result_digest = result_digest,
                 };
-                try session.publishCompletionEvidence(token, evidence);
+                try session.publishCompletionEvidence(evidence);
                 if (completion_hook) |hook| try hook.offered(hook.context, evidence);
                 return error.CompletionOffered;
             }
-            const result_entry = try session.appendConversation(token, .tool_result, result_ref, null);
-            try core.reducer.commitToolResult(session.active_leaf_id, result_entry.entry_id);
+            const result_entry = try session.appendConversation(.tool_result, result_ref, null);
+            try core.reducer.commitToolResult(session.activeLeafId(), result_entry.entry_id);
             const facts = [_]session_transition.Fact{
                 session_transition.result(.{
                     .operation = operation_context,
@@ -1194,11 +1170,11 @@ pub fn resolvePermission(
                     .content_ref = result_ref,
                 }),
             };
-            try commitCoreFacts(session, token, core_state_buffer, &core, &facts, false);
+            try commitCoreFacts(session, core_state_buffer, &core, &facts, false);
         },
         .apply_patch => {
             var binding_bytes: [patch_tool.binding_size]u8 = undefined;
-            var binding_reader = try session.openBlob(token, pending.binding_ref);
+            var binding_reader = try session.openBlob(pending.binding_ref);
             defer binding_reader.close();
             if (binding_reader.length() != binding_bytes.len or
                 (try binding_reader.readWindow(0, &binding_bytes)).len != binding_bytes.len)
@@ -1237,7 +1213,7 @@ pub fn resolvePermission(
                 .descriptor_digest = descriptor.descriptor_digest,
                 .allowed = allow,
             });
-            _ = try session.commitSemantic(token, &.{authorization}, null);
+            _ = try session.commitSemantic(&.{authorization}, null);
             if (allow) return error.PatchExecutionDeferred;
             const result_ref = (@as(u64, 1) << 57) | @as(u32, @truncate(observation.result_ref));
             var result_bytes: [patch_tool.result_size]u8 = undefined;
@@ -1247,14 +1223,14 @@ pub fn resolvePermission(
                 .expected_workspace_digest = binding.workspace_digest,
                 .observed_workspace_digest = 0,
             });
-            try session.storeBlob(token, result_ref, &result_bytes);
-            const result_entry = try session.appendConversation(token, .tool_result, result_ref, null);
-            try core.reducer.commitToolResult(session.active_leaf_id, result_entry.entry_id);
+            try session.storeBlob(result_ref, &result_bytes);
+            const result_entry = try session.appendConversation(.tool_result, result_ref, null);
+            try core.reducer.commitToolResult(session.activeLeafId(), result_entry.entry_id);
             const facts = [_]session_transition.Fact{
                 session_transition.result(.{
                     .operation = operation_context,
                     .result_ref = result_ref,
-                    .result_digest = try blobDigest(session, token, result_ref),
+                    .result_digest = try blobDigest(session, result_ref),
                     .class = .ordinary,
                     .evidence = .{ .immediate = .consequential },
                 }),
@@ -1266,7 +1242,7 @@ pub fn resolvePermission(
                     .content_ref = result_ref,
                 }),
             };
-            try commitCoreFacts(session, token, core_state_buffer, &core, &facts, false);
+            try commitCoreFacts(session, core_state_buffer, &core, &facts, false);
         },
         else => unreachable,
     }
@@ -1312,7 +1288,7 @@ pub fn acceptCompletion(
             .bash, .apply_patch => .consequential,
         },
     };
-    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
+    _ = try session.inspectSemantic(&history, FactSearch.applyFact);
     const attempt = history.attempt orelse return error.StaleCompletion;
     if (attempt.attempt_id != offered.attempt_id) return error.StaleCompletion;
     if (history.result) |result| {
@@ -1328,7 +1304,7 @@ pub fn acceptCompletion(
         .attempt_id = offered.attempt_id,
         .maximum_epoch = token.epoch,
     };
-    _ = try session.scanCompletionEvidence(token, &inbox, InboxSearch.apply);
+    _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
     const evidence = inbox.match orelse return error.CompletionEvidenceMissing;
     if (evidence.result_ref != offered.result_ref or evidence.result_digest != offered.result_digest) {
         return error.ConflictingCompletionEvidence;
@@ -1373,12 +1349,11 @@ fn reconcileBash(
         .generation = 1,
         .recovery_class = .consequential,
     };
-    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
+    _ = try session.inspectSemantic(&history, FactSearch.applyFact);
     const descriptor = history.descriptor orelse return .none;
     if (history.result) |result| {
         try reconcileBashResult(
             session,
-            token,
             core,
             core_state_buffer,
             toolResultFromRecord(result),
@@ -1405,18 +1380,17 @@ fn reconcileBash(
         };
         var encoded: [bash_tool.result_header_size]u8 = undefined;
         _ = try bash_tool.encodeResult(&encoded, execution);
-        try storeOrExpectBlob(session, token, result_ref, &encoded);
+        try storeOrExpectBlob(session, result_ref, &encoded);
         const denied = session_transition.result(.{
             .operation = operationContext(session, operation_id, 1),
             .result_ref = result_ref,
-            .result_digest = try blobDigest(session, token, result_ref),
+            .result_digest = try blobDigest(session, result_ref),
             .class = .ordinary,
             .evidence = .{ .immediate = .consequential },
         });
-        _ = try session.commitSemantic(token, &.{denied}, null);
+        _ = try session.commitSemantic(&.{denied}, null);
         try reconcileBashResult(
             session,
-            token,
             core,
             core_state_buffer,
             toolResultFromRecord(denied.result),
@@ -1431,19 +1405,19 @@ fn reconcileBash(
         .attempt_id = attempt.attempt_id,
         .maximum_epoch = token.epoch,
     };
-    _ = try session.scanCompletionEvidence(token, &inbox, InboxSearch.apply);
+    _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
     var evidence_agent = agentContext(session);
     var result_ref: u64 = undefined;
     var result_digest: u64 = descriptor.descriptor_digest;
     var status: bash_tool.Status = undefined;
     if (inbox.match) |envelope| {
-        if (try blobDigest(session, token, envelope.result_ref) != envelope.result_digest) {
+        if (try blobDigest(session, envelope.result_ref) != envelope.result_digest) {
             return error.CompletionResultDigestMismatch;
         }
         result_ref = envelope.result_ref;
         result_digest = envelope.result_digest;
         evidence_agent.ownership_epoch = envelope.ownership_epoch;
-        status = try readBashStatus(session, token, envelope.result_ref);
+        status = try readBashStatus(session, envelope.result_ref);
     } else {
         const response_ref: u32 = @truncate(model_observation.result_ref);
         result_ref = (@as(u64, 1) << 61) | response_ref;
@@ -1456,10 +1430,10 @@ fn reconcileBash(
         };
         var encoded: [bash_tool.result_header_size]u8 = undefined;
         _ = try bash_tool.encodeResult(&encoded, execution);
-        try storeOrExpectBlob(session, token, result_ref, &encoded);
-        result_digest = try blobDigest(session, token, result_ref);
+        try storeOrExpectBlob(session, result_ref, &encoded);
+        result_digest = try blobDigest(session, result_ref);
         status = .indeterminate;
-        try session.publishCompletionEvidence(token, .{
+        try session.publishCompletionEvidence(.{
             .kind = .bash,
             .session_id = session.session_id,
             .ownership_epoch = token.epoch,
@@ -1479,10 +1453,9 @@ fn reconcileBash(
         .class = if (status == .indeterminate) .indeterminate else .ordinary,
         .evidence = .{ .durable = .{ .bash = attempt.attempt_id } },
     });
-    _ = try session.commitSemantic(token, &.{result}, null);
+    _ = try session.commitSemantic(&.{result}, null);
     try reconcileBashResult(
         session,
-        token,
         core,
         core_state_buffer,
         toolResultFromRecord(result.result),
@@ -1495,10 +1468,9 @@ fn reconcileBash(
 
 fn readBashStatus(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     reference: u64,
 ) !bash_tool.Status {
-    var reader = try session.openBlob(token, reference);
+    var reader = try session.openBlob(reference);
     defer reader.close();
     if (reader.length() < bash_tool.result_header_size) return error.TruncatedBashResult;
     var header: [bash_tool.result_header_size]u8 = undefined;
@@ -1545,7 +1517,7 @@ fn reconcilePatch(
         .generation = 1,
         .recovery_class = .consequential,
     };
-    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
+    _ = try session.inspectSemantic(&history, FactSearch.applyFact);
     const validated = history.descriptor orelse return .none;
     if (validated.descriptor_digest == 0 or validated.descriptor_ref != patch_ref) {
         return error.InvalidPatchHistory;
@@ -1556,7 +1528,6 @@ fn reconcilePatch(
         }
         try reconcileToolResult(
             session,
-            token,
             core,
             core_state_buffer,
             patch_ref,
@@ -1574,7 +1545,7 @@ fn reconcilePatch(
         return error.InvalidPatchHistory;
     }
     var binding_bytes: [patch_tool.binding_size]u8 = undefined;
-    try readExactBlob(session, token, authorization.permission_ref, &binding_bytes);
+    try readExactBlob(session, authorization.permission_ref, &binding_bytes);
     const binding = try patch_tool.decodeBinding(&binding_bytes);
     if (binding.operation_id != operation_id or binding.operation_generation != 1 or
         binding.patch_ref != patch_ref or binding.patch_digest != validated.descriptor_digest)
@@ -1588,7 +1559,7 @@ fn reconcilePatch(
     }
     if (binding.decision == .allow) {
         var patch_buffer: [patch_tool.max_patch_size]u8 = undefined;
-        const patch = try readBoundedBlob(session, token, patch_ref, &patch_buffer);
+        const patch = try readBoundedBlob(session, patch_ref, &patch_buffer);
         const target_path = try patch_tool.validateStructure(patch);
         const expected: patch_tool.Validation = .{
             .target_path = target_path,
@@ -1665,18 +1636,17 @@ fn persistPatchPreflightResult(
         .expected_workspace_digest = expected_workspace_digest,
         .observed_workspace_digest = observed_workspace_digest,
     });
-    try storeOrExpectBlob(session, token, result_ref, &result_bytes);
+    try storeOrExpectBlob(session, result_ref, &result_bytes);
     const terminal = session_transition.result(.{
         .operation = operationContext(session, operation_id, 1),
         .result_ref = result_ref,
-        .result_digest = try blobDigest(session, token, result_ref),
+        .result_digest = try blobDigest(session, result_ref),
         .class = .ordinary,
         .evidence = .{ .immediate = .consequential },
     });
-    _ = try session.commitSemantic(token, &.{terminal}, null);
+    _ = try session.commitSemantic(&.{terminal}, null);
     try reconcileToolResult(
         session,
-        token,
         core,
         core_state_buffer,
         patch_ref,
@@ -1695,7 +1665,6 @@ fn persistPatchPreflightResult(
 
 fn reconcileBashResult(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     core: *Core,
     core_state_buffer: []u8,
     result: ToolResult,
@@ -1703,18 +1672,17 @@ fn reconcileBashResult(
     const response_ref: u32 = @truncate(result.result);
     if (result.result != ((@as(u64, 1) << 61) | response_ref)) return error.InvalidToolResultReference;
     const descriptor_ref = (@as(u64, 1) << 62) | response_ref;
-    try reconcileToolResult(session, token, core, core_state_buffer, descriptor_ref, result);
+    try reconcileToolResult(session, core, core_state_buffer, descriptor_ref, result);
 }
 
 fn reconcileToolResult(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     core: *Core,
     core_state_buffer: []u8,
     descriptor_ref: u64,
     result: ToolResult,
 ) !void {
-    const active = try session.readEntry(session.active_leaf_id);
+    const active = try session.readEntry(session.activeLeafId());
     var call_entry: session_store.ConversationEntry = undefined;
     var result_entry: session_store.ConversationEntry = undefined;
     if (active.kind == .tool_result and active.content_ref == result.result) {
@@ -1722,7 +1690,7 @@ fn reconcileToolResult(
         call_entry = try session.readEntry(active.parent_id);
     } else if (active.kind == .assistant and active.content_ref == descriptor_ref) {
         call_entry = active;
-        result_entry = try session.appendConversation(token, .tool_result, result.result, null);
+        result_entry = try session.appendConversation(.tool_result, result.result, null);
     } else {
         return error.ToolConversationMismatch;
     }
@@ -1737,7 +1705,7 @@ fn reconcileToolResult(
             .operation = operationContext(session, result.operation_id, result.operation_generation),
             .attempt_id = result.attempt_id,
             .result_ref = result.result,
-            .result_digest = try blobDigest(session, token, result.result),
+            .result_digest = try blobDigest(session, result.result),
             .recovery_class = .consequential,
         }),
         session_transition.conversationAdvanced(.{
@@ -1750,7 +1718,6 @@ fn reconcileToolResult(
     };
     try commitCoreFacts(
         session,
-        token,
         core_state_buffer,
         core,
         &applied_facts,
@@ -1771,7 +1738,7 @@ fn durableCompletion(
         .generation = operation_generation,
         .recovery_class = .model,
     };
-    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
+    _ = try session.inspectSemantic(&history, FactSearch.applyFact);
     if (history.attempt_count == 0) return error.MissingAcceptedAttempt;
     var intent: ?session_transition.AttemptRecord = null;
     var result = history.result;
@@ -1795,7 +1762,7 @@ fn durableCompletion(
                 .attempt_id = attempt.attempt_id,
                 .maximum_epoch = token.epoch,
             };
-            _ = try session.scanCompletionEvidence(token, &inbox, InboxSearch.apply);
+            _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
             if (inbox.match) |envelope| {
                 intent = attempt;
                 matched_envelope = envelope;
@@ -1803,7 +1770,7 @@ fn durableCompletion(
             }
         }
         const envelope = matched_envelope orelse return error.SessionOperationPending;
-        if (try blobDigest(session, token, envelope.result_ref) != envelope.result_digest) {
+        if (try blobDigest(session, envelope.result_ref) != envelope.result_digest) {
             return error.CompletionResultDigestMismatch;
         }
         var evidence_agent = agentContext(session);
@@ -1819,7 +1786,7 @@ fn durableCompletion(
             .class = .ordinary,
             .evidence = .{ .durable = .{ .model = intent.?.attempt_id } },
         });
-        _ = try session.commitSemantic(token, &.{terminal}, null);
+        _ = try session.commitSemantic(&.{terminal}, null);
         result = terminal.result;
     }
     const accepted = intent orelse return error.InvalidOperationHistory;
@@ -1936,7 +1903,6 @@ const FactSearch = struct {
 pub fn pendingApprovalRequired(session: *session_store.Session) !?ApprovalRequired {
     var search: PendingApprovalSearch = .{};
     _ = try session.inspectSemantic(
-        session.ownerToken(),
         &search,
         PendingApprovalSearch.applyFact,
     );
@@ -2040,10 +2006,9 @@ fn resultAttemptId(result: session_transition.ResultRecord) u64 {
 
 fn hasIndeterminateBash(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
 ) !bool {
     var found = false;
-    _ = try session.inspectSemantic(token, &found, detectIndeterminate);
+    _ = try session.inspectSemantic(&found, detectIndeterminate);
     return found;
 }
 
@@ -2061,7 +2026,6 @@ fn detectIndeterminate(context: *anyopaque, fact: session_transition.Fact) anyer
 
 fn finalizeCandidate(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     core: *Core,
     core_state_buffer: []u8,
     fault: ?FaultHook,
@@ -2071,7 +2035,7 @@ fn finalizeCandidate(
     if (task.phase != .final_candidate or response.disposition != .final_answer) {
         return error.FinalAnswerNotCandidate;
     }
-    try stageDurableResponse(session, token, core, response);
+    try stageDurableResponse(session, core, response);
     var final_buffer: [model_protocol.max_response_size]u8 = undefined;
     const expected = try core.reducer.copyResponseWindow(response.text, &final_buffer);
     if (expected.len == 0) {
@@ -2081,10 +2045,10 @@ fn finalizeCandidate(
     if (response_ref == 0) return error.InvalidModelResponseReference;
     const final_ref = finalReference(response_ref);
 
-    var final_blob = session.openBlob(token, final_ref) catch |err| switch (err) {
+    var final_blob = session.openBlob(final_ref) catch |err| switch (err) {
         error.FileNotFound => blk: {
-            try session.storeBlob(token, final_ref, expected);
-            break :blk try session.openBlob(token, final_ref);
+            try session.storeBlob(final_ref, expected);
+            break :blk try session.openBlob(final_ref);
         },
         else => return err,
     };
@@ -2092,9 +2056,9 @@ fn finalizeCandidate(
     try expectBlob(&final_blob, expected);
     try reach(fault, .after_final_blob);
 
-    var entry = try session.readEntry(session.active_leaf_id);
+    var entry = try session.readEntry(session.activeLeafId());
     if (entry.kind != .assistant or entry.content_ref != final_ref) {
-        entry = try session.appendConversation(token, .assistant, final_ref, null);
+        entry = try session.appendConversation(.assistant, final_ref, null);
     }
     try reach(fault, .after_assistant_entry);
     try core.reducer.commitFinalAnswer(entry.entry_id);
@@ -2110,7 +2074,6 @@ fn finalizeCandidate(
     };
     try commitCoreFacts(
         session,
-        token,
         core_state_buffer,
         core,
         &final_facts,
@@ -2121,11 +2084,10 @@ fn finalizeCandidate(
 
 fn stageDurableResponse(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     core: *Core,
     response: core_image.Response,
 ) !void {
-    var blob = try session.openBlob(token, response.content_ref);
+    var blob = try session.openBlob(response.content_ref);
     defer blob.close();
     if (blob.length() == 0 or blob.length() > model_protocol.max_response_size) {
         return error.ResponseTooLarge;
@@ -2156,11 +2118,10 @@ fn expectBlob(reader: *session_store.BlobReader, expected: []const u8) !void {
 
 fn readExactBlob(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     reference: u64,
     out: []u8,
 ) !void {
-    var reader = try session.openBlob(token, reference);
+    var reader = try session.openBlob(reference);
     defer reader.close();
     if (reader.length() != out.len) return error.BlobLengthMismatch;
     const bytes = try reader.readWindow(0, out);
@@ -2169,11 +2130,10 @@ fn readExactBlob(
 
 fn readBoundedBlob(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     reference: u64,
     out: []u8,
 ) ![]const u8 {
-    var reader = try session.openBlob(token, reference);
+    var reader = try session.openBlob(reference);
     defer reader.close();
     if (reader.length() == 0 or reader.length() > out.len) return error.BlobLengthMismatch;
     const bytes = try reader.readWindow(0, out[0..@intCast(reader.length())]);
@@ -2183,13 +2143,12 @@ fn readBoundedBlob(
 
 fn storeOrExpectBlob(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     reference: u64,
     bytes: []const u8,
 ) !void {
-    var reader = session.openBlob(token, reference) catch |err| switch (err) {
+    var reader = session.openBlob(reference) catch |err| switch (err) {
         error.FileNotFound => {
-            try session.storeBlob(token, reference, bytes);
+            try session.storeBlob(reference, bytes);
             return;
         },
         else => return err,
@@ -2209,10 +2168,9 @@ fn storeOrExpectBlob(
 
 fn blobDigest(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     reference: u64,
 ) !u64 {
-    var reader = try session.openBlob(token, reference);
+    var reader = try session.openBlob(reference);
     defer reader.close();
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var window: [4096]u8 = undefined;

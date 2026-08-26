@@ -34,10 +34,10 @@ pub fn main(init: std.process.Init) !void {
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
     _ = try owner.drive();
     const finished = try owner.drive();
-    try expectFinal(&finished, answer);
+    try expectFinal(owner, &finished, answer);
     const borrowed_final = finalProjection(&finished) orelse return error.FinalAnswerProjectionMissing;
     _ = try owner.drive();
-    if (borrowed_final.openContent()) |reader_value| {
+    if (owner.openProjectionContent(borrowed_final)) |reader_value| {
         var reader = reader_value;
         reader.close();
         return error.StaleProjectionRemainedUsable;
@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
     defer restored.close();
     _ = try restored.drive();
     const regenerated = try restored.drive();
-    try expectFinal(&regenerated, answer);
+    try expectFinal(restored, &regenerated, answer);
 
     try lostCompletionNotificationRecovers(&layout, init.io, allocator);
     try offeredPermissionDenialContinues(&layout, init.io, allocator);
@@ -100,7 +100,7 @@ fn uncommittedTaskCanBeReadmitted(
     if (restored.offer(.task) != .accepted) return error.TaskReadmissionRejected;
     _ = try restored.drive();
     const finished = try restored.drive();
-    try expectFinal(&finished, answer);
+    try expectFinal(restored, &finished, answer);
 }
 
 fn cancellationRegenerates(
@@ -196,7 +196,7 @@ fn offeredPermissionDenialContinues(
     } }) != .accepted) return error.PermissionOfferRejected;
     _ = try restored.drive();
     const finished = try restored.drive();
-    try expectFinal(&finished, answer);
+    try expectFinal(restored, &finished, answer);
     const denied = layout.workspace.openFile(io, "denied.txt", .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
@@ -267,7 +267,7 @@ fn restoredPatchApprovalUsesExactDescriptor(
     const regenerated = try restored.drive();
     const approval = approvalProjection(&regenerated) orelse
         return error.ApprovalProjectionMissingAfterRestore;
-    var descriptor = try approval.openContent();
+    var descriptor = try restored.openProjectionContent(approval);
     errdefer descriptor.close();
     var descriptor_bytes: [256]u8 = undefined;
     const actual = try descriptor.readWindow(0, descriptor_bytes[0..patch.len]);
@@ -281,7 +281,7 @@ fn restoredPatchApprovalUsesExactDescriptor(
     } }) != .accepted) return error.PermissionOfferRejected;
     _ = try restored.drive();
     const finished = try restored.drive();
-    try expectFinal(&finished, answer);
+    try expectFinal(restored, &finished, answer);
 }
 
 fn approvedPatchThenShutdownEntersSettlement(
@@ -372,7 +372,7 @@ fn lostCompletionNotificationRecovers(
     const first = try owner.drive();
     const session_id = try sessionProjection(&first);
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
-    try expectInjectedCrash(&owner);
+    try expectInjectedCrash(owner);
     owner.close();
 
     var restored = try harness.Harness.open(.{
@@ -383,7 +383,7 @@ fn lostCompletionNotificationRecovers(
     _ = try restored.drive();
     _ = try restored.drive();
     const recovered = try restored.drive();
-    try expectFinal(&recovered, answer);
+    try expectFinal(restored, &recovered, answer);
 }
 
 fn uncertainModelRetryUsesNewAttempt(
@@ -406,7 +406,7 @@ fn uncertainModelRetryUsesNewAttempt(
     const first = try owner.drive();
     const session_id = try sessionProjection(&first);
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
-    try expectInjectedCrash(&owner);
+    try expectInjectedCrash(owner);
     owner.close();
 
     var restored = try harness.Harness.open(.{
@@ -417,7 +417,7 @@ fn uncertainModelRetryUsesNewAttempt(
     _ = try restored.drive();
     _ = try restored.drive();
     const recovered = try restored.drive();
-    try expectFinal(&recovered, answer);
+    try expectFinal(restored, &recovered, answer);
     if (fixture.calls != 2) return error.ModelRetryDidNotUseSecondAttempt;
 }
 
@@ -443,7 +443,7 @@ fn exhaustedModelRetriesBecomeFailure(
         const first = try owner.drive();
         const id = try sessionProjection(&first);
         if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
-        try expectInjectedCrash(&owner);
+        try expectInjectedCrash(owner);
         break :initial id;
     };
 
@@ -458,7 +458,7 @@ fn exhaustedModelRetriesBecomeFailure(
         });
         defer retry.close();
         _ = try retry.drive();
-        try expectInjectedCrash(&retry);
+        try expectInjectedCrash(retry);
     }
 
     var restored = try harness.Harness.open(.{
@@ -509,7 +509,7 @@ fn uncertainBashNeverReplays(
     const session_id = try sessionProjection(&first);
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
     _ = try owner.drive();
-    try expectInjectedCrash(&owner);
+    try expectInjectedCrash(owner);
     owner.close();
 
     inline for (0..2) |_| {
@@ -540,11 +540,15 @@ fn sessionProjection(progress: *const harness.Progress) !u64 {
     return progress.projections[0].session_id;
 }
 
-fn expectFinal(progress: *const harness.Progress, expected: []const u8) !void {
+fn expectFinal(
+    owner: *harness.Harness,
+    progress: *const harness.Progress,
+    expected: []const u8,
+) !void {
     if (progress.state != .finished) return error.SessionDidNotFinish;
     for (progress.projectionSlice()) |projection| {
         if (projection.kind != .final_answer) continue;
-        var reader = try projection.openContent();
+        var reader = try owner.openProjectionContent(projection);
         defer reader.close();
         var bytes: [256]u8 = undefined;
         if (reader.length() != expected.len) return error.FinalAnswerMismatch;

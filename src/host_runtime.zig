@@ -1,6 +1,7 @@
 const std = @import("std");
 const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
+const session_store = @import("session.zig");
 
 pub const Config = struct {
     sqlite_heap_limit_bytes: u64 = 8 * 1024 * 1024,
@@ -16,6 +17,64 @@ const State = struct {
     storage: host_store.StorageOwner,
     execution: lifecycle.Host = .{},
     harness_owners: std.atomic.Value(usize) = .init(0),
+    retired_lock: std.Io.Mutex = .init,
+    retired: ?*Retired = null,
+};
+
+pub const Retired = struct {
+    next: ?*Retired = null,
+    context: *anyopaque,
+    destroy: *const fn (std.mem.Allocator, *anyopaque) void,
+};
+
+pub const Lease = struct {
+    runtime: *HostRuntime,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    execution: *lifecycle.Host,
+    active: bool = true,
+
+    pub fn acquire(runtime: *HostRuntime) !Lease {
+        try retainHarness(runtime);
+        const value = state(runtime);
+        return .{
+            .runtime = runtime,
+            .io = value.io,
+            .allocator = value.allocator,
+            .execution = &value.execution,
+        };
+    }
+
+    pub fn createSession(self: Lease, config: session_store.Config) !session_store.Session {
+        const value = state(self.runtime);
+        return session_store.Session.create(value.state_root, &value.storage, self.io, config);
+    }
+
+    pub fn restoreSession(self: Lease, session_id: u64) !session_store.Restored {
+        const value = state(self.runtime);
+        return session_store.Session.openExisting(
+            value.state_root,
+            &value.storage,
+            self.io,
+            session_id,
+        );
+    }
+
+    pub fn release(self: *Lease) void {
+        if (!self.active) return;
+        releaseHarness(self.runtime);
+        self.active = false;
+    }
+
+    pub fn retire(self: *Lease, retired: *Retired) void {
+        if (!self.active) return;
+        const value = state(self.runtime);
+        value.retired_lock.lockUncancelable(self.io);
+        retired.next = value.retired;
+        value.retired = retired;
+        value.retired_lock.unlock(self.io);
+        self.release();
+    }
 };
 
 pub const HostRuntime = opaque {
@@ -66,6 +125,12 @@ pub const HostRuntime = opaque {
         host_store.disableProcessHeapLimit();
         runtime.state_root.close(runtime.io);
         const allocator = runtime.allocator;
+        var retired = runtime.retired;
+        while (retired) |node| {
+            const next = node.next;
+            node.destroy(allocator, node.context);
+            retired = next;
+        }
         allocator.destroy(runtime);
         runtime_open.store(false, .release);
     }
@@ -75,7 +140,7 @@ pub const HostRuntime = opaque {
     }
 };
 
-pub fn retainHarness(runtime: *HostRuntime) !void {
+fn retainHarness(runtime: *HostRuntime) !void {
     // Harness.open is serialized against HostRuntime.close by the application
     // owner. Atomic retention supports concurrent Harness opens and closes once
     // each caller already owns a valid runtime reference.
@@ -94,30 +159,10 @@ pub fn retainHarness(runtime: *HostRuntime) !void {
     }
 }
 
-pub fn releaseHarness(runtime: *HostRuntime) void {
+fn releaseHarness(runtime: *HostRuntime) void {
     const value = state(runtime);
     const previous = value.harness_owners.fetchSub(1, .release);
     std.debug.assert(previous > 0 and previous != std.math.maxInt(usize));
-}
-
-pub fn getIo(runtime: *const HostRuntime) std.Io {
-    return state(runtime).io;
-}
-
-pub fn getAllocator(runtime: *const HostRuntime) std.mem.Allocator {
-    return state(runtime).allocator;
-}
-
-pub fn stateRoot(runtime: *const HostRuntime) std.Io.Dir {
-    return state(runtime).state_root;
-}
-
-pub fn storageOwner(runtime: *HostRuntime) *host_store.StorageOwner {
-    return &state(runtime).storage;
-}
-
-pub fn executionHost(runtime: *HostRuntime) *lifecycle.Host {
-    return &state(runtime).execution;
 }
 
 fn state(runtime: *const HostRuntime) *State {

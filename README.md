@@ -27,8 +27,9 @@ compile time and does not vary with logical-agent count.
 Applications open exactly one SQLite-owning `HostRuntime` per process from a state path and pass only
 that runtime to `Harness.open`. It owns the process-wide SQLite allowance, state directory, Activation
 Slot pool, lifetime operating-system lock, SQLite connection, and bounded Storage Owner; lifecycle callers do not assemble or retain those
-mechanics separately. The runtime outlives every Harness opened from it. Each Session retains exact create and resume identity, durable ownership
-epochs, an ordered semantic ledger, and an append-only parent-linked conversation. Sleeping Sessions
+mechanics separately. `Harness.open` returns an opaque pointer-stable owner backed by one retained runtime lease. Projections are data-only and
+reopen content through that live Harness rather than retaining internal pointers. Each Session retains exact create and resume identity, durable ownership
+epochs, one replayable resident value reduced from its ordered semantic ledger, and a linear V1 conversation. Sleeping Sessions
 retain rows and blob references rather than SQLite connections or resident object graphs.
 
 The first agent slice now performs one real durable model turn through the product CLI. A fixture
@@ -67,7 +68,7 @@ Ownership epochs, Completion evidence, Session metadata, Conversation metadata, 
 multi-fact transactions now live behind the same serialized Storage Owner. Session supplies only a
 typed transaction; storage canonically encodes it and derives every relational write. SQLite assigns
 Completion Inbox identity, and the transaction that publishes a terminal Result associates its
-immutable evidence. Per-Session WAL,
+immutable evidence. Only pending relevant evidence consumes the enforced 4,096-row per-Session Inbox bound; consumed evidence is excluded from recovery. Per-Session WAL,
 Inbox, Conversation, checkpoint, and manifest files are no longer production storage paths.
 
 ## Requirements

@@ -183,6 +183,8 @@ test "multiple Completion rows can be consumed by one semantic commit" {
     _ = try owner.commit(.{ .session_id = 41, .epoch = 1 }, transaction(2, &facts));
     try std.testing.expectEqual(@as(?u64, 2), (try owner.readCompletion(41, 1)).consumed_by_sequence);
     try std.testing.expectEqual(@as(?u64, 2), (try owner.readCompletion(41, 2)).consumed_by_sequence);
+    try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(41));
+    try std.testing.expect((try owner.readCompletionAfter(41, 0, 2)) == null);
 }
 
 test "the Host Store lock is host scoped" {

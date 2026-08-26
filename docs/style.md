@@ -54,8 +54,15 @@ deferred explicitly.
   live state. If a platform operation still fails after commit, make the live owner unavailable and
   reconstruct from durable state.
 - Make ownership, generation, identity, and capacity transitions explicit. Stale references fail closed.
+- Let a resource owner retain and validate its own fence. Do not make callers retrieve an ownership token
+  from an object merely to pass it back to that object's methods.
 - Serialize acquisition against destruction for top-level owning handles. A retained-child count protects
   existing children; it does not turn an unretained raw pointer into a concurrent weak reference.
+- Return resource-owning modules through opaque pointer-stable handles. Do not expose copyable values
+  containing mutexes, file handles, leases, or close authority. Public Projections are data-only and
+  reopen content through the live owning Harness.
+- Represent multi-phase recovery with a tagged state. Do not keep booleans beside cursor fields whose
+  validity depends on those booleans.
 - Keep every production query indexed and bounded in input bytes, rows, result bytes, temporary work,
   transaction work, and recovery work. Do not rely on an unbounded sort, aggregation, join, or temporary
   result spilling to disk.

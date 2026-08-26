@@ -66,13 +66,12 @@ pub const ProviderIo = struct {
 
     pub fn open(
         session: *session_store.Session,
-        token: session_store.OwnerToken,
         request_ref: u64,
         response_ref: u64,
     ) !ProviderIo {
-        var request = try session.openBlob(token, request_ref);
+        var request = try session.openBlob(request_ref);
         errdefer request.close();
-        const response = try session.beginBlob(token, response_ref);
+        const response = try session.beginBlob(response_ref);
         return .{ .request = request, .response = response };
     }
 
@@ -96,11 +95,10 @@ pub const ProviderIo = struct {
     pub fn publishProviderFailure(
         self: *ProviderIo,
         session: *session_store.Session,
-        token: session_store.OwnerToken,
         response_ref: u64,
     ) !u64 {
         self.response.abort();
-        return publishFailureResult(session, token, response_ref);
+        return publishFailureResult(session, response_ref);
     }
 
     fn requestLength(context: *anyopaque) u64 {
@@ -126,19 +124,17 @@ pub const ProviderIo = struct {
 
 pub fn publishFailureResult(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     identity: u64,
 ) !u64 {
     const failure_ref = (@as(u64, 1) << 56) | (identity & ((@as(u64, 1) << 56) - 1));
     var buffer: [model_protocol.header_size]u8 = undefined;
     const encoded = try model_protocol.encodeText(&buffer, .provider_error, "");
-    try session.storeBlob(token, failure_ref, encoded);
+    try session.storeBlob(failure_ref, encoded);
     return failure_ref;
 }
 
 pub fn buildRequest(
     session: *session_store.Session,
-    token: session_store.OwnerToken,
     request_ref: u64,
     first_entry: u32,
     entry_count: u32,
@@ -147,9 +143,9 @@ pub fn buildRequest(
         return error.InvalidContextSelection;
     }
     const last = @as(u64, first_entry) + entry_count - 1;
-    if (last > session.entry_count) return error.InvalidContextSelection;
+    if (last > session.entryCount()) return error.InvalidContextSelection;
 
-    var writer = try session.beginBlob(token, request_ref);
+    var writer = try session.beginBlob(request_ref);
     errdefer writer.abort();
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var total: u64 = 0;
@@ -163,7 +159,7 @@ pub fn buildRequest(
     var sequence: u64 = first_entry;
     while (sequence <= last) : (sequence += 1) {
         const entry = try session.readEntry(sequence);
-        var content = try session.openBlob(token, entry.content_ref);
+        var content = try session.openBlob(entry.content_ref);
         defer content.close();
         var entry_header: [entry_header_size]u8 = @splat(0);
         entry_header[0] = @intFromEnum(entry.kind);
@@ -419,8 +415,7 @@ test "request reconstruction walks durable entries through bounded windows" {
         .task = "Explain the repository",
     });
     defer session.close();
-    const token = session.ownerToken();
-    const descriptor = try buildRequest(&session, token, 1001, 1, 1);
+    const descriptor = try buildRequest(&session, 1001, 1, 1);
     try std.testing.expect(descriptor.digest != 0);
     try std.testing.expectEqual(@as(u32, 1), descriptor.entry_count);
 
@@ -429,7 +424,7 @@ test "request reconstruction walks durable entries through bounded windows" {
         .final_answer = "This repository contains one bounded agent core.",
     };
     const provider = fixture.provider();
-    var provider_io = try ProviderIo.open(&session, token, descriptor.request_ref, 1002);
+    var provider_io = try ProviderIo.open(&session, descriptor.request_ref, 1002);
     defer provider_io.close();
     try provider.dispatch(
         provider.context,
@@ -437,7 +432,7 @@ test "request reconstruction walks durable entries through bounded windows" {
         provider_io.responseCapability(),
     );
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const response = try session.readBlob(token, 1002, 0, &response_buffer);
+    const response = try session.readBlob(1002, 0, &response_buffer);
     try std.testing.expectEqual(
         model_protocol.Disposition.final_answer,
         model_protocol.parse(response).disposition,

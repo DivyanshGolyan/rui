@@ -50,6 +50,15 @@ pub const Config = struct {
     recovery_quantum: u8 = default_recovery_quantum,
 };
 
+const RetainedConfig = struct {
+    provider: ?model_operation.Provider,
+    fault: ?FaultHook,
+    bash_cancelled: ?*const std.atomic.Value(bool),
+    permission_mode: PermissionMode,
+    recovery_quantum: u8,
+    created: bool,
+};
+
 pub const Input = union(enum) {
     task,
     permission: PermissionDecision,
@@ -122,20 +131,7 @@ pub const Projection = struct {
     operation_generation: u32 = 0,
     descriptor_digest: u64 = 0,
     content_ref: u64 = 0,
-    session: ?*session_store.Session = null,
-    owner_generation: ?*const u64 = null,
     generation: u64 = 0,
-
-    pub fn openContent(self: Projection) !session_store.BlobReader {
-        const session = self.session orelse return error.ProjectionHasNoContent;
-        const owner_generation = self.owner_generation orelse return error.StaleProjection;
-        if (owner_generation.* != self.generation or self.content_ref == 0 or
-            self.session_id != session.session_id)
-        {
-            return error.StaleProjection;
-        }
-        return session.openBlob(session.ownerToken(), self.content_ref);
-    }
 };
 
 pub const Progress = struct {
@@ -152,8 +148,51 @@ pub const Progress = struct {
     }
 };
 
-pub const Harness = struct {
-    config: Config,
+pub const Harness = opaque {
+    pub fn open(config: Config) !*Harness {
+        var lease = try host_runtime.Lease.acquire(config.runtime);
+        errdefer lease.release();
+        const owner = try lease.allocator.create(HarnessState);
+        errdefer lease.allocator.destroy(owner);
+        owner.* = try HarnessState.init(config, lease);
+        owner.retired = .{
+            .context = owner,
+            .destroy = destroyRetiredHarness,
+        };
+        return @ptrCast(owner);
+    }
+
+    pub fn offer(self: *Harness, input: Input) OfferResult {
+        return harnessState(self).offer(input);
+    }
+
+    pub fn drive(self: *Harness) !Progress {
+        return harnessState(self).drive();
+    }
+
+    pub fn openProjectionContent(
+        self: *Harness,
+        projection: Projection,
+    ) !session_store.BlobReader {
+        const owner = harnessState(self);
+        const session = if (owner.session) |*value| value else return error.StaleProjection;
+        if (projection.generation != owner.projection_generation or projection.content_ref == 0 or
+            projection.session_id != session.session_id)
+        {
+            return error.StaleProjection;
+        }
+        return session.openBlob(projection.content_ref);
+    }
+
+    pub fn close(self: *Harness) void {
+        harnessState(self).close();
+    }
+};
+
+const HarnessState = struct {
+    config: RetainedConfig,
+    lease: host_runtime.Lease,
+    retired: host_runtime.Retired = undefined,
     pending: ?Input = null,
     state: State,
     session: ?session_store.Session = null,
@@ -164,11 +203,11 @@ pub const Harness = struct {
     awaiting_approval: ?lifecycle.ApprovalRequired = null,
     settling_control: ?lifecycle.Control = null,
     recovery_pending: bool = false,
-    runtime_retained: bool = false,
+    closing: bool = false,
     ingress_lock: std.Io.Mutex = .init,
     drive_lock: std.Io.Mutex = .init,
 
-    pub fn open(config: Config) !Harness {
+    fn init(config: Config, lease: host_runtime.Lease) !HarnessState {
         if (config.recovery_quantum == 0) return error.InvalidRecoveryQuantum;
         switch (config.mode) {
             .create => |create| {
@@ -180,40 +219,45 @@ pub const Harness = struct {
             },
             .restore => |restore| if (restore.session_id == 0) return error.InvalidSessionIdentity,
         }
-        try host_runtime.retainHarness(config.runtime);
-        errdefer host_runtime.releaseHarness(config.runtime);
-        var owner: Harness = .{
-            .config = config,
+        var owner: HarnessState = .{
+            .config = switch (config.mode) {
+                .create => |create| .{
+                    .provider = create.provider,
+                    .fault = create.fault,
+                    .bash_cancelled = create.bash_cancelled,
+                    .permission_mode = config.permission_mode,
+                    .recovery_quantum = config.recovery_quantum,
+                    .created = true,
+                },
+                .restore => |restore| .{
+                    .provider = restore.provider,
+                    .fault = restore.fault,
+                    .bash_cancelled = null,
+                    .permission_mode = config.permission_mode,
+                    .recovery_quantum = config.recovery_quantum,
+                    .created = false,
+                },
+            },
+            .lease = lease,
             .state = switch (config.mode) {
                 .create => .ready,
                 .restore => .restoring,
             },
-            .runtime_retained = true,
         };
         errdefer if (owner.session) |*session| session.close();
         switch (config.mode) {
-            .create => |create| owner.session = try session_store.Session.create(
-                host_runtime.stateRoot(config.runtime),
-                host_runtime.storageOwner(config.runtime),
-                host_runtime.getIo(config.runtime),
-                .{
-                    .workspace_path = create.workspace_path,
-                    .model = create.model,
-                    .task = create.task,
-                },
-            ),
+            .create => |create| owner.session = try lease.createSession(.{
+                .workspace_path = create.workspace_path,
+                .model = create.model,
+                .task = create.task,
+            }),
             .restore => |restore| {
-                const restored = try session_store.Session.openExisting(
-                    host_runtime.stateRoot(config.runtime),
-                    host_runtime.storageOwner(config.runtime),
-                    host_runtime.getIo(config.runtime),
-                    restore.session_id,
-                );
+                const restored = try lease.restoreSession(restore.session_id);
                 owner.session = restored.session;
                 owner.recovery_pending = true;
                 const session = &owner.session.?;
-                if (try session.recoveryIsEmpty(session.ownerToken())) {
-                    _ = try session.recoverSemanticWindow(session.ownerToken(), 1);
+                if (try session.recoveryIsEmpty()) {
+                    _ = try session.recoverSemanticWindow(1);
                     owner.recovery_pending = false;
                     owner.setState(.ready);
                 }
@@ -223,9 +267,9 @@ pub const Harness = struct {
         return owner;
     }
 
-    pub fn offer(self: *Harness, input: Input) OfferResult {
+    fn offer(self: *HarnessState, input: Input) OfferResult {
         if (!self.ingress_lock.tryLock()) return .busy;
-        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
+        defer self.ingress_lock.unlock(self.lease.io);
         if (self.state == .closed) return .closed;
         if (self.state == .unavailable) return .unavailable;
         if (self.pending != null) return .full;
@@ -244,18 +288,15 @@ pub const Harness = struct {
         return .accepted;
     }
 
-    pub fn drive(self: *Harness) !Progress {
+    fn drive(self: *HarnessState) !Progress {
         if (!self.drive_lock.tryLock()) return error.HarnessBusy;
-        defer self.drive_lock.unlock(host_runtime.getIo(self.config.runtime));
+        defer self.drive_lock.unlock(self.lease.io);
         if (self.state == .unavailable) return error.HarnessUnavailable;
         if (self.projection_generation == std.math.maxInt(u64)) return error.ProjectionGenerationExhausted;
         self.projection_generation += 1;
         if (self.recovery_pending) {
             const session = &self.session.?;
-            const recovery = session.recoverSemanticWindow(
-                session.ownerToken(),
-                self.config.recovery_quantum,
-            ) catch |err| {
+            const recovery = session.recoverSemanticWindow(self.config.recovery_quantum) catch |err| {
                 self.setState(.unavailable);
                 return err;
             };
@@ -288,7 +329,6 @@ pub const Harness = struct {
                 .kind = if (self.state == .closed) .closed else .cancelled,
                 .session_id = session.session_id,
                 .task_id = session.task_id,
-                .session = session,
             };
             terminal.projection_count = 1;
             return terminal;
@@ -314,23 +354,17 @@ pub const Harness = struct {
                     return error.StalePermissionDecision;
                 }
                 const session = if (self.session) |*value| value else return error.SessionUnavailable;
-                const provider = switch (self.config.mode) {
-                    .create => |create| @as(?model_operation.Provider, create.provider),
-                    .restore => |restore| restore.provider,
-                };
+                const provider = self.config.provider;
                 self.setState(.running);
                 self.final_ref = lifecycle.resolvePermission(
-                    host_runtime.executionHost(self.config.runtime),
-                    host_runtime.getAllocator(self.config.runtime),
+                    self.lease.execution,
+                    self.lease.allocator,
                     session,
                     &self.core_state_buffer,
                     expected,
                     decision.allow,
                     provider,
-                    switch (self.config.mode) {
-                        .create => |create| create.bash_cancelled,
-                        .restore => null,
-                    },
+                    self.config.bash_cancelled,
                     self.completionHook(),
                 ) catch |err| {
                     try self.refreshApprovalRequired(session);
@@ -344,8 +378,8 @@ pub const Harness = struct {
                 const session = if (self.session) |*value| value else return error.SessionUnavailable;
                 self.setState(.running);
                 self.final_ref = lifecycle.acceptCompletion(
-                    host_runtime.executionHost(self.config.runtime),
-                    host_runtime.getAllocator(self.config.runtime),
+                    self.lease.execution,
+                    self.lease.allocator,
                     session,
                     &self.core_state_buffer,
                     .{
@@ -365,10 +399,7 @@ pub const Harness = struct {
                         .result_digest = completion.result_digest,
                     },
                     self.runtimeConfig(),
-                    switch (self.config.mode) {
-                        .create => |create| @as(?model_operation.Provider, create.provider),
-                        .restore => |restore| restore.provider,
-                    },
+                    self.config.provider,
                 ) catch |err| if (self.settlingControl() != null and switch (err) {
                     error.ToolCallDeferred,
                     error.SessionNeedsModel,
@@ -386,58 +417,55 @@ pub const Harness = struct {
             else => {},
         };
         if (self.final_ref != 0) return self.finish(progress);
-        switch (self.config.mode) {
-            .create => |create| {
-                const input = current_input orelse return .{ .state = .ready };
+        if (self.config.created) {
+            const input = current_input orelse return .{ .state = .ready };
+            progress.consumed = 1;
+            if (input != .task) return self.consumeControl(input, progress);
+            self.setState(.running);
+            const session = if (self.session) |*value| value else return error.SessionUnavailable;
+            self.final_ref = lifecycle.advanceCreated(
+                self.lease.execution,
+                session,
+                &self.core_state_buffer,
+                self.runtimeConfig(),
+                self.config.provider orelse return error.SessionNeedsModel,
+            ) catch |err| return self.classifyLifecycleError(err, progress);
+        } else {
+            if (current_input) |input| {
                 progress.consumed = 1;
-                if (input != .task) return self.consumeControl(input, progress);
-                self.setState(.running);
-                const session = if (self.session) |*value| value else return error.SessionUnavailable;
-                self.final_ref = lifecycle.advanceCreated(
-                    host_runtime.executionHost(self.config.runtime),
-                    session,
-                    &self.core_state_buffer,
-                    self.runtimeConfig(),
-                    create.provider,
-                ) catch |err| return self.classifyLifecycleError(err, progress);
-            },
-            .restore => |restore| {
-                if (current_input) |input| {
-                    progress.consumed = 1;
-                    if (input == .shutdown or input == .cancel) {
-                        return self.consumeControl(input, progress);
-                    }
-                    if (input == .task and self.state == .ready) {
-                        const session = if (self.session) |*value| value else return error.SessionUnavailable;
-                        self.setState(.running);
-                        self.final_ref = lifecycle.advanceCreated(
-                            host_runtime.executionHost(self.config.runtime),
-                            session,
-                            &self.core_state_buffer,
-                            self.runtimeConfig(),
-                            restore.provider orelse return error.SessionNeedsModel,
-                        ) catch |err| return self.classifyLifecycleError(err, progress);
-                        if (self.final_ref != 0) return self.finish(progress);
-                        return error.CompletionExpected;
-                    }
-                    return error.InvalidResumeInput;
+                if (input == .shutdown or input == .cancel) {
+                    return self.consumeControl(input, progress);
                 }
-                self.setState(.running);
-                const session = if (self.session) |*value| value else return error.SessionUnavailable;
-                self.final_ref = lifecycle.advanceRestored(
-                    host_runtime.executionHost(self.config.runtime),
-                    host_runtime.getAllocator(self.config.runtime),
-                    session,
-                    &self.core_state_buffer,
-                    self.runtimeConfig(),
-                    restore.provider,
-                ) catch |err| return self.classifyLifecycleError(err, progress);
-            },
+                if (input == .task and self.state == .ready) {
+                    const session = if (self.session) |*value| value else return error.SessionUnavailable;
+                    self.setState(.running);
+                    self.final_ref = lifecycle.advanceCreated(
+                        self.lease.execution,
+                        session,
+                        &self.core_state_buffer,
+                        self.runtimeConfig(),
+                        self.config.provider orelse return error.SessionNeedsModel,
+                    ) catch |err| return self.classifyLifecycleError(err, progress);
+                    if (self.final_ref != 0) return self.finish(progress);
+                    return error.CompletionExpected;
+                }
+                return error.InvalidResumeInput;
+            }
+            self.setState(.running);
+            const session = if (self.session) |*value| value else return error.SessionUnavailable;
+            self.final_ref = lifecycle.advanceRestored(
+                self.lease.execution,
+                self.lease.allocator,
+                session,
+                &self.core_state_buffer,
+                self.runtimeConfig(),
+                self.config.provider,
+            ) catch |err| return self.classifyLifecycleError(err, progress);
         }
         return self.finish(progress);
     }
 
-    fn finish(self: *Harness, initial: Progress) !Progress {
+    fn finish(self: *HarnessState, initial: Progress) !Progress {
         var progress = initial;
         const session = if (self.session) |*value| value else return error.SessionUnavailable;
         const final_ref = self.final_ref;
@@ -449,15 +477,12 @@ pub const Harness = struct {
             .kind = .session,
             .session_id = session.session_id,
             .task_id = session.task_id,
-            .session = session,
         };
         progress.projections[1] = .{
             .kind = .final_answer,
             .session_id = session.session_id,
             .task_id = session.task_id,
             .content_ref = final_ref,
-            .session = session,
-            .owner_generation = &self.projection_generation,
             .generation = self.projection_generation,
         };
         progress.projections[2] = .{
@@ -465,35 +490,29 @@ pub const Harness = struct {
             .session_id = session.session_id,
             .task_id = session.task_id,
             .content_ref = final_ref,
-            .session = session,
-            .owner_generation = &self.projection_generation,
             .generation = self.projection_generation,
         };
         progress.projection_count = 3;
         return progress;
     }
 
-    fn publishSessionIdentity(self: *Harness, restoring: bool) Progress {
+    fn publishSessionIdentity(self: *HarnessState, restoring: bool) Progress {
         const session = &self.session.?;
         self.session_projection_pending = false;
         var identified: Progress = .{
             .state = if (restoring) .restoring else self.state,
-            .more = switch (self.config.mode) {
-                .create => false,
-                .restore => true,
-            },
+            .more = !self.config.created,
         };
         identified.projections[0] = .{
             .kind = .session,
             .session_id = session.session_id,
             .task_id = session.task_id,
-            .session = session,
         };
         identified.projection_count = 1;
         return identified;
     }
 
-    fn consumeControl(self: *Harness, input: Input, progress: Progress) !Progress {
+    fn consumeControl(self: *HarnessState, input: Input, progress: Progress) !Progress {
         var result = progress;
         switch (input) {
             .shutdown => {
@@ -509,7 +528,6 @@ pub const Harness = struct {
                             .kind = .outcome,
                             .session_id = session.session_id,
                             .task_id = session.task_id,
-                            .session = session,
                         };
                         result.projection_count = 1;
                         return result;
@@ -523,7 +541,6 @@ pub const Harness = struct {
                     .kind = .closed,
                     .session_id = session.session_id,
                     .task_id = session.task_id,
-                    .session = session,
                 };
                 result.projection_count = 1;
             },
@@ -540,7 +557,6 @@ pub const Harness = struct {
                             .kind = .outcome,
                             .session_id = session.session_id,
                             .task_id = session.task_id,
-                            .session = session,
                         };
                         result.projection_count = 1;
                         return result;
@@ -554,7 +570,6 @@ pub const Harness = struct {
                     .kind = .cancelled,
                     .session_id = session.session_id,
                     .task_id = session.task_id,
-                    .session = session,
                 };
                 result.projection_count = 1;
             },
@@ -563,21 +578,18 @@ pub const Harness = struct {
         return result;
     }
 
-    fn denyPendingApproval(self: *Harness, session: *session_store.Session) !void {
+    fn denyPendingApproval(self: *HarnessState, session: *session_store.Session) !void {
         try self.refreshApprovalRequired(session);
         const approval = self.approvalSnapshot() orelse return;
         _ = lifecycle.resolvePermission(
-            host_runtime.executionHost(self.config.runtime),
-            host_runtime.getAllocator(self.config.runtime),
+            self.lease.execution,
+            self.lease.allocator,
             session,
             &self.core_state_buffer,
             approval,
             false,
             null,
-            switch (self.config.mode) {
-                .create => |create| create.bash_cancelled,
-                .restore => null,
-            },
+            self.config.bash_cancelled,
             self.completionHook(),
         ) catch |err| {
             try self.refreshApprovalRequired(session);
@@ -589,16 +601,16 @@ pub const Harness = struct {
         try self.refreshApprovalRequired(session);
     }
 
-    fn refreshApprovalRequired(self: *Harness, session: *session_store.Session) !void {
+    fn refreshApprovalRequired(self: *HarnessState, session: *session_store.Session) !void {
         self.setApproval(try lifecycle.pendingApprovalRequired(session));
     }
 
-    fn continueSettlingControl(self: *Harness) !Progress {
+    fn continueSettlingControl(self: *HarnessState) !Progress {
         if (self.settlingControl() == null) return error.MissingSettlingControl;
         const session = if (self.session) |*value| value else return error.SessionUnavailable;
         _ = lifecycle.advanceRestored(
-            host_runtime.executionHost(self.config.runtime),
-            host_runtime.getAllocator(self.config.runtime),
+            self.lease.execution,
+            self.lease.allocator,
             session,
             &self.core_state_buffer,
             self.runtimeConfig(),
@@ -625,7 +637,7 @@ pub const Harness = struct {
     }
 
     fn finishSettlingControl(
-        self: *Harness,
+        self: *HarnessState,
         session: *session_store.Session,
         initial: Progress,
     ) !Progress {
@@ -641,13 +653,12 @@ pub const Harness = struct {
             .kind = if (control == .cancel) .cancelled else .closed,
             .session_id = session.session_id,
             .task_id = session.task_id,
-            .session = session,
         };
         progress.projection_count = 1;
         return progress;
     }
 
-    fn classifyLifecycleError(self: *Harness, err: anyerror, progress: Progress) anyerror!Progress {
+    fn classifyLifecycleError(self: *HarnessState, err: anyerror, progress: Progress) anyerror!Progress {
         var result = progress;
         if (err == error.CompletionOffered) result.dispatched = 1;
         if (err == error.MissingLedgerCoreState) {
@@ -702,14 +713,12 @@ pub const Harness = struct {
             .kind = kind,
             .session_id = session.session_id,
             .task_id = session.task_id,
-            .session = session,
         };
         if (self.approvalSnapshot()) |approval| {
             projection.operation_id = approval.operation_id;
             projection.operation_generation = approval.operation_generation;
             projection.descriptor_digest = approval.descriptor_digest;
             projection.content_ref = approval.descriptor_ref;
-            projection.owner_generation = &self.projection_generation;
             projection.generation = self.projection_generation;
         }
         result.projections[0] = projection;
@@ -731,23 +740,22 @@ pub const Harness = struct {
         };
     }
 
-    fn failureProjection(self: *Harness) Projection {
+    fn failureProjection(self: *HarnessState) Projection {
         const session = &self.session.?;
         return .{
             .kind = .failure,
             .session_id = session.session_id,
             .task_id = session.task_id,
-            .session = session,
         };
     }
 
     fn approvalRequired(context: *anyopaque, approval: lifecycle.ApprovalRequired) anyerror!void {
-        const self: *Harness = @ptrCast(@alignCast(context));
+        const self: *HarnessState = @ptrCast(@alignCast(context));
         self.setApproval(approval);
     }
 
     fn adapterCompletionOffered(context: *anyopaque, evidence: completion_inbox.Envelope) anyerror!void {
-        const self: *Harness = @ptrCast(@alignCast(context));
+        const self: *HarnessState = @ptrCast(@alignCast(context));
         const completion: Completion = .{
             .kind = switch (evidence.kind) {
                 .model => .model,
@@ -771,23 +779,17 @@ pub const Harness = struct {
         }
     }
 
-    fn completionHook(self: *Harness) lifecycle.CompletionHook {
+    fn completionHook(self: *HarnessState) lifecycle.CompletionHook {
         return .{ .context = self, .offered = adapterCompletionOffered };
     }
 
-    fn runtimeConfig(self: *Harness) lifecycle.RuntimeConfig {
+    fn runtimeConfig(self: *HarnessState) lifecycle.RuntimeConfig {
         const session = &self.session.?;
         return .{
             .workspace_path = session.workspacePath(),
-            .fault = switch (self.config.mode) {
-                .create => |create| create.fault,
-                .restore => |restore| restore.fault,
-            },
+            .fault = self.config.fault,
             .bash_policy = self.bashPolicy(),
-            .bash_cancelled = switch (self.config.mode) {
-                .create => |create| create.bash_cancelled,
-                .restore => null,
-            },
+            .bash_cancelled = self.config.bash_cancelled,
             .patch_policy = self.patchPolicy(),
             .approval_required_hook = self.approvalRequiredHook(),
             .completion_hook = self.completionHook(),
@@ -795,12 +797,12 @@ pub const Harness = struct {
         };
     }
 
-    fn approvalRequiredHook(self: *Harness) lifecycle.ApprovalRequiredHook {
+    fn approvalRequiredHook(self: *HarnessState) lifecycle.ApprovalRequiredHook {
         return .{ .context = self, .required = approvalRequired };
     }
 
     fn classifyBash(context: *anyopaque, _: u64, _: bash_tool.Call) anyerror!bash_tool.Decision {
-        const self: *Harness = @ptrCast(@alignCast(context));
+        const self: *HarnessState = @ptrCast(@alignCast(context));
         return if (self.config.permission_mode == .bypass) .allow else .ask;
     }
 
@@ -808,12 +810,12 @@ pub const Harness = struct {
         return error.PermissionInputRequired;
     }
 
-    fn bashPolicy(self: *Harness) bash_tool.Policy {
+    fn bashPolicy(self: *HarnessState) bash_tool.Policy {
         return .{ .context = self, .classify_fn = classifyBash, .ask_fn = requestBashPermission };
     }
 
     fn classifyPatch(context: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!patch_tool.Decision {
-        const self: *Harness = @ptrCast(@alignCast(context));
+        const self: *HarnessState = @ptrCast(@alignCast(context));
         return if (self.config.permission_mode == .bypass) .allow else .ask;
     }
 
@@ -821,11 +823,11 @@ pub const Harness = struct {
         return error.PermissionInputRequired;
     }
 
-    fn patchPolicy(self: *Harness) patch_tool.Policy {
+    fn patchPolicy(self: *HarnessState) patch_tool.Policy {
         return .{ .context = self, .classify_fn = classifyPatch, .ask_fn = requestPatchPermission };
     }
 
-    fn accepts(self: *const Harness, input: Input) bool {
+    fn accepts(self: *const HarnessState, input: Input) bool {
         return switch (input) {
             .task => self.state == .ready,
             .permission => self.state == .waiting,
@@ -836,56 +838,71 @@ pub const Harness = struct {
         };
     }
 
-    fn takePending(self: *Harness) ?Input {
-        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
-        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
+    fn takePending(self: *HarnessState) ?Input {
+        self.ingress_lock.lockUncancelable(self.lease.io);
+        defer self.ingress_lock.unlock(self.lease.io);
         const pending = self.pending;
         self.pending = null;
         return pending;
     }
 
-    fn setState(self: *Harness, state: State) void {
-        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
-        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
+    fn setState(self: *HarnessState, state: State) void {
+        self.ingress_lock.lockUncancelable(self.lease.io);
+        defer self.ingress_lock.unlock(self.lease.io);
         self.state = state;
     }
 
-    fn approvalSnapshot(self: *Harness) ?lifecycle.ApprovalRequired {
-        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
-        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
+    fn approvalSnapshot(self: *HarnessState) ?lifecycle.ApprovalRequired {
+        self.ingress_lock.lockUncancelable(self.lease.io);
+        defer self.ingress_lock.unlock(self.lease.io);
         return self.awaiting_approval;
     }
 
-    fn setApproval(self: *Harness, approval: ?lifecycle.ApprovalRequired) void {
-        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
-        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
+    fn setApproval(self: *HarnessState, approval: ?lifecycle.ApprovalRequired) void {
+        self.ingress_lock.lockUncancelable(self.lease.io);
+        defer self.ingress_lock.unlock(self.lease.io);
         self.awaiting_approval = approval;
     }
 
-    fn settlingControl(self: *Harness) ?lifecycle.Control {
-        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
-        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
+    fn settlingControl(self: *HarnessState) ?lifecycle.Control {
+        self.ingress_lock.lockUncancelable(self.lease.io);
+        defer self.ingress_lock.unlock(self.lease.io);
         return self.settling_control;
     }
 
-    fn setSettlingControl(self: *Harness, control: ?lifecycle.Control) void {
-        self.ingress_lock.lockUncancelable(host_runtime.getIo(self.config.runtime));
-        defer self.ingress_lock.unlock(host_runtime.getIo(self.config.runtime));
+    fn setSettlingControl(self: *HarnessState, control: ?lifecycle.Control) void {
+        self.ingress_lock.lockUncancelable(self.lease.io);
+        defer self.ingress_lock.unlock(self.lease.io);
         self.settling_control = control;
     }
 
-    pub fn close(self: *Harness) void {
+    fn close(self: *HarnessState) void {
+        self.drive_lock.lockUncancelable(self.lease.io);
+        defer self.drive_lock.unlock(self.lease.io);
+        self.ingress_lock.lockUncancelable(self.lease.io);
+        if (self.closing or !self.lease.active) {
+            self.ingress_lock.unlock(self.lease.io);
+            return;
+        }
+        self.closing = true;
         if (self.projection_generation != std.math.maxInt(u64)) self.projection_generation += 1;
+        self.state = .closed;
+        self.pending = null;
+        self.ingress_lock.unlock(self.lease.io);
         if (self.session) |*session| session.close();
         self.session = null;
-        self.pending = null;
-        self.setState(.closed);
-        if (self.runtime_retained) {
-            host_runtime.releaseHarness(self.config.runtime);
-            self.runtime_retained = false;
-        }
+        self.lease.retire(&self.retired);
     }
 };
+
+fn harnessState(harness: *Harness) *HarnessState {
+    return @ptrCast(@alignCast(harness));
+}
+
+fn destroyRetiredHarness(allocator: std.mem.Allocator, context: *anyopaque) void {
+    const owner: *HarnessState = @ptrCast(@alignCast(context));
+    allocator.destroy(owner);
+}
 
 fn openTestRuntime(tmp: *const std.testing.TmpDir) !*HostRuntime {
     return openTestRuntimeConfigured(tmp, .{});
@@ -947,6 +964,59 @@ test "one process owns one SQLite Host Runtime budget" {
     );
 }
 
+test "Harness close is idempotent and releases one Runtime lease" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    var fixture: model_operation.Fixture = .{
+        .expected_task = "task",
+        .final_answer = "done",
+    };
+    const owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:answer",
+            .task = "task",
+            .provider = fixture.provider(),
+        } },
+    });
+    owner.close();
+    owner.close();
+    try runtime.close();
+}
+
+test "Runtime close waits for every opaque Harness lease" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    var first_fixture: model_operation.Fixture = .{ .expected_task = "first", .final_answer = "done" };
+    var second_fixture: model_operation.Fixture = .{ .expected_task = "second", .final_answer = "done" };
+    const first = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:first",
+            .task = "first",
+            .provider = first_fixture.provider(),
+        } },
+    });
+    const second = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:second",
+            .task = "second",
+            .provider = second_fixture.provider(),
+        } },
+    });
+    try std.testing.expectError(error.HostRuntimeBusy, runtime.close());
+    first.close();
+    try std.testing.expectError(error.HostRuntimeBusy, runtime.close());
+    second.close();
+    try runtime.close();
+}
+
 test "restore withholds projections until the configured recovery quantum reaches safety" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -965,11 +1035,11 @@ test "restore withholds projections until the configured recovery quantum reache
             .provider = fixture.provider(),
         } },
     });
-    const session = &created.session.?;
+    const session = &harnessState(created).session.?;
     const session_id = session.session_id;
     for (0..5) |index| {
-        try session.storeBlob(session.ownerToken(), index + 1, "ledger fixture");
-        _ = try session.commitSemantic(session.ownerToken(), &.{session_transition.taskAdmitted(.{
+        try session.storeBlob(index + 1, "ledger fixture");
+        _ = try session.commitSemantic(&.{session_transition.taskAdmitted(.{
             .agent_id = session.agent_id,
             .agent_generation = 1,
             .ownership_epoch = session.ownership_epoch,
@@ -1029,12 +1099,12 @@ test "restore publishes Session identity before reconciling Completion evidence"
     const waiting = try created.drive();
     try std.testing.expectEqual(State.waiting, waiting.state);
     var ignored: u8 = 0;
-    const before = try created.session.?.inspectSemantic(
-        created.session.?.ownerToken(),
+    const created_state = harnessState(created);
+    const before = try created_state.session.?.inspectSemantic(
         &ignored,
         IgnoreReplay.apply,
     );
-    const session_id = created.session.?.session_id;
+    const session_id = created_state.session.?.session_id;
     created.close();
 
     var restored = try Harness.open(.{
@@ -1046,8 +1116,8 @@ test "restore publishes Session identity before reconciling Completion evidence"
     try std.testing.expectEqual(State.restoring, identified.state);
     try std.testing.expectEqual(@as(u8, 1), identified.projection_count);
     try std.testing.expectEqual(ProjectionKind.session, identified.projections[0].kind);
-    const before_reconcile = try restored.session.?.inspectSemantic(
-        restored.session.?.ownerToken(),
+    const restored_state = harnessState(restored);
+    const before_reconcile = try restored_state.session.?.inspectSemantic(
         &ignored,
         IgnoreReplay.apply,
     );
@@ -1055,8 +1125,7 @@ test "restore publishes Session identity before reconciling Completion evidence"
 
     const reconciled = try restored.drive();
     try std.testing.expectEqual(State.finished, reconciled.state);
-    const after_reconcile = try restored.session.?.inspectSemantic(
-        restored.session.?.ownerToken(),
+    const after_reconcile = try restored_state.session.?.inspectSemantic(
         &ignored,
         IgnoreReplay.apply,
     );
@@ -1096,7 +1165,7 @@ test "failed Host Store recovery makes the live Harness unavailable" {
             .provider = fixture.provider(),
         } },
     });
-    const session = &created.session.?;
+    const session = &harnessState(created).session.?;
     const session_id = session.session_id;
     const descriptor = session_transition.operationSubmitted(.{
         .agent = .{
@@ -1108,11 +1177,10 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         .generation = 1,
     }, 11, 12, .none);
     try session.storeBlob(
-        session.ownerToken(),
         descriptor.operation_submitted.descriptor_ref,
         "operation descriptor",
     );
-    _ = try session.commitSemantic(session.ownerToken(), &.{descriptor}, null);
+    _ = try session.commitSemantic(&.{descriptor}, null);
     created.close();
     read_fault.armed = true;
 
@@ -1171,14 +1239,14 @@ test "shutdown denies Approval Required before closing" {
     try std.testing.expectEqual(State.waiting, waiting.state);
     try std.testing.expectEqual(ProjectionKind.approval_required, waiting.projections[0].kind);
     var facts: PermissionFacts = .{};
-    _ = try owner.session.?.inspectSemantic(
-        owner.session.?.ownerToken(),
+    const owner_state = harnessState(owner);
+    _ = try owner_state.session.?.inspectSemantic(
         &facts,
         PermissionFacts.apply,
     );
     try std.testing.expectEqual(@as(u8, 1), facts.approval_required);
     try std.testing.expectEqual(@as(u8, 0), facts.undecided_authorization);
-    const session_id = owner.session.?.session_id;
+    const session_id = owner_state.session.?.session_id;
     owner.close();
 
     var restored = try Harness.open(.{
@@ -1240,7 +1308,7 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
         } },
     });
     defer owner.close();
-    provider.owner = &owner;
+    provider.owner = owner;
     _ = try owner.drive();
     try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
     _ = try owner.drive();
@@ -1312,7 +1380,8 @@ test "known provider failure is one durable terminal Result" {
         } },
     });
     _ = try owner.drive();
-    const session_id = owner.session.?.session_id;
+    const owner_state = harnessState(owner);
+    const session_id = owner_state.session.?.session_id;
     try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
     const waiting = try owner.drive();
     try std.testing.expectEqual(State.waiting, waiting.state);
@@ -1320,8 +1389,7 @@ test "known provider failure is one durable terminal Result" {
     try std.testing.expectEqual(State.failed, failed.state);
     try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
     var facts: ResultFacts = .{};
-    _ = try owner.session.?.inspectSemantic(
-        owner.session.?.ownerToken(),
+    _ = try owner_state.session.?.inspectSemantic(
         &facts,
         ResultFacts.apply,
     );

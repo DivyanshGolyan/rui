@@ -50,8 +50,8 @@ pub fn main(init: std.process.Init) !void {
         });
         defer owner.close();
         const identified = try owner.drive();
-        try renderProgress(init.io, &identified);
-        try pumpOwner(init.io, &owner);
+        try renderProgress(init.io, owner, &identified);
+        try pumpOwner(init.io, owner);
         return;
     }
     {
@@ -129,9 +129,9 @@ fn runCreate(
     });
     defer owner.close();
     const identified = try owner.drive();
-    try renderProgress(io, &identified);
+    try renderProgress(io, owner, &identified);
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
-    try pumpOwner(io, &owner);
+    try pumpOwner(io, owner);
 }
 
 fn pumpOwner(io: std.Io, owner: *harness.Harness) !void {
@@ -139,9 +139,9 @@ fn pumpOwner(io: std.Io, owner: *harness.Harness) !void {
         harness.default_recovery_quantum - 1) / harness.default_recovery_quantum;
     for (0..recovery_drives + 8) |_| {
         const progress = try owner.drive();
-        try renderProgress(io, &progress);
+        try renderProgress(io, owner, &progress);
         if (approvalProjection(&progress)) |approval| {
-            const allow = try promptPermission(io, approval);
+            const allow = try promptPermission(io, owner, approval);
             if (owner.offer(.{ .permission = .{
                 .operation_id = approval.operation_id,
                 .operation_generation = approval.operation_generation,
@@ -164,7 +164,7 @@ fn pumpOwner(io: std.Io, owner: *harness.Harness) !void {
     return error.DriveQuantumExceeded;
 }
 
-fn renderProgress(io: std.Io, progress: *const harness.Progress) !void {
+fn renderProgress(io: std.Io, owner: *harness.Harness, progress: *const harness.Progress) !void {
     for (progress.projectionSlice()) |projection| switch (projection.kind) {
         .session => {
             var id_buffer: [16]u8 = undefined;
@@ -175,7 +175,7 @@ fn renderProgress(io: std.Io, progress: *const harness.Progress) !void {
         },
         .final_answer => {
             try std.Io.File.stdout().writeStreamingAll(io, "Final Answer:\n");
-            try writeFinalAnswer(io, projection);
+            try writeFinalAnswer(io, owner, projection);
             try std.Io.File.stdout().writeStreamingAll(io, "\n");
         },
         .approval_required => try std.Io.File.stdout().writeStreamingAll(
@@ -272,7 +272,7 @@ fn approvalProjection(progress: *const harness.Progress) ?harness.Projection {
     return null;
 }
 
-fn promptPermission(io: std.Io, approval: harness.Projection) !bool {
+fn promptPermission(io: std.Io, owner: *harness.Harness, approval: harness.Projection) !bool {
     var header: [192]u8 = undefined;
     const prompt = try std.fmt.bufPrint(
         &header,
@@ -280,7 +280,7 @@ fn promptPermission(io: std.Io, approval: harness.Projection) !bool {
         .{ approval.operation_id, approval.operation_generation, approval.descriptor_digest },
     );
     try std.Io.File.stdout().writeStreamingAll(io, prompt);
-    var reader = try approval.openContent();
+    var reader = try owner.openProjectionContent(approval);
     defer reader.close();
     var window: [output_window_size]u8 = undefined;
     var offset: u64 = 0;
@@ -337,8 +337,8 @@ fn resolveWorkspacePath(
     return std.fs.path.join(allocator, &.{ cwd, path });
 }
 
-fn writeFinalAnswer(io: std.Io, projection: harness.Projection) !void {
-    var reader = try projection.openContent();
+fn writeFinalAnswer(io: std.Io, owner: *harness.Harness, projection: harness.Projection) !void {
+    var reader = try owner.openProjectionContent(projection);
     defer reader.close();
     var window: [output_window_size]u8 = undefined;
     var safe: [output_window_size]u8 = undefined;

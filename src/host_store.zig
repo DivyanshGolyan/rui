@@ -76,7 +76,7 @@ const completion_schema =
 ;
 const completion_index_schema =
     \\CREATE INDEX completion_inbox_by_session
-    \\ON completion_inbox (session_id, inbox_id)
+    \\ON completion_inbox (session_id, consumed_by_sequence, inbox_id)
 ;
 
 const read_session_sql: [:0]const u8 =
@@ -90,10 +90,19 @@ const claim_ownership_sql: [:0]const u8 =
     \\WHERE session_id = ?1 AND ownership_epoch < 9223372036854775807
     \\RETURNING ownership_epoch
 ;
-const current_ownership_sql: [:0]const u8 =
-    "SELECT ownership_epoch FROM session WHERE session_id = ?1";
 const completion_head_sql: [:0]const u8 =
-    "SELECT inbox_id FROM completion_inbox WHERE session_id = ?1 ORDER BY inbox_id DESC LIMIT 1";
+    "SELECT inbox_id FROM completion_inbox WHERE session_id = ?1 AND consumed_by_sequence IS NULL ORDER BY inbox_id DESC LIMIT 1";
+const pending_completion_count_sql: [:0]const u8 =
+    \\SELECT count(p.inbox_id)
+    \\FROM session AS s
+    \\LEFT JOIN (
+    \\    SELECT inbox_id, session_id FROM completion_inbox
+    \\    WHERE session_id = ?1 AND consumed_by_sequence IS NULL
+    \\    LIMIT 4096
+    \\) AS p ON p.session_id = s.session_id
+    \\WHERE s.session_id = ?1 AND s.agent_id = ?2
+    \\GROUP BY s.session_id
+;
 const find_completion_sql: [:0]const u8 =
     \\SELECT c.inbox_id, c.result_reference, c.result_digest
     \\FROM completion_inbox AS c
@@ -117,7 +126,8 @@ const read_completion_after_sql: [:0]const u8 =
     \\       c.attempt_id, c.result_reference, c.result_digest, c.consumed_by_sequence
     \\FROM completion_inbox AS c
     \\JOIN session AS s ON s.session_id = c.session_id
-    \\WHERE c.session_id = ?1 AND c.inbox_id > ?2 AND c.inbox_id <= ?3
+    \\WHERE c.session_id = ?1 AND c.consumed_by_sequence IS NULL
+    \\  AND c.inbox_id > ?2 AND c.inbox_id <= ?3
     \\ORDER BY c.inbox_id
     \\LIMIT 1
 ;
@@ -205,7 +215,7 @@ pub const SessionIdentity = struct {
     task_id: u64,
     branch_id: u64,
 
-    fn validate(self: SessionIdentity) !void {
+    pub fn validate(self: SessionIdentity) !void {
         const values = [_]u64{
             self.session_id,
             self.agent_id,
@@ -477,24 +487,6 @@ pub const StorageOwner = struct {
         return @intCast(epoch);
     }
 
-    pub fn authorizeSession(self: *StorageOwner, token: OwnerToken) !void {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        if (token.session_id == 0 or token.epoch == 0 or token.epoch > std.math.maxInt(i64)) {
-            return error.StaleOwner;
-        }
-        const statement = try self.prepare(current_ownership_sql);
-        defer finalize(statement);
-        var encoded_session_id: [8]u8 = undefined;
-        try bindIdentity(statement, 1, token.session_id, &encoded_session_id);
-        const result = c.sqlite3_step(statement);
-        if (result != c.SQLITE_ROW) return error.StaleOwner;
-        const epoch = c.sqlite3_column_int64(statement, 0);
-        if (epoch <= 0 or @as(u64, @intCast(epoch)) != token.epoch) return error.StaleOwner;
-        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-    }
-
     pub fn completionHead(self: *StorageOwner, session_id: u64) !u64 {
         self.request_lock.lockUncancelable(self.io);
         defer self.request_lock.unlock(self.io);
@@ -522,6 +514,9 @@ pub const StorageOwner = struct {
         try self.ensureOpen();
         try completion_inbox.validate(envelope);
 
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollbackOrPoison();
+
         var identities: [7][8]u8 = undefined;
         const existing = try self.prepare(find_completion_sql);
         defer finalize(existing);
@@ -543,9 +538,24 @@ pub const StorageOwner = struct {
                 return error.ConflictingCompletionEvidence;
             }
             if (c.sqlite3_step(existing) != c.SQLITE_DONE) return error.CorruptHostStore;
+            try self.execute("COMMIT");
             return @intCast(sequence);
         }
         if (existing_result != c.SQLITE_DONE) return mapSqliteError(existing_result);
+
+        const count = try self.prepare(pending_completion_count_sql);
+        defer finalize(count);
+        try bindIdentity(count, 1, envelope.session_id, &identities[0]);
+        try bindIdentity(count, 2, envelope.agent_id, &identities[2]);
+        const count_result = c.sqlite3_step(count);
+        if (count_result == c.SQLITE_DONE) return error.InvalidCompletionIdentity;
+        if (count_result != c.SQLITE_ROW) return mapSqliteError(count_result);
+        const pending_count = c.sqlite3_column_int64(count, 0);
+        if (pending_count < 0) return error.CorruptHostStore;
+        if (pending_count >= completion_inbox.max_records) {
+            return error.CompletionCapacityExceeded;
+        }
+        if (c.sqlite3_step(count) != c.SQLITE_DONE) return error.CorruptHostStore;
 
         const insert = try self.prepare(
             \\INSERT INTO completion_inbox (
@@ -573,6 +583,7 @@ pub const StorageOwner = struct {
         const inbox_id = c.sqlite3_column_int64(insert, 0);
         if (inbox_id <= 0) return error.CorruptHostStore;
         if (c.sqlite3_step(insert) != c.SQLITE_DONE) return error.CorruptHostStore;
+        try self.execute("COMMIT");
         return @intCast(inbox_id);
     }
 
@@ -759,7 +770,17 @@ pub const StorageOwner = struct {
                     evidence,
                 ),
             },
-            else => {},
+            .task_admitted,
+            .operation_submitted,
+            .operation_accepted,
+            .attempt_admitted,
+            .authorization,
+            .outcome,
+            .cancellation,
+            .shutdown,
+            .result_applied,
+            .approval_required,
+            => {},
         };
     }
 
@@ -1171,7 +1192,16 @@ fn validateCommitIdentity(
 fn isAdmission(transaction: session_transition.Transaction) bool {
     for (transaction.factSlice()) |fact| switch (fact) {
         .task_admitted, .operation_submitted, .attempt_admitted => return true,
-        else => {},
+        .operation_accepted,
+        .authorization,
+        .result,
+        .conversation_advanced,
+        .outcome,
+        .cancellation,
+        .shutdown,
+        .result_applied,
+        .approval_required,
+        => {},
     };
     return false;
 }
@@ -1581,4 +1611,60 @@ test "Completion recovery range is bounded by its Session index" {
         c.SQLITE_STMTSTATUS_AUTOINDEX,
         0,
     ));
+}
+
+test "Completion publication enforces the pending per-Session bound" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+    try owner.createSession(.{
+        .session_id = 8,
+        .agent_id = 9,
+        .task_id = 10,
+        .branch_id = 11,
+    });
+
+    try owner.execute("BEGIN IMMEDIATE");
+    errdefer owner.rollbackOrPoison();
+    const insert = try owner.prepare(
+        \\INSERT INTO completion_inbox (
+        \\    session_id, ownership_epoch, agent_generation,
+        \\    operation_id, operation_generation, attempt_id, evidence_kind,
+        \\    result_reference, result_digest
+        \\) VALUES (?1, ?2, 1, ?3, 1, ?4, 1, ?5, ?6)
+    );
+    defer finalize(insert);
+    var ids: [6][8]u8 = undefined;
+    for (0..completion_inbox.max_records) |index| {
+        try bindIdentity(insert, 1, 8, &ids[0]);
+        try bindIdentity(insert, 2, 1, &ids[1]);
+        try bindIdentity(insert, 3, 100, &ids[2]);
+        try bindIdentity(insert, 4, index + 1, &ids[3]);
+        try bindIdentity(insert, 5, index + 10_000, &ids[4]);
+        try bindIdentity(insert, 6, 200, &ids[5]);
+        try expectDone(c.sqlite3_step(insert));
+        try expectOk(c.sqlite3_reset(insert));
+        try expectOk(c.sqlite3_clear_bindings(insert));
+    }
+    try owner.execute("COMMIT");
+
+    try std.testing.expectError(error.CompletionCapacityExceeded, owner.publishCompletion(.{
+        .kind = .model,
+        .session_id = 8,
+        .ownership_epoch = 1,
+        .agent_id = 9,
+        .agent_generation = 1,
+        .operation_id = 100,
+        .operation_generation = 1,
+        .attempt_id = completion_inbox.max_records + 1,
+        .result_ref = 20_000,
+        .result_digest = 200,
+    }));
 }
