@@ -1,5 +1,9 @@
 # Fixed-credit harness spike
 
+> Historical evidence. The fixed owner-loop results remain useful. ADR-0008 removed the Wasm
+> contract, ADR-0009 replaced the journal/checkpoint storage shape, and current V1 capacity is the
+> single `active_capacity` defined by `ARCHITECTURE.md`.
+
 ## Question
 
 Can task, completion, permission, cancellation, and shutdown producers hand work to one owner without allocating, waiting, growing resident state, or bypassing durable-before-mutation ordering?

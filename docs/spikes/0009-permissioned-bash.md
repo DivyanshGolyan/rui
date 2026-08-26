@@ -1,5 +1,9 @@
 # Permissioned Bash and second model turn
 
+> Historical evidence. The permission and Bash uncertainty decisions remain relevant, but ADR-0009
+> replaces this spike's checkpoint and journal mechanics. Current authority and verification are
+> defined by `ARCHITECTURE.md` and `VERIFICATION.md`.
+
 ## Question
 
 Can OnePage authorize and execute one real shell call without widening the tool vocabulary, retaining

@@ -1,10 +1,9 @@
 # Memory-model spike
 
-> Historical result: this spike established page reuse and durable sleeping agents using
-> JavaScriptCore. Production execution is now native Zig; see
-> [`0011-native-core-image.md`](0011-native-core-image.md). The Wasm build remains a conformance
-> target, so the measurements below are retained as the runtime-cost comparison that motivated the
-> change.
+> Historical evidence. This spike established page reuse and durable dormant agents using
+> JavaScriptCore. Production execution is native Zig; ADR-0008 removed Wasm from V1, ADR-0009
+> replaced the per-Session persistence design with the Host Store, and ADR-0010 makes simplicity a
+> release requirement. The measurements below remain evidence for the decision, not current scope.
 
 ## Question
 

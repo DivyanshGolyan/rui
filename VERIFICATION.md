@@ -25,10 +25,11 @@ This document maps each public architectural claim to required evidence. A claim
 | No silent Bash replay | Process termination after possible command execution always produces an indeterminate Result without redispatch. |
 | Patch reconciliation is honest | Exact preimage, postimage, and divergent Workspace fixtures plus concurrent replacement, symlink, and stale-Authorization cases. |
 | Authorization binds exact execution | Descriptor-digest tests cover tool kind, bytes, Workspace, working directory, environment authority, timeout, generation, and preimage. |
-| Sleeping population does not scale active memory | Increase durable Sessions while holding every resident pool fixed; report RSS tolerance and disk growth separately. |
+| Authoritative bindings are collision-resistant and typed | Domain-separated SHA-256 vectors and type-level mismatch tests cover descriptors, Patch Intent, preimage, postimage, Results, Completions, and ledger records; absence is represented separately from digest bytes. |
+| Dormant population does not scale active memory | Increase Dormant Sessions while holding every resident pool fixed; report RSS tolerance and disk growth separately. |
 | SQLite remains within its host allowance | Process-global current and high-water heap stay below the Host Runtime hard limit for the 32, 64, and 128 KiB cache profiles at increasing Session populations. Page-cache, lookaside, and statement counters are reported as overlapping diagnostics; request and result reservations are reported separately. |
-| Storage work is bounded | Indexed-query plans and worst-case admitted inputs prove each Host Store statement and result remains bounded. Issue #3 owns request-credit and cross-Session fairness evidence. |
-| Topology does not scale activation memory | Flat, deep, wide, and balanced synthetic delegation shapes with equal runnable work and fixed pool capacity. |
+| Storage work is bounded | Indexed-query plans and worst-case admitted inputs prove each Host Store statement and result remains bounded. |
+| Active capacity is startup-fixed | Configure zero, one, exactly full, and one beyond full; prove Slot storage is reserved once, opening beyond capacity acquires no Session ownership, temporary exhaustion does not allocate or spin, and closure work outranks new admission. |
 | Output remains bounded in RAM | Adversarial model and command outputs larger than memory tails, exact durable spool recovery, and steady resident-memory measurements. |
 | Ownership and slot reuse are fenced | Late, duplicate, prior-epoch, future-epoch, stale-window, and generation-exhaustion tests across scrubbed slot reuse. |
 | Terminal output is safe | Control, ANSI, OSC, hyperlink, clipboard, carriage-return, backspace, fragmented UTF-8, and oversized-line fixtures. |
@@ -49,36 +50,28 @@ Storage topology tests start two fresh processes against one Host Store and prov
 
 Point lookups are bounded structurally by primary or unique-key equality. Populated critical range tests execute the exact production statement and reject nonzero `SQLITE_STMTSTATUS_FULLSCAN_STEP`, `SORT`, or `AUTOINDEX`; they do not depend on unstable planner prose. Limits cover request count and bytes, statement parameters, returned rows and bytes, transaction work, recovery work, database pages, and immutable blob references. The 32, 64, and 128 KiB page-cache profiles are test points; larger host-derived profiles use the same semantics.
 
-## Crash matrix
+## Targeted crash evidence
 
-At minimum, fresh-process tests terminate before and after:
+Crash tests belong to the vertical slice whose effect contract they prove. V1 does not multiply every semantic state by every tool and storage failure. Fresh-process tests cover these distinct decisions:
 
-1. immutable content publication;
-2. task or Operation submission commit;
-3. Operation acceptance transaction, immediately before and after SQLite commit;
-4. Attempt admission transaction, immediately before and after SQLite commit;
-5. adapter observation, where an admitted unterminated Attempt becomes conservatively `possibly_executed`;
-6. external execution without terminal evidence;
-7. immutable Result content publication;
-8. Completion Inbox envelope publication;
-9. in-memory Completion offer;
-10. terminal Result Host Store transaction and Inbox evidence association;
-11. Conversation Entry content publication and Session Ledger attachment;
-12. prepared Core State publication in the semantic transaction;
-13. durable Projection regeneration;
-14. slot scrub and release.
+1. termination before Attempt admission is safe to dispatch later, while a committed admitted Attempt is already at the conservative uncertainty boundary;
+2. a model or Bash Attempt terminated after dispatch may have begun is never automatically repeated as the same Attempt;
+3. a patch terminated after mutation recognizes its bound expected postimage and does not reapply;
+4. a patch target matching neither preimage nor postimage stops without writing;
+5. process exit after SQLite commit but before `ResidentState` publication reconstructs exactly the committed transaction;
+6. storage or active-capacity exhaustion admits no new external effect unless its bounded terminal evidence can still use the supported closure path.
 
-The matrix separately crashes after volatile `offer` acceptance and before the corresponding Host Store transaction for Task, Completion, `ask` decision, and cancellation. Completion recovers through the Completion Inbox; the Task is not partially admitted; the user is asked again; cancellation is not silently applied; and no CLI acknowledgement exists before the committed Projection.
-
-Every acknowledged fact must reappear after recovery. A failed transaction never exposes a subset of its semantic facts. An admitted Attempt without a terminal Session Ledger transition is `possibly_executed` unless durable evidence completes it; absence of Inbox evidence never proves `definitely_unsent`. Lost Completion notifications are recovered from the Inbox, and no accepted external effect may disappear, replay under the wrong policy, complete twice, or become model-visible without a committed Conversation Entry.
+Ordinary transaction, reducer, Inbox, Projection, and volatile-ingress tests cover the intermediate ledger states without requiring a separate process-crash fixture for each one. Every acknowledged fact must still reappear after recovery. A failed transaction exposes no subset of its semantic facts, lost Completion notifications recover through the Inbox, and admitted uncertain work never disappears, completes twice, or becomes model-visible without a committed Conversation Entry.
 
 ## Durable-store failures
 
-Tests cover disk exhaustion during immutable content and SQLite writes; `SQLITE_FULL`, `BUSY`, `IOERR`, `CORRUPT`, `NOTADB`, and `NOMEM`; failed sync; invalid canonical payloads; sequence gaps and conflicts; missing content; unsupported Host Store and payload versions; and recovery with every rebuildable view removed. Physical Host Store corruption may make every Session unavailable, and tests must not misreport it as an isolated Session failure.
+OnePage tests its classification and publication behavior, not SQLite's pager implementation. The residual release matrix covers `SQLITE_FULL`, an injected ambiguous `IOERR` at the Storage Owner boundary, corrupt or invalid schema on open, and process exit after a successful commit. `BUSY` is required only if it is reachable through the supported singleton topology; `NOMEM` remains covered by ordinary failed-transaction and unavailable-owner tests. A custom VFS, short-write campaign, and exhaustive allocation failure sweep are outside V1.
+
+Tests also cover invalid canonical payloads, sequence gaps and conflicts, missing immutable content, unsupported Host Store and payload versions, and recovery with rebuildable views removed. Physical Host Store corruption may make every Session unavailable, and tests must not misreport it as an isolated Session failure.
 
 Model-retry recovery repeatedly terminates the process after dispatch but before Completion publication. At the fixed Attempt-history limit, the next restore must publish and apply one durable provider-failure Result without dispatching a ninth Attempt or making the Session unavailable.
 
-Operational tests enforce maximum page count by filling a transaction until admission rolls back, then prove the configured low-water page margin remains available. This evidence does not claim per-Attempt closure capacity; issue #3 must test admission credits against measured worst-case SQLite pages, immutable-blob bytes, and filesystem metadata before scaling in-flight concurrency. Tests also reuse free pages without foreground `VACUUM`. Schema tests open a valid, non-empty but schema-empty SQLite file to prove bootstrap is based on transactional identity rather than file existence. A later host-snapshot test must cover one consistent SQLite snapshot plus its exact immutable-blob closure before claiming recoverable backup. Major shrinking or recovery maintenance requires the Host Store to be offline under its lifetime lock.
+Operational tests enforce maximum page count by filling a transaction until admission rolls back, then prove the configured low-water page margin remains available. Before dispatch, each effect slice proves that its immutable descriptor and known closure evidence are durable and that the remaining terminal representation is bounded. This does not claim guaranteed recovery from arbitrary filesystem exhaustion after a possible effect. Tests also reuse free pages without foreground `VACUUM`. Schema tests open a valid, non-empty but schema-empty SQLite file to prove bootstrap is based on transactional identity rather than file existence. Snapshot, export, collection, shrinking, and migration evidence is post-V1.
 
 ## Resource ledger
 
@@ -99,10 +92,10 @@ No headline may fold these values into the 64 KiB Activation Slot claim.
 
 ## Release gates
 
-Before the live repair demonstration is considered credible:
+Before the V1 demonstration is considered credible:
 
 - the deterministic repair passes through the real CLI and Harness interfaces;
-- the complete crash matrix passes in fresh processes;
+- the targeted effect-specific crash cases and residual storage classifications pass;
 - the Session reconstructs from canonical transactions with rebuildable indexes deleted;
 - the Host Runtime exclusively owns the Host Store and every durable path traverses the Storage Owner;
 - SQLite allocation remains within the validated host allowance across supported cache profiles and increasing Session population;
@@ -110,4 +103,5 @@ Before the live repair demonstration is considered credible:
 - one-file patch reconciliation passes all three Workspace states;
 - both Permission Modes exercise the same validation, Session Ledger, Attempt, and recovery paths;
 - large model and tool outputs remain bounded in resident memory and complete on disk;
-- density results include raw reproducible measurements for fixed resident capacity and increasing sleeping population.
+- density results include raw reproducible measurements for fixed resident capacity and increasing Dormant Session population.
+- `zig build check` discovers every stable first-party Zig source through a production, test, or self-maintaining declaration-coverage root without adding a parallel manual inventory.

@@ -1,12 +1,14 @@
 # Native Core image
 
-> Historical evidence. This spike established the native production path and exact 64 KiB resident allocation. ADR-0006 supersedes its decision to make the complete raw image persistent: the exact allocation is now the Activation Slot, while compact Core State has a canonical durable encoding.
+> Historical evidence. This spike established the native production path and exact 64 KiB resident
+> allocation. ADR-0006 supersedes its raw-image persistence decision, and ADR-0008 removed Wasm from
+> V1. The exact allocation is now the Activation Slot; compact Core State has a canonical durable
+> encoding. The Wasm mechanics below describe the experiment, not current conformance scope.
 
 ## Question
 
-Can OnePage keep the one-page state invariant without paying for a WebAssembly runtime in the
-production path, while retaining an independently compiled target that catches layout and semantic
-drift?
+Could OnePage keep the one-page state invariant without paying for a WebAssembly runtime in the
+production path while experimentally retaining a second compiled target?
 
 ## Decision
 
@@ -23,9 +25,9 @@ This is a stronger boundary than “the Wasm linear memory is one page”:
 - The native call stack, allocator metadata, executable text, host buffers, and operating-system
   pages are measured separately and are not included in the one-page claim.
 
-The production binary neither loads JavaScriptCore nor reads a `.wasm` artifact. The Wasm artifact
-remains valuable because it is a separately compiled representation of the same reducer, not because
-it makes the demonstration easier.
+The production binary neither loaded JavaScriptCore nor read a `.wasm` artifact. At the time of this
+spike, the Wasm artifact was retained as a separately compiled representation of the same reducer.
+ADR-0008 later removed that weak oracle and its extra ABI from V1.
 
 ## Mechanical invariants
 
@@ -82,7 +84,6 @@ allocation close to the actual image size.
 ## Consequence
 
 “One page” now describes a language-level native state image, not a runtime implementation detail.
-It supports the intended single-host shape: sleeping agents are checkpoints and durable records;
-active agents borrow bounded images; and topology or total logical-agent count does not require a
-resident object graph. Wasm remains useful as a portability and conformance oracle, but it is not on
-the user path.
+It supports the intended single-host shape: Dormant Sessions are compact durable state and ledger
+records; active agents borrow bounded slots; and total durable Session count does not require a
+resident object graph. ADR-0008 removed the experimental Wasm oracle from V1.

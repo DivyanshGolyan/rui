@@ -12,8 +12,9 @@ When rules compete, decide in this order:
 
 1. correctness, durability, and security;
 2. bounded resource use;
-3. measured performance;
-4. developer experience.
+3. architectural simplicity;
+4. measured performance;
+5. developer experience.
 
 Do not defer a known defect in the first two priorities. Product scope and non-critical cleanup may be
 deferred explicitly.
@@ -31,6 +32,24 @@ deferred explicitly.
 
 ## Mandatory rules
 
+### Keep the V1 architecture necessary
+
+- Every production module, abstraction, pool, background owner, durable representation, and extension
+  seam must support a current product guarantee, an external-effect boundary, or required release
+  evidence. Hypothetical reuse is not a requirement.
+- Prefer an established dependency or explicit supported-platform assumption for mechanisms that do not
+  need OnePage policy. Do not wrap a dependency with a generalized framework for one implementation.
+- Keep one owner and one representation for each responsibility. Delete or consolidate duplicated
+  protocol state before adding another synchronization path.
+- Add the narrowest complete vertical behavior through existing deep modules. Do not introduce a
+  scheduler, registry, plugin surface, generic tool layer, terminal framework, or maintenance subsystem
+  for a single consumer.
+- A change that adds an architectural surface must name the current consumer, ownership boundary,
+  resource bound, failure contract, and simpler alternative rejected. Cross-cutting additions require an
+  accepted ADR. Missing justification is a standards violation.
+- Prefer deleting superseded paths and issue requirements. Pre-release formats and internal APIs have no
+  compatibility value unless the product contract explicitly grants it.
+
 ### Bound resources and work
 
 - Give every queue, payload, read, record, retry count, output tail, recovery scan, and `drive` quantum
@@ -39,8 +58,6 @@ deferred explicitly.
   flow control.
 - Before adding an architectural surface, sketch its maximum resident memory, durable bytes, CPU work,
   I/O, and recovery work.
-- Keep logical delegation depth independent of resident call-stack or ancestry traversal. Execution,
-  recovery, parsing, and topology traversal are iterative and bounded.
 
 ### Preserve ownership and ordering
 

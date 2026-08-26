@@ -1,5 +1,9 @@
 # Fixture-model Final Answer
 
+> Historical evidence. The deterministic product path remains relevant. ADR-0008 removed the Wasm
+> and JavaScriptCore machinery, and ADR-0009 replaced checkpoints and separate journals with
+> canonical Core State in the Session Ledger.
+
 ## Question
 
 Can the first user-visible OnePage command perform a durable model turn, release its execution page

@@ -1,6 +1,9 @@
 # Atomic checkpoint publication
 
-> Historical evidence. The old-or-new file publication and crash measurements remain valid, but ADR-0007 supersedes this spike's checkpoint-authority conclusion. A State Checkpoint is now a rebuildable view at one Session WAL sequence; the WAL's valid prefix is semantic authority.
+> Historical evidence. The old-or-new file publication and crash measurements remain valid.
+> ADR-0007 first superseded this spike's checkpoint-authority conclusion; ADR-0009 subsequently
+> replaced the physical Session WAL and State Checkpoint with canonical Core State in the Host Store
+> Session Ledger.
 
 ## Question
 
