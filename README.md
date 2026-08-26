@@ -1,13 +1,14 @@
 # OnePage
 
-A single-host coding-agent architecture in which every active Core borrows one exact 64 KiB
+A single-host coding-agent architecture in which every active Core borrows one compile-time-bounded
 Activation Slot from a fixed resident pool.
 
 The production CLI executes a Zig reducer natively and has no embedded language or secondary runtime.
 The target architecture separates compact, canonically encoded Core State from transient
 Activation Slot scratch. Core State is currently 160 bytes; authoritative semantic transactions
-carry it directly. Activation decodes that state into one caller-owned 65,536-byte slot, and
-suspension scrubs the complete slot. A fixed caller-owned pool returns closed capacity instead of allocating a
+carry it directly. Activation decodes that state into one caller-owned slot containing only named
+bounded scratch; V1 removes sizing filler and enforces a 32 KiB ceiling. Suspension scrubs the
+complete slot. A fixed caller-owned pool returns closed capacity instead of allocating a
 fallback slot. Native invariant traces check typed outcomes, rejection-state preservation, semantic
 observations, and canonical restoration rather than slot bytes. Complete Session semantics reconstruct
 from one ordered Session Ledger inside a bounded host-wide SQLite Host Store.
@@ -86,7 +87,7 @@ zig build test -Doptimize=ReleaseSafe
 zig build native-core -Doptimize=ReleaseSafe
 ```
 
-`native-core` reports the exact slot, compact Dormant Session state bytes, process RSS, and 32 randomized
+`native-core` reports the current exact slot, compact Dormant Session state bytes, process RSS, and 32 randomized
 native invariant traces through canonical suspend and poisoned-slot restore.
 
 See the spike notes for architecture, measurements, caveats, and next questions:
@@ -113,6 +114,7 @@ Source audits that informed the architecture:
 - [`docs/research/opencode-sqlite-v2-lessons.md`](docs/research/opencode-sqlite-v2-lessons.md)
 - [`docs/research/sqlite-host-store-practices.md`](docs/research/sqlite-host-store-practices.md)
 - [`docs/research/linting-typechecking-setup.md`](docs/research/linting-typechecking-setup.md)
+- [`docs/research/future-architecture-options.md`](docs/research/future-architecture-options.md)
 
 Historical design records:
 
@@ -134,3 +136,4 @@ Architectural decisions:
 - [`docs/adr/0008-keep-v1-core-native-only.md`](docs/adr/0008-keep-v1-core-native-only.md)
 - [`docs/adr/0009-use-one-host-store-with-session-ledgers.md`](docs/adr/0009-use-one-host-store-with-session-ledgers.md)
 - [`docs/adr/0010-make-simplicity-a-v1-requirement.md`](docs/adr/0010-make-simplicity-a-v1-requirement.md)
+- [`docs/adr/0011-size-the-activation-slot-from-bounded-needs.md`](docs/adr/0011-size-the-activation-slot-from-bounded-needs.md)

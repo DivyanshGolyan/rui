@@ -6,7 +6,7 @@ This document maps each public architectural claim to required evidence. A claim
 
 | Claim | Required evidence |
 | --- | --- |
-| One exact 64 KiB Activation Slot | Compile-time size and alignment assertions over the production slot type; startup pool accounting. |
+| One actual bounded Activation Slot | Compile-time size, alignment, named-component accounting, absence of filler, and `<= 32 KiB` assertions over the production slot type; startup pool accounting from `@sizeOf(ActivationSlot)`. |
 | Core State is independent of slot layout | Canonical codec vectors, unknown-version rejection, and restore into differently poisoned slots with identical semantic outcomes. |
 | No Core activation allocation | Compile-time rejection of allocator-bearing parameter and storage types across every lifecycle method, direct review of Core dependencies, plus complete activate, transition, suspend, restore, and reuse tests. |
 | Native semantic invariants | Randomized accepted and rejected transition traces with typed outcomes, rejection-state preservation, semantic observations, deterministic canonical encoding, and poisoned-slot restoration. |
@@ -77,18 +77,18 @@ Operational tests enforce maximum page count by filling a transaction until admi
 
 Every density and product run reports these categories separately:
 
-- exact configured and occupied Activation Slot bytes;
+- actual Activation Slot size and named components, exact configured reservation, and occupied high-water bytes;
 - native executor stack and thread count;
 - Harness ingress, Completion, adapter-record, and recovery buffers;
 - process-wide SQLite hard heap allowance and current/high-water total; overlapping page-cache, lookaside, and prepared-statement diagnostics; separate Storage Owner request/result bytes;
 - model transport and bounded output tails;
-- whole-process RSS and measurement conditions;
+- whole-process virtual size, physical RSS or platform physical-footprint measure, compressed memory where available, and measurement conditions after slots have been dirtied and released;
 - subprocess RSS where available;
 - Host Store, immutable content, free-page, index, and spool disk bytes;
 - logical, runnable, resident, waiting, and in-flight counts;
 - model Attempts, possible duplicate billing, tool Attempts, and indeterminate effects.
 
-No headline may fold these values into the 64 KiB Activation Slot claim.
+No headline may present the Activation Slot ceiling or reservation as total per-agent process memory.
 
 ## Release gates
 
