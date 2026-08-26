@@ -27,21 +27,20 @@ test "Approval Required and Authorization have distinct canonical payloads" {
     };
     var approval_buffer: [transition.max_payload_size]u8 = undefined;
     var authorization_buffer: [transition.max_payload_size]u8 = undefined;
-    const encoded_approval = try transition.encode(&approval_buffer, 1, approval, null);
-    const encoded_authorization = try transition.encode(
-        &authorization_buffer,
-        1,
-        authorization,
-        null,
-    );
+    var approval_transaction: transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    approval_transaction.facts[0] = approval;
+    var authorization_transaction: transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    authorization_transaction.facts[0] = authorization;
+    const encoded_approval = try transition.encode(&approval_buffer, approval_transaction);
+    const encoded_authorization = try transition.encode(&authorization_buffer, authorization_transaction);
     try std.testing.expect(!std.mem.eql(u8, encoded_approval, encoded_authorization));
     try std.testing.expectEqual(
         approval,
-        (try transition.decode(encoded_approval)).fact,
+        (try transition.decode(1, encoded_approval)).facts[0],
     );
     try std.testing.expectEqual(
         authorization,
-        (try transition.decode(encoded_authorization)).fact,
+        (try transition.decode(1, encoded_authorization)).facts[0],
     );
 }
 
@@ -61,9 +60,11 @@ test "a kind-specific transition carries canonical Core State without native lay
         .reference = 31,
     };
     var buffer: [transition.max_payload_size]u8 = undefined;
-    const encoded = try transition.encode(&buffer, 1, fact, &state);
-    const decoded = try transition.decode(encoded);
+    var transaction: transition.Transaction = .{ .sequence = 1, .fact_count = 1, .core = state };
+    transaction.facts[0] = fact;
+    const encoded = try transition.encode(&buffer, transaction);
+    const decoded = try transition.decode(1, encoded);
     try std.testing.expectEqual(@as(u64, 1), decoded.sequence);
-    try std.testing.expectEqual(fact, decoded.fact);
+    try std.testing.expectEqual(fact, decoded.facts[0]);
     try std.testing.expectEqualSlices(u8, &state, &decoded.core.?);
 }

@@ -1,17 +1,11 @@
 const std = @import("std");
 const blob_store = @import("blob_store.zig");
-const checkpoint = @import("checkpoint.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const core_state = @import("core_state.zig");
 const host_store = @import("host_store.zig");
 const session_transition = @import("session_transition.zig");
 
 pub const workspace_path_capacity = 1024;
-pub const conversation_record_size = 80;
-pub const conversation_version: u16 = 1;
-
-const conversation_magic = "ONECONV\x00";
-const conversation_path = "conversation.log";
 const lock_path = "owner.lock";
 const blobs_path = "blobs";
 
@@ -203,12 +197,11 @@ const SemanticIndex = struct {
         self.last_sequence = transaction.sequence;
     }
 
-    fn emit(
+    fn emitFacts(
         self: *const SemanticIndex,
         context: *anyopaque,
-        apply_fn: *const fn (*anyopaque, session_transition.Transaction) anyerror!void,
+        apply_fn: *const fn (*anyopaque, session_transition.Fact) anyerror!void,
     ) !void {
-        var sequence: u64 = 1;
         const histories = [_]OperationHistory{ self.model, self.consequential };
         for (histories) |history| {
             const facts = [_]?session_transition.Fact{
@@ -217,27 +210,22 @@ const SemanticIndex = struct {
                 history.authorization,
             };
             for (facts) |maybe_fact| if (maybe_fact) |fact| {
-                try applyOne(context, apply_fn, sequence, fact);
-                sequence += 1;
+                try apply_fn(context, fact);
             };
             for (history.attempts[0..history.attempt_count]) |maybe_attempt| {
-                try applyOne(context, apply_fn, sequence, maybe_attempt.?);
-                sequence += 1;
+                try apply_fn(context, maybe_attempt.?);
             }
             if (history.result) |fact| {
-                try applyOne(context, apply_fn, sequence, fact);
-                sequence += 1;
+                try apply_fn(context, fact);
             }
         }
         if (self.open_operation) |fact| {
-            try applyOne(context, apply_fn, sequence, fact);
-            sequence += 1;
+            try apply_fn(context, fact);
         }
         if (self.indeterminate) |fact| {
-            try applyOne(context, apply_fn, sequence, fact);
-            sequence += 1;
+            try apply_fn(context, fact);
         }
-        if (self.control) |fact| try applyOne(context, apply_fn, sequence, fact);
+        if (self.control) |fact| try apply_fn(context, fact);
     }
 };
 
@@ -247,17 +235,6 @@ fn uniqueIndexedFact(existing: ?session_transition.Fact, fact: session_transitio
         return value;
     }
     return fact;
-}
-
-fn applyOne(
-    context: *anyopaque,
-    apply_fn: *const fn (*anyopaque, session_transition.Transaction) anyerror!void,
-    sequence: u64,
-    fact: session_transition.Fact,
-) !void {
-    var transaction: session_transition.Transaction = .{ .sequence = sequence, .fact_count = 1 };
-    transaction.facts[0] = fact;
-    try apply_fn(context, transaction);
 }
 
 pub const RecoveryProgress = struct {
@@ -450,6 +427,7 @@ pub const Session = struct {
     ownership_epoch: u64,
     active_leaf_id: u64,
     entry_count: u64,
+    pending_conversation: ?ConversationEntry = null,
     ledger_sequence: u64 = 0,
     semantic_index: SemanticIndex = .{},
     recovery_sequence: u64 = 1,
@@ -526,17 +504,6 @@ pub const Session = struct {
         try blob_store.put(blobs, io, config.identities.task_id, config.task);
         try syncDir(dir, io);
 
-        var conversation = try dir.createFile(io, conversation_path, .{ .exclusive = true });
-        defer conversation.close(io);
-        try appendEntryFile(conversation, io, 0, .{
-            .kind = .user,
-            .session_id = config.identities.session_id,
-            .entry_id = 1,
-            .parent_id = 0,
-            .task_id = config.identities.task_id,
-            .content_ref = config.identities.task_id,
-            .sequence = 1,
-        });
         try storage.createSessionWithMetadata(.{
             .identities = .{
                 .session_id = config.identities.session_id,
@@ -578,9 +545,6 @@ pub const Session = struct {
         var stored = try storage.readSession(session_id);
         try validateWorkspace(io, stored.workspacePath());
         stored.ownership_epoch = try storage.claimSession(session_id);
-        try validateConversationRoot(dir, io, stored.identities);
-        stored.active_leaf_id = 1;
-        stored.entry_count = 1;
         return .{
             .session = fromStored(io, storage, dir, lock_file, stored, false),
         };
@@ -670,50 +634,36 @@ pub const Session = struct {
         content_ref: u64,
         fault: ?FaultHook,
     ) !ConversationEntry {
-        const stored = try self.storage.readSession(self.session_id);
-        try reconcileConversation(self.dir, self.io, stored.identities, stored.active_leaf_id, stored.entry_count);
-        if (stored.entry_count == std.math.maxInt(u64)) return error.EntryIdentityExhausted;
+        if (self.entry_count == std.math.maxInt(u64)) return error.EntryIdentityExhausted;
 
         const entry: ConversationEntry = .{
             .kind = kind,
             .session_id = self.session_id,
-            .entry_id = stored.entry_count + 1,
-            .parent_id = stored.active_leaf_id,
+            .entry_id = self.entry_count + 1,
+            .parent_id = self.active_leaf_id,
             .task_id = self.task_id,
             .content_ref = content_ref,
-            .sequence = stored.entry_count + 1,
+            .sequence = self.entry_count + 1,
         };
-        var conversation = try self.dir.openFile(self.io, conversation_path, .{ .mode = .read_write });
-        defer conversation.close(self.io);
-        const actual_count = (try conversation.length(self.io)) / conversation_record_size;
-        if (actual_count == stored.entry_count + 1) {
-            const prepared = try readEntryFile(conversation, self.io, stored.entry_count);
-            if (prepared.kind != kind or prepared.content_ref != content_ref or
-                prepared.parent_id != stored.active_leaf_id)
-            {
-                return error.UncommittedConversationConflict;
-            }
-            return prepared;
+        if (self.pending_conversation) |pending| {
+            if (!std.meta.eql(pending, entry)) return error.UncommittedConversationConflict;
+            return pending;
         }
-        try appendEntryFile(conversation, self.io, stored.entry_count, entry);
+        self.pending_conversation = entry;
         if (fault) |hook| try hook.reached(hook.context, .after_entry_sync);
         return entry;
     }
 
     fn validatePreparedConversationEntry(self: *Session, fact: session_transition.Fact) !void {
-        const stored = try self.storage.readSession(self.session_id);
-        try reconcileConversation(self.dir, self.io, stored.identities, stored.active_leaf_id, stored.entry_count);
-        if (fact.subject <= stored.entry_count) {
+        if (fact.subject <= self.entry_count) {
             const existing = try self.readEntry(fact.subject);
             if (existing.content_ref != fact.reference) return error.ConversationLedgerMismatch;
             return;
         }
-        if (fact.subject != stored.entry_count + 1) return error.ConversationLedgerGap;
-        var conversation = try self.dir.openFile(self.io, conversation_path, .{});
-        defer conversation.close(self.io);
-        const entry = try readEntryFile(conversation, self.io, stored.entry_count);
+        if (fact.subject != self.entry_count + 1) return error.ConversationLedgerGap;
+        const entry = self.pending_conversation orelse return error.MissingPreparedConversationEntry;
         if (entry.entry_id != fact.subject or entry.sequence != fact.subject or
-            entry.parent_id != stored.active_leaf_id or entry.content_ref != fact.reference or
+            entry.parent_id != self.active_leaf_id or entry.content_ref != fact.reference or
             entry.session_id != self.session_id or entry.task_id != self.task_id)
         {
             return error.ConversationLedgerMismatch;
@@ -725,6 +675,7 @@ pub const Session = struct {
         std.debug.assert(fact.subject == self.entry_count + 1);
         self.active_leaf_id = fact.subject;
         self.entry_count = fact.subject;
+        self.pending_conversation = null;
     }
 
     fn reconstructConversationEntry(self: *Session, fact: session_transition.Fact) !void {
@@ -734,9 +685,7 @@ pub const Session = struct {
             return;
         }
         if (fact.subject != self.entry_count + 1) return error.ConversationLedgerGap;
-        var conversation = try self.dir.openFile(self.io, conversation_path, .{});
-        defer conversation.close(self.io);
-        const entry = try readEntryFile(conversation, self.io, self.entry_count);
+        const entry = try self.loadEntry(fact.subject);
         if (entry.entry_id != fact.subject or entry.sequence != fact.subject or
             entry.parent_id != self.active_leaf_id or entry.content_ref != fact.reference or
             entry.session_id != self.session_id or entry.task_id != self.task_id)
@@ -750,9 +699,24 @@ pub const Session = struct {
     pub fn readEntry(self: *Session, sequence: u64) !ConversationEntry {
         if (!self.open) return error.SessionClosed;
         if (sequence == 0 or sequence > self.entry_count) return error.InvalidEntrySequence;
-        var conversation = try self.dir.openFile(self.io, conversation_path, .{});
-        defer conversation.close(self.io);
-        return readEntryFile(conversation, self.io, sequence - 1);
+        return self.loadEntry(sequence);
+    }
+
+    fn loadEntry(self: *Session, sequence: u64) !ConversationEntry {
+        const stored = try self.storage.readConversationEntry(self.session_id, sequence);
+        if (stored.committed_by_sequence == null and self.ledger_sequence != 0) {
+            return error.InvalidEntrySequence;
+        }
+        const kind = std.enums.fromInt(EntryKind, stored.kind) orelse return error.UnsupportedConversationKind;
+        return .{
+            .kind = kind,
+            .session_id = self.session_id,
+            .entry_id = stored.entry_id,
+            .parent_id = stored.parent_id,
+            .task_id = self.task_id,
+            .content_ref = stored.content_ref,
+            .sequence = stored.entry_id,
+        };
     }
 
     pub fn storeBlob(
@@ -818,7 +782,7 @@ pub const Session = struct {
         if (facts.len == 0 or facts.len > session_transition.max_facts) {
             return error.InvalidSemanticFactCount;
         }
-        if (self.ledger_sequence > std.math.maxInt(u64) - facts.len) {
+        if (self.ledger_sequence == std.math.maxInt(u64)) {
             return error.SessionSequenceExhausted;
         }
         if (encoded_core) |bytes| {
@@ -830,41 +794,67 @@ pub const Session = struct {
             try self.validatePreparedBlobReferences(fact);
         }
 
+        var transaction: session_transition.Transaction = .{
+            .sequence = self.ledger_sequence + 1,
+            .fact_count = @intCast(facts.len),
+            .core = if (encoded_core) |bytes| bytes[0..core_state.encoded_size].* else null,
+        };
+        @memcpy(transaction.facts[0..facts.len], facts);
         var prepared_index = self.semantic_index;
-        var payload_buffers: [session_transition.max_facts][session_transition.max_payload_size]u8 = undefined;
-        var records: [session_transition.max_facts]host_store.PreparedRecord = undefined;
-        for (facts, 0..) |fact, index| {
-            const sequence = self.ledger_sequence + index + 1;
-            const core = if (index + 1 == facts.len) encoded_core else null;
-            const canonical_fact = fact;
-            const payload = try session_transition.encode(
-                &payload_buffers[index],
-                sequence,
-                canonical_fact,
-                core,
-            );
-            const digest = try session_transition.digest(payload);
-            records[index] = .{
-                .payload_version = session_transition.payload_version,
-                .kind = canonical_fact.kind,
-                .payload = payload,
-                .digest = digest,
-            };
-            var transaction: session_transition.Transaction = .{
-                .sequence = sequence,
-                .fact_count = 1,
-                .core = if (core) |bytes| bytes[0..core_state.encoded_size].* else null,
-            };
-            transaction.facts[0] = fact;
-            try prepared_index.apply(transaction);
-        }
+        try prepared_index.apply(transaction);
 
-        const final_sequence = try self.storage.appendBatch(.{
-            .session_id = self.session_id,
+        var conversations: [session_transition.max_facts]host_store.ConversationInsert = undefined;
+        var conversation_count: usize = 0;
+        var completions: [session_transition.max_facts]host_store.CompletionAssociation = undefined;
+        var completion_count: usize = 0;
+        var capacity_class: host_store.CapacityClass = .closure;
+        for (facts) |fact| {
+            if (fact.kind == .task_admitted or fact.kind == .operation_submitted or
+                fact.kind == .attempt_admitted) capacity_class = .admission;
+            if (fact.kind == .conversation_advanced) {
+                const entry = if (fact.subject == 1) ConversationEntry{
+                    .kind = .user,
+                    .session_id = self.session_id,
+                    .entry_id = 1,
+                    .parent_id = 0,
+                    .task_id = self.task_id,
+                    .content_ref = self.task_id,
+                    .sequence = 1,
+                } else self.pending_conversation orelse return error.MissingPreparedConversationEntry;
+                conversations[conversation_count] = .{
+                    .entry_id = entry.entry_id,
+                    .parent_id = entry.parent_id,
+                    .kind = @intFromEnum(entry.kind),
+                    .content_ref = entry.content_ref,
+                };
+                conversation_count += 1;
+            }
+            if (fact.kind == .result and fact.attempt_id != 0) {
+                completions[completion_count] = .{
+                    .ownership_epoch = fact.ownership_epoch,
+                    .agent_id = fact.agent_id,
+                    .agent_generation = fact.agent_generation,
+                    .operation_id = fact.operation_id,
+                    .operation_generation = fact.generation,
+                    .attempt_id = fact.attempt_id,
+                    .evidence_kind = fact.evidence_kind,
+                    .result_reference = fact.reference,
+                    .result_digest = fact.digest,
+                };
+                completion_count += 1;
+            }
+        }
+        var payload_buffer: [session_transition.max_payload_size]u8 = undefined;
+        const payload = try session_transition.encode(&payload_buffer, transaction);
+        const final_sequence = try self.storage.commit(.{
+            .token = .{ .session_id = self.session_id, .epoch = self.ownership_epoch },
             .expected_sequence = self.ledger_sequence,
-            .records = records[0..facts.len],
+            .payload = payload,
+            .conversations = conversations[0..conversation_count],
+            .completions = completions[0..completion_count],
+            .capacity_class = capacity_class,
         });
-        std.debug.assert(final_sequence == self.ledger_sequence + facts.len);
+        std.debug.assert(final_sequence == transaction.sequence);
         self.ledger_sequence = final_sequence;
         self.semantic_index = prepared_index;
         for (facts) |fact| {
@@ -893,15 +883,15 @@ pub const Session = struct {
         }
     }
 
-    pub fn replaySemantic(
+    pub fn inspectSemantic(
         self: *Session,
         token: OwnerToken,
         context: *anyopaque,
-        apply: *const fn (*anyopaque, session_transition.Transaction) anyerror!void,
+        apply: *const fn (*anyopaque, session_transition.Fact) anyerror!void,
     ) !LedgerView {
         try self.authorize(token);
         if (!self.recovery_complete) return error.SessionRecoveryIncomplete;
-        try self.semantic_index.emit(context, apply);
+        try self.semantic_index.emitFacts(context, apply);
         const view: LedgerView = .{
             .last_sequence = self.semantic_index.last_sequence,
             .last_core = self.semantic_index.last_core,
@@ -936,16 +926,10 @@ pub const Session = struct {
                     self.recovery_sequence,
                     &stored,
                 );
-                if (stored.payload_version != session_transition.payload_version) {
-                    return error.UnsupportedTransitionPayloadVersion;
-                }
-                const decoded = try session_transition.decode(stored.payloadSlice());
-                var transaction: session_transition.Transaction = .{
-                    .sequence = stored.sequence,
-                    .fact_count = 1,
-                    .core = decoded.core,
-                };
-                transaction.facts[0] = decoded.fact;
+                const transaction = try session_transition.decode(
+                    stored.sequence,
+                    stored.payloadSlice(),
+                );
                 var prepared_index = self.semantic_index;
                 try prepared_index.apply(transaction);
                 for (transaction.factSlice()) |fact| {
@@ -957,7 +941,6 @@ pub const Session = struct {
                 continue;
             }
             if (self.recovery_inbox_sequence == 1) {
-                try self.validateCheckpointSequence(self.recovery_ledger_head);
                 self.ledger_sequence = self.recovery_ledger_head;
             }
             if (self.recovery_inbox_sequence <= self.recovery_inbox_head) {
@@ -976,43 +959,11 @@ pub const Session = struct {
                 processed += 1;
                 continue;
             }
-            try self.storage.rebuildConversationProjection(
-                self.session_id,
-                self.active_leaf_id,
-                self.entry_count,
-            );
-            const stored = try self.storage.readSession(self.session_id);
-            try reconcileConversation(
-                self.dir,
-                self.io,
-                stored.identities,
-                self.active_leaf_id,
-                self.entry_count,
-            );
             self.recovery_complete = true;
             self.recovery_started = false;
             return .{ .processed = processed, .more = false };
         }
         return .{ .processed = processed, .more = true };
-    }
-
-    fn validateCheckpointSequence(self: *Session, ledger_head: u64) !void {
-        var checkpoint_bytes: [checkpoint.encoded_size]u8 = undefined;
-        const stored = self.storage.readCheckpoint(
-            self.session_id,
-            &checkpoint_bytes,
-        ) catch |err| switch (err) {
-            error.CheckpointNotFound => return,
-            error.CorruptCheckpoint, error.CheckpointDigestMismatch => return,
-            else => return err,
-        };
-        if (stored.payload_version != checkpoint.version) return error.UnsupportedCheckpointVersion;
-        if (stored.payload_length != checkpoint_bytes.len) return;
-        const decoded = checkpoint.decode(&checkpoint_bytes, self.agent_id, 1) catch |err| switch (err) {
-            error.UnsupportedVersion => return err,
-            else => return, // Corrupt cache bytes never override the Session Ledger.
-        };
-        if (decoded.ledger_sequence > ledger_head) return error.CheckpointAheadOfLedger;
     }
 
     pub fn publishCompletionEvidence(
@@ -1049,44 +1000,6 @@ pub const Session = struct {
             if (maybe_envelope) |envelope| try apply(context, envelope);
         }
         return 0;
-    }
-
-    pub fn publishCheckpoint(
-        self: *Session,
-        token: OwnerToken,
-        generation: u32,
-        encoded: []u8,
-        state: []const u8,
-    ) !void {
-        try self.authorize(token);
-        try checkpoint.encode(encoded, self.agent_id, generation, self.ledger_sequence, state);
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(encoded, &digest, .{});
-        try self.storage.putCheckpoint(.{
-            .session_id = self.session_id,
-            .sequence = self.ledger_sequence,
-            .payload_version = checkpoint.version,
-            .payload = encoded,
-            .digest = digest,
-        });
-    }
-
-    pub fn restoreCheckpoint(
-        self: *Session,
-        token: OwnerToken,
-        generation: u32,
-        encoded: []u8,
-        state: []u8,
-    ) !void {
-        try self.authorize(token);
-        if (encoded.len != checkpoint.encoded_size or state.len != checkpoint.state_size) {
-            return error.InvalidCheckpointBuffer;
-        }
-        const stored = try self.storage.readCheckpoint(self.session_id, encoded);
-        if (stored.payload_version != checkpoint.version) return error.UnsupportedCheckpointVersion;
-        if (stored.payload_length != encoded.len) return error.TruncatedCheckpoint;
-        const restored = try checkpoint.decode(encoded, self.agent_id, generation);
-        @memcpy(state, restored.state);
     }
 
     pub fn close(self: *Session) void {
@@ -1190,150 +1103,6 @@ fn readSmallFile(dir: std.Io.Dir, io: std.Io, path: []const u8, buffer: []u8) ![
     const actual = try file.readPositionalAll(io, buffer[0..length], 0);
     if (actual != length) return error.TruncatedControlFile;
     return std.mem.trim(u8, buffer[0..length], " \t\r\n");
-}
-
-fn encodeEntry(out: *[conversation_record_size]u8, entry: ConversationEntry) !void {
-    if (entry.session_id == 0 or entry.entry_id == 0 or entry.task_id == 0 or
-        entry.content_ref == 0 or entry.sequence == 0 or entry.entry_id != entry.sequence)
-    {
-        return error.InvalidConversationEntry;
-    }
-    if ((entry.sequence == 1 and entry.parent_id != 0) or
-        (entry.sequence > 1 and
-            (entry.parent_id == 0 or entry.parent_id >= entry.entry_id)))
-    {
-        return error.InvalidConversationParent;
-    }
-    @memset(out, 0);
-    @memcpy(out[0..conversation_magic.len], conversation_magic);
-    write(u16, out, 8, conversation_version);
-    out[10] = @intFromEnum(entry.kind);
-    out[11] = 0;
-    write(u64, out, 12, entry.session_id);
-    write(u64, out, 20, entry.entry_id);
-    write(u64, out, 28, entry.parent_id);
-    write(u64, out, 36, entry.task_id);
-    write(u64, out, 44, entry.content_ref);
-    write(u64, out, 52, entry.sequence);
-    write(u32, out, 60, std.hash.Crc32.hash(out[0..60]));
-}
-
-fn decodeEntry(bytes: *const [conversation_record_size]u8) !ConversationEntry {
-    if (!std.mem.eql(u8, bytes[0..conversation_magic.len], conversation_magic)) {
-        return error.InvalidConversationMagic;
-    }
-    if (read(u16, bytes, 8) != conversation_version) return error.UnsupportedConversationVersion;
-    if (bytes[11] != 0) return error.UnsupportedConversationFlags;
-    for (bytes[64..]) |byte| {
-        if (byte != 0) return error.NonzeroConversationReservedByte;
-    }
-    if (read(u32, bytes, 60) != std.hash.Crc32.hash(bytes[0..60])) {
-        return error.ConversationChecksumMismatch;
-    }
-    const kind: EntryKind = switch (bytes[10]) {
-        1 => .user,
-        2 => .assistant,
-        3 => .tool_result,
-        4 => .context_checkpoint,
-        else => return error.InvalidConversationKind,
-    };
-    const entry: ConversationEntry = .{
-        .kind = kind,
-        .session_id = read(u64, bytes, 12),
-        .entry_id = read(u64, bytes, 20),
-        .parent_id = read(u64, bytes, 28),
-        .task_id = read(u64, bytes, 36),
-        .content_ref = read(u64, bytes, 44),
-        .sequence = read(u64, bytes, 52),
-    };
-    var canonical: [conversation_record_size]u8 = undefined;
-    try encodeEntry(&canonical, entry);
-    if (!std.mem.eql(u8, bytes, &canonical)) return error.NonCanonicalConversationEntry;
-    return entry;
-}
-
-fn appendEntryFile(
-    file: std.Io.File,
-    io: std.Io,
-    expected_count: u64,
-    entry: ConversationEntry,
-) !void {
-    const stat = try file.stat(io);
-    const expected_offset = std.math.mul(u64, expected_count, conversation_record_size) catch {
-        return error.ConversationTooLarge;
-    };
-    if (stat.size != expected_offset) return error.ConversationLengthMismatch;
-    var encoded: [conversation_record_size]u8 = undefined;
-    try encodeEntry(&encoded, entry);
-    try file.writePositionalAll(io, &encoded, expected_offset);
-    try file.sync(io);
-}
-
-fn readEntryFile(file: std.Io.File, io: std.Io, zero_based_index: u64) !ConversationEntry {
-    const offset = std.math.mul(u64, zero_based_index, conversation_record_size) catch {
-        return error.ConversationTooLarge;
-    };
-    var encoded: [conversation_record_size]u8 = undefined;
-    const bytes_read = try file.readPositionalAll(io, &encoded, offset);
-    if (bytes_read != conversation_record_size) return error.TruncatedConversationEntry;
-    return decodeEntry(&encoded);
-}
-
-fn reconcileConversation(
-    dir: std.Io.Dir,
-    io: std.Io,
-    identities: host_store.SessionIdentity,
-    active_leaf_id: u64,
-    entry_count: u64,
-) !void {
-    var conversation = try dir.openFile(io, conversation_path, .{});
-    defer conversation.close(io);
-    const stat = try conversation.stat(io);
-    if (stat.size % conversation_record_size != 0) return error.TruncatedConversationEntry;
-    const actual_count = stat.size / conversation_record_size;
-    if (actual_count < entry_count or actual_count > entry_count + 1) {
-        return error.ConversationLengthMismatch;
-    }
-    if (actual_count == 0) return error.MissingConversationRoot;
-    const last = try readEntryFile(conversation, io, actual_count - 1);
-    if (last.session_id != identities.session_id or
-        last.task_id != identities.task_id or
-        last.sequence != actual_count)
-    {
-        return error.ConversationIdentityMismatch;
-    }
-    if (actual_count == entry_count) {
-        if (last.entry_id != active_leaf_id) return error.ActiveLeafMismatch;
-        return;
-    }
-    if (last.parent_id != active_leaf_id) return error.ActiveLeafMismatch;
-}
-
-fn validateConversationRoot(
-    dir: std.Io.Dir,
-    io: std.Io,
-    identities: host_store.SessionIdentity,
-) !void {
-    var conversation = try dir.openFile(io, conversation_path, .{});
-    defer conversation.close(io);
-    const stat = try conversation.stat(io);
-    if (stat.size < conversation_record_size or stat.size % conversation_record_size != 0) {
-        return error.TruncatedConversationEntry;
-    }
-    const root = try readEntryFile(conversation, io, 0);
-    if (root.session_id != identities.session_id or root.task_id != identities.task_id or
-        root.entry_id != 1 or root.sequence != 1 or root.parent_id != 0)
-    {
-        return error.ConversationIdentityMismatch;
-    }
-}
-
-fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
-    std.mem.writeInt(T, out[offset..][0..@sizeOf(T)], value, .little);
-}
-
-fn read(comptime T: type, input: []const u8, offset: usize) T {
-    return std.mem.readInt(T, input[offset..][0..@sizeOf(T)], .little);
 }
 
 fn testConfig(workspace_path: []const u8, session_id: u64) CreateConfig {
@@ -1746,50 +1515,6 @@ test "conversation advances only after its Ledger fact commits" {
     );
 }
 
-test "recovery rebuilds a stale Conversation projection from the Session Ledger" {
-    const io = std.testing.io;
-    var layout = try TestLayout.init(io);
-    defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 25));
-    const token = created.ownerToken();
-    try created.storeBlob(token, 900, "Rebuilt from authority.");
-    const assistant = try created.appendConversation(token, .assistant, 900, null);
-    _ = try created.commitSemantic(token, &.{.{
-        .kind = .conversation_advanced,
-        .agent_id = created.agent_id,
-        .agent_generation = 1,
-        .ownership_epoch = created.ownership_epoch,
-        .subject = assistant.entry_id,
-        .reference = assistant.content_ref,
-    }}, null);
-    try layout.storage.rebuildConversationProjection(25, 1, 1);
-    created.close();
-
-    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 25);
-    defer restored.session.close();
-    while ((try restored.session.recoverSemanticWindow(restored.session.ownerToken(), 1)).more) {}
-    try std.testing.expectEqual(@as(u64, 2), restored.session.active_leaf_id);
-    try std.testing.expectEqualDeep(assistant, try restored.session.readEntry(2));
-    const rebuilt = try layout.storage.readSession(25);
-    try std.testing.expectEqual(@as(u64, 2), rebuilt.active_leaf_id);
-    try std.testing.expectEqual(@as(u64, 2), rebuilt.entry_count);
-}
-
-test "conversation records preserve parent links needed by future forks" {
-    const entry: ConversationEntry = .{
-        .kind = .assistant,
-        .session_id = 1,
-        .entry_id = 3,
-        .parent_id = 1,
-        .task_id = 2,
-        .content_ref = 4,
-        .sequence = 3,
-    };
-    var encoded: [conversation_record_size]u8 = undefined;
-    try encodeEntry(&encoded, entry);
-    try std.testing.expectEqualDeep(entry, try decodeEntry(&encoded));
-}
-
 const AppendCrash = struct {
     fn reached(_: *anyopaque, boundary: AppendBoundary) anyerror!void {
         if (boundary == .after_entry_sync) return error.InjectedCrash;
@@ -1925,30 +1650,4 @@ test "resume rejects a missing recorded workspace before advancing ownership" {
     );
     const stored = try layout.storage.readSession(85);
     try std.testing.expectEqual(@as(u64, 1), stored.ownership_epoch);
-}
-
-test "resume publishes the new epoch before conversation reconstruction" {
-    const io = std.testing.io;
-    var layout = try TestLayout.init(io);
-    defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 90));
-    created.close();
-
-    var name_buffer: [16]u8 = undefined;
-    var session_dir = try layout.sessions.openDir(io, sessionName(90, &name_buffer), .{});
-    defer session_dir.close(io);
-    var conversation = try session_dir.openFile(io, conversation_path, .{ .mode = .read_write });
-    defer conversation.close(io);
-    var byte: [1]u8 = undefined;
-    _ = try conversation.readPositionalAll(io, &byte, 20);
-    byte[0] ^= 1;
-    try conversation.writePositionalAll(io, &byte, 20);
-    try conversation.sync(io);
-
-    try std.testing.expectError(
-        error.ConversationChecksumMismatch,
-        Session.openExisting(layout.sessions, &layout.storage, io, 90),
-    );
-    const stored = try layout.storage.readSession(90);
-    try std.testing.expectEqual(@as(u64, 2), stored.ownership_epoch);
 }

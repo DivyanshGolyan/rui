@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_answer = b.addRunArtifact(cli);
     run_fixture_answer.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-v2-fixture-sessions",
+        ".zig-cache/onepage-v3-fixture-sessions",
         "--repo",
         ".",
         "--model",
@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_bash = b.addRunArtifact(cli);
     run_fixture_bash.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-v2-bash-sessions",
+        ".zig-cache/onepage-v3-bash-sessions",
         "--repo",
         ".",
         "--model",
@@ -91,7 +91,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_patch = b.addRunArtifact(cli);
     run_fixture_patch.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-v2-patch-sessions",
+        ".zig-cache/onepage-v3-patch-sessions",
         "--repo",
         ".",
         "--model",
@@ -139,7 +139,6 @@ fn addTestGraph(
 ) void {
     const plain_test_roots = [_][]const u8{
         "src/core_state.zig",
-        "src/checkpoint.zig",
         "src/core_image.zig",
         "src/harness.zig",
         "src/session.zig",

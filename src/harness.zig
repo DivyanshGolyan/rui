@@ -1,6 +1,6 @@
 const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
-const checkpoint = @import("checkpoint.zig");
+const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
@@ -160,7 +160,7 @@ pub const Harness = struct {
     session: ?session_store.Session = null,
     session_projection_pending: bool = false,
     final_ref: u64 = 0,
-    checkpoint_buffer: [checkpoint.encoded_size]u8 = undefined,
+    core_state_buffer: [core_state.encoded_size]u8 = undefined,
     projection_generation: u64 = 0,
     awaiting_approval: ?lifecycle.ApprovalRequired = null,
     settling_control: ?lifecycle.Control = null,
@@ -319,7 +319,7 @@ pub const Harness = struct {
                     self.config.host,
                     self.config.allocator,
                     session,
-                    &self.checkpoint_buffer,
+                    &self.core_state_buffer,
                     expected,
                     decision.allow,
                     provider,
@@ -343,7 +343,7 @@ pub const Harness = struct {
                     self.config.host,
                     self.config.allocator,
                     session,
-                    &self.checkpoint_buffer,
+                    &self.core_state_buffer,
                     .{
                         .kind = switch (completion.kind) {
                             .model => .model,
@@ -392,7 +392,7 @@ pub const Harness = struct {
                 self.final_ref = lifecycle.advanceCreated(
                     self.config.host,
                     session,
-                    &self.checkpoint_buffer,
+                    &self.core_state_buffer,
                     self.runtimeConfig(),
                     create.provider,
                 ) catch |err| return self.classifyLifecycleError(err, progress);
@@ -409,7 +409,7 @@ pub const Harness = struct {
                         self.final_ref = lifecycle.advanceCreated(
                             self.config.host,
                             session,
-                            &self.checkpoint_buffer,
+                            &self.core_state_buffer,
                             self.runtimeConfig(),
                             restore.provider orelse return error.SessionNeedsModel,
                         ) catch |err| return self.classifyLifecycleError(err, progress);
@@ -425,7 +425,7 @@ pub const Harness = struct {
                         self.config.host,
                         self.config.allocator,
                         session,
-                        &self.checkpoint_buffer,
+                        &self.core_state_buffer,
                         self.runtimeConfig(),
                         provider,
                     ) catch |err| return self.classifyLifecycleError(err, progress)
@@ -434,7 +434,7 @@ pub const Harness = struct {
                         self.config.host,
                         self.config.allocator,
                         session,
-                        &self.checkpoint_buffer,
+                        &self.core_state_buffer,
                     ) catch |err| return self.classifyLifecycleError(err, progress);
             },
         }
@@ -574,7 +574,7 @@ pub const Harness = struct {
             self.config.host,
             self.config.allocator,
             session,
-            &self.checkpoint_buffer,
+            &self.core_state_buffer,
             approval,
             false,
             null,
@@ -604,7 +604,7 @@ pub const Harness = struct {
             self.config.host,
             self.config.allocator,
             session,
-            &self.checkpoint_buffer,
+            &self.core_state_buffer,
             self.runtimeConfig(),
             null,
         ) catch |err| switch (err) {
@@ -1002,7 +1002,7 @@ test "restore withholds projections until the configured recovery quantum reache
 
 test "restore publishes Session identity before reconciling Completion evidence" {
     const IgnoreReplay = struct {
-        fn apply(_: *anyopaque, _: session_transition.Transaction) !void {}
+        fn apply(_: *anyopaque, _: session_transition.Fact) !void {}
     };
 
     var host: Host = .{};
@@ -1032,7 +1032,7 @@ test "restore publishes Session identity before reconciling Completion evidence"
     const waiting = try created.drive();
     try std.testing.expectEqual(State.waiting, waiting.state);
     var ignored: u8 = 0;
-    const before = try created.session.?.replaySemantic(
+    const before = try created.session.?.inspectSemantic(
         created.session.?.ownerToken(),
         &ignored,
         IgnoreReplay.apply,
@@ -1053,7 +1053,7 @@ test "restore publishes Session identity before reconciling Completion evidence"
     try std.testing.expectEqual(State.restoring, identified.state);
     try std.testing.expectEqual(@as(u8, 1), identified.projection_count);
     try std.testing.expectEqual(ProjectionKind.session, identified.projections[0].kind);
-    const before_reconcile = try restored.session.?.replaySemantic(
+    const before_reconcile = try restored.session.?.inspectSemantic(
         restored.session.?.ownerToken(),
         &ignored,
         IgnoreReplay.apply,
@@ -1062,7 +1062,7 @@ test "restore publishes Session identity before reconciling Completion evidence"
 
     const reconciled = try restored.drive();
     try std.testing.expectEqual(State.finished, reconciled.state);
-    const after_reconcile = try restored.session.?.replaySemantic(
+    const after_reconcile = try restored.session.?.inspectSemantic(
         restored.session.?.ownerToken(),
         &ignored,
         IgnoreReplay.apply,
@@ -1143,15 +1143,15 @@ test "shutdown denies Approval Required before closing" {
         approval_required: u8 = 0,
         undecided_authorization: u8 = 0,
 
-        fn apply(context: *anyopaque, transaction: session_transition.Transaction) !void {
+        fn apply(context: *anyopaque, fact: session_transition.Fact) !void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            for (transaction.factSlice()) |fact| switch (fact.kind) {
+            switch (fact.kind) {
                 .approval_required => self.approval_required += 1,
                 .authorization => if (fact.flags == 0) {
                     self.undecided_authorization += 1;
                 },
                 else => {},
-            };
+            }
         }
     };
 
@@ -1191,7 +1191,7 @@ test "shutdown denies Approval Required before closing" {
     try std.testing.expectEqual(State.waiting, waiting.state);
     try std.testing.expectEqual(ProjectionKind.approval_required, waiting.projections[0].kind);
     var facts: PermissionFacts = .{};
-    _ = try owner.session.?.replaySemantic(
+    _ = try owner.session.?.inspectSemantic(
         owner.session.?.ownerToken(),
         &facts,
         PermissionFacts.apply,
@@ -1310,11 +1310,9 @@ test "known provider failure is one durable terminal Result" {
     const ResultFacts = struct {
         count: u8 = 0,
 
-        fn apply(context: *anyopaque, transaction: session_transition.Transaction) !void {
+        fn apply(context: *anyopaque, fact: session_transition.Fact) !void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            for (transaction.factSlice()) |fact| {
-                if (fact.kind == .result and fact.recovery_class == .model) self.count += 1;
-            }
+            if (fact.kind == .result and fact.recovery_class == .model) self.count += 1;
         }
     };
 
@@ -1346,7 +1344,7 @@ test "known provider failure is one durable terminal Result" {
     try std.testing.expectEqual(State.failed, failed.state);
     try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
     var facts: ResultFacts = .{};
-    _ = try owner.session.?.replaySemantic(
+    _ = try owner.session.?.inspectSemantic(
         owner.session.?.ownerToken(),
         &facts,
         ResultFacts.apply,

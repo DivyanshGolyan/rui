@@ -5,9 +5,9 @@ Activation Slot from a fixed resident pool.
 
 The production CLI executes a Zig reducer natively and has no embedded language or secondary runtime.
 The target architecture separates compact, canonically encoded Core State from transient
-Activation Slot scratch. Core State is currently 160 bytes and its rebuildable State Checkpoint is
-224 bytes; activation decodes that state into one caller-owned 65,536-byte slot, and suspension
-scrubs the complete slot. A fixed caller-owned pool returns closed capacity instead of allocating a
+Activation Slot scratch. Core State is currently 160 bytes; authoritative semantic transactions
+carry it directly. Activation decodes that state into one caller-owned 65,536-byte slot, and
+suspension scrubs the complete slot. A fixed caller-owned pool returns closed capacity instead of allocating a
 fallback slot. Native invariant traces check typed outcomes, rejection-state preservation, semantic
 observations, and canonical restoration rather than slot bytes. Complete Session semantics reconstruct
 from one ordered Session Ledger inside a bounded host-wide SQLite Host Store.
@@ -61,11 +61,10 @@ select it again.
 zig build fixture-patch-deny -Doptimize=ReleaseSmall
 ```
 
-State Checkpoints, ownership epochs, Completion evidence, Session metadata, and canonical transitions
-now live behind the same Storage Owner. The SQLite transaction that publishes a terminal Result also
-associates its immutable Completion evidence; a corrupt checkpoint loses acceleration rather than
-ledger authority. Per-Session WAL, Inbox, checkpoint, and manifest files are no longer production
-storage paths.
+Ownership epochs, Completion evidence, Session metadata, Conversation metadata, and canonical
+multi-fact transactions now live behind the same Storage Owner. The SQLite transaction that
+publishes a terminal Result also associates its immutable Completion evidence. Per-Session WAL,
+Inbox, Conversation, checkpoint, and manifest files are no longer production storage paths.
 
 ## Requirements
 

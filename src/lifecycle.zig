@@ -1,6 +1,5 @@
 const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
-const checkpoint = @import("checkpoint.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const core_image = @import("core_image.zig");
 const core_state = @import("core_state.zig");
@@ -55,7 +54,7 @@ pub const Control = enum { cancel, shutdown };
 pub fn commitControl(session: *session_store.Session, control: Control) !void {
     const token = session.ownerToken();
     var state: ControlSearch = .{};
-    _ = try session.replaySemantic(token, &state, ControlSearch.applyTransaction);
+    _ = try session.inspectSemantic(token, &state, ControlSearch.applyFact);
     if (state.open_operation) return error.AcceptedOperationUnsettled;
     const fact = semanticFact(if (control == .cancel) .cancellation else .shutdown, session);
     _ = try session.commitSemantic(token, &.{fact}, null);
@@ -63,7 +62,7 @@ pub fn commitControl(session: *session_store.Session, control: Control) !void {
 
 pub fn restoredControl(session: *session_store.Session) !?Control {
     var state: ControlSearch = .{};
-    _ = try session.replaySemantic(session.ownerToken(), &state, ControlSearch.applyTransaction);
+    _ = try session.inspectSemantic(session.ownerToken(), &state, ControlSearch.applyFact);
     return state.control;
 }
 
@@ -73,9 +72,9 @@ const ControlSearch = struct {
     generation: u32 = 0,
     control: ?Control = null,
 
-    fn applyTransaction(context: *anyopaque, transaction: session_transition.Transaction) anyerror!void {
+    fn applyFact(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
         const self: *ControlSearch = @ptrCast(@alignCast(context));
-        for (transaction.factSlice()) |fact| switch (fact.kind) {
+        switch (fact.kind) {
             .operation_accepted => {
                 self.open_operation = true;
                 self.operation_id = fact.operation_id;
@@ -89,7 +88,7 @@ const ControlSearch = struct {
             .cancellation => self.control = .cancel,
             .shutdown => self.control = .shutdown,
             else => {},
-        };
+        }
     }
 };
 
@@ -102,7 +101,7 @@ pub const FaultBoundary = enum {
     after_bash_execution,
     after_bash_result,
     after_tool_result_entry,
-    after_tool_checkpoint,
+    after_tool_state_commit,
     after_patch_permission_binding,
 };
 
@@ -180,19 +179,14 @@ const Core = struct {
 fn commitCoreFacts(
     session: *session_store.Session,
     token: session_store.OwnerToken,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     core: *Core,
     facts: []const session_transition.Fact,
     reactivate: bool,
 ) !void {
+    _ = core_state_buffer;
     try core.suspendIntoState();
     _ = try session.commitSemantic(token, facts, &core.encoded_state);
-    try session.publishCheckpoint(
-        token,
-        agent_generation,
-        checkpoint_buffer,
-        &core.encoded_state,
-    );
     if (reactivate) try core.activate();
 }
 
@@ -211,21 +205,21 @@ fn semanticFact(
 fn restoreCoreFromLedger(
     session: *session_store.Session,
     token: session_store.OwnerToken,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     core: *Core,
 ) !void {
-    _ = checkpoint_buffer;
+    _ = core_state_buffer;
     var replay_context: u8 = 0;
-    const replay = try session.replaySemantic(
+    const replay = try session.inspectSemantic(
         token,
         &replay_context,
-        ignoreTransaction,
+        ignoreFact,
     );
     core.encoded_state = replay.last_core orelse return error.MissingLedgerCoreState;
     try core.activate();
 }
 
-fn ignoreTransaction(_: *anyopaque, _: session_transition.Transaction) anyerror!void {}
+fn ignoreFact(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
 
 const ModelSlot = struct {
     core: *Core,
@@ -252,7 +246,7 @@ const ModelSlot = struct {
 pub fn advanceCreated(
     host: *Host,
     session: *session_store.Session,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     config: RuntimeConfig,
     provider: model_operation.Provider,
 ) !u64 {
@@ -263,7 +257,7 @@ pub fn advanceCreated(
     const token = session.ownerToken();
     try core.initialize(session.agent_id);
     try core.reducer.startTask(session.active_leaf_id);
-    if (checkpoint_buffer.len != checkpoint.encoded_size) return error.InvalidCheckpointBuffer;
+    if (core_state_buffer.len != core_state.encoded_size) return error.InvalidCoreStateBuffer;
     var task_facts: [2]session_transition.Fact = undefined;
     task_facts[0] = semanticFact(.task_admitted, session);
     task_facts[0].subject = session.task_id;
@@ -274,7 +268,7 @@ pub fn advanceCreated(
     try commitCoreFacts(
         session,
         token,
-        checkpoint_buffer,
+        core_state_buffer,
         &core,
         &task_facts,
         true,
@@ -285,7 +279,7 @@ pub fn advanceCreated(
         token,
         &core,
         &core_open,
-        checkpoint_buffer,
+        core_state_buffer,
         provider,
         1,
         config.completion_hook,
@@ -300,7 +294,7 @@ fn performModelTurn(
     token: session_store.OwnerToken,
     core: *Core,
     core_open: *bool,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     provider: model_operation.Provider,
     model_sequence: u32,
     completion_hook: ?CompletionHook,
@@ -334,7 +328,7 @@ fn performModelTurn(
     try commitCoreFacts(
         session,
         token,
-        checkpoint_buffer,
+        core_state_buffer,
         core,
         &admission_facts,
         false,
@@ -358,7 +352,7 @@ fn retryModelAttempt(
     token: session_store.OwnerToken,
     core: *Core,
     core_open: *bool,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     provider: model_operation.Provider,
     completion_hook: ?CompletionHook,
 ) !void {
@@ -368,7 +362,7 @@ fn retryModelAttempt(
         .generation = operation.generation,
         .recovery_class = .model,
     };
-    _ = try session.replaySemantic(token, &history, FactSearch.applyTransaction);
+    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
     const descriptor = history.descriptor orelse return error.MissingModelDescriptor;
     var attempt_id: u64 = 0;
     var response_ref: u32 = 0;
@@ -391,7 +385,7 @@ fn retryModelAttempt(
     try commitCoreFacts(
         session,
         token,
-        checkpoint_buffer,
+        core_state_buffer,
         core,
         &.{attempt},
         false,
@@ -466,7 +460,7 @@ fn executeBashCall(
     token: session_store.OwnerToken,
     core: *Core,
     slot_pool: *ProductionSlotPool,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     ids: OperationIds,
     core_open: *bool,
     workspace_path: []const u8,
@@ -519,7 +513,7 @@ fn executeBashCall(
         approval.generation = 1;
         approval.digest = digest;
         approval.reference = descriptor_ref;
-        try commitCoreFacts(session, token, checkpoint_buffer, core, &.{approval}, true);
+        try commitCoreFacts(session, token, core_state_buffer, core, &.{approval}, true);
         if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .bash,
             .operation_id = tool_operation_id,
@@ -554,7 +548,7 @@ fn executeBashCall(
         try commitCoreFacts(
             session,
             token,
-            checkpoint_buffer,
+            core_state_buffer,
             core,
             &.{attempt},
             false,
@@ -571,7 +565,7 @@ fn executeBashCall(
         try reach(fault, .after_bash_execution);
         core.* = try Core.open(slot_pool);
         core_open.* = true;
-        try restoreCoreFromLedger(session, token, checkpoint_buffer, core);
+        try restoreCoreFromLedger(session, token, core_state_buffer, core);
     } else {
         execution = .{
             .allocator = allocator,
@@ -624,12 +618,12 @@ fn executeBashCall(
     try commitCoreFacts(
         session,
         token,
-        checkpoint_buffer,
+        core_state_buffer,
         core,
         &result_facts,
         true,
     );
-    try reach(fault, .after_tool_checkpoint);
+    try reach(fault, .after_tool_state_commit);
 }
 
 const PatchPermissionOutcome = enum { ready, approved };
@@ -640,7 +634,7 @@ fn requestPatchPermission(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     ids: OperationIds,
     workspace_path: []const u8,
     policy: patch_tool.Policy,
@@ -704,7 +698,7 @@ fn requestPatchPermission(
         try commitCoreFacts(
             session,
             token,
-            checkpoint_buffer,
+            core_state_buffer,
             core,
             &.{approval},
             true,
@@ -791,7 +785,7 @@ fn requestPatchPermission(
     try commitCoreFacts(
         session,
         token,
-        checkpoint_buffer,
+        core_state_buffer,
         core,
         &result_facts,
         true,
@@ -828,13 +822,13 @@ pub fn inspectRestored(
     host: *Host,
     allocator: std.mem.Allocator,
     session: *session_store.Session,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
 ) !u64 {
     var core = try Core.open(&host.slots);
     defer core.close();
     const token = session.ownerToken();
-    if (checkpoint_buffer.len != checkpoint.encoded_size) return error.InvalidCheckpointBuffer;
-    try restoreCoreFromLedger(session, token, checkpoint_buffer, &core);
+    if (core_state_buffer.len != core_state.encoded_size) return error.InvalidCoreStateBuffer;
+    try restoreCoreFromLedger(session, token, core_state_buffer, &core);
     var outcome = (try core.reducer.task()).phase;
     if (outcome == .awaiting_model) {
         const completion = try durableCompletion(session, token, &core);
@@ -847,7 +841,7 @@ pub fn inspectRestored(
         try commitCoreFacts(
             session,
             token,
-            checkpoint_buffer,
+            core_state_buffer,
             &core,
             &.{applied},
             true,
@@ -865,7 +859,7 @@ pub fn inspectRestored(
             session,
             token,
             &core,
-            checkpoint_buffer,
+            core_state_buffer,
             null,
         );
         return final_ref;
@@ -875,7 +869,7 @@ pub fn inspectRestored(
             session,
             token,
             &core,
-            checkpoint_buffer,
+            core_state_buffer,
             allocator,
             session.workspacePath(),
         )) {
@@ -905,7 +899,7 @@ pub fn advanceRestored(
     host: *Host,
     allocator: std.mem.Allocator,
     session: *session_store.Session,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     config: RuntimeConfig,
     provider: ?model_operation.Provider,
 ) !u64 {
@@ -914,8 +908,8 @@ pub fn advanceRestored(
     var core_open = true;
     defer if (core_open) core.close();
     const token = session.ownerToken();
-    if (checkpoint_buffer.len != checkpoint.encoded_size) return error.InvalidCheckpointBuffer;
-    try restoreCoreFromLedger(session, token, checkpoint_buffer, &core);
+    if (core_state_buffer.len != core_state.encoded_size) return error.InvalidCoreStateBuffer;
+    try restoreCoreFromLedger(session, token, core_state_buffer, &core);
     var outcome = (try core.reducer.task()).phase;
     if (outcome == .awaiting_model) {
         if (durableCompletion(session, token, &core)) |completion| {
@@ -932,7 +926,7 @@ pub fn advanceRestored(
             try commitCoreFacts(
                 session,
                 token,
-                checkpoint_buffer,
+                core_state_buffer,
                 &core,
                 &.{applied},
                 true,
@@ -950,7 +944,7 @@ pub fn advanceRestored(
                 token,
                 &core,
                 &core_open,
-                checkpoint_buffer,
+                core_state_buffer,
                 provider orelse return error.SessionOperationPending,
                 config.completion_hook,
             ),
@@ -963,7 +957,7 @@ pub fn advanceRestored(
             session,
             token,
             &core,
-            checkpoint_buffer,
+            core_state_buffer,
             null,
         );
     }
@@ -972,7 +966,7 @@ pub fn advanceRestored(
             session,
             token,
             &core,
-            checkpoint_buffer,
+            core_state_buffer,
             allocator,
             session.workspacePath(),
         )) {
@@ -998,7 +992,7 @@ pub fn advanceRestored(
                         token,
                         &core,
                         &host.slots,
-                        checkpoint_buffer,
+                        core_state_buffer,
                         ids,
                         &core_open,
                         config.workspace_path,
@@ -1015,7 +1009,7 @@ pub fn advanceRestored(
                             session,
                             token,
                             &core,
-                            checkpoint_buffer,
+                            core_state_buffer,
                             ids,
                             config.workspace_path,
                             config.patch_policy orelse return error.ToolCallDeferred,
@@ -1039,7 +1033,7 @@ pub fn advanceRestored(
         token,
         &core,
         &core_open,
-        checkpoint_buffer,
+        core_state_buffer,
         provider orelse return error.SessionNeedsModel,
         2,
         config.completion_hook,
@@ -1052,7 +1046,7 @@ pub fn advanceRestored(
         session,
         token,
         &core,
-        checkpoint_buffer,
+        core_state_buffer,
         null,
     );
     return final_ref;
@@ -1062,7 +1056,7 @@ pub fn resolvePermission(
     host: *Host,
     allocator: std.mem.Allocator,
     session: *session_store.Session,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     decision: ApprovalRequired,
     allow: bool,
     provider: ?model_operation.Provider,
@@ -1071,11 +1065,11 @@ pub fn resolvePermission(
 ) !u64 {
     const io = session.io;
     const token = session.ownerToken();
-    if (checkpoint_buffer.len != checkpoint.encoded_size) return error.InvalidCheckpointBuffer;
+    if (core_state_buffer.len != core_state.encoded_size) return error.InvalidCoreStateBuffer;
     var core = try Core.open(&host.slots);
     var core_open = true;
     defer if (core_open) core.close();
-    try restoreCoreFromLedger(session, token, checkpoint_buffer, &core);
+    try restoreCoreFromLedger(session, token, core_state_buffer, &core);
     if ((try core.reducer.task()).phase != .awaiting_tool) return error.PermissionNoLongerRequired;
     const response = try core.reducer.response();
     const observation = try core.reducer.operation();
@@ -1094,7 +1088,7 @@ pub fn resolvePermission(
         .generation = 1,
         .recovery_class = .consequential,
     };
-    _ = try session.replaySemantic(token, &history, FactSearch.applyTransaction);
+    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
     const descriptor = history.descriptor orelse return error.MissingActionDescriptor;
     if (descriptor.digest != decision.descriptor_digest or
         descriptor.reference != decision.descriptor_ref)
@@ -1135,7 +1129,7 @@ pub fn resolvePermission(
                 attempt.digest = descriptor.digest;
                 attempt.recovery_class = .consequential;
                 attempt.disposition = .possibly_executed;
-                try commitCoreFacts(session, token, checkpoint_buffer, &core, &.{attempt}, false);
+                try commitCoreFacts(session, token, core_state_buffer, &core, &.{attempt}, false);
                 core.close();
                 core_open = false;
                 execution = try bash_tool.executeControlled(
@@ -1147,7 +1141,7 @@ pub fn resolvePermission(
                 );
                 core = try Core.open(&host.slots);
                 core_open = true;
-                try restoreCoreFromLedger(session, token, checkpoint_buffer, &core);
+                try restoreCoreFromLedger(session, token, core_state_buffer, &core);
             } else {
                 execution = .{
                     .allocator = allocator,
@@ -1195,7 +1189,7 @@ pub fn resolvePermission(
             facts[1] = semanticFact(.conversation_advanced, session);
             facts[1].subject = result_entry.entry_id;
             facts[1].reference = result_ref;
-            try commitCoreFacts(session, token, checkpoint_buffer, &core, &facts, false);
+            try commitCoreFacts(session, token, core_state_buffer, &core, &facts, false);
         },
         .apply_patch => {
             var binding_bytes: [patch_tool.binding_size]u8 = undefined;
@@ -1262,7 +1256,7 @@ pub fn resolvePermission(
             facts[1] = semanticFact(.conversation_advanced, session);
             facts[1].subject = result_entry.entry_id;
             facts[1].reference = result_ref;
-            try commitCoreFacts(session, token, checkpoint_buffer, &core, &facts, false);
+            try commitCoreFacts(session, token, core_state_buffer, &core, &facts, false);
         },
         else => unreachable,
     }
@@ -1273,7 +1267,7 @@ pub fn resolvePermission(
         host,
         allocator,
         session,
-        checkpoint_buffer,
+        core_state_buffer,
         .{
             .workspace_path = session.workspacePath(),
             .bash_cancelled = cancellation,
@@ -1287,7 +1281,7 @@ pub fn acceptCompletion(
     host: *Host,
     allocator: std.mem.Allocator,
     session: *session_store.Session,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     offered: completion_inbox.Envelope,
     config: RuntimeConfig,
     provider: ?model_operation.Provider,
@@ -1308,7 +1302,7 @@ pub fn acceptCompletion(
             .bash, .apply_patch => .consequential,
         },
     };
-    _ = try session.replaySemantic(token, &history, FactSearch.applyTransaction);
+    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
     const attempt = history.attempt orelse return error.StaleCompletion;
     if (attempt.attempt_id != offered.attempt_id) return error.StaleCompletion;
     if (history.result) |result| {
@@ -1329,7 +1323,7 @@ pub fn acceptCompletion(
     if (evidence.result_ref != offered.result_ref or evidence.result_digest != offered.result_digest) {
         return error.ConflictingCompletionEvidence;
     }
-    return advanceRestored(host, allocator, session, checkpoint_buffer, config, provider);
+    return advanceRestored(host, allocator, session, core_state_buffer, config, provider);
 }
 
 const ToolRecovery = enum { none, ready, indeterminate, approval_required, approved };
@@ -1338,17 +1332,17 @@ fn reconcileToolCall(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     allocator: std.mem.Allocator,
     workspace_path: []const u8,
 ) !ToolRecovery {
     return switch ((try core.reducer.response()).tool) {
-        .bash => reconcileBash(session, token, core, checkpoint_buffer),
+        .bash => reconcileBash(session, token, core, core_state_buffer),
         .apply_patch => reconcilePatch(
             session,
             token,
             core,
-            checkpoint_buffer,
+            core_state_buffer,
             allocator,
             workspace_path,
         ),
@@ -1360,7 +1354,7 @@ fn reconcileBash(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
 ) !ToolRecovery {
     const model_observation = try core.reducer.operation();
     const operation_id = (@as(u64, 1) << 63) | model_observation.id;
@@ -1369,14 +1363,14 @@ fn reconcileBash(
         .generation = 1,
         .recovery_class = .consequential,
     };
-    _ = try session.replaySemantic(token, &history, FactSearch.applyTransaction);
+    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
     const descriptor = history.descriptor orelse return .none;
     if (history.result) |result| {
         try reconcileBashResult(
             session,
             token,
             core,
-            checkpoint_buffer,
+            core_state_buffer,
             recordFromFact(result),
         );
         return if (result.flags == @intFromEnum(bash_tool.Status.indeterminate))
@@ -1415,7 +1409,7 @@ fn reconcileBash(
             session,
             token,
             core,
-            checkpoint_buffer,
+            core_state_buffer,
             recordFromFact(denied),
         );
         return .ready;
@@ -1478,7 +1472,7 @@ fn reconcileBash(
         session,
         token,
         core,
-        checkpoint_buffer,
+        core_state_buffer,
         recordFromFact(result),
     );
     return if (result.flags == @intFromEnum(bash_tool.Status.indeterminate))
@@ -1518,7 +1512,7 @@ fn reconcilePatch(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     allocator: std.mem.Allocator,
     workspace_path: []const u8,
 ) !ToolRecovery {
@@ -1533,7 +1527,7 @@ fn reconcilePatch(
         .generation = 1,
         .recovery_class = .consequential,
     };
-    _ = try session.replaySemantic(token, &history, FactSearch.applyTransaction);
+    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
     const validated = history.descriptor orelse return .none;
     if (validated.digest == 0 or validated.reference != patch_ref) {
         return error.InvalidPatchHistory;
@@ -1546,7 +1540,7 @@ fn reconcilePatch(
             session,
             token,
             core,
-            checkpoint_buffer,
+            core_state_buffer,
             patch_ref,
             recordFromFact(settled),
         );
@@ -1593,7 +1587,7 @@ fn reconcilePatch(
             session,
             token,
             core,
-            checkpoint_buffer,
+            core_state_buffer,
             operation_id,
             patch_ref,
             result_ref,
@@ -1608,7 +1602,7 @@ fn reconcilePatch(
         session,
         token,
         core,
-        checkpoint_buffer,
+        core_state_buffer,
         operation_id,
         patch_ref,
         result_ref,
@@ -1635,7 +1629,7 @@ fn persistPatchPreflightResult(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     operation_id: u64,
     patch_ref: u64,
     result_ref: u64,
@@ -1665,7 +1659,7 @@ fn persistPatchPreflightResult(
         session,
         token,
         core,
-        checkpoint_buffer,
+        core_state_buffer,
         patch_ref,
         .{
             .agent_id = session.agent_id,
@@ -1684,20 +1678,20 @@ fn reconcileBashResult(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     result: ToolResult,
 ) !void {
     const response_ref: u32 = @truncate(result.result);
     if (result.result != ((@as(u64, 1) << 61) | response_ref)) return error.InvalidToolResultReference;
     const descriptor_ref = (@as(u64, 1) << 62) | response_ref;
-    try reconcileToolResult(session, token, core, checkpoint_buffer, descriptor_ref, result);
+    try reconcileToolResult(session, token, core, core_state_buffer, descriptor_ref, result);
 }
 
 fn reconcileToolResult(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     descriptor_ref: u64,
     result: ToolResult,
 ) !void {
@@ -1733,7 +1727,7 @@ fn reconcileToolResult(
     try commitCoreFacts(
         session,
         token,
-        checkpoint_buffer,
+        core_state_buffer,
         core,
         &applied_facts,
         true,
@@ -1753,7 +1747,7 @@ fn durableCompletion(
         .generation = operation_generation,
         .recovery_class = .model,
     };
-    _ = try session.replaySemantic(token, &history, FactSearch.applyTransaction);
+    _ = try session.inspectSemantic(token, &history, FactSearch.applyFact);
     if (history.attempt_count == 0) return error.MissingAcceptedAttempt;
     var intent: ?session_transition.Fact = null;
     var result = history.result;
@@ -1833,39 +1827,37 @@ const FactSearch = struct {
     authorization: ?session_transition.Fact = null,
     result: ?session_transition.Fact = null,
 
-    fn applyTransaction(context: *anyopaque, transaction: session_transition.Transaction) anyerror!void {
+    fn applyFact(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
         const self: *FactSearch = @ptrCast(@alignCast(context));
-        for (transaction.factSlice()) |fact| {
-            if (fact.operation_id != self.operation_id or fact.generation != self.generation) continue;
-            if (fact.recovery_class != .none and fact.recovery_class != self.recovery_class) continue;
-            switch (fact.kind) {
-                .operation_submitted => self.descriptor = try uniqueFact(self.descriptor, fact),
-                .attempt_admitted => {
-                    var found = false;
-                    for (self.attempts[0..self.attempt_count]) |maybe_existing| {
-                        const existing = maybe_existing.?;
-                        if (existing.attempt_id != fact.attempt_id) continue;
-                        if (!std.meta.eql(existing, fact)) return error.ConflictingLedgerFacts;
-                        found = true;
-                        break;
-                    }
-                    if (!found) {
-                        if (self.attempt_count == max_attempts) return error.AttemptCapacityExceeded;
-                        self.attempts[self.attempt_count] = fact;
-                        self.attempt_count += 1;
-                    }
-                    if (self.target_attempt_id == 0 or self.target_attempt_id == fact.attempt_id) {
-                        self.attempt = fact;
-                    }
-                },
-                .approval_required => self.approval_required = try uniqueFact(
-                    self.approval_required,
-                    fact,
-                ),
-                .authorization => self.authorization = try uniqueFact(self.authorization, fact),
-                .result => self.result = try uniqueFact(self.result, fact),
-                else => {},
-            }
+        if (fact.operation_id != self.operation_id or fact.generation != self.generation) return;
+        if (fact.recovery_class != .none and fact.recovery_class != self.recovery_class) return;
+        switch (fact.kind) {
+            .operation_submitted => self.descriptor = try uniqueFact(self.descriptor, fact),
+            .attempt_admitted => {
+                var found = false;
+                for (self.attempts[0..self.attempt_count]) |maybe_existing| {
+                    const existing = maybe_existing.?;
+                    if (existing.attempt_id != fact.attempt_id) continue;
+                    if (!std.meta.eql(existing, fact)) return error.ConflictingLedgerFacts;
+                    found = true;
+                    break;
+                }
+                if (!found) {
+                    if (self.attempt_count == max_attempts) return error.AttemptCapacityExceeded;
+                    self.attempts[self.attempt_count] = fact;
+                    self.attempt_count += 1;
+                }
+                if (self.target_attempt_id == 0 or self.target_attempt_id == fact.attempt_id) {
+                    self.attempt = fact;
+                }
+            },
+            .approval_required => self.approval_required = try uniqueFact(
+                self.approval_required,
+                fact,
+            ),
+            .authorization => self.authorization = try uniqueFact(self.authorization, fact),
+            .result => self.result = try uniqueFact(self.result, fact),
+            else => {},
         }
     }
 
@@ -1883,10 +1875,10 @@ const FactSearch = struct {
 
 pub fn pendingApprovalRequired(session: *session_store.Session) !?ApprovalRequired {
     var search: PendingApprovalSearch = .{};
-    _ = try session.replaySemantic(
+    _ = try session.inspectSemantic(
         session.ownerToken(),
         &search,
-        PendingApprovalSearch.applyTransaction,
+        PendingApprovalSearch.applyFact,
     );
     return search.approval;
 }
@@ -1894,9 +1886,9 @@ pub fn pendingApprovalRequired(session: *session_store.Session) !?ApprovalRequir
 const PendingApprovalSearch = struct {
     approval: ?ApprovalRequired = null,
 
-    fn applyTransaction(context: *anyopaque, transaction: session_transition.Transaction) anyerror!void {
+    fn applyFact(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
         const self: *PendingApprovalSearch = @ptrCast(@alignCast(context));
-        for (transaction.factSlice()) |fact| switch (fact.kind) {
+        switch (fact.kind) {
             .approval_required => {
                 self.approval = .{
                     .kind = if ((fact.operation_id >> 62) == 3) .apply_patch else .bash,
@@ -1921,7 +1913,7 @@ const PendingApprovalSearch = struct {
                 }
             },
             else => {},
-        };
+        }
     }
 };
 
@@ -1965,18 +1957,16 @@ fn hasIndeterminateBash(
     token: session_store.OwnerToken,
 ) !bool {
     var found = false;
-    _ = try session.replaySemantic(token, &found, detectIndeterminate);
+    _ = try session.inspectSemantic(token, &found, detectIndeterminate);
     return found;
 }
 
-fn detectIndeterminate(context: *anyopaque, transaction: session_transition.Transaction) anyerror!void {
+fn detectIndeterminate(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
     const found: *bool = @ptrCast(@alignCast(context));
-    for (transaction.factSlice()) |fact| {
-        if (fact.kind == .result and fact.recovery_class == .consequential and
-            fact.flags == @intFromEnum(bash_tool.Status.indeterminate))
-        {
-            found.* = true;
-        }
+    if (fact.kind == .result and fact.recovery_class == .consequential and
+        fact.flags == @intFromEnum(bash_tool.Status.indeterminate))
+    {
+        found.* = true;
     }
 }
 
@@ -1984,7 +1974,7 @@ fn finalizeCandidate(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
-    checkpoint_buffer: []u8,
+    core_state_buffer: []u8,
     fault: ?FaultHook,
 ) !u64 {
     const task = try core.reducer.task();
@@ -2029,7 +2019,7 @@ fn finalizeCandidate(
     try commitCoreFacts(
         session,
         token,
-        checkpoint_buffer,
+        core_state_buffer,
         core,
         &final_facts,
         true,

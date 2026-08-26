@@ -5,14 +5,11 @@ pub const payload_version: u16 = 1;
 pub const max_facts: usize = 8;
 pub const max_transitions: u32 = 32_768;
 
-const magic = "ONETRAN\x00";
-const envelope_size: usize = 56;
-const digest_offset: usize = 24;
-const common_size: usize = 24;
-const maximum_specific_size: usize = 37;
-pub const max_payload_size: usize = envelope_size + common_size + maximum_specific_size + core_state.encoded_size;
+const header_size: usize = 4;
+const fact_size: usize = 72;
+pub const max_payload_size: usize = header_size + max_facts * fact_size + core_state.encoded_size;
 
-pub const Kind = enum(u16) {
+pub const Kind = enum(u8) {
     task_admitted = 1,
     operation_submitted = 2,
     operation_accepted = 3,
@@ -68,112 +65,63 @@ pub const Transaction = struct {
     }
 };
 
-pub const Decoded = struct {
-    sequence: u64,
-    fact: Fact,
-    core: ?[core_state.encoded_size]u8 = null,
-};
-
 pub fn encode(
     out: *[max_payload_size]u8,
-    sequence: u64,
-    fact: Fact,
-    encoded_core: ?[]const u8,
+    transaction: Transaction,
 ) ![]const u8 {
-    if (sequence == 0) return error.InvalidTransitionSequence;
-    try validateFact(fact);
-    const specific_size = kindSpecificSize(fact.kind);
-    const core_length: usize = if (encoded_core != null) core_state.encoded_size else 0;
-    const body_length = common_size + specific_size + core_length;
-    const encoded_length = envelope_size + body_length;
-    @memset(out, 0);
-    @memcpy(out[0..magic.len], magic);
-    write(u16, out, 8, payload_version);
-    write(u16, out, 10, @intFromEnum(fact.kind));
-    write(u32, out, 12, @intCast(encoded_length));
-    write(u64, out, 16, sequence);
-    const body = out[envelope_size..];
-    write(u64, body, 0, fact.agent_id);
-    write(u64, body, 8, fact.ownership_epoch);
-    write(u32, body, 16, fact.agent_generation);
-    body[20] = fact.flags;
-    body[21] = @intFromEnum(fact.recovery_class);
-    body[22] = @intFromEnum(fact.disposition);
-    body[23] = if (encoded_core != null) 1 else 0;
-    encodeSpecific(body[common_size..], fact);
-    if (encoded_core) |bytes| {
-        if (bytes.len != core_state.encoded_size) return error.InvalidCoreStateLength;
-        _ = try core_state.decode(bytes);
-        @memcpy(body[common_size + specific_size ..][0..core_state.encoded_size], bytes);
+    if (transaction.sequence == 0 or transaction.fact_count == 0 or
+        transaction.fact_count > max_facts)
+    {
+        return error.InvalidTransaction;
     }
-    var canonical_digest: [32]u8 = undefined;
-    hashCanonical(out[0..encoded_length], &canonical_digest);
-    @memcpy(out[digest_offset..][0..canonical_digest.len], &canonical_digest);
+    const core_length: usize = if (transaction.core != null) core_state.encoded_size else 0;
+    const encoded_length = header_size + transaction.fact_count * fact_size + core_length;
+    @memset(out, 0);
+    write(u16, out, 0, payload_version);
+    out[2] = transaction.fact_count;
+    out[3] = @intFromBool(transaction.core != null);
+    var cursor: usize = header_size;
+    for (transaction.factSlice()) |fact| {
+        try encodeFact(out[cursor..][0..fact_size], fact);
+        cursor += fact_size;
+    }
+    if (transaction.core) |state| {
+        _ = try core_state.decode(&state);
+        @memcpy(out[cursor..][0..core_state.encoded_size], &state);
+    }
     return out[0..encoded_length];
 }
 
-pub fn decode(payload: []const u8) !Decoded {
-    if (payload.len < envelope_size or !std.mem.eql(u8, payload[0..magic.len], magic)) {
-        return error.InvalidTransitionEnvelope;
-    }
-    if (read(u16, payload, 8) != payload_version) return error.UnsupportedTransitionPayloadVersion;
-    const kind = std.enums.fromInt(Kind, read(u16, payload, 10)) orelse
-        return error.UnsupportedTransitionKind;
-    if (read(u32, payload, 12) != payload.len) return error.InvalidTransitionPayloadLength;
-    const sequence = read(u64, payload, 16);
+pub fn decode(sequence: u64, payload: []const u8) !Transaction {
     if (sequence == 0) return error.InvalidTransitionSequence;
-    var actual_digest: [32]u8 = undefined;
-    hashCanonical(payload, &actual_digest);
-    if (!std.mem.eql(u8, &actual_digest, payload[digest_offset..][0..32])) {
-        return error.PayloadDigestMismatch;
-    }
-    const specific_size = kindSpecificSize(kind);
-    const base_length = common_size + specific_size;
-    const body = payload[envelope_size..];
-    if (body.len != base_length and body.len != base_length + core_state.encoded_size) {
-        return error.InvalidTransitionPayloadLength;
-    }
-    const core_present = switch (body[23]) {
+    if (payload.len < header_size) return error.InvalidTransitionPayloadLength;
+    if (read(u16, payload, 0) != payload_version) return error.UnsupportedTransitionPayloadVersion;
+    const fact_count = payload[2];
+    if (fact_count == 0 or fact_count > max_facts) return error.InvalidTransitionCount;
+    const core_present = switch (payload[3]) {
         0 => false,
         1 => true,
         else => return error.InvalidCorePresence,
     };
-    if (core_present != (body.len != base_length)) return error.InvalidCorePresence;
-    var fact: Fact = .{
-        .kind = kind,
-        .agent_id = read(u64, body, 0),
-        .ownership_epoch = read(u64, body, 8),
-        .agent_generation = read(u32, body, 16),
-        .flags = body[20],
-        .recovery_class = std.enums.fromInt(RecoveryClass, body[21]) orelse
-            return error.InvalidRecoveryClass,
-        .disposition = std.enums.fromInt(Disposition, body[22]) orelse
-            return error.InvalidDisposition,
+    const expected_length = header_size + @as(usize, fact_count) * fact_size +
+        (if (core_present) core_state.encoded_size else 0);
+    if (payload.len != expected_length) return error.InvalidTransitionPayloadLength;
+    var transaction: Transaction = .{
+        .sequence = sequence,
+        .fact_count = fact_count,
     };
-    decodeSpecific(body[common_size..base_length], &fact);
-    try validateFact(fact);
-    var decoded: Decoded = .{ .sequence = sequence, .fact = fact };
+    var cursor: usize = header_size;
+    for (0..fact_count) |index| {
+        transaction.facts[index] = try decodeFact(payload[cursor..][0..fact_size]);
+        cursor += fact_size;
+    }
     if (core_present) {
         var state: [core_state.encoded_size]u8 = undefined;
-        @memcpy(&state, body[base_length..]);
+        @memcpy(&state, payload[cursor..][0..core_state.encoded_size]);
         _ = try core_state.decode(&state);
-        decoded.core = state;
+        transaction.core = state;
     }
-    return decoded;
-}
-
-pub fn digest(payload: []const u8) ![32]u8 {
-    _ = try decode(payload);
-    var result: [32]u8 = undefined;
-    @memcpy(&result, payload[digest_offset..][0..32]);
-    return result;
-}
-
-fn hashCanonical(payload: []const u8, out: *[32]u8) void {
-    var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
-    hash.update(payload[0..digest_offset]);
-    hash.update(payload[digest_offset + 32 ..]);
-    hash.final(out);
+    return transaction;
 }
 
 fn validateFact(fact: Fact) !void {
@@ -263,90 +211,49 @@ fn validateFact(fact: Fact) !void {
     }
 }
 
-fn kindSpecificSize(kind: Kind) usize {
-    return switch (kind) {
-        .cancellation, .shutdown => 0,
-        .task_admitted, .conversation_advanced, .outcome => 16,
-        .operation_submitted, .operation_accepted, .authorization => 28,
-        .attempt_admitted, .result_applied, .approval_required => 36,
-        .result => 37,
+fn encodeFact(out: []u8, fact: Fact) !void {
+    try validateFact(fact);
+    @memset(out, 0);
+    out[0] = @intFromEnum(fact.kind);
+    out[1] = @intFromEnum(fact.recovery_class);
+    out[2] = @intFromEnum(fact.disposition);
+    out[3] = fact.flags;
+    write(u32, out, 4, fact.generation);
+    write(u32, out, 8, fact.agent_generation);
+    write(u64, out, 12, fact.agent_id);
+    write(u64, out, 20, fact.operation_id);
+    write(u64, out, 28, fact.attempt_id);
+    write(u64, out, 36, fact.subject);
+    write(u64, out, 44, fact.reference);
+    write(u64, out, 52, fact.digest);
+    write(u64, out, 60, fact.ownership_epoch);
+    out[68] = fact.evidence_kind;
+}
+
+fn decodeFact(input: []const u8) !Fact {
+    if (input[69] != 0 or input[70] != 0 or input[71] != 0) {
+        return error.NonzeroReservedByte;
+    }
+    const fact: Fact = .{
+        .kind = std.enums.fromInt(Kind, input[0]) orelse return error.UnsupportedTransitionKind,
+        .recovery_class = std.enums.fromInt(RecoveryClass, input[1]) orelse
+            return error.InvalidRecoveryClass,
+        .disposition = std.enums.fromInt(Disposition, input[2]) orelse
+            return error.InvalidDisposition,
+        .flags = input[3],
+        .generation = read(u32, input, 4),
+        .agent_generation = read(u32, input, 8),
+        .agent_id = read(u64, input, 12),
+        .operation_id = read(u64, input, 20),
+        .attempt_id = read(u64, input, 28),
+        .subject = read(u64, input, 36),
+        .reference = read(u64, input, 44),
+        .digest = read(u64, input, 52),
+        .ownership_epoch = read(u64, input, 60),
+        .evidence_kind = input[68],
     };
-}
-
-fn encodeSpecific(out: []u8, fact: Fact) void {
-    switch (fact.kind) {
-        .cancellation, .shutdown => {},
-        .task_admitted, .conversation_advanced, .outcome => {
-            write(u64, out, 0, fact.subject);
-            write(u64, out, 8, fact.reference);
-        },
-        .operation_submitted, .operation_accepted, .authorization => {
-            write(u64, out, 0, fact.operation_id);
-            write(u32, out, 8, fact.generation);
-            write(u64, out, 12, fact.reference);
-            write(u64, out, 20, fact.digest);
-        },
-        .attempt_admitted, .result_applied => {
-            write(u64, out, 0, fact.operation_id);
-            write(u32, out, 8, fact.generation);
-            write(u64, out, 12, fact.attempt_id);
-            write(u64, out, 20, fact.reference);
-            write(u64, out, 28, fact.digest);
-        },
-        .result => {
-            write(u64, out, 0, fact.operation_id);
-            write(u32, out, 8, fact.generation);
-            write(u64, out, 12, fact.attempt_id);
-            write(u64, out, 20, fact.reference);
-            write(u64, out, 28, fact.digest);
-            out[36] = fact.evidence_kind;
-        },
-        .approval_required => {
-            write(u64, out, 0, fact.operation_id);
-            write(u32, out, 8, fact.generation);
-            write(u64, out, 12, fact.subject);
-            write(u64, out, 20, fact.reference);
-            write(u64, out, 28, fact.digest);
-        },
-    }
-}
-
-fn decodeSpecific(input: []const u8, fact: *Fact) void {
-    switch (fact.kind) {
-        .cancellation, .shutdown => {},
-        .task_admitted, .conversation_advanced, .outcome => {
-            fact.subject = read(u64, input, 0);
-            fact.reference = read(u64, input, 8);
-        },
-        .operation_submitted, .operation_accepted, .authorization => {
-            fact.operation_id = read(u64, input, 0);
-            fact.generation = read(u32, input, 8);
-            fact.reference = read(u64, input, 12);
-            fact.digest = read(u64, input, 20);
-        },
-        .attempt_admitted, .result_applied => {
-            fact.operation_id = read(u64, input, 0);
-            fact.generation = read(u32, input, 8);
-            fact.attempt_id = read(u64, input, 12);
-            fact.reference = read(u64, input, 20);
-            fact.digest = read(u64, input, 28);
-        },
-        .result => {
-            fact.operation_id = read(u64, input, 0);
-            fact.generation = read(u32, input, 8);
-            fact.attempt_id = read(u64, input, 12);
-            fact.reference = read(u64, input, 20);
-            fact.digest = read(u64, input, 28);
-            fact.evidence_kind = input[36];
-        },
-        .approval_required => {
-            fact.operation_id = read(u64, input, 0);
-            fact.generation = read(u32, input, 8);
-            fact.subject = read(u64, input, 12);
-            fact.reference = read(u64, input, 20);
-            fact.digest = read(u64, input, 28);
-        },
-    }
+    try validateFact(fact);
+    return fact;
 }
 
 fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
