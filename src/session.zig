@@ -502,7 +502,9 @@ pub const Session = struct {
         var name_buffer: [16]u8 = undefined;
         const name = sessionName(config.identities.session_id, &name_buffer);
         try root.createDir(io, name, .fromMode(0o700));
-        errdefer root.deleteTree(io, name) catch {};
+        errdefer root.deleteTree(io, name) catch {
+            // A leftover directory is non-authoritative and exclusive creation fails closed on reuse.
+        };
         try syncDir(root, io);
         var dir = try root.openDir(io, name, .{});
         errdefer dir.close(io);
@@ -718,15 +720,11 @@ pub const Session = struct {
         }
     }
 
-    fn publishConversationEntry(self: *Session, fact: session_transition.Fact) !void {
+    fn publishConversationEntry(self: *Session, fact: session_transition.Fact) void {
         if (fact.subject <= self.entry_count) return;
         std.debug.assert(fact.subject == self.entry_count + 1);
-        const stored = try self.storage.readSession(self.session_id);
-        if (stored.active_leaf_id != fact.subject or stored.entry_count != fact.subject) {
-            return error.ConversationProjectionMismatch;
-        }
-        self.active_leaf_id = stored.active_leaf_id;
-        self.entry_count = stored.entry_count;
+        self.active_leaf_id = fact.subject;
+        self.entry_count = fact.subject;
     }
 
     fn reconstructConversationEntry(self: *Session, fact: session_transition.Fact) !void {
@@ -870,12 +868,7 @@ pub const Session = struct {
         self.ledger_sequence = final_sequence;
         self.semantic_index = prepared_index;
         for (facts) |fact| {
-            if (fact.kind == .conversation_advanced) {
-                self.publishConversationEntry(fact) catch |err| {
-                    self.failed = true;
-                    return err;
-                };
-            }
+            if (fact.kind == .conversation_advanced) self.publishConversationEntry(fact);
         }
         return final_sequence;
     }
@@ -1031,6 +1024,7 @@ pub const Session = struct {
         if (envelope.session_id != self.session_id or envelope.agent_id != self.agent_id) {
             return error.CompletionIdentityMismatch;
         }
+        if (envelope.ownership_epoch > token.epoch) return error.FutureCompletionEpoch;
         var result = try self.openBlob(token, envelope.result_ref);
         result.close();
         _ = try self.storage.publishCompletion(envelope);
@@ -1468,6 +1462,30 @@ test "create and exact resume preserve distinct identities and one owner" {
             &task_buffer,
         ),
     );
+}
+
+test "future ownership epochs never enter the durable Completion Inbox" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 15));
+    defer created.close();
+    const token = created.ownerToken();
+    try created.storeBlob(token, 99, "future result");
+    try std.testing.expectError(error.FutureCompletionEpoch, created.publishCompletionEvidence(token, .{
+        .kind = .model,
+        .session_id = created.session_id,
+        .ownership_epoch = token.epoch + 1,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = 100,
+        .operation_generation = 1,
+        .attempt_id = 101,
+        .result_ref = 99,
+        .result_digest = 102,
+    }));
+    try std.testing.expectEqual(@as(u64, 0), try layout.storage.completionHead(created.session_id));
 }
 
 test "recovery advances only within the configured Session Ledger quantum" {
