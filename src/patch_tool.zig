@@ -1,10 +1,11 @@
 const std = @import("std");
+const binding_digest = @import("binding.zig");
 
 pub const max_patch_size = 16 * 1024;
 pub const max_path_size = 1024;
-pub const binding_size = 112;
-pub const result_size = 40;
-pub const version: u16 = 1;
+pub const binding_size = 160;
+pub const result_size = 112;
+pub const version: u16 = 2;
 
 const binding_magic = "ONEPATCH";
 const result_magic = "ONEPRES\x00";
@@ -17,9 +18,9 @@ pub const Decision = enum(u8) {
 
 pub const Validation = struct {
     target_path: []const u8,
-    patch_digest: u64,
-    preimage_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8,
-    workspace_digest: u64,
+    patch_digest: binding_digest.PatchDescriptor,
+    preimage_digest: binding_digest.Preimage,
+    workspace_digest: binding_digest.WorkspaceState,
     preimage_size: u64,
     preimage_inode: std.Io.File.INode,
 };
@@ -50,11 +51,11 @@ pub const Binding = struct {
     operation_generation: u32,
     ownership_epoch: u64,
     patch_ref: u64,
-    patch_digest: u64,
-    workspace_digest: u64,
+    patch_digest: binding_digest.PatchDescriptor,
+    workspace_digest: binding_digest.WorkspaceState,
     preimage_size: u64,
     preimage_inode: u64,
-    preimage_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8,
+    preimage_digest: binding_digest.Preimage,
 };
 
 pub const ResultStatus = enum(u8) {
@@ -64,14 +65,14 @@ pub const ResultStatus = enum(u8) {
 
 pub const Result = struct {
     status: ResultStatus,
-    patch_digest: u64,
-    expected_workspace_digest: u64,
-    observed_workspace_digest: u64,
+    patch_digest: binding_digest.PatchDescriptor,
+    expected_workspace_digest: binding_digest.WorkspaceState,
+    observed_workspace_digest: ?binding_digest.WorkspaceState,
 };
 
 pub fn encodeBinding(out: *[binding_size]u8, binding: Binding) !void {
     if (binding.operation_id == 0 or binding.operation_generation == 0 or binding.ownership_epoch == 0 or
-        binding.patch_ref == 0 or binding.patch_digest == 0 or binding.workspace_digest == 0)
+        binding.patch_ref == 0)
     {
         return error.InvalidPatchBinding;
     }
@@ -84,11 +85,11 @@ pub fn encodeBinding(out: *[binding_size]u8, binding: Binding) !void {
     write(u32, out, 24, binding.operation_generation);
     write(u64, out, 32, binding.ownership_epoch);
     write(u64, out, 40, binding.patch_ref);
-    write(u64, out, 48, binding.patch_digest);
-    write(u64, out, 56, binding.workspace_digest);
-    write(u64, out, 64, binding.preimage_size);
-    write(u64, out, 72, binding.preimage_inode);
-    @memcpy(out[80..112], &binding.preimage_digest);
+    @memcpy(out[48..80], &binding.patch_digest.bytes);
+    @memcpy(out[80..112], &binding.workspace_digest.bytes);
+    write(u64, out, 112, binding.preimage_size);
+    write(u64, out, 120, binding.preimage_inode);
+    @memcpy(out[128..160], &binding.preimage_digest.bytes);
 }
 
 pub fn decodeBinding(bytes: *const [binding_size]u8) !Binding {
@@ -111,11 +112,11 @@ pub fn decodeBinding(bytes: *const [binding_size]u8) !Binding {
         .operation_generation = read(u32, bytes, 24),
         .ownership_epoch = read(u64, bytes, 32),
         .patch_ref = read(u64, bytes, 40),
-        .patch_digest = read(u64, bytes, 48),
-        .workspace_digest = read(u64, bytes, 56),
-        .preimage_size = read(u64, bytes, 64),
-        .preimage_inode = read(u64, bytes, 72),
-        .preimage_digest = bytes[80..112].*,
+        .patch_digest = .{ .bytes = bytes[48..80].* },
+        .workspace_digest = .{ .bytes = bytes[80..112].* },
+        .preimage_size = read(u64, bytes, 112),
+        .preimage_inode = read(u64, bytes, 120),
+        .preimage_digest = .{ .bytes = bytes[128..160].* },
     };
     var canonical: [binding_size]u8 = undefined;
     try encodeBinding(&canonical, binding);
@@ -124,24 +125,22 @@ pub fn decodeBinding(bytes: *const [binding_size]u8) !Binding {
 }
 
 pub fn encodeResult(out: *[result_size]u8, result: Result) !void {
-    if (result.patch_digest == 0 or result.expected_workspace_digest == 0 or
-        (result.status == .stale and result.observed_workspace_digest == 0) or
-        (result.status == .denied and result.observed_workspace_digest != 0))
-    {
+    if (result.status == .denied and result.observed_workspace_digest != null) {
         return error.InvalidPatchResult;
     }
     @memset(out, 0);
     @memcpy(out[0..result_magic.len], result_magic);
     write(u16, out, 8, version);
     out[10] = @intFromEnum(result.status);
-    write(u64, out, 16, result.patch_digest);
-    write(u64, out, 24, result.expected_workspace_digest);
-    write(u64, out, 32, result.observed_workspace_digest);
+    out[11] = @intFromBool(result.observed_workspace_digest != null);
+    @memcpy(out[16..48], &result.patch_digest.bytes);
+    @memcpy(out[48..80], &result.expected_workspace_digest.bytes);
+    if (result.observed_workspace_digest) |observed| @memcpy(out[80..112], &observed.bytes);
 }
 
 pub fn decodeResult(bytes: *const [result_size]u8) !Result {
     if (!std.mem.eql(u8, bytes[0..result_magic.len], result_magic) or
-        read(u16, bytes, 8) != version or bytes[11] != 0 or bytes[12] != 0 or
+        read(u16, bytes, 8) != version or bytes[11] > 1 or bytes[12] != 0 or
         bytes[13] != 0 or bytes[14] != 0 or bytes[15] != 0)
     {
         return error.InvalidPatchResult;
@@ -153,9 +152,12 @@ pub fn decodeResult(bytes: *const [result_size]u8) !Result {
     };
     const result: Result = .{
         .status = status,
-        .patch_digest = read(u64, bytes, 16),
-        .expected_workspace_digest = read(u64, bytes, 24),
-        .observed_workspace_digest = read(u64, bytes, 32),
+        .patch_digest = .{ .bytes = bytes[16..48].* },
+        .expected_workspace_digest = .{ .bytes = bytes[48..80].* },
+        .observed_workspace_digest = if (bytes[11] == 1)
+            .{ .bytes = bytes[80..112].* }
+        else
+            null,
     };
     var canonical: [result_size]u8 = undefined;
     try encodeResult(&canonical, result);
@@ -164,16 +166,16 @@ pub fn decodeResult(bytes: *const [result_size]u8) !Result {
 }
 
 pub fn sameWorkspace(expected: Validation, observed: Validation) bool {
-    return expected.patch_digest == observed.patch_digest and
-        expected.workspace_digest == observed.workspace_digest and
+    return binding_digest.eql(binding_digest.PatchDescriptor, expected.patch_digest, observed.patch_digest) and
+        binding_digest.eql(binding_digest.WorkspaceState, expected.workspace_digest, observed.workspace_digest) and
         expected.preimage_size == observed.preimage_size and
         expected.preimage_inode == observed.preimage_inode and
-        std.mem.eql(u8, &expected.preimage_digest, &observed.preimage_digest) and
+        binding_digest.eql(binding_digest.Preimage, expected.preimage_digest, observed.preimage_digest) and
         std.mem.eql(u8, expected.target_path, observed.target_path);
 }
 
-pub fn descriptorDigest(patch: []const u8) u64 {
-    return digest64(patch);
+pub fn descriptorDigest(patch: []const u8) binding_digest.PatchDescriptor {
+    return binding_digest.hash(binding_digest.PatchDescriptor, patch);
 }
 
 pub fn validate(
@@ -200,7 +202,7 @@ pub fn validate(
     if (confirmed_stat.kind != .file or confirmed_stat.nlink != 1) return error.UnsupportedSpecialFile;
     const confirmed_digest = try hashFile(io, confirmed_target, confirmed_stat.size);
     if (confirmed_stat.inode != stat.inode or confirmed_stat.size != stat.size or
-        !std.mem.eql(u8, &confirmed_digest, &preimage_digest))
+        !binding_digest.eql(binding_digest.Preimage, confirmed_digest, preimage_digest))
     {
         return error.PreimageChangedDuringValidation;
     }
@@ -208,7 +210,13 @@ pub fn validate(
         .target_path = target_path,
         .patch_digest = descriptorDigest(patch),
         .preimage_digest = preimage_digest,
-        .workspace_digest = workspaceDigest(target_path, preimage_digest, stat.size, stat.inode),
+        .workspace_digest = workspaceDigest(
+            target_path,
+            descriptorDigest(patch),
+            preimage_digest,
+            stat.size,
+            stat.inode,
+        ),
         .preimage_size = stat.size,
         .preimage_inode = stat.inode,
     };
@@ -361,8 +369,8 @@ fn openRegularTarget(workspace: std.Io.Dir, io: std.Io, target_path: []const u8)
     return file;
 }
 
-fn hashFile(io: std.Io, file: std.Io.File, size: u64) ![std.crypto.hash.sha2.Sha256.digest_length]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+fn hashFile(io: std.Io, file: std.Io.File, size: u64) !binding_digest.Preimage {
+    var hasher = binding_digest.Hasher(binding_digest.Preimage).init();
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;
     while (offset < size) {
@@ -373,9 +381,7 @@ fn hashFile(io: std.Io, file: std.Io.File, size: u64) ![std.crypto.hash.sha2.Sha
         offset += count;
     }
     if (try file.length(io) != size) return error.PreimageChangedDuringRead;
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    hasher.final(&digest);
-    return digest;
+    return hasher.final();
 }
 
 fn gitTracked(io: std.Io, workspace_path: []const u8, target_path: []const u8) !void {
@@ -428,31 +434,20 @@ fn runGit(
 
 fn workspaceDigest(
     target_path: []const u8,
-    preimage_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8,
+    patch_digest: binding_digest.PatchDescriptor,
+    preimage_digest: binding_digest.Preimage,
     size: u64,
     inode: std.Io.File.INode,
-) u64 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+) binding_digest.WorkspaceState {
+    var hasher = binding_digest.Hasher(binding_digest.WorkspaceState).init();
     hasher.update(target_path);
-    hasher.update(&preimage_digest);
+    hasher.update(&patch_digest.bytes);
+    hasher.update(&preimage_digest.bytes);
     var integers: [16]u8 = undefined;
     std.mem.writeInt(u64, integers[0..8], size, .little);
     std.mem.writeInt(u64, integers[8..16], @intCast(inode), .little);
     hasher.update(&integers);
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    hasher.final(&digest);
-    return nonzero64(digest);
-}
-
-fn digest64(bytes: []const u8) u64 {
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    return nonzero64(digest);
-}
-
-fn nonzero64(digest: [std.crypto.hash.sha2.Sha256.digest_length]u8) u64 {
-    const value = std.mem.readInt(u64, digest[0..8], .little);
-    return if (value == 0) 1 else value;
+    return hasher.final();
 }
 
 fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
@@ -482,8 +477,12 @@ test "one exact tracked regular-file patch validates without mutation" {
         "+new\n";
     const validated = try validate(std.testing.allocator, io, path, patch);
     try std.testing.expectEqualStrings("note.txt", validated.target_path);
-    try std.testing.expectEqual(descriptorDigest(patch), validated.patch_digest);
-    try std.testing.expect(validated.workspace_digest != 0);
+    try std.testing.expect(binding_digest.eql(
+        binding_digest.PatchDescriptor,
+        descriptorDigest(patch),
+        validated.patch_digest,
+    ));
+    try std.testing.expectEqual(@as(usize, 32), validated.workspace_digest.bytes.len);
     try std.testing.expectEqual(@as(u64, 4), validated.preimage_size);
     var actual: [4]u8 = undefined;
     var file = try tmp.dir.openFile(io, "note.txt", .{});
@@ -493,15 +492,15 @@ test "one exact tracked regular-file patch validates without mutation" {
 }
 
 test "permission binding and typed result are canonical" {
-    const preimage: [32]u8 = @splat(7);
+    const preimage = binding_digest.hash(binding_digest.Preimage, "preimage-7");
     const expected: Binding = .{
         .decision = .ask,
         .operation_id = 11,
         .operation_generation = 2,
         .ownership_epoch = 3,
         .patch_ref = 4,
-        .patch_digest = 5,
-        .workspace_digest = 6,
+        .patch_digest = binding_digest.hash(binding_digest.PatchDescriptor, "patch-5"),
+        .workspace_digest = binding_digest.hash(binding_digest.WorkspaceState, "workspace-6"),
         .preimage_size = 7,
         .preimage_inode = 8,
         .preimage_digest = preimage,
@@ -511,18 +510,31 @@ test "permission binding and typed result are canonical" {
     const decoded = try decodeBinding(&binding_bytes);
     try std.testing.expectEqual(expected.operation_id, decoded.operation_id);
     try std.testing.expectEqual(expected.decision, decoded.decision);
-    try std.testing.expectEqualSlices(u8, &preimage, &decoded.preimage_digest);
+    try std.testing.expect(binding_digest.eql(
+        binding_digest.Preimage,
+        preimage,
+        decoded.preimage_digest,
+    ));
 
     const expected_result: Result = .{
         .status = .stale,
-        .patch_digest = 9,
-        .expected_workspace_digest = 10,
-        .observed_workspace_digest = 11,
+        .patch_digest = binding_digest.hash(binding_digest.PatchDescriptor, "patch-9"),
+        .expected_workspace_digest = binding_digest.hash(binding_digest.WorkspaceState, "workspace-10"),
+        .observed_workspace_digest = binding_digest.hash(binding_digest.WorkspaceState, "workspace-11"),
     };
     var result_bytes: [result_size]u8 = undefined;
     try encodeResult(&result_bytes, expected_result);
     const decoded_result = try decodeResult(&result_bytes);
     try std.testing.expectEqualDeep(expected_result, decoded_result);
+
+    const unavailable_result: Result = .{
+        .status = .stale,
+        .patch_digest = expected_result.patch_digest,
+        .expected_workspace_digest = expected_result.expected_workspace_digest,
+        .observed_workspace_digest = null,
+    };
+    try encodeResult(&result_bytes, unavailable_result);
+    try std.testing.expectEqualDeep(unavailable_result, try decodeResult(&result_bytes));
 }
 
 test "applicable control bytes validate but remain exact data" {

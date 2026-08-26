@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
 const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
@@ -70,7 +71,7 @@ pub const Input = union(enum) {
 pub const PermissionDecision = struct {
     operation_id: u64,
     operation_generation: u32,
-    descriptor_digest: u64,
+    descriptor_digest: binding.Descriptor,
     allow: bool,
 };
 
@@ -84,7 +85,8 @@ pub const Completion = struct {
     operation_generation: u32,
     attempt_id: u64,
     result_ref: u64,
-    result_digest: u64,
+    result_digest: binding.Result,
+    completion_digest: binding.Completion,
 };
 
 pub const CompletionKind = enum { model, bash, apply_patch };
@@ -129,7 +131,7 @@ pub const Projection = struct {
     task_id: u64 = 0,
     operation_id: u64 = 0,
     operation_generation: u32 = 0,
-    descriptor_digest: u64 = 0,
+    descriptor_digest: ?binding.Descriptor = null,
     content_ref: u64 = 0,
     generation: u64 = 0,
 };
@@ -279,7 +281,7 @@ const HarnessState = struct {
             const expected = self.awaiting_approval orelse return .invalid;
             if (decision.operation_id != expected.operation_id or
                 decision.operation_generation != expected.operation_generation or
-                decision.descriptor_digest != expected.descriptor_digest)
+                !binding.descriptorEql(decision.descriptor_digest, expected.descriptor_digest))
             {
                 return .invalid;
             }
@@ -349,7 +351,7 @@ const HarnessState = struct {
                 const expected = self.approvalSnapshot() orelse return error.PermissionNotRequested;
                 if (decision.operation_id != expected.operation_id or
                     decision.operation_generation != expected.operation_generation or
-                    decision.descriptor_digest != expected.descriptor_digest)
+                    !binding.descriptorEql(decision.descriptor_digest, expected.descriptor_digest))
                 {
                     return error.StalePermissionDecision;
                 }
@@ -397,6 +399,7 @@ const HarnessState = struct {
                         .attempt_id = completion.attempt_id,
                         .result_ref = completion.result_ref,
                         .result_digest = completion.result_digest,
+                        .completion_digest = completion.completion_digest,
                     },
                     self.runtimeConfig(),
                     self.config.provider,
@@ -771,6 +774,7 @@ const HarnessState = struct {
             .attempt_id = evidence.attempt_id,
             .result_ref = evidence.result_ref,
             .result_digest = evidence.result_digest,
+            .completion_digest = evidence.completion_digest,
         };
         switch (self.offer(.{ .completion = completion })) {
             .accepted => {},
@@ -801,12 +805,20 @@ const HarnessState = struct {
         return .{ .context = self, .required = approvalRequired };
     }
 
-    fn classifyBash(context: *anyopaque, _: u64, _: bash_tool.Call) anyerror!bash_tool.Decision {
+    fn classifyBash(
+        context: *anyopaque,
+        _: binding.BashDescriptor,
+        _: bash_tool.Call,
+    ) anyerror!bash_tool.Decision {
         const self: *HarnessState = @ptrCast(@alignCast(context));
         return if (self.config.permission_mode == .bypass) .allow else .ask;
     }
 
-    fn requestBashPermission(_: *anyopaque, _: u64, _: bash_tool.Call) anyerror!bool {
+    fn requestBashPermission(
+        _: *anyopaque,
+        _: binding.BashDescriptor,
+        _: bash_tool.Call,
+    ) anyerror!bool {
         return error.PermissionInputRequired;
     }
 
@@ -1175,7 +1187,7 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         },
         .operation_id = 10,
         .generation = 1,
-    }, 11, 12, .none);
+    }, 11, .{ .model = binding.hash(binding.ModelDescriptor, "descriptor-12") }, .none);
     try session.storeBlob(
         descriptor.operation_submitted.descriptor_ref,
         "operation descriptor",

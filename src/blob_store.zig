@@ -1,15 +1,16 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 
-pub const header_size = 32;
+pub const header_size = 64;
 pub const max_blob_size = 1024 * 1024;
 pub const validation_window_size = 4096;
-pub const version: u16 = 1;
+pub const version: u16 = 2;
 
 const magic = "ONEBLOB\x00";
 
 pub const Metadata = struct {
     length: u64,
-    payload_crc: u32,
+    digest: binding.Blob,
 };
 
 pub const Writer = struct {
@@ -17,7 +18,7 @@ pub const Writer = struct {
     file: std.Io.File,
     reference: u64,
     length: u64 = 0,
-    crc: std.hash.Crc32 = .init(),
+    hasher: binding.Hasher(binding.Blob) = .init(),
     open: bool = true,
 
     pub fn begin(dir: std.Io.Dir, io: std.Io, reference: u64) !Writer {
@@ -43,7 +44,7 @@ pub const Writer = struct {
         if (bytes.len == 0) return;
         if (self.length + bytes.len > max_blob_size) return error.BlobTooLarge;
         try self.file.writePositionalAll(io, bytes, header_size + self.length);
-        self.crc.update(bytes);
+        self.hasher.update(bytes);
         self.length += bytes.len;
     }
 
@@ -51,7 +52,7 @@ pub const Writer = struct {
         if (!self.open) return error.BlobWriterClosed;
         if (self.length == 0) return error.EmptyBlob;
         var header: [header_size]u8 = undefined;
-        encodeHeaderFields(&header, self.length, self.crc.final());
+        encodeHeaderFields(&header, self.length, self.hasher.final());
         try self.file.writePositionalAll(io, &header, 0);
         try self.file.sync(io);
         self.file.close(io);
@@ -141,29 +142,31 @@ fn validateFile(file: std.Io.File, io: std.Io) !Metadata {
     const meta = try decodeHeader(&header);
     if (stat.size != header_size + meta.length) return error.InvalidBlobLength;
 
-    var crc: std.hash.Crc32 = .init();
+    var hasher = binding.Hasher(binding.Blob).init();
     var window: [validation_window_size]u8 = undefined;
     var offset: u64 = 0;
     while (offset < meta.length) {
         const expected: usize = @intCast(@min(meta.length - offset, window.len));
         const actual = try file.readPositionalAll(io, window[0..expected], header_size + offset);
         if (actual != expected) return error.TruncatedBlob;
-        crc.update(window[0..actual]);
+        hasher.update(window[0..actual]);
         offset += actual;
     }
-    if (crc.final() != meta.payload_crc) return error.BlobChecksumMismatch;
+    if (!binding.eql(binding.Blob, hasher.final(), meta.digest)) {
+        return error.BlobChecksumMismatch;
+    }
     return meta;
 }
 
-fn encodeHeaderFields(out: *[header_size]u8, length: u64, payload_crc: u32) void {
+fn encodeHeaderFields(out: *[header_size]u8, length: u64, digest: binding.Blob) void {
     @memset(out, 0);
     @memcpy(out[0..magic.len], magic);
     write(u16, out, 8, version);
     write(u16, out, 10, header_size);
     write(u32, out, 12, 0);
     write(u64, out, 16, length);
-    write(u32, out, 24, payload_crc);
-    write(u32, out, 28, std.hash.Crc32.hash(out[0..28]));
+    @memcpy(out[24..56], &digest.bytes);
+    write(u32, out, 60, std.hash.Crc32.hash(out[0..60]));
 }
 
 fn decodeHeader(bytes: *const [header_size]u8) !Metadata {
@@ -171,12 +174,14 @@ fn decodeHeader(bytes: *const [header_size]u8) !Metadata {
     if (read(u16, bytes, 8) != version) return error.UnsupportedBlobVersion;
     if (read(u16, bytes, 10) != header_size) return error.InvalidBlobHeader;
     if (read(u32, bytes, 12) != 0) return error.UnsupportedBlobFlags;
-    if (read(u32, bytes, 28) != std.hash.Crc32.hash(bytes[0..28])) {
+    if (read(u32, bytes, 56) != 0 or
+        read(u32, bytes, 60) != std.hash.Crc32.hash(bytes[0..60]))
+    {
         return error.BlobHeaderChecksumMismatch;
     }
     const length = read(u64, bytes, 16);
     if (length == 0 or length > max_blob_size) return error.InvalidBlobLength;
-    return .{ .length = length, .payload_crc = read(u32, bytes, 24) };
+    return .{ .length = length, .digest = .{ .bytes = bytes[24..56].* } };
 }
 
 fn blobName(reference: u64, buffer: *[21]u8) ![]const u8 {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const core_state = @import("core_state.zig");
 const transition = @import("session_transition.zig");
 
@@ -17,12 +18,12 @@ test "Approval Required and Authorization have distinct canonical payloads" {
         .operation = operation,
         .binding_ref = 13,
         .descriptor_ref = 17,
-        .descriptor_digest = 19,
+        .descriptor_digest = .{ .bash = binding.hash(binding.BashDescriptor, "descriptor-19") },
     });
     const authorization = transition.authorization(.{
         .operation = operation,
         .permission_ref = 23,
-        .descriptor_digest = 19,
+        .descriptor_digest = .{ .bash = binding.hash(binding.BashDescriptor, "descriptor-19") },
         .allowed = true,
     });
     var approval_buffer: [transition.max_payload_size]u8 = undefined;
@@ -77,7 +78,7 @@ test "a malformed flat wire record never becomes a typed fact" {
     transaction.facts[0] = fact;
     const encoded = try transition.encode(&buffer, transaction);
 
-    // The private flat record stores operation_id 20 bytes into its 72-byte
+    // The private flat record stores operation_id 20 bytes into its 104-byte
     // fact body, after the four-byte transaction header.
     buffer[4 + 20] = 1;
     try std.testing.expectError(
@@ -96,14 +97,14 @@ test "Result evidence round trips as immediate or durable typed choices" {
         transition.result(.{
             .operation = operation,
             .result_ref = 13,
-            .result_digest = 17,
+            .result_digest = binding.hash(binding.Result, "result-17"),
             .class = .ordinary,
             .evidence = .{ .immediate = .consequential },
         }),
         transition.result(.{
             .operation = operation,
             .result_ref = 19,
-            .result_digest = 23,
+            .result_digest = binding.hash(binding.Result, "result-23"),
             .class = .ordinary,
             .evidence = .{ .durable = .{ .model = 29 } },
         }),
@@ -117,4 +118,24 @@ test "Result evidence round trips as immediate or durable typed choices" {
     try std.testing.expect(decoded.facts[0].result.evidence == .immediate);
     try std.testing.expect(decoded.facts[1].result.evidence == .durable);
     try std.testing.expect(decoded.facts[1].result.evidence.durable == .model);
+}
+
+test "an all-zero authoritative binding is not decoded as absence" {
+    const zero: binding.Result = .{ .bytes = @splat(0) };
+    var transaction: transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    transaction.facts[0] = transition.result(.{
+        .operation = .{
+            .agent = .{ .agent_id = 7, .agent_generation = 1, .ownership_epoch = 2 },
+            .operation_id = 11,
+            .generation = 3,
+        },
+        .result_ref = 13,
+        .result_digest = zero,
+        .class = .ordinary,
+        .evidence = .{ .immediate = .consequential },
+    });
+    var buffer: [transition.max_payload_size]u8 = undefined;
+    const decoded = try transition.decode(1, try transition.encode(&buffer, transaction));
+
+    try std.testing.expect(binding.eql(binding.Result, zero, decoded.facts[0].result.result_digest));
 }

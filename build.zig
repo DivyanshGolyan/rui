@@ -138,6 +138,7 @@ fn addTestGraph(
     optimize: std.builtin.OptimizeMode,
 ) void {
     const plain_test_roots = [_][]const u8{
+        "src/binding.zig",
         "src/core_state.zig",
         "src/core_image.zig",
         "src/harness.zig",

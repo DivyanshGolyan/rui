@@ -185,13 +185,13 @@ fn offeredPermissionDenialContinues(
     _ = try restored.drive();
     const regenerated = try restored.drive();
     const approval = approvalProjection(&regenerated) orelse return error.ApprovalProjectionMissingAfterRestore;
-    if (approval.content_ref == 0 or approval.descriptor_digest == 0) {
+    if (approval.content_ref == 0 or approval.descriptor_digest == null) {
         return error.ApprovalProjectionIncomplete;
     }
     if (restored.offer(.{ .permission = .{
         .operation_id = approval.operation_id,
         .operation_generation = approval.operation_generation,
-        .descriptor_digest = approval.descriptor_digest,
+        .descriptor_digest = approval.descriptor_digest orelse return error.ApprovalProjectionIncomplete,
         .allow = false,
     } }) != .accepted) return error.PermissionOfferRejected;
     _ = try restored.drive();
@@ -276,7 +276,7 @@ fn restoredPatchApprovalUsesExactDescriptor(
     if (restored.offer(.{ .permission = .{
         .operation_id = approval.operation_id,
         .operation_generation = approval.operation_generation,
-        .descriptor_digest = approval.descriptor_digest,
+        .descriptor_digest = approval.descriptor_digest orelse return error.ApprovalProjectionIncomplete,
         .allow = false,
     } }) != .accepted) return error.PermissionOfferRejected;
     _ = try restored.drive();
@@ -335,7 +335,7 @@ fn approvedPatchThenShutdownEntersSettlement(
     if (owner.offer(.{ .permission = .{
         .operation_id = approval.operation_id,
         .operation_generation = approval.operation_generation,
-        .descriptor_digest = approval.descriptor_digest,
+        .descriptor_digest = approval.descriptor_digest orelse return error.ApprovalProjectionIncomplete,
         .allow = true,
     } }) != .accepted) return error.PermissionOfferRejected;
     const deferred = try owner.drive();

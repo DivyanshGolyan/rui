@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 
 pub const version: u16 = 1;
 pub const call_header_size = 16;
@@ -61,10 +62,10 @@ pub const Control = struct {
 
 pub const Policy = struct {
     context: *anyopaque,
-    classify_fn: *const fn (*anyopaque, u64, Call) anyerror!Decision,
-    ask_fn: *const fn (*anyopaque, u64, Call) anyerror!bool,
+    classify_fn: *const fn (*anyopaque, binding.BashDescriptor, Call) anyerror!Decision,
+    ask_fn: *const fn (*anyopaque, binding.BashDescriptor, Call) anyerror!bool,
 
-    pub fn decide(self: Policy, digest: u64, call: Call) !bool {
+    pub fn decide(self: Policy, digest: binding.BashDescriptor, call: Call) !bool {
         return switch (try self.classify_fn(self.context, digest, call)) {
             .allow => true,
             .deny => false,
@@ -103,12 +104,8 @@ pub fn decodeCall(bytes: []const u8) !Call {
     return call;
 }
 
-pub fn descriptorDigest(bytes: []const u8) u64 {
-    var digest_bytes: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest_bytes, .{});
-    var digest = std.mem.readInt(u64, digest_bytes[0..8], .little);
-    if (digest == 0) digest = 1;
-    return digest;
+pub fn descriptorDigest(bytes: []const u8) binding.BashDescriptor {
+    return binding.hash(binding.BashDescriptor, bytes);
 }
 
 pub fn execute(
@@ -394,7 +391,7 @@ test "bash call is canonical, bounded, and digest bound" {
     const decoded = try decodeCall(encoded);
     try std.testing.expectEqualStrings("git status --short", decoded.command);
     try std.testing.expectEqual(@as(u32, 5000), decoded.timeout_ms);
-    try std.testing.expect(descriptorDigest(encoded) != 0);
+    try std.testing.expectEqual(@as(usize, 32), descriptorDigest(encoded).bytes.len);
     try std.testing.expectError(error.InvalidBashCall, decodeCall("not a call"));
 }
 
@@ -450,13 +447,17 @@ test "permission ask is bound to the exact digest and call" {
     const Subject = struct {
         asked: bool = false,
 
-        fn classify(_: *anyopaque, _: u64, _: Call) anyerror!Decision {
+        fn classify(_: *anyopaque, _: binding.BashDescriptor, _: Call) anyerror!Decision {
             return .ask;
         }
 
-        fn ask(context: *anyopaque, digest: u64, call: Call) anyerror!bool {
+        fn ask(context: *anyopaque, digest: binding.BashDescriptor, call: Call) anyerror!bool {
             const self: *@This() = @ptrCast(@alignCast(context));
-            if (digest != 99 or !std.mem.eql(u8, call.command, "git diff")) {
+            if (!binding.eql(
+                binding.BashDescriptor,
+                digest,
+                binding.hash(binding.BashDescriptor, "descriptor-99"),
+            ) or !std.mem.eql(u8, call.command, "git diff")) {
                 return error.PermissionSubjectMismatch;
             }
             self.asked = true;
@@ -469,7 +470,10 @@ test "permission ask is bound to the exact digest and call" {
         .classify_fn = Subject.classify,
         .ask_fn = Subject.ask,
     };
-    try std.testing.expect(try policy.decide(99, .{ .command = "git diff", .timeout_ms = 5000 }));
+    try std.testing.expect(try policy.decide(
+        binding.hash(binding.BashDescriptor, "descriptor-99"),
+        .{ .command = "git diff", .timeout_ms = 5000 },
+    ));
     try std.testing.expect(subject.asked);
 }
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const host_store = @import("host_store.zig");
 const transition = @import("session_transition.zig");
@@ -105,7 +106,7 @@ test "Completion publication validates the Session Agent identity" {
     defer owner.close();
     try create(&owner, 27);
 
-    try std.testing.expectError(error.InvalidCompletionIdentity, owner.publishCompletion(.{
+    try std.testing.expectError(error.InvalidCompletionIdentity, owner.publishCompletion(completion_inbox.bind(.{
         .kind = .model,
         .session_id = 27,
         .ownership_epoch = 1,
@@ -115,8 +116,8 @@ test "Completion publication validates the Session Agent identity" {
         .operation_generation = 1,
         .attempt_id = 31,
         .result_ref = 32,
-        .result_digest = 33,
-    }));
+        .result_digest = binding.hash(binding.Result, "result-33"),
+    })));
     try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(27));
 }
 
@@ -151,12 +152,24 @@ test "multiple Completion rows can be consumed by one semantic commit" {
     var owner = try host_store.StorageOwner.open(std.testing.io, try pathFor(&tmp, &path_buffer), .{});
     defer owner.close();
     try create(&owner, 41);
-    const first: completion_inbox.Envelope = .{ .kind = .model, .session_id = 41, .ownership_epoch = 1, .agent_id = 42, .agent_generation = 1, .operation_id = 50, .operation_generation = 1, .attempt_id = 60, .result_ref = 70, .result_digest = 80 };
+    const first = completion_inbox.bind(.{ .kind = .model, .session_id = 41, .ownership_epoch = 1, .agent_id = 42, .agent_generation = 1, .operation_id = 50, .operation_generation = 1, .attempt_id = 60, .result_ref = 70, .result_digest = binding.hash(binding.Result, "result-80") });
     var second = first;
     second.operation_id = 51;
     second.attempt_id = 61;
     second.result_ref = 71;
-    second.result_digest = 81;
+    second.result_digest = binding.hash(binding.Result, "result-81");
+    second = completion_inbox.bind(.{
+        .kind = second.kind,
+        .session_id = second.session_id,
+        .ownership_epoch = second.ownership_epoch,
+        .agent_id = second.agent_id,
+        .agent_generation = second.agent_generation,
+        .operation_id = second.operation_id,
+        .operation_generation = second.operation_generation,
+        .attempt_id = second.attempt_id,
+        .result_ref = second.result_ref,
+        .result_digest = second.result_digest,
+    });
     _ = try owner.publishCompletion(first);
     _ = try owner.publishCompletion(second);
     const agent: transition.AgentContext = .{
@@ -168,14 +181,14 @@ test "multiple Completion rows can be consumed by one semantic commit" {
         transition.result(.{
             .operation = .{ .agent = agent, .operation_id = 50, .generation = 1 },
             .result_ref = 70,
-            .result_digest = 80,
+            .result_digest = binding.hash(binding.Result, "result-80"),
             .class = .ordinary,
             .evidence = .{ .durable = .{ .model = 60 } },
         }),
         transition.result(.{
             .operation = .{ .agent = agent, .operation_id = 51, .generation = 1 },
             .result_ref = 71,
-            .result_digest = 81,
+            .result_digest = binding.hash(binding.Result, "result-81"),
             .class = .ordinary,
             .evidence = .{ .durable = .{ .model = 61 } },
         }),

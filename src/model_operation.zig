@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const host_store = @import("host_store.zig");
 const bash_tool = @import("bash_tool.zig");
 const model_protocol = @import("model_protocol.zig");
@@ -14,7 +15,7 @@ const request_magic = "ONEREQ\x00\x00";
 
 pub const Descriptor = struct {
     request_ref: u64,
-    digest: u64,
+    digest: binding.ModelDescriptor,
     length: u64,
     first_entry: u32,
     entry_count: u32,
@@ -147,7 +148,7 @@ pub fn buildRequest(
 
     var writer = try session.beginBlob(request_ref);
     errdefer writer.abort();
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var hasher = binding.Hasher(binding.ModelDescriptor).init();
     var total: u64 = 0;
     var request_header: [request_header_size]u8 = @splat(0);
     @memcpy(request_header[0..request_magic.len], request_magic);
@@ -180,13 +181,9 @@ pub fn buildRequest(
     }
     try writer.finish();
 
-    var digest_bytes: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    hasher.final(&digest_bytes);
-    var digest = std.mem.readInt(u64, digest_bytes[0..8], .little);
-    if (digest == 0) digest = 1;
     return .{
         .request_ref = request_ref,
-        .digest = digest,
+        .digest = hasher.final(),
         .length = total,
         .first_entry = first_entry,
         .entry_count = entry_count,
@@ -195,7 +192,7 @@ pub fn buildRequest(
 
 fn appendHashed(
     writer: *session_store.BlobWriter,
-    hasher: *std.crypto.hash.sha2.Sha256,
+    hasher: *binding.Hasher(binding.ModelDescriptor),
     total: *u64,
     bytes: []const u8,
 ) !void {
@@ -416,7 +413,7 @@ test "request reconstruction walks durable entries through bounded windows" {
     });
     defer session.close();
     const descriptor = try buildRequest(&session, 1001, 1, 1);
-    try std.testing.expect(descriptor.digest != 0);
+    try std.testing.expectEqual(@as(usize, 32), descriptor.digest.bytes.len);
     try std.testing.expectEqual(@as(u32, 1), descriptor.entry_count);
 
     var fixture: Fixture = .{
