@@ -33,11 +33,7 @@ pub const RecoveryClass = enum(u8) {
     consequential = 2,
 };
 
-pub const EvidenceKind = enum(u8) {
-    model = 1,
-    bash = 2,
-    apply_patch = 3,
-};
+pub const EvidenceKind = binding.DescriptorKind;
 
 pub const ResultClass = enum(u8) {
     ordinary = 0,
@@ -51,7 +47,7 @@ pub const ConversationKind = enum(u8) {
     context_checkpoint = 4,
 };
 
-pub const DurableResultEvidence = union(EvidenceKind) {
+pub const DurableResultEvidence = union(binding.DescriptorKind) {
     model: u64,
     bash: u64,
     apply_patch: u64,
@@ -226,19 +222,18 @@ pub fn operationAccepted(
     } };
 }
 
-pub fn attemptAdmitted(
+pub fn consequentialAttemptAdmitted(
     operation: OperationContext,
     attempt_id: u64,
     descriptor_ref: u64,
     descriptor_digest: binding.Descriptor,
-    recovery_class: RecoveryClass,
 ) Fact {
     return .{ .attempt_admitted = .{
         .operation = operation,
         .attempt_id = attempt_id,
         .descriptor_ref = descriptor_ref,
         .descriptor_digest = descriptor_digest,
-        .recovery_class = recovery_class,
+        .recovery_class = .consequential,
         .possible_duplicate_attempts = 0,
     } };
 }

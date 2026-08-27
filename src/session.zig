@@ -303,7 +303,7 @@ const InboxIndex = struct {
         if (envelope.ownership_epoch != attempt.operation.agent.ownership_epoch) {
             return error.CompletionAttemptEpochMismatch;
         }
-        if (envelope.kind != evidenceKind(attempt.descriptor_digest)) {
+        if (envelope.kind != std.meta.activeTag(attempt.descriptor_digest)) {
             return error.CompletionEvidenceKindMismatch;
         }
         if (history.result != null) return .{
@@ -407,15 +407,7 @@ const InboxIndex = struct {
         kind: completion_inbox.EvidenceKind,
     ) bool {
         const attempt = history.findAttempt(attempt_id) orelse return false;
-        return evidenceKind(attempt.descriptor_digest) == kind;
-    }
-
-    fn evidenceKind(descriptor: binding.Descriptor) completion_inbox.EvidenceKind {
-        return switch (descriptor) {
-            .model => .model,
-            .bash => .bash,
-            .apply_patch => .apply_patch,
-        };
+        return std.meta.activeTag(attempt.descriptor_digest) == kind;
     }
 };
 
@@ -1572,12 +1564,11 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
                 0,
             )
         else
-            session_transition.attemptAdmitted(
+            session_transition.consequentialAttemptAdmitted(
                 operation,
                 attempt_id,
                 descriptor_ref,
                 case.descriptor,
-                .consequential,
             );
         _ = try created.commitSemantic(&.{
             session_transition.operationSubmitted(
@@ -1693,12 +1684,11 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
                 case.descriptor,
                 .none,
             ),
-            session_transition.attemptAdmitted(
+            session_transition.consequentialAttemptAdmitted(
                 operation,
                 attempt_id,
                 descriptor_ref,
                 case.descriptor,
-                .consequential,
             ),
         }, null);
         try created.publishCompletionEvidence(completion_inbox.bind(.{
@@ -1798,12 +1788,11 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
                 case.descriptor,
                 .none,
             ),
-            session_transition.attemptAdmitted(
+            session_transition.consequentialAttemptAdmitted(
                 operation,
                 attempt_id,
                 descriptor_ref,
                 case.descriptor,
-                .consequential,
             ),
         }, null);
         try created.publishCompletionEvidence(completion_inbox.bind(.{
@@ -2058,7 +2047,13 @@ test "irrelevant inbox records cannot displace admitted Attempt evidence" {
     var semantic: SemanticIndex = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
     admission.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
-    admission.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, testDescriptor("12"), .model);
+    admission.facts[1] = session_transition.modelAttemptAdmitted(
+        operation,
+        13,
+        11,
+        testDescriptor("12"),
+        0,
+    );
     try semantic.apply(admission);
 
     var inbox: InboxIndex = .{};
@@ -2144,7 +2139,13 @@ test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
     var semantic: SemanticIndex = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
     admission.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
-    admission.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, testDescriptor("12"), .model);
+    admission.facts[1] = session_transition.modelAttemptAdmitted(
+        operation,
+        13,
+        11,
+        testDescriptor("12"),
+        0,
+    );
     try semantic.apply(admission);
     var inbox: InboxIndex = .{};
     const first = completion_inbox.bind(.{
@@ -2191,11 +2192,17 @@ test "failed recovered frame leaves the published semantic index unchanged" {
         .descriptor_digest = testDescriptor("12"),
         .allowed = true,
     });
-    invalid.facts[1] = session_transition.attemptAdmitted(.{
-        .agent = agent,
-        .operation_id = 99,
-        .generation = 1,
-    }, 13, 11, testDescriptor("12"), .model);
+    invalid.facts[1] = session_transition.modelAttemptAdmitted(
+        .{
+            .agent = agent,
+            .operation_id = 99,
+            .generation = 1,
+        },
+        13,
+        11,
+        testDescriptor("12"),
+        0,
+    );
     var prepared = index;
     try std.testing.expectError(error.InvalidOperationHistory, prepared.apply(invalid));
     try std.testing.expectEqual(@as(u64, 1), index.last_sequence);

@@ -583,12 +583,11 @@ fn executeBashCall(
 
     var attempt_id: u64 = 0;
     while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
-    const attempt = session_transition.attemptAdmitted(
+    const attempt = session_transition.consequentialAttemptAdmitted(
         operation_context,
         attempt_id,
         descriptor_ref,
         .{ .bash = digest },
-        .consequential,
     );
     try commitCoreFacts(
         session,
@@ -987,12 +986,11 @@ pub fn resolvePermission(
             var execution: bash_tool.Execution = undefined;
             if (allow) {
                 while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
-                const attempt = session_transition.attemptAdmitted(
+                const attempt = session_transition.consequentialAttemptAdmitted(
                     operation_context,
                     attempt_id,
                     descriptor.descriptor_ref,
                     descriptor.descriptor_digest,
-                    .consequential,
                 );
                 try commitCoreFacts(session, core_state_buffer, &core, &.{attempt}, false);
                 core.close();
@@ -1136,12 +1134,7 @@ pub fn acceptCompletion(
     if (offered.ownership_epoch != attempt.operation.agent.ownership_epoch) {
         return error.CompletionAttemptEpochMismatch;
     }
-    const expected_kind: completion_inbox.EvidenceKind = switch (attempt.descriptor_digest) {
-        .model => .model,
-        .bash => .bash,
-        .apply_patch => .apply_patch,
-    };
-    if (offered.kind != expected_kind) return error.StaleCompletion;
+    if (offered.kind != std.meta.activeTag(attempt.descriptor_digest)) return error.StaleCompletion;
     if (history.result) |result| {
         if (resultAttemptId(result) != offered.attempt_id) {
             return advanceRestored(host, allocator, session, core_state_buffer, config, provider);
@@ -1161,7 +1154,7 @@ pub fn acceptCompletion(
         .attempt_id = offered.attempt_id,
         .maximum_epoch = token.epoch,
         .expected_epoch = attempt.operation.agent.ownership_epoch,
-        .expected_kind = expected_kind,
+        .expected_kind = std.meta.activeTag(attempt.descriptor_digest),
     };
     _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
     const evidence = inbox.match orelse return error.CompletionEvidenceMissing;
@@ -1437,12 +1430,11 @@ fn reconcilePatch(
         } else {
             var attempt_id: u64 = 0;
             while (attempt_id == 0) session.io.random(std.mem.asBytes(&attempt_id));
-            const admitted = session_transition.attemptAdmitted(
+            const admitted = session_transition.consequentialAttemptAdmitted(
                 operationContext(session, operation_id, 1),
                 attempt_id,
                 validated.descriptor_ref,
                 validated.descriptor_digest,
-                .consequential,
             );
             try commitCoreFacts(session, core_state_buffer, core, &.{admitted}, false);
             attempt = admitted.attempt_admitted;
