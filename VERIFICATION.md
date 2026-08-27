@@ -38,6 +38,8 @@ This document maps each public architectural claim to required evidence. A claim
 
 The highest product seam is the real CLI against a temporary Git repository and deterministic adapters. It proves that a user can create and resume a Session, supply a selected provider for model work required after resume, select either Permission Mode, inspect exact Actions, observe typed Results, complete a repair, and receive the same terminal Outcome that durable state records.
 
+`zig build fixture-repair -Doptimize=ReleaseSmall` is the reproducible repair command. It begins with a committed executable failure, drives red Bash Result -> authorized Patch Intent -> applied Patch Result -> green Bash Result -> Final Answer through the production CLI and Harness, and runs both Permission Modes. The Provider validates the complete durable Conversation at each turn and has no call-count or time-based response selector.
+
 The highest deterministic lifecycle seam is `Harness.open / offer / drive` with the production Core reducer, real SQLite Host Store and immutable blob store, fixed caller-owned pools, deterministic adapters, and semantic fault injection. Lifecycle tests assert durable behaviour, adapter admission, Conversation advancement, Projections, and Outcomes rather than private table names, SQL text, row identifiers, numeric Core fields, or helper calls.
 
 Ingress tests distinguish three outcomes: `full` or `busy` leaves ownership with the producer; `accepted` transfers volatile custody to the live Harness; a later committed Projection acknowledges durable acceptance. Tests fill ingress while every Activation Slot is occupied and prove bounded retry without an unbounded fallback queue.

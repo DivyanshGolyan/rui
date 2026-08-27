@@ -73,13 +73,28 @@ target remains quiescent from Authorization until Result commit; it does not pro
 compare-and-swap protection against an uncooperative editor.
 
 V1 keeps only `bash` and `apply_patch`. The default `ask` permission mode prompts for every exact
-tool call. An explicit invocation-scoped bypass mode will admit validated calls without prompting;
+tool call. An explicit invocation-scoped bypass mode admits validated calls without prompting;
 it does not bypass validation, durability, patch preimage checks, or recovery rules, and resume must
 select it again.
 
 ```sh
 zig build fixture-patch-deny -Doptimize=ReleaseSmall
 ```
+
+The complete deterministic repair starts from a committed Git repository whose executable test
+fails. Its fixture Provider selects each response from the exact durable Conversation: the red Bash
+Result authorizes one Patch Intent, the applied Patch Result authorizes verification through the same
+Bash command, and only the green Result permits the Final Answer. The fixture runs both `ask` and
+bypass through the production CLI and Harness; tool-specific validation and recovery remain distinct,
+while lifecycle owns the one invocation-scoped Permission Mode.
+
+```sh
+zig build fixture-repair -Doptimize=ReleaseSmall
+```
+
+The canonical test graph also runs model and Bash recovery in separate processes. Missing model
+evidence admits a new Attempt under the same Operation, the eighth uncertain Attempt terminalizes
+without a ninth dispatch, and an uncertain Bash Attempt becomes indeterminate without replay.
 
 Ownership epochs, Completion evidence, Session metadata, Conversation metadata, and canonical
 multi-fact transactions now live behind the same serialized Storage Owner. Session supplies only a

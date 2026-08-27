@@ -363,6 +363,178 @@ pub const ToolFixture = struct {
     }
 };
 
+const repair_entry_capacity = 7;
+const repair_request_capacity = 32 * 1024;
+
+const RequestEntry = struct {
+    kind: session_store.EntryKind,
+    content: []const u8,
+};
+
+/// Drives the complete deterministic repair from the exact committed
+/// Conversation. It has no call counter: each response is selected only after
+/// the durable request proves the preceding Action and typed Result.
+pub const RepairFixture = struct {
+    expected_task: []const u8,
+    bash_call: []const u8,
+    patch: []const u8,
+    final_answer: []const u8,
+
+    pub fn provider(self: *RepairFixture) Provider {
+        return .{ .context = self, .dispatch = dispatch };
+    }
+
+    fn dispatch(
+        context: *anyopaque,
+        request: RequestReader,
+        response: ResponseWriter,
+    ) anyerror!void {
+        const self: *RepairFixture = @ptrCast(@alignCast(context));
+        var request_buffer: [repair_request_capacity]u8 = undefined;
+        const durable_request = try readCompleteRequest(request, &request_buffer);
+        var entries: [repair_entry_capacity]RequestEntry = undefined;
+        const history = try decodeRequestEntries(durable_request, &entries);
+
+        var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
+        const encoded = switch (history.len) {
+            1 => blk: {
+                try expectEntry(history[0], .user, self.expected_task);
+                break :blk try model_protocol.encodeTool(
+                    &encoded_buffer,
+                    .bash,
+                    self.bash_call,
+                );
+            },
+            3 => blk: {
+                try self.expectPrefix(history, 3);
+                try expectBashResult(history[2], .nonzero_exit, 1);
+                break :blk try model_protocol.encodeTool(
+                    &encoded_buffer,
+                    .apply_patch,
+                    self.patch,
+                );
+            },
+            5 => blk: {
+                try self.expectPrefix(history, 5);
+                try expectPatchResult(history[4], .applied);
+                break :blk try model_protocol.encodeTool(
+                    &encoded_buffer,
+                    .bash,
+                    self.bash_call,
+                );
+            },
+            7 => blk: {
+                try self.expectPrefix(history, 7);
+                try expectBashResult(history[6], .success, 0);
+                break :blk try model_protocol.encodeText(
+                    &encoded_buffer,
+                    .complete,
+                    self.final_answer,
+                );
+            },
+            else => return error.UnexpectedRepairHistory,
+        };
+        try response.append(encoded);
+        try response.finish();
+    }
+
+    fn expectPrefix(self: *const RepairFixture, entries: []const RequestEntry, count: usize) !void {
+        if (entries.len != count) return error.UnexpectedRepairHistory;
+        try expectEntry(entries[0], .user, self.expected_task);
+        try expectEntry(entries[1], .assistant, self.bash_call);
+        if (count >= 5) {
+            try expectBashResult(entries[2], .nonzero_exit, 1);
+            try expectEntry(entries[3], .assistant, self.patch);
+        }
+        if (count >= 7) {
+            try expectPatchResult(entries[4], .applied);
+            try expectEntry(entries[5], .assistant, self.bash_call);
+        }
+    }
+};
+
+fn readCompleteRequest(request: RequestReader, out: []u8) ![]const u8 {
+    const length = request.length();
+    if (length == 0 or length > out.len) return error.UnexpectedRepairHistory;
+    var offset: usize = 0;
+    while (offset < length) {
+        const bytes = try request.readWindow(offset, out[offset..@intCast(length)]);
+        if (bytes.len == 0 or bytes.len > length - offset) return error.UnexpectedRepairHistory;
+        if (bytes.ptr != out[offset..].ptr) @memcpy(out[offset..][0..bytes.len], bytes);
+        offset += bytes.len;
+    }
+    return out[0..@intCast(length)];
+}
+
+fn decodeRequestEntries(
+    bytes: []const u8,
+    out: *[repair_entry_capacity]RequestEntry,
+) ![]const RequestEntry {
+    if (bytes.len < request_header_size or
+        !std.mem.eql(u8, bytes[0..request_magic.len], request_magic) or
+        read(u16, bytes, 8) != version or read(u16, bytes, 10) != request_header_size)
+    {
+        return error.UnexpectedRepairHistory;
+    }
+    const count: usize = @intCast(read(u32, bytes, 12));
+    if (count == 0 or count > out.len) return error.UnexpectedRepairHistory;
+    var cursor: usize = request_header_size;
+    for (0..count) |index| {
+        if (cursor > bytes.len or bytes.len - cursor < entry_header_size) {
+            return error.UnexpectedRepairHistory;
+        }
+        const header = bytes[cursor..][0..entry_header_size];
+        const kind: session_store.EntryKind = switch (header[0]) {
+            1 => .user,
+            2 => .assistant,
+            3 => .tool_result,
+            4 => .context_checkpoint,
+            else => return error.UnexpectedRepairHistory,
+        };
+        const entry_id = read(u64, header, 8);
+        const parent_id = read(u64, header, 16);
+        const content_ref = read(u64, header, 24);
+        const content_length = read(u64, header, 32);
+        if (entry_id != index + 1 or parent_id != index or content_ref == 0 or
+            content_length > bytes.len - cursor - entry_header_size)
+        {
+            return error.UnexpectedRepairHistory;
+        }
+        const content_start = cursor + entry_header_size;
+        const content_end = content_start + @as(usize, @intCast(content_length));
+        out[index] = .{ .kind = kind, .content = bytes[content_start..content_end] };
+        cursor = content_end;
+    }
+    if (cursor != bytes.len) return error.UnexpectedRepairHistory;
+    return out[0..count];
+}
+
+fn expectEntry(entry: RequestEntry, kind: session_store.EntryKind, content: []const u8) !void {
+    if (entry.kind != kind or !std.mem.eql(u8, entry.content, content)) {
+        return error.UnexpectedRepairHistory;
+    }
+}
+
+fn expectBashResult(entry: RequestEntry, status: bash_tool.Status, exit_code: u8) !void {
+    if (entry.kind != .tool_result) return error.UnexpectedRepairHistory;
+    const result = try bash_tool.decodeResult(entry.content);
+    if (result.status != status or result.exit_code != exit_code or
+        result.stdout.len != 0 or result.stderr.len != 0)
+    {
+        return error.UnexpectedRepairHistory;
+    }
+}
+
+fn expectPatchResult(entry: RequestEntry, status: patch_tool.ResultStatus) !void {
+    if (entry.kind != .tool_result or entry.content.len != patch_tool.result_size) {
+        return error.UnexpectedRepairHistory;
+    }
+    const bytes: *const [patch_tool.result_size]u8 = @ptrCast(entry.content.ptr);
+    if ((try patch_tool.decodeResult(bytes)).status != status) {
+        return error.UnexpectedRepairHistory;
+    }
+}
+
 fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
     std.mem.writeInt(T, out[offset..][0..@sizeOf(T)], value, .little);
 }

@@ -13,12 +13,6 @@ pub const version: u16 = 4;
 const intent_magic = "ONEPINT\x00";
 const result_magic = "ONEPRES\x00";
 
-pub const Decision = enum(u8) {
-    allow = 1,
-    ask = 2,
-    deny = 3,
-};
-
 pub const TargetPath = struct {
     length: u16,
     bytes: [max_path_size]u8,
@@ -66,20 +60,6 @@ const PreparationTestHook = struct {
 
     fn call(self: PreparationTestHook, phase: PreparationTestPhase) !void {
         try self.call_fn(self.context, phase);
-    }
-};
-
-pub const Policy = struct {
-    context: *anyopaque,
-    classify_fn: *const fn (*anyopaque, Intent, []const u8) anyerror!Decision,
-    ask_fn: *const fn (*anyopaque, Intent, []const u8) anyerror!bool,
-
-    pub fn classify(self: Policy, intent: Intent, patch: []const u8) !Decision {
-        return self.classify_fn(self.context, intent, patch);
-    }
-
-    pub fn ask(self: Policy, intent: Intent, patch: []const u8) !bool {
-        return self.ask_fn(self.context, intent, patch);
     }
 };
 

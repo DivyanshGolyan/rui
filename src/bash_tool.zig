@@ -36,12 +36,6 @@ pub const Descriptor = struct {
     call: Call,
 };
 
-pub const Decision = enum(u8) {
-    allow = 1,
-    ask = 2,
-    deny = 3,
-};
-
 pub const Status = enum(u8) {
     success = 1,
     nonzero_exit = 2,
@@ -77,20 +71,6 @@ pub const ResultView = struct {
 pub const Control = struct {
     cancelled: ?*const std.atomic.Value(bool) = null,
     bash_path: []const u8 = "/bin/bash",
-};
-
-pub const Policy = struct {
-    context: *anyopaque,
-    classify_fn: *const fn (*anyopaque, binding.BashDescriptor, Call) anyerror!Decision,
-    ask_fn: *const fn (*anyopaque, binding.BashDescriptor, Call) anyerror!bool,
-
-    pub fn decide(self: Policy, digest: binding.BashDescriptor, call: Call) !bool {
-        return switch (try self.classify_fn(self.context, digest, call)) {
-            .allow => true,
-            .deny => false,
-            .ask => self.ask_fn(self.context, digest, call),
-        };
-    }
 };
 
 pub fn encodeCall(out: []u8, call: Call) ![]const u8 {
@@ -584,40 +564,6 @@ test "bash distinguishes nonzero, missing Bash, and timeout" {
     );
     defer missing.deinit();
     try std.testing.expectEqual(Status.missing_executable, missing.status);
-}
-
-test "permission ask is bound to the exact digest and call" {
-    const Subject = struct {
-        asked: bool = false,
-
-        fn classify(_: *anyopaque, _: binding.BashDescriptor, _: Call) anyerror!Decision {
-            return .ask;
-        }
-
-        fn ask(context: *anyopaque, digest: binding.BashDescriptor, call: Call) anyerror!bool {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (!binding.eql(
-                binding.BashDescriptor,
-                digest,
-                binding.hash(binding.BashDescriptor, "descriptor-99"),
-            ) or !std.mem.eql(u8, call.command, "git diff")) {
-                return error.PermissionSubjectMismatch;
-            }
-            self.asked = true;
-            return true;
-        }
-    };
-    var subject: Subject = .{};
-    const policy: Policy = .{
-        .context = &subject,
-        .classify_fn = Subject.classify,
-        .ask_fn = Subject.ask,
-    };
-    try std.testing.expect(try policy.decide(
-        binding.hash(binding.BashDescriptor, "descriptor-99"),
-        .{ .command = "git diff", .timeout_ms = 5000 },
-    ));
-    try std.testing.expect(subject.asked);
 }
 
 test "truncation and cancellation are distinct typed results" {

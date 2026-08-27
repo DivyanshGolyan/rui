@@ -19,12 +19,16 @@ pub const Host = struct {
     slots: ProductionSlotPool = .{},
 };
 
+pub const PermissionMode = enum {
+    ask,
+    bypass,
+};
+
 pub const RuntimeConfig = struct {
     workspace_path: []const u8,
     fault: ?FaultHook = null,
-    bash_policy: ?bash_tool.Policy = null,
+    permission_mode: PermissionMode = .ask,
     bash_cancelled: ?*const std.atomic.Value(bool) = null,
-    patch_policy: ?patch_tool.Policy = null,
     approval_required_hook: ?ApprovalRequiredHook = null,
     completion_hook: ?CompletionHook = null,
     settle_only: bool = false,
@@ -104,9 +108,6 @@ pub const FaultBoundary = enum {
     after_final_blob,
     after_assistant_entry,
     after_bash_execution,
-    after_bash_result,
-    after_tool_result_entry,
-    after_tool_state_commit,
     after_patch_authorization,
     after_patch_attempt,
     after_patch_mutation,
@@ -492,7 +493,7 @@ fn executeBashCall(
     ids: OperationIds,
     core_open: *bool,
     workspace_path: []const u8,
-    policy: bash_tool.Policy,
+    permission_mode: PermissionMode,
     cancellation: ?*const std.atomic.Value(bool),
     approval_required_hook: ?ApprovalRequiredHook,
     completion_hook: ?CompletionHook,
@@ -555,8 +556,7 @@ fn executeBashCall(
     };
     _ = try session.commitSemantic(&descriptor_facts, null);
 
-    const classification = try policy.classify_fn(policy.context, digest, call);
-    if (classification == .ask) {
+    if (permission_mode == .ask) {
         const approval = session_transition.approvalRequired(.{
             .operation = operation_context,
             .binding_ref = 0,
@@ -571,112 +571,65 @@ fn executeBashCall(
             .descriptor_digest = .{ .bash = digest },
             .descriptor_ref = descriptor_ref,
         });
+        return error.PermissionInputRequired;
     }
-    const allowed = switch (classification) {
-        .allow => true,
-        .deny => false,
-        .ask => try policy.ask_fn(policy.context, digest, call),
-    };
     const authorization = session_transition.authorization(.{
         .operation = operation_context,
         .permission_ref = 0,
         .descriptor_digest = .{ .bash = digest },
-        .allowed = allowed,
+        .allowed = true,
     });
     _ = try session.commitSemantic(&.{authorization}, null);
 
     var attempt_id: u64 = 0;
-    var execution: bash_tool.Execution = undefined;
-    if (allowed) {
-        while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
-        const attempt = session_transition.attemptAdmitted(
-            operation_context,
-            attempt_id,
-            descriptor_ref,
-            .{ .bash = digest },
-            .consequential,
-        );
-        try commitCoreFacts(
-            session,
-            core_state_buffer,
-            core,
-            &.{attempt},
-            false,
-        );
-        core.close();
-        core_open.* = false;
-        execution = try bash_tool.executeDescriptor(
-            allocator,
-            io,
-            descriptor,
-            .{ .cancelled = cancellation },
-        );
-        try reach(fault, .after_bash_execution);
-        core.* = try Core.open(slot_pool);
-        core_open.* = true;
-        try restoreCoreFromLedger(session, core_state_buffer, core);
-    } else {
-        execution = .{
-            .allocator = allocator,
-            .status = .denied,
-            .stdout = try allocator.alloc(u8, 0),
-            .stderr = try allocator.alloc(u8, 0),
-        };
-    }
+    while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
+    const attempt = session_transition.attemptAdmitted(
+        operation_context,
+        attempt_id,
+        descriptor_ref,
+        .{ .bash = digest },
+        .consequential,
+    );
+    try commitCoreFacts(
+        session,
+        core_state_buffer,
+        core,
+        &.{attempt},
+        false,
+    );
+    core.close();
+    core_open.* = false;
+    var execution = try bash_tool.executeDescriptor(
+        allocator,
+        io,
+        descriptor,
+        .{ .cancelled = cancellation },
+    );
+    try reach(fault, .after_bash_execution);
+    core.* = try Core.open(slot_pool);
+    core_open.* = true;
+    try restoreCoreFromLedger(session, core_state_buffer, core);
     defer execution.deinit();
     const result_buffer = try allocator.alloc(u8, bash_tool.result_header_size + 2 * bash_tool.max_output_size);
     defer allocator.free(result_buffer);
     const encoded_result = try bash_tool.encodeResult(result_buffer, execution);
     try session.storeBlob(result_ref, encoded_result);
     const result_digest = try blobDigest(session, result_ref);
-    if (allowed) {
-        const evidence = completion_inbox.bind(.{
-            .kind = .bash,
-            .session_id = session.session_id,
-            .ownership_epoch = token.epoch,
-            .agent_id = session.agent_id,
-            .agent_generation = agent_generation,
-            .operation_id = tool_operation_id,
-            .operation_generation = 1,
-            .attempt_id = attempt_id,
-            .result_ref = result_ref,
-            .result_digest = result_digest,
-        });
-        try session.publishCompletionEvidence(evidence);
-        if (completion_hook) |hook| try hook.offered(hook.context, evidence);
-        return error.CompletionOffered;
-    }
-    try reach(fault, .after_bash_result);
-    const result_entry = try session.appendConversation(.tool_result, result_ref, null);
-    try reach(fault, .after_tool_result_entry);
-    try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
-    const result_facts = [_]session_transition.Fact{
-        session_transition.result(.{
-            .operation = operation_context,
-            .result_ref = result_ref,
-            .result_digest = result_digest,
-            .class = if (execution.status == .indeterminate) .indeterminate else .ordinary,
-            .evidence = if (attempt_id == 0)
-                .{ .immediate = .consequential }
-            else
-                .{ .durable = .{ .bash = attempt_id } },
-        }),
-        session_transition.conversationAdvanced(.{
-            .agent = agentContext(session),
-            .entry_id = result_entry.entry_id,
-            .parent_id = result_entry.parent_id,
-            .kind = result_entry.kind,
-            .content_ref = result_ref,
-        }),
-    };
-    try commitCoreFacts(
-        session,
-        core_state_buffer,
-        core,
-        &result_facts,
-        true,
-    );
-    try reach(fault, .after_tool_state_commit);
+    const evidence = completion_inbox.bind(.{
+        .kind = .bash,
+        .session_id = session.session_id,
+        .ownership_epoch = token.epoch,
+        .agent_id = session.agent_id,
+        .agent_generation = agent_generation,
+        .operation_id = tool_operation_id,
+        .operation_generation = 1,
+        .attempt_id = attempt_id,
+        .result_ref = result_ref,
+        .result_digest = result_digest,
+    });
+    try session.publishCompletionEvidence(evidence);
+    if (completion_hook) |hook| try hook.offered(hook.context, evidence);
+    return error.CompletionOffered;
 }
 
 fn requestPatchPermission(
@@ -686,7 +639,7 @@ fn requestPatchPermission(
     core_state_buffer: []u8,
     ids: OperationIds,
     workspace_path: []const u8,
-    policy: patch_tool.Policy,
+    permission_mode: PermissionMode,
     approval_required_hook: ?ApprovalRequiredHook,
     fault: ?FaultHook,
 ) !void {
@@ -734,9 +687,7 @@ fn requestPatchPermission(
     };
     _ = try session.commitSemantic(&descriptor_facts, null);
 
-    const classification = try policy.classify(intent, patch);
-    var allowed = classification == .allow;
-    if (classification == .ask) {
+    if (permission_mode == .ask) {
         const approval = session_transition.approvalRequired(.{
             .operation = operation_context,
             .binding_ref = intent_ref,
@@ -757,13 +708,13 @@ fn requestPatchPermission(
             .descriptor_digest = .{ .apply_patch = intent.intent_digest },
             .descriptor_ref = patch_ref,
         });
-        allowed = try policy.ask(intent, patch);
+        return error.PermissionInputRequired;
     }
     const authorization = session_transition.authorization(.{
         .operation = operation_context,
         .permission_ref = intent_ref,
         .descriptor_digest = .{ .apply_patch = intent.intent_digest },
-        .allowed = allowed,
+        .allowed = true,
     });
     _ = try session.commitSemantic(&.{authorization}, null);
     try reach(fault, .after_patch_authorization);
@@ -879,7 +830,7 @@ pub fn advanceRestored(
                         ids,
                         &core_open,
                         config.workspace_path,
-                        config.bash_policy orelse return error.ToolCallDeferred,
+                        config.permission_mode,
                         config.bash_cancelled,
                         config.approval_required_hook,
                         config.completion_hook,
@@ -893,7 +844,7 @@ pub fn advanceRestored(
                             core_state_buffer,
                             ids,
                             config.workspace_path,
-                            config.patch_policy orelse return error.ToolCallDeferred,
+                            config.permission_mode,
                             config.approval_required_hook,
                             config.fault,
                         );
