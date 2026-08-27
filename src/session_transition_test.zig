@@ -143,6 +143,32 @@ test "Result evidence round trips as immediate or durable typed choices" {
     try std.testing.expect(decoded.facts[1].result.evidence.durable == .model);
 }
 
+test "model Attempt duplicate exposure is bounded and round trips" {
+    const operation: transition.OperationContext = .{
+        .agent = .{ .agent_id = 7, .agent_generation = 1, .ownership_epoch = 2 },
+        .operation_id = 11,
+        .generation = 3,
+    };
+    var transaction: transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    transaction.facts[0] = transition.modelAttemptAdmitted(
+        operation,
+        13,
+        17,
+        .{ .model = binding.hash(binding.ModelDescriptor, "request") },
+        3,
+    );
+    var buffer: [transition.max_payload_size]u8 = undefined;
+    const encoded = try transition.encode(&buffer, transaction);
+    const decoded = try transition.decode(1, encoded);
+    try std.testing.expectEqual(@as(u8, 3), decoded.facts[0].attempt_admitted.possible_duplicate_attempts);
+
+    buffer[4 + 3] = transition.max_operation_attempts;
+    try std.testing.expectError(
+        error.InvalidKindSpecificPayload,
+        transition.decode(1, encoded),
+    );
+}
+
 test "an all-zero authoritative binding is not decoded as absence" {
     const zero: binding.Result = .{ .bytes = @splat(0) };
     var transaction: transition.Transaction = .{ .sequence = 1, .fact_count = 1 };

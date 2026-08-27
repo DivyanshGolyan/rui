@@ -87,6 +87,12 @@ const OperationHistory = struct {
             self.attempt = existing;
             return;
         }
+        if ((attempt.recovery_class == .model and
+            attempt.possible_duplicate_attempts != self.attempt_count) or
+            (attempt.recovery_class != .model and attempt.possible_duplicate_attempts != 0))
+        {
+            return error.InvalidAttemptDuplicateAccounting;
+        }
         if (self.attempt_count == max_attempts) return error.AttemptCapacityExceeded;
         self.attempts[self.attempt_count] = attempt;
         self.attempt_count += 1;
@@ -262,6 +268,7 @@ const InboxIndex = struct {
     const Disposition = enum {
         irrelevant,
         duplicate,
+        audit,
         persist,
     };
 
@@ -279,12 +286,13 @@ const InboxIndex = struct {
             return .irrelevant;
         }
         const history = historyForEnvelope(semantic, envelope);
-        if (history.result != null or history.operation_id != envelope.operation_id or
+        if (history.operation_id != envelope.operation_id or
             history.generation != envelope.operation_generation or
             !history.containsAttempt(envelope.attempt_id))
         {
             return .irrelevant;
         }
+        if (history.result != null) return .audit;
         var ambiguous_slot: ?*?AttemptKey = null;
         for (&self.ambiguous) |*slot| {
             const key = slot.* orelse {
@@ -1077,6 +1085,12 @@ pub const Session = struct {
                         self.agent_id,
                         self.ownership_epoch,
                     );
+                    if (prepared.disposition == .audit) {
+                        _ = try self.storage.publishAuditedCompletion(
+                            stored.envelope,
+                            self.resident.semantic.last_sequence,
+                        );
+                    }
                     self.resident = prepared.state;
                     self.recovery = .{ .inbox = .{
                         .after_id = stored.inbox_id,
@@ -1123,6 +1137,12 @@ pub const Session = struct {
         );
         switch (prepared.disposition) {
             .irrelevant, .duplicate => return,
+            .audit => {
+                _ = try self.storage.publishAuditedCompletion(
+                    envelope,
+                    self.resident.semantic.last_sequence,
+                );
+            },
             .persist => {
                 _ = try self.storage.publishCompletion(envelope);
                 self.resident = prepared.state;
@@ -1473,8 +1493,8 @@ test "fallible Inbox publication is prepared before durable Completion commit" {
     };
     var semantic: session_transition.Transaction = .{ .sequence = 2, .fact_count = 3 };
     semantic.facts[0] = session_transition.operationSubmitted(operation, 101, testDescriptor("102"), .model);
-    semantic.facts[1] = session_transition.attemptAdmitted(operation, 103, 101, testDescriptor("102"), .model);
-    semantic.facts[2] = session_transition.attemptAdmitted(operation, 108, 101, testDescriptor("102"), .model);
+    semantic.facts[1] = session_transition.modelAttemptAdmitted(operation, 103, 101, testDescriptor("102"), 0);
+    semantic.facts[2] = session_transition.modelAttemptAdmitted(operation, 108, 101, testDescriptor("102"), 1);
     try created.resident.semantic.apply(semantic);
 
     const existing = completion_inbox.bind(.{
@@ -1635,10 +1655,10 @@ test "late evidence for an earlier model Attempt survives a later admission" {
     var semantic: SemanticIndex = .{};
     var first: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
     first.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
-    first.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, testDescriptor("12"), .model);
+    first.facts[1] = session_transition.modelAttemptAdmitted(operation, 13, 11, testDescriptor("12"), 0);
     try semantic.apply(first);
     var retry: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    retry.facts[0] = session_transition.attemptAdmitted(operation, 14, 11, testDescriptor("12"), .model);
+    retry.facts[0] = session_transition.modelAttemptAdmitted(operation, 14, 11, testDescriptor("12"), 1);
     try semantic.apply(retry);
 
     var inbox: InboxIndex = .{};

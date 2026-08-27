@@ -1,8 +1,11 @@
 const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
+const binding = @import("binding.zig");
+const completion_inbox = @import("completion_inbox.zig");
 const harness = @import("harness.zig");
 const host_runtime = @import("host_runtime.zig");
 const model_operation = @import("model_operation.zig");
+const model_protocol = @import("model_protocol.zig");
 const session_store = @import("session.zig");
 const session_transition = @import("session_transition.zig");
 
@@ -23,6 +26,8 @@ pub fn main(init: std.process.Init) !void {
         try retryModel(init.io, runtime, try parseSessionId(args[3]));
     } else if (std.mem.eql(u8, mode, "finish-model")) {
         try finishModel(init.io, runtime, try parseSessionId(args[3]));
+    } else if (std.mem.eql(u8, mode, "late-model")) {
+        try lateModel(init.io, runtime, try parseSessionId(args[3]));
     } else if (std.mem.eql(u8, mode, "exhaust-model")) {
         try exhaustModel(init.io, runtime, try parseSessionId(args[3]));
     } else if (std.mem.eql(u8, mode, "start-bash")) {
@@ -89,6 +94,71 @@ fn finishModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void
         return;
     }
     return error.SessionDidNotFinish;
+}
+
+fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
+    var lease = try host_runtime.Lease.acquire(runtime);
+    var restored = try lease.restoreSession(session_id);
+    while ((try restored.session.recoverSemanticWindow(32)).more) {}
+    var audit: ModelAttemptAudit = .{};
+    const before = try restored.session.inspectSemantic(&audit, ModelAttemptAudit.apply);
+    if (audit.count != 2) return error.ModelAttemptCountMismatch;
+
+    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    const response = try model_protocol.encodeText(&response_buffer, .complete, "late original response");
+    const result_ref = (@as(u64, 1) << 54) | (audit.ids[0] & ((@as(u64, 1) << 54) - 1));
+    try restored.session.storeBlob(result_ref, response);
+    const envelope = completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = session_id,
+        .ownership_epoch = audit.ownership_epoch,
+        .agent_id = restored.session.agent_id,
+        .agent_generation = 1,
+        .operation_id = audit.operation_id,
+        .operation_generation = audit.operation_generation,
+        .attempt_id = audit.ids[0],
+        .result_ref = result_ref,
+        .result_digest = binding.hash(binding.Result, response),
+    });
+    try restored.session.publishCompletionEvidence(envelope);
+    if (try restored.session.scanCompletionEvidence(undefined, rejectPendingCompletion) != 0) {
+        return error.LateEvidenceRemainedPending;
+    }
+    restored.session.close();
+    lease.release();
+
+    var owner = try harness.Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{ .session_id = session_id } },
+    });
+    defer owner.close();
+    if (owner.offer(.{ .completion = envelope }) != .accepted) return error.LateEvidenceOfferRejected;
+    for (0..24) |_| {
+        const progress = try owner.drive();
+        for (progress.projectionSlice()) |projection| {
+            if (projection.kind == .failure) return error.LateEvidenceProjectedFailure;
+        }
+        if (progress.state != .finished) continue;
+        owner.close();
+
+        var verification_lease = try host_runtime.Lease.acquire(runtime);
+        defer verification_lease.release();
+        var verified = try verification_lease.restoreSession(session_id);
+        defer verified.session.close();
+        while ((try verified.session.recoverSemanticWindow(32)).more) {}
+        var after_audit: ModelAttemptAudit = .{};
+        const after = try verified.session.inspectSemantic(&after_audit, ModelAttemptAudit.apply);
+        if (after.last_sequence != before.last_sequence or after_audit.count != audit.count) {
+            return error.LateEvidenceAdvancedSession;
+        }
+        try std.Io.File.stdout().writeStreamingAll(io, "audited\n");
+        return;
+    }
+    return error.LateEvidenceDidNotSettle;
+}
+
+fn rejectPendingCompletion(_: *anyopaque, _: completion_inbox.Envelope) anyerror!void {
+    return error.LateEvidenceRemainedPending;
 }
 
 fn exhaustModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
@@ -202,6 +272,7 @@ const ModelAttemptAudit = struct {
     count: u8 = 0,
     operation_id: u64 = 0,
     operation_generation: u32 = 0,
+    ownership_epoch: u64 = 0,
 
     fn apply(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
         const self: *ModelAttemptAudit = @ptrCast(@alignCast(context));
@@ -211,9 +282,13 @@ const ModelAttemptAudit = struct {
         };
         if (attempt.recovery_class != .model) return;
         if (self.count == self.ids.len) return error.ModelAttemptCapacityExceeded;
+        if (attempt.possible_duplicate_attempts != self.count) {
+            return error.ModelDuplicateExposureMismatch;
+        }
         if (self.count == 0) {
             self.operation_id = attempt.operation.operation_id;
             self.operation_generation = attempt.operation.generation;
+            self.ownership_epoch = attempt.operation.agent.ownership_epoch;
         } else if (attempt.operation.operation_id != self.operation_id or
             attempt.operation.generation != self.operation_generation)
         {

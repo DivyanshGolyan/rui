@@ -110,7 +110,8 @@ const pending_completion_count_sql: [:0]const u8 =
     \\GROUP BY s.session_id
 ;
 const find_completion_sql: [:0]const u8 =
-    \\SELECT c.inbox_id, c.result_reference, c.result_digest, c.completion_digest
+    \\SELECT c.inbox_id, c.result_reference, c.result_digest, c.completion_digest,
+    \\       c.consumed_by_sequence
     \\FROM completion_inbox AS c
     \\JOIN session AS s ON s.session_id = c.session_id
     \\WHERE c.session_id = ?1 AND c.ownership_epoch = ?2
@@ -516,6 +517,23 @@ pub const StorageOwner = struct {
         self: *StorageOwner,
         envelope: completion_inbox.Envelope,
     ) !u64 {
+        return self.publishCompletionState(envelope, null);
+    }
+
+    pub fn publishAuditedCompletion(
+        self: *StorageOwner,
+        envelope: completion_inbox.Envelope,
+        consumed_by_sequence: u64,
+    ) !u64 {
+        if (consumed_by_sequence == 0) return error.InvalidSequence;
+        return self.publishCompletionState(envelope, consumed_by_sequence);
+    }
+
+    fn publishCompletionState(
+        self: *StorageOwner,
+        envelope: completion_inbox.Envelope,
+        consumed_by_sequence: ?u64,
+    ) !u64 {
         self.request_lock.lockUncancelable(self.io);
         defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
@@ -548,32 +566,45 @@ pub const StorageOwner = struct {
             {
                 return error.ConflictingCompletionEvidence;
             }
+            if (consumed_by_sequence) |sequence_value| {
+                if (c.sqlite3_column_type(existing, 4) == c.SQLITE_NULL) {
+                    const audit = try self.prepare(
+                        "UPDATE completion_inbox SET consumed_by_sequence = ?2 WHERE inbox_id = ?1 AND consumed_by_sequence IS NULL",
+                    );
+                    defer finalize(audit);
+                    try bindU64(audit, 1, @intCast(sequence));
+                    try bindU64(audit, 2, sequence_value);
+                    if (c.sqlite3_step(audit) != c.SQLITE_DONE) return error.CorruptHostStore;
+                }
+            }
             if (c.sqlite3_step(existing) != c.SQLITE_DONE) return error.CorruptHostStore;
             try self.execute("COMMIT");
             return @intCast(sequence);
         }
         if (existing_result != c.SQLITE_DONE) return mapSqliteError(existing_result);
 
-        const count = try self.prepare(pending_completion_count_sql);
-        defer finalize(count);
-        try bindIdentity(count, 1, envelope.session_id, &identities[0]);
-        try bindIdentity(count, 2, envelope.agent_id, &identities[2]);
-        const count_result = c.sqlite3_step(count);
-        if (count_result == c.SQLITE_DONE) return error.InvalidCompletionIdentity;
-        if (count_result != c.SQLITE_ROW) return mapSqliteError(count_result);
-        const pending_count = c.sqlite3_column_int64(count, 0);
-        if (pending_count < 0) return error.CorruptHostStore;
-        if (pending_count >= completion_inbox.max_records) {
-            return error.CompletionCapacityExceeded;
+        if (consumed_by_sequence == null) {
+            const count = try self.prepare(pending_completion_count_sql);
+            defer finalize(count);
+            try bindIdentity(count, 1, envelope.session_id, &identities[0]);
+            try bindIdentity(count, 2, envelope.agent_id, &identities[2]);
+            const count_result = c.sqlite3_step(count);
+            if (count_result == c.SQLITE_DONE) return error.InvalidCompletionIdentity;
+            if (count_result != c.SQLITE_ROW) return mapSqliteError(count_result);
+            const pending_count = c.sqlite3_column_int64(count, 0);
+            if (pending_count < 0) return error.CorruptHostStore;
+            if (pending_count >= completion_inbox.max_records) {
+                return error.CompletionCapacityExceeded;
+            }
+            if (c.sqlite3_step(count) != c.SQLITE_DONE) return error.CorruptHostStore;
         }
-        if (c.sqlite3_step(count) != c.SQLITE_DONE) return error.CorruptHostStore;
 
         const insert = try self.prepare(
             \\INSERT INTO completion_inbox (
             \\    session_id, ownership_epoch, agent_generation,
             \\    operation_id, operation_generation, attempt_id, evidence_kind,
-            \\    result_reference, result_digest, completion_digest
-            \\) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+            \\    result_reference, result_digest, completion_digest, consumed_by_sequence
+            \\) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12
             \\  FROM session WHERE session_id = ?1 AND agent_id = ?11
             \\RETURNING inbox_id
         );
@@ -589,6 +620,9 @@ pub const StorageOwner = struct {
         try bindBlob(insert, 9, &envelope.result_digest.bytes);
         try bindBlob(insert, 10, &envelope.completion_digest.bytes);
         try bindIdentity(insert, 11, envelope.agent_id, &identities[2]);
+        if (consumed_by_sequence) |sequence_value| {
+            try bindU64(insert, 12, sequence_value);
+        } else try expectOk(c.sqlite3_bind_null(insert, 12));
         const insert_result = c.sqlite3_step(insert);
         if (insert_result == c.SQLITE_DONE) return error.InvalidCompletionIdentity;
         if (insert_result != c.SQLITE_ROW) return mapSqliteError(insert_result);
@@ -1633,6 +1667,83 @@ test "Completion recovery range is bounded by its Session index" {
         c.SQLITE_STMTSTATUS_AUTOINDEX,
         0,
     ));
+}
+
+test "late Completion evidence is inserted already consumed for audit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+    try owner.createSession(.{
+        .session_id = 8,
+        .agent_id = 9,
+        .task_id = 10,
+        .branch_id = 11,
+    });
+    const envelope = completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = 8,
+        .ownership_epoch = 1,
+        .agent_id = 9,
+        .agent_generation = 1,
+        .operation_id = 101,
+        .operation_generation = 1,
+        .attempt_id = 102,
+        .result_ref = 103,
+        .result_digest = binding.hash(binding.Result, "late-result"),
+    });
+    const inbox_id = try owner.publishAuditedCompletion(envelope, 1);
+    const stored = try owner.readCompletion(8, inbox_id);
+    try std.testing.expectEqual(@as(?u64, 1), stored.consumed_by_sequence);
+    try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(8));
+
+    var pending = envelope;
+    pending.attempt_id = 105;
+    pending.result_ref = 106;
+    pending.result_digest = binding.hash(binding.Result, "pending-then-audited");
+    pending = completion_inbox.bind(.{
+        .kind = pending.kind,
+        .session_id = pending.session_id,
+        .ownership_epoch = pending.ownership_epoch,
+        .agent_id = pending.agent_id,
+        .agent_generation = pending.agent_generation,
+        .operation_id = pending.operation_id,
+        .operation_generation = pending.operation_generation,
+        .attempt_id = pending.attempt_id,
+        .result_ref = pending.result_ref,
+        .result_digest = pending.result_digest,
+    });
+    const pending_id = try owner.publishCompletion(pending);
+    try std.testing.expectEqual(pending_id, try owner.completionHead(8));
+    try std.testing.expectEqual(pending_id, try owner.publishAuditedCompletion(pending, 1));
+    try std.testing.expectEqual(@as(?u64, 1), (try owner.readCompletion(8, pending_id)).consumed_by_sequence);
+    try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(8));
+
+    var conflicting = envelope;
+    conflicting.result_ref = 104;
+    conflicting.result_digest = binding.hash(binding.Result, "conflicting-late-result");
+    conflicting = completion_inbox.bind(.{
+        .kind = conflicting.kind,
+        .session_id = conflicting.session_id,
+        .ownership_epoch = conflicting.ownership_epoch,
+        .agent_id = conflicting.agent_id,
+        .agent_generation = conflicting.agent_generation,
+        .operation_id = conflicting.operation_id,
+        .operation_generation = conflicting.operation_generation,
+        .attempt_id = conflicting.attempt_id,
+        .result_ref = conflicting.result_ref,
+        .result_digest = conflicting.result_digest,
+    });
+    try std.testing.expectError(
+        error.ConflictingCompletionEvidence,
+        owner.publishAuditedCompletion(conflicting, 1),
+    );
 }
 
 test "Completion publication enforces the pending per-Session bound" {

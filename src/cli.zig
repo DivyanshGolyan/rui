@@ -6,6 +6,7 @@ const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 
 const output_window_size = 4096;
+const max_permission_decision_line_size: usize = 64;
 
 const Arguments = struct {
     state_path: ?[]const u8 = null,
@@ -326,10 +327,19 @@ fn promptPermission(io: std.Io, owner: *harness.Harness, approval: harness.Proje
     try std.Io.File.stdout().writeStreamingAll(io, "\nAllow? [y/N] ");
     var first: ?u8 = null;
     var byte: [1]u8 = undefined;
+    var length: usize = 0;
     while (true) {
-        const count = try std.Io.File.stdin().readStreaming(io, &.{&byte});
-        if (count == 0 or byte[0] == '\n') break;
+        const count = std.Io.File.stdin().readStreaming(io, &.{&byte}) catch |err| switch (err) {
+            error.EndOfStream => return error.PermissionDecisionLineUnterminated,
+            else => return err,
+        };
+        if (count == 0) return error.PermissionDecisionLineUnterminated;
+        if (byte[0] == '\n') break;
+        if (length == max_permission_decision_line_size) {
+            return error.PermissionDecisionLineTooLong;
+        }
         if (first == null) first = byte[0];
+        length += 1;
     }
     return first == 'y' or first == 'Y';
 }

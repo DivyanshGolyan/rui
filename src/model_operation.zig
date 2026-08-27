@@ -10,8 +10,88 @@ pub const request_header_size = 16;
 pub const entry_header_size = 40;
 pub const request_window_size = 4096;
 pub const version: u16 = 1;
+const fixture_entry_capacity = 7;
+const fixture_request_capacity = 32 * 1024;
 
 const request_magic = "ONEREQ\x00\x00";
+
+const RequestEntry = struct {
+    kind: session_store.EntryKind,
+    content: []const u8,
+};
+
+/// One bounded, fixture-private interpretation of the durable request wire
+/// format. All deterministic providers inspect history through this decoder.
+const RequestHistory = struct {
+    bytes: [fixture_request_capacity]u8,
+    entries: [fixture_entry_capacity]RequestEntry,
+    entry_count: usize,
+
+    fn decode(self: *RequestHistory, request: RequestReader) !void {
+        const length = request.length();
+        if (length < request_header_size or length > self.bytes.len) {
+            return error.UnexpectedFixtureRequest;
+        }
+        const byte_count: usize = @intCast(length);
+        var offset: usize = 0;
+        while (offset < byte_count) {
+            const bytes = try request.readWindow(offset, self.bytes[offset..byte_count]);
+            if (bytes.len == 0 or bytes.len > byte_count - offset) {
+                return error.UnexpectedFixtureRequest;
+            }
+            if (bytes.ptr != self.bytes[offset..].ptr) {
+                @memcpy(self.bytes[offset..][0..bytes.len], bytes);
+            }
+            offset += bytes.len;
+        }
+
+        const durable = self.bytes[0..byte_count];
+        if (!std.mem.eql(u8, durable[0..request_magic.len], request_magic) or
+            read(u16, durable, 8) != version or
+            read(u16, durable, 10) != request_header_size)
+        {
+            return error.UnexpectedFixtureRequest;
+        }
+        const count: usize = @intCast(read(u32, durable, 12));
+        if (count == 0 or count > self.entries.len) return error.UnexpectedFixtureRequest;
+
+        var cursor: usize = request_header_size;
+        for (0..count) |index| {
+            if (cursor > durable.len or durable.len - cursor < entry_header_size) {
+                return error.UnexpectedFixtureRequest;
+            }
+            const header = durable[cursor..][0..entry_header_size];
+            const kind: session_store.EntryKind = switch (header[0]) {
+                1 => .user,
+                2 => .assistant,
+                3 => .tool_result,
+                4 => .context_checkpoint,
+                else => return error.UnexpectedFixtureRequest,
+            };
+            const content_length = read(u64, header, 32);
+            if (read(u64, header, 8) != index + 1 or
+                read(u64, header, 16) != index or
+                read(u64, header, 24) == 0 or
+                content_length > durable.len - cursor - entry_header_size)
+            {
+                return error.UnexpectedFixtureRequest;
+            }
+            const content_start = cursor + entry_header_size;
+            const content_end = content_start + @as(usize, @intCast(content_length));
+            self.entries[index] = .{
+                .kind = kind,
+                .content = self.bytes[content_start..content_end],
+            };
+            cursor = content_end;
+        }
+        if (cursor != durable.len) return error.UnexpectedFixtureRequest;
+        self.entry_count = count;
+    }
+
+    fn slice(self: *const RequestHistory) []const RequestEntry {
+        return self.entries[0..self.entry_count];
+    }
+};
 
 pub const Descriptor = struct {
     request_ref: u64,
@@ -219,25 +299,12 @@ pub const Fixture = struct {
     ) anyerror!void {
         const self: *Fixture = @ptrCast(@alignCast(context));
         self.calls += 1;
-        var header: [request_header_size + entry_header_size]u8 = undefined;
-        const prefix = try request.readWindow(0, &header);
-        if (prefix.len != header.len or
-            !std.mem.eql(u8, prefix[0..request_magic.len], request_magic) or
-            read(u16, prefix, 8) != version or
-            read(u16, prefix, 10) != request_header_size or
-            read(u32, prefix, 12) == 0 or
-            prefix[request_header_size] != @intFromEnum(session_store.EntryKind.user))
-        {
-            return error.UnexpectedFixtureRequest;
-        }
+        var history: RequestHistory = undefined;
+        try history.decode(request);
+        const entries = history.slice();
+        if (entries[0].kind != .user) return error.UnexpectedFixtureRequest;
         if (self.expected_task) |expected_task| {
-            const task_length = read(u64, prefix, request_header_size + 32);
-            if (task_length != expected_task.len or task_length > request_window_size) {
-                return error.UnexpectedFixtureRequest;
-            }
-            var task_buffer: [request_window_size]u8 = undefined;
-            const task = try request.readWindow(header.len, task_buffer[0..@intCast(task_length)]);
-            if (!std.mem.eql(u8, task, expected_task)) return error.UnexpectedFixtureRequest;
+            try expectEntry(entries[0], .user, expected_task);
         }
 
         var response_buffer: [model_protocol.max_response_size]u8 = undefined;
@@ -270,28 +337,14 @@ pub const ToolFixture = struct {
         response: ResponseWriter,
     ) anyerror!void {
         const self: *ToolFixture = @ptrCast(@alignCast(context));
-        var header: [request_header_size + entry_header_size]u8 = undefined;
-        const prefix = try request.readWindow(0, &header);
-        if (prefix.len != header.len or
-            !std.mem.eql(u8, prefix[0..request_magic.len], request_magic) or
-            read(u16, prefix, 8) != version or read(u16, prefix, 10) != request_header_size)
-        {
-            return error.UnexpectedFixtureRequest;
-        }
-        const entry_count = read(u32, prefix, 12);
+        var history: RequestHistory = undefined;
+        try history.decode(request);
+        const entries = history.slice();
         var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
         const encoded = switch (self.calls) {
             0 => blk: {
-                if (entry_count != 1 or prefix[request_header_size] != @intFromEnum(session_store.EntryKind.user)) {
-                    return error.UnexpectedFixtureRequest;
-                }
-                const task_length = read(u64, prefix, request_header_size + 32);
-                if (task_length != self.expected_task.len or task_length > request_window_size) {
-                    return error.UnexpectedFixtureRequest;
-                }
-                var task_buffer: [request_window_size]u8 = undefined;
-                const task = try request.readWindow(header.len, task_buffer[0..@intCast(task_length)]);
-                if (!std.mem.eql(u8, task, self.expected_task)) return error.UnexpectedFixtureRequest;
+                if (entries.len != 1) return error.UnexpectedFixtureRequest;
+                try expectEntry(entries[0], .user, self.expected_task);
                 break :blk try model_protocol.encodeTool(
                     &encoded_buffer,
                     self.tool,
@@ -299,50 +352,22 @@ pub const ToolFixture = struct {
                 );
             },
             1 => blk: {
-                if (entry_count != 3) return error.ToolResultMissingFromContext;
-                const task_length = read(u64, prefix, request_header_size + 32);
-                const second_header_offset = request_header_size + entry_header_size + task_length;
-                var second_header: [entry_header_size]u8 = undefined;
-                const second = try request.readWindow(second_header_offset, &second_header);
-                if (second.len != second_header.len or
-                    second[0] != @intFromEnum(session_store.EntryKind.assistant))
+                if (entries.len != 3) return error.ToolResultMissingFromContext;
+                try expectEntry(entries[0], .user, self.expected_task);
+                if (entries[1].kind != .assistant or
+                    !std.mem.eql(u8, entries[1].content, self.tool_arguments))
                 {
                     return error.ToolCallMissingFromContext;
                 }
-                const call_length = read(u64, second, 32);
-                if (call_length != self.tool_arguments.len) return error.ToolCallMissingFromContext;
-                if (call_length > request_window_size) return error.ToolCallMissingFromContext;
-                var call_buffer: [request_window_size]u8 = undefined;
-                const call_bytes = try request.readWindow(
-                    second_header_offset + entry_header_size,
-                    call_buffer[0..@intCast(call_length)],
-                );
-                if (!std.mem.eql(u8, call_bytes, self.tool_arguments)) return error.ToolCallMissingFromContext;
-                const third_header_offset = second_header_offset + entry_header_size + call_length;
-                var third_header: [entry_header_size]u8 = undefined;
-                const third = try request.readWindow(third_header_offset, &third_header);
-                if (third.len != third_header.len or
-                    third[0] != @intFromEnum(session_store.EntryKind.tool_result))
-                {
-                    return error.ToolResultMissingFromContext;
-                }
-                const result_length = read(u64, third, 32);
-                if (result_length > request_window_size) {
-                    return error.InvalidFixtureToolResult;
-                }
-                var result_buffer: [request_window_size]u8 = undefined;
-                const result = try request.readWindow(
-                    third_header_offset + entry_header_size,
-                    result_buffer[0..@intCast(result_length)],
-                );
+                const result = entries[2].content;
                 switch (self.tool) {
                     .bash => {
-                        if (result_length < bash_tool.result_header_size) return error.InvalidFixtureToolResult;
+                        if (result.len < bash_tool.result_header_size) return error.InvalidFixtureToolResult;
                         const view = try bash_tool.decodeResult(result);
                         if (view.status != self.expected_tool_status) return error.UnexpectedFixtureToolStatus;
                     },
                     .apply_patch => {
-                        if (result_length != patch_tool.result_size) return error.InvalidFixtureToolResult;
+                        if (result.len != patch_tool.result_size) return error.InvalidFixtureToolResult;
                         const bytes: *const [patch_tool.result_size]u8 = @ptrCast(result.ptr);
                         const view = try patch_tool.decodeResult(bytes);
                         if (view.status != self.expected_patch_status) return error.UnexpectedFixtureToolStatus;
@@ -361,14 +386,6 @@ pub const ToolFixture = struct {
         try response.append(encoded);
         try response.finish();
     }
-};
-
-const repair_entry_capacity = 7;
-const repair_request_capacity = 32 * 1024;
-
-const RequestEntry = struct {
-    kind: session_store.EntryKind,
-    content: []const u8,
 };
 
 /// Drives the complete deterministic repair from the exact committed
@@ -390,10 +407,9 @@ pub const RepairFixture = struct {
         response: ResponseWriter,
     ) anyerror!void {
         const self: *RepairFixture = @ptrCast(@alignCast(context));
-        var request_buffer: [repair_request_capacity]u8 = undefined;
-        const durable_request = try readCompleteRequest(request, &request_buffer);
-        var entries: [repair_entry_capacity]RequestEntry = undefined;
-        const history = try decodeRequestEntries(durable_request, &entries);
+        var decoded: RequestHistory = undefined;
+        try decoded.decode(request);
+        const history = decoded.slice();
 
         var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
         const encoded = switch (history.len) {
@@ -452,62 +468,6 @@ pub const RepairFixture = struct {
         }
     }
 };
-
-fn readCompleteRequest(request: RequestReader, out: []u8) ![]const u8 {
-    const length = request.length();
-    if (length == 0 or length > out.len) return error.UnexpectedRepairHistory;
-    var offset: usize = 0;
-    while (offset < length) {
-        const bytes = try request.readWindow(offset, out[offset..@intCast(length)]);
-        if (bytes.len == 0 or bytes.len > length - offset) return error.UnexpectedRepairHistory;
-        if (bytes.ptr != out[offset..].ptr) @memcpy(out[offset..][0..bytes.len], bytes);
-        offset += bytes.len;
-    }
-    return out[0..@intCast(length)];
-}
-
-fn decodeRequestEntries(
-    bytes: []const u8,
-    out: *[repair_entry_capacity]RequestEntry,
-) ![]const RequestEntry {
-    if (bytes.len < request_header_size or
-        !std.mem.eql(u8, bytes[0..request_magic.len], request_magic) or
-        read(u16, bytes, 8) != version or read(u16, bytes, 10) != request_header_size)
-    {
-        return error.UnexpectedRepairHistory;
-    }
-    const count: usize = @intCast(read(u32, bytes, 12));
-    if (count == 0 or count > out.len) return error.UnexpectedRepairHistory;
-    var cursor: usize = request_header_size;
-    for (0..count) |index| {
-        if (cursor > bytes.len or bytes.len - cursor < entry_header_size) {
-            return error.UnexpectedRepairHistory;
-        }
-        const header = bytes[cursor..][0..entry_header_size];
-        const kind: session_store.EntryKind = switch (header[0]) {
-            1 => .user,
-            2 => .assistant,
-            3 => .tool_result,
-            4 => .context_checkpoint,
-            else => return error.UnexpectedRepairHistory,
-        };
-        const entry_id = read(u64, header, 8);
-        const parent_id = read(u64, header, 16);
-        const content_ref = read(u64, header, 24);
-        const content_length = read(u64, header, 32);
-        if (entry_id != index + 1 or parent_id != index or content_ref == 0 or
-            content_length > bytes.len - cursor - entry_header_size)
-        {
-            return error.UnexpectedRepairHistory;
-        }
-        const content_start = cursor + entry_header_size;
-        const content_end = content_start + @as(usize, @intCast(content_length));
-        out[index] = .{ .kind = kind, .content = bytes[content_start..content_end] };
-        cursor = content_end;
-    }
-    if (cursor != bytes.len) return error.UnexpectedRepairHistory;
-    return out[0..count];
-}
 
 fn expectEntry(entry: RequestEntry, kind: session_store.EntryKind, content: []const u8) !void {
     if (entry.kind != kind or !std.mem.eql(u8, entry.content, content)) {

@@ -94,7 +94,9 @@ zig build fixture-repair -Doptimize=ReleaseSmall
 
 The canonical test graph also runs model and Bash recovery in separate processes. Missing model
 evidence admits a new Attempt under the same Operation, the eighth uncertain Attempt terminalizes
-without a ninth dispatch, and an uncertain Bash Attempt becomes indeterminate without replay.
+without a ninth dispatch, and each replacement durably exposes the number of earlier dispatches that
+may duplicate provider work or billing. Late evidence from a superseded Attempt remains audited
+without a second lifecycle advancement. An uncertain Bash Attempt becomes indeterminate without replay.
 
 Ownership epochs, Completion evidence, Session metadata, Conversation metadata, and canonical
 multi-fact transactions now live behind the same serialized Storage Owner. Session supplies only a

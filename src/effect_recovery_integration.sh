@@ -9,6 +9,7 @@ mkdir -p "$root/model/state" "$root/model/repo"
 git -C "$root/model/repo" init -q
 model_session=$($fixture start-model "$root/model/state" "$root/model/repo")
 test "$($fixture finish-model "$root/model/state" "$model_session")" = finished
+test "$($fixture late-model "$root/model/state" "$model_session")" = audited
 
 mkdir -p "$root/exhaustion/state" "$root/exhaustion/repo"
 git -C "$root/exhaustion/repo" init -q

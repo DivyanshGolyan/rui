@@ -327,12 +327,12 @@ fn performModelTurn(
             .{ .model = descriptor.digest },
             .none,
         ),
-        session_transition.attemptAdmitted(
+        session_transition.modelAttemptAdmitted(
             operation_context,
             ids.attempt_id,
             ids.request_ref,
             .{ .model = descriptor.digest },
-            .model,
+            0,
         ),
     };
     try commitCoreFacts(
@@ -407,12 +407,12 @@ fn retryModelAttempt(
         }
     }
     if (attempt_id == 0 or response_ref == 0) return error.OperationIdentityAllocationExhausted;
-    const attempt = session_transition.attemptAdmitted(
+    const attempt = session_transition.modelAttemptAdmitted(
         operationContext(session, operation.id, operation.generation),
         attempt_id,
         descriptor.descriptor_ref,
         descriptor.descriptor_digest,
-        .model,
+        history.attempt_count,
     );
     try commitCoreFacts(
         session,
@@ -1140,6 +1140,9 @@ pub fn acceptCompletion(
     };
     if (offered.kind != expected_kind) return error.StaleCompletion;
     if (history.result) |result| {
+        if (resultAttemptId(result) != offered.attempt_id) {
+            return advanceRestored(host, allocator, session, core_state_buffer, config, provider);
+        }
         if (result.result_ref != offered.result_ref or
             !binding.eql(binding.Result, result.result_digest, offered.result_digest))
         {

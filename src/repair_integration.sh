@@ -71,3 +71,36 @@ run_case() {
 
 run_case ask ""
 run_case bypass --dangerously-bypass-permissions
+
+run_permission_input_case() {
+    case_name=$1
+    decision=$2
+    expected_error=$3
+    prepare_repo "$case_name"
+    repo="$root/$case_name/repo"
+    state="$root/$case_name/state"
+    if output=$(printf '%s' "$decision" | $onepage \
+        --state "$state" \
+        --repo "$repo" \
+        --model fixture:bash \
+        --fixture-response "must resume" \
+        --fixture-bash-command ./test.sh \
+        "Inspect the failing executable test." 2>&1); then
+        return 1
+    fi
+    printf '%s\n' "$output" | grep -F "error: $expected_error" >/dev/null
+    session_id=$(printf '%s\n' "$output" | sed -n 's/^Session: //p' | head -1)
+    test -n "$session_id"
+    resumed=$(printf 'y\n' | $onepage \
+        --state "$state" \
+        --resume "$session_id" \
+        --model fixture:resume \
+        --fixture-response "Approval remained durable and resumable.")
+    printf '%s\n' "$resumed" | grep -F "Final Answer:" >/dev/null
+    printf '%s\n' "$resumed" | grep -F "Approval remained durable and resumable." >/dev/null
+}
+
+run_permission_input_case overlong \
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+    PermissionDecisionLineTooLong
+run_permission_input_case unterminated y PermissionDecisionLineUnterminated
