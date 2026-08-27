@@ -638,6 +638,7 @@ const HarnessState = struct {
         switch (err) {
             error.StaleCompletion,
             error.FutureCompletionEpoch,
+            error.CompletionAttemptEpochMismatch,
             error.ConflictingCompletionEvidence,
             error.CompletionEvidenceMissing,
             => {

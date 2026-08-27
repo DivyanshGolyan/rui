@@ -1133,6 +1133,9 @@ pub fn acceptCompletion(
     _ = try session.inspectSemantic(&history, FactSearch.applyFact);
     const attempt = history.attempt orelse return error.StaleCompletion;
     if (attempt.attempt_id != offered.attempt_id) return error.StaleCompletion;
+    if (offered.ownership_epoch != attempt.operation.agent.ownership_epoch) {
+        return error.CompletionAttemptEpochMismatch;
+    }
     const expected_kind: completion_inbox.EvidenceKind = switch (attempt.descriptor_digest) {
         .model => .model,
         .bash => .bash,
@@ -1157,6 +1160,7 @@ pub fn acceptCompletion(
         .operation_generation = offered.operation_generation,
         .attempt_id = offered.attempt_id,
         .maximum_epoch = token.epoch,
+        .expected_epoch = attempt.operation.agent.ownership_epoch,
         .expected_kind = expected_kind,
     };
     _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
@@ -1264,10 +1268,11 @@ fn reconcileBash(
         .operation_generation = 1,
         .attempt_id = attempt.attempt_id,
         .maximum_epoch = token.epoch,
+        .expected_epoch = attempt.operation.agent.ownership_epoch,
         .expected_kind = .bash,
     };
     _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
-    var evidence_agent = agentContext(session);
+    var evidence_agent = attempt.operation.agent;
     var result_ref: u64 = undefined;
     var result_digest: binding.Result = undefined;
     var status: bash_tool.Status = undefined;
@@ -1301,7 +1306,7 @@ fn reconcileBash(
         try session.publishCompletionEvidence(completion_inbox.bind(.{
             .kind = .bash,
             .session_id = session.session_id,
-            .ownership_epoch = token.epoch,
+            .ownership_epoch = attempt.operation.agent.ownership_epoch,
             .agent_id = session.agent_id,
             .agent_generation = agent_generation,
             .operation_id = operation_id,
@@ -1447,7 +1452,7 @@ fn reconcilePatch(
 
     var result_digest: binding.Result = undefined;
     var result_status: patch_tool.ResultStatus = undefined;
-    var evidence_agent = agentContext(session);
+    var evidence_agent = if (attempt) |admitted| admitted.operation.agent else agentContext(session);
     var result_evidence: session_transition.ResultEvidence = .{ .immediate = .consequential };
     if (immediate_status) |status| {
         result_status = status;
@@ -1474,6 +1479,7 @@ fn reconcilePatch(
             .operation_generation = 1,
             .attempt_id = admitted.attempt_id,
             .maximum_epoch = token.epoch,
+            .expected_epoch = admitted.operation.agent.ownership_epoch,
             .expected_kind = .apply_patch,
         };
         _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
@@ -1506,7 +1512,7 @@ fn reconcilePatch(
             const envelope = completion_inbox.bind(.{
                 .kind = .apply_patch,
                 .session_id = session.session_id,
-                .ownership_epoch = token.epoch,
+                .ownership_epoch = admitted.operation.agent.ownership_epoch,
                 .agent_id = session.agent_id,
                 .agent_generation = agent_generation,
                 .operation_id = operation_id,
@@ -1673,6 +1679,7 @@ fn durableCompletion(
                 .operation_generation = operation_generation,
                 .attempt_id = attempt.attempt_id,
                 .maximum_epoch = token.epoch,
+                .expected_epoch = attempt.operation.agent.ownership_epoch,
                 .expected_kind = .model,
             };
             _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
@@ -1872,6 +1879,7 @@ const InboxSearch = struct {
     operation_generation: u32,
     attempt_id: u64,
     maximum_epoch: u64,
+    expected_epoch: u64,
     expected_kind: completion_inbox.EvidenceKind,
     match: ?completion_inbox.Envelope = null,
 
@@ -1886,6 +1894,9 @@ const InboxSearch = struct {
             return;
         }
         if (envelope.ownership_epoch > self.maximum_epoch) return error.FutureCompletionEpoch;
+        if (envelope.ownership_epoch != self.expected_epoch) {
+            return error.CompletionAttemptEpochMismatch;
+        }
         if (self.match) |existing| {
             if (!std.meta.eql(existing, envelope)) return error.ConflictingCompletionEvidence;
             return;
@@ -2150,6 +2161,7 @@ test "Completion Inbox search never crosses evidence kinds" {
         .operation_generation = 1,
         .attempt_id = 4,
         .maximum_epoch = 5,
+        .expected_epoch = 5,
         .expected_kind = .apply_patch,
     };
     const wrong = completion_inbox.bind(.{
@@ -2165,5 +2177,35 @@ test "Completion Inbox search never crosses evidence kinds" {
         .result_digest = binding.hash(binding.Result, "result"),
     });
     try InboxSearch.apply(&search, wrong);
+    try std.testing.expect(search.match == null);
+}
+
+test "Completion Inbox search binds evidence to the admitted Attempt epoch" {
+    var search: InboxSearch = .{
+        .session_id = 1,
+        .agent_id = 2,
+        .operation_id = 3,
+        .operation_generation = 1,
+        .attempt_id = 4,
+        .maximum_epoch = 6,
+        .expected_epoch = 5,
+        .expected_kind = .model,
+    };
+    const rebound = completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = 1,
+        .ownership_epoch = 6,
+        .agent_id = 2,
+        .agent_generation = agent_generation,
+        .operation_id = 3,
+        .operation_generation = 1,
+        .attempt_id = 4,
+        .result_ref = 6,
+        .result_digest = binding.hash(binding.Result, "result"),
+    });
+    try std.testing.expectError(
+        error.CompletionAttemptEpochMismatch,
+        InboxSearch.apply(&search, rebound),
+    );
     try std.testing.expect(search.match == null);
 }

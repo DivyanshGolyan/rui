@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const fixture_state_namespace = ".zig-cache/onepage-fixture-v2-";
+const fixture_state_namespace = ".zig-cache/onepage-fixture-v3-";
 
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});

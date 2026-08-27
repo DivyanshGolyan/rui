@@ -7,7 +7,7 @@ const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
-pub const schema_version: u32 = 2;
+pub const schema_version: u32 = 3;
 pub const application_id: u32 = 0x4f4e5047; // "ONPG"
 pub const max_path_bytes: usize = 1024;
 pub const max_transition_payload: usize = session_transition.max_payload_size;
@@ -72,7 +72,7 @@ const completion_schema =
     \\    completion_digest BLOB NOT NULL CHECK (length(completion_digest) = 32),
     \\    consumed_by_sequence INTEGER,
     \\    UNIQUE (
-    \\        session_id, ownership_epoch, agent_generation, operation_id,
+    \\        session_id, agent_generation, operation_id,
     \\        operation_generation, attempt_id, evidence_kind
     \\    ),
     \\    FOREIGN KEY (session_id) REFERENCES session (session_id),
@@ -111,13 +111,12 @@ const pending_completion_count_sql: [:0]const u8 =
 ;
 const find_completion_sql: [:0]const u8 =
     \\SELECT c.inbox_id, c.result_reference, c.result_digest, c.completion_digest,
-    \\       c.consumed_by_sequence
+    \\       c.ownership_epoch, c.consumed_by_sequence
     \\FROM completion_inbox AS c
     \\JOIN session AS s ON s.session_id = c.session_id
-    \\WHERE c.session_id = ?1 AND c.ownership_epoch = ?2
-    \\  AND s.agent_id = ?3 AND c.agent_generation = ?4
-    \\  AND c.operation_id = ?5 AND c.operation_generation = ?6
-    \\  AND c.attempt_id = ?7 AND c.evidence_kind = ?8
+    \\WHERE c.session_id = ?1 AND s.agent_id = ?2 AND c.agent_generation = ?3
+    \\  AND c.operation_id = ?4 AND c.operation_generation = ?5
+    \\  AND c.attempt_id = ?6 AND c.evidence_kind = ?7
 ;
 const read_completion_sql: [:0]const u8 =
     \\SELECT c.evidence_kind, c.ownership_epoch, s.agent_id, c.agent_generation,
@@ -546,28 +545,28 @@ pub const StorageOwner = struct {
         const existing = try self.prepare(find_completion_sql);
         defer finalize(existing);
         try bindIdentity(existing, 1, envelope.session_id, &identities[0]);
-        try bindIdentity(existing, 2, envelope.ownership_epoch, &identities[1]);
-        try bindIdentity(existing, 3, envelope.agent_id, &identities[2]);
-        try bindU64(existing, 4, envelope.agent_generation);
-        try bindIdentity(existing, 5, envelope.operation_id, &identities[3]);
-        try bindU64(existing, 6, envelope.operation_generation);
-        try bindIdentity(existing, 7, envelope.attempt_id, &identities[4]);
-        try bindU64(existing, 8, @intFromEnum(envelope.kind));
+        try bindIdentity(existing, 2, envelope.agent_id, &identities[2]);
+        try bindU64(existing, 3, envelope.agent_generation);
+        try bindIdentity(existing, 4, envelope.operation_id, &identities[3]);
+        try bindU64(existing, 5, envelope.operation_generation);
+        try bindIdentity(existing, 6, envelope.attempt_id, &identities[4]);
+        try bindU64(existing, 7, @intFromEnum(envelope.kind));
         const existing_result = c.sqlite3_step(existing);
         if (existing_result == c.SQLITE_ROW) {
             const sequence = c.sqlite3_column_int64(existing, 0);
             const result_ref = try readIdentityColumn(existing, 1);
             const result_digest = try readBindingColumn(binding.Result, existing, 2);
             const completion_digest = try readBindingColumn(binding.Completion, existing, 3);
+            const ownership_epoch = try readIdentityColumn(existing, 4);
             if (sequence <= 0) return error.CorruptHostStore;
-            if (result_ref != envelope.result_ref or
+            if (ownership_epoch != envelope.ownership_epoch or result_ref != envelope.result_ref or
                 !binding.eql(binding.Result, result_digest, envelope.result_digest) or
                 !binding.eql(binding.Completion, completion_digest, envelope.completion_digest))
             {
                 return error.ConflictingCompletionEvidence;
             }
             if (consumed_by_sequence) |sequence_value| {
-                if (c.sqlite3_column_type(existing, 4) == c.SQLITE_NULL) {
+                if (c.sqlite3_column_type(existing, 5) == c.SQLITE_NULL) {
                     const audit = try self.prepare(
                         "UPDATE completion_inbox SET consumed_by_sequence = ?2 WHERE inbox_id = ?1 AND consumed_by_sequence IS NULL",
                     );
@@ -1030,7 +1029,7 @@ pub const StorageOwner = struct {
         }
         self.execute(completion_index_schema) catch |err| return err;
         self.execute("PRAGMA application_id=1330532423") catch |err| return err;
-        self.execute("PRAGMA user_version=2") catch |err| return err;
+        self.execute("PRAGMA user_version=3") catch |err| return err;
         self.execute("COMMIT") catch |err| {
             self.rollbackOrPoison();
             return err;
@@ -1539,7 +1538,7 @@ test "matching identity cannot hide an incomplete or unhardened schema" {
     const database = maybe_database orelse return error.HostStoreOpenFailed;
     try expectOk(c.sqlite3_exec(
         database,
-        "CREATE TABLE session (session_id BLOB); PRAGMA application_id=1330532423; PRAGMA user_version=2",
+        "CREATE TABLE session (session_id BLOB); PRAGMA application_id=1330532423; PRAGMA user_version=3",
         null,
         null,
         null,
@@ -1724,6 +1723,27 @@ test "late Completion evidence is inserted already consumed for audit" {
     try std.testing.expectEqual(pending_id, try owner.publishAuditedCompletion(pending, 1));
     try std.testing.expectEqual(@as(?u64, 1), (try owner.readCompletion(8, pending_id)).consumed_by_sequence);
     try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(8));
+
+    var cross_epoch = envelope;
+    cross_epoch.ownership_epoch = 2;
+    cross_epoch.result_ref = 107;
+    cross_epoch.result_digest = binding.hash(binding.Result, "cross-epoch-conflict");
+    cross_epoch = completion_inbox.bind(.{
+        .kind = cross_epoch.kind,
+        .session_id = cross_epoch.session_id,
+        .ownership_epoch = cross_epoch.ownership_epoch,
+        .agent_id = cross_epoch.agent_id,
+        .agent_generation = cross_epoch.agent_generation,
+        .operation_id = cross_epoch.operation_id,
+        .operation_generation = cross_epoch.operation_generation,
+        .attempt_id = cross_epoch.attempt_id,
+        .result_ref = cross_epoch.result_ref,
+        .result_digest = cross_epoch.result_digest,
+    });
+    try std.testing.expectError(
+        error.ConflictingCompletionEvidence,
+        owner.publishAuditedCompletion(cross_epoch, 1),
+    );
 
     var conflicting = envelope;
     conflicting.result_ref = 104;
