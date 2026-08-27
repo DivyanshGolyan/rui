@@ -44,7 +44,7 @@ This is simpler than either Node or a retained QuickJS process:
 
 The spike proves that QuickJS can retain and resolve native Promise capabilities, pump pending jobs, and enforce engine limits. The bridge currently stores native resolvers and keys in a fixed pending array, then resolves them in later waves.    That is good feasibility evidence—but production can delete most of that machinery by never delivering an asynchronous job completion into an old runtime.
 
-The official C API supports a runtime allocation limit, maximum stack size, and interrupt callback, matching the mechanisms exercised by the spike. Those are useful first-line controls, not complete process-level resource enforcement. 
+The official C API supports a runtime allocation limit, maximum stack size, and interrupt callback, matching the mechanisms exercised by the spike. Those are useful first-line controls, not complete process-level resource enforcement.
 
 No unresolved unknown prevents this roadmap decision under the assumptions in §14.
 
@@ -188,9 +188,9 @@ Do not call arbitrary model-authored workflows simply “safe.” Say:
 - **appropriate for a single-user local execution model**;
 - **not hardened native-code isolation**.
 
-QuickJS-ng’s own security policy explicitly treats vulnerabilities reachable from untrusted JavaScript in a trusted embedder as relevant to its threat model, which is a positive fit. It also makes clear that untrusted QuickJS bytecode is outside that protection. 
+QuickJS-ng’s own security policy explicitly treats vulnerabilities reachable from untrusted JavaScript in a trusted embedder as relevant to its threat model, which is a positive fit. It also makes clear that untrusted QuickJS bytecode is outside that protection.
 
-Therefore, V1 must execute **source only**. Never accept, cache, restore, or IPC-transfer QuickJS bytecode. QuickJS’s documentation warns that bytecode is version-bound and not security-checked. 
+Therefore, V1 must execute **source only**. Never accept, cache, restore, or IPC-transfer QuickJS bytecode. QuickJS’s documentation warns that bytecode is version-bound and not security-checked.
 
 ## Memory contract
 
@@ -225,7 +225,7 @@ The evidence has crossed the threshold needed to reverse the Node recommendation
 
 This is not merely a performance optimization. It aligns the authoring runtime with the product’s authority model.
 
-QuickJS-ng 0.16.2 is the latest release as of August 27, 2026. The release includes several correctness, leak, alignment, and interrupt-check fixes. That indicates active maintenance, while also illustrating why OnePage must have an explicit update process rather than treating the engine as a frozen utility. 
+QuickJS-ng 0.16.2 is the latest release as of August 27, 2026. The release includes several correctness, leak, alignment, and interrupt-check fixes. That indicates active maintenance, while also illustrating why OnePage must have an explicit update process rather than treating the engine as a frozen utility.
 
 ### Important modification
 
@@ -342,7 +342,7 @@ That is hierarchical fan-in. It need not become a special Host primitive.
 
 ### Engine limit versus process limit
 
-The spike applies a 16 MiB engine limit, 512 KiB stack limit, and interrupt deadline.  But the fixed `Host.entries` array and each `strdup` allocation sit outside that QuickJS managed limit.  
+The spike applies a 16 MiB engine limit, 512 KiB stack limit, and interrupt deadline.  But the fixed `Host.entries` array and each `strdup` allocation sit outside that QuickJS managed limit.
 
 Production should therefore use:
 
@@ -464,7 +464,7 @@ local_sequence
 
 A UI can suppress duplicate presentation if useful, but logs must not become workflow authority.
 
-The representative saved workflow already demonstrates that external JavaScript can own fan-out, labels, schemas, and final joins without a model-visible Agent tool or Host DAG. 
+The representative saved workflow already demonstrates that external JavaScript can own fan-out, labels, schemas, and final joins without a model-visible Agent tool or Host DAG.
 
 ### Keep one `agent()` shape
 
@@ -511,7 +511,7 @@ The mock compatibility runner currently:
 - replaces one exact source substring;
 - constructs an `AsyncFunction`;
 - injects globals positionally;
-- executes the transformed file as a function body. 
+- executes the transformed file as a function body.
 
 That is appropriate for corpus testing, not a stable parser or security boundary. A textual rewrite can be confused by comments, strings, alternate export formatting, additional imports, and source-level name collisions.
 
@@ -539,7 +539,7 @@ The following must also be normative.
 
 Do not use an ordinary `JS_NewContext()` and merely avoid `std` and `os`.
 
-QuickJS exposes `JS_NewContextRaw()` and separately installable intrinsics, including Date, eval, Proxy, Promise, WeakRef, performance, and others. That exists specifically to let embedders select the realm’s facilities. 
+QuickJS exposes `JS_NewContextRaw()` and separately installable intrinsics, including Date, eval, Proxy, Promise, WeakRef, performance, and others. That exists specifically to let embedders select the realm’s facilities.
 
 The production realm should begin raw and add only the features required by the corpus. At minimum, omit:
 
@@ -595,7 +595,7 @@ An engine upgrade can change:
 - parser semantics;
 - memory use near a configured limit.
 
-The current v0.16.2 release itself contains observable ECMAScript and interrupt-behavior corrections. 
+The current v0.16.2 release itself contains observable ECMAScript and interrupt-behavior corrections.
 
 Because OnePage is unreleased, you need not support old versions indefinitely. But silently resuming an existing run under changed interpreter semantics is unsafe.
 
@@ -692,7 +692,7 @@ local patches, if any
 
 Do not commit the amalgamation merely to avoid a dependency fetch. Committing 90,000 generated C lines would make provenance and upgrades less clear, not more.
 
-QuickJS-ng is explicitly a small embeddable JavaScript engine and is MIT-licensed. 
+QuickJS-ng is explicitly a small embeddable JavaScript engine and is MIT-licensed.
 
 ### Required release gates
 
@@ -713,7 +713,7 @@ QuickJS-ng is explicitly a small embeddable JavaScript engine and is MIT-license
 - Do not cache bytecode between versions.
 - Do not accept QuickJS bytecode over the protocol.
 
-The upstream security policy explicitly excludes hostile bytecode, while covering relevant untrusted-source bugs. 
+The upstream security policy explicitly excludes hostile bytecode, while covering relevant untrusted-source bugs.
 
 #### Sanitizer coverage
 
@@ -749,7 +749,7 @@ The most valuable downstream fuzz target is not generic ECMAScript parsing alone
 
 #### OOM and ownership fault injection
 
-QuickJS uses explicit reference counting and requires the embedder to check exceptions and correctly duplicate or free every retained `JSValue`. The official embedding guide calls out these ownership and exception rules. 
+QuickJS uses explicit reference counting and requires the embedder to check exceptions and correctly duplicate or free every retained `JSValue`. The official embedding guide calls out these ownership and exception rules.
 
 Inject allocation failure at every bridge allocation and C API call that can fail. Verify:
 
@@ -769,7 +769,7 @@ The parent must kill the child when it exceeds:
 - total memory;
 - protocol inactivity deadline.
 
-`JS_SetInterruptHandler()` is regularly polled by the engine, but should not be treated as an independent hard real-time guarantee. The fact that v0.16.2 added interrupt checks to additional Array methods illustrates that interrupt coverage can evolve. 
+`JS_SetInterruptHandler()` is regularly polled by the engine, but should not be treated as an independent hard real-time guarantee. The fact that v0.16.2 added interrupt checks to additional Array methods illustrates that interrupt coverage can evolve.
 
 #### Update policy
 
@@ -849,7 +849,7 @@ Given that model calls dominate workflow latency, ScriptC is unlikely to earn it
 
 **Decision: yes, with a small QuickJS runner-kernel gate.**
 
-The current long-lived Harness still retains a Host lease, Session, buffers, pending ingress, and locks.  Model Attempt admission still closes Core and then invokes the Provider synchronously in the same lifecycle path.  
+The current long-lived Harness still retains a Host lease, Session, buffers, pending ingress, and locks.  Model Attempt admission still closes Core and then invokes the Provider synchronously in the same lifecycle path.
 
 QuickJS does not alter the need to remove that architecture first.
 
