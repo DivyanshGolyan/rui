@@ -679,8 +679,6 @@ fn executeBashCall(
     try reach(fault, .after_tool_state_commit);
 }
 
-const PatchPermissionOutcome = enum { ready, approved };
-
 fn requestPatchPermission(
     io: std.Io,
     session: *session_store.Session,
@@ -691,7 +689,7 @@ fn requestPatchPermission(
     policy: patch_tool.Policy,
     approval_required_hook: ?ApprovalRequiredHook,
     fault: ?FaultHook,
-) !PatchPermissionOutcome {
+) !void {
     const response = try core.reducer.response();
     const arguments_length = response.arguments.length;
     if (arguments_length == 0 or arguments_length > patch_tool.max_patch_size or
@@ -704,7 +702,6 @@ fn requestPatchPermission(
     const tool_operation_id = (@as(u64, 3) << 62) | ids.operation_id;
     const patch_ref = (@as(u64, 1) << 60) | ids.response_ref;
     const intent_ref = (@as(u64, 1) << 58) | ids.response_ref;
-    const result_ref = (@as(u64, 1) << 57) | ids.response_ref;
     const intent = try patch_tool.prepare(io, workspace_path, patch, .{
         .operation_id = tool_operation_id,
         .operation_generation = 1,
@@ -737,12 +734,7 @@ fn requestPatchPermission(
     };
     _ = try session.commitSemantic(&descriptor_facts, null);
 
-    const subject: patch_tool.PermissionSubject = .{
-        .operation_id = tool_operation_id,
-        .operation_generation = 1,
-        .intent = intent,
-    };
-    const classification = try policy.classify(subject, patch);
+    const classification = try policy.classify(intent, patch);
     var allowed = classification == .allow;
     if (classification == .ask) {
         const approval = session_transition.approvalRequired(.{
@@ -765,7 +757,7 @@ fn requestPatchPermission(
             .descriptor_digest = .{ .apply_patch = intent.intent_digest },
             .descriptor_ref = patch_ref,
         });
-        allowed = try policy.ask(subject, patch);
+        allowed = try policy.ask(intent, patch);
     }
     const authorization = session_transition.authorization(.{
         .operation = operation_context,
@@ -775,47 +767,6 @@ fn requestPatchPermission(
     });
     _ = try session.commitSemantic(&.{authorization}, null);
     try reach(fault, .after_patch_authorization);
-
-    var status: patch_tool.ResultStatus = .denied;
-    if (allowed) {
-        if (try patch_tool.readyForAttempt(io, intent, patch)) return .approved;
-        status = .stale;
-    }
-
-    var result_bytes: [patch_tool.result_size]u8 = undefined;
-    try patch_tool.encodeResult(&result_bytes, .{
-        .status = status,
-        .intent_ref = intent_ref,
-        .intent_digest = intent.intent_digest,
-    });
-    try session.storeBlob(result_ref, &result_bytes);
-    const result_entry = try session.appendConversation(.tool_result, result_ref, null);
-    try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
-    const result_digest = try blobDigest(session, result_ref);
-    const result_facts = [_]session_transition.Fact{
-        session_transition.result(.{
-            .operation = operation_context,
-            .result_ref = result_ref,
-            .result_digest = result_digest,
-            .class = .ordinary,
-            .evidence = .{ .immediate = .consequential },
-        }),
-        session_transition.conversationAdvanced(.{
-            .agent = agentContext(session),
-            .entry_id = result_entry.entry_id,
-            .parent_id = result_entry.parent_id,
-            .kind = result_entry.kind,
-            .content_ref = result_ref,
-        }),
-    };
-    try commitCoreFacts(
-        session,
-        core_state_buffer,
-        core,
-        &result_facts,
-        true,
-    );
-    return .ready;
 }
 
 fn storePatchIntent(
@@ -935,7 +886,7 @@ pub fn advanceRestored(
                         config.fault,
                     ),
                     .apply_patch => {
-                        const permission = try requestPatchPermission(
+                        try requestPatchPermission(
                             io,
                             session,
                             &core,
@@ -946,7 +897,7 @@ pub fn advanceRestored(
                             config.approval_required_hook,
                             config.fault,
                         );
-                        if (permission == .approved) _ = try reconcilePatch(
+                        _ = try reconcilePatch(
                             session,
                             token,
                             &core,
@@ -1182,35 +1133,6 @@ pub fn resolvePermission(
                 .allowed = allow,
             });
             _ = try session.commitSemantic(&.{authorization}, null);
-            if (!allow) {
-                const result_ref = (@as(u64, 1) << 57) | @as(u32, @truncate(observation.result_ref));
-                var result_bytes: [patch_tool.result_size]u8 = undefined;
-                try patch_tool.encodeResult(&result_bytes, .{
-                    .status = .denied,
-                    .intent_ref = pending.binding_ref,
-                    .intent_digest = patch_descriptor,
-                });
-                try session.storeBlob(result_ref, &result_bytes);
-                const result_entry = try session.appendConversation(.tool_result, result_ref, null);
-                try core.reducer.commitToolResult(session.activeLeafId(), result_entry.entry_id);
-                const facts = [_]session_transition.Fact{
-                    session_transition.result(.{
-                        .operation = operation_context,
-                        .result_ref = result_ref,
-                        .result_digest = try blobDigest(session, result_ref),
-                        .class = .ordinary,
-                        .evidence = .{ .immediate = .consequential },
-                    }),
-                    session_transition.conversationAdvanced(.{
-                        .agent = agentContext(session),
-                        .entry_id = result_entry.entry_id,
-                        .parent_id = result_entry.parent_id,
-                        .kind = result_entry.kind,
-                        .content_ref = result_ref,
-                    }),
-                };
-                try commitCoreFacts(session, core_state_buffer, &core, &facts, false);
-            }
         },
         else => unreachable,
     }
@@ -1542,112 +1464,108 @@ fn reconcilePatch(
     {
         return error.InvalidPatchHistory;
     }
-    if (!authorization.allowed) return persistImmediatePatchResult(
-        session,
-        token,
-        core,
-        core_state_buffer,
-        operation_id,
-        patch_ref,
-        result_ref,
-        validated.descriptor_ref,
-        patch_descriptor,
-        .denied,
-    );
-
     var patch_buffer: [patch_tool.max_patch_size]u8 = undefined;
-    const patch = try readBoundedBlob(session, patch_ref, &patch_buffer);
+    var patch: []const u8 = &.{};
     var attempt = history.attempt;
-    if (attempt == null) {
-        if (!try patch_tool.readyForAttempt(session.io, intent, patch)) {
-            return persistImmediatePatchResult(
-                session,
-                token,
-                core,
-                core_state_buffer,
-                operation_id,
-                patch_ref,
-                result_ref,
-                validated.descriptor_ref,
-                patch_descriptor,
-                .stale,
-            );
-        }
-        var attempt_id: u64 = 0;
-        while (attempt_id == 0) session.io.random(std.mem.asBytes(&attempt_id));
-        const admitted = session_transition.attemptAdmitted(
-            operationContext(session, operation_id, 1),
-            attempt_id,
-            validated.descriptor_ref,
-            validated.descriptor_digest,
-            .consequential,
-        );
-        try commitCoreFacts(session, core_state_buffer, core, &.{admitted}, false);
-        attempt = admitted.attempt_admitted;
-        try reach(fault, .after_patch_attempt);
+    var immediate_status: ?patch_tool.ResultStatus = if (authorization.allowed) null else .denied;
+    if (!authorization.allowed and attempt != null) return error.InvalidPatchHistory;
+    if (authorization.allowed) {
+        patch = try readBoundedBlob(session, patch_ref, &patch_buffer);
     }
-    const admitted = attempt.?;
-    if (admitted.descriptor_ref != validated.descriptor_ref or
-        !binding.descriptorEql(admitted.descriptor_digest, validated.descriptor_digest))
-    {
-        return error.InvalidPatchHistory;
+    if (authorization.allowed and attempt == null) {
+        if (!try patch_tool.readyForAttempt(session.io, intent, patch)) {
+            immediate_status = .stale;
+        } else {
+            var attempt_id: u64 = 0;
+            while (attempt_id == 0) session.io.random(std.mem.asBytes(&attempt_id));
+            const admitted = session_transition.attemptAdmitted(
+                operationContext(session, operation_id, 1),
+                attempt_id,
+                validated.descriptor_ref,
+                validated.descriptor_digest,
+                .consequential,
+            );
+            try commitCoreFacts(session, core_state_buffer, core, &.{admitted}, false);
+            attempt = admitted.attempt_admitted;
+            try reach(fault, .after_patch_attempt);
+        }
     }
 
-    var inbox: InboxSearch = .{
-        .session_id = session.session_id,
-        .agent_id = session.agent_id,
-        .operation_id = operation_id,
-        .operation_generation = 1,
-        .attempt_id = admitted.attempt_id,
-        .maximum_epoch = token.epoch,
-        .expected_kind = .apply_patch,
-    };
-    _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
     var result_digest: binding.Result = undefined;
     var result_status: patch_tool.ResultStatus = undefined;
     var evidence_agent = agentContext(session);
-    if (inbox.match) |envelope| {
-        if (envelope.result_ref != result_ref or !binding.eql(
-            binding.Result,
-            try blobDigest(session, envelope.result_ref),
-            envelope.result_digest,
-        )) return error.CompletionResultDigestMismatch;
-        result_digest = envelope.result_digest;
-        evidence_agent.ownership_epoch = envelope.ownership_epoch;
-        result_status = try readPatchResultStatus(
-            session,
-            envelope.result_ref,
-            validated.descriptor_ref,
-            patch_descriptor,
-        );
-    } else {
-        const reconciliation = try patch_tool.reconcile(session.io, intent, patch);
-        result_status = reconciliation.status;
-        if (reconciliation.mutated) try reach(fault, .after_patch_mutation);
+    var result_evidence: session_transition.ResultEvidence = .{ .immediate = .consequential };
+    if (immediate_status) |status| {
+        result_status = status;
         var result_bytes: [patch_tool.result_size]u8 = undefined;
         try patch_tool.encodeResult(&result_bytes, .{
-            .status = result_status,
+            .status = status,
             .intent_ref = validated.descriptor_ref,
             .intent_digest = patch_descriptor,
         });
         try storeOrExpectBlob(session, result_ref, &result_bytes);
         result_digest = try blobDigest(session, result_ref);
-        const envelope = completion_inbox.bind(.{
-            .kind = .apply_patch,
+    } else {
+        const admitted = attempt orelse return error.InvalidPatchHistory;
+        if (admitted.descriptor_ref != validated.descriptor_ref or
+            !binding.descriptorEql(admitted.descriptor_digest, validated.descriptor_digest))
+        {
+            return error.InvalidPatchHistory;
+        }
+        result_evidence = .{ .durable = .{ .apply_patch = admitted.attempt_id } };
+        var inbox: InboxSearch = .{
             .session_id = session.session_id,
-            .ownership_epoch = token.epoch,
             .agent_id = session.agent_id,
-            .agent_generation = agent_generation,
             .operation_id = operation_id,
             .operation_generation = 1,
             .attempt_id = admitted.attempt_id,
-            .result_ref = result_ref,
-            .result_digest = result_digest,
-        });
-        try session.publishCompletionEvidence(envelope);
-        if (completion_hook) |hook| {
-            try hook.offered(hook.context, envelope);
-            return error.CompletionOffered;
+            .maximum_epoch = token.epoch,
+            .expected_kind = .apply_patch,
+        };
+        _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
+        if (inbox.match) |envelope| {
+            if (envelope.result_ref != result_ref or !binding.eql(
+                binding.Result,
+                try blobDigest(session, envelope.result_ref),
+                envelope.result_digest,
+            )) return error.CompletionResultDigestMismatch;
+            result_digest = envelope.result_digest;
+            evidence_agent.ownership_epoch = envelope.ownership_epoch;
+            result_status = try readPatchResultStatus(
+                session,
+                envelope.result_ref,
+                validated.descriptor_ref,
+                patch_descriptor,
+            );
+        } else {
+            const reconciliation = try patch_tool.reconcile(session.io, intent, patch);
+            result_status = reconciliation.status;
+            if (reconciliation.mutated) try reach(fault, .after_patch_mutation);
+            var result_bytes: [patch_tool.result_size]u8 = undefined;
+            try patch_tool.encodeResult(&result_bytes, .{
+                .status = result_status,
+                .intent_ref = validated.descriptor_ref,
+                .intent_digest = patch_descriptor,
+            });
+            try storeOrExpectBlob(session, result_ref, &result_bytes);
+            result_digest = try blobDigest(session, result_ref);
+            const envelope = completion_inbox.bind(.{
+                .kind = .apply_patch,
+                .session_id = session.session_id,
+                .ownership_epoch = token.epoch,
+                .agent_id = session.agent_id,
+                .agent_generation = agent_generation,
+                .operation_id = operation_id,
+                .operation_generation = 1,
+                .attempt_id = admitted.attempt_id,
+                .result_ref = result_ref,
+                .result_digest = result_digest,
+            });
+            try session.publishCompletionEvidence(envelope);
+            if (completion_hook) |hook| {
+                try hook.offered(hook.context, envelope);
+                return error.CompletionOffered;
+            }
         }
     }
     const terminal = session_transition.result(.{
@@ -1655,7 +1573,7 @@ fn reconcilePatch(
         .result_ref = result_ref,
         .result_digest = result_digest,
         .class = if (result_status == .indeterminate) .indeterminate else .ordinary,
-        .evidence = .{ .durable = .{ .apply_patch = admitted.attempt_id } },
+        .evidence = result_evidence,
     });
     _ = try session.commitSemantic(&.{terminal}, null);
     try reconcileToolResult(
@@ -1701,51 +1619,6 @@ fn readPatchResultStatus(
         return error.InvalidPatchResult;
     }
     return result.status;
-}
-
-fn persistImmediatePatchResult(
-    session: *session_store.Session,
-    token: session_store.OwnerToken,
-    core: *Core,
-    core_state_buffer: []u8,
-    operation_id: u64,
-    patch_ref: u64,
-    result_ref: u64,
-    intent_ref: u64,
-    descriptor_digest: binding.PatchIntent,
-    status: patch_tool.ResultStatus,
-) !ToolRecovery {
-    var result_bytes: [patch_tool.result_size]u8 = undefined;
-    try patch_tool.encodeResult(&result_bytes, .{
-        .status = status,
-        .intent_ref = intent_ref,
-        .intent_digest = descriptor_digest,
-    });
-    try storeOrExpectBlob(session, result_ref, &result_bytes);
-    const terminal = session_transition.result(.{
-        .operation = operationContext(session, operation_id, 1),
-        .result_ref = result_ref,
-        .result_digest = try blobDigest(session, result_ref),
-        .class = .ordinary,
-        .evidence = .{ .immediate = .consequential },
-    });
-    _ = try session.commitSemantic(&.{terminal}, null);
-    try reconcileToolResult(
-        session,
-        core,
-        core_state_buffer,
-        patch_ref,
-        .{
-            .agent_id = session.agent_id,
-            .agent_generation = agent_generation,
-            .operation_id = operation_id,
-            .operation_generation = 1,
-            .attempt_id = 0,
-            .ownership_epoch = token.epoch,
-            .result = result_ref,
-        },
-    );
-    return .ready;
 }
 
 fn reconcileBashResult(

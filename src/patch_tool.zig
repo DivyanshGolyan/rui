@@ -71,25 +71,19 @@ const PreparationTestHook = struct {
 
 pub const Policy = struct {
     context: *anyopaque,
-    classify_fn: *const fn (*anyopaque, PermissionSubject, []const u8) anyerror!Decision,
-    ask_fn: *const fn (*anyopaque, PermissionSubject, []const u8) anyerror!bool,
+    classify_fn: *const fn (*anyopaque, Intent, []const u8) anyerror!Decision,
+    ask_fn: *const fn (*anyopaque, Intent, []const u8) anyerror!bool,
 
-    pub fn classify(self: Policy, subject: PermissionSubject, patch: []const u8) !Decision {
-        return self.classify_fn(self.context, subject, patch);
+    pub fn classify(self: Policy, intent: Intent, patch: []const u8) !Decision {
+        return self.classify_fn(self.context, intent, patch);
     }
 
-    pub fn ask(self: Policy, subject: PermissionSubject, patch: []const u8) !bool {
-        return self.ask_fn(self.context, subject, patch);
+    pub fn ask(self: Policy, intent: Intent, patch: []const u8) !bool {
+        return self.ask_fn(self.context, intent, patch);
     }
 };
 
-pub const PermissionSubject = struct {
-    operation_id: u64,
-    operation_generation: u32,
-    intent: Intent,
-};
-
-pub const Observation = enum(u8) {
+const Observation = enum(u8) {
     preimage = 1,
     postimage = 2,
     diverged = 3,
@@ -217,7 +211,7 @@ pub fn decodeResult(bytes: *const [result_size]u8) !Result {
     return result;
 }
 
-pub fn descriptorDigest(patch: []const u8) binding_digest.PatchDescriptor {
+fn descriptorDigest(patch: []const u8) binding_digest.PatchDescriptor {
     return binding_digest.hash(binding_digest.PatchDescriptor, patch);
 }
 
@@ -654,7 +648,7 @@ fn runGit(
     };
 }
 
-pub fn observe(io: std.Io, intent: Intent, patch: []const u8) !Observation {
+fn observe(io: std.Io, intent: Intent, patch: []const u8) !Observation {
     if (!binding_digest.eql(binding_digest.PatchIntent, intentDigest(intent), intent.intent_digest) or
         !binding_digest.eql(binding_digest.PatchDescriptor, descriptorDigest(patch), intent.patch_digest))
     {
@@ -694,7 +688,7 @@ pub fn observe(io: std.Io, intent: Intent, patch: []const u8) !Observation {
     return .diverged;
 }
 
-pub fn apply(io: std.Io, intent: Intent, patch: []const u8) !Observation {
+fn apply(io: std.Io, intent: Intent, patch: []const u8) !Observation {
     if (try observe(io, intent, patch) != .preimage) return error.PatchPreimageMismatch;
     var workspace = try std.Io.Dir.cwd().openDir(io, intent.workspace_path, .{});
     defer workspace.close(io);

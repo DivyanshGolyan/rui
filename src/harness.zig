@@ -777,12 +777,12 @@ const HarnessState = struct {
         return .{ .context = self, .classify_fn = classifyBash, .ask_fn = requestBashPermission };
     }
 
-    fn classifyPatch(context: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!patch_tool.Decision {
+    fn classifyPatch(context: *anyopaque, _: patch_tool.Intent, _: []const u8) anyerror!patch_tool.Decision {
         const self: *HarnessState = @ptrCast(@alignCast(context));
         return if (self.config.permission_mode == .bypass) .allow else .ask;
     }
 
-    fn requestPatchPermission(_: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!bool {
+    fn requestPatchPermission(_: *anyopaque, _: patch_tool.Intent, _: []const u8) anyerror!bool {
         return error.PermissionInputRequired;
     }
 
