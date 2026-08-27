@@ -57,9 +57,11 @@ zig build fixture-bash -Doptimize=ReleaseSmall
 The patch slice prepares one immutable durable Patch Intent before Authorization. That Intent binds
 the canonical Workspace and target, tracked single-link regular-file constraints and mode, exact
 patch, preimage, and expected postimage. Approval Required, Authorization, Attempt, and Result all
-reference it; no parallel permission binding or derived Workspace fingerprint exists. Git parses and
-applies the patch in a bounded private copy; `patch_tool` writes that exact postimage through the
-authorized file handle and observes preimage, postimage, divergence, or invalid target.
+reference it; no parallel permission binding or derived Workspace fingerprint exists. Every Git call
+uses `/usr/bin/git` with a replacement environment containing only fixed locale, path, and disabled
+configuration authority. Git parses and applies the patch in a bounded private copy; `patch_tool`
+writes that exact postimage through the authorized file handle and observes preimage, postimage,
+divergence, or invalid target.
 Lifecycle commits Authorization and Attempt before `patch_tool` may mutate, publishes adapter evidence through
 the Completion Inbox, and advances Conversation from the first terminal Result.
 

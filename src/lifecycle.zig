@@ -740,7 +740,7 @@ fn requestPatchPermission(
     const subject: patch_tool.PermissionSubject = .{
         .operation_id = tool_operation_id,
         .operation_generation = 1,
-        .validation = intent,
+        .intent = intent,
     };
     const classification = try policy.classify(subject, patch);
     var allowed = classification == .allow;

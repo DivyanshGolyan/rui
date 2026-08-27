@@ -19,12 +19,28 @@ pub const Decision = enum(u8) {
     deny = 3,
 };
 
+pub const TargetPath = struct {
+    length: u16,
+    bytes: [max_path_size]u8,
+
+    fn init(path: []const u8) !TargetPath {
+        if (path.len == 0 or path.len > max_path_size) return error.RepositoryEscape;
+        var result: TargetPath = .{ .length = @intCast(path.len), .bytes = @splat(0) };
+        @memcpy(result.bytes[0..path.len], path);
+        return result;
+    }
+
+    pub fn slice(self: *const TargetPath) []const u8 {
+        return self.bytes[0..self.length];
+    }
+};
+
 pub const Intent = struct {
     operation_id: u64,
     operation_generation: u32,
     patch_ref: u64,
     workspace_path: []const u8,
-    target_path: []const u8,
+    target_path: TargetPath,
     patch_digest: binding_digest.PatchDescriptor,
     intent_digest: binding_digest.PatchIntent,
     preimage_digest: binding_digest.Preimage,
@@ -33,24 +49,22 @@ pub const Intent = struct {
     file_mode: u32,
 };
 
-pub const Validation = Intent;
-
 pub const ActionContext = struct {
     operation_id: u64,
     operation_generation: u32,
     patch_ref: u64,
 };
 
-const ValidationTestPhase = enum {
+const PreparationTestPhase = enum {
     after_first_snapshot_chunk,
     before_git,
 };
 
-const ValidationTestHook = struct {
+const PreparationTestHook = struct {
     context: *anyopaque,
-    call_fn: *const fn (*anyopaque, ValidationTestPhase) anyerror!void,
+    call_fn: *const fn (*anyopaque, PreparationTestPhase) anyerror!void,
 
-    fn call(self: ValidationTestHook, phase: ValidationTestPhase) !void {
+    fn call(self: PreparationTestHook, phase: PreparationTestPhase) !void {
         try self.call_fn(self.context, phase);
     }
 };
@@ -72,7 +86,7 @@ pub const Policy = struct {
 pub const PermissionSubject = struct {
     operation_id: u64,
     operation_generation: u32,
-    validation: Intent,
+    intent: Intent,
 };
 
 pub const Observation = enum(u8) {
@@ -103,18 +117,18 @@ pub const Reconciliation = struct {
 pub fn encodeIntent(out: []u8, intent: Intent) ![]const u8 {
     if (intent.operation_id == 0 or intent.operation_generation == 0 or intent.patch_ref == 0 or
         intent.workspace_path.len == 0 or intent.workspace_path.len > max_workspace_path_size or
-        intent.target_path.len == 0 or intent.target_path.len > max_path_size)
+        intent.target_path.length == 0 or intent.target_path.length > max_path_size)
     {
         return error.InvalidPatchIntent;
     }
-    const total = intent_header_size + intent.workspace_path.len + intent.target_path.len;
+    const total = intent_header_size + intent.workspace_path.len + intent.target_path.length;
     if (out.len < total) return error.IntentBufferTooSmall;
     @memset(out[0..total], 0);
     @memcpy(out[0..intent_magic.len], intent_magic);
     write(u16, out, 8, version);
     write(u16, out, 10, @intCast(total));
     write(u16, out, 12, @intCast(intent.workspace_path.len));
-    write(u16, out, 14, @intCast(intent.target_path.len));
+    write(u16, out, 14, intent.target_path.length);
     write(u64, out, 16, intent.operation_id);
     write(u32, out, 24, intent.operation_generation);
     write(u32, out, 28, intent.file_mode);
@@ -125,7 +139,7 @@ pub fn encodeIntent(out: []u8, intent: Intent) ![]const u8 {
     @memcpy(out[112..144], &intent.postimage_digest.bytes);
     @memcpy(out[144..176], &intent.intent_digest.bytes);
     @memcpy(out[intent_header_size..][0..intent.workspace_path.len], intent.workspace_path);
-    @memcpy(out[intent_header_size + intent.workspace_path.len .. total], intent.target_path);
+    @memcpy(out[intent_header_size + intent.workspace_path.len .. total], intent.target_path.slice());
     const canonical_digest = intentDigest(intent);
     if (!binding_digest.eql(binding_digest.PatchIntent, canonical_digest, intent.intent_digest)) {
         return error.InvalidPatchIntent;
@@ -159,7 +173,7 @@ pub fn decodeIntent(bytes: []const u8) !Intent {
         .postimage_digest = .{ .bytes = bytes[112..144].* },
         .intent_digest = .{ .bytes = bytes[144..176].* },
         .workspace_path = bytes[intent_header_size..][0..workspace_length],
-        .target_path = bytes[intent_header_size + workspace_length ..],
+        .target_path = try TargetPath.init(bytes[intent_header_size + workspace_length ..]),
     };
     var canonical: [max_intent_size]u8 = undefined;
     const encoded = try encodeIntent(&canonical, intent);
@@ -207,24 +221,22 @@ pub fn descriptorDigest(patch: []const u8) binding_digest.PatchDescriptor {
     return binding_digest.hash(binding_digest.PatchDescriptor, patch);
 }
 
-pub fn validate(
+pub fn prepare(
     io: std.Io,
     workspace_path: []const u8,
     patch: []const u8,
     action: ActionContext,
-) !Validation {
-    return validateWithTestHook(io, workspace_path, patch, action, null);
+) !Intent {
+    return prepareWithTestHook(io, workspace_path, patch, action, null);
 }
 
-pub const prepare = validate;
-
-fn validateWithTestHook(
+fn prepareWithTestHook(
     io: std.Io,
     workspace_path: []const u8,
     patch: []const u8,
     action: ActionContext,
-    test_hook: ?ValidationTestHook,
-) !Validation {
+    test_hook: ?PreparationTestHook,
+) !Intent {
     if (action.operation_id == 0 or action.operation_generation == 0 or action.patch_ref == 0) {
         return error.InvalidPatchIntent;
     }
@@ -239,7 +251,8 @@ fn validateWithTestHook(
         workspace_path,
         canonical_workspace_buffer[0..canonical_workspace_length],
     )) return error.NoncanonicalWorkspace;
-    const target_path = try validateStructure(patch);
+    var target_buffer: [max_path_size]u8 = undefined;
+    const target_path = try deriveTarget(io, patch, &target_buffer);
     var workspace = try std.Io.Dir.cwd().openDir(io, workspace_path, .{});
     defer workspace.close(io);
     var target = try openRegularTarget(workspace, io, target_path);
@@ -274,7 +287,7 @@ fn validateWithTestHook(
         .operation_generation = action.operation_generation,
         .patch_ref = action.patch_ref,
         .workspace_path = workspace_path,
-        .target_path = target_path,
+        .target_path = try TargetPath.init(target_path),
         .patch_digest = descriptorDigest(patch),
         .intent_digest = undefined,
         .preimage_digest = prepared.preimage_digest,
@@ -286,113 +299,67 @@ fn validateWithTestHook(
     return intent;
 }
 
-pub fn validateStructure(patch: []const u8) ![]const u8 {
+fn deriveTarget(
+    io: std.Io,
+    patch: []const u8,
+    out: *[max_path_size]u8,
+) ![]const u8 {
     if (patch.len == 0) return error.MalformedPatch;
     if (patch.len > max_patch_size) return error.PatchTooLarge;
-    if (patch[patch.len - 1] != '\n' or std.mem.indexOfScalar(u8, patch, 0) != null or
-        std.mem.indexOfScalar(u8, patch, '\r') != null)
-    {
+    var git_output: [max_patch_size + 1]u8 = undefined;
+    const parsed = try runGit(
+        io,
+        "/private/tmp",
+        &.{ "apply", "--no-index", "--numstat", "-z", "-" },
+        patch,
+        &git_output,
+    );
+    if (parsed.code != 0) return error.MalformedPatch;
+    var summary_output: [max_patch_size + 1]u8 = undefined;
+    const summary = try runGit(
+        io,
+        "/private/tmp",
+        &.{ "apply", "--no-index", "--summary", "-z", "-" },
+        patch,
+        &summary_output,
+    );
+    if (summary.code != 0) return error.MalformedPatch;
+    // Git reports create, delete, rename, copy, and mode metadata here. V1 admits none of them.
+    if (summary.stdout_len != 0) return error.UnsupportedSpecialFile;
+    // Parse only Git's NUL-delimited machine result: two counts and exactly one literal path.
+    const bytes = git_output[0..parsed.stdout_len];
+    const first_tab = std.mem.indexOfScalar(u8, bytes, '\t') orelse return error.MalformedPatch;
+    const second_tab = std.mem.indexOfPos(u8, bytes, first_tab + 1, "\t") orelse
         return error.MalformedPatch;
+    const terminator = std.mem.indexOfScalar(u8, bytes, 0) orelse return error.MalformedPatch;
+    if (terminator + 1 != bytes.len) return error.MultipleFiles;
+    if (!decimalCount(bytes[0..first_tab]) or !decimalCount(bytes[first_tab + 1 .. second_tab])) {
+        return if (std.mem.eql(u8, bytes[0..first_tab], "-") and
+            std.mem.eql(u8, bytes[first_tab + 1 .. second_tab], "-"))
+            error.BinaryPatch
+        else
+            error.MalformedPatch;
     }
+    const path = bytes[second_tab + 1 .. terminator];
+    try validateRelativePath(path);
+    @memcpy(out[0..path.len], path);
+    return out[0..path.len];
+}
 
-    var lines = std.mem.splitScalar(u8, patch, '\n');
-    const first = lines.next() orelse return error.MalformedPatch;
-    const prefix = "diff --git ";
-    if (!std.mem.startsWith(u8, first, prefix)) return error.MalformedPatch;
-    var paths = std.mem.splitScalar(u8, first[prefix.len..], ' ');
-    const old_token = paths.next() orelse return error.MalformedPatch;
-    const new_token = paths.next() orelse return error.MalformedPatch;
-    if (paths.next() != null or !std.mem.startsWith(u8, old_token, "a/") or
-        !std.mem.startsWith(u8, new_token, "b/") or old_token.len <= 2 or new_token.len <= 2 or
-        !std.mem.eql(u8, old_token[2..], new_token[2..]))
-    {
-        return error.MalformedPatch;
-    }
-    const target_path = old_token[2..];
-    try validateRelativePath(target_path);
-
-    var line = lines.next() orelse return error.MalformedPatch;
-    if (std.mem.startsWith(u8, line, "index ")) {
-        line = lines.next() orelse return error.MalformedPatch;
-    }
-    try rejectMetadata(line);
-    if (!std.mem.startsWith(u8, line, "--- ") or !std.mem.eql(u8, line[4..], old_token)) {
-        return error.MalformedPatch;
-    }
-    line = lines.next() orelse return error.MalformedPatch;
-    if (!std.mem.startsWith(u8, line, "+++ ") or !std.mem.eql(u8, line[4..], new_token)) {
-        return error.MalformedPatch;
-    }
-
-    var saw_hunk = false;
-    var saw_body = false;
-    while (lines.next()) |body_line| {
-        if (body_line.len == 0) {
-            if (lines.next() != null) return error.MalformedPatch;
-            break;
-        }
-        if (std.mem.startsWith(u8, body_line, "diff --git ") or
-            std.mem.startsWith(u8, body_line, "index ") or
-            std.mem.startsWith(u8, body_line, "--- ") or
-            std.mem.startsWith(u8, body_line, "+++ "))
-        {
-            return error.MultipleFiles;
-        }
-        if (std.mem.startsWith(u8, body_line, "@@ ")) {
-            if (std.mem.indexOfPos(u8, body_line, 3, " @@") == null) return error.MalformedPatch;
-            saw_hunk = true;
-            continue;
-        }
-        if (!saw_hunk) {
-            try rejectMetadata(body_line);
-            return error.MalformedPatch;
-        }
-        if (body_line[0] != ' ' and body_line[0] != '+' and body_line[0] != '-' and
-            !std.mem.eql(u8, body_line, "\\ No newline at end of file"))
-        {
-            return error.MalformedPatch;
-        }
-        saw_body = true;
-    }
-    if (!saw_hunk or !saw_body) return error.MalformedPatch;
-    return target_path;
+fn decimalCount(bytes: []const u8) bool {
+    if (bytes.len == 0) return false;
+    for (bytes) |byte| if (byte < '0' or byte > '9') return false;
+    return true;
 }
 
 fn validateRelativePath(path: []const u8) !void {
-    if (path.len == 0 or path.len > max_path_size or path[0] == '/' or path[path.len - 1] == '/' or
-        std.mem.indexOfScalar(u8, path, '\\') != null or std.mem.indexOfScalar(u8, path, '\t') != null)
-    {
+    if (path.len == 0 or path.len > max_path_size or path[0] == '/' or path[path.len - 1] == '/') {
         return error.RepositoryEscape;
     }
     var components = std.mem.splitScalar(u8, path, '/');
     while (components.next()) |component| {
         if (component.len == 0 or std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) {
             return error.PathTraversal;
-        }
-    }
-}
-
-fn rejectMetadata(line: []const u8) !void {
-    const unsupported = [_][]const u8{
-        "GIT binary patch",
-        "Binary files ",
-        "new file mode ",
-        "deleted file mode ",
-        "old mode ",
-        "new mode ",
-        "similarity index ",
-        "dissimilarity index ",
-        "rename from ",
-        "rename to ",
-        "copy from ",
-        "copy to ",
-    };
-    for (unsupported) |prefix| {
-        if (std.mem.startsWith(u8, line, prefix)) {
-            if (std.mem.startsWith(u8, prefix, "GIT binary") or std.mem.startsWith(u8, prefix, "Binary")) {
-                return error.BinaryPatch;
-            }
-            return error.UnsupportedSpecialFile;
         }
     }
 }
@@ -473,7 +440,7 @@ fn prepareSnapshot(
     source_size: u64,
     target_path: []const u8,
     patch: []const u8,
-    test_hook: ?ValidationTestHook,
+    test_hook: ?PreparationTestHook,
     apply_intent: ?Intent,
 ) !PreparedSnapshot {
     var temporary_root = try std.Io.Dir.cwd().openDir(io, "/private/tmp", .{});
@@ -511,18 +478,20 @@ fn prepareSnapshot(
     if (test_hook) |hook| try hook.call(.before_git);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "/private/tmp/{s}", .{name});
-    const term = try runGit(
+    const applied = try runGit(
         io,
         path,
         &.{ "apply", "--no-index", "--whitespace=nowarn", "-" },
         patch,
+        null,
     );
-    if (term != 0) return error.PatchNotApplicable;
+    if (applied.code != 0) return error.PatchNotApplicable;
     var target = try openRegularTarget(temporary, io, target_path);
     defer target.close(io);
     const stat = try target.stat(io);
     if (stat.kind != .file or stat.nlink != 1) return error.UnsupportedSpecialFile;
     if (stat.size > max_file_size) return error.PatchPostimageTooLarge;
+    if (stat.permissions != preimage_stat.permissions) return error.UnsupportedSpecialFile;
     const postimage_digest = try hashFileAs(binding_digest.Postimage, io, target, stat.size);
     if (apply_intent) |intent| {
         if (!binding_digest.eql(binding_digest.Postimage, postimage_digest, intent.postimage_digest)) {
@@ -564,7 +533,7 @@ fn copyExactTarget(
     source_size: u64,
     destination_dir: std.Io.Dir,
     target_path: []const u8,
-    test_hook: ?ValidationTestHook,
+    test_hook: ?PreparationTestHook,
 ) !void {
     std.debug.assert(source_size <= max_file_size);
     if (std.mem.lastIndexOfScalar(u8, target_path, '/')) |separator| {
@@ -572,6 +541,8 @@ fn copyExactTarget(
     }
     var destination = try destination_dir.createFile(io, target_path, .{ .exclusive = true });
     defer destination.close(io);
+    const source_stat = try source.stat(io);
+    try destination.setPermissions(io, source_stat.permissions);
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;
     while (offset < source_size) {
@@ -588,41 +559,42 @@ fn copyExactTarget(
 }
 
 fn gitTracked(io: std.Io, workspace_path: []const u8, target_path: []const u8) !void {
-    const allocator = std.heap.page_allocator;
-    const result = try std.process.run(allocator, io, .{
-        .argv = &.{
-            "/usr/bin/git",
+    var output: [max_path_size + 2]u8 = undefined;
+    const result = try runGit(
+        io,
+        workspace_path,
+        &.{
             "--literal-pathspecs",
             "ls-files",
+            "-z",
             "--error-unmatch",
             "--format=%(path)",
             "--",
             target_path,
         },
-        .cwd = .{ .path = workspace_path },
-        .stdout_limit = .limited(max_path_size + 2),
-        .stderr_limit = .limited(1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    const exited_cleanly = switch (result.term) {
-        .exited => |code| code == 0,
-        else => false,
-    };
-    if (!exited_cleanly or result.stdout.len != target_path.len + 1 or
-        !std.mem.eql(u8, result.stdout[0..target_path.len], target_path) or
-        result.stdout[target_path.len] != '\n')
+        null,
+        &output,
+    );
+    if (result.code != 0 or result.stdout_len != target_path.len + 1 or
+        !std.mem.eql(u8, output[0..target_path.len], target_path) or
+        output[target_path.len] != 0)
     {
         return error.NotTrackedRepositoryFile;
     }
 }
+
+const GitResult = struct {
+    code: u8,
+    stdout_len: usize,
+};
 
 fn runGit(
     io: std.Io,
     workspace_path: []const u8,
     arguments: []const []const u8,
     input: ?[]const u8,
-) !u8 {
+    stdout_buffer: ?[]u8,
+) !GitResult {
     var argv_buffer: [8][]const u8 = undefined;
     if (arguments.len + 1 > argv_buffer.len) return error.InvalidGitInvocation;
     argv_buffer[0] = "/usr/bin/git";
@@ -631,27 +603,54 @@ fn runGit(
     defer environment.deinit();
     try environment.put("PATH", "/usr/bin:/bin");
     try environment.put("LC_ALL", "C");
+    try environment.put("GIT_CONFIG_NOSYSTEM", "1");
+    try environment.put("GIT_CONFIG_GLOBAL", "/dev/null");
     var child = try std.process.spawn(io, .{
         .argv = argv_buffer[0 .. arguments.len + 1],
         .cwd = .{ .path = workspace_path },
         .environ_map = &environment,
         .stdin = if (input == null) .ignore else .pipe,
-        .stdout = .ignore,
+        .stdout = if (stdout_buffer == null) .ignore else .pipe,
         .stderr = .ignore,
     });
     errdefer {
         child.kill(io);
-        _ = child.wait(io) catch {};
     }
     if (input) |bytes| {
         try child.stdin.?.writeStreamingAll(io, bytes);
         child.stdin.?.close(io);
         child.stdin = null;
     }
+    var stdout_len: usize = 0;
+    if (stdout_buffer) |buffer| {
+        while (stdout_len < buffer.len) {
+            const count = child.stdout.?.readStreaming(io, &.{buffer[stdout_len..]}) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            if (count == 0) break;
+            stdout_len += count;
+        }
+        if (stdout_len == buffer.len) {
+            var extra: [1]u8 = undefined;
+            const count = child.stdout.?.readStreaming(io, &.{&extra}) catch |err| switch (err) {
+                error.EndOfStream => 0,
+                else => return err,
+            };
+            if (count != 0) {
+                return error.GitOutputTooLarge;
+            }
+        }
+        child.stdout.?.close(io);
+        child.stdout = null;
+    }
     const term = try child.wait(io);
-    return switch (term) {
-        .exited => |code| code,
-        else => 255,
+    return .{
+        .code = switch (term) {
+            .exited => |code| code,
+            else => 255,
+        },
+        .stdout_len = stdout_len,
     };
 }
 
@@ -661,8 +660,9 @@ pub fn observe(io: std.Io, intent: Intent, patch: []const u8) !Observation {
     {
         return error.InvalidPatchIntent;
     }
-    const target_path = validateStructure(patch) catch return .invalid;
-    if (!std.mem.eql(u8, target_path, intent.target_path)) return .invalid;
+    var target_buffer: [max_path_size]u8 = undefined;
+    const target_path = deriveTarget(io, patch, &target_buffer) catch return .invalid;
+    if (!std.mem.eql(u8, target_path, intent.target_path.slice())) return .invalid;
     var canonical_workspace: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const canonical_length = std.Io.Dir.cwd().realPathFile(
         io,
@@ -674,7 +674,7 @@ pub fn observe(io: std.Io, intent: Intent, patch: []const u8) !Observation {
     }
     var workspace = std.Io.Dir.cwd().openDir(io, intent.workspace_path, .{}) catch return .invalid;
     defer workspace.close(io);
-    var target = openRegularTarget(workspace, io, intent.target_path) catch return .invalid;
+    var target = openRegularTarget(workspace, io, intent.target_path.slice()) catch return .invalid;
     defer target.close(io);
     const stat = target.stat(io) catch return .invalid;
     if (stat.kind != .file or stat.nlink != 1 or stat.size > max_file_size or
@@ -682,7 +682,7 @@ pub fn observe(io: std.Io, intent: Intent, patch: []const u8) !Observation {
     {
         return .invalid;
     }
-    gitTracked(io, intent.workspace_path, intent.target_path) catch return .invalid;
+    gitTracked(io, intent.workspace_path, intent.target_path.slice()) catch return .invalid;
     const preimage = hashFileAs(binding_digest.Preimage, io, target, stat.size) catch return .invalid;
     if (binding_digest.eql(binding_digest.Preimage, preimage, intent.preimage_digest)) {
         return if (stat.inode == intent.preimage_inode) .preimage else .diverged;
@@ -698,10 +698,10 @@ pub fn apply(io: std.Io, intent: Intent, patch: []const u8) !Observation {
     if (try observe(io, intent, patch) != .preimage) return error.PatchPreimageMismatch;
     var workspace = try std.Io.Dir.cwd().openDir(io, intent.workspace_path, .{});
     defer workspace.close(io);
-    var target = try openRegularTargetMode(workspace, io, intent.target_path, .read_write);
+    var target = try openRegularTargetMode(workspace, io, intent.target_path.slice(), .read_write);
     defer target.close(io);
     const stat = try target.stat(io);
-    _ = try prepareSnapshot(io, target, stat.size, intent.target_path, patch, null, intent);
+    _ = try prepareSnapshot(io, target, stat.size, intent.target_path.slice(), patch, null, intent);
     const observed = try observe(io, intent, patch);
     if (observed != .postimage) return error.PatchEffectUncertain;
     return observed;
@@ -745,7 +745,7 @@ fn intentDigest(intent: Intent) binding_digest.PatchIntent {
     std.mem.writeInt(u64, integers[24..32], @intCast(intent.preimage_inode), .little);
     hasher.update(&integers);
     updateLengthPrefixed(binding_digest.PatchIntent, &hasher, intent.workspace_path);
-    updateLengthPrefixed(binding_digest.PatchIntent, &hasher, intent.target_path);
+    updateLengthPrefixed(binding_digest.PatchIntent, &hasher, intent.target_path.slice());
     hasher.update("regular-file-single-link-v1\x00");
     hasher.update(&intent.patch_digest.bytes);
     hasher.update(&intent.preimage_digest.bytes);
@@ -792,8 +792,8 @@ test "one exact tracked regular-file patch validates without mutation" {
         "@@ -1 +1 @@\n" ++
         "-old\n" ++
         "+new\n";
-    const validated = try validate(io, path, patch, testAction());
-    try std.testing.expectEqualStrings("note.txt", validated.target_path);
+    const validated = try prepare(io, path, patch, testAction());
+    try std.testing.expectEqualStrings("note.txt", validated.target_path.slice());
     try std.testing.expect(binding_digest.eql(
         binding_digest.PatchDescriptor,
         descriptorDigest(patch),
@@ -819,6 +819,38 @@ test "one exact tracked regular-file patch validates without mutation" {
     defer file.close(io);
     try std.testing.expectEqual(@as(usize, 4), try file.readPositionalAll(io, &actual, 0));
     try std.testing.expectEqualStrings("old\n", &actual);
+}
+
+test "prepare accepts Git-valid spaces and quoted path bytes" {
+    const io = std.testing.io;
+    const cases = [_]struct { target: []const u8, patch: []const u8 }{
+        .{
+            .target = "space name.txt",
+            .patch = "diff --git a/space name.txt b/space name.txt\n" ++
+                "index 3367afd..3e75765 100644\n" ++
+                "--- a/space name.txt\t\n+++ b/space name.txt\t\n" ++
+                "@@ -1 +1 @@\n-old\n+new\n",
+        },
+        .{
+            .target = "quote\"name.txt",
+            .patch = "diff --git \"a/quote\\\"name.txt\" \"b/quote\\\"name.txt\"\n" ++
+                "index 3367afd..3e75765 100644\n" ++
+                "--- \"a/quote\\\"name.txt\"\n+++ \"b/quote\\\"name.txt\"\n" ++
+                "@@ -1 +1 @@\n-old\n+new\n",
+        },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try writeTestFile(tmp.dir, io, case.target, "old\n");
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try canonicalTestPath(io, &tmp.sub_path, &path_buffer);
+        try expectGit(io, path, &.{ "init", "-q" });
+        try expectGit(io, path, &.{ "add", case.target });
+        const intent = try prepare(io, path, case.patch, testAction());
+        try std.testing.expectEqualStrings(case.target, intent.target_path.slice());
+        try expectTestFile(tmp.dir, io, case.target, "old\n");
+    }
 }
 
 test "patch preparation bounds both target and expected postimage bytes" {
@@ -858,10 +890,10 @@ test "patch preparation bounds both target and expected postimage bytes" {
         if (case.expected_error) |expected_error| {
             try std.testing.expectError(
                 expected_error,
-                validate(io, path, patch, testAction()),
+                prepare(io, path, patch, testAction()),
             );
         } else {
-            _ = try validate(io, path, patch, testAction());
+            _ = try prepare(io, path, patch, testAction());
         }
         try expectSizedTestFileUnchanged(tmp.dir, io, "bounded.txt", case.target_size);
     }
@@ -894,7 +926,7 @@ test "patch preparation binds the exact bounded snapshot used by git" {
         " x\n";
     try std.testing.expectError(
         error.PreimageChangedDuringValidation,
-        validateWithTestHook(
+        prepareWithTestHook(
             io,
             path,
             patch,
@@ -938,7 +970,7 @@ test "patch preparation rejects concurrent growth before git sees the snapshot" 
         " x\n";
     try std.testing.expectError(
         error.PreimageChangedDuringRead,
-        validateWithTestHook(
+        prepareWithTestHook(
             io,
             path,
             patch,
@@ -956,7 +988,7 @@ test "one immutable Patch Intent and typed Result are canonical" {
         .operation_generation = 2,
         .patch_ref = 4,
         .workspace_path = "/tmp/workspace",
-        .target_path = "src/main.zig",
+        .target_path = try TargetPath.init("src/main.zig"),
         .patch_digest = binding_digest.hash(binding_digest.PatchDescriptor, "patch-5"),
         .intent_digest = undefined,
         .preimage_inode = 8,
@@ -1137,7 +1169,7 @@ test "dirty overlap, missing, untracked, symlink, and special substitution never
     }
 }
 
-test "applicable control bytes validate but remain exact data" {
+test "applicable control bytes prepare but remain exact data" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1156,36 +1188,60 @@ test "applicable control bytes validate but remain exact data" {
         "@@ -1 +1 @@\n" ++
         "-old\x1b[2J\n" ++
         "+new\x1b[2J\n";
-    _ = try validate(io, path, patch, testAction());
+    _ = try prepare(io, path, patch, testAction());
     try expectTestFile(tmp.dir, io, "control.txt", "old\x1b[2J\n");
 }
 
-test "structural rejection classes fail before workspace access" {
+test "Git-derived policy rejects unsupported patch operations" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTestFile(tmp.dir, io, "a.txt", "old\n");
+    try writeTestFile(tmp.dir, io, "b.txt", "x\n");
+    try writeTestFile(tmp.dir, io, "a.bin", "\x00\x01\x02\x03");
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try canonicalTestPath(io, &tmp.sub_path, &path_buffer);
+    try expectGit(io, path, &.{ "init", "-q" });
+    try expectGit(io, path, &.{ "add", "a.txt", "b.txt", "a.bin" });
+
+    try std.testing.expectError(error.MalformedPatch, prepare(io, path, "not a patch\n", testAction()));
+    const binary =
+        "diff --git a/a.bin b/a.bin\n" ++
+        "index eaf36c1daccfdf325514461cd1a2ffbc139b5464..82ae0e33690b082386b8b25a3b10eba15c20285b 100644\n" ++
+        "GIT binary patch\nliteral 4\nLcmZQzWMKvX01^NR\n\nliteral 4\nLcmZQzWMT#Y01f~L\n\n";
+    try std.testing.expectError(error.BinaryPatch, prepare(io, path, binary, testAction()));
     const valid =
         "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n";
-    try std.testing.expectEqualStrings("a.txt", try validateStructure(valid));
-    try std.testing.expectError(error.MalformedPatch, validateStructure("not a patch\n"));
-    try std.testing.expectError(error.BinaryPatch, validateStructure(
-        "diff --git a/a.txt b/a.txt\nGIT binary patch\nliteral 0\n",
+    const second =
+        "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y\n";
+    try std.testing.expectError(error.MultipleFiles, prepare(io, path, valid ++ second, testAction()));
+    try std.testing.expectError(error.UnsupportedSpecialFile, prepare(
+        io,
+        path,
+        "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new\n",
+        testAction(),
     ));
-    try std.testing.expectError(error.MultipleFiles, validateStructure(
-        valid ++ "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y\n",
+    try std.testing.expectError(error.UnsupportedSpecialFile, prepare(
+        io,
+        path,
+        "diff --git a/a.txt b/a.txt\ndeleted file mode 100644\n--- a/a.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n",
+        testAction(),
     ));
-    try std.testing.expectError(error.MultipleFiles, validateStructure(
-        valid ++ "--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y\n",
+    try std.testing.expectError(error.UnsupportedSpecialFile, prepare(
+        io,
+        path,
+        "diff --git a/a.txt b/renamed.txt\nsimilarity index 100%\nrename from a.txt\nrename to renamed.txt\n",
+        testAction(),
     ));
-    try std.testing.expectError(error.PathTraversal, validateStructure(
-        "diff --git a/../a.txt b/../a.txt\n--- a/../a.txt\n+++ b/../a.txt\n@@ -1 +1 @@\n-x\n+y\n",
-    ));
-    try std.testing.expectError(error.RepositoryEscape, validateStructure(
-        "diff --git a//tmp/a b//tmp/a\n--- a//tmp/a\n+++ b//tmp/a\n@@ -1 +1 @@\n-x\n+y\n",
-    ));
-    try std.testing.expectError(error.UnsupportedSpecialFile, validateStructure(
-        "diff --git a/a.txt b/a.txt\nnew file mode 100644\n--- /dev/null\n+++ b/a.txt\n@@ -0,0 +1 @@\n+x\n",
+    try std.testing.expectError(error.UnsupportedSpecialFile, prepare(
+        io,
+        path,
+        "diff --git a/a.txt b/a.txt\nold mode 100644\nnew mode 100755\n",
+        testAction(),
     ));
     var oversized: [max_patch_size + 1]u8 = @splat('x');
     oversized[oversized.len - 1] = '\n';
-    try std.testing.expectError(error.PatchTooLarge, validateStructure(&oversized));
+    try std.testing.expectError(error.PatchTooLarge, prepare(io, path, &oversized, testAction()));
 }
 
 test "symlink target and symlink parent are rejected without changing bytes" {
@@ -1205,16 +1261,16 @@ test "symlink target and symlink parent are rejected without changing bytes" {
     const path = path_buffer[0..path_length];
     const target_patch =
         "diff --git a/link.txt b/link.txt\n--- a/link.txt\n+++ b/link.txt\n@@ -1 +1 @@\n-outside\n+changed\n";
-    try std.testing.expectError(error.SymlinkEscape, validate(io, path, target_patch, testAction()));
+    try std.testing.expectError(error.SymlinkEscape, prepare(io, path, target_patch, testAction()));
     const hardlink_patch =
         "diff --git a/hard.txt b/hard.txt\n--- a/hard.txt\n+++ b/hard.txt\n@@ -1 +1 @@\n-outside\n+changed\n";
     try std.testing.expectError(
         error.UnsupportedSpecialFile,
-        validate(io, path, hardlink_patch, testAction()),
+        prepare(io, path, hardlink_patch, testAction()),
     );
     const parent_patch =
         "diff --git a/linked/note.txt b/linked/note.txt\n--- a/linked/note.txt\n+++ b/linked/note.txt\n@@ -1 +1 @@\n-old\n+changed\n";
-    try std.testing.expectError(error.SymlinkEscape, validate(io, path, parent_patch, testAction()));
+    try std.testing.expectError(error.SymlinkEscape, prepare(io, path, parent_patch, testAction()));
     try expectTestFile(tmp.dir, io, "outside.txt", "outside\n");
     try expectTestFile(tmp.dir, io, "real/note.txt", "old\n");
 }
@@ -1247,11 +1303,11 @@ const SnapshotRaceTestState = struct {
     mode: Mode,
     before_git_count: usize = 0,
 
-    fn hook(self: *SnapshotRaceTestState) ValidationTestHook {
+    fn hook(self: *SnapshotRaceTestState) PreparationTestHook {
         return .{ .context = self, .call_fn = call };
     }
 
-    fn call(context: *anyopaque, phase: ValidationTestPhase) !void {
+    fn call(context: *anyopaque, phase: PreparationTestPhase) !void {
         const self: *SnapshotRaceTestState = @ptrCast(@alignCast(context));
         var file = try self.dir.openFile(self.io, switch (self.mode) {
             .same_size_restore => "stable.txt",
@@ -1296,7 +1352,18 @@ fn expectTestFile(dir: std.Io.Dir, io: std.Io, path: []const u8, expected: []con
 }
 
 fn expectGit(io: std.Io, path: []const u8, arguments: []const []const u8) !void {
-    if (try runGit(io, path, arguments, null) != 0) return error.GitFixtureFailed;
+    if ((try runGit(io, path, arguments, null, null)).code != 0) return error.GitFixtureFailed;
+}
+
+fn canonicalTestPath(
+    io: std.Io,
+    sub_path: []const u8,
+    out: *[std.Io.Dir.max_path_bytes]u8,
+) ![]const u8 {
+    var relative_buffer: [128]u8 = undefined;
+    const relative = try std.fmt.bufPrint(&relative_buffer, ".zig-cache/tmp/{s}", .{sub_path});
+    const length = try std.Io.Dir.cwd().realPathFile(io, relative, out);
+    return out[0..length];
 }
 
 fn testAction() ActionContext {
