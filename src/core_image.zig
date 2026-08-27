@@ -1,8 +1,9 @@
 const std = @import("std");
 const core_state = @import("core_state.zig");
 const model_protocol = @import("model_protocol.zig");
+const session_transition = @import("session_transition.zig");
 
-pub const slot_size = 64 * 1024;
+pub const slot_ceiling = 32 * 1024;
 pub const slot_alignment = 8;
 pub const parser_scratch_size = 4 * 1024;
 pub const response_scratch_size = model_protocol.max_response_size;
@@ -13,17 +14,21 @@ pub const ContentWindow = core_state.ContentWindow;
 pub const OperationPhase = core_state.OperationPhase;
 pub const TaskPhase = core_state.TaskPhase;
 
-const reserved_size = slot_size - @sizeOf(State) -
-    parser_scratch_size - response_scratch_size - transition_scratch_size;
-
 /// Caller-owned working storage for one Activation. None of its layout is durable.
 pub const ActivationSlot = extern struct {
     state: State,
     parser_scratch: [parser_scratch_size]u8,
     response_scratch: [response_scratch_size]u8,
     transition_scratch: [transition_scratch_size]u8,
-    reserved: [reserved_size]u8,
 };
+
+pub const slot_size = @sizeOf(ActivationSlot);
+
+comptime {
+    std.debug.assert(slot_size <= slot_ceiling);
+    std.debug.assert(session_transition.max_payload_size <= transition_scratch_size);
+    std.debug.assert(@sizeOf(session_transition.Transaction) <= transition_scratch_size);
+}
 
 pub const Identity = struct {
     agent_id: u64,
@@ -650,6 +655,16 @@ test "fixed slot pool returns closed capacity and scrubs before reuse" {
     defer reused.release() catch unreachable;
     for (std.mem.asBytes(reused.slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
     try std.testing.expectEqual(slot_size, pool.residentBytes());
+}
+
+test "the filler-free Activation Slot and widened transaction scratch stay bounded" {
+    try std.testing.expectEqual(
+        @sizeOf(State) + parser_scratch_size + response_scratch_size + transition_scratch_size,
+        @sizeOf(ActivationSlot),
+    );
+    try std.testing.expect(@sizeOf(ActivationSlot) <= slot_ceiling);
+    try std.testing.expect(session_transition.max_payload_size <= transition_scratch_size);
+    try std.testing.expect(@sizeOf(session_transition.Transaction) <= transition_scratch_size);
 }
 
 test "stale copied lease cannot release a newly borrowed slot" {

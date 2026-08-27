@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const session_transition = @import("session_transition.zig");
 
@@ -6,12 +7,16 @@ const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
-pub const schema_version: u32 = 1;
+pub const schema_version: u32 = 2;
 pub const application_id: u32 = 0x4f4e5047; // "ONPG"
 pub const max_path_bytes: usize = 1024;
 pub const max_transition_payload: usize = session_transition.max_payload_size;
 pub const max_workspace_path_bytes: usize = 1024;
 pub const max_model_bytes: usize = 128;
+
+comptime {
+    std.debug.assert(max_transition_payload == 996);
+}
 
 const session_schema =
     \\CREATE TABLE session (
@@ -32,7 +37,7 @@ const transition_schema =
     \\CREATE TABLE session_transition (
     \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
     \\    sequence INTEGER NOT NULL CHECK (sequence > 0),
-    \\    payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 740),
+    \\    payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 996),
     \\    record_digest BLOB NOT NULL CHECK (length(record_digest) = 32),
     \\    PRIMARY KEY (session_id, sequence),
     \\    FOREIGN KEY (session_id) REFERENCES session (session_id)
@@ -63,7 +68,8 @@ const completion_schema =
     \\    attempt_id BLOB NOT NULL CHECK (length(attempt_id) = 8),
     \\    evidence_kind INTEGER NOT NULL CHECK (evidence_kind > 0),
     \\    result_reference BLOB NOT NULL CHECK (length(result_reference) = 8),
-    \\    result_digest BLOB NOT NULL CHECK (length(result_digest) = 8),
+    \\    result_digest BLOB NOT NULL CHECK (length(result_digest) = 32),
+    \\    completion_digest BLOB NOT NULL CHECK (length(completion_digest) = 32),
     \\    consumed_by_sequence INTEGER,
     \\    UNIQUE (
     \\        session_id, ownership_epoch, agent_generation, operation_id,
@@ -104,7 +110,7 @@ const pending_completion_count_sql: [:0]const u8 =
     \\GROUP BY s.session_id
 ;
 const find_completion_sql: [:0]const u8 =
-    \\SELECT c.inbox_id, c.result_reference, c.result_digest
+    \\SELECT c.inbox_id, c.result_reference, c.result_digest, c.completion_digest
     \\FROM completion_inbox AS c
     \\JOIN session AS s ON s.session_id = c.session_id
     \\WHERE c.session_id = ?1 AND c.ownership_epoch = ?2
@@ -115,7 +121,7 @@ const find_completion_sql: [:0]const u8 =
 const read_completion_sql: [:0]const u8 =
     \\SELECT c.evidence_kind, c.ownership_epoch, s.agent_id, c.agent_generation,
     \\       c.operation_id, c.operation_generation, c.attempt_id,
-    \\       c.result_reference, c.result_digest, c.consumed_by_sequence
+    \\       c.result_reference, c.result_digest, c.completion_digest, c.consumed_by_sequence
     \\FROM completion_inbox AS c
     \\JOIN session AS s ON s.session_id = c.session_id
     \\WHERE c.session_id = ?1 AND c.inbox_id = ?2
@@ -123,7 +129,8 @@ const read_completion_sql: [:0]const u8 =
 const read_completion_after_sql: [:0]const u8 =
     \\SELECT c.inbox_id, c.evidence_kind, c.ownership_epoch, s.agent_id,
     \\       c.agent_generation, c.operation_id, c.operation_generation,
-    \\       c.attempt_id, c.result_reference, c.result_digest, c.consumed_by_sequence
+    \\       c.attempt_id, c.result_reference, c.result_digest,
+    \\       c.completion_digest, c.consumed_by_sequence
     \\FROM completion_inbox AS c
     \\JOIN session AS s ON s.session_id = c.session_id
     \\WHERE c.session_id = ?1 AND c.consumed_by_sequence IS NULL
@@ -159,7 +166,7 @@ pub const StoredTransition = struct {
     sequence: u64,
     payload: [max_transition_payload]u8,
     payload_length: u16,
-    record_digest: [32]u8,
+    record_digest: binding.LedgerRecord,
 
     pub fn payloadSlice(self: *const StoredTransition) []const u8 {
         return self.payload[0..self.payload_length];
@@ -517,7 +524,7 @@ pub const StorageOwner = struct {
         try self.execute("BEGIN IMMEDIATE");
         errdefer self.rollbackOrPoison();
 
-        var identities: [7][8]u8 = undefined;
+        var identities: [6][8]u8 = undefined;
         const existing = try self.prepare(find_completion_sql);
         defer finalize(existing);
         try bindIdentity(existing, 1, envelope.session_id, &identities[0]);
@@ -532,9 +539,13 @@ pub const StorageOwner = struct {
         if (existing_result == c.SQLITE_ROW) {
             const sequence = c.sqlite3_column_int64(existing, 0);
             const result_ref = try readIdentityColumn(existing, 1);
-            const result_digest = try readIdentityColumn(existing, 2);
+            const result_digest = try readBindingColumn(binding.Result, existing, 2);
+            const completion_digest = try readBindingColumn(binding.Completion, existing, 3);
             if (sequence <= 0) return error.CorruptHostStore;
-            if (result_ref != envelope.result_ref or result_digest != envelope.result_digest) {
+            if (result_ref != envelope.result_ref or
+                !binding.eql(binding.Result, result_digest, envelope.result_digest) or
+                !binding.eql(binding.Completion, completion_digest, envelope.completion_digest))
+            {
                 return error.ConflictingCompletionEvidence;
             }
             if (c.sqlite3_step(existing) != c.SQLITE_DONE) return error.CorruptHostStore;
@@ -561,9 +572,9 @@ pub const StorageOwner = struct {
             \\INSERT INTO completion_inbox (
             \\    session_id, ownership_epoch, agent_generation,
             \\    operation_id, operation_generation, attempt_id, evidence_kind,
-            \\    result_reference, result_digest
-            \\) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
-            \\  FROM session WHERE session_id = ?1 AND agent_id = ?10
+            \\    result_reference, result_digest, completion_digest
+            \\) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+            \\  FROM session WHERE session_id = ?1 AND agent_id = ?11
             \\RETURNING inbox_id
         );
         defer finalize(insert);
@@ -575,8 +586,9 @@ pub const StorageOwner = struct {
         try bindIdentity(insert, 6, envelope.attempt_id, &identities[4]);
         try bindU64(insert, 7, @intFromEnum(envelope.kind));
         try bindIdentity(insert, 8, envelope.result_ref, &identities[5]);
-        try bindIdentity(insert, 9, envelope.result_digest, &identities[6]);
-        try bindIdentity(insert, 10, envelope.agent_id, &identities[2]);
+        try bindBlob(insert, 9, &envelope.result_digest.bytes);
+        try bindBlob(insert, 10, &envelope.completion_digest.bytes);
+        try bindIdentity(insert, 11, envelope.agent_id, &identities[2]);
         const insert_result = c.sqlite3_step(insert);
         if (insert_result == c.SQLITE_DONE) return error.InvalidCompletionIdentity;
         if (insert_result != c.SQLITE_ROW) return mapSqliteError(insert_result);
@@ -620,13 +632,14 @@ pub const StorageOwner = struct {
             .operation_generation = try readPositiveU32Column(statement, 5),
             .attempt_id = try readIdentityColumn(statement, 6),
             .result_ref = try readIdentityColumn(statement, 7),
-            .result_digest = try readIdentityColumn(statement, 8),
+            .result_digest = try readBindingColumn(binding.Result, statement, 8),
+            .completion_digest = try readBindingColumn(binding.Completion, statement, 9),
         };
         try completion_inbox.validate(envelope);
-        const consumed_by_sequence: ?u64 = switch (c.sqlite3_column_type(statement, 9)) {
+        const consumed_by_sequence: ?u64 = switch (c.sqlite3_column_type(statement, 10)) {
             c.SQLITE_NULL => null,
             c.SQLITE_INTEGER => consumed: {
-                const consumed = c.sqlite3_column_int64(statement, 9);
+                const consumed = c.sqlite3_column_int64(statement, 10);
                 if (consumed <= 0) return error.CorruptHostStore;
                 break :consumed @intCast(consumed);
             },
@@ -677,12 +690,13 @@ pub const StorageOwner = struct {
                 .operation_generation = try readPositiveU32Column(statement, 6),
                 .attempt_id = try readIdentityColumn(statement, 7),
                 .result_ref = try readIdentityColumn(statement, 8),
-                .result_digest = try readIdentityColumn(statement, 9),
+                .result_digest = try readBindingColumn(binding.Result, statement, 9),
+                .completion_digest = try readBindingColumn(binding.Completion, statement, 10),
             },
-            .consumed_by_sequence = switch (c.sqlite3_column_type(statement, 10)) {
+            .consumed_by_sequence = switch (c.sqlite3_column_type(statement, 11)) {
                 c.SQLITE_NULL => null,
                 c.SQLITE_INTEGER => consumed: {
-                    const value = c.sqlite3_column_int64(statement, 10);
+                    const value = c.sqlite3_column_int64(statement, 11);
                     if (value <= 0) return error.CorruptHostStore;
                     break :consumed @intCast(value);
                 },
@@ -737,8 +751,7 @@ pub const StorageOwner = struct {
         transaction: session_transition.Transaction,
         payload: []const u8,
     ) !void {
-        var digest: [32]u8 = undefined;
-        recordDigest(session_id, transaction.sequence, payload, &digest);
+        const digest = recordDigest(session_id, transaction.sequence, payload);
         const insert = try self.prepare(
             \\INSERT INTO session_transition (session_id, sequence, payload, record_digest)
             \\VALUES (?1, ?2, ?3, ?4)
@@ -748,7 +761,7 @@ pub const StorageOwner = struct {
         try bindIdentity(insert, 1, session_id, &encoded_session_id);
         try bindU64(insert, 2, transaction.sequence);
         try bindBlob(insert, 3, payload);
-        try bindBlob(insert, 4, &digest);
+        try bindBlob(insert, 4, &digest.bytes);
         try expectDone(c.sqlite3_step(insert));
         try self.reach(.after_transition_insert);
 
@@ -796,7 +809,7 @@ pub const StorageOwner = struct {
             inline else => |value| value,
         };
         const evidence_kind = std.meta.activeTag(evidence);
-        var ids: [7][8]u8 = undefined;
+        var ids: [6][8]u8 = undefined;
         const statement = try self.prepare(associate_completion_sql);
         defer finalize(statement);
         try bindIdentity(statement, 1, session_id, &ids[0]);
@@ -808,8 +821,8 @@ pub const StorageOwner = struct {
         try bindIdentity(statement, 7, attempt_id, &ids[3]);
         try bindU64(statement, 8, @intFromEnum(evidence_kind));
         try bindIdentity(statement, 9, result.result_ref, &ids[4]);
-        try bindIdentity(statement, 10, result.result_digest, &ids[5]);
-        try bindIdentity(statement, 11, operation.agent.agent_id, &ids[6]);
+        try bindBlob(statement, 10, &result.result_digest.bytes);
+        try bindIdentity(statement, 11, operation.agent.agent_id, &ids[5]);
         try expectDone(c.sqlite3_step(statement));
         if (c.sqlite3_changes(self.database) != 1) return error.CompletionEvidenceMissing;
     }
@@ -882,10 +895,11 @@ pub const StorageOwner = struct {
         const payload_bytes: [*]const u8 = @ptrCast(payload_pointer);
         @memcpy(out.payload[0..out.payload_length], payload_bytes[0..out.payload_length]);
         const digest_bytes: [*]const u8 = @ptrCast(digest_pointer);
-        @memcpy(&out.record_digest, digest_bytes[0..32]);
-        var actual_digest: [32]u8 = undefined;
-        recordDigest(session_id, sequence, out.payloadSlice(), &actual_digest);
-        if (!std.mem.eql(u8, &actual_digest, &out.record_digest)) return error.PayloadDigestMismatch;
+        @memcpy(&out.record_digest.bytes, digest_bytes[0..32]);
+        const actual_digest = recordDigest(session_id, sequence, out.payloadSlice());
+        if (!binding.eql(binding.LedgerRecord, actual_digest, out.record_digest)) {
+            return error.PayloadDigestMismatch;
+        }
         if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
     }
 
@@ -982,7 +996,7 @@ pub const StorageOwner = struct {
         }
         self.execute(completion_index_schema) catch |err| return err;
         self.execute("PRAGMA application_id=1330532423") catch |err| return err;
-        self.execute("PRAGMA user_version=1") catch |err| return err;
+        self.execute("PRAGMA user_version=2") catch |err| return err;
         self.execute("COMMIT") catch |err| {
             self.rollbackOrPoison();
             return err;
@@ -1328,6 +1342,15 @@ fn readIdentityColumn(statement: *c.sqlite3_stmt, index: c_int) !u64 {
     return value;
 }
 
+fn readBindingColumn(comptime T: type, statement: *c.sqlite3_stmt, index: c_int) !T {
+    if (c.sqlite3_column_bytes(statement, index) != @sizeOf(binding.Sha256)) {
+        return error.CorruptHostStore;
+    }
+    const pointer = c.sqlite3_column_blob(statement, index) orelse return error.CorruptHostStore;
+    const bytes: [*]const u8 = @ptrCast(pointer);
+    return .{ .bytes = bytes[0..@sizeOf(binding.Sha256)].* };
+}
+
 fn columnTextEquals(statement: *c.sqlite3_stmt, index: c_int, expected: []const u8) bool {
     const length = c.sqlite3_column_bytes(statement, index);
     if (length < 0 or length != expected.len) return false;
@@ -1367,15 +1390,14 @@ fn nonnegative(value: anytype) !u64 {
     return @intCast(value);
 }
 
-fn recordDigest(session_id: u64, sequence: u64, payload: []const u8, out: *[32]u8) void {
-    var hasher: std.crypto.hash.sha2.Sha256 = .init(.{});
-    hasher.update("onepage-ledger-v1\x00");
+fn recordDigest(session_id: u64, sequence: u64, payload: []const u8) binding.LedgerRecord {
+    var hasher = binding.Hasher(binding.LedgerRecord).init();
     var identity: [16]u8 = undefined;
     std.mem.writeInt(u64, identity[0..8], session_id, .little);
     std.mem.writeInt(u64, identity[8..16], sequence, .little);
     hasher.update(&identity);
     hasher.update(payload);
-    hasher.final(out);
+    return hasher.final();
 }
 
 fn mapSqliteError(result: c_int) anyerror {
@@ -1483,7 +1505,7 @@ test "matching identity cannot hide an incomplete or unhardened schema" {
     const database = maybe_database orelse return error.HostStoreOpenFailed;
     try expectOk(c.sqlite3_exec(
         database,
-        "CREATE TABLE session (session_id BLOB); PRAGMA application_id=1330532423; PRAGMA user_version=1",
+        "CREATE TABLE session (session_id BLOB); PRAGMA application_id=1330532423; PRAGMA user_version=2",
         null,
         null,
         null,
@@ -1575,7 +1597,7 @@ test "Completion recovery range is bounded by its Session index" {
             .branch_id = base + 3,
         });
     }
-    _ = try owner.publishCompletion(.{
+    _ = try owner.publishCompletion(completion_inbox.bind(.{
         .kind = .model,
         .session_id = 8,
         .ownership_epoch = 1,
@@ -1585,8 +1607,8 @@ test "Completion recovery range is bounded by its Session index" {
         .operation_generation = 1,
         .attempt_id = 102,
         .result_ref = 103,
-        .result_digest = 104,
-    });
+        .result_digest = binding.hash(binding.Result, "result-104"),
+    }));
     try owner.execute("ANALYZE");
     const statement = try owner.prepare(read_completion_after_sql);
     defer finalize(statement);
@@ -1637,25 +1659,28 @@ test "Completion publication enforces the pending per-Session bound" {
         \\INSERT INTO completion_inbox (
         \\    session_id, ownership_epoch, agent_generation,
         \\    operation_id, operation_generation, attempt_id, evidence_kind,
-        \\    result_reference, result_digest
-        \\) VALUES (?1, ?2, 1, ?3, 1, ?4, 1, ?5, ?6)
+        \\    result_reference, result_digest, completion_digest
+        \\) VALUES (?1, ?2, 1, ?3, 1, ?4, 1, ?5, ?6, ?7)
     );
     defer finalize(insert);
-    var ids: [6][8]u8 = undefined;
+    var ids: [5][8]u8 = undefined;
+    const result_digest = binding.hash(binding.Result, "capacity-result");
+    const completion_digest = binding.hash(binding.Completion, "capacity-completion");
     for (0..completion_inbox.max_records) |index| {
         try bindIdentity(insert, 1, 8, &ids[0]);
         try bindIdentity(insert, 2, 1, &ids[1]);
         try bindIdentity(insert, 3, 100, &ids[2]);
         try bindIdentity(insert, 4, index + 1, &ids[3]);
         try bindIdentity(insert, 5, index + 10_000, &ids[4]);
-        try bindIdentity(insert, 6, 200, &ids[5]);
+        try bindBlob(insert, 6, &result_digest.bytes);
+        try bindBlob(insert, 7, &completion_digest.bytes);
         try expectDone(c.sqlite3_step(insert));
         try expectOk(c.sqlite3_reset(insert));
         try expectOk(c.sqlite3_clear_bindings(insert));
     }
     try owner.execute("COMMIT");
 
-    try std.testing.expectError(error.CompletionCapacityExceeded, owner.publishCompletion(.{
+    try std.testing.expectError(error.CompletionCapacityExceeded, owner.publishCompletion(completion_inbox.bind(.{
         .kind = .model,
         .session_id = 8,
         .ownership_epoch = 1,
@@ -1665,6 +1690,6 @@ test "Completion publication enforces the pending per-Session bound" {
         .operation_generation = 1,
         .attempt_id = completion_inbox.max_records + 1,
         .result_ref = 20_000,
-        .result_digest = 200,
-    }));
+        .result_digest = binding.hash(binding.Result, "result-200"),
+    })));
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
 const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
@@ -70,24 +71,12 @@ pub const Input = union(enum) {
 pub const PermissionDecision = struct {
     operation_id: u64,
     operation_generation: u32,
-    descriptor_digest: u64,
+    descriptor_digest: binding.Descriptor,
     allow: bool,
 };
 
-pub const Completion = struct {
-    kind: CompletionKind,
-    session_id: u64,
-    ownership_epoch: u64,
-    agent_id: u64,
-    agent_generation: u32,
-    operation_id: u64,
-    operation_generation: u32,
-    attempt_id: u64,
-    result_ref: u64,
-    result_digest: u64,
-};
-
-pub const CompletionKind = enum { model, bash, apply_patch };
+pub const Completion = completion_inbox.Envelope;
+pub const CompletionKind = completion_inbox.EvidenceKind;
 
 pub const OfferResult = enum {
     accepted,
@@ -129,7 +118,7 @@ pub const Projection = struct {
     task_id: u64 = 0,
     operation_id: u64 = 0,
     operation_generation: u32 = 0,
-    descriptor_digest: u64 = 0,
+    descriptor_digest: ?binding.Descriptor = null,
     content_ref: u64 = 0,
     generation: u64 = 0,
 };
@@ -279,7 +268,7 @@ const HarnessState = struct {
             const expected = self.awaiting_approval orelse return .invalid;
             if (decision.operation_id != expected.operation_id or
                 decision.operation_generation != expected.operation_generation or
-                decision.descriptor_digest != expected.descriptor_digest)
+                !binding.descriptorEql(decision.descriptor_digest, expected.descriptor_digest))
             {
                 return .invalid;
             }
@@ -349,7 +338,7 @@ const HarnessState = struct {
                 const expected = self.approvalSnapshot() orelse return error.PermissionNotRequested;
                 if (decision.operation_id != expected.operation_id or
                     decision.operation_generation != expected.operation_generation or
-                    decision.descriptor_digest != expected.descriptor_digest)
+                    !binding.descriptorEql(decision.descriptor_digest, expected.descriptor_digest))
                 {
                     return error.StalePermissionDecision;
                 }
@@ -382,22 +371,7 @@ const HarnessState = struct {
                     self.lease.allocator,
                     session,
                     &self.core_state_buffer,
-                    .{
-                        .kind = switch (completion.kind) {
-                            .model => .model,
-                            .bash => .bash,
-                            .apply_patch => .apply_patch,
-                        },
-                        .session_id = completion.session_id,
-                        .ownership_epoch = completion.ownership_epoch,
-                        .agent_id = completion.agent_id,
-                        .agent_generation = completion.agent_generation,
-                        .operation_id = completion.operation_id,
-                        .operation_generation = completion.operation_generation,
-                        .attempt_id = completion.attempt_id,
-                        .result_ref = completion.result_ref,
-                        .result_digest = completion.result_digest,
-                    },
+                    completion,
                     self.runtimeConfig(),
                     self.config.provider,
                 ) catch |err| if (self.settlingControl() != null and switch (err) {
@@ -756,23 +730,7 @@ const HarnessState = struct {
 
     fn adapterCompletionOffered(context: *anyopaque, evidence: completion_inbox.Envelope) anyerror!void {
         const self: *HarnessState = @ptrCast(@alignCast(context));
-        const completion: Completion = .{
-            .kind = switch (evidence.kind) {
-                .model => .model,
-                .bash => .bash,
-                .apply_patch => .apply_patch,
-            },
-            .session_id = evidence.session_id,
-            .ownership_epoch = evidence.ownership_epoch,
-            .agent_id = evidence.agent_id,
-            .agent_generation = evidence.agent_generation,
-            .operation_id = evidence.operation_id,
-            .operation_generation = evidence.operation_generation,
-            .attempt_id = evidence.attempt_id,
-            .result_ref = evidence.result_ref,
-            .result_digest = evidence.result_digest,
-        };
-        switch (self.offer(.{ .completion = completion })) {
+        switch (self.offer(.{ .completion = evidence })) {
             .accepted => {},
             .full => {}, // Durable Inbox evidence preserves a notification that loses live custody.
             else => return error.CompletionOfferRejected,
@@ -801,12 +759,20 @@ const HarnessState = struct {
         return .{ .context = self, .required = approvalRequired };
     }
 
-    fn classifyBash(context: *anyopaque, _: u64, _: bash_tool.Call) anyerror!bash_tool.Decision {
+    fn classifyBash(
+        context: *anyopaque,
+        _: binding.BashDescriptor,
+        _: bash_tool.Call,
+    ) anyerror!bash_tool.Decision {
         const self: *HarnessState = @ptrCast(@alignCast(context));
         return if (self.config.permission_mode == .bypass) .allow else .ask;
     }
 
-    fn requestBashPermission(_: *anyopaque, _: u64, _: bash_tool.Call) anyerror!bool {
+    fn requestBashPermission(
+        _: *anyopaque,
+        _: binding.BashDescriptor,
+        _: bash_tool.Call,
+    ) anyerror!bool {
         return error.PermissionInputRequired;
     }
 
@@ -1175,7 +1141,7 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         },
         .operation_id = 10,
         .generation = 1,
-    }, 11, 12, .none);
+    }, 11, .{ .model = binding.hash(binding.ModelDescriptor, "descriptor-12") }, .none);
     try session.storeBlob(
         descriptor.operation_submitted.descriptor_ref,
         "operation descriptor",

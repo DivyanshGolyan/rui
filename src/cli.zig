@@ -142,10 +142,12 @@ fn pumpOwner(io: std.Io, owner: *harness.Harness) !void {
         try renderProgress(io, owner, &progress);
         if (approvalProjection(&progress)) |approval| {
             const allow = try promptPermission(io, owner, approval);
+            const descriptor_digest = approval.descriptor_digest orelse
+                return error.ApprovalProjectionIncomplete;
             if (owner.offer(.{ .permission = .{
                 .operation_id = approval.operation_id,
                 .operation_generation = approval.operation_generation,
-                .descriptor_digest = approval.descriptor_digest,
+                .descriptor_digest = descriptor_digest,
                 .allow = allow,
             } }) != .accepted) return error.PermissionOfferRejected;
             continue;
@@ -274,10 +276,12 @@ fn approvalProjection(progress: *const harness.Progress) ?harness.Projection {
 
 fn promptPermission(io: std.Io, owner: *harness.Harness, approval: harness.Projection) !bool {
     var header: [192]u8 = undefined;
+    const descriptor = approval.descriptor_digest orelse return error.ApprovalProjectionIncomplete;
+    const digest_hex = std.fmt.bytesToHex(descriptor.bytes(), .lower);
     const prompt = try std.fmt.bufPrint(
         &header,
-        "Action (operation {x:0>16}/{d}, digest {x:0>16}):\n",
-        .{ approval.operation_id, approval.operation_generation, approval.descriptor_digest },
+        "Action (operation {x:0>16}/{d}, binding {s}):\n",
+        .{ approval.operation_id, approval.operation_generation, &digest_hex },
     );
     try std.Io.File.stdout().writeStreamingAll(io, prompt);
     var reader = try owner.openProjectionContent(approval);

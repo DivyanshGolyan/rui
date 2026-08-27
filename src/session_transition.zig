@@ -1,14 +1,16 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const core_state = @import("core_state.zig");
 
-pub const payload_version: u16 = 2;
+pub const payload_version: u16 = 3;
 pub const max_facts: usize = 8;
 pub const max_transitions: u32 = 32_768;
 pub const max_operation_attempts: usize = 8;
 
 const header_size: usize = 4;
-const fact_size: usize = 72;
+const fact_size: usize = 104;
 pub const max_payload_size: usize = header_size + max_facts * fact_size + core_state.encoded_size;
+const result_digest_kind: u8 = 4;
 
 pub const Kind = enum(u8) {
     task_admitted = 1,
@@ -75,7 +77,7 @@ pub const OperationContext = struct {
 pub const OperationRecord = struct {
     operation: OperationContext,
     descriptor_ref: u64,
-    descriptor_digest: u64,
+    descriptor_digest: binding.Descriptor,
     recovery_class: RecoveryClass,
 };
 
@@ -89,21 +91,21 @@ pub const AttemptRecord = struct {
     operation: OperationContext,
     attempt_id: u64,
     descriptor_ref: u64,
-    descriptor_digest: u64,
+    descriptor_digest: binding.Descriptor,
     recovery_class: RecoveryClass,
 };
 
 pub const AuthorizationRecord = struct {
     operation: OperationContext,
     permission_ref: u64,
-    descriptor_digest: u64,
+    descriptor_digest: binding.Descriptor,
     allowed: bool,
 };
 
 pub const ResultRecord = struct {
     operation: OperationContext,
     result_ref: u64,
-    result_digest: u64,
+    result_digest: binding.Result,
     class: ResultClass,
     evidence: ResultEvidence,
 };
@@ -126,7 +128,7 @@ pub const ResultAppliedRecord = struct {
     operation: OperationContext,
     attempt_id: u64,
     result_ref: u64,
-    result_digest: u64,
+    result_digest: binding.Result,
     recovery_class: RecoveryClass,
 };
 
@@ -134,7 +136,7 @@ pub const ApprovalRequiredRecord = struct {
     operation: OperationContext,
     binding_ref: u64,
     descriptor_ref: u64,
-    descriptor_digest: u64,
+    descriptor_digest: binding.Descriptor,
 };
 
 pub const Fact = union(Kind) {
@@ -180,7 +182,9 @@ const RawFact = struct {
     attempt_id: u64,
     subject: u64,
     reference: u64,
-    digest: u64,
+    auxiliary: u64,
+    digest: binding.Sha256,
+    digest_kind: u8,
     ownership_epoch: u64,
     generation: u32,
     agent_generation: u32,
@@ -194,7 +198,7 @@ pub fn taskAdmitted(agent: AgentContext, task_id: u64, content_ref: u64) Fact {
 pub fn operationSubmitted(
     operation: OperationContext,
     descriptor_ref: u64,
-    descriptor_digest: u64,
+    descriptor_digest: binding.Descriptor,
     recovery_class: RecoveryClass,
 ) Fact {
     return .{ .operation_submitted = .{
@@ -208,7 +212,7 @@ pub fn operationSubmitted(
 pub fn operationAccepted(
     operation: OperationContext,
     descriptor_ref: u64,
-    descriptor_digest: u64,
+    descriptor_digest: binding.Descriptor,
     recovery_class: RecoveryClass,
 ) Fact {
     return .{ .operation_accepted = .{
@@ -223,7 +227,7 @@ pub fn attemptAdmitted(
     operation: OperationContext,
     attempt_id: u64,
     descriptor_ref: u64,
-    descriptor_digest: u64,
+    descriptor_digest: binding.Descriptor,
     recovery_class: RecoveryClass,
 ) Fact {
     return .{ .attempt_admitted = .{
@@ -341,6 +345,9 @@ fn validateRawFact(fact: RawFact) !void {
     if (fact.agent_id == 0 or fact.agent_generation == 0 or fact.ownership_epoch == 0) {
         return error.InvalidTransitionIdentity;
     }
+    if (fact.digest_kind == 0 and !std.mem.allEqual(u8, &fact.digest, 0)) {
+        return error.NoncanonicalAbsentBinding;
+    }
     const operation_kind = switch (fact.kind) {
         .operation_submitted,
         .operation_accepted,
@@ -358,8 +365,8 @@ fn validateRawFact(fact: RawFact) !void {
     switch (fact.kind) {
         .task_admitted, .outcome => {
             if (fact.subject == 0 or fact.reference == 0 or fact.operation_id != 0 or
-                fact.attempt_id != 0 or fact.digest != 0 or fact.flags != 0 or
-                fact.recovery_class != .none or fact.evidence_kind != 0)
+                fact.attempt_id != 0 or fact.auxiliary != 0 or fact.digest_kind != 0 or
+                fact.recovery_class != .none or fact.flags != 0 or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
@@ -368,14 +375,14 @@ fn validateRawFact(fact: RawFact) !void {
             if (fact.subject == 0 or fact.reference == 0 or fact.operation_id != 0 or
                 fact.attempt_id != 0 or fact.recovery_class != .none or fact.evidence_kind != 0 or
                 std.enums.fromInt(ConversationKind, fact.flags) == null or
-                (fact.subject == 1) != (fact.digest == 0))
+                fact.digest_kind != 0 or (fact.subject == 1) != (fact.auxiliary == 0))
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .cancellation, .shutdown => {
             if (fact.operation_id != 0 or fact.attempt_id != 0 or fact.subject != 0 or
-                fact.reference != 0 or fact.digest != 0 or fact.flags != 0 or
+                fact.reference != 0 or fact.auxiliary != 0 or fact.digest_kind != 0 or fact.flags != 0 or
                 fact.recovery_class != .none or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
@@ -383,27 +390,32 @@ fn validateRawFact(fact: RawFact) !void {
         },
         .operation_submitted, .operation_accepted => {
             if (fact.attempt_id != 0 or fact.subject != 0 or fact.reference == 0 or
-                fact.digest == 0 or fact.flags != 0 or fact.evidence_kind != 0)
+                fact.auxiliary != 0 or !validDescriptorKind(fact.digest_kind) or
+                fact.flags != 0 or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .attempt_admitted => {
-            if (fact.attempt_id == 0 or fact.subject != 0 or fact.digest == 0 or fact.flags != 0 or
-                fact.recovery_class == .none or fact.evidence_kind != 0)
+            if (fact.attempt_id == 0 or fact.subject != 0 or fact.auxiliary != 0 or
+                !validDescriptorKind(fact.digest_kind) or fact.flags != 0 or
+                !descriptorMatchesRecovery(fact.digest_kind, fact.recovery_class) or
+                fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .approval_required => {
-            if (fact.reference == 0 or fact.digest == 0 or fact.flags != 0 or
+            if (fact.reference == 0 or fact.auxiliary != 0 or
+                !validDescriptorKind(fact.digest_kind) or fact.flags != 0 or
                 fact.attempt_id != 0 or fact.recovery_class != .none or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .authorization => {
-            if (fact.digest == 0 or (fact.flags != 1 and fact.flags != 2) or
+            if (fact.auxiliary != 0 or !validDescriptorKind(fact.digest_kind) or
+                (fact.flags != 1 and fact.flags != 2) or
                 fact.attempt_id != 0 or fact.subject != 0 or fact.recovery_class != .none or
                 fact.evidence_kind != 0)
             {
@@ -411,7 +423,8 @@ fn validateRawFact(fact: RawFact) !void {
             }
         },
         .result => {
-            if (fact.reference == 0 or fact.digest == 0 or fact.subject != 0 or
+            if (fact.reference == 0 or fact.auxiliary != 0 or
+                fact.digest_kind != result_digest_kind or fact.subject != 0 or
                 fact.recovery_class == .none or
                 fact.flags > @intFromEnum(ResultClass.indeterminate) or
                 (fact.attempt_id == 0) != (fact.evidence_kind == 0) or
@@ -427,6 +440,7 @@ fn validateRawFact(fact: RawFact) !void {
         },
         .result_applied => {
             if (fact.reference == 0 or fact.subject != 0 or fact.flags != 0 or
+                fact.auxiliary != 0 or fact.digest_kind != result_digest_kind or
                 fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
@@ -441,7 +455,7 @@ fn encodeFact(out: []u8, fact: Fact) !void {
     @memset(out, 0);
     out[0] = @intFromEnum(raw.kind);
     out[1] = @intFromEnum(raw.recovery_class);
-    out[2] = 0;
+    out[2] = raw.digest_kind;
     out[3] = raw.flags;
     write(u32, out, 4, raw.generation);
     write(u32, out, 8, raw.agent_generation);
@@ -450,13 +464,14 @@ fn encodeFact(out: []u8, fact: Fact) !void {
     write(u64, out, 28, raw.attempt_id);
     write(u64, out, 36, raw.subject);
     write(u64, out, 44, raw.reference);
-    write(u64, out, 52, raw.digest);
+    write(u64, out, 52, raw.auxiliary);
     write(u64, out, 60, raw.ownership_epoch);
     out[68] = raw.evidence_kind;
+    @memcpy(out[72..104], &raw.digest);
 }
 
 fn decodeFact(input: []const u8) !Fact {
-    if (input[2] != 0 or input[69] != 0 or input[70] != 0 or input[71] != 0) {
+    if (input[69] != 0 or input[70] != 0 or input[71] != 0) {
         return error.NonzeroReservedByte;
     }
     const raw: RawFact = .{
@@ -471,7 +486,9 @@ fn decodeFact(input: []const u8) !Fact {
         .attempt_id = read(u64, input, 28),
         .subject = read(u64, input, 36),
         .reference = read(u64, input, 44),
-        .digest = read(u64, input, 52),
+        .auxiliary = read(u64, input, 52),
+        .digest = input[72..104].*,
+        .digest_kind = input[2],
         .ownership_epoch = read(u64, input, 60),
         .evidence_kind = input[68],
     };
@@ -489,26 +506,27 @@ fn rawFact(fact: Fact) RawFact {
         .operation_submitted, .operation_accepted => |value| {
             setOperation(&raw, value.operation);
             raw.reference = value.descriptor_ref;
-            raw.digest = value.descriptor_digest;
+            setDescriptor(&raw, value.descriptor_digest);
             raw.recovery_class = value.recovery_class;
         },
         .attempt_admitted => |value| {
             setOperation(&raw, value.operation);
             raw.attempt_id = value.attempt_id;
             raw.reference = value.descriptor_ref;
-            raw.digest = value.descriptor_digest;
+            setDescriptor(&raw, value.descriptor_digest);
             raw.recovery_class = value.recovery_class;
         },
         .authorization => |value| {
             setOperation(&raw, value.operation);
             raw.reference = value.permission_ref;
-            raw.digest = value.descriptor_digest;
+            setDescriptor(&raw, value.descriptor_digest);
             raw.flags = if (value.allowed) 1 else 2;
         },
         .result => |value| {
             setOperation(&raw, value.operation);
             raw.reference = value.result_ref;
-            raw.digest = value.result_digest;
+            raw.digest = value.result_digest.bytes;
+            raw.digest_kind = result_digest_kind;
             raw.flags = @intFromEnum(value.class);
             switch (value.evidence) {
                 .immediate => |recovery_class| raw.recovery_class = recovery_class,
@@ -527,7 +545,7 @@ fn rawFact(fact: Fact) RawFact {
         .conversation_advanced => |value| {
             raw.subject = value.entry_id;
             raw.reference = value.content_ref;
-            raw.digest = value.parent_id;
+            raw.auxiliary = value.parent_id;
             raw.flags = @intFromEnum(value.kind);
         },
         .outcome => |value| {
@@ -539,14 +557,15 @@ fn rawFact(fact: Fact) RawFact {
             setOperation(&raw, value.operation);
             raw.attempt_id = value.attempt_id;
             raw.reference = value.result_ref;
-            raw.digest = value.result_digest;
+            raw.digest = value.result_digest.bytes;
+            raw.digest_kind = result_digest_kind;
             raw.recovery_class = value.recovery_class;
         },
         .approval_required => |value| {
             setOperation(&raw, value.operation);
             raw.subject = value.binding_ref;
             raw.reference = value.descriptor_ref;
-            raw.digest = value.descriptor_digest;
+            setDescriptor(&raw, value.descriptor_digest);
         },
     }
     return raw;
@@ -562,7 +581,9 @@ fn emptyRaw(kind: Kind, agent: AgentContext) RawFact {
         .attempt_id = 0,
         .subject = 0,
         .reference = 0,
-        .digest = 0,
+        .auxiliary = 0,
+        .digest = @splat(0),
+        .digest_kind = 0,
         .ownership_epoch = agent.ownership_epoch,
         .generation = 0,
         .agent_generation = agent.agent_generation,
@@ -573,6 +594,30 @@ fn emptyRaw(kind: Kind, agent: AgentContext) RawFact {
 fn setOperation(raw: *RawFact, operation: OperationContext) void {
     raw.operation_id = operation.operation_id;
     raw.generation = operation.generation;
+}
+
+fn setDescriptor(raw: *RawFact, descriptor: binding.Descriptor) void {
+    raw.digest = descriptor.bytes();
+    raw.digest_kind = @intFromEnum(std.meta.activeTag(descriptor));
+}
+
+fn validDescriptorKind(value: u8) bool {
+    return std.enums.fromInt(binding.DescriptorKind, value) != null;
+}
+
+fn descriptorMatchesRecovery(value: u8, recovery: RecoveryClass) bool {
+    const kind = std.enums.fromInt(binding.DescriptorKind, value) orelse return false;
+    return switch (kind) {
+        .model => recovery == .model,
+        .bash, .apply_patch => recovery == .consequential,
+    };
+}
+
+fn descriptorFromRaw(raw: RawFact) binding.Descriptor {
+    return binding.Descriptor.fromBytes(
+        std.enums.fromInt(binding.DescriptorKind, raw.digest_kind) orelse unreachable,
+        raw.digest,
+    );
 }
 
 fn factFromRaw(raw: RawFact) Fact {
@@ -595,32 +640,32 @@ fn factFromRaw(raw: RawFact) Fact {
         .operation_submitted => .{ .operation_submitted = .{
             .operation = operation,
             .descriptor_ref = raw.reference,
-            .descriptor_digest = raw.digest,
+            .descriptor_digest = descriptorFromRaw(raw),
             .recovery_class = raw.recovery_class,
         } },
         .operation_accepted => .{ .operation_accepted = .{
             .operation = operation,
             .descriptor_ref = raw.reference,
-            .descriptor_digest = raw.digest,
+            .descriptor_digest = descriptorFromRaw(raw),
             .recovery_class = raw.recovery_class,
         } },
         .attempt_admitted => .{ .attempt_admitted = .{
             .operation = operation,
             .attempt_id = raw.attempt_id,
             .descriptor_ref = raw.reference,
-            .descriptor_digest = raw.digest,
+            .descriptor_digest = descriptorFromRaw(raw),
             .recovery_class = raw.recovery_class,
         } },
         .authorization => .{ .authorization = .{
             .operation = operation,
             .permission_ref = raw.reference,
-            .descriptor_digest = raw.digest,
+            .descriptor_digest = descriptorFromRaw(raw),
             .allowed = raw.flags == 1,
         } },
         .result => .{ .result = .{
             .operation = operation,
             .result_ref = raw.reference,
-            .result_digest = raw.digest,
+            .result_digest = .{ .bytes = raw.digest },
             .class = std.enums.fromInt(ResultClass, raw.flags) orelse unreachable,
             .evidence = if (raw.attempt_id == 0)
                 .{ .immediate = raw.recovery_class }
@@ -634,7 +679,7 @@ fn factFromRaw(raw: RawFact) Fact {
         .conversation_advanced => .{ .conversation_advanced = .{
             .agent = agent,
             .entry_id = raw.subject,
-            .parent_id = raw.digest,
+            .parent_id = raw.auxiliary,
             .kind = std.enums.fromInt(ConversationKind, raw.flags) orelse unreachable,
             .content_ref = raw.reference,
         } },
@@ -649,14 +694,14 @@ fn factFromRaw(raw: RawFact) Fact {
             .operation = operation,
             .attempt_id = raw.attempt_id,
             .result_ref = raw.reference,
-            .result_digest = raw.digest,
+            .result_digest = .{ .bytes = raw.digest },
             .recovery_class = raw.recovery_class,
         } },
         .approval_required => .{ .approval_required = .{
             .operation = operation,
             .binding_ref = raw.subject,
             .descriptor_ref = raw.reference,
-            .descriptor_digest = raw.digest,
+            .descriptor_digest = descriptorFromRaw(raw),
         } },
     };
 }

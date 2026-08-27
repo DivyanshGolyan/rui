@@ -1,5 +1,6 @@
 const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
+const binding = @import("binding.zig");
 const harness = @import("harness.zig");
 const model_operation = @import("model_operation.zig");
 
@@ -56,6 +57,7 @@ pub fn main(init: std.process.Init) !void {
 
     try lostCompletionNotificationRecovers(&layout, init.io, allocator);
     try offeredPermissionDenialContinues(&layout, init.io, allocator);
+    try restoredBashApprovalDispatchesExactDescriptor(&layout, init.io, allocator);
     try restoredPatchApprovalUsesExactDescriptor(&layout, init.io, allocator);
     try approvedPatchThenShutdownEntersSettlement(&layout, init.io, allocator);
     try cancellationRegenerates(&layout, init.io, allocator);
@@ -171,7 +173,9 @@ fn offeredPermissionDenialContinues(
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
     _ = try owner.drive();
     const waiting = try owner.drive();
-    _ = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
+    const original_approval = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
+    const original_digest = original_approval.descriptor_digest orelse
+        return error.ApprovalProjectionIncomplete;
     owner.close();
 
     var restored = try harness.Harness.open(.{
@@ -185,13 +189,24 @@ fn offeredPermissionDenialContinues(
     _ = try restored.drive();
     const regenerated = try restored.drive();
     const approval = approvalProjection(&regenerated) orelse return error.ApprovalProjectionMissingAfterRestore;
-    if (approval.content_ref == 0 or approval.descriptor_digest == 0) {
+    if (approval.content_ref == 0 or approval.descriptor_digest == null) {
         return error.ApprovalProjectionIncomplete;
+    }
+    if (approval.content_ref != original_approval.content_ref or
+        !binding.descriptorEql(approval.descriptor_digest.?, original_digest))
+    {
+        return error.RestoredBashDescriptorMismatch;
     }
     if (restored.offer(.{ .permission = .{
         .operation_id = approval.operation_id,
         .operation_generation = approval.operation_generation,
-        .descriptor_digest = approval.descriptor_digest,
+        .descriptor_digest = .{ .bash = binding.hash(binding.BashDescriptor, "wrong-authority") },
+        .allow = false,
+    } }) != .invalid) return error.MismatchedPermissionAccepted;
+    if (restored.offer(.{ .permission = .{
+        .operation_id = approval.operation_id,
+        .operation_generation = approval.operation_generation,
+        .descriptor_digest = approval.descriptor_digest orelse return error.ApprovalProjectionIncomplete,
         .allow = false,
     } }) != .accepted) return error.PermissionOfferRejected;
     _ = try restored.drive();
@@ -203,6 +218,104 @@ fn offeredPermissionDenialContinues(
     };
     denied.close(io);
     return error.DeniedBashExecuted;
+}
+
+fn restoredBashApprovalDispatchesExactDescriptor(
+    layout: *Layout,
+    io: std.Io,
+    _: std.mem.Allocator,
+) !void {
+    var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
+    const call = try bash_tool.encodeCall(&call_buffer, .{
+        .command = "printf bound > approved.txt",
+        .timeout_ms = 5000,
+    });
+    var fixture: model_operation.ToolFixture = .{
+        .expected_task = task,
+        .tool_arguments = call,
+        .final_answer = answer,
+    };
+    var owner = try harness.Harness.open(.{
+        .runtime = layout.runtime,
+        .mode = .{ .create = .{
+            .workspace_path = layout.workspace_path,
+            .model = "fixture:restored-bash-authority",
+            .task = task,
+            .provider = fixture.provider(),
+        } },
+    });
+    const identified = try owner.drive();
+    const session_id = try sessionProjection(&identified);
+    if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+    _ = try owner.drive();
+    const waiting = try owner.drive();
+    const initial = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
+    owner.close();
+
+    var restored = try harness.Harness.open(.{
+        .runtime = layout.runtime,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .provider = fixture.provider(),
+        } },
+    });
+    defer restored.close();
+    _ = try restored.drive();
+    const regenerated = try restored.drive();
+    const approval = approvalProjection(&regenerated) orelse
+        return error.ApprovalProjectionMissingAfterRestore;
+    const initial_digest = initial.descriptor_digest orelse return error.ApprovalProjectionIncomplete;
+    const approval_digest = approval.descriptor_digest orelse return error.ApprovalProjectionIncomplete;
+    if (approval.content_ref != initial.content_ref or
+        approval.operation_id != initial.operation_id or
+        approval.operation_generation != initial.operation_generation or
+        !binding.descriptorEql(approval_digest, initial_digest))
+    {
+        return error.RestoredBashDescriptorMismatch;
+    }
+    var reader = try restored.openProjectionContent(approval);
+    defer reader.close();
+    var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
+    const descriptor_length: usize = @intCast(reader.length());
+    if (descriptor_length > descriptor_buffer.len) return error.InvalidBashDescriptor;
+    const descriptor_bytes = try reader.readWindow(0, descriptor_buffer[0..descriptor_length]);
+    const descriptor = try bash_tool.decodeDescriptor(descriptor_bytes);
+    var canonical_workspace: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const canonical_workspace_length = try std.Io.Dir.cwd().realPathFile(
+        io,
+        layout.workspace_path,
+        &canonical_workspace,
+    );
+    const expected_workspace = canonical_workspace[0..canonical_workspace_length];
+    if (descriptor.operation_id != approval.operation_id or
+        descriptor.operation_generation != approval.operation_generation or
+        !std.mem.eql(u8, descriptor.workspace_path, expected_workspace) or
+        !std.mem.eql(u8, descriptor.working_directory, expected_workspace) or
+        !std.mem.eql(u8, descriptor.call.command, "printf bound > approved.txt") or
+        descriptor.call.timeout_ms != 5000)
+    {
+        return error.RestoredBashDescriptorMismatch;
+    }
+    if (restored.offer(.{ .permission = .{
+        .operation_id = approval.operation_id,
+        .operation_generation = approval.operation_generation,
+        .descriptor_digest = approval_digest,
+        .allow = true,
+    } }) != .accepted) return error.PermissionOfferRejected;
+    var progress = try restored.drive();
+    for (0..4) |_| {
+        if (progress.state == .finished) break;
+        progress = try restored.drive();
+    }
+    try expectFinal(restored, &progress, answer);
+    var approved = try layout.workspace.openFile(io, "approved.txt", .{});
+    defer approved.close(io);
+    var content: [5]u8 = undefined;
+    if (try approved.readPositionalAll(io, &content, 0) != content.len or
+        !std.mem.eql(u8, &content, "bound"))
+    {
+        return error.ApprovedBashDidNotExecute;
+    }
 }
 
 fn restoredPatchApprovalUsesExactDescriptor(
@@ -276,7 +389,7 @@ fn restoredPatchApprovalUsesExactDescriptor(
     if (restored.offer(.{ .permission = .{
         .operation_id = approval.operation_id,
         .operation_generation = approval.operation_generation,
-        .descriptor_digest = approval.descriptor_digest,
+        .descriptor_digest = approval.descriptor_digest orelse return error.ApprovalProjectionIncomplete,
         .allow = false,
     } }) != .accepted) return error.PermissionOfferRejected;
     _ = try restored.drive();
@@ -335,7 +448,7 @@ fn approvedPatchThenShutdownEntersSettlement(
     if (owner.offer(.{ .permission = .{
         .operation_id = approval.operation_id,
         .operation_generation = approval.operation_generation,
-        .descriptor_digest = approval.descriptor_digest,
+        .descriptor_digest = approval.descriptor_digest orelse return error.ApprovalProjectionIncomplete,
         .allow = true,
     } }) != .accepted) return error.PermissionOfferRejected;
     const deferred = try owner.drive();

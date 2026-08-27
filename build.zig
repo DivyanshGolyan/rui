@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const fixture_state_namespace = ".zig-cache/onepage-fixture-v2-";
+
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const native_target = b.standardTargetOptions(.{});
@@ -50,7 +52,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_answer = b.addRunArtifact(cli);
     run_fixture_answer.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-resident-state-fixture-sessions",
+        fixture_state_namespace ++ "answer-sessions",
         "--repo",
         ".",
         "--model",
@@ -69,7 +71,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_bash = b.addRunArtifact(cli);
     run_fixture_bash.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-resident-state-bash-sessions",
+        fixture_state_namespace ++ "bash-sessions",
         "--repo",
         ".",
         "--model",
@@ -91,7 +93,7 @@ pub fn build(b: *std.Build) void {
     const run_fixture_patch = b.addRunArtifact(cli);
     run_fixture_patch.addArgs(&.{
         "--state",
-        ".zig-cache/onepage-resident-state-patch-sessions",
+        fixture_state_namespace ++ "patch-sessions",
         "--repo",
         ".",
         "--model",
@@ -138,6 +140,7 @@ fn addTestGraph(
     optimize: std.builtin.OptimizeMode,
 ) void {
     const plain_test_roots = [_][]const u8{
+        "src/binding.zig",
         "src/core_state.zig",
         "src/core_image.zig",
         "src/harness.zig",

@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const core_image = @import("core_image.zig");
@@ -35,7 +36,7 @@ pub const ApprovalRequired = struct {
     kind: ApprovalRequiredKind,
     operation_id: u64,
     operation_generation: u32,
-    descriptor_digest: u64,
+    descriptor_digest: binding.Descriptor,
     descriptor_ref: u64,
 };
 
@@ -314,20 +315,20 @@ fn performModelTurn(
         session_transition.operationSubmitted(
             operation_context,
             ids.request_ref,
-            descriptor.digest,
+            .{ .model = descriptor.digest },
             .none,
         ),
         session_transition.operationAccepted(
             operation_context,
             ids.request_ref,
-            descriptor.digest,
+            .{ .model = descriptor.digest },
             .none,
         ),
         session_transition.attemptAdmitted(
             operation_context,
             ids.attempt_id,
             ids.request_ref,
-            descriptor.digest,
+            .{ .model = descriptor.digest },
             .model,
         ),
     };
@@ -376,7 +377,7 @@ fn retryModelAttempt(
             session,
             attempt.attempt_id,
         );
-        const evidence: completion_inbox.Envelope = .{
+        const evidence = completion_inbox.bind(.{
             .kind = .model,
             .session_id = session.session_id,
             .ownership_epoch = attempt.operation.agent.ownership_epoch,
@@ -387,7 +388,7 @@ fn retryModelAttempt(
             .attempt_id = attempt.attempt_id,
             .result_ref = result_ref,
             .result_digest = try blobDigest(session, result_ref),
-        };
+        });
         try session.publishCompletionEvidence(evidence);
         if (completion_hook) |hook| try hook.offered(hook.context, evidence);
         return error.CompletionOffered;
@@ -460,7 +461,7 @@ fn dispatchModelAttempt(
         try provider_io.ensureResponsePublished();
         try reach(fault, .after_model_dispatch);
     }
-    const evidence: completion_inbox.Envelope = .{
+    const evidence = completion_inbox.bind(.{
         .kind = .model,
         .session_id = session.session_id,
         .ownership_epoch = token.epoch,
@@ -471,7 +472,7 @@ fn dispatchModelAttempt(
         .attempt_id = dispatch.attempt_id,
         .result_ref = result_ref,
         .result_digest = try blobDigest(session, result_ref),
-    };
+    });
     try session.publishCompletionEvidence(evidence);
     try reach(fault, .after_completion_inbox);
     if (completion_hook) |hook| try hook.offered(hook.context, evidence);
@@ -505,28 +506,49 @@ fn executeBashCall(
     {
         return error.InvalidBashCallRange;
     }
-    var descriptor_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
-    const descriptor_bytes = try core.reducer.copyResponseWindow(
+    var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
+    const call_bytes = try core.reducer.copyResponseWindow(
         response.arguments,
-        &descriptor_buffer,
+        &call_buffer,
     );
-    const call = try bash_tool.decodeCall(descriptor_bytes);
-    const digest = bash_tool.descriptorDigest(descriptor_bytes);
+    const call = try bash_tool.decodeCall(call_bytes);
     const tool_operation_id = (@as(u64, 1) << 63) | ids.operation_id;
+    const descriptor: bash_tool.Descriptor = .{
+        .operation_id = tool_operation_id,
+        .operation_generation = 1,
+        .workspace_path = workspace_path,
+        .working_directory = workspace_path,
+        .call = call,
+    };
+    var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
+    const descriptor_bytes = try bash_tool.encodeDescriptor(&descriptor_buffer, descriptor);
+    const digest = bash_tool.descriptorDigest(descriptor_bytes);
+    const call_ref = (@as(u64, 1) << 59) | ids.response_ref;
     const descriptor_ref = (@as(u64, 1) << 62) | ids.response_ref;
     const result_ref = (@as(u64, 1) << 61) | ids.response_ref;
+    try session.storeBlob(call_ref, call_bytes);
     try session.storeBlob(descriptor_ref, descriptor_bytes);
-    const call_entry = try session.appendConversation(.assistant, descriptor_ref, null);
+    const call_entry = try session.appendConversation(.assistant, call_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
     const descriptor_facts = [_]session_transition.Fact{
-        session_transition.operationSubmitted(operation_context, descriptor_ref, digest, .consequential),
-        session_transition.operationAccepted(operation_context, descriptor_ref, digest, .consequential),
+        session_transition.operationSubmitted(
+            operation_context,
+            descriptor_ref,
+            .{ .bash = digest },
+            .consequential,
+        ),
+        session_transition.operationAccepted(
+            operation_context,
+            descriptor_ref,
+            .{ .bash = digest },
+            .consequential,
+        ),
         session_transition.conversationAdvanced(.{
             .agent = agentContext(session),
             .entry_id = call_entry.entry_id,
             .parent_id = call_entry.parent_id,
             .kind = call_entry.kind,
-            .content_ref = descriptor_ref,
+            .content_ref = call_ref,
         }),
     };
     _ = try session.commitSemantic(&descriptor_facts, null);
@@ -537,14 +559,14 @@ fn executeBashCall(
             .operation = operation_context,
             .binding_ref = 0,
             .descriptor_ref = descriptor_ref,
-            .descriptor_digest = digest,
+            .descriptor_digest = .{ .bash = digest },
         });
         try commitCoreFacts(session, core_state_buffer, core, &.{approval}, true);
         if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .bash,
             .operation_id = tool_operation_id,
             .operation_generation = 1,
-            .descriptor_digest = digest,
+            .descriptor_digest = .{ .bash = digest },
             .descriptor_ref = descriptor_ref,
         });
     }
@@ -556,7 +578,7 @@ fn executeBashCall(
     const authorization = session_transition.authorization(.{
         .operation = operation_context,
         .permission_ref = 0,
-        .descriptor_digest = digest,
+        .descriptor_digest = .{ .bash = digest },
         .allowed = allowed,
     });
     _ = try session.commitSemantic(&.{authorization}, null);
@@ -569,7 +591,7 @@ fn executeBashCall(
             operation_context,
             attempt_id,
             descriptor_ref,
-            digest,
+            .{ .bash = digest },
             .consequential,
         );
         try commitCoreFacts(
@@ -581,11 +603,10 @@ fn executeBashCall(
         );
         core.close();
         core_open.* = false;
-        execution = try bash_tool.executeControlled(
+        execution = try bash_tool.executeDescriptor(
             allocator,
             io,
-            workspace_path,
-            call,
+            descriptor,
             .{ .cancelled = cancellation },
         );
         try reach(fault, .after_bash_execution);
@@ -607,7 +628,7 @@ fn executeBashCall(
     try session.storeBlob(result_ref, encoded_result);
     const result_digest = try blobDigest(session, result_ref);
     if (allowed) {
-        const evidence: completion_inbox.Envelope = .{
+        const evidence = completion_inbox.bind(.{
             .kind = .bash,
             .session_id = session.session_id,
             .ownership_epoch = token.epoch,
@@ -618,7 +639,7 @@ fn executeBashCall(
             .attempt_id = attempt_id,
             .result_ref = result_ref,
             .result_digest = result_digest,
-        };
+        });
         try session.publishCompletionEvidence(evidence);
         if (completion_hook) |hook| try hook.offered(hook.context, evidence);
         return error.CompletionOffered;
@@ -660,7 +681,6 @@ const PatchPermissionOutcome = enum { ready, approved };
 
 fn requestPatchPermission(
     io: std.Io,
-    allocator: std.mem.Allocator,
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
@@ -680,12 +700,16 @@ fn requestPatchPermission(
     }
     var patch_buffer: [patch_tool.max_patch_size]u8 = undefined;
     const patch = try core.reducer.copyResponseWindow(response.arguments, &patch_buffer);
-    const validation = try patch_tool.validate(allocator, io, workspace_path, patch);
     const tool_operation_id = (@as(u64, 3) << 62) | ids.operation_id;
     const patch_ref = (@as(u64, 1) << 60) | ids.response_ref;
     const approval_ref = (@as(u64, 1) << 59) | ids.response_ref;
     const permission_ref = (@as(u64, 1) << 58) | ids.response_ref;
     const result_ref = (@as(u64, 1) << 57) | ids.response_ref;
+    const validation = try patch_tool.validate(io, workspace_path, patch, .{
+        .operation_id = tool_operation_id,
+        .operation_generation = 1,
+        .patch_ref = patch_ref,
+    });
     try session.storeBlob(patch_ref, patch);
     const call_entry = try session.appendConversation(.assistant, patch_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
@@ -693,13 +717,13 @@ fn requestPatchPermission(
         session_transition.operationSubmitted(
             operation_context,
             patch_ref,
-            validation.patch_digest,
+            .{ .apply_patch = validation.intent_digest },
             .consequential,
         ),
         session_transition.operationAccepted(
             operation_context,
             patch_ref,
-            validation.patch_digest,
+            .{ .apply_patch = validation.intent_digest },
             .consequential,
         ),
         session_transition.conversationAdvanced(.{
@@ -733,7 +757,7 @@ fn requestPatchPermission(
             .operation = operation_context,
             .binding_ref = approval_ref,
             .descriptor_ref = patch_ref,
-            .descriptor_digest = validation.patch_digest,
+            .descriptor_digest = .{ .apply_patch = validation.intent_digest },
         });
         try commitCoreFacts(
             session,
@@ -746,7 +770,7 @@ fn requestPatchPermission(
             .kind = .apply_patch,
             .operation_id = tool_operation_id,
             .operation_generation = 1,
-            .descriptor_digest = validation.patch_digest,
+            .descriptor_digest = .{ .apply_patch = validation.intent_digest },
             .descriptor_ref = patch_ref,
         });
         allowed = try policy.ask(subject, patch);
@@ -764,16 +788,20 @@ fn requestPatchPermission(
     const authorization = session_transition.authorization(.{
         .operation = operation_context,
         .permission_ref = permission_ref,
-        .descriptor_digest = validation.patch_digest,
+        .descriptor_digest = .{ .apply_patch = validation.intent_digest },
         .allowed = allowed,
     });
     _ = try session.commitSemantic(&.{authorization}, null);
     try reach(fault, .after_patch_permission_binding);
 
     var status: patch_tool.ResultStatus = .denied;
-    var observed_workspace_digest: u64 = 0;
+    var observed_workspace_digest: ?binding.WorkspaceState = null;
     if (allowed) {
-        const observed = patch_tool.validate(allocator, io, workspace_path, patch) catch |err| switch (err) {
+        const observed = patch_tool.validate(io, workspace_path, patch, .{
+            .operation_id = tool_operation_id,
+            .operation_generation = 1,
+            .patch_ref = patch_ref,
+        }) catch |err| switch (err) {
             error.FileNotFound,
             error.NotDir,
             error.SymLinkLoop,
@@ -782,6 +810,8 @@ fn requestPatchPermission(
             error.SymlinkEscape,
             error.PatchNotApplicable,
             error.NotTrackedRepositoryFile,
+            error.PatchTargetTooLarge,
+            error.PatchPostimageTooLarge,
             error.PreimageChangedDuringRead,
             error.PreimageChangedDuringValidation,
             => null,
@@ -792,8 +822,6 @@ fn requestPatchPermission(
             if (patch_tool.sameWorkspace(validation, current)) {
                 return .approved;
             }
-        } else {
-            observed_workspace_digest = 1;
         }
         status = .stale;
     }
@@ -801,7 +829,7 @@ fn requestPatchPermission(
     var result_bytes: [patch_tool.result_size]u8 = undefined;
     try patch_tool.encodeResult(&result_bytes, .{
         .status = status,
-        .patch_digest = validation.patch_digest,
+        .intent_digest = validation.intent_digest,
         .expected_workspace_digest = validation.workspace_digest,
         .observed_workspace_digest = observed_workspace_digest,
     });
@@ -852,10 +880,12 @@ fn storePatchBinding(
         .ownership_epoch = token.epoch,
         .patch_ref = patch_ref,
         .patch_digest = validation.patch_digest,
+        .intent_digest = validation.intent_digest,
         .workspace_digest = validation.workspace_digest,
         .preimage_size = validation.preimage_size,
         .preimage_inode = @intCast(validation.preimage_inode),
         .preimage_digest = validation.preimage_digest,
+        .postimage_digest = validation.postimage_digest,
     });
     try session.storeBlob(binding_ref, &bytes);
 }
@@ -887,7 +917,7 @@ pub fn advanceRestored(
                 .operation = operationContext(session, completion.operation_id, completion.operation_generation),
                 .attempt_id = 0,
                 .result_ref = completion.result,
-                .result_digest = 0,
+                .result_digest = try blobDigest(session, completion.result),
                 .recovery_class = .none,
             });
             try commitCoreFacts(
@@ -932,7 +962,6 @@ pub fn advanceRestored(
             token,
             &core,
             core_state_buffer,
-            allocator,
             session.workspacePath(),
         )) {
             .indeterminate => return error.BashPossiblyExecuted,
@@ -970,7 +999,6 @@ pub fn advanceRestored(
                     .apply_patch => {
                         const permission = try requestPatchPermission(
                             io,
-                            allocator,
                             session,
                             token,
                             &core,
@@ -1062,7 +1090,7 @@ pub fn resolvePermission(
     };
     _ = try session.inspectSemantic(&history, FactSearch.applyFact);
     const descriptor = history.descriptor orelse return error.MissingActionDescriptor;
-    if (descriptor.descriptor_digest != decision.descriptor_digest or
+    if (!binding.descriptorEql(descriptor.descriptor_digest, decision.descriptor_digest) or
         descriptor.descriptor_ref != decision.descriptor_ref)
     {
         return error.StalePermissionDecision;
@@ -1070,7 +1098,7 @@ pub fn resolvePermission(
     if (history.result != null or history.attempt != null) return error.PermissionNoLongerRequired;
     const pending = history.approval_required orelse return error.ApprovalNotCommitted;
     if (history.authorization != null or
-        pending.descriptor_digest != descriptor.descriptor_digest)
+        !binding.descriptorEql(pending.descriptor_digest, descriptor.descriptor_digest))
     {
         return error.PermissionNoLongerRequired;
     }
@@ -1078,6 +1106,29 @@ pub fn resolvePermission(
     switch (response.tool) {
         .bash => {
             const operation_context = operationContext(session, expected_operation_id, 1);
+            var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
+            var reader = try session.openBlob(descriptor.descriptor_ref);
+            defer reader.close();
+            if (reader.length() > descriptor_buffer.len) return error.InvalidBashCallRange;
+            const descriptor_length: usize = @intCast(reader.length());
+            const descriptor_bytes = try reader.readWindow(0, descriptor_buffer[0..descriptor_length]);
+            if (descriptor_bytes.len != descriptor_length) return error.TruncatedBashDescriptor;
+            const bash_descriptor = try bash_tool.decodeDescriptor(descriptor_bytes);
+            const expected_bash_digest = switch (descriptor.descriptor_digest) {
+                .bash => |value| value,
+                else => return error.StalePermissionDecision,
+            };
+            if (bash_descriptor.operation_id != expected_operation_id or
+                bash_descriptor.operation_generation != 1 or
+                !std.mem.eql(u8, bash_descriptor.workspace_path, session.workspacePath()) or
+                !binding.eql(
+                    binding.BashDescriptor,
+                    bash_tool.descriptorDigest(descriptor_bytes),
+                    expected_bash_digest,
+                ))
+            {
+                return error.StalePermissionDecision;
+            }
             const authorization = session_transition.authorization(.{
                 .operation = operation_context,
                 .permission_ref = 0,
@@ -1085,14 +1136,6 @@ pub fn resolvePermission(
                 .allowed = allow,
             });
             _ = try session.commitSemantic(&.{authorization}, null);
-            var descriptor_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
-            var reader = try session.openBlob(descriptor.descriptor_ref);
-            defer reader.close();
-            if (reader.length() > descriptor_buffer.len) return error.InvalidBashCallRange;
-            const descriptor_length: usize = @intCast(reader.length());
-            const descriptor_bytes = try reader.readWindow(0, descriptor_buffer[0..descriptor_length]);
-            if (descriptor_bytes.len != descriptor_length) return error.TruncatedBashDescriptor;
-            const call = try bash_tool.decodeCall(descriptor_bytes);
             const result_ref = (@as(u64, 1) << 61) | @as(u32, @truncate(observation.result_ref));
             var attempt_id: u64 = 0;
             var execution: bash_tool.Execution = undefined;
@@ -1108,11 +1151,10 @@ pub fn resolvePermission(
                 try commitCoreFacts(session, core_state_buffer, &core, &.{attempt}, false);
                 core.close();
                 core_open = false;
-                execution = try bash_tool.executeControlled(
+                execution = try bash_tool.executeDescriptor(
                     allocator,
                     io,
-                    session.workspacePath(),
-                    call,
+                    bash_descriptor,
                     .{ .cancelled = cancellation },
                 );
                 core = try Core.open(&host.slots);
@@ -1133,7 +1175,7 @@ pub fn resolvePermission(
             try session.storeBlob(result_ref, encoded);
             const result_digest = try blobDigest(session, result_ref);
             if (allow) {
-                const evidence: completion_inbox.Envelope = .{
+                const evidence = completion_inbox.bind(.{
                     .kind = .bash,
                     .session_id = session.session_id,
                     .ownership_epoch = token.epoch,
@@ -1144,7 +1186,7 @@ pub fn resolvePermission(
                     .attempt_id = attempt_id,
                     .result_ref = result_ref,
                     .result_digest = result_digest,
-                };
+                });
                 try session.publishCompletionEvidence(evidence);
                 if (completion_hook) |hook| try hook.offered(hook.context, evidence);
                 return error.CompletionOffered;
@@ -1181,11 +1223,15 @@ pub fn resolvePermission(
             {
                 return error.InvalidPatchBinding;
             }
-            const binding = try patch_tool.decodeBinding(&binding_bytes);
-            if (binding.operation_id != expected_operation_id or
-                binding.operation_generation != 1 or
-                binding.patch_ref != descriptor.descriptor_ref or
-                binding.patch_digest != descriptor.descriptor_digest)
+            const patch_binding = try patch_tool.decodeBinding(&binding_bytes);
+            const patch_descriptor = switch (descriptor.descriptor_digest) {
+                .apply_patch => |value| value,
+                else => return error.StalePermissionDecision,
+            };
+            if (patch_binding.operation_id != expected_operation_id or
+                patch_binding.operation_generation != 1 or
+                patch_binding.patch_ref != descriptor.descriptor_ref or
+                !binding.eql(binding.PatchIntent, patch_binding.intent_digest, patch_descriptor))
             {
                 return error.StalePermissionDecision;
             }
@@ -1197,14 +1243,17 @@ pub fn resolvePermission(
                 if (allow) .allow else .deny,
                 expected_operation_id,
                 .{
+                    .workspace_path = session.workspacePath(),
                     .target_path = "",
-                    .patch_digest = binding.patch_digest,
-                    .preimage_digest = binding.preimage_digest,
-                    .workspace_digest = binding.workspace_digest,
-                    .preimage_size = binding.preimage_size,
-                    .preimage_inode = @intCast(binding.preimage_inode),
+                    .patch_digest = patch_binding.patch_digest,
+                    .intent_digest = patch_binding.intent_digest,
+                    .preimage_digest = patch_binding.preimage_digest,
+                    .postimage_digest = patch_binding.postimage_digest,
+                    .workspace_digest = patch_binding.workspace_digest,
+                    .preimage_size = patch_binding.preimage_size,
+                    .preimage_inode = @intCast(patch_binding.preimage_inode),
                 },
-                binding.patch_ref,
+                patch_binding.patch_ref,
             );
             const operation_context = operationContext(session, expected_operation_id, 1);
             const authorization = session_transition.authorization(.{
@@ -1219,9 +1268,9 @@ pub fn resolvePermission(
             var result_bytes: [patch_tool.result_size]u8 = undefined;
             try patch_tool.encodeResult(&result_bytes, .{
                 .status = .denied,
-                .patch_digest = descriptor.descriptor_digest,
-                .expected_workspace_digest = binding.workspace_digest,
-                .observed_workspace_digest = 0,
+                .intent_digest = patch_descriptor,
+                .expected_workspace_digest = patch_binding.workspace_digest,
+                .observed_workspace_digest = null,
             });
             try session.storeBlob(result_ref, &result_bytes);
             const result_entry = try session.appendConversation(.tool_result, result_ref, null);
@@ -1273,6 +1322,7 @@ pub fn acceptCompletion(
     provider: ?model_operation.Provider,
 ) !u64 {
     const token = session.ownerToken();
+    try completion_inbox.validate(offered);
     if (offered.session_id != session.session_id or offered.agent_id != session.agent_id or
         offered.agent_generation != agent_generation or
         offered.ownership_epoch > token.epoch)
@@ -1292,7 +1342,9 @@ pub fn acceptCompletion(
     const attempt = history.attempt orelse return error.StaleCompletion;
     if (attempt.attempt_id != offered.attempt_id) return error.StaleCompletion;
     if (history.result) |result| {
-        if (result.result_ref != offered.result_ref or result.result_digest != offered.result_digest) {
+        if (result.result_ref != offered.result_ref or
+            !binding.eql(binding.Result, result.result_digest, offered.result_digest))
+        {
             return error.ConflictingCompletionEvidence;
         }
     }
@@ -1306,7 +1358,10 @@ pub fn acceptCompletion(
     };
     _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
     const evidence = inbox.match orelse return error.CompletionEvidenceMissing;
-    if (evidence.result_ref != offered.result_ref or evidence.result_digest != offered.result_digest) {
+    if (evidence.result_ref != offered.result_ref or
+        !binding.eql(binding.Result, evidence.result_digest, offered.result_digest) or
+        !binding.eql(binding.Completion, evidence.completion_digest, offered.completion_digest))
+    {
         return error.ConflictingCompletionEvidence;
     }
     return advanceRestored(host, allocator, session, core_state_buffer, config, provider);
@@ -1319,7 +1374,6 @@ fn reconcileToolCall(
     token: session_store.OwnerToken,
     core: *Core,
     core_state_buffer: []u8,
-    allocator: std.mem.Allocator,
     workspace_path: []const u8,
 ) !ToolRecovery {
     return switch ((try core.reducer.response()).tool) {
@@ -1329,7 +1383,6 @@ fn reconcileToolCall(
             token,
             core,
             core_state_buffer,
-            allocator,
             workspace_path,
         ),
         else => error.UnsupportedTool,
@@ -1350,7 +1403,7 @@ fn reconcileBash(
         .recovery_class = .consequential,
     };
     _ = try session.inspectSemantic(&history, FactSearch.applyFact);
-    const descriptor = history.descriptor orelse return .none;
+    _ = history.descriptor orelse return .none;
     if (history.result) |result| {
         try reconcileBashResult(
             session,
@@ -1408,10 +1461,14 @@ fn reconcileBash(
     _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
     var evidence_agent = agentContext(session);
     var result_ref: u64 = undefined;
-    var result_digest: u64 = descriptor.descriptor_digest;
+    var result_digest: binding.Result = undefined;
     var status: bash_tool.Status = undefined;
     if (inbox.match) |envelope| {
-        if (try blobDigest(session, envelope.result_ref) != envelope.result_digest) {
+        if (!binding.eql(
+            binding.Result,
+            try blobDigest(session, envelope.result_ref),
+            envelope.result_digest,
+        )) {
             return error.CompletionResultDigestMismatch;
         }
         result_ref = envelope.result_ref;
@@ -1433,7 +1490,7 @@ fn reconcileBash(
         try storeOrExpectBlob(session, result_ref, &encoded);
         result_digest = try blobDigest(session, result_ref);
         status = .indeterminate;
-        try session.publishCompletionEvidence(.{
+        try session.publishCompletionEvidence(completion_inbox.bind(.{
             .kind = .bash,
             .session_id = session.session_id,
             .ownership_epoch = token.epoch,
@@ -1444,7 +1501,7 @@ fn reconcileBash(
             .attempt_id = attempt.attempt_id,
             .result_ref = result_ref,
             .result_digest = result_digest,
-        });
+        }));
     }
     const result = session_transition.result(.{
         .operation = .{ .agent = evidence_agent, .operation_id = operation_id, .generation = 1 },
@@ -1493,7 +1550,6 @@ fn toolResultFromRecord(result: session_transition.ResultRecord) ToolResult {
         .operation_generation = result.operation.generation,
         .attempt_id = attempt_id,
         .ownership_epoch = result.operation.agent.ownership_epoch,
-        .descriptor_digest = result.result_digest,
         .result = result.result_ref,
     };
 }
@@ -1503,7 +1559,6 @@ fn reconcilePatch(
     token: session_store.OwnerToken,
     core: *Core,
     core_state_buffer: []u8,
-    allocator: std.mem.Allocator,
     workspace_path: []const u8,
 ) !ToolRecovery {
     const operation_observation = try core.reducer.operation();
@@ -1519,9 +1574,13 @@ fn reconcilePatch(
     };
     _ = try session.inspectSemantic(&history, FactSearch.applyFact);
     const validated = history.descriptor orelse return .none;
-    if (validated.descriptor_digest == 0 or validated.descriptor_ref != patch_ref) {
+    if (validated.descriptor_ref != patch_ref) {
         return error.InvalidPatchHistory;
     }
+    const patch_descriptor = switch (validated.descriptor_digest) {
+        .apply_patch => |value| value,
+        else => return error.InvalidPatchHistory,
+    };
     if (history.result) |settled| {
         if (settled.result_ref != result_ref) {
             return error.InvalidPatchHistory;
@@ -1539,41 +1598,52 @@ fn reconcilePatch(
         return .approval_required;
     }
     const authorization = history.authorization orelse return .none;
-    if (authorization.descriptor_digest != validated.descriptor_digest or
+    if (!binding.descriptorEql(authorization.descriptor_digest, validated.descriptor_digest) or
         authorization.permission_ref == 0)
     {
         return error.InvalidPatchHistory;
     }
     var binding_bytes: [patch_tool.binding_size]u8 = undefined;
     try readExactBlob(session, authorization.permission_ref, &binding_bytes);
-    const binding = try patch_tool.decodeBinding(&binding_bytes);
-    if (binding.operation_id != operation_id or binding.operation_generation != 1 or
-        binding.patch_ref != patch_ref or binding.patch_digest != validated.descriptor_digest)
+    const patch_binding = try patch_tool.decodeBinding(&binding_bytes);
+    if (patch_binding.operation_id != operation_id or patch_binding.operation_generation != 1 or
+        patch_binding.patch_ref != patch_ref or
+        !binding.eql(binding.PatchIntent, patch_binding.intent_digest, patch_descriptor))
     {
         return error.InvalidPatchPermissionBinding;
     }
-    if ((authorization.allowed and binding.decision != .allow) or
-        (!authorization.allowed and binding.decision != .deny))
+    if ((authorization.allowed and patch_binding.decision != .allow) or
+        (!authorization.allowed and patch_binding.decision != .deny))
     {
         return error.InvalidPatchHistory;
     }
-    if (binding.decision == .allow) {
+    if (patch_binding.decision == .allow) {
         var patch_buffer: [patch_tool.max_patch_size]u8 = undefined;
         const patch = try readBoundedBlob(session, patch_ref, &patch_buffer);
         const target_path = try patch_tool.validateStructure(patch);
         const expected: patch_tool.Validation = .{
+            .workspace_path = workspace_path,
             .target_path = target_path,
-            .patch_digest = binding.patch_digest,
-            .preimage_digest = binding.preimage_digest,
-            .workspace_digest = binding.workspace_digest,
-            .preimage_size = binding.preimage_size,
-            .preimage_inode = @intCast(binding.preimage_inode),
+            .patch_digest = patch_binding.patch_digest,
+            .intent_digest = patch_binding.intent_digest,
+            .preimage_digest = patch_binding.preimage_digest,
+            .postimage_digest = patch_binding.postimage_digest,
+            .workspace_digest = patch_binding.workspace_digest,
+            .preimage_size = patch_binding.preimage_size,
+            .preimage_inode = @intCast(patch_binding.preimage_inode),
         };
-        const observed = patch_tool.validate(allocator, session.io, workspace_path, patch) catch null;
+        const observed = patch_tool.validate(session.io, workspace_path, patch, .{
+            .operation_id = operation_id,
+            .operation_generation = 1,
+            .patch_ref = patch_ref,
+        }) catch null;
         if (observed) |current| {
             if (patch_tool.sameWorkspace(expected, current)) return .approved;
         }
-        const observed_digest = if (observed) |current| current.workspace_digest else 1;
+        const observed_digest: ?binding.WorkspaceState = if (observed) |current|
+            current.workspace_digest
+        else
+            null;
         try persistPatchPreflightResult(
             session,
             token,
@@ -1582,9 +1652,9 @@ fn reconcilePatch(
             operation_id,
             patch_ref,
             result_ref,
-            validated.descriptor_digest,
+            patch_descriptor,
             .stale,
-            binding.workspace_digest,
+            patch_binding.workspace_digest,
             observed_digest,
         );
         return .ready;
@@ -1597,10 +1667,10 @@ fn reconcilePatch(
         operation_id,
         patch_ref,
         result_ref,
-        validated.descriptor_digest,
+        patch_descriptor,
         .denied,
-        binding.workspace_digest,
-        0,
+        patch_binding.workspace_digest,
+        null,
     );
     return .ready;
 }
@@ -1612,7 +1682,6 @@ const ToolResult = struct {
     operation_generation: u32,
     attempt_id: u64,
     ownership_epoch: u64,
-    descriptor_digest: u64,
     result: u64,
 };
 
@@ -1624,15 +1693,15 @@ fn persistPatchPreflightResult(
     operation_id: u64,
     patch_ref: u64,
     result_ref: u64,
-    descriptor_digest: u64,
+    descriptor_digest: binding.PatchIntent,
     status: patch_tool.ResultStatus,
-    expected_workspace_digest: u64,
-    observed_workspace_digest: u64,
+    expected_workspace_digest: binding.WorkspaceState,
+    observed_workspace_digest: ?binding.WorkspaceState,
 ) !void {
     var result_bytes: [patch_tool.result_size]u8 = undefined;
     try patch_tool.encodeResult(&result_bytes, .{
         .status = status,
-        .patch_digest = descriptor_digest,
+        .intent_digest = descriptor_digest,
         .expected_workspace_digest = expected_workspace_digest,
         .observed_workspace_digest = observed_workspace_digest,
     });
@@ -1657,7 +1726,6 @@ fn persistPatchPreflightResult(
             .operation_generation = 1,
             .attempt_id = 0,
             .ownership_epoch = token.epoch,
-            .descriptor_digest = descriptor_digest,
             .result = result_ref,
         },
     );
@@ -1671,8 +1739,8 @@ fn reconcileBashResult(
 ) !void {
     const response_ref: u32 = @truncate(result.result);
     if (result.result != ((@as(u64, 1) << 61) | response_ref)) return error.InvalidToolResultReference;
-    const descriptor_ref = (@as(u64, 1) << 62) | response_ref;
-    try reconcileToolResult(session, core, core_state_buffer, descriptor_ref, result);
+    const call_ref = (@as(u64, 1) << 59) | response_ref;
+    try reconcileToolResult(session, core, core_state_buffer, call_ref, result);
 }
 
 fn reconcileToolResult(
@@ -1770,7 +1838,11 @@ fn durableCompletion(
             }
         }
         const envelope = matched_envelope orelse return error.SessionOperationPending;
-        if (try blobDigest(session, envelope.result_ref) != envelope.result_digest) {
+        if (!binding.eql(
+            binding.Result,
+            try blobDigest(session, envelope.result_ref),
+            envelope.result_digest,
+        )) {
             return error.CompletionResultDigestMismatch;
         }
         var evidence_agent = agentContext(session);
@@ -1791,9 +1863,7 @@ fn durableCompletion(
     }
     const accepted = intent orelse return error.InvalidOperationHistory;
     const completed = result.?;
-    if (resultAttemptId(completed) != accepted.attempt_id or
-        completed.result_digest == 0 or completed.result_ref == 0)
-    {
+    if (resultAttemptId(completed) != accepted.attempt_id or completed.result_ref == 0) {
         return error.InvalidOperationHistory;
     }
     return .{
@@ -2169,10 +2239,10 @@ fn storeOrExpectBlob(
 fn blobDigest(
     session: *session_store.Session,
     reference: u64,
-) !u64 {
+) !binding.Result {
     var reader = try session.openBlob(reference);
     defer reader.close();
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var hasher = binding.Hasher(binding.Result).init();
     var window: [4096]u8 = undefined;
     var offset: u64 = 0;
     while (offset < reader.length()) {
@@ -2181,11 +2251,7 @@ fn blobDigest(
         hasher.update(bytes);
         offset += bytes.len;
     }
-    var digest_bytes: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    hasher.final(&digest_bytes);
-    var digest = std.mem.readInt(u64, digest_bytes[0..8], .little);
-    if (digest == 0) digest = 1;
-    return digest;
+    return hasher.final();
 }
 
 fn allocateOperationIds(io: std.Io, session: *const session_store.Session) !OperationIds {

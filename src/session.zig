@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const blob_store = @import("blob_store.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const core_state = @import("core_state.zig");
@@ -574,6 +575,16 @@ pub const Session = struct {
             return error.InvalidSessionMetadata;
         }
         try validateWorkspace(io, config.workspace_path);
+        var canonical_workspace_buffer: [workspace_path_capacity]u8 = undefined;
+        const canonical_workspace_length = try std.Io.Dir.cwd().realPathFile(
+            io,
+            config.workspace_path,
+            &canonical_workspace_buffer,
+        );
+        if (canonical_workspace_length == 0 or canonical_workspace_length > workspace_path_capacity) {
+            return error.InvalidSessionMetadata;
+        }
+        const canonical_workspace = canonical_workspace_buffer[0..canonical_workspace_length];
 
         var name_buffer: [16]u8 = undefined;
         const name = sessionName(config.identities.session_id, &name_buffer);
@@ -628,9 +639,9 @@ pub const Session = struct {
             .task_id = config.identities.task_id,
             .branch_id = config.identities.branch_id,
             .ownership_epoch = 1,
-            .workspace_path_length = @intCast(config.workspace_path.len),
+            .workspace_path_length = @intCast(canonical_workspace.len),
         };
-        @memcpy(created.workspace_path[0..config.workspace_path.len], config.workspace_path);
+        @memcpy(created.workspace_path[0..canonical_workspace.len], canonical_workspace);
         created.resident = try created.resident.applyingLedger(initial, created.agent_id, created.ownership_epoch);
 
         try storage.createSessionWithMetadata(.{
@@ -640,7 +651,7 @@ pub const Session = struct {
                 .task_id = config.identities.task_id,
                 .branch_id = config.identities.branch_id,
             },
-            .workspace_path = config.workspace_path,
+            .workspace_path = canonical_workspace,
             .model = config.model,
         }, initial);
         return created;
@@ -1097,6 +1108,7 @@ pub const Session = struct {
         envelope: completion_inbox.Envelope,
     ) !void {
         try self.ensureUsable();
+        try completion_inbox.validate(envelope);
         if (envelope.session_id != self.session_id or envelope.agent_id != self.agent_id) {
             return error.CompletionIdentityMismatch;
         }
@@ -1324,6 +1336,29 @@ const TestLayout = struct {
     }
 };
 
+fn testDescriptor(label: []const u8) binding.Descriptor {
+    return .{ .model = binding.hash(binding.ModelDescriptor, label) };
+}
+
+fn testResultDigest(label: []const u8) binding.Result {
+    return binding.hash(binding.Result, label);
+}
+
+fn testReboundEnvelope(envelope: completion_inbox.Envelope) completion_inbox.Envelope {
+    return completion_inbox.bind(.{
+        .kind = envelope.kind,
+        .session_id = envelope.session_id,
+        .ownership_epoch = envelope.ownership_epoch,
+        .agent_id = envelope.agent_id,
+        .agent_generation = envelope.agent_generation,
+        .operation_id = envelope.operation_id,
+        .operation_generation = envelope.operation_generation,
+        .attempt_id = envelope.attempt_id,
+        .result_ref = envelope.result_ref,
+        .result_digest = envelope.result_digest,
+    });
+}
+
 test "create and exact resume preserve distinct identities and one owner" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
@@ -1347,7 +1382,16 @@ test "create and exact resume preserve distinct identities and one owner" {
     var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 10);
     defer restored.session.close();
     try std.testing.expectEqual(@as(u64, 2), restored.session.ownership_epoch);
-    try std.testing.expectEqualStrings(layout.workspacePath(), restored.session.workspacePath());
+    var expected_workspace: [workspace_path_capacity]u8 = undefined;
+    const expected_workspace_length = try std.Io.Dir.cwd().realPathFile(
+        io,
+        layout.workspacePath(),
+        &expected_workspace,
+    );
+    try std.testing.expectEqualStrings(
+        expected_workspace[0..expected_workspace_length],
+        restored.session.workspacePath(),
+    );
     try std.testing.expectEqualDeep(Projection{
         .session_id = 10,
         .task_id = 12,
@@ -1380,7 +1424,7 @@ test "future ownership epochs never enter the durable Completion Inbox" {
     defer created.close();
     const token = created.ownerToken();
     try created.storeBlob(99, "future result");
-    try std.testing.expectError(error.FutureCompletionEpoch, created.publishCompletionEvidence(.{
+    try std.testing.expectError(error.FutureCompletionEpoch, created.publishCompletionEvidence(completion_inbox.bind(.{
         .kind = .model,
         .session_id = created.session_id,
         .ownership_epoch = token.epoch + 1,
@@ -1390,11 +1434,11 @@ test "future ownership epochs never enter the durable Completion Inbox" {
         .operation_generation = 1,
         .attempt_id = 101,
         .result_ref = 99,
-        .result_digest = 102,
-    }));
+        .result_digest = testResultDigest("102"),
+    })));
     try std.testing.expectEqual(@as(u64, 0), try layout.storage.completionHead(created.session_id));
 
-    try created.publishCompletionEvidence(.{
+    try created.publishCompletionEvidence(completion_inbox.bind(.{
         .kind = .model,
         .session_id = created.session_id,
         .ownership_epoch = token.epoch,
@@ -1404,8 +1448,8 @@ test "future ownership epochs never enter the durable Completion Inbox" {
         .operation_generation = 1,
         .attempt_id = 101,
         .result_ref = 99,
-        .result_digest = 102,
-    });
+        .result_digest = testResultDigest("102"),
+    }));
     try std.testing.expectEqual(@as(u64, 0), try layout.storage.completionHead(created.session_id));
 }
 
@@ -1428,12 +1472,12 @@ test "fallible Inbox publication is prepared before durable Completion commit" {
         .generation = 1,
     };
     var semantic: session_transition.Transaction = .{ .sequence = 2, .fact_count = 3 };
-    semantic.facts[0] = session_transition.operationSubmitted(operation, 101, 102, .model);
-    semantic.facts[1] = session_transition.attemptAdmitted(operation, 103, 101, 102, .model);
-    semantic.facts[2] = session_transition.attemptAdmitted(operation, 108, 101, 102, .model);
+    semantic.facts[0] = session_transition.operationSubmitted(operation, 101, testDescriptor("102"), .model);
+    semantic.facts[1] = session_transition.attemptAdmitted(operation, 103, 101, testDescriptor("102"), .model);
+    semantic.facts[2] = session_transition.attemptAdmitted(operation, 108, 101, testDescriptor("102"), .model);
     try created.resident.semantic.apply(semantic);
 
-    const existing: completion_inbox.Envelope = .{
+    const existing = completion_inbox.bind(.{
         .kind = .model,
         .session_id = created.session_id,
         .ownership_epoch = token.epoch,
@@ -1443,8 +1487,8 @@ test "fallible Inbox publication is prepared before durable Completion commit" {
         .operation_generation = 1,
         .attempt_id = 103,
         .result_ref = 104,
-        .result_digest = 105,
-    };
+        .result_digest = testResultDigest("105"),
+    });
     _ = try created.resident.inbox.apply(
         &created.resident.semantic,
         existing,
@@ -1460,7 +1504,8 @@ test "fallible Inbox publication is prepared before durable Completion commit" {
 
     var conflicting = existing;
     conflicting.result_ref = 106;
-    conflicting.result_digest = 107;
+    conflicting.result_digest = testResultDigest("107");
+    conflicting = testReboundEnvelope(conflicting);
     try created.storeBlob(conflicting.result_ref, "conflicting result");
     try std.testing.expectError(
         error.InboxSemanticCapacityExceeded,
@@ -1521,7 +1566,7 @@ test "semantic commits reject missing immutable blob references before advancing
             },
             .operation_id = 100,
             .generation = 1,
-        }, 999, 123, .none)},
+        }, 999, testDescriptor("123"), .none)},
         null,
     ));
     try std.testing.expectEqual(@as(u64, 1), created.resident.semantic.last_sequence);
@@ -1541,12 +1586,12 @@ test "irrelevant inbox records cannot displace admitted Attempt evidence" {
     };
     var semantic: SemanticIndex = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    admission.facts[0] = session_transition.operationSubmitted(operation, 11, 12, .none);
-    admission.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, 12, .model);
+    admission.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
+    admission.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, testDescriptor("12"), .model);
     try semantic.apply(admission);
 
     var inbox: InboxIndex = .{};
-    const relevant: completion_inbox.Envelope = .{
+    const relevant = completion_inbox.bind(.{
         .kind = .model,
         .session_id = 1,
         .ownership_epoch = 1,
@@ -1556,23 +1601,23 @@ test "irrelevant inbox records cannot displace admitted Attempt evidence" {
         .operation_generation = 1,
         .attempt_id = 13,
         .result_ref = 14,
-        .result_digest = 15,
-    };
+        .result_digest = testResultDigest("15"),
+    });
     var misrouted = relevant;
     misrouted.session_id = 99;
     misrouted.result_ref = 98;
-    _ = try inbox.apply(&semantic, misrouted, 1, 1, 1);
+    _ = try inbox.apply(&semantic, testReboundEnvelope(misrouted), 1, 1, 1);
     _ = try inbox.apply(&semantic, relevant, 1, 1, 1);
     for (0..16) |index| {
         var irrelevant = relevant;
         irrelevant.operation_id = 100 + index;
         irrelevant.attempt_id = 200 + index;
-        _ = try inbox.apply(&semantic, irrelevant, 1, 1, 1);
+        _ = try inbox.apply(&semantic, testReboundEnvelope(irrelevant), 1, 1, 1);
     }
     var future = relevant;
     future.ownership_epoch = 2;
     future.result_ref = 99;
-    _ = try inbox.apply(&semantic, future, 1, 1, 1);
+    _ = try inbox.apply(&semantic, testReboundEnvelope(future), 1, 1, 1);
     try std.testing.expectEqualDeep(relevant, inbox.entries[0].?);
 }
 
@@ -1589,15 +1634,15 @@ test "late evidence for an earlier model Attempt survives a later admission" {
     };
     var semantic: SemanticIndex = .{};
     var first: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    first.facts[0] = session_transition.operationSubmitted(operation, 11, 12, .none);
-    first.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, 12, .model);
+    first.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
+    first.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, testDescriptor("12"), .model);
     try semantic.apply(first);
     var retry: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    retry.facts[0] = session_transition.attemptAdmitted(operation, 14, 11, 12, .model);
+    retry.facts[0] = session_transition.attemptAdmitted(operation, 14, 11, testDescriptor("12"), .model);
     try semantic.apply(retry);
 
     var inbox: InboxIndex = .{};
-    const late: completion_inbox.Envelope = .{
+    const late = completion_inbox.bind(.{
         .kind = .model,
         .session_id = 1,
         .ownership_epoch = 1,
@@ -1607,8 +1652,8 @@ test "late evidence for an earlier model Attempt survives a later admission" {
         .operation_generation = 1,
         .attempt_id = 13,
         .result_ref = 15,
-        .result_digest = 16,
-    };
+        .result_digest = testResultDigest("16"),
+    });
     _ = try inbox.apply(&semantic, late, 1, 1, 1);
     try std.testing.expectEqual(@as(u8, 2), semantic.model.attempt_count);
     try std.testing.expectEqualDeep(late, inbox.entries[0].?);
@@ -1627,11 +1672,11 @@ test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
     };
     var semantic: SemanticIndex = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    admission.facts[0] = session_transition.operationSubmitted(operation, 11, 12, .none);
-    admission.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, 12, .model);
+    admission.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
+    admission.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, testDescriptor("12"), .model);
     try semantic.apply(admission);
     var inbox: InboxIndex = .{};
-    const first: completion_inbox.Envelope = .{
+    const first = completion_inbox.bind(.{
         .kind = .model,
         .session_id = 1,
         .ownership_epoch = 1,
@@ -1641,13 +1686,13 @@ test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
         .operation_generation = 1,
         .attempt_id = 13,
         .result_ref = 14,
-        .result_digest = 15,
-    };
+        .result_digest = testResultDigest("15"),
+    });
     _ = try inbox.apply(&semantic, first, 1, 1, 1);
     var conflicting = first;
     conflicting.result_ref = 16;
-    conflicting.result_digest = 17;
-    _ = try inbox.apply(&semantic, conflicting, 1, 1, 1);
+    conflicting.result_digest = testResultDigest("17");
+    _ = try inbox.apply(&semantic, testReboundEnvelope(conflicting), 1, 1, 1);
     try std.testing.expect(inbox.entries[0] == null);
     try std.testing.expect(inbox.ambiguous[0].?.matches(first));
 }
@@ -1665,21 +1710,21 @@ test "failed recovered frame leaves the published semantic index unchanged" {
     };
     var index: SemanticIndex = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
-    admission.facts[0] = session_transition.operationSubmitted(operation, 11, 12, .none);
+    admission.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
     try index.apply(admission);
 
     var invalid: session_transition.Transaction = .{ .sequence = 2, .fact_count = 2 };
     invalid.facts[0] = session_transition.authorization(.{
         .operation = operation,
         .permission_ref = 11,
-        .descriptor_digest = 12,
+        .descriptor_digest = testDescriptor("12"),
         .allowed = true,
     });
     invalid.facts[1] = session_transition.attemptAdmitted(.{
         .agent = agent,
         .operation_id = 99,
         .generation = 1,
-    }, 13, 11, 12, .model);
+    }, 13, 11, testDescriptor("12"), .model);
     var prepared = index;
     try std.testing.expectError(error.InvalidOperationHistory, prepared.apply(invalid));
     try std.testing.expectEqual(@as(u64, 1), index.last_sequence);
