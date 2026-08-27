@@ -1,0 +1,21 @@
+# Separate model-tool data from execution authority
+
+OnePage uses one provider-neutral Conversation and model-tool data contract. Conversation distinguishes
+user text, assistant text, tool calls, tool results, and context checkpoints. A bounded immutable Tool
+Catalog gives each model-visible Tool Definition a stable Tool Key, provider-facing metadata, bounded
+input JSON Schema, and result-content contract. Provider adapters translate this semantic request at
+the edge and return one complete assistant text, generic tool call, or typed failure.
+
+The exact catalog, model contract, instructions, Model Context, and semantic request digest are bound
+to a model Operation. Replacement Attempts under that Operation dispatch identical semantic request
+bytes. Changing the catalog creates a new Operation rather than changing a retry.
+
+This generic data shape grants no execution authority. V1 Harness admission maps allowed Tool Keys
+through a closed switch to the `bash` and `apply_patch` Actions. Their validation, permissions,
+Authorization, Attempt admission, recovery, and adapters remain distinct. Unknown or unbound keys fail
+closed. OnePage does not add runtime tool registration, MCP execution, plugins, or a generic effect
+executor before a concrete product use requires them.
+
+The split is necessary now because both the deterministic fixture and Codex Provider must
+consume the same request without understanding tool-specific durable encodings. It preserves a small
+provider seam while retaining ADR-0005's closed V1 product surface and ADR-0010's simplicity rule.

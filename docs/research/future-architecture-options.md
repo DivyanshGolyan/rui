@@ -13,27 +13,27 @@ Primary implementations reviewed:
 
 ## Decision summary
 
-1. Remove the artificial 64 KiB slot filler. Make the actual compile-time slot size the reservation, enforce a 32 KiB V1 ceiling, and report actual and high-water use.
-2. Do not make tools plugins in V1. Keep `bash` and `apply_patch` as closed typed capabilities behind the existing adapter boundary. If external tools become a real requirement, introduce a narrow definition-and-registry contract then.
+1. Reserve the actual compile-time slot size, remove storage without a production user, enforce a 32 KiB V1 ceiling, and report actual and high-water use.
+2. Do not make tools plugins in V1. Use a generic model-visible Tool Definition/Call shape now so providers share one protocol, while keeping execution closed to the typed `bash` and `apply_patch` Actions. If external execution becomes a real requirement, design its admission and lifecycle then.
 3. Do not make Cloudflare Durable Objects a V1 target. Keep Core, storage semantics, and effects separated well enough that a later Workerd profile can substitute implementations without changing Session meaning.
 4. Treat RLM support as a strong post-V1 direction. OnePage's durable out-of-core state and suspendable effects fit RLM execution unusually well, but recursive calls and a code environment are real new product capabilities.
 5. Revisit the name separately. Removing the one-page-sized slot removes the name's literal technical explanation; that is a naming fact, not enough evidence by itself to choose a replacement.
 
 ## 1. Exact bounded memory, not a 64 KiB artefact
 
-The current native slot's named fields total 24,736 bytes; the remainder of its 65,536 bytes is reserved filler ([current layout](../../src/core_image.zig)). Wasm no longer ships or supplies the V1 conformance oracle, so the filler has no runtime responsibility.
+The native slot now reserves its exact 24,704-byte production type rather than a 65,536-byte page ([current layout](../../src/core_image.zig)). A later audit found that its 4 KiB parser scratch and 4 KiB transition scratch have no production reader or writer, so naming those fields does not make them necessary. Wasm no longer ships or supplies a V1 conformance oracle, and neither a historical headline nor possible future use justifies resident reserve.
 
 Ghostty's recent memory work supports removing it. Ghostty did not preserve allocations for a memorable headline. It separated authoritative terminal state from reconstructable working sets, made residency explicit, then discarded or compressed resources only when reconstruction was safe. It also distinguished virtual address reservation from physical residency: cold history can retain address space while releasing physical pages, and hidden surfaces can release a GPU swap chain while preserving terminal state ([history compression](https://github.com/ghostty-org/ghostty/pull/13264), [discard implementation](https://github.com/ghostty-org/ghostty/commit/0fb89f4ffebabd7ea868f75a93f14a41ff65764a), [hidden-surface release](https://github.com/ghostty-org/ghostty/pull/14017)).
 
 The corresponding OnePage rule is:
 
-- reserve `@sizeOf(ActivationSlot) * active_capacity`, without an explicit filler field;
+- reserve `@sizeOf(ActivationSlot) * active_capacity`, without filler or fields lacking a production consumer;
 - fail the build when `@sizeOf(ActivationSlot) > 32 * 1024` in V1;
 - preserve fixed-capacity scratch and allocator-free Core activation;
 - report slot size, occupied high-water bytes, pool reservation, SQLite memory, adapter buffers, subprocesses, and RSS separately;
 - measure active, waiting, restored, and dormant states rather than presenting one number as total agent memory.
 
-A 32 KiB ceiling is a guardrail, not a target allocation. The current approximately 24 KiB layout should remain exact unless measurements justify shrinking parser, response, or transition scratch. Conversely, exceeding 32 KiB should require an explicit architectural decision rather than hidden heap fallback.
+A 32 KiB ceiling is a guardrail, not a target allocation. The unused parser and transition reserves should be removed now; future scratch should arrive with the production path that consumes it. The remaining response storage should shrink only when a simpler ownership or incremental-parsing design proves that Core no longer needs the complete bounded response. Conversely, exceeding 32 KiB should require an explicit architectural decision rather than hidden heap fallback.
 
 Ghostty's virtual-memory technique is not needed for this change. A host-owned reserved mapping with discard/recommit is worth investigating only if a measured large configured pool retains unwanted physical pages after slot release. Virtual size, RSS, physical footprint, and compressed memory must remain distinct evidence.
 
@@ -45,7 +45,9 @@ Its narrower tool contract is useful prior art. A tool registers schema and exec
 
 OnePage should copy the separation, not the meta-framework:
 
-- Core continues to emit a closed typed Action.
+- Conversation and Provider requests use generic Tool Keys, definitions, calls, and results rather than tool-specific protocol tags.
+- The exact bounded Tool Catalog is immutable for one model Operation and is not an executable registry.
+- Harness maps only admitted Tool Keys through a closed switch to typed V1 Actions.
 - Harness continues to own descriptor validation, Authorization, Attempt admission, durable ordering, and recovery.
 - A leaf tool adapter receives only an immutable admitted Attempt and returns typed evidence.
 - Tool selection or visibility never grants authority.
@@ -53,7 +55,7 @@ OnePage should copy the separation, not the meta-framework:
 
 V1 has two tools and no external extension author. A dynamic registry, discovery format, unload lifecycle, dependency injection graph, event waterfall, configuration overlay, or per-agent shadowing would add failure modes without a second consumer. Calling the current adapters “plugins” would also imply packaging and lifecycle promises that do not exist.
 
-If post-V1 demand establishes independently distributed tools, the smallest credible extension is a host-resolved `ToolDefinition`: stable kind/name, canonical input and output contracts, capability requirements, and one executor. Definitions resolve once into a fixed host capability table. Approval and durable recovery stay outside executors. Package discovery, compatibility, isolation, and unload should be designed only when their actual deployment model is known.
+If post-V1 demand establishes independently distributed tools, the model-visible Tool Definition already exists. The new work would be a host-resolved execution binding with capability requirements and one executor. Approval and durable recovery stay outside executors. Package discovery, compatibility, isolation, and unload should be designed only when their actual deployment model is known.
 
 ## 3. Cloudflare Durable Objects are a possible port, not an easy deployment
 
@@ -110,11 +112,11 @@ The missing pieces are substantial and post-V1:
 
 Persistent REPL variables must not silently become Session authority. Either the environment is ephemeral and reconstructable from durable context and code, or its checkpoint is an explicit external-effect Result with compatibility and size limits. OnePage should also retain a depth-independent durable topology even if a product policy caps depth for cost or quality.
 
-V1 should not add delegation, a REPL, or an RLM API. It should only avoid closing the path: keep immutable content range-addressable, retain typed provider/tool Attempts, keep Core independent of a resident call stack, and let future capacities be host-owned.
+V1 adds caller-directed keyed agent Jobs for workflows, but not model-directed delegation, a REPL, or an RLM API. It should otherwise avoid closing the path: keep immutable content range-addressable, retain typed provider/tool Attempts, keep Core independent of a resident call stack, and let future capacities be host-owned.
 
 ## 5. Naming consequence
 
-“OnePage” currently has a literal explanation: one active Core occupies one 64 KiB page-sized slot. Removing the filler leaves a better engineering contract—one exact bounded activation workspace—but removes that literal page size. The name may still work as a metaphor for a small working set, but the architecture should not preserve waste to justify it.
+“OnePage” historically had a literal explanation: one active Core occupied one 64 KiB page-sized slot. The exact bounded activation workspace is a better engineering contract but no longer gives the name that literal page size. The name may still work as a metaphor for a small working set, but the architecture must not preserve unused storage to justify it.
 
 Whether to rename depends on product positioning, discoverability, and audience, none of which these implementation sources answer. Decide it after the memory contract is rewritten, and independently of the Cloudflare and RLM options.
 
