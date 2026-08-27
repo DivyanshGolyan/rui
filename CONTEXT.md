@@ -67,7 +67,7 @@ The explicit bounded strict-data value fulfilled by a workflow's default export,
 _Avoid_: Job Output, Result, Final Answer, terminal Outcome
 
 **Workflow Data Value**:
-A bounded null, Boolean, string, array, string-keyed plain object, or finite IEEE-754 number shared by workflow arguments, inputs, schema-backed Job Outputs, and Workflow Output. Integral numbers must be safe integers; negative zero canonicalizes to zero. `undefined`, non-finite numbers, unsafe integers, bigint, symbols, functions, accessors, proxies, cycles, host objects, and unsupported prototypes are excluded.
+A bounded null, Boolean, string, array, string-keyed plain object, or finite IEEE-754 number shared by workflow arguments, inputs, schema-backed Job Outputs, and Workflow Output. Strings contain only Unicode scalar text: valid surrogate pairs encode as standard UTF-8 scalars, and lone UTF-16 surrogates are rejected without replacement. Integral numbers must be safe integers; negative zero canonicalizes to zero. `undefined`, non-finite numbers, unsafe integers, bigint, symbols, functions, accessors, proxies, cycles, host objects, lone surrogates, and unsupported prototypes are excluded.
 _Avoid_: Conversation, arbitrary JavaScript object, provider wire value
 
 **Agent Profile**:

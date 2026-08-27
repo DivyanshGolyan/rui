@@ -35,10 +35,11 @@ ordinary Session. V1 exposes no model-visible Agent tool.
 The evaluator uses a raw allowlisted realm. It has no filesystem, process, network, environment,
 credential, wall-clock, randomness, timer, general module-loading, or bytecode capability. Source is
 read, bounded, hashed, stored, and supplied by the Host; resume never rereads the path. The bridge
-accepts only bounded null, Boolean, string, array, string-keyed plain object, and finite IEEE-754
-number values. Integral numbers must be safe integers and negative zero canonicalizes to zero. It
+accepts only bounded null, Boolean, Unicode-scalar string, array, string-keyed plain object, and finite IEEE-754
+number values. Valid UTF-16 surrogate pairs encode as their standard UTF-8 scalars; lone surrogates
+are rejected without replacement. Integral numbers must be safe integers and negative zero canonicalizes to zero. It
 rejects `undefined`, functions, symbols, bigint, accessors, proxies, cycles, host objects, unsupported
-prototypes, non-finite numbers, unsafe integers, and reentrant conversion. The root must explicitly return one valid value;
+prototypes, lone surrogates, non-finite numbers, unsafe integers, and reentrant conversion. The root must explicitly return one valid value;
 the Host commits it as Workflow Output before rendering, while an invalid return fails as
 `WorkflowOutputInvalid`.
 
