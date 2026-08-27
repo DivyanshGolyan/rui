@@ -156,6 +156,12 @@ const read_transition_sql: [:0]const u8 =
     \\FROM session_transition
     \\WHERE session_id = ?1 AND sequence = ?2
 ;
+const find_completed_attempt_sql: [:0]const u8 =
+    \\SELECT sequence, payload, record_digest
+    \\FROM session_transition
+    \\WHERE session_id = ?1
+    \\ORDER BY sequence
+;
 const read_conversation_sql: [:0]const u8 =
     \\SELECT parent_id, kind, content_ref, committed_by_sequence
     \\FROM conversation_entry WHERE session_id = ?1 AND entry_id = ?2
@@ -177,6 +183,14 @@ pub const StoredCompletion = struct {
     inbox_id: u64,
     envelope: completion_inbox.Envelope,
     consumed_by_sequence: ?u64,
+};
+
+/// The exact admitted Attempt and the first terminal Result transaction for
+/// its Operation. This is reconstructed from the authoritative bounded ledger
+/// rather than retained as an unbounded resident history.
+pub const CompletedAttempt = struct {
+    attempt: session_transition.AttemptRecord,
+    terminal_result_sequence: u64,
 };
 
 pub const StoredConversationEntry = struct {
@@ -934,6 +948,90 @@ pub const StorageOwner = struct {
             return error.PayloadDigestMismatch;
         }
         if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+    }
+
+    pub fn findCompletedAttempt(
+        self: *StorageOwner,
+        session_id: u64,
+        operation_id: u64,
+        operation_generation: u32,
+        attempt_id: u64,
+    ) !?CompletedAttempt {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
+        try self.ensureOpen();
+        if (session_id == 0 or operation_id == 0 or operation_generation == 0 or attempt_id == 0) {
+            return error.InvalidIdentity;
+        }
+
+        const statement = try self.prepare(find_completed_attempt_sql);
+        defer finalize(statement);
+        var encoded_session_id: [8]u8 = undefined;
+        try bindIdentity(statement, 1, session_id, &encoded_session_id);
+
+        var expected_sequence: u64 = 1;
+        var admitted: ?session_transition.AttemptRecord = null;
+        var terminal_result_sequence: ?u64 = null;
+        while (true) {
+            const step = c.sqlite3_step(statement);
+            if (step == c.SQLITE_DONE) break;
+            if (step != c.SQLITE_ROW) return mapSqliteError(step);
+            const sequence = try nonnegative(c.sqlite3_column_int64(statement, 0));
+            if (sequence != expected_sequence or sequence > session_transition.max_transitions) {
+                return error.CorruptHostStore;
+            }
+            expected_sequence += 1;
+
+            const payload_length = c.sqlite3_column_bytes(statement, 1);
+            const digest_length = c.sqlite3_column_bytes(statement, 2);
+            if (payload_length <= 0 or payload_length > max_transition_payload or digest_length != 32) {
+                return error.CorruptHostStore;
+            }
+            const payload_pointer = c.sqlite3_column_blob(statement, 1) orelse
+                return error.CorruptHostStore;
+            const digest_pointer = c.sqlite3_column_blob(statement, 2) orelse
+                return error.CorruptHostStore;
+            const payload_bytes: [*]const u8 = @ptrCast(payload_pointer);
+            const payload = payload_bytes[0..@intCast(payload_length)];
+            const digest_bytes: [*]const u8 = @ptrCast(digest_pointer);
+            var stored_digest: binding.LedgerRecord = undefined;
+            @memcpy(&stored_digest.bytes, digest_bytes[0..32]);
+            if (!binding.eql(
+                binding.LedgerRecord,
+                recordDigest(session_id, sequence, payload),
+                stored_digest,
+            )) return error.PayloadDigestMismatch;
+
+            const transaction = try session_transition.decode(sequence, payload);
+            for (transaction.factSlice()) |fact| switch (fact) {
+                .attempt_admitted => |attempt| {
+                    if (attempt.operation.operation_id != operation_id or
+                        attempt.operation.generation != operation_generation or
+                        attempt.attempt_id != attempt_id)
+                    {
+                        continue;
+                    }
+                    if (admitted) |existing| {
+                        if (!std.meta.eql(existing, attempt)) return error.ConflictingLedgerFacts;
+                    } else admitted = attempt;
+                },
+                .result => |result| {
+                    if (terminal_result_sequence == null and
+                        result.operation.operation_id == operation_id and
+                        result.operation.generation == operation_generation)
+                    {
+                        terminal_result_sequence = sequence;
+                    }
+                },
+                else => {},
+            };
+        }
+        const attempt = admitted orelse return null;
+        const terminal_sequence = terminal_result_sequence orelse return null;
+        return .{
+            .attempt = attempt,
+            .terminal_result_sequence = terminal_sequence,
+        };
     }
 
     pub fn readConversationEntry(
