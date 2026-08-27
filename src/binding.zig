@@ -14,7 +14,6 @@ pub const ModelDescriptor = Semantic("model-descriptor");
 pub const BashDescriptor = Semantic("bash-descriptor");
 pub const PatchDescriptor = Semantic("patch-descriptor");
 pub const PatchIntent = Semantic("patch-intent");
-pub const WorkspaceState = Semantic("workspace-state");
 pub const Preimage = Semantic("preimage");
 pub const Postimage = Semantic("postimage");
 pub const Result = Semantic("result");
@@ -105,7 +104,6 @@ test "authoritative bindings use stable domain-separated SHA-256 vectors" {
         hash(BashDescriptor, "echo onepage").bytes,
         hash(PatchDescriptor, "echo onepage").bytes,
         hash(PatchIntent, "echo onepage").bytes,
-        hash(WorkspaceState, "echo onepage").bytes,
         hash(Preimage, "echo onepage").bytes,
         hash(Postimage, "echo onepage").bytes,
         hash(Result, "echo onepage").bytes,
@@ -118,7 +116,6 @@ test "authoritative bindings use stable domain-separated SHA-256 vectors" {
         "7fe7f013c5aec0fc2ab55221722c2fce0fd81d63a83498c377ccf32578c40301",
         "cdf6070e6871f050d023a9ff0059edc7fae700671d3d719ff37885a1ba7decf6",
         "e43caae38f8e52b4db1f4b52dca021c891ed2723344c13e61d58cf67be65e88d",
-        "585cd773912550ec4c6b581469dff9cf55f6960441d162355cc102901d944892",
         "68e07bc3ac475f4ea5bbb937ef6a5fe0359e17d7af5ffd2d88ddd99d6490cab3",
         "7771002160873aa19d8185d89e1ccada1512959b376fc555910d0a435601602b",
         "5dcca21a410451185e1161b6b2895b8624125c2c9b07e5ecbd759c888497bae4",

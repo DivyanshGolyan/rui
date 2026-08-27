@@ -196,6 +196,18 @@ fn addTestGraph(
     run_host_lock.addFileArg(b.path("src/host_runtime_lock_integration.sh"));
     run_host_lock.addArtifactArg(host_lock_fixture);
     parent.dependOn(&run_host_lock.step);
+
+    const patch_recovery_fixture = addNativeExecutable(
+        b,
+        "onepage-patch-recovery-fixture",
+        "src/patch_recovery_fixture.zig",
+        native_target,
+        optimize,
+    );
+    const run_patch_recovery = b.addSystemCommand(&.{"sh"});
+    run_patch_recovery.addFileArg(b.path("src/patch_recovery_integration.sh"));
+    run_patch_recovery.addArtifactArg(patch_recovery_fixture);
+    parent.dependOn(&run_patch_recovery.step);
 }
 
 fn addTestRun(
@@ -271,6 +283,7 @@ fn usesHostStore(root: []const u8) bool {
         "src/host_runtime_lock_fixture.zig",
         "src/host_store_test.zig",
         "src/model_operation.zig",
+        "src/patch_recovery_fixture.zig",
         "src/session.zig",
     };
     for (roots) |candidate| {

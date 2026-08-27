@@ -54,10 +54,21 @@ Bash.
 zig build fixture-bash -Doptimize=ReleaseSmall
 ```
 
-The patch-permission slice validates one exact, tracked, regular-file diff, binds its preimage and
-permission evidence durably, and can regenerate an approval-required prompt after a restart. The
-deterministic fixture denies the call, gives the typed result to turn two, and leaves the worktree
-unchanged.
+The patch slice prepares one immutable durable Patch Intent before Authorization. That Intent binds
+the canonical Workspace and target, tracked single-link regular-file constraints and mode, exact
+patch, preimage, and expected postimage. Approval Required, Authorization, Attempt, and Result all
+reference it; no parallel permission binding or derived Workspace fingerprint exists. Git parses and
+applies the patch in a bounded private copy; `patch_tool` writes that exact postimage through the
+authorized file handle and observes preimage, postimage, divergence, or invalid target.
+Lifecycle commits Authorization and Attempt before `patch_tool` may mutate, publishes adapter evidence through
+the Completion Inbox, and advances Conversation from the first terminal Result.
+
+Fresh-process fixtures terminate after Attempt admission and after Git mutation. Recovery applies an
+authorized exact preimage, accepts the exact expected postimage without reapplication, and publishes
+an indeterminate Result for divergence without overwriting it. Replacement, dirty overlap, symlink
+substitution, missing or untracked files, special files, and wrong mode fail closed. V1 assumes the
+target remains quiescent from Authorization until Result commit; it does not provide atomic
+compare-and-swap protection against an uncooperative editor.
 
 V1 keeps only `bash` and `apply_patch`. The default `ask` permission mode prompts for every exact
 tool call. An explicit invocation-scoped bypass mode will admit validated calls without prompting;
@@ -75,14 +86,14 @@ Completion Inbox identity, and the transaction that publishes a terminal Result 
 immutable evidence. Only pending relevant evidence consumes the enforced 4,096-row per-Session Inbox bound; consumed evidence is excluded from recovery. Per-Session WAL,
 Inbox, Conversation, checkpoint, and manifest files are no longer production storage paths.
 
-Implemented authoritative descriptor, Patch Intent, preimage, expected-postimage, Workspace-state,
+Implemented authoritative descriptor, Patch Intent, preimage, expected-postimage,
 Result, Completion, immutable-blob, and ledger-record bytes use distinct versioned SHA-256 binding
 types. Bash persists one descriptor binding its canonical Workspace and working directory, fixed
-environment authority, timeout, command, Operation identity, and generation. Patch validation uses Git
+environment authority, timeout, command, Operation identity, and generation. Patch preparation uses Git
 in a private scratch copy to prepare the expected postimage without mutating the Workspace, then stores
-the complete intent binding before Authorization. Patch preparation admits a target and expected
-postimage of at most 1 MiB each; patch application and reconciliation remain the separate durable effect
-slice. The all-zero value remains valid data; absence is represented separately.
+the complete Intent before Authorization. Preparation, observation, and application each admit at most
+1 MiB of target or expected-postimage work. The all-zero value remains valid data; absence is represented
+separately.
 These unkeyed bindings detect accidental corruption and resist collisions but do not make locally
 rewritable storage tamper-proof.
 
@@ -90,6 +101,7 @@ rewritable storage tamper-proof.
 
 - macOS on Apple Silicon
 - Zig 0.16.0
+- the system Git at `/usr/bin/git`
 
 ## Run the spike
 

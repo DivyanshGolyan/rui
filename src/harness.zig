@@ -377,7 +377,6 @@ const HarnessState = struct {
                 ) catch |err| if (self.settlingControl() != null and switch (err) {
                     error.ToolCallDeferred,
                     error.SessionNeedsModel,
-                    error.PatchExecutionDeferred,
                     error.PatchApprovalRequired,
                     error.BashPossiblyExecuted,
                     => true,
@@ -593,7 +592,6 @@ const HarnessState = struct {
             error.SessionOperationPending => return .{ .state = .cancelling, .more = true },
             error.SessionNeedsModel,
             error.ToolCallDeferred,
-            error.PatchExecutionDeferred,
             error.PatchApprovalRequired,
             error.BashPossiblyExecuted,
             => {},
@@ -665,7 +663,6 @@ const HarnessState = struct {
             error.BashPossiblyExecuted => .{ .indeterminate, .waiting },
             error.SessionNeedsModel,
             error.ToolCallDeferred,
-            error.PatchExecutionDeferred,
             error.CompletionOffered,
             => .{ .outcome, .waiting },
             error.InjectedCrash => return err,
