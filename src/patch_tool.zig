@@ -211,24 +211,21 @@ pub fn descriptorDigest(patch: []const u8) binding_digest.PatchDescriptor {
 }
 
 pub fn validate(
-    allocator: std.mem.Allocator,
     io: std.Io,
     workspace_path: []const u8,
     patch: []const u8,
     action: ActionContext,
 ) !Validation {
-    return validateWithTestHook(allocator, io, workspace_path, patch, action, null);
+    return validateWithTestHook(io, workspace_path, patch, action, null);
 }
 
 fn validateWithTestHook(
-    allocator: std.mem.Allocator,
     io: std.Io,
     workspace_path: []const u8,
     patch: []const u8,
     action: ActionContext,
     test_hook: ?ValidationTestHook,
 ) !Validation {
-    _ = allocator;
     if (action.operation_id == 0 or action.operation_generation == 0 or action.patch_ref == 0) {
         return error.InvalidPatchIntent;
     }
@@ -692,7 +689,7 @@ test "one exact tracked regular-file patch validates without mutation" {
         "@@ -1 +1 @@\n" ++
         "-old\n" ++
         "+new\n";
-    const validated = try validate(std.testing.allocator, io, path, patch, testAction());
+    const validated = try validate(io, path, patch, testAction());
     try std.testing.expectEqualStrings("note.txt", validated.target_path);
     try std.testing.expect(binding_digest.eql(
         binding_digest.PatchDescriptor,
@@ -767,10 +764,10 @@ test "patch preparation bounds both target and expected postimage bytes" {
         if (case.expected_error) |expected_error| {
             try std.testing.expectError(
                 expected_error,
-                validate(std.testing.allocator, io, path, patch, testAction()),
+                validate(io, path, patch, testAction()),
             );
         } else {
-            const validated = try validate(std.testing.allocator, io, path, patch, testAction());
+            const validated = try validate(io, path, patch, testAction());
             try std.testing.expectEqual(max_file_size, validated.preimage_size);
         }
         try expectSizedTestFileUnchanged(tmp.dir, io, "bounded.txt", case.target_size);
@@ -805,7 +802,6 @@ test "patch preparation binds the exact bounded snapshot used by git" {
     try std.testing.expectError(
         error.PreimageChangedDuringValidation,
         validateWithTestHook(
-            std.testing.allocator,
             io,
             path,
             patch,
@@ -850,7 +846,6 @@ test "patch preparation rejects concurrent growth before git sees the snapshot" 
     try std.testing.expectError(
         error.PreimageChangedDuringRead,
         validateWithTestHook(
-            std.testing.allocator,
             io,
             path,
             patch,
@@ -929,7 +924,7 @@ test "applicable control bytes validate but remain exact data" {
         "@@ -1 +1 @@\n" ++
         "-old\x1b[2J\n" ++
         "+new\x1b[2J\n";
-    _ = try validate(std.testing.allocator, io, path, patch, testAction());
+    _ = try validate(io, path, patch, testAction());
     try expectTestFile(tmp.dir, io, "control.txt", "old\x1b[2J\n");
 }
 
@@ -978,16 +973,16 @@ test "symlink target and symlink parent are rejected without changing bytes" {
     const path = path_buffer[0..path_length];
     const target_patch =
         "diff --git a/link.txt b/link.txt\n--- a/link.txt\n+++ b/link.txt\n@@ -1 +1 @@\n-outside\n+changed\n";
-    try std.testing.expectError(error.SymlinkEscape, validate(std.testing.allocator, io, path, target_patch, testAction()));
+    try std.testing.expectError(error.SymlinkEscape, validate(io, path, target_patch, testAction()));
     const hardlink_patch =
         "diff --git a/hard.txt b/hard.txt\n--- a/hard.txt\n+++ b/hard.txt\n@@ -1 +1 @@\n-outside\n+changed\n";
     try std.testing.expectError(
         error.UnsupportedSpecialFile,
-        validate(std.testing.allocator, io, path, hardlink_patch, testAction()),
+        validate(io, path, hardlink_patch, testAction()),
     );
     const parent_patch =
         "diff --git a/linked/note.txt b/linked/note.txt\n--- a/linked/note.txt\n+++ b/linked/note.txt\n@@ -1 +1 @@\n-old\n+changed\n";
-    try std.testing.expectError(error.SymlinkEscape, validate(std.testing.allocator, io, path, parent_patch, testAction()));
+    try std.testing.expectError(error.SymlinkEscape, validate(io, path, parent_patch, testAction()));
     try expectTestFile(tmp.dir, io, "outside.txt", "outside\n");
     try expectTestFile(tmp.dir, io, "real/note.txt", "old\n");
 }

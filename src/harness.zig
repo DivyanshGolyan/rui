@@ -75,21 +75,8 @@ pub const PermissionDecision = struct {
     allow: bool,
 };
 
-pub const Completion = struct {
-    kind: CompletionKind,
-    session_id: u64,
-    ownership_epoch: u64,
-    agent_id: u64,
-    agent_generation: u32,
-    operation_id: u64,
-    operation_generation: u32,
-    attempt_id: u64,
-    result_ref: u64,
-    result_digest: binding.Result,
-    completion_digest: binding.Completion,
-};
-
-pub const CompletionKind = enum { model, bash, apply_patch };
+pub const Completion = completion_inbox.Envelope;
+pub const CompletionKind = completion_inbox.EvidenceKind;
 
 pub const OfferResult = enum {
     accepted,
@@ -384,23 +371,7 @@ const HarnessState = struct {
                     self.lease.allocator,
                     session,
                     &self.core_state_buffer,
-                    .{
-                        .kind = switch (completion.kind) {
-                            .model => .model,
-                            .bash => .bash,
-                            .apply_patch => .apply_patch,
-                        },
-                        .session_id = completion.session_id,
-                        .ownership_epoch = completion.ownership_epoch,
-                        .agent_id = completion.agent_id,
-                        .agent_generation = completion.agent_generation,
-                        .operation_id = completion.operation_id,
-                        .operation_generation = completion.operation_generation,
-                        .attempt_id = completion.attempt_id,
-                        .result_ref = completion.result_ref,
-                        .result_digest = completion.result_digest,
-                        .completion_digest = completion.completion_digest,
-                    },
+                    completion,
                     self.runtimeConfig(),
                     self.config.provider,
                 ) catch |err| if (self.settlingControl() != null and switch (err) {
@@ -759,24 +730,7 @@ const HarnessState = struct {
 
     fn adapterCompletionOffered(context: *anyopaque, evidence: completion_inbox.Envelope) anyerror!void {
         const self: *HarnessState = @ptrCast(@alignCast(context));
-        const completion: Completion = .{
-            .kind = switch (evidence.kind) {
-                .model => .model,
-                .bash => .bash,
-                .apply_patch => .apply_patch,
-            },
-            .session_id = evidence.session_id,
-            .ownership_epoch = evidence.ownership_epoch,
-            .agent_id = evidence.agent_id,
-            .agent_generation = evidence.agent_generation,
-            .operation_id = evidence.operation_id,
-            .operation_generation = evidence.operation_generation,
-            .attempt_id = evidence.attempt_id,
-            .result_ref = evidence.result_ref,
-            .result_digest = evidence.result_digest,
-            .completion_digest = evidence.completion_digest,
-        };
-        switch (self.offer(.{ .completion = completion })) {
+        switch (self.offer(.{ .completion = evidence })) {
             .accepted => {},
             .full => {}, // Durable Inbox evidence preserves a notification that loses live custody.
             else => return error.CompletionOfferRejected,

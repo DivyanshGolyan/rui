@@ -681,7 +681,6 @@ const PatchPermissionOutcome = enum { ready, approved };
 
 fn requestPatchPermission(
     io: std.Io,
-    allocator: std.mem.Allocator,
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
@@ -706,7 +705,7 @@ fn requestPatchPermission(
     const approval_ref = (@as(u64, 1) << 59) | ids.response_ref;
     const permission_ref = (@as(u64, 1) << 58) | ids.response_ref;
     const result_ref = (@as(u64, 1) << 57) | ids.response_ref;
-    const validation = try patch_tool.validate(allocator, io, workspace_path, patch, .{
+    const validation = try patch_tool.validate(io, workspace_path, patch, .{
         .operation_id = tool_operation_id,
         .operation_generation = 1,
         .patch_ref = patch_ref,
@@ -798,7 +797,7 @@ fn requestPatchPermission(
     var status: patch_tool.ResultStatus = .denied;
     var observed_workspace_digest: ?binding.WorkspaceState = null;
     if (allowed) {
-        const observed = patch_tool.validate(allocator, io, workspace_path, patch, .{
+        const observed = patch_tool.validate(io, workspace_path, patch, .{
             .operation_id = tool_operation_id,
             .operation_generation = 1,
             .patch_ref = patch_ref,
@@ -963,7 +962,6 @@ pub fn advanceRestored(
             token,
             &core,
             core_state_buffer,
-            allocator,
             session.workspacePath(),
         )) {
             .indeterminate => return error.BashPossiblyExecuted,
@@ -1001,7 +999,6 @@ pub fn advanceRestored(
                     .apply_patch => {
                         const permission = try requestPatchPermission(
                             io,
-                            allocator,
                             session,
                             token,
                             &core,
@@ -1377,7 +1374,6 @@ fn reconcileToolCall(
     token: session_store.OwnerToken,
     core: *Core,
     core_state_buffer: []u8,
-    allocator: std.mem.Allocator,
     workspace_path: []const u8,
 ) !ToolRecovery {
     return switch ((try core.reducer.response()).tool) {
@@ -1387,7 +1383,6 @@ fn reconcileToolCall(
             token,
             core,
             core_state_buffer,
-            allocator,
             workspace_path,
         ),
         else => error.UnsupportedTool,
@@ -1564,7 +1559,6 @@ fn reconcilePatch(
     token: session_store.OwnerToken,
     core: *Core,
     core_state_buffer: []u8,
-    allocator: std.mem.Allocator,
     workspace_path: []const u8,
 ) !ToolRecovery {
     const operation_observation = try core.reducer.operation();
@@ -1638,7 +1632,7 @@ fn reconcilePatch(
             .preimage_size = patch_binding.preimage_size,
             .preimage_inode = @intCast(patch_binding.preimage_inode),
         };
-        const observed = patch_tool.validate(allocator, session.io, workspace_path, patch, .{
+        const observed = patch_tool.validate(session.io, workspace_path, patch, .{
             .operation_id = operation_id,
             .operation_generation = 1,
             .patch_ref = patch_ref,
