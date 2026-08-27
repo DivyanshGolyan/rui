@@ -41,9 +41,13 @@ deferred explicitly.
   need OnePage policy. Do not wrap a dependency with a generalized framework for one implementation.
 - Keep one owner and one representation for each responsibility. Delete or consolidate duplicated
   protocol state before adding another synchronization path.
-- Add the narrowest complete vertical behavior through existing deep modules. Do not introduce a
-  scheduler, registry, plugin surface, generic tool layer, terminal framework, or maintenance subsystem
-  for a single consumer.
+- Add the narrowest complete vertical behavior through existing deep modules. Provider-neutral model
+  data must not encode the current concrete tool inventory, but do not turn that data contract into a
+  runtime registry, plugin surface, generic effect executor, scheduler, terminal framework, or
+  maintenance subsystem.
+- Keep the native Zig Host Runtime as the sole agent runtime. A workflow evaluator is a disposable
+  caller: it may submit and observe keyed Jobs, but it must not own Sessions, providers, tools,
+  permissions, recovery, or a durable DAG.
 - A change that adds an architectural surface must name the current consumer, ownership boundary,
   resource bound, failure contract, and simpler alternative rejected. Cross-cutting additions require an
   accepted ADR. Missing justification is a standards violation.
@@ -54,6 +58,20 @@ deferred explicitly.
 
 - Give every queue, payload, read, record, retry count, output tail, recovery scan, and `drive` quantum
   an explicit bound.
+- Bound workflow source, arguments, Job count, blocked set, visible Results, JavaScript heap and stack,
+  native bridge arena, protocol bytes, microtasks, diagnostics, evaluation time, and cumulative replay.
+  Destroy the evaluator at every Job barrier; never retain a Promise resolver across durable waits.
+- Keep speculative reserve out of fixed resident structures. Every Activation Slot field and other
+  per-capacity buffer must have a current production reader and writer; add future scratch when its
+  consumer exists.
+- Stream or spool variable content directly into its durable or final bounded owner. Do not retain a
+  complete value and then allocate another complete encoding solely to transfer it between modules.
+- Destroy consumed resource-owning handles. Do not retain full closed objects until host shutdown to
+  make duplicate use appear safe; stale use is a caller error unless a bounded handle table is itself a
+  product requirement.
+- Separate orchestration memory owned by OnePage from workload memory intentionally consumed by a
+  model-requested process. Bound the former, report the latter, and do not introduce a workload memory
+  sandbox merely to improve the harness headline.
 - Reject or backpressure at capacity. Do not use allocator failure or the operating-system OOM killer as
   flow control.
 - Before adding an architectural surface, sketch its maximum resident memory, durable bytes, CPU work,
@@ -62,6 +80,8 @@ deferred explicitly.
 ### Preserve ownership and ordering
 
 - Never reenter Core from a callback. One `drive` quantum completes before another Activation begins.
+- Never deliver a provider, tool, or Job completion into a live workflow evaluation. Evaluations see
+  one immutable run-local Visibility Snapshot and return a complete blocked set before exit.
 - Route external input through `offer` and apply it through `drive`.
 - Treat `offer` acceptance as volatile custody. Only a committed Host Store transaction acknowledges a
   semantic fact.
@@ -71,6 +91,11 @@ deferred explicitly.
   live state. If a platform operation still fails after commit, make the live owner unavailable and
   reconstruct from durable state.
 - Make ownership, generation, identity, and capacity transitions explicit. Stale references fail closed.
+- Treat Active Credit transfer as ownership transfer: one credit has exactly one Harness, admitted
+  Attempt, or closure-handoff owner. Adapters and wake hints never retain a destroyed Harness.
+- Acquire the bounded Workspace Effect Fence before admitting Bash or patch, retain it through
+  terminal-evidence application, and reconstruct it from durable non-terminal effect Attempts before
+  new admission. Never infer that arbitrary Bash is read-only.
 - Let a resource owner retain and validate its own fence. Do not make callers retrieve an ownership token
   from an object merely to pass it back to that object's methods.
 - Serialize acquisition against destruction for top-level owning handles. A retained-child count protects
@@ -104,6 +129,9 @@ deferred explicitly.
   owner.
 - Bind Authorization to the exact immutable Action and Workspace evidence that the user or bypass mode
   authorized.
+- Treat workflow source and JavaScript-to-native conversion as hostile boundaries. Use source only,
+  reject imports and ambient capabilities, reject accessors and proxies without invoking them, and
+  make bridge mutation reentrancy-safe.
 
 ### Make failures explicit
 

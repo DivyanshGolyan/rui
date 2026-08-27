@@ -1,9 +1,18 @@
 # OnePage
 
-A single-host coding-agent architecture in which every active Core borrows one compile-time-bounded
-Activation Slot from a fixed resident pool.
+A single-host coding-agent harness with a programmable workflow caller. One native Zig Host Runtime
+owns every agent Session; each active Core borrows one compile-time-bounded Activation Slot from a
+fixed resident pool.
 
-The production CLI executes a Zig reducer natively and has no embedded language or secondary runtime.
+The current checkout implements the deterministic single-Session lifecycle, SQLite Host Store,
+permissioned Bash and patch execution, and repair fixtures described below. The provider-neutral,
+asynchronous Workflow Run architecture is the planned V1 destination tracked by issues #32–#36; it
+is not yet implemented.
+
+The V1 `onepage run workflow.js` path will evaluate a caller-supplied workflow in a fresh restricted QuickJS-ng
+subprocess. QuickJS is only the caller-side evaluator: it submits and observes keyed durable Jobs and
+is destroyed at each Job barrier. It never owns a Session, provider, tool, permission, or recovery
+decision, and no evaluator remains resident while the workflow waits.
 The target architecture separates compact, canonically encoded Core State from transient
 Activation Slot scratch. Core State is currently 160 bytes; authoritative semantic transactions
 carry it directly. Activation decodes that state into one caller-owned slot containing only named
@@ -21,19 +30,32 @@ but they do not override those documents or accepted ADRs.
 check for implementation work. [ADR-0010](docs/adr/0010-make-simplicity-a-v1-requirement.md)
 makes architectural simplicity a V1 correctness constraint: new surfaces require a current product
 obligation and may not generalize a single consumer.
+[ADR-0012](docs/adr/0012-separate-model-tool-contracts-from-execution.md) keeps the model-visible
+Conversation and tool data provider-neutral while leaving V1 execution closed.
+[ADR-0013](docs/adr/0013-bound-orchestration-memory-not-workload-memory.md) bounds memory owned by
+OnePage while treating memory intentionally used by model-requested processes as separately reported
+workload memory.
+[ADR-0014](docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md) makes workflow control
+reconstructive: exact source and arguments replay against durable keyed Job Outputs in a disposable
+evaluator instead of checkpointing JavaScript continuation state.
 
 The fixed-credit harness spike established a 1.5 KiB-bounded native owner with nonblocking task,
 completion, permission, cancellation, and shutdown admission; durable-before-apply ordering;
 committed projections; bounded drive quanta; and crash/replay tests. Its 32-entry maximum is fixed at
 compile time and does not vary with logical-agent count.
 
-Applications open exactly one SQLite-owning `HostRuntime` per process from a state path and pass only
+The planned V1 lifecycle opens exactly one SQLite-owning `HostRuntime` per process from a state path and passes only
 that runtime to `Harness.open`. It owns the process-wide SQLite allowance, state directory, Activation
 Slot pool, lifetime operating-system lock, SQLite connection, and bounded Storage Owner; lifecycle callers do not assemble or retain those
-mechanics separately. `Harness.open` returns an opaque pointer-stable owner backed by one retained runtime lease. Projections are data-only and
-reopen content through that live Harness rather than retaining internal pointers. Each Session retains exact create and resume identity, durable ownership
+mechanics separately. `Harness.open` returns an opaque pointer-stable owner backed by one retained runtime lease. `Harness.close` consumes and
+destroys that owner; the runtime does not retain complete closed handles. Projections are data-only and
+reopen content through their live Harness rather than retaining internal pointers. Each Session retains exact create and resume identity, durable ownership
 epochs, one replayable resident value reduced from its ordered semantic ledger, and a linear V1 conversation. Dormant Sessions
 retain rows and blob references rather than SQLite connections or resident object graphs.
+
+The memory contract applies to OnePage-owned orchestration resources. Model-requested Bash processes
+may intentionally use arbitrary workload memory; that usage is reported separately rather than constrained
+to preserve the harness budget. OnePage still bounds its own output capture and durable publication path.
 
 The first agent slice now performs one real durable model turn through the product CLI. A fixture
 provider validates the request reconstructed from the conversation, writes a complete response spool,
@@ -76,6 +98,12 @@ V1 keeps only `bash` and `apply_patch`. The default `ask` permission mode prompt
 tool call. An explicit invocation-scoped bypass mode admits validated calls without prompting;
 it does not bypass validation, durability, patch preimage checks, or recovery rules, and resume must
 select it again.
+
+The planned #32 model-facing representation is provider-neutral. Conversation records generic text,
+tool-call, tool-result, and checkpoint entries; each model Operation binds an immutable bounded Tool
+Catalog and stable Tool Keys. Provider adapters translate that house request at the edge. Harness then
+maps only the two admitted V1 keys to concrete Actions, so adding a provider does not change durable
+history and generic model data does not become a runtime plugin or permission system.
 
 ```sh
 zig build fixture-patch-deny -Doptimize=ReleaseSmall
@@ -158,6 +186,9 @@ Source audits that informed the architecture:
 - [`docs/research/sqlite-host-store-practices.md`](docs/research/sqlite-host-store-practices.md)
 - [`docs/research/linting-typechecking-setup.md`](docs/research/linting-typechecking-setup.md)
 - [`docs/research/future-architecture-options.md`](docs/research/future-architecture-options.md)
+- [`docs/research/claude-code-dynamic-workflows.md`](docs/research/claude-code-dynamic-workflows.md)
+- [`docs/research/model-transport-memory-budget.md`](docs/research/model-transport-memory-budget.md)
+- [`docs/research/quickjs-workflow-runtime-consultation.md`](docs/research/quickjs-workflow-runtime-consultation.md)
 
 Historical design records:
 
@@ -180,3 +211,6 @@ Architectural decisions:
 - [`docs/adr/0009-use-one-host-store-with-session-ledgers.md`](docs/adr/0009-use-one-host-store-with-session-ledgers.md)
 - [`docs/adr/0010-make-simplicity-a-v1-requirement.md`](docs/adr/0010-make-simplicity-a-v1-requirement.md)
 - [`docs/adr/0011-size-the-activation-slot-from-bounded-needs.md`](docs/adr/0011-size-the-activation-slot-from-bounded-needs.md)
+- [`docs/adr/0012-separate-model-tool-contracts-from-execution.md`](docs/adr/0012-separate-model-tool-contracts-from-execution.md)
+- [`docs/adr/0013-bound-orchestration-memory-not-workload-memory.md`](docs/adr/0013-bound-orchestration-memory-not-workload-memory.md)
+- [`docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md`](docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md)
