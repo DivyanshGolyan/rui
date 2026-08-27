@@ -17,7 +17,8 @@ pub const HostRuntimeConfig = host_runtime.Config;
 pub const FaultBoundary = lifecycle.FaultBoundary;
 pub const FaultHook = lifecycle.FaultHook;
 pub const default_recovery_quantum: u8 = 32;
-pub const max_recovery_records: usize = session_transition.max_transitions + completion_inbox.max_records;
+pub const max_recovery_records: usize = session_transition.max_transitions +
+    completion_inbox.max_records * (session_transition.max_transitions + 1);
 
 pub const PermissionMode = lifecycle.PermissionMode;
 

@@ -152,14 +152,14 @@ const associate_completion_sql: [:0]const u8 =
     \\  AND session_id IN (SELECT session_id FROM session WHERE agent_id = ?11)
 ;
 const read_transition_sql: [:0]const u8 =
-    \\SELECT payload, record_digest
+    \\SELECT sequence, payload, record_digest
     \\FROM session_transition
     \\WHERE session_id = ?1 AND sequence = ?2
 ;
-const find_completed_attempt_sql: [:0]const u8 =
+const scan_completed_attempt_sql: [:0]const u8 =
     \\SELECT sequence, payload, record_digest
     \\FROM session_transition
-    \\WHERE session_id = ?1
+    \\WHERE session_id = ?1 AND sequence >= ?2 AND sequence <= ?3
     \\ORDER BY sequence
 ;
 const read_conversation_sql: [:0]const u8 =
@@ -170,13 +170,7 @@ const read_conversation_sql: [:0]const u8 =
 pub const StoredTransition = struct {
     session_id: u64,
     sequence: u64,
-    payload: [max_transition_payload]u8,
-    payload_length: u16,
-    record_digest: binding.LedgerRecord,
-
-    pub fn payloadSlice(self: *const StoredTransition) []const u8 {
-        return self.payload[0..self.payload_length];
-    }
+    transaction: session_transition.Transaction,
 };
 
 pub const StoredCompletion = struct {
@@ -191,6 +185,22 @@ pub const StoredCompletion = struct {
 pub const CompletedAttempt = struct {
     attempt: session_transition.AttemptRecord,
     terminal_result_sequence: u64,
+};
+
+pub const CompletedAttemptScan = struct {
+    next_sequence: u64 = 1,
+    attempt: ?session_transition.AttemptRecord = null,
+    terminal_before_attempt: bool = false,
+    completed: ?CompletedAttempt = null,
+    exhausted: bool = false,
+
+    pub fn result(self: CompletedAttemptScan) ?CompletedAttempt {
+        return self.completed;
+    }
+
+    pub fn done(self: CompletedAttemptScan) bool {
+        return self.completed != null or self.exhausted;
+    }
 };
 
 pub const StoredConversationEntry = struct {
@@ -920,118 +930,65 @@ pub const StorageOwner = struct {
         const result = c.sqlite3_step(statement);
         if (result == c.SQLITE_DONE) return error.TransitionNotFound;
         if (result != c.SQLITE_ROW) return mapSqliteError(result);
-
-        const payload_length = c.sqlite3_column_bytes(statement, 0);
-        const digest_length = c.sqlite3_column_bytes(statement, 1);
-        if (payload_length <= 0 or payload_length > max_transition_payload or digest_length != 32) {
-            return error.CorruptHostStore;
-        }
-        const payload_pointer = c.sqlite3_column_blob(statement, 0) orelse {
-            return error.CorruptHostStore;
-        };
-        const digest_pointer = c.sqlite3_column_blob(statement, 1) orelse {
-            return error.CorruptHostStore;
-        };
-        out.* = .{
-            .session_id = session_id,
-            .sequence = sequence,
-            .payload = undefined,
-            .payload_length = @intCast(payload_length),
-            .record_digest = undefined,
-        };
-        const payload_bytes: [*]const u8 = @ptrCast(payload_pointer);
-        @memcpy(out.payload[0..out.payload_length], payload_bytes[0..out.payload_length]);
-        const digest_bytes: [*]const u8 = @ptrCast(digest_pointer);
-        @memcpy(&out.record_digest.bytes, digest_bytes[0..32]);
-        const actual_digest = recordDigest(session_id, sequence, out.payloadSlice());
-        if (!binding.eql(binding.LedgerRecord, actual_digest, out.record_digest)) {
-            return error.PayloadDigestMismatch;
-        }
+        try decodeVerifiedTransitionRow(statement, session_id, sequence, out);
         if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
     }
 
-    pub fn findCompletedAttempt(
+    pub fn scanCompletedAttemptWindow(
         self: *StorageOwner,
         session_id: u64,
         operation_id: u64,
         operation_generation: u32,
         attempt_id: u64,
-    ) !?CompletedAttempt {
+        ledger_head: u64,
+        row_budget: u8,
+        scan: *CompletedAttemptScan,
+    ) !u8 {
         self.request_lock.lockUncancelable(self.io);
         defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
         if (session_id == 0 or operation_id == 0 or operation_generation == 0 or attempt_id == 0) {
             return error.InvalidIdentity;
         }
+        if (ledger_head == 0 or ledger_head > session_transition.max_transitions or row_budget == 0) {
+            return error.InvalidHistoricalScanRange;
+        }
+        if (scan.next_sequence == 0 or scan.next_sequence > ledger_head + 1) {
+            return error.InvalidHistoricalScanCursor;
+        }
+        if (scan.done()) return 0;
+        const last_sequence = @min(
+            ledger_head,
+            scan.next_sequence + @as(u64, row_budget) - 1,
+        );
 
-        const statement = try self.prepare(find_completed_attempt_sql);
+        const statement = try self.prepare(scan_completed_attempt_sql);
         defer finalize(statement);
         var encoded_session_id: [8]u8 = undefined;
         try bindIdentity(statement, 1, session_id, &encoded_session_id);
+        try bindU64(statement, 2, scan.next_sequence);
+        try bindU64(statement, 3, last_sequence);
 
-        var expected_sequence: u64 = 1;
-        var admitted: ?session_transition.AttemptRecord = null;
-        var terminal_result_sequence: ?u64 = null;
-        while (true) {
+        var processed: u8 = 0;
+        while (processed < row_budget and scan.next_sequence <= last_sequence) {
             const step = c.sqlite3_step(statement);
-            if (step == c.SQLITE_DONE) break;
+            if (step == c.SQLITE_DONE) return error.TransitionNotFound;
             if (step != c.SQLITE_ROW) return mapSqliteError(step);
-            const sequence = try nonnegative(c.sqlite3_column_int64(statement, 0));
-            if (sequence != expected_sequence or sequence > session_transition.max_transitions) {
-                return error.CorruptHostStore;
-            }
-            expected_sequence += 1;
-
-            const payload_length = c.sqlite3_column_bytes(statement, 1);
-            const digest_length = c.sqlite3_column_bytes(statement, 2);
-            if (payload_length <= 0 or payload_length > max_transition_payload or digest_length != 32) {
-                return error.CorruptHostStore;
-            }
-            const payload_pointer = c.sqlite3_column_blob(statement, 1) orelse
-                return error.CorruptHostStore;
-            const digest_pointer = c.sqlite3_column_blob(statement, 2) orelse
-                return error.CorruptHostStore;
-            const payload_bytes: [*]const u8 = @ptrCast(payload_pointer);
-            const payload = payload_bytes[0..@intCast(payload_length)];
-            const digest_bytes: [*]const u8 = @ptrCast(digest_pointer);
-            var stored_digest: binding.LedgerRecord = undefined;
-            @memcpy(&stored_digest.bytes, digest_bytes[0..32]);
-            if (!binding.eql(
-                binding.LedgerRecord,
-                recordDigest(session_id, sequence, payload),
-                stored_digest,
-            )) return error.PayloadDigestMismatch;
-
-            const transaction = try session_transition.decode(sequence, payload);
-            for (transaction.factSlice()) |fact| switch (fact) {
-                .attempt_admitted => |attempt| {
-                    if (attempt.operation.operation_id != operation_id or
-                        attempt.operation.generation != operation_generation or
-                        attempt.attempt_id != attempt_id)
-                    {
-                        continue;
-                    }
-                    if (admitted) |existing| {
-                        if (!std.meta.eql(existing, attempt)) return error.ConflictingLedgerFacts;
-                    } else admitted = attempt;
-                },
-                .result => |result| {
-                    if (terminal_result_sequence == null and
-                        result.operation.operation_id == operation_id and
-                        result.operation.generation == operation_generation)
-                    {
-                        terminal_result_sequence = sequence;
-                    }
-                },
-                else => {},
-            };
+            var stored: StoredTransition = undefined;
+            try decodeVerifiedTransitionRow(statement, session_id, scan.next_sequence, &stored);
+            scan.next_sequence += 1;
+            processed += 1;
+            try applyCompletedAttemptFacts(
+                scan,
+                stored.transaction,
+                operation_id,
+                operation_generation,
+                attempt_id,
+            );
+            if (scan.completed != null) break;
         }
-        const attempt = admitted orelse return null;
-        const terminal_sequence = terminal_result_sequence orelse return null;
-        return .{
-            .attempt = attempt,
-            .terminal_result_sequence = terminal_sequence,
-        };
+        if (scan.completed == null and scan.next_sequence > ledger_head) scan.exhausted = true;
+        return processed;
     }
 
     pub fn readConversationEntry(
@@ -1521,6 +1478,88 @@ fn nonnegative(value: anytype) !u64 {
     return @intCast(value);
 }
 
+fn decodeVerifiedTransitionRow(
+    statement: *c.sqlite3_stmt,
+    session_id: u64,
+    expected_sequence: u64,
+    out: *StoredTransition,
+) !void {
+    const sequence = try nonnegative(c.sqlite3_column_int64(statement, 0));
+    if (sequence != expected_sequence or sequence > session_transition.max_transitions) {
+        return error.CorruptHostStore;
+    }
+    const payload_length = c.sqlite3_column_bytes(statement, 1);
+    const digest_length = c.sqlite3_column_bytes(statement, 2);
+    if (payload_length <= 0 or payload_length > max_transition_payload or digest_length != 32) {
+        return error.CorruptHostStore;
+    }
+    const payload_pointer = c.sqlite3_column_blob(statement, 1) orelse
+        return error.CorruptHostStore;
+    const digest_pointer = c.sqlite3_column_blob(statement, 2) orelse
+        return error.CorruptHostStore;
+    const length: usize = @intCast(payload_length);
+    var payload: [max_transition_payload]u8 = undefined;
+    const payload_bytes: [*]const u8 = @ptrCast(payload_pointer);
+    @memcpy(payload[0..length], payload_bytes[0..length]);
+    const digest_bytes: [*]const u8 = @ptrCast(digest_pointer);
+    var stored_digest: binding.LedgerRecord = undefined;
+    @memcpy(&stored_digest.bytes, digest_bytes[0..32]);
+    if (!binding.eql(
+        binding.LedgerRecord,
+        recordDigest(session_id, sequence, payload[0..length]),
+        stored_digest,
+    )) return error.PayloadDigestMismatch;
+    out.* = .{
+        .session_id = session_id,
+        .sequence = sequence,
+        .transaction = try session_transition.decode(
+            sequence,
+            payload[0..length],
+        ),
+    };
+}
+
+fn applyCompletedAttemptFacts(
+    scan: *CompletedAttemptScan,
+    transaction: session_transition.Transaction,
+    operation_id: u64,
+    operation_generation: u32,
+    attempt_id: u64,
+) !void {
+    for (transaction.factSlice()) |fact| switch (fact) {
+        .attempt_admitted => |attempt| {
+            if (attempt.operation.operation_id != operation_id or
+                attempt.operation.generation != operation_generation or
+                attempt.attempt_id != attempt_id)
+            {
+                continue;
+            }
+            if (scan.terminal_before_attempt) return error.InvalidHistoricalCompletionOrdering;
+            if (scan.attempt) |existing| {
+                if (!std.meta.eql(existing, attempt)) return error.ConflictingLedgerFacts;
+            } else scan.attempt = attempt;
+        },
+        .result => |result| {
+            if (result.operation.operation_id != operation_id or
+                result.operation.generation != operation_generation or
+                scan.completed != null or scan.terminal_before_attempt)
+            {
+                continue;
+            }
+            if (scan.attempt) |attempt| {
+                if (!std.meta.eql(attempt.operation, result.operation)) {
+                    return error.InvalidHistoricalCompletionRelationship;
+                }
+                scan.completed = .{
+                    .attempt = attempt,
+                    .terminal_result_sequence = transaction.sequence,
+                };
+            } else scan.terminal_before_attempt = true;
+        },
+        else => {},
+    };
+}
+
 fn recordDigest(session_id: u64, sequence: u64, payload: []const u8) binding.LedgerRecord {
     var hasher = binding.Hasher(binding.LedgerRecord).init();
     var identity: [16]u8 = undefined;
@@ -1749,6 +1788,70 @@ test "Completion recovery range is bounded by its Session index" {
     try bindU64(statement, 3, std.math.maxInt(i64));
     if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CompletionNotFound;
     if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
+        statement,
+        c.SQLITE_STMTSTATUS_FULLSCAN_STEP,
+        0,
+    ));
+    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
+        statement,
+        c.SQLITE_STMTSTATUS_SORT,
+        0,
+    ));
+    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
+        statement,
+        c.SQLITE_STMTSTATUS_AUTOINDEX,
+        0,
+    ));
+}
+
+test "historical Completion range is bounded by the Session Ledger key" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+    try owner.createSession(.{
+        .session_id = 8,
+        .agent_id = 9,
+        .task_id = 10,
+        .branch_id = 11,
+    });
+
+    const populate = try owner.prepare(
+        \\WITH RECURSIVE ledger_sequence(value) AS (
+        \\    SELECT 2
+        \\    UNION ALL
+        \\    SELECT value + 1 FROM ledger_sequence WHERE value < 32768
+        \\)
+        \\INSERT INTO session_transition (session_id, sequence, payload, record_digest)
+        \\SELECT ?1, value, zeroblob(1), zeroblob(32) FROM ledger_sequence
+    );
+    defer finalize(populate);
+    var populated_session_id: [8]u8 = undefined;
+    try bindIdentity(populate, 1, 8, &populated_session_id);
+    try expectDone(c.sqlite3_step(populate));
+    try owner.execute("ANALYZE");
+
+    const statement = try owner.prepare(scan_completed_attempt_sql);
+    defer finalize(statement);
+    var encoded_session_id: [8]u8 = undefined;
+    try bindIdentity(statement, 1, 8, &encoded_session_id);
+    try bindU64(statement, 2, 1);
+    try bindU64(statement, 3, session_transition.max_transitions);
+    var row_count: u32 = 0;
+    while (true) {
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) break;
+        if (step != c.SQLITE_ROW) return mapSqliteError(step);
+        row_count += 1;
+    }
+    try std.testing.expectEqual(session_transition.max_transitions, row_count);
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
         statement,
         c.SQLITE_STMTSTATUS_FULLSCAN_STEP,

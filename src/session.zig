@@ -491,6 +491,13 @@ const Recovery = union(enum) {
     inbox: struct {
         after_id: u64,
         watermark: u64,
+        ledger_head: u64,
+    },
+    historical: struct {
+        completion: host_store.StoredCompletion,
+        watermark: u64,
+        ledger_head: u64,
+        scan: host_store.CompletedAttemptScan,
     },
 };
 
@@ -1052,6 +1059,7 @@ pub const Session = struct {
                         self.recovery = .{ .inbox = .{
                             .after_id = 0,
                             .watermark = cursor.inbox_watermark,
+                            .ledger_head = cursor.ledger_head,
                         } };
                         continue;
                     }
@@ -1061,10 +1069,7 @@ pub const Session = struct {
                         cursor.next_sequence,
                         &stored,
                     );
-                    const transaction = try session_transition.decode(
-                        stored.sequence,
-                        stored.payloadSlice(),
-                    );
+                    const transaction = stored.transaction;
                     for (transaction.factSlice()) |fact| switch (fact) {
                         .conversation_advanced => |advanced| try self.verifyConversationEntry(advanced),
                         .task_admitted,
@@ -1112,26 +1117,75 @@ pub const Session = struct {
                         self.ownership_epoch,
                     );
                     switch (prepared.disposition) {
-                        .irrelevant => if (try self.historicalAuditSequence(stored.envelope)) |terminal_sequence| {
-                            _ = try self.storage.publishAuditedCompletion(
-                                stored.envelope,
-                                terminal_sequence,
-                            );
+                        .irrelevant => {
+                            self.resident = prepared.state;
+                            self.recovery = .{ .historical = .{
+                                .completion = stored,
+                                .watermark = cursor.watermark,
+                                .ledger_head = cursor.ledger_head,
+                                .scan = .{},
+                            } };
                         },
                         .audit => |terminal_sequence| {
                             _ = try self.storage.publishAuditedCompletion(
                                 stored.envelope,
                                 terminal_sequence,
                             );
+                            self.resident = prepared.state;
+                            self.recovery = .{ .inbox = .{
+                                .after_id = stored.inbox_id,
+                                .watermark = cursor.watermark,
+                                .ledger_head = cursor.ledger_head,
+                            } };
                         },
-                        else => {},
+                        .duplicate, .persist => {
+                            self.resident = prepared.state;
+                            self.recovery = .{ .inbox = .{
+                                .after_id = stored.inbox_id,
+                                .watermark = cursor.watermark,
+                                .ledger_head = cursor.ledger_head,
+                            } };
+                        },
                     }
-                    self.resident = prepared.state;
-                    self.recovery = .{ .inbox = .{
-                        .after_id = stored.inbox_id,
-                        .watermark = cursor.watermark,
-                    } };
                     processed += 1;
+                },
+                .historical => |cursor| {
+                    var scan = cursor.scan;
+                    const scanned = try self.storage.scanCompletedAttemptWindow(
+                        self.session_id,
+                        cursor.completion.envelope.operation_id,
+                        cursor.completion.envelope.operation_generation,
+                        cursor.completion.envelope.attempt_id,
+                        cursor.ledger_head,
+                        frame_budget - processed,
+                        &scan,
+                    );
+                    if (scanned == 0) return error.InvalidHistoricalScanProgress;
+                    processed += scanned;
+                    if (scan.done()) {
+                        if (scan.result()) |completed| {
+                            const terminal_sequence = try self.validateHistoricalCompletion(
+                                cursor.completion.envelope,
+                                completed,
+                            );
+                            _ = try self.storage.publishAuditedCompletion(
+                                cursor.completion.envelope,
+                                terminal_sequence,
+                            );
+                        }
+                        self.recovery = .{ .inbox = .{
+                            .after_id = cursor.completion.inbox_id,
+                            .watermark = cursor.watermark,
+                            .ledger_head = cursor.ledger_head,
+                        } };
+                    } else {
+                        self.recovery = .{ .historical = .{
+                            .completion = cursor.completion,
+                            .watermark = cursor.watermark,
+                            .ledger_head = cursor.ledger_head,
+                            .scan = scan,
+                        } };
+                    }
                 },
             }
         }
@@ -1146,6 +1200,7 @@ pub const Session = struct {
                 self.recovery = .ready;
                 return .{ .processed = processed, .more = false };
             },
+            .historical => {},
             .ready => return .{ .processed = processed, .more = false },
             .pending => unreachable,
         }
@@ -1193,12 +1248,30 @@ pub const Session = struct {
         self: *Session,
         envelope: completion_inbox.Envelope,
     ) !?u64 {
-        const completed = try self.storage.findCompletedAttempt(
-            self.session_id,
-            envelope.operation_id,
-            envelope.operation_generation,
-            envelope.attempt_id,
-        ) orelse return null;
+        var scan: host_store.CompletedAttemptScan = .{};
+        const ledger_head = try self.storage.sessionHead(self.session_id);
+        while (!scan.done()) {
+            const scanned = try self.storage.scanCompletedAttemptWindow(
+                self.session_id,
+                envelope.operation_id,
+                envelope.operation_generation,
+                envelope.attempt_id,
+                ledger_head,
+                std.math.maxInt(u8),
+                &scan,
+            );
+            if (scanned == 0) return error.InvalidHistoricalScanProgress;
+        }
+        const completed = scan.result() orelse return null;
+        return @as(?u64, try self.validateHistoricalCompletion(envelope, completed));
+    }
+
+    fn validateHistoricalCompletion(
+        self: *Session,
+        envelope: completion_inbox.Envelope,
+        completed: host_store.CompletedAttempt,
+    ) !u64 {
+        _ = self;
         const attempt = completed.attempt;
         if (attempt.operation.agent.agent_id != envelope.agent_id or
             attempt.operation.agent.agent_generation != envelope.agent_generation)
@@ -2209,6 +2282,16 @@ test "late evidence for a prior Operation audits through durable history" {
             session_id,
         )).session;
         defer restored.close();
+        const ledger_recovery = try restored.recoverSemanticWindow(@intCast(sequence_before_late));
+        try std.testing.expectEqual(@as(u8, @intCast(sequence_before_late)), ledger_recovery.processed);
+        try std.testing.expect(ledger_recovery.more);
+        const first_history_window = try restored.recoverSemanticWindow(2);
+        try std.testing.expectEqual(@as(u8, 2), first_history_window.processed);
+        try std.testing.expect(first_history_window.more);
+        try std.testing.expectEqual(
+            @as(?u64, null),
+            (try layout.storage.readCompletion(session_id, recovered_inbox_id)).consumed_by_sequence,
+        );
         while ((try restored.recoverSemanticWindow(32)).more) {}
         const recovered_audit = try layout.storage.readCompletion(session_id, recovered_inbox_id);
         try std.testing.expectEqual(terminal_sequence, recovered_audit.consumed_by_sequence.?);
