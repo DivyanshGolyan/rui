@@ -105,7 +105,7 @@ A uniquely identified instance of external work initiated by an action. An opera
 _Avoid_: Action, job, request
 
 **Attempt**:
-One uniquely identified try to execute an accepted operation. Its disposition states whether execution definitely did not occur, may have occurred, or produced a durable terminal result.
+One uniquely identified try to execute an accepted operation. Its disposition states whether execution definitely did not occur, may have occurred, or produced a durable terminal result. A model Attempt also records how many earlier Attempts under that Operation may already have reached the provider.
 _Avoid_: Operation, retry, request
 
 **Result**:

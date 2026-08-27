@@ -2,7 +2,7 @@ const std = @import("std");
 const binding = @import("binding.zig");
 const core_state = @import("core_state.zig");
 
-pub const payload_version: u16 = 3;
+pub const payload_version: u16 = 4;
 pub const max_facts: usize = 8;
 pub const max_transitions: u32 = 32_768;
 pub const max_operation_attempts: usize = 8;
@@ -33,11 +33,7 @@ pub const RecoveryClass = enum(u8) {
     consequential = 2,
 };
 
-pub const EvidenceKind = enum(u8) {
-    model = 1,
-    bash = 2,
-    apply_patch = 3,
-};
+pub const EvidenceKind = binding.DescriptorKind;
 
 pub const ResultClass = enum(u8) {
     ordinary = 0,
@@ -51,7 +47,7 @@ pub const ConversationKind = enum(u8) {
     context_checkpoint = 4,
 };
 
-pub const DurableResultEvidence = union(EvidenceKind) {
+pub const DurableResultEvidence = union(binding.DescriptorKind) {
     model: u64,
     bash: u64,
     apply_patch: u64,
@@ -93,6 +89,9 @@ pub const AttemptRecord = struct {
     descriptor_ref: u64,
     descriptor_digest: binding.Descriptor,
     recovery_class: RecoveryClass,
+    /// Number of earlier model Attempts that may also have reached the
+    /// provider. Non-model Attempts are always zero.
+    possible_duplicate_attempts: u8,
 };
 
 pub const AuthorizationRecord = struct {
@@ -223,19 +222,36 @@ pub fn operationAccepted(
     } };
 }
 
-pub fn attemptAdmitted(
+pub fn consequentialAttemptAdmitted(
     operation: OperationContext,
     attempt_id: u64,
     descriptor_ref: u64,
     descriptor_digest: binding.Descriptor,
-    recovery_class: RecoveryClass,
 ) Fact {
     return .{ .attempt_admitted = .{
         .operation = operation,
         .attempt_id = attempt_id,
         .descriptor_ref = descriptor_ref,
         .descriptor_digest = descriptor_digest,
-        .recovery_class = recovery_class,
+        .recovery_class = .consequential,
+        .possible_duplicate_attempts = 0,
+    } };
+}
+
+pub fn modelAttemptAdmitted(
+    operation: OperationContext,
+    attempt_id: u64,
+    descriptor_ref: u64,
+    descriptor_digest: binding.Descriptor,
+    possible_duplicate_attempts: u8,
+) Fact {
+    return .{ .attempt_admitted = .{
+        .operation = operation,
+        .attempt_id = attempt_id,
+        .descriptor_ref = descriptor_ref,
+        .descriptor_digest = descriptor_digest,
+        .recovery_class = .model,
+        .possible_duplicate_attempts = possible_duplicate_attempts,
     } };
 }
 
@@ -398,7 +414,9 @@ fn validateRawFact(fact: RawFact) !void {
         },
         .attempt_admitted => {
             if (fact.attempt_id == 0 or fact.subject != 0 or fact.auxiliary != 0 or
-                !validDescriptorKind(fact.digest_kind) or fact.flags != 0 or
+                !validDescriptorKind(fact.digest_kind) or
+                (fact.recovery_class != .model and fact.flags != 0) or
+                fact.flags >= max_operation_attempts or
                 !descriptorMatchesRecovery(fact.digest_kind, fact.recovery_class) or
                 fact.evidence_kind != 0)
             {
@@ -515,6 +533,7 @@ fn rawFact(fact: Fact) RawFact {
             raw.reference = value.descriptor_ref;
             setDescriptor(&raw, value.descriptor_digest);
             raw.recovery_class = value.recovery_class;
+            raw.flags = value.possible_duplicate_attempts;
         },
         .authorization => |value| {
             setOperation(&raw, value.operation);
@@ -655,6 +674,7 @@ fn factFromRaw(raw: RawFact) Fact {
             .descriptor_ref = raw.reference,
             .descriptor_digest = descriptorFromRaw(raw),
             .recovery_class = raw.recovery_class,
+            .possible_duplicate_attempts = raw.flags,
         } },
         .authorization => .{ .authorization = .{
             .operation = operation,

@@ -6,6 +6,7 @@ const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 
 const output_window_size = 4096;
+const max_permission_decision_line_size: usize = 64;
 
 const Arguments = struct {
     state_path: ?[]const u8 = null,
@@ -61,6 +62,33 @@ pub fn main(init: std.process.Init) !void {
         const task = arguments.task orelse return error.MissingTask;
         const workspace_path = try resolveWorkspacePath(init.io, allocator, arguments.repo_path);
         defer allocator.free(workspace_path);
+        if (arguments.fixture_bash_command != null and arguments.fixture_patch_path != null) {
+            const patch = try std.Io.Dir.cwd().readFileAlloc(
+                init.io,
+                arguments.fixture_patch_path.?,
+                allocator,
+                .limited(patch_tool.max_patch_size),
+            );
+            defer allocator.free(patch);
+            var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
+            const encoded_call = try bash_tool.encodeCall(&call_buffer, .{
+                .command = arguments.fixture_bash_command.?,
+                .timeout_ms = arguments.bash_timeout_ms,
+            });
+            var fixture: model_operation.RepairFixture = .{
+                .expected_task = task,
+                .bash_call = encoded_call,
+                .patch = patch,
+                .final_answer = response,
+            };
+            try runCreate(init.io, runtime, arguments.dangerously_bypass_permissions, .{
+                .workspace_path = workspace_path,
+                .model = model,
+                .task = task,
+                .provider = fixture.provider(),
+            });
+            return;
+        }
         if (arguments.fixture_patch_path) |patch_path| {
             const patch = try std.Io.Dir.cwd().readFileAlloc(
                 init.io,
@@ -297,9 +325,23 @@ fn promptPermission(io: std.Io, owner: *harness.Harness, approval: harness.Proje
         offset += bytes.len;
     }
     try std.Io.File.stdout().writeStreamingAll(io, "\nAllow? [y/N] ");
-    var answer: [8]u8 = undefined;
-    const count = try std.Io.File.stdin().readStreaming(io, &.{&answer});
-    return count > 0 and (answer[0] == 'y' or answer[0] == 'Y');
+    var first: ?u8 = null;
+    var byte: [1]u8 = undefined;
+    var length: usize = 0;
+    while (true) {
+        const count = std.Io.File.stdin().readStreaming(io, &.{&byte}) catch |err| switch (err) {
+            error.EndOfStream => return error.PermissionDecisionLineUnterminated,
+            else => return err,
+        };
+        if (count == 0) return error.PermissionDecisionLineUnterminated;
+        if (byte[0] == '\n') break;
+        if (length == max_permission_decision_line_size) {
+            return error.PermissionDecisionLineTooLong;
+        }
+        if (first == null) first = byte[0];
+        length += 1;
+    }
+    return first == 'y' or first == 'Y';
 }
 
 fn escapePatch(allocator: std.mem.Allocator, patch: []const u8) ![]u8 {

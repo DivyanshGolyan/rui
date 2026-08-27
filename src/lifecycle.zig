@@ -19,12 +19,16 @@ pub const Host = struct {
     slots: ProductionSlotPool = .{},
 };
 
+pub const PermissionMode = enum {
+    ask,
+    bypass,
+};
+
 pub const RuntimeConfig = struct {
     workspace_path: []const u8,
     fault: ?FaultHook = null,
-    bash_policy: ?bash_tool.Policy = null,
+    permission_mode: PermissionMode = .ask,
     bash_cancelled: ?*const std.atomic.Value(bool) = null,
-    patch_policy: ?patch_tool.Policy = null,
     approval_required_hook: ?ApprovalRequiredHook = null,
     completion_hook: ?CompletionHook = null,
     settle_only: bool = false,
@@ -104,9 +108,6 @@ pub const FaultBoundary = enum {
     after_final_blob,
     after_assistant_entry,
     after_bash_execution,
-    after_bash_result,
-    after_tool_result_entry,
-    after_tool_state_commit,
     after_patch_authorization,
     after_patch_attempt,
     after_patch_mutation,
@@ -326,12 +327,12 @@ fn performModelTurn(
             .{ .model = descriptor.digest },
             .none,
         ),
-        session_transition.attemptAdmitted(
+        session_transition.modelAttemptAdmitted(
             operation_context,
             ids.attempt_id,
             ids.request_ref,
             .{ .model = descriptor.digest },
-            .model,
+            0,
         ),
     };
     try commitCoreFacts(
@@ -406,12 +407,12 @@ fn retryModelAttempt(
         }
     }
     if (attempt_id == 0 or response_ref == 0) return error.OperationIdentityAllocationExhausted;
-    const attempt = session_transition.attemptAdmitted(
+    const attempt = session_transition.modelAttemptAdmitted(
         operationContext(session, operation.id, operation.generation),
         attempt_id,
         descriptor.descriptor_ref,
         descriptor.descriptor_digest,
-        .model,
+        history.attempt_count,
     );
     try commitCoreFacts(
         session,
@@ -492,7 +493,7 @@ fn executeBashCall(
     ids: OperationIds,
     core_open: *bool,
     workspace_path: []const u8,
-    policy: bash_tool.Policy,
+    permission_mode: PermissionMode,
     cancellation: ?*const std.atomic.Value(bool),
     approval_required_hook: ?ApprovalRequiredHook,
     completion_hook: ?CompletionHook,
@@ -555,8 +556,7 @@ fn executeBashCall(
     };
     _ = try session.commitSemantic(&descriptor_facts, null);
 
-    const classification = try policy.classify_fn(policy.context, digest, call);
-    if (classification == .ask) {
+    if (permission_mode == .ask) {
         const approval = session_transition.approvalRequired(.{
             .operation = operation_context,
             .binding_ref = 0,
@@ -571,112 +571,64 @@ fn executeBashCall(
             .descriptor_digest = .{ .bash = digest },
             .descriptor_ref = descriptor_ref,
         });
+        return error.PermissionInputRequired;
     }
-    const allowed = switch (classification) {
-        .allow => true,
-        .deny => false,
-        .ask => try policy.ask_fn(policy.context, digest, call),
-    };
     const authorization = session_transition.authorization(.{
         .operation = operation_context,
         .permission_ref = 0,
         .descriptor_digest = .{ .bash = digest },
-        .allowed = allowed,
+        .allowed = true,
     });
     _ = try session.commitSemantic(&.{authorization}, null);
 
     var attempt_id: u64 = 0;
-    var execution: bash_tool.Execution = undefined;
-    if (allowed) {
-        while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
-        const attempt = session_transition.attemptAdmitted(
-            operation_context,
-            attempt_id,
-            descriptor_ref,
-            .{ .bash = digest },
-            .consequential,
-        );
-        try commitCoreFacts(
-            session,
-            core_state_buffer,
-            core,
-            &.{attempt},
-            false,
-        );
-        core.close();
-        core_open.* = false;
-        execution = try bash_tool.executeDescriptor(
-            allocator,
-            io,
-            descriptor,
-            .{ .cancelled = cancellation },
-        );
-        try reach(fault, .after_bash_execution);
-        core.* = try Core.open(slot_pool);
-        core_open.* = true;
-        try restoreCoreFromLedger(session, core_state_buffer, core);
-    } else {
-        execution = .{
-            .allocator = allocator,
-            .status = .denied,
-            .stdout = try allocator.alloc(u8, 0),
-            .stderr = try allocator.alloc(u8, 0),
-        };
-    }
+    while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
+    const attempt = session_transition.consequentialAttemptAdmitted(
+        operation_context,
+        attempt_id,
+        descriptor_ref,
+        .{ .bash = digest },
+    );
+    try commitCoreFacts(
+        session,
+        core_state_buffer,
+        core,
+        &.{attempt},
+        false,
+    );
+    core.close();
+    core_open.* = false;
+    var execution = try bash_tool.executeDescriptor(
+        allocator,
+        io,
+        descriptor,
+        .{ .cancelled = cancellation },
+    );
+    try reach(fault, .after_bash_execution);
+    core.* = try Core.open(slot_pool);
+    core_open.* = true;
+    try restoreCoreFromLedger(session, core_state_buffer, core);
     defer execution.deinit();
     const result_buffer = try allocator.alloc(u8, bash_tool.result_header_size + 2 * bash_tool.max_output_size);
     defer allocator.free(result_buffer);
     const encoded_result = try bash_tool.encodeResult(result_buffer, execution);
     try session.storeBlob(result_ref, encoded_result);
     const result_digest = try blobDigest(session, result_ref);
-    if (allowed) {
-        const evidence = completion_inbox.bind(.{
-            .kind = .bash,
-            .session_id = session.session_id,
-            .ownership_epoch = token.epoch,
-            .agent_id = session.agent_id,
-            .agent_generation = agent_generation,
-            .operation_id = tool_operation_id,
-            .operation_generation = 1,
-            .attempt_id = attempt_id,
-            .result_ref = result_ref,
-            .result_digest = result_digest,
-        });
-        try session.publishCompletionEvidence(evidence);
-        if (completion_hook) |hook| try hook.offered(hook.context, evidence);
-        return error.CompletionOffered;
-    }
-    try reach(fault, .after_bash_result);
-    const result_entry = try session.appendConversation(.tool_result, result_ref, null);
-    try reach(fault, .after_tool_result_entry);
-    try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
-    const result_facts = [_]session_transition.Fact{
-        session_transition.result(.{
-            .operation = operation_context,
-            .result_ref = result_ref,
-            .result_digest = result_digest,
-            .class = if (execution.status == .indeterminate) .indeterminate else .ordinary,
-            .evidence = if (attempt_id == 0)
-                .{ .immediate = .consequential }
-            else
-                .{ .durable = .{ .bash = attempt_id } },
-        }),
-        session_transition.conversationAdvanced(.{
-            .agent = agentContext(session),
-            .entry_id = result_entry.entry_id,
-            .parent_id = result_entry.parent_id,
-            .kind = result_entry.kind,
-            .content_ref = result_ref,
-        }),
-    };
-    try commitCoreFacts(
-        session,
-        core_state_buffer,
-        core,
-        &result_facts,
-        true,
-    );
-    try reach(fault, .after_tool_state_commit);
+    const evidence = completion_inbox.bind(.{
+        .kind = .bash,
+        .session_id = session.session_id,
+        .ownership_epoch = token.epoch,
+        .agent_id = session.agent_id,
+        .agent_generation = agent_generation,
+        .operation_id = tool_operation_id,
+        .operation_generation = 1,
+        .attempt_id = attempt_id,
+        .result_ref = result_ref,
+        .result_digest = result_digest,
+    });
+    try session.publishCompletionEvidence(evidence);
+    if (completion_hook) |hook| try hook.offered(hook.context, evidence);
+    return error.CompletionOffered;
 }
 
 fn requestPatchPermission(
@@ -686,7 +638,7 @@ fn requestPatchPermission(
     core_state_buffer: []u8,
     ids: OperationIds,
     workspace_path: []const u8,
-    policy: patch_tool.Policy,
+    permission_mode: PermissionMode,
     approval_required_hook: ?ApprovalRequiredHook,
     fault: ?FaultHook,
 ) !void {
@@ -734,9 +686,7 @@ fn requestPatchPermission(
     };
     _ = try session.commitSemantic(&descriptor_facts, null);
 
-    const classification = try policy.classify(intent, patch);
-    var allowed = classification == .allow;
-    if (classification == .ask) {
+    if (permission_mode == .ask) {
         const approval = session_transition.approvalRequired(.{
             .operation = operation_context,
             .binding_ref = intent_ref,
@@ -757,13 +707,13 @@ fn requestPatchPermission(
             .descriptor_digest = .{ .apply_patch = intent.intent_digest },
             .descriptor_ref = patch_ref,
         });
-        allowed = try policy.ask(intent, patch);
+        return error.PermissionInputRequired;
     }
     const authorization = session_transition.authorization(.{
         .operation = operation_context,
         .permission_ref = intent_ref,
         .descriptor_digest = .{ .apply_patch = intent.intent_digest },
-        .allowed = allowed,
+        .allowed = true,
     });
     _ = try session.commitSemantic(&.{authorization}, null);
     try reach(fault, .after_patch_authorization);
@@ -879,7 +829,7 @@ pub fn advanceRestored(
                         ids,
                         &core_open,
                         config.workspace_path,
-                        config.bash_policy orelse return error.ToolCallDeferred,
+                        config.permission_mode,
                         config.bash_cancelled,
                         config.approval_required_hook,
                         config.completion_hook,
@@ -893,7 +843,7 @@ pub fn advanceRestored(
                             core_state_buffer,
                             ids,
                             config.workspace_path,
-                            config.patch_policy orelse return error.ToolCallDeferred,
+                            config.permission_mode,
                             config.approval_required_hook,
                             config.fault,
                         );
@@ -1036,12 +986,11 @@ pub fn resolvePermission(
             var execution: bash_tool.Execution = undefined;
             if (allow) {
                 while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
-                const attempt = session_transition.attemptAdmitted(
+                const attempt = session_transition.consequentialAttemptAdmitted(
                     operation_context,
                     attempt_id,
                     descriptor.descriptor_ref,
                     descriptor.descriptor_digest,
-                    .consequential,
                 );
                 try commitCoreFacts(session, core_state_buffer, &core, &.{attempt}, false);
                 core.close();
@@ -1182,13 +1131,14 @@ pub fn acceptCompletion(
     _ = try session.inspectSemantic(&history, FactSearch.applyFact);
     const attempt = history.attempt orelse return error.StaleCompletion;
     if (attempt.attempt_id != offered.attempt_id) return error.StaleCompletion;
-    const expected_kind: completion_inbox.EvidenceKind = switch (attempt.descriptor_digest) {
-        .model => .model,
-        .bash => .bash,
-        .apply_patch => .apply_patch,
-    };
-    if (offered.kind != expected_kind) return error.StaleCompletion;
+    if (offered.ownership_epoch != attempt.operation.agent.ownership_epoch) {
+        return error.CompletionAttemptEpochMismatch;
+    }
+    if (offered.kind != std.meta.activeTag(attempt.descriptor_digest)) return error.StaleCompletion;
     if (history.result) |result| {
+        if (resultAttemptId(result) != offered.attempt_id) {
+            return advanceRestored(host, allocator, session, core_state_buffer, config, provider);
+        }
         if (result.result_ref != offered.result_ref or
             !binding.eql(binding.Result, result.result_digest, offered.result_digest))
         {
@@ -1203,7 +1153,8 @@ pub fn acceptCompletion(
         .operation_generation = offered.operation_generation,
         .attempt_id = offered.attempt_id,
         .maximum_epoch = token.epoch,
-        .expected_kind = expected_kind,
+        .expected_epoch = attempt.operation.agent.ownership_epoch,
+        .expected_kind = std.meta.activeTag(attempt.descriptor_digest),
     };
     _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
     const evidence = inbox.match orelse return error.CompletionEvidenceMissing;
@@ -1310,10 +1261,11 @@ fn reconcileBash(
         .operation_generation = 1,
         .attempt_id = attempt.attempt_id,
         .maximum_epoch = token.epoch,
+        .expected_epoch = attempt.operation.agent.ownership_epoch,
         .expected_kind = .bash,
     };
     _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
-    var evidence_agent = agentContext(session);
+    var evidence_agent = attempt.operation.agent;
     var result_ref: u64 = undefined;
     var result_digest: binding.Result = undefined;
     var status: bash_tool.Status = undefined;
@@ -1347,7 +1299,7 @@ fn reconcileBash(
         try session.publishCompletionEvidence(completion_inbox.bind(.{
             .kind = .bash,
             .session_id = session.session_id,
-            .ownership_epoch = token.epoch,
+            .ownership_epoch = attempt.operation.agent.ownership_epoch,
             .agent_id = session.agent_id,
             .agent_generation = agent_generation,
             .operation_id = operation_id,
@@ -1478,12 +1430,11 @@ fn reconcilePatch(
         } else {
             var attempt_id: u64 = 0;
             while (attempt_id == 0) session.io.random(std.mem.asBytes(&attempt_id));
-            const admitted = session_transition.attemptAdmitted(
+            const admitted = session_transition.consequentialAttemptAdmitted(
                 operationContext(session, operation_id, 1),
                 attempt_id,
                 validated.descriptor_ref,
                 validated.descriptor_digest,
-                .consequential,
             );
             try commitCoreFacts(session, core_state_buffer, core, &.{admitted}, false);
             attempt = admitted.attempt_admitted;
@@ -1493,7 +1444,7 @@ fn reconcilePatch(
 
     var result_digest: binding.Result = undefined;
     var result_status: patch_tool.ResultStatus = undefined;
-    var evidence_agent = agentContext(session);
+    var evidence_agent = if (attempt) |admitted| admitted.operation.agent else agentContext(session);
     var result_evidence: session_transition.ResultEvidence = .{ .immediate = .consequential };
     if (immediate_status) |status| {
         result_status = status;
@@ -1520,6 +1471,7 @@ fn reconcilePatch(
             .operation_generation = 1,
             .attempt_id = admitted.attempt_id,
             .maximum_epoch = token.epoch,
+            .expected_epoch = admitted.operation.agent.ownership_epoch,
             .expected_kind = .apply_patch,
         };
         _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
@@ -1552,7 +1504,7 @@ fn reconcilePatch(
             const envelope = completion_inbox.bind(.{
                 .kind = .apply_patch,
                 .session_id = session.session_id,
-                .ownership_epoch = token.epoch,
+                .ownership_epoch = admitted.operation.agent.ownership_epoch,
                 .agent_id = session.agent_id,
                 .agent_generation = agent_generation,
                 .operation_id = operation_id,
@@ -1719,6 +1671,7 @@ fn durableCompletion(
                 .operation_generation = operation_generation,
                 .attempt_id = attempt.attempt_id,
                 .maximum_epoch = token.epoch,
+                .expected_epoch = attempt.operation.agent.ownership_epoch,
                 .expected_kind = .model,
             };
             _ = try session.scanCompletionEvidence(&inbox, InboxSearch.apply);
@@ -1918,6 +1871,7 @@ const InboxSearch = struct {
     operation_generation: u32,
     attempt_id: u64,
     maximum_epoch: u64,
+    expected_epoch: u64,
     expected_kind: completion_inbox.EvidenceKind,
     match: ?completion_inbox.Envelope = null,
 
@@ -1932,6 +1886,9 @@ const InboxSearch = struct {
             return;
         }
         if (envelope.ownership_epoch > self.maximum_epoch) return error.FutureCompletionEpoch;
+        if (envelope.ownership_epoch != self.expected_epoch) {
+            return error.CompletionAttemptEpochMismatch;
+        }
         if (self.match) |existing| {
             if (!std.meta.eql(existing, envelope)) return error.ConflictingCompletionEvidence;
             return;
@@ -2196,6 +2153,7 @@ test "Completion Inbox search never crosses evidence kinds" {
         .operation_generation = 1,
         .attempt_id = 4,
         .maximum_epoch = 5,
+        .expected_epoch = 5,
         .expected_kind = .apply_patch,
     };
     const wrong = completion_inbox.bind(.{
@@ -2211,5 +2169,35 @@ test "Completion Inbox search never crosses evidence kinds" {
         .result_digest = binding.hash(binding.Result, "result"),
     });
     try InboxSearch.apply(&search, wrong);
+    try std.testing.expect(search.match == null);
+}
+
+test "Completion Inbox search binds evidence to the admitted Attempt epoch" {
+    var search: InboxSearch = .{
+        .session_id = 1,
+        .agent_id = 2,
+        .operation_id = 3,
+        .operation_generation = 1,
+        .attempt_id = 4,
+        .maximum_epoch = 6,
+        .expected_epoch = 5,
+        .expected_kind = .model,
+    };
+    const rebound = completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = 1,
+        .ownership_epoch = 6,
+        .agent_id = 2,
+        .agent_generation = agent_generation,
+        .operation_id = 3,
+        .operation_generation = 1,
+        .attempt_id = 4,
+        .result_ref = 6,
+        .result_digest = binding.hash(binding.Result, "result"),
+    });
+    try std.testing.expectError(
+        error.CompletionAttemptEpochMismatch,
+        InboxSearch.apply(&search, rebound),
+    );
     try std.testing.expect(search.match == null);
 }

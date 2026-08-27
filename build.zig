@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const fixture_state_namespace = ".zig-cache/onepage-fixture-v2-";
+const fixture_state_namespace = ".zig-cache/onepage-fixture-v3-";
 
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
@@ -107,6 +107,16 @@ pub fn build(b: *std.Build) void {
     run_fixture_patch.setStdIn(.{ .bytes = "n\n" });
     fixture_patch_step.dependOn(&run_fixture_patch.step);
     check_step.dependOn(&run_fixture_patch.step);
+
+    const fixture_repair_step = b.step(
+        "fixture-repair",
+        "Repair a failing test through Bash, apply_patch, Bash, and a Final Answer",
+    );
+    const run_fixture_repair = b.addSystemCommand(&.{"sh"});
+    run_fixture_repair.addFileArg(b.path("src/repair_integration.sh"));
+    run_fixture_repair.addArtifactArg(cli);
+    fixture_repair_step.dependOn(&run_fixture_repair.step);
+    check_step.dependOn(&run_fixture_repair.step);
 
     const native_core_spike = addNativeExecutable(
         b,
@@ -220,6 +230,18 @@ fn addTestGraph(
     run_patch_git_environment.addFileArg(b.path("src/patch_git_environment_integration.sh"));
     run_patch_git_environment.addArtifactArg(patch_git_environment_fixture);
     parent.dependOn(&run_patch_git_environment.step);
+
+    const effect_recovery_fixture = addNativeExecutable(
+        b,
+        "onepage-effect-recovery-fixture",
+        "src/effect_recovery_fixture.zig",
+        native_target,
+        optimize,
+    );
+    const run_effect_recovery = b.addSystemCommand(&.{"sh"});
+    run_effect_recovery.addFileArg(b.path("src/effect_recovery_integration.sh"));
+    run_effect_recovery.addArtifactArg(effect_recovery_fixture);
+    parent.dependOn(&run_effect_recovery.step);
 }
 
 fn addTestRun(
@@ -291,6 +313,7 @@ fn usesHostStore(root: []const u8) bool {
         "src/agent_integration.zig",
         "src/cli.zig",
         "src/cli_resume_fixture.zig",
+        "src/effect_recovery_fixture.zig",
         "src/harness.zig",
         "src/host_runtime_lock_fixture.zig",
         "src/host_store_test.zig",

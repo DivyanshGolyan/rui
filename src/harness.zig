@@ -17,12 +17,10 @@ pub const HostRuntimeConfig = host_runtime.Config;
 pub const FaultBoundary = lifecycle.FaultBoundary;
 pub const FaultHook = lifecycle.FaultHook;
 pub const default_recovery_quantum: u8 = 32;
-pub const max_recovery_records: usize = session_transition.max_transitions + completion_inbox.max_records;
+pub const max_recovery_records: usize = session_transition.max_transitions +
+    completion_inbox.max_records * (session_transition.max_transitions + 1);
 
-pub const PermissionMode = enum {
-    ask,
-    bypass,
-};
+pub const PermissionMode = lifecycle.PermissionMode;
 
 pub const Create = struct {
     workspace_path: []const u8,
@@ -641,6 +639,7 @@ const HarnessState = struct {
         switch (err) {
             error.StaleCompletion,
             error.FutureCompletionEpoch,
+            error.CompletionAttemptEpochMismatch,
             error.ConflictingCompletionEvidence,
             error.CompletionEvidenceMissing,
             => {
@@ -743,9 +742,8 @@ const HarnessState = struct {
         return .{
             .workspace_path = session.workspacePath(),
             .fault = self.config.fault,
-            .bash_policy = self.bashPolicy(),
+            .permission_mode = self.config.permission_mode,
             .bash_cancelled = self.config.bash_cancelled,
-            .patch_policy = self.patchPolicy(),
             .approval_required_hook = self.approvalRequiredHook(),
             .completion_hook = self.completionHook(),
             .settle_only = self.settlingControl() != null,
@@ -754,40 +752,6 @@ const HarnessState = struct {
 
     fn approvalRequiredHook(self: *HarnessState) lifecycle.ApprovalRequiredHook {
         return .{ .context = self, .required = approvalRequired };
-    }
-
-    fn classifyBash(
-        context: *anyopaque,
-        _: binding.BashDescriptor,
-        _: bash_tool.Call,
-    ) anyerror!bash_tool.Decision {
-        const self: *HarnessState = @ptrCast(@alignCast(context));
-        return if (self.config.permission_mode == .bypass) .allow else .ask;
-    }
-
-    fn requestBashPermission(
-        _: *anyopaque,
-        _: binding.BashDescriptor,
-        _: bash_tool.Call,
-    ) anyerror!bool {
-        return error.PermissionInputRequired;
-    }
-
-    fn bashPolicy(self: *HarnessState) bash_tool.Policy {
-        return .{ .context = self, .classify_fn = classifyBash, .ask_fn = requestBashPermission };
-    }
-
-    fn classifyPatch(context: *anyopaque, _: patch_tool.Intent, _: []const u8) anyerror!patch_tool.Decision {
-        const self: *HarnessState = @ptrCast(@alignCast(context));
-        return if (self.config.permission_mode == .bypass) .allow else .ask;
-    }
-
-    fn requestPatchPermission(_: *anyopaque, _: patch_tool.Intent, _: []const u8) anyerror!bool {
-        return error.PermissionInputRequired;
-    }
-
-    fn patchPolicy(self: *HarnessState) patch_tool.Policy {
-        return .{ .context = self, .classify_fn = classifyPatch, .ask_fn = requestPatchPermission };
     }
 
     fn accepts(self: *const HarnessState, input: Input) bool {

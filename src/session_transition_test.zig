@@ -1,7 +1,63 @@
 const std = @import("std");
 const binding = @import("binding.zig");
+const completion_inbox = @import("completion_inbox.zig");
 const core_state = @import("core_state.zig");
 const transition = @import("session_transition.zig");
+
+test "descriptor kind is the stable tag for descriptors Completions and durable evidence" {
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(binding.DescriptorKind.model));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(binding.DescriptorKind.bash));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(binding.DescriptorKind.apply_patch));
+
+    const descriptor: binding.Descriptor = .{
+        .bash = binding.hash(binding.BashDescriptor, "descriptor"),
+    };
+    const evidence: transition.DurableResultEvidence = .{ .bash = 7 };
+    const completion = completion_inbox.bind(.{
+        .kind = .bash,
+        .session_id = 11,
+        .ownership_epoch = 13,
+        .agent_id = 17,
+        .agent_generation = 1,
+        .operation_id = 19,
+        .operation_generation = 1,
+        .attempt_id = 23,
+        .result_ref = 29,
+        .result_digest = binding.hash(binding.Result, "result"),
+    });
+    const descriptor_kind: binding.DescriptorKind = std.meta.activeTag(descriptor);
+    const evidence_kind: binding.DescriptorKind = std.meta.activeTag(evidence);
+    const completion_kind: binding.DescriptorKind = completion.kind;
+    try std.testing.expectEqual(binding.DescriptorKind.bash, descriptor_kind);
+    try std.testing.expectEqual(descriptor_kind, evidence_kind);
+    try std.testing.expectEqual(descriptor_kind, completion_kind);
+}
+
+test "Attempt constructors fix recovery class by effect category" {
+    const operation: transition.OperationContext = .{
+        .agent = .{ .agent_id = 7, .agent_generation = 1, .ownership_epoch = 2 },
+        .operation_id = 11,
+        .generation = 3,
+    };
+    const consequential = transition.consequentialAttemptAdmitted(
+        operation,
+        13,
+        17,
+        .{ .bash = binding.hash(binding.BashDescriptor, "command") },
+    ).attempt_admitted;
+    try std.testing.expectEqual(transition.RecoveryClass.consequential, consequential.recovery_class);
+    try std.testing.expectEqual(@as(u8, 0), consequential.possible_duplicate_attempts);
+
+    const model = transition.modelAttemptAdmitted(
+        operation,
+        19,
+        23,
+        .{ .model = binding.hash(binding.ModelDescriptor, "request") },
+        1,
+    ).attempt_admitted;
+    try std.testing.expectEqual(transition.RecoveryClass.model, model.recovery_class);
+    try std.testing.expectEqual(@as(u8, 1), model.possible_duplicate_attempts);
+}
 
 test "Approval Required and Authorization have distinct canonical payloads" {
     const agent: transition.AgentContext = .{
@@ -141,6 +197,32 @@ test "Result evidence round trips as immediate or durable typed choices" {
     try std.testing.expect(decoded.facts[0].result.evidence == .immediate);
     try std.testing.expect(decoded.facts[1].result.evidence == .durable);
     try std.testing.expect(decoded.facts[1].result.evidence.durable == .model);
+}
+
+test "model Attempt duplicate exposure is bounded and round trips" {
+    const operation: transition.OperationContext = .{
+        .agent = .{ .agent_id = 7, .agent_generation = 1, .ownership_epoch = 2 },
+        .operation_id = 11,
+        .generation = 3,
+    };
+    var transaction: transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    transaction.facts[0] = transition.modelAttemptAdmitted(
+        operation,
+        13,
+        17,
+        .{ .model = binding.hash(binding.ModelDescriptor, "request") },
+        3,
+    );
+    var buffer: [transition.max_payload_size]u8 = undefined;
+    const encoded = try transition.encode(&buffer, transaction);
+    const decoded = try transition.decode(1, encoded);
+    try std.testing.expectEqual(@as(u8, 3), decoded.facts[0].attempt_admitted.possible_duplicate_attempts);
+
+    buffer[4 + 3] = transition.max_operation_attempts;
+    try std.testing.expectError(
+        error.InvalidKindSpecificPayload,
+        transition.decode(1, encoded),
+    );
 }
 
 test "an all-zero authoritative binding is not decoded as absence" {

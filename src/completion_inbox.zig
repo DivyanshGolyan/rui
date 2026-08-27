@@ -1,10 +1,9 @@
 const std = @import("std");
 const binding = @import("binding.zig");
-const session_transition = @import("session_transition.zig");
 
 pub const max_records: u32 = 4096;
 
-pub const EvidenceKind = session_transition.EvidenceKind;
+pub const EvidenceKind = binding.DescriptorKind;
 
 pub const UnboundEnvelope = struct {
     kind: EvidenceKind,

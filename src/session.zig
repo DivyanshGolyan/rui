@@ -74,6 +74,7 @@ const OperationHistory = struct {
     approval_required: ?session_transition.ApprovalRequiredRecord = null,
     authorization: ?session_transition.AuthorizationRecord = null,
     result: ?session_transition.ResultRecord = null,
+    terminal_result_sequence: ?u64 = null,
 
     fn accepts(self: OperationHistory, operation: session_transition.OperationContext) bool {
         return self.operation_id == operation.operation_id and self.generation == operation.generation;
@@ -87,17 +88,24 @@ const OperationHistory = struct {
             self.attempt = existing;
             return;
         }
+        if ((attempt.recovery_class == .model and
+            attempt.possible_duplicate_attempts != self.attempt_count) or
+            (attempt.recovery_class != .model and attempt.possible_duplicate_attempts != 0))
+        {
+            return error.InvalidAttemptDuplicateAccounting;
+        }
         if (self.attempt_count == max_attempts) return error.AttemptCapacityExceeded;
         self.attempts[self.attempt_count] = attempt;
         self.attempt_count += 1;
         self.attempt = attempt;
     }
 
-    fn containsAttempt(self: OperationHistory, attempt_id: u64) bool {
+    fn findAttempt(self: OperationHistory, attempt_id: u64) ?session_transition.AttemptRecord {
         for (self.attempts[0..self.attempt_count]) |maybe_attempt| {
-            if (maybe_attempt.?.attempt_id == attempt_id) return true;
+            const attempt = maybe_attempt.?;
+            if (attempt.attempt_id == attempt_id) return attempt;
         }
-        return false;
+        return null;
     }
 };
 
@@ -150,11 +158,17 @@ const SemanticIndex = struct {
                 .result => |record| {
                     const history = historyFor(self, record.operation, resultRecoveryClass(record));
                     if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    const first_terminal = history.result == null;
                     history.result = try uniqueValue(
                         session_transition.ResultRecord,
                         history.result,
                         record,
                     );
+                    if (first_terminal) {
+                        history.terminal_result_sequence = transaction.sequence;
+                    } else if (history.terminal_result_sequence == null) {
+                        return error.MissingTerminalResultSequence;
+                    }
                     if (self.open_operation) |open_fact| {
                         if (open_fact.operation.operation_id == record.operation.operation_id and
                             open_fact.operation.generation == record.operation.generation)
@@ -259,9 +273,10 @@ const InboxIndex = struct {
         }
     };
 
-    const Disposition = enum {
+    const Disposition = union(enum) {
         irrelevant,
         duplicate,
+        audit: u64,
         persist,
     };
 
@@ -279,12 +294,22 @@ const InboxIndex = struct {
             return .irrelevant;
         }
         const history = historyForEnvelope(semantic, envelope);
-        if (history.result != null or history.operation_id != envelope.operation_id or
-            history.generation != envelope.operation_generation or
-            !history.containsAttempt(envelope.attempt_id))
+        if (history.operation_id != envelope.operation_id or
+            history.generation != envelope.operation_generation)
         {
             return .irrelevant;
         }
+        const attempt = history.findAttempt(envelope.attempt_id) orelse return .irrelevant;
+        if (envelope.ownership_epoch != attempt.operation.agent.ownership_epoch) {
+            return error.CompletionAttemptEpochMismatch;
+        }
+        if (envelope.kind != std.meta.activeTag(attempt.descriptor_digest)) {
+            return error.CompletionEvidenceKindMismatch;
+        }
+        if (history.result != null) return .{
+            .audit = history.terminal_result_sequence orelse
+                return error.MissingTerminalResultSequence,
+        };
         var ambiguous_slot: ?*?AttemptKey = null;
         for (&self.ambiguous) |*slot| {
             const key = slot.* orelse {
@@ -306,7 +331,7 @@ const InboxIndex = struct {
             const existing_history = historyForEnvelope(semantic, existing);
             if (existing_history.operation_id != existing.operation_id or
                 existing_history.generation != existing.operation_generation or
-                !existing_history.containsAttempt(existing.attempt_id))
+                !attemptMatchesKind(existing_history, existing.attempt_id, existing.kind))
             {
                 if (available == null) available = slot;
                 continue;
@@ -356,14 +381,14 @@ const InboxIndex = struct {
         };
         return history.operation_id == key.operation_id and
             history.generation == key.operation_generation and
-            history.containsAttempt(key.attempt_id);
+            attemptMatchesKind(history, key.attempt_id, key.kind);
     }
 
     fn envelopeIsPending(semantic: *const SemanticIndex, envelope: completion_inbox.Envelope) bool {
         const history = historyForEnvelope(semantic, envelope);
         return history.result == null and history.operation_id == envelope.operation_id and
             history.generation == envelope.operation_generation and
-            history.containsAttempt(envelope.attempt_id);
+            attemptMatchesKind(history, envelope.attempt_id, envelope.kind);
     }
 
     fn keyIsPending(semantic: *const SemanticIndex, key: AttemptKey) bool {
@@ -373,7 +398,16 @@ const InboxIndex = struct {
         };
         return history.result == null and history.operation_id == key.operation_id and
             history.generation == key.operation_generation and
-            history.containsAttempt(key.attempt_id);
+            attemptMatchesKind(history, key.attempt_id, key.kind);
+    }
+
+    fn attemptMatchesKind(
+        history: OperationHistory,
+        attempt_id: u64,
+        kind: completion_inbox.EvidenceKind,
+    ) bool {
+        const attempt = history.findAttempt(attempt_id) orelse return false;
+        return std.meta.activeTag(attempt.descriptor_digest) == kind;
     }
 };
 
@@ -457,6 +491,13 @@ const Recovery = union(enum) {
     inbox: struct {
         after_id: u64,
         watermark: u64,
+        ledger_head: u64,
+    },
+    historical: struct {
+        completion: host_store.StoredCompletion,
+        watermark: u64,
+        ledger_head: u64,
+        scan: host_store.CompletedAttemptScan,
     },
 };
 
@@ -1018,6 +1059,7 @@ pub const Session = struct {
                         self.recovery = .{ .inbox = .{
                             .after_id = 0,
                             .watermark = cursor.inbox_watermark,
+                            .ledger_head = cursor.ledger_head,
                         } };
                         continue;
                     }
@@ -1027,10 +1069,7 @@ pub const Session = struct {
                         cursor.next_sequence,
                         &stored,
                     );
-                    const transaction = try session_transition.decode(
-                        stored.sequence,
-                        stored.payloadSlice(),
-                    );
+                    const transaction = stored.transaction;
                     for (transaction.factSlice()) |fact| switch (fact) {
                         .conversation_advanced => |advanced| try self.verifyConversationEntry(advanced),
                         .task_admitted,
@@ -1077,12 +1116,76 @@ pub const Session = struct {
                         self.agent_id,
                         self.ownership_epoch,
                     );
-                    self.resident = prepared.state;
-                    self.recovery = .{ .inbox = .{
-                        .after_id = stored.inbox_id,
-                        .watermark = cursor.watermark,
-                    } };
+                    switch (prepared.disposition) {
+                        .irrelevant => {
+                            self.resident = prepared.state;
+                            self.recovery = .{ .historical = .{
+                                .completion = stored,
+                                .watermark = cursor.watermark,
+                                .ledger_head = cursor.ledger_head,
+                                .scan = .{},
+                            } };
+                        },
+                        .audit => |terminal_sequence| {
+                            _ = try self.storage.publishAuditedCompletion(
+                                stored.envelope,
+                                terminal_sequence,
+                            );
+                            self.resident = prepared.state;
+                            self.recovery = .{ .inbox = .{
+                                .after_id = stored.inbox_id,
+                                .watermark = cursor.watermark,
+                                .ledger_head = cursor.ledger_head,
+                            } };
+                        },
+                        .duplicate, .persist => {
+                            self.resident = prepared.state;
+                            self.recovery = .{ .inbox = .{
+                                .after_id = stored.inbox_id,
+                                .watermark = cursor.watermark,
+                                .ledger_head = cursor.ledger_head,
+                            } };
+                        },
+                    }
                     processed += 1;
+                },
+                .historical => |cursor| {
+                    var scan = cursor.scan;
+                    const scanned = try self.storage.scanCompletedAttemptWindow(
+                        self.session_id,
+                        cursor.completion.envelope.operation_id,
+                        cursor.completion.envelope.operation_generation,
+                        cursor.completion.envelope.attempt_id,
+                        cursor.ledger_head,
+                        frame_budget - processed,
+                        &scan,
+                    );
+                    if (scanned == 0) return error.InvalidHistoricalScanProgress;
+                    processed += scanned;
+                    if (scan.done()) {
+                        if (scan.result()) |completed| {
+                            const terminal_sequence = try self.validateHistoricalCompletion(
+                                cursor.completion.envelope,
+                                completed,
+                            );
+                            _ = try self.storage.publishAuditedCompletion(
+                                cursor.completion.envelope,
+                                terminal_sequence,
+                            );
+                        }
+                        self.recovery = .{ .inbox = .{
+                            .after_id = cursor.completion.inbox_id,
+                            .watermark = cursor.watermark,
+                            .ledger_head = cursor.ledger_head,
+                        } };
+                    } else {
+                        self.recovery = .{ .historical = .{
+                            .completion = cursor.completion,
+                            .watermark = cursor.watermark,
+                            .ledger_head = cursor.ledger_head,
+                            .scan = scan,
+                        } };
+                    }
                 },
             }
         }
@@ -1097,6 +1200,7 @@ pub const Session = struct {
                 self.recovery = .ready;
                 return .{ .processed = processed, .more = false };
             },
+            .historical => {},
             .ready => return .{ .processed = processed, .more = false },
             .pending => unreachable,
         }
@@ -1122,12 +1226,65 @@ pub const Session = struct {
             self.ownership_epoch,
         );
         switch (prepared.disposition) {
-            .irrelevant, .duplicate => return,
+            .irrelevant => {
+                const terminal_sequence = try self.historicalAuditSequence(envelope) orelse return;
+                _ = try self.storage.publishAuditedCompletion(envelope, terminal_sequence);
+            },
+            .duplicate => return,
+            .audit => |terminal_sequence| {
+                _ = try self.storage.publishAuditedCompletion(
+                    envelope,
+                    terminal_sequence,
+                );
+            },
             .persist => {
                 _ = try self.storage.publishCompletion(envelope);
                 self.resident = prepared.state;
             },
         }
+    }
+
+    fn historicalAuditSequence(
+        self: *Session,
+        envelope: completion_inbox.Envelope,
+    ) !?u64 {
+        var scan: host_store.CompletedAttemptScan = .{};
+        const ledger_head = try self.storage.sessionHead(self.session_id);
+        while (!scan.done()) {
+            const scanned = try self.storage.scanCompletedAttemptWindow(
+                self.session_id,
+                envelope.operation_id,
+                envelope.operation_generation,
+                envelope.attempt_id,
+                ledger_head,
+                std.math.maxInt(u8),
+                &scan,
+            );
+            if (scanned == 0) return error.InvalidHistoricalScanProgress;
+        }
+        const completed = scan.result() orelse return null;
+        return @as(?u64, try self.validateHistoricalCompletion(envelope, completed));
+    }
+
+    fn validateHistoricalCompletion(
+        self: *Session,
+        envelope: completion_inbox.Envelope,
+        completed: host_store.CompletedAttempt,
+    ) !u64 {
+        _ = self;
+        const attempt = completed.attempt;
+        if (attempt.operation.agent.agent_id != envelope.agent_id or
+            attempt.operation.agent.agent_generation != envelope.agent_generation)
+        {
+            return error.CompletionIdentityMismatch;
+        }
+        if (attempt.operation.agent.ownership_epoch != envelope.ownership_epoch) {
+            return error.CompletionAttemptEpochMismatch;
+        }
+        if (std.meta.activeTag(attempt.descriptor_digest) != envelope.kind) {
+            return error.CompletionEvidenceKindMismatch;
+        }
+        return completed.terminal_result_sequence;
     }
 
     pub fn scanCompletionEvidence(
@@ -1359,6 +1516,56 @@ fn testReboundEnvelope(envelope: completion_inbox.Envelope) completion_inbox.Env
     });
 }
 
+fn testEffectAttempt(
+    kind: binding.DescriptorKind,
+    operation: session_transition.OperationContext,
+    attempt_id: u64,
+    descriptor_ref: u64,
+    descriptor: binding.Descriptor,
+    possible_duplicate_attempts: u8,
+) session_transition.Fact {
+    return switch (kind) {
+        .model => session_transition.modelAttemptAdmitted(
+            operation,
+            attempt_id,
+            descriptor_ref,
+            descriptor,
+            possible_duplicate_attempts,
+        ),
+        .bash, .apply_patch => session_transition.consequentialAttemptAdmitted(
+            operation,
+            attempt_id,
+            descriptor_ref,
+            descriptor,
+        ),
+    };
+}
+
+fn testDurableEvidence(
+    kind: binding.DescriptorKind,
+    attempt_id: u64,
+) session_transition.DurableResultEvidence {
+    return switch (kind) {
+        .model => .{ .model = attempt_id },
+        .bash => .{ .bash = attempt_id },
+        .apply_patch => .{ .apply_patch = attempt_id },
+    };
+}
+
+const TestCurrentOperation = struct {
+    operation_id: u64 = 0,
+    attempt_id: u64 = 0,
+
+    fn apply(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
+        const self: *TestCurrentOperation = @ptrCast(@alignCast(context));
+        switch (fact) {
+            .operation_submitted => |record| self.operation_id = record.operation.operation_id,
+            .attempt_admitted => |record| self.attempt_id = record.attempt_id,
+            else => {},
+        }
+    }
+};
+
 test "create and exact resume preserve distinct identities and one owner" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
@@ -1453,6 +1660,667 @@ test "future ownership epochs never enter the durable Completion Inbox" {
     try std.testing.expectEqual(@as(u64, 0), try layout.storage.completionHead(created.session_id));
 }
 
+test "Completion evidence must match the admitted Attempt ownership epoch for every effect kind" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    const cases = [_]struct {
+        kind: completion_inbox.EvidenceKind,
+        operation_id: u64,
+        descriptor: binding.Descriptor,
+        recovery_class: session_transition.RecoveryClass,
+    }{
+        .{
+            .kind = .model,
+            .operation_id = 100,
+            .descriptor = .{ .model = binding.hash(binding.ModelDescriptor, "epoch-model") },
+            .recovery_class = .model,
+        },
+        .{
+            .kind = .bash,
+            .operation_id = (@as(u64, 1) << 63) | 101,
+            .descriptor = .{ .bash = binding.hash(binding.BashDescriptor, "epoch-bash") },
+            .recovery_class = .consequential,
+        },
+        .{
+            .kind = .apply_patch,
+            .operation_id = (@as(u64, 1) << 63) | 102,
+            .descriptor = .{ .apply_patch = binding.hash(binding.PatchIntent, "epoch-patch") },
+            .recovery_class = .consequential,
+        },
+    };
+
+    for (cases, 0..) |case, index| {
+        const session_id: u64 = 20 + @as(u64, @intCast(index)) * 10;
+        var created = try Session.createExact(
+            layout.sessions,
+            &layout.storage,
+            io,
+            testConfig(layout.workspacePath(), session_id),
+        );
+        const attempt_epoch = created.ownership_epoch;
+        const operation: session_transition.OperationContext = .{
+            .agent = .{
+                .agent_id = created.agent_id,
+                .agent_generation = 1,
+                .ownership_epoch = attempt_epoch,
+            },
+            .operation_id = case.operation_id,
+            .generation = 1,
+        };
+        const descriptor_ref = 200 + index;
+        const attempt_id = 210 + index;
+        const first_result_ref = 220 + index;
+        try created.storeBlob(descriptor_ref, "epoch descriptor");
+        try created.storeBlob(first_result_ref, "first evidence");
+        const admitted = if (case.recovery_class == .model)
+            session_transition.modelAttemptAdmitted(
+                operation,
+                attempt_id,
+                descriptor_ref,
+                case.descriptor,
+                0,
+            )
+        else
+            session_transition.consequentialAttemptAdmitted(
+                operation,
+                attempt_id,
+                descriptor_ref,
+                case.descriptor,
+            );
+        _ = try created.commitSemantic(&.{
+            session_transition.operationSubmitted(
+                operation,
+                descriptor_ref,
+                case.descriptor,
+                .none,
+            ),
+            admitted,
+        }, null);
+        const first = completion_inbox.bind(.{
+            .kind = case.kind,
+            .session_id = created.session_id,
+            .ownership_epoch = attempt_epoch,
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .operation_id = case.operation_id,
+            .operation_generation = 1,
+            .attempt_id = attempt_id,
+            .result_ref = first_result_ref,
+            .result_digest = testResultDigest("first epoch evidence"),
+        });
+        try created.publishCompletionEvidence(first);
+        const first_inbox_id = try layout.storage.completionHead(created.session_id);
+        if (first_inbox_id == 0) return error.CompletionNotPublished;
+        created.close();
+
+        var restored = (try Session.openExisting(
+            layout.sessions,
+            &layout.storage,
+            io,
+            session_id,
+        )).session;
+        while ((try restored.recoverSemanticWindow(32)).more) {}
+        const conflicting_result_ref = 230 + index;
+        try restored.storeBlob(conflicting_result_ref, "cross epoch evidence");
+        const cross_epoch = completion_inbox.bind(.{
+            .kind = case.kind,
+            .session_id = restored.session_id,
+            .ownership_epoch = restored.ownership_epoch,
+            .agent_id = restored.agent_id,
+            .agent_generation = 1,
+            .operation_id = case.operation_id,
+            .operation_generation = 1,
+            .attempt_id = attempt_id,
+            .result_ref = conflicting_result_ref,
+            .result_digest = testResultDigest("cross epoch evidence"),
+        });
+        try std.testing.expectError(
+            error.CompletionAttemptEpochMismatch,
+            restored.publishCompletionEvidence(cross_epoch),
+        );
+        try std.testing.expectEqual(first_inbox_id, try layout.storage.completionHead(session_id));
+        try std.testing.expectEqualDeep(
+            first,
+            (try layout.storage.readCompletion(session_id, first_inbox_id)).envelope,
+        );
+        restored.close();
+    }
+}
+
+test "live Completion publication rejects Bash and Patch evidence kind swaps" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    const cases = [_]struct {
+        descriptor: binding.Descriptor,
+        result_evidence: session_transition.DurableResultEvidence,
+        correct_kind: completion_inbox.EvidenceKind,
+        wrong_kind: completion_inbox.EvidenceKind,
+    }{
+        .{
+            .descriptor = .{ .bash = binding.hash(binding.BashDescriptor, "live-bash") },
+            .result_evidence = .{ .bash = 320 },
+            .correct_kind = .bash,
+            .wrong_kind = .apply_patch,
+        },
+        .{
+            .descriptor = .{ .apply_patch = binding.hash(binding.PatchIntent, "live-patch") },
+            .result_evidence = .{ .apply_patch = 321 },
+            .correct_kind = .apply_patch,
+            .wrong_kind = .bash,
+        },
+    };
+
+    for (cases, 0..) |case, index| {
+        const session_id = 60 + @as(u64, @intCast(index)) * 10;
+        var created = try Session.createExact(
+            layout.sessions,
+            &layout.storage,
+            io,
+            testConfig(layout.workspacePath(), session_id),
+        );
+        defer created.close();
+        const operation: session_transition.OperationContext = .{
+            .agent = .{
+                .agent_id = created.agent_id,
+                .agent_generation = 1,
+                .ownership_epoch = created.ownership_epoch,
+            },
+            .operation_id = (@as(u64, 1) << 63) | 300 + index,
+            .generation = 1,
+        };
+        const descriptor_ref = 310 + index;
+        const attempt_id = 320 + index;
+        const result_ref = 330 + index;
+        try created.storeBlob(descriptor_ref, "descriptor");
+        try created.storeBlob(result_ref, "wrong-kind result");
+        _ = try created.commitSemantic(&.{
+            session_transition.operationSubmitted(
+                operation,
+                descriptor_ref,
+                case.descriptor,
+                .none,
+            ),
+            session_transition.consequentialAttemptAdmitted(
+                operation,
+                attempt_id,
+                descriptor_ref,
+                case.descriptor,
+            ),
+        }, null);
+        try created.publishCompletionEvidence(completion_inbox.bind(.{
+            .kind = case.correct_kind,
+            .session_id = created.session_id,
+            .ownership_epoch = operation.agent.ownership_epoch,
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .operation_id = operation.operation_id,
+            .operation_generation = operation.generation,
+            .attempt_id = attempt_id,
+            .result_ref = result_ref,
+            .result_digest = testResultDigest("wrong-kind result"),
+        }));
+        const correct_inbox_id = try layout.storage.completionHead(session_id);
+        _ = try created.commitSemantic(&.{session_transition.result(.{
+            .operation = operation,
+            .result_ref = result_ref,
+            .result_digest = testResultDigest("wrong-kind result"),
+            .class = .ordinary,
+            .evidence = .{ .durable = case.result_evidence },
+        })}, null);
+        const wrong = completion_inbox.bind(.{
+            .kind = case.wrong_kind,
+            .session_id = created.session_id,
+            .ownership_epoch = operation.agent.ownership_epoch,
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .operation_id = operation.operation_id,
+            .operation_generation = operation.generation,
+            .attempt_id = attempt_id,
+            .result_ref = result_ref,
+            .result_digest = testResultDigest("wrong-kind result"),
+        });
+        try std.testing.expectError(
+            error.CompletionEvidenceKindMismatch,
+            created.publishCompletionEvidence(wrong),
+        );
+        try std.testing.expectEqual(@as(u64, 0), try layout.storage.completionHead(session_id));
+        try std.testing.expectError(
+            error.CompletionNotFound,
+            layout.storage.readCompletion(session_id, correct_inbox_id + 1),
+        );
+    }
+}
+
+test "lost Completion notification recovery rejects Bash and Patch evidence kind swaps" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    const cases = [_]struct {
+        descriptor: binding.Descriptor,
+        result_evidence: session_transition.DurableResultEvidence,
+        correct_kind: completion_inbox.EvidenceKind,
+        wrong_kind: completion_inbox.EvidenceKind,
+    }{
+        .{
+            .descriptor = .{ .bash = binding.hash(binding.BashDescriptor, "recovery-bash") },
+            .result_evidence = .{ .bash = 420 },
+            .correct_kind = .bash,
+            .wrong_kind = .apply_patch,
+        },
+        .{
+            .descriptor = .{ .apply_patch = binding.hash(binding.PatchIntent, "recovery-patch") },
+            .result_evidence = .{ .apply_patch = 421 },
+            .correct_kind = .apply_patch,
+            .wrong_kind = .bash,
+        },
+    };
+
+    for (cases, 0..) |case, index| {
+        const session_id = 80 + @as(u64, @intCast(index)) * 10;
+        var created = try Session.createExact(
+            layout.sessions,
+            &layout.storage,
+            io,
+            testConfig(layout.workspacePath(), session_id),
+        );
+        const operation: session_transition.OperationContext = .{
+            .agent = .{
+                .agent_id = created.agent_id,
+                .agent_generation = 1,
+                .ownership_epoch = created.ownership_epoch,
+            },
+            .operation_id = (@as(u64, 1) << 63) | 400 + index,
+            .generation = 1,
+        };
+        const descriptor_ref = 410 + index;
+        const attempt_id = 420 + index;
+        const result_ref = 430 + index;
+        try created.storeBlob(descriptor_ref, "descriptor");
+        try created.storeBlob(result_ref, "lost wrong-kind result");
+        _ = try created.commitSemantic(&.{
+            session_transition.operationSubmitted(
+                operation,
+                descriptor_ref,
+                case.descriptor,
+                .none,
+            ),
+            session_transition.consequentialAttemptAdmitted(
+                operation,
+                attempt_id,
+                descriptor_ref,
+                case.descriptor,
+            ),
+        }, null);
+        try created.publishCompletionEvidence(completion_inbox.bind(.{
+            .kind = case.correct_kind,
+            .session_id = created.session_id,
+            .ownership_epoch = operation.agent.ownership_epoch,
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .operation_id = operation.operation_id,
+            .operation_generation = operation.generation,
+            .attempt_id = attempt_id,
+            .result_ref = result_ref,
+            .result_digest = testResultDigest("lost wrong-kind result"),
+        }));
+        _ = try created.commitSemantic(&.{session_transition.result(.{
+            .operation = operation,
+            .result_ref = result_ref,
+            .result_digest = testResultDigest("lost wrong-kind result"),
+            .class = .ordinary,
+            .evidence = .{ .durable = case.result_evidence },
+        })}, null);
+        const wrong = completion_inbox.bind(.{
+            .kind = case.wrong_kind,
+            .session_id = created.session_id,
+            .ownership_epoch = operation.agent.ownership_epoch,
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .operation_id = operation.operation_id,
+            .operation_generation = operation.generation,
+            .attempt_id = attempt_id,
+            .result_ref = result_ref,
+            .result_digest = testResultDigest("lost wrong-kind result"),
+        });
+        const inbox_id = try layout.storage.publishCompletion(wrong);
+        created.close();
+
+        var restored = (try Session.openExisting(
+            layout.sessions,
+            &layout.storage,
+            io,
+            session_id,
+        )).session;
+        defer restored.close();
+        try std.testing.expectError(
+            error.CompletionEvidenceKindMismatch,
+            restored.recoverSemanticWindow(32),
+        );
+        for (restored.resident.inbox.entries) |entry| try std.testing.expect(entry == null);
+        const pending = try layout.storage.readCompletion(session_id, inbox_id);
+        try std.testing.expect(pending.consumed_by_sequence == null);
+        try std.testing.expectEqual(inbox_id, try layout.storage.completionHead(session_id));
+    }
+}
+
+test "late evidence audits against the first terminal Result sequence" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 55));
+    defer created.close();
+    const operation: session_transition.OperationContext = .{
+        .agent = .{
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .ownership_epoch = created.ownership_epoch,
+        },
+        .operation_id = 100,
+        .generation = 1,
+    };
+    const descriptor = testDescriptor("terminal sequence descriptor");
+    try created.storeBlob(201, "descriptor");
+    try created.storeBlob(202, "winning result");
+    try created.storeBlob(203, "later outcome");
+    try created.storeBlob(204, "late result");
+    _ = try created.commitSemantic(&.{
+        session_transition.operationSubmitted(operation, 201, descriptor, .none),
+        session_transition.modelAttemptAdmitted(operation, 211, 201, descriptor, 0),
+        session_transition.modelAttemptAdmitted(operation, 212, 201, descriptor, 1),
+    }, null);
+    try created.publishCompletionEvidence(completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = created.session_id,
+        .ownership_epoch = operation.agent.ownership_epoch,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = operation.operation_id,
+        .operation_generation = operation.generation,
+        .attempt_id = 212,
+        .result_ref = 202,
+        .result_digest = testResultDigest("winning result"),
+    }));
+    const terminal_sequence = try created.commitSemantic(&.{session_transition.result(.{
+        .operation = operation,
+        .result_ref = 202,
+        .result_digest = testResultDigest("winning result"),
+        .class = .ordinary,
+        .evidence = .{ .durable = .{ .model = 212 } },
+    })}, null);
+    _ = try created.commitSemantic(&.{session_transition.outcome(
+        operation.agent,
+        301,
+        203,
+    )}, null);
+
+    try created.publishCompletionEvidence(completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = created.session_id,
+        .ownership_epoch = operation.agent.ownership_epoch,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = operation.operation_id,
+        .operation_generation = operation.generation,
+        .attempt_id = 211,
+        .result_ref = 204,
+        .result_digest = testResultDigest("late result"),
+    }));
+    const audited = try layout.storage.readCompletion(created.session_id, 2);
+    try std.testing.expectEqual(terminal_sequence, audited.consumed_by_sequence.?);
+}
+
+test "late evidence for a prior Operation audits through durable history" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    const cases = [_]struct {
+        kind: binding.DescriptorKind,
+        recovery_class: session_transition.RecoveryClass,
+        descriptor_a: binding.Descriptor,
+        descriptor_b: binding.Descriptor,
+        wrong_kind: binding.DescriptorKind,
+    }{
+        .{
+            .kind = .model,
+            .recovery_class = .model,
+            .descriptor_a = .{ .model = binding.hash(binding.ModelDescriptor, "prior-model-a") },
+            .descriptor_b = .{ .model = binding.hash(binding.ModelDescriptor, "current-model-b") },
+            .wrong_kind = .bash,
+        },
+        .{
+            .kind = .bash,
+            .recovery_class = .consequential,
+            .descriptor_a = .{ .bash = binding.hash(binding.BashDescriptor, "prior-bash-a") },
+            .descriptor_b = .{ .bash = binding.hash(binding.BashDescriptor, "current-bash-b") },
+            .wrong_kind = .apply_patch,
+        },
+    };
+
+    for (cases, 0..) |case, case_index| {
+        const session_id = 110 + @as(u64, @intCast(case_index)) * 10;
+        var created = try Session.createExact(
+            layout.sessions,
+            &layout.storage,
+            io,
+            testConfig(layout.workspacePath(), session_id),
+        );
+        errdefer created.close();
+        const operation_base: u64 = if (case.kind == .model) 500 else (@as(u64, 1) << 63) | 500;
+        const operation_a: session_transition.OperationContext = .{
+            .agent = .{
+                .agent_id = created.agent_id,
+                .agent_generation = 1,
+                .ownership_epoch = created.ownership_epoch,
+            },
+            .operation_id = operation_base + @as(u64, @intCast(case_index)) * 10,
+            .generation = 1,
+        };
+        const operation_b: session_transition.OperationContext = .{
+            .agent = operation_a.agent,
+            .operation_id = operation_a.operation_id + 1,
+            .generation = 1,
+        };
+        const descriptor_a_ref: u64 = 510 + @as(u64, @intCast(case_index)) * 20;
+        const descriptor_b_ref = descriptor_a_ref + 1;
+        const winner_attempt = descriptor_a_ref + 2;
+        const live_attempt = descriptor_a_ref + 3;
+        const recovery_attempt = descriptor_a_ref + 4;
+        const wrong_epoch_attempt = descriptor_a_ref + 5;
+        const wrong_kind_attempt = descriptor_a_ref + 6;
+        const current_attempt = descriptor_a_ref + 7;
+        const winner_result_ref = descriptor_a_ref + 8;
+        const live_result_ref = descriptor_a_ref + 9;
+        const recovery_result_ref = descriptor_a_ref + 10;
+        const conflict_result_ref = descriptor_a_ref + 11;
+        try created.storeBlob(descriptor_a_ref, "prior descriptor");
+        try created.storeBlob(descriptor_b_ref, "current descriptor");
+        try created.storeBlob(winner_result_ref, "winning result");
+        try created.storeBlob(live_result_ref, "live late result");
+        try created.storeBlob(recovery_result_ref, "recovered late result");
+        try created.storeBlob(conflict_result_ref, "conflicting late result");
+
+        var admission: [6]session_transition.Fact = undefined;
+        admission[0] = session_transition.operationSubmitted(
+            operation_a,
+            descriptor_a_ref,
+            case.descriptor_a,
+            case.recovery_class,
+        );
+        const attempt_ids = [_]u64{
+            winner_attempt,
+            live_attempt,
+            recovery_attempt,
+            wrong_epoch_attempt,
+            wrong_kind_attempt,
+        };
+        for (attempt_ids, 0..) |attempt_id, index| admission[index + 1] = testEffectAttempt(
+            case.kind,
+            operation_a,
+            attempt_id,
+            descriptor_a_ref,
+            case.descriptor_a,
+            @intCast(index),
+        );
+        _ = try created.commitSemantic(&admission, null);
+        try created.publishCompletionEvidence(completion_inbox.bind(.{
+            .kind = case.kind,
+            .session_id = created.session_id,
+            .ownership_epoch = operation_a.agent.ownership_epoch,
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .operation_id = operation_a.operation_id,
+            .operation_generation = operation_a.generation,
+            .attempt_id = winner_attempt,
+            .result_ref = winner_result_ref,
+            .result_digest = testResultDigest("winning result"),
+        }));
+        const winner_inbox_id = try layout.storage.completionHead(session_id);
+        const terminal_sequence = try created.commitSemantic(&.{session_transition.result(.{
+            .operation = operation_a,
+            .result_ref = winner_result_ref,
+            .result_digest = testResultDigest("winning result"),
+            .class = .ordinary,
+            .evidence = .{ .durable = testDurableEvidence(case.kind, winner_attempt) },
+        })}, null);
+        _ = try created.commitSemantic(&.{
+            session_transition.operationSubmitted(
+                operation_b,
+                descriptor_b_ref,
+                case.descriptor_b,
+                case.recovery_class,
+            ),
+            testEffectAttempt(
+                case.kind,
+                operation_b,
+                current_attempt,
+                descriptor_b_ref,
+                case.descriptor_b,
+                0,
+            ),
+        }, null);
+        const sequence_before_late = try layout.storage.sessionHead(session_id);
+        const projection_before_late = created.projection();
+
+        const live_late = completion_inbox.bind(.{
+            .kind = case.kind,
+            .session_id = created.session_id,
+            .ownership_epoch = operation_a.agent.ownership_epoch,
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .operation_id = operation_a.operation_id,
+            .operation_generation = operation_a.generation,
+            .attempt_id = live_attempt,
+            .result_ref = live_result_ref,
+            .result_digest = testResultDigest("live late result"),
+        });
+        try created.publishCompletionEvidence(live_late);
+        const live_audit = try layout.storage.readCompletion(session_id, winner_inbox_id + 1);
+        try std.testing.expectEqual(terminal_sequence, live_audit.consumed_by_sequence.?);
+        try std.testing.expectEqualDeep(live_late, live_audit.envelope);
+
+        const wrong_kind = completion_inbox.bind(.{
+            .kind = case.wrong_kind,
+            .session_id = created.session_id,
+            .ownership_epoch = operation_a.agent.ownership_epoch,
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .operation_id = operation_a.operation_id,
+            .operation_generation = operation_a.generation,
+            .attempt_id = wrong_kind_attempt,
+            .result_ref = live_result_ref,
+            .result_digest = testResultDigest("live late result"),
+        });
+        try std.testing.expectError(
+            error.CompletionEvidenceKindMismatch,
+            created.publishCompletionEvidence(wrong_kind),
+        );
+        const conflicting = completion_inbox.bind(.{
+            .kind = case.kind,
+            .session_id = created.session_id,
+            .ownership_epoch = operation_a.agent.ownership_epoch,
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .operation_id = operation_a.operation_id,
+            .operation_generation = operation_a.generation,
+            .attempt_id = live_attempt,
+            .result_ref = conflict_result_ref,
+            .result_digest = testResultDigest("conflicting late result"),
+        });
+        try std.testing.expectError(
+            error.ConflictingCompletionEvidence,
+            created.publishCompletionEvidence(conflicting),
+        );
+        try std.testing.expectEqual(sequence_before_late, try layout.storage.sessionHead(session_id));
+        try std.testing.expectEqualDeep(projection_before_late, created.projection());
+        var current: TestCurrentOperation = .{};
+        _ = try created.inspectSemantic(&current, TestCurrentOperation.apply);
+        try std.testing.expectEqual(operation_b.operation_id, current.operation_id);
+        try std.testing.expectEqual(current_attempt, current.attempt_id);
+
+        const recovered_late = completion_inbox.bind(.{
+            .kind = case.kind,
+            .session_id = created.session_id,
+            .ownership_epoch = operation_a.agent.ownership_epoch,
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .operation_id = operation_a.operation_id,
+            .operation_generation = operation_a.generation,
+            .attempt_id = recovery_attempt,
+            .result_ref = recovery_result_ref,
+            .result_digest = testResultDigest("recovered late result"),
+        });
+        const recovered_inbox_id = try layout.storage.publishCompletion(recovered_late);
+        try std.testing.expectEqual(winner_inbox_id + 2, recovered_inbox_id);
+        created.close();
+
+        var restored = (try Session.openExisting(
+            layout.sessions,
+            &layout.storage,
+            io,
+            session_id,
+        )).session;
+        defer restored.close();
+        const ledger_recovery = try restored.recoverSemanticWindow(@intCast(sequence_before_late));
+        try std.testing.expectEqual(@as(u8, @intCast(sequence_before_late)), ledger_recovery.processed);
+        try std.testing.expect(ledger_recovery.more);
+        const first_history_window = try restored.recoverSemanticWindow(2);
+        try std.testing.expectEqual(@as(u8, 2), first_history_window.processed);
+        try std.testing.expect(first_history_window.more);
+        try std.testing.expectEqual(
+            @as(?u64, null),
+            (try layout.storage.readCompletion(session_id, recovered_inbox_id)).consumed_by_sequence,
+        );
+        while ((try restored.recoverSemanticWindow(32)).more) {}
+        const recovered_audit = try layout.storage.readCompletion(session_id, recovered_inbox_id);
+        try std.testing.expectEqual(terminal_sequence, recovered_audit.consumed_by_sequence.?);
+        try std.testing.expectEqualDeep(recovered_late, recovered_audit.envelope);
+        try std.testing.expectEqual(sequence_before_late, try layout.storage.sessionHead(session_id));
+        const wrong_epoch = completion_inbox.bind(.{
+            .kind = case.kind,
+            .session_id = restored.session_id,
+            .ownership_epoch = restored.ownership_epoch,
+            .agent_id = restored.agent_id,
+            .agent_generation = 1,
+            .operation_id = operation_a.operation_id,
+            .operation_generation = operation_a.generation,
+            .attempt_id = wrong_epoch_attempt,
+            .result_ref = live_result_ref,
+            .result_digest = testResultDigest("live late result"),
+        });
+        try std.testing.expectError(
+            error.CompletionAttemptEpochMismatch,
+            restored.publishCompletionEvidence(wrong_epoch),
+        );
+        try std.testing.expectEqual(@as(u64, 0), try layout.storage.completionHead(session_id));
+        var restored_current: TestCurrentOperation = .{};
+        _ = try restored.inspectSemantic(&restored_current, TestCurrentOperation.apply);
+        try std.testing.expectEqual(operation_b.operation_id, restored_current.operation_id);
+        try std.testing.expectEqual(current_attempt, restored_current.attempt_id);
+    }
+}
+
 test "fallible Inbox publication is prepared before durable Completion commit" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
@@ -1473,8 +2341,8 @@ test "fallible Inbox publication is prepared before durable Completion commit" {
     };
     var semantic: session_transition.Transaction = .{ .sequence = 2, .fact_count = 3 };
     semantic.facts[0] = session_transition.operationSubmitted(operation, 101, testDescriptor("102"), .model);
-    semantic.facts[1] = session_transition.attemptAdmitted(operation, 103, 101, testDescriptor("102"), .model);
-    semantic.facts[2] = session_transition.attemptAdmitted(operation, 108, 101, testDescriptor("102"), .model);
+    semantic.facts[1] = session_transition.modelAttemptAdmitted(operation, 103, 101, testDescriptor("102"), 0);
+    semantic.facts[2] = session_transition.modelAttemptAdmitted(operation, 108, 101, testDescriptor("102"), 1);
     try created.resident.semantic.apply(semantic);
 
     const existing = completion_inbox.bind(.{
@@ -1587,7 +2455,13 @@ test "irrelevant inbox records cannot displace admitted Attempt evidence" {
     var semantic: SemanticIndex = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
     admission.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
-    admission.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, testDescriptor("12"), .model);
+    admission.facts[1] = session_transition.modelAttemptAdmitted(
+        operation,
+        13,
+        11,
+        testDescriptor("12"),
+        0,
+    );
     try semantic.apply(admission);
 
     var inbox: InboxIndex = .{};
@@ -1635,10 +2509,10 @@ test "late evidence for an earlier model Attempt survives a later admission" {
     var semantic: SemanticIndex = .{};
     var first: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
     first.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
-    first.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, testDescriptor("12"), .model);
+    first.facts[1] = session_transition.modelAttemptAdmitted(operation, 13, 11, testDescriptor("12"), 0);
     try semantic.apply(first);
     var retry: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    retry.facts[0] = session_transition.attemptAdmitted(operation, 14, 11, testDescriptor("12"), .model);
+    retry.facts[0] = session_transition.modelAttemptAdmitted(operation, 14, 11, testDescriptor("12"), 1);
     try semantic.apply(retry);
 
     var inbox: InboxIndex = .{};
@@ -1673,7 +2547,13 @@ test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
     var semantic: SemanticIndex = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
     admission.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
-    admission.facts[1] = session_transition.attemptAdmitted(operation, 13, 11, testDescriptor("12"), .model);
+    admission.facts[1] = session_transition.modelAttemptAdmitted(
+        operation,
+        13,
+        11,
+        testDescriptor("12"),
+        0,
+    );
     try semantic.apply(admission);
     var inbox: InboxIndex = .{};
     const first = completion_inbox.bind(.{
@@ -1720,11 +2600,17 @@ test "failed recovered frame leaves the published semantic index unchanged" {
         .descriptor_digest = testDescriptor("12"),
         .allowed = true,
     });
-    invalid.facts[1] = session_transition.attemptAdmitted(.{
-        .agent = agent,
-        .operation_id = 99,
-        .generation = 1,
-    }, 13, 11, testDescriptor("12"), .model);
+    invalid.facts[1] = session_transition.modelAttemptAdmitted(
+        .{
+            .agent = agent,
+            .operation_id = 99,
+            .generation = 1,
+        },
+        13,
+        11,
+        testDescriptor("12"),
+        0,
+    );
     var prepared = index;
     try std.testing.expectError(error.InvalidOperationHistory, prepared.apply(invalid));
     try std.testing.expectEqual(@as(u64, 1), index.last_sequence);

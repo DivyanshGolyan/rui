@@ -45,8 +45,86 @@ test "one semantic commit occupies one ledger sequence" {
     );
     var stored: host_store.StoredTransition = undefined;
     try owner.readTransition(11, 2, &stored);
-    try std.testing.expectEqual(@as(u8, 1), (try transition.decode(2, stored.payloadSlice())).fact_count);
+    try std.testing.expectEqual(@as(u8, 1), stored.transaction.fact_count);
     try std.testing.expectError(error.TransitionNotFound, owner.readTransition(11, 3, &stored));
+}
+
+test "historical Completion scan rejects an Attempt admitted after its terminal Result" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    var owner = try host_store.StorageOwner.open(std.testing.io, try pathFor(&tmp, &path_buffer), .{});
+    defer owner.close();
+    try create(&owner, 15);
+    const agent: transition.AgentContext = .{
+        .agent_id = 16,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    const operation: transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 20,
+        .generation = 1,
+    };
+    const descriptor: binding.Descriptor = .{
+        .model = binding.hash(binding.ModelDescriptor, "historical-ordering"),
+    };
+    _ = try owner.commit(.{ .session_id = 15, .epoch = 1 }, transaction(2, &.{
+        transition.operationSubmitted(operation, 21, descriptor, .model),
+        transition.result(.{
+            .operation = operation,
+            .result_ref = 22,
+            .result_digest = binding.hash(binding.Result, "terminal-before-attempt"),
+            .class = .ordinary,
+            .evidence = .{ .immediate = .model },
+        }),
+    }));
+    _ = try owner.commit(.{ .session_id = 15, .epoch = 1 }, transaction(3, &.{
+        transition.modelAttemptAdmitted(operation, 23, 21, descriptor, 0),
+    }));
+
+    var scan: host_store.CompletedAttemptScan = .{};
+    try std.testing.expectError(
+        error.InvalidHistoricalCompletionOrdering,
+        owner.scanCompletedAttemptWindow(15, 20, 1, 23, 3, 3, &scan),
+    );
+}
+
+test "historical Completion scan requires the Result to share the Attempt context" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    var owner = try host_store.StorageOwner.open(std.testing.io, try pathFor(&tmp, &path_buffer), .{});
+    defer owner.close();
+    try create(&owner, 25);
+    const admitted_operation: transition.OperationContext = .{
+        .agent = .{ .agent_id = 26, .agent_generation = 1, .ownership_epoch = 1 },
+        .operation_id = 30,
+        .generation = 1,
+    };
+    const descriptor: binding.Descriptor = .{
+        .model = binding.hash(binding.ModelDescriptor, "historical-relationship"),
+    };
+    _ = try owner.commit(.{ .session_id = 25, .epoch = 1 }, transaction(2, &.{
+        transition.operationSubmitted(admitted_operation, 31, descriptor, .model),
+        transition.modelAttemptAdmitted(admitted_operation, 32, 31, descriptor, 0),
+    }));
+    const claimed_epoch = try owner.claimSession(25);
+    var terminal_operation = admitted_operation;
+    terminal_operation.agent.ownership_epoch = claimed_epoch;
+    _ = try owner.commit(.{ .session_id = 25, .epoch = claimed_epoch }, transaction(3, &.{transition.result(.{
+        .operation = terminal_operation,
+        .result_ref = 33,
+        .result_digest = binding.hash(binding.Result, "mismatched-terminal-context"),
+        .class = .ordinary,
+        .evidence = .{ .immediate = .model },
+    })}));
+
+    var scan: host_store.CompletedAttemptScan = .{};
+    try std.testing.expectError(
+        error.InvalidHistoricalCompletionRelationship,
+        owner.scanCompletedAttemptWindow(25, 30, 1, 32, 3, 3, &scan),
+    );
 }
 
 test "epoch and head are fenced by the same commit" {
