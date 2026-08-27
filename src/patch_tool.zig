@@ -4,11 +4,13 @@ const binding_digest = @import("binding.zig");
 pub const max_patch_size = 16 * 1024;
 pub const max_file_size: u64 = 1024 * 1024;
 pub const max_path_size = 1024;
-pub const binding_size = 224;
-pub const result_size = 112;
-pub const version: u16 = 3;
+pub const max_workspace_path_size = 1024;
+pub const intent_header_size = 176;
+pub const max_intent_size = intent_header_size + max_workspace_path_size + max_path_size;
+pub const result_size = 64;
+pub const version: u16 = 4;
 
-const binding_magic = "ONEPATCH";
+const intent_magic = "ONEPINT\x00";
 const result_magic = "ONEPRES\x00";
 
 pub const Decision = enum(u8) {
@@ -17,16 +19,34 @@ pub const Decision = enum(u8) {
     deny = 3,
 };
 
-pub const Validation = struct {
+pub const TargetPath = struct {
+    length: u16,
+    bytes: [max_path_size]u8,
+
+    fn init(path: []const u8) !TargetPath {
+        if (path.len == 0 or path.len > max_path_size) return error.RepositoryEscape;
+        var result: TargetPath = .{ .length = @intCast(path.len), .bytes = @splat(0) };
+        @memcpy(result.bytes[0..path.len], path);
+        return result;
+    }
+
+    pub fn slice(self: *const TargetPath) []const u8 {
+        return self.bytes[0..self.length];
+    }
+};
+
+pub const Intent = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    patch_ref: u64,
     workspace_path: []const u8,
-    target_path: []const u8,
+    target_path: TargetPath,
     patch_digest: binding_digest.PatchDescriptor,
     intent_digest: binding_digest.PatchIntent,
     preimage_digest: binding_digest.Preimage,
     postimage_digest: binding_digest.Postimage,
-    workspace_digest: binding_digest.WorkspaceState,
-    preimage_size: u64,
     preimage_inode: std.Io.File.INode,
+    file_mode: u32,
 };
 
 pub const ActionContext = struct {
@@ -35,159 +55,155 @@ pub const ActionContext = struct {
     patch_ref: u64,
 };
 
-const ValidationTestPhase = enum {
+const PreparationTestPhase = enum {
     after_first_snapshot_chunk,
     before_git,
 };
 
-const ValidationTestHook = struct {
+const PreparationTestHook = struct {
     context: *anyopaque,
-    call_fn: *const fn (*anyopaque, ValidationTestPhase) anyerror!void,
+    call_fn: *const fn (*anyopaque, PreparationTestPhase) anyerror!void,
 
-    fn call(self: ValidationTestHook, phase: ValidationTestPhase) !void {
+    fn call(self: PreparationTestHook, phase: PreparationTestPhase) !void {
         try self.call_fn(self.context, phase);
     }
 };
 
 pub const Policy = struct {
     context: *anyopaque,
-    classify_fn: *const fn (*anyopaque, PermissionSubject, []const u8) anyerror!Decision,
-    ask_fn: *const fn (*anyopaque, PermissionSubject, []const u8) anyerror!bool,
+    classify_fn: *const fn (*anyopaque, Intent, []const u8) anyerror!Decision,
+    ask_fn: *const fn (*anyopaque, Intent, []const u8) anyerror!bool,
 
-    pub fn classify(self: Policy, subject: PermissionSubject, patch: []const u8) !Decision {
-        return self.classify_fn(self.context, subject, patch);
+    pub fn classify(self: Policy, intent: Intent, patch: []const u8) !Decision {
+        return self.classify_fn(self.context, intent, patch);
     }
 
-    pub fn ask(self: Policy, subject: PermissionSubject, patch: []const u8) !bool {
-        return self.ask_fn(self.context, subject, patch);
+    pub fn ask(self: Policy, intent: Intent, patch: []const u8) !bool {
+        return self.ask_fn(self.context, intent, patch);
     }
 };
 
-pub const PermissionSubject = struct {
-    operation_id: u64,
-    operation_generation: u32,
-    validation: Validation,
-};
-
-pub const Binding = struct {
-    decision: Decision,
-    operation_id: u64,
-    operation_generation: u32,
-    ownership_epoch: u64,
-    patch_ref: u64,
-    patch_digest: binding_digest.PatchDescriptor,
-    intent_digest: binding_digest.PatchIntent,
-    workspace_digest: binding_digest.WorkspaceState,
-    preimage_size: u64,
-    preimage_inode: u64,
-    preimage_digest: binding_digest.Preimage,
-    postimage_digest: binding_digest.Postimage,
+const Observation = enum(u8) {
+    preimage = 1,
+    postimage = 2,
+    diverged = 3,
+    invalid = 4,
 };
 
 pub const ResultStatus = enum(u8) {
     denied = 1,
     stale = 2,
+    applied = 3,
+    indeterminate = 4,
 };
 
 pub const Result = struct {
     status: ResultStatus,
+    intent_ref: u64,
     intent_digest: binding_digest.PatchIntent,
-    expected_workspace_digest: binding_digest.WorkspaceState,
-    observed_workspace_digest: ?binding_digest.WorkspaceState,
 };
 
-pub fn encodeBinding(out: *[binding_size]u8, binding: Binding) !void {
-    if (binding.operation_id == 0 or binding.operation_generation == 0 or binding.ownership_epoch == 0 or
-        binding.patch_ref == 0)
+pub const Reconciliation = struct {
+    status: ResultStatus,
+    mutated: bool,
+};
+
+pub fn encodeIntent(out: []u8, intent: Intent) ![]const u8 {
+    if (intent.operation_id == 0 or intent.operation_generation == 0 or intent.patch_ref == 0 or
+        intent.workspace_path.len == 0 or intent.workspace_path.len > max_workspace_path_size or
+        intent.target_path.length == 0 or intent.target_path.length > max_path_size)
     {
-        return error.InvalidPatchBinding;
+        return error.InvalidPatchIntent;
     }
-    @memset(out, 0);
-    @memcpy(out[0..binding_magic.len], binding_magic);
+    const total = intent_header_size + intent.workspace_path.len + intent.target_path.length;
+    if (out.len < total) return error.IntentBufferTooSmall;
+    @memset(out[0..total], 0);
+    @memcpy(out[0..intent_magic.len], intent_magic);
     write(u16, out, 8, version);
-    write(u16, out, 10, binding_size);
-    out[12] = @intFromEnum(binding.decision);
-    write(u64, out, 16, binding.operation_id);
-    write(u32, out, 24, binding.operation_generation);
-    write(u64, out, 32, binding.ownership_epoch);
-    write(u64, out, 40, binding.patch_ref);
-    @memcpy(out[48..80], &binding.patch_digest.bytes);
-    @memcpy(out[80..112], &binding.intent_digest.bytes);
-    @memcpy(out[112..144], &binding.workspace_digest.bytes);
-    write(u64, out, 144, binding.preimage_size);
-    write(u64, out, 152, binding.preimage_inode);
-    @memcpy(out[160..192], &binding.preimage_digest.bytes);
-    @memcpy(out[192..224], &binding.postimage_digest.bytes);
+    write(u16, out, 10, @intCast(total));
+    write(u16, out, 12, @intCast(intent.workspace_path.len));
+    write(u16, out, 14, intent.target_path.length);
+    write(u64, out, 16, intent.operation_id);
+    write(u32, out, 24, intent.operation_generation);
+    write(u32, out, 28, intent.file_mode);
+    write(u64, out, 32, intent.patch_ref);
+    write(u64, out, 40, @intCast(intent.preimage_inode));
+    @memcpy(out[48..80], &intent.patch_digest.bytes);
+    @memcpy(out[80..112], &intent.preimage_digest.bytes);
+    @memcpy(out[112..144], &intent.postimage_digest.bytes);
+    @memcpy(out[144..176], &intent.intent_digest.bytes);
+    @memcpy(out[intent_header_size..][0..intent.workspace_path.len], intent.workspace_path);
+    @memcpy(out[intent_header_size + intent.workspace_path.len .. total], intent.target_path.slice());
+    const canonical_digest = intentDigest(intent);
+    if (!binding_digest.eql(binding_digest.PatchIntent, canonical_digest, intent.intent_digest)) {
+        return error.InvalidPatchIntent;
+    }
+    return out[0..total];
 }
 
-pub fn decodeBinding(bytes: *const [binding_size]u8) !Binding {
-    if (!std.mem.eql(u8, bytes[0..binding_magic.len], binding_magic) or
-        read(u16, bytes, 8) != version or read(u16, bytes, 10) != binding_size or
-        bytes[13] != 0 or bytes[14] != 0 or bytes[15] != 0 or
-        bytes[28] != 0 or bytes[29] != 0 or bytes[30] != 0 or bytes[31] != 0)
+pub fn decodeIntent(bytes: []const u8) !Intent {
+    if (bytes.len < intent_header_size or bytes.len > max_intent_size or
+        !std.mem.eql(u8, bytes[0..intent_magic.len], intent_magic) or
+        read(u16, bytes, 8) != version or read(u16, bytes, 10) != bytes.len)
     {
-        return error.InvalidPatchBinding;
+        return error.InvalidPatchIntent;
     }
-    const decision: Decision = switch (bytes[12]) {
-        1 => .allow,
-        2 => .ask,
-        3 => .deny,
-        else => return error.InvalidPatchBinding,
-    };
-    const binding: Binding = .{
-        .decision = decision,
+    const workspace_length = read(u16, bytes, 12);
+    const target_length = read(u16, bytes, 14);
+    if (workspace_length == 0 or workspace_length > max_workspace_path_size or
+        target_length == 0 or target_length > max_path_size or
+        intent_header_size + workspace_length + target_length != bytes.len)
+    {
+        return error.InvalidPatchIntent;
+    }
+    const intent: Intent = .{
         .operation_id = read(u64, bytes, 16),
         .operation_generation = read(u32, bytes, 24),
-        .ownership_epoch = read(u64, bytes, 32),
-        .patch_ref = read(u64, bytes, 40),
+        .file_mode = read(u32, bytes, 28),
+        .patch_ref = read(u64, bytes, 32),
+        .preimage_inode = @intCast(read(u64, bytes, 40)),
         .patch_digest = .{ .bytes = bytes[48..80].* },
-        .intent_digest = .{ .bytes = bytes[80..112].* },
-        .workspace_digest = .{ .bytes = bytes[112..144].* },
-        .preimage_size = read(u64, bytes, 144),
-        .preimage_inode = read(u64, bytes, 152),
-        .preimage_digest = .{ .bytes = bytes[160..192].* },
-        .postimage_digest = .{ .bytes = bytes[192..224].* },
+        .preimage_digest = .{ .bytes = bytes[80..112].* },
+        .postimage_digest = .{ .bytes = bytes[112..144].* },
+        .intent_digest = .{ .bytes = bytes[144..176].* },
+        .workspace_path = bytes[intent_header_size..][0..workspace_length],
+        .target_path = try TargetPath.init(bytes[intent_header_size + workspace_length ..]),
     };
-    var canonical: [binding_size]u8 = undefined;
-    try encodeBinding(&canonical, binding);
-    if (!std.mem.eql(u8, &canonical, bytes)) return error.InvalidPatchBinding;
-    return binding;
+    var canonical: [max_intent_size]u8 = undefined;
+    const encoded = try encodeIntent(&canonical, intent);
+    if (!std.mem.eql(u8, encoded, bytes)) return error.InvalidPatchIntent;
+    return intent;
 }
 
 pub fn encodeResult(out: *[result_size]u8, result: Result) !void {
-    if (result.status == .denied and result.observed_workspace_digest != null) {
-        return error.InvalidPatchResult;
-    }
+    if (result.intent_ref == 0) return error.InvalidPatchResult;
     @memset(out, 0);
     @memcpy(out[0..result_magic.len], result_magic);
     write(u16, out, 8, version);
     out[10] = @intFromEnum(result.status);
-    out[11] = @intFromBool(result.observed_workspace_digest != null);
-    @memcpy(out[16..48], &result.intent_digest.bytes);
-    @memcpy(out[48..80], &result.expected_workspace_digest.bytes);
-    if (result.observed_workspace_digest) |observed| @memcpy(out[80..112], &observed.bytes);
+    write(u64, out, 16, result.intent_ref);
+    @memcpy(out[32..64], &result.intent_digest.bytes);
 }
 
 pub fn decodeResult(bytes: *const [result_size]u8) !Result {
     if (!std.mem.eql(u8, bytes[0..result_magic.len], result_magic) or
-        read(u16, bytes, 8) != version or bytes[11] > 1 or bytes[12] != 0 or
-        bytes[13] != 0 or bytes[14] != 0 or bytes[15] != 0)
+        read(u16, bytes, 8) != version or bytes[11] != 0 or bytes[12] != 0 or
+        bytes[13] != 0 or bytes[14] != 0 or bytes[15] != 0 or
+        !std.mem.allEqual(u8, bytes[24..32], 0))
     {
         return error.InvalidPatchResult;
     }
     const status: ResultStatus = switch (bytes[10]) {
         1 => .denied,
         2 => .stale,
+        3 => .applied,
+        4 => .indeterminate,
         else => return error.InvalidPatchResult,
     };
     const result: Result = .{
         .status = status,
-        .intent_digest = .{ .bytes = bytes[16..48].* },
-        .expected_workspace_digest = .{ .bytes = bytes[48..80].* },
-        .observed_workspace_digest = if (bytes[11] == 1)
-            .{ .bytes = bytes[80..112].* }
-        else
-            null,
+        .intent_ref = read(u64, bytes, 16),
+        .intent_digest = .{ .bytes = bytes[32..64].* },
     };
     var canonical: [result_size]u8 = undefined;
     try encodeResult(&canonical, result);
@@ -195,37 +211,26 @@ pub fn decodeResult(bytes: *const [result_size]u8) !Result {
     return result;
 }
 
-pub fn sameWorkspace(expected: Validation, observed: Validation) bool {
-    return std.mem.eql(u8, expected.workspace_path, observed.workspace_path) and
-        binding_digest.eql(binding_digest.PatchDescriptor, expected.patch_digest, observed.patch_digest) and
-        binding_digest.eql(binding_digest.PatchIntent, expected.intent_digest, observed.intent_digest) and
-        binding_digest.eql(binding_digest.WorkspaceState, expected.workspace_digest, observed.workspace_digest) and
-        expected.preimage_size == observed.preimage_size and
-        expected.preimage_inode == observed.preimage_inode and
-        binding_digest.eql(binding_digest.Preimage, expected.preimage_digest, observed.preimage_digest) and
-        std.mem.eql(u8, expected.target_path, observed.target_path);
-}
-
-pub fn descriptorDigest(patch: []const u8) binding_digest.PatchDescriptor {
+fn descriptorDigest(patch: []const u8) binding_digest.PatchDescriptor {
     return binding_digest.hash(binding_digest.PatchDescriptor, patch);
 }
 
-pub fn validate(
+pub fn prepare(
     io: std.Io,
     workspace_path: []const u8,
     patch: []const u8,
     action: ActionContext,
-) !Validation {
-    return validateWithTestHook(io, workspace_path, patch, action, null);
+) !Intent {
+    return prepareWithTestHook(io, workspace_path, patch, action, null);
 }
 
-fn validateWithTestHook(
+fn prepareWithTestHook(
     io: std.Io,
     workspace_path: []const u8,
     patch: []const u8,
     action: ActionContext,
-    test_hook: ?ValidationTestHook,
-) !Validation {
+    test_hook: ?PreparationTestHook,
+) !Intent {
     if (action.operation_id == 0 or action.operation_generation == 0 or action.patch_ref == 0) {
         return error.InvalidPatchIntent;
     }
@@ -240,7 +245,8 @@ fn validateWithTestHook(
         workspace_path,
         canonical_workspace_buffer[0..canonical_workspace_length],
     )) return error.NoncanonicalWorkspace;
-    const target_path = try validateStructure(patch);
+    var target_buffer: [max_path_size]u8 = undefined;
+    const target_path = try deriveTarget(io, patch, &target_buffer);
     var workspace = try std.Io.Dir.cwd().openDir(io, workspace_path, .{});
     defer workspace.close(io);
     var target = try openRegularTarget(workspace, io, target_path);
@@ -257,6 +263,7 @@ fn validateWithTestHook(
         target_path,
         patch,
         test_hook,
+        null,
     );
     var confirmed_target = try openRegularTarget(workspace, io, target_path);
     defer confirmed_target.close(io);
@@ -269,112 +276,78 @@ fn validateWithTestHook(
     {
         return error.PreimageChangedDuringValidation;
     }
-    const patch_digest = descriptorDigest(patch);
-    const workspace_digest = workspaceDigest(
-        workspace_path,
-        target_path,
-        prepared.preimage_digest,
-        stat.size,
-        stat.inode,
-    );
-    return .{
+    var intent: Intent = .{
+        .operation_id = action.operation_id,
+        .operation_generation = action.operation_generation,
+        .patch_ref = action.patch_ref,
         .workspace_path = workspace_path,
-        .target_path = target_path,
-        .patch_digest = patch_digest,
-        .intent_digest = intentDigest(
-            action,
-            workspace_path,
-            target_path,
-            patch_digest,
-            prepared.preimage_digest,
-            prepared.postimage_digest,
-            stat.size,
-            stat.inode,
-        ),
+        .target_path = try TargetPath.init(target_path),
+        .patch_digest = descriptorDigest(patch),
+        .intent_digest = undefined,
         .preimage_digest = prepared.preimage_digest,
         .postimage_digest = prepared.postimage_digest,
-        .workspace_digest = workspace_digest,
-        .preimage_size = stat.size,
         .preimage_inode = stat.inode,
+        .file_mode = @intFromEnum(stat.permissions),
     };
+    intent.intent_digest = intentDigest(intent);
+    return intent;
 }
 
-pub fn validateStructure(patch: []const u8) ![]const u8 {
+fn deriveTarget(
+    io: std.Io,
+    patch: []const u8,
+    out: *[max_path_size]u8,
+) ![]const u8 {
     if (patch.len == 0) return error.MalformedPatch;
     if (patch.len > max_patch_size) return error.PatchTooLarge;
-    if (patch[patch.len - 1] != '\n' or std.mem.indexOfScalar(u8, patch, 0) != null or
-        std.mem.indexOfScalar(u8, patch, '\r') != null)
-    {
+    var git_output: [max_patch_size + 1]u8 = undefined;
+    const parsed = try runGit(
+        io,
+        "/private/tmp",
+        &.{ "apply", "--no-index", "--numstat", "-z", "-" },
+        patch,
+        &git_output,
+    );
+    if (parsed.code != 0) return error.MalformedPatch;
+    var summary_output: [max_patch_size + 1]u8 = undefined;
+    const summary = try runGit(
+        io,
+        "/private/tmp",
+        &.{ "apply", "--no-index", "--summary", "-z", "-" },
+        patch,
+        &summary_output,
+    );
+    if (summary.code != 0) return error.MalformedPatch;
+    // Git reports create, delete, rename, copy, and mode metadata here. V1 admits none of them.
+    if (summary.stdout_len != 0) return error.UnsupportedSpecialFile;
+    // Parse only Git's NUL-delimited machine result: two counts and exactly one literal path.
+    const bytes = git_output[0..parsed.stdout_len];
+    const first_tab = std.mem.indexOfScalar(u8, bytes, '\t') orelse return error.MalformedPatch;
+    const second_tab = std.mem.indexOfPos(u8, bytes, first_tab + 1, "\t") orelse
         return error.MalformedPatch;
+    const terminator = std.mem.indexOfScalar(u8, bytes, 0) orelse return error.MalformedPatch;
+    if (terminator + 1 != bytes.len) return error.MultipleFiles;
+    if (!decimalCount(bytes[0..first_tab]) or !decimalCount(bytes[first_tab + 1 .. second_tab])) {
+        return if (std.mem.eql(u8, bytes[0..first_tab], "-") and
+            std.mem.eql(u8, bytes[first_tab + 1 .. second_tab], "-"))
+            error.BinaryPatch
+        else
+            error.MalformedPatch;
     }
+    const path = bytes[second_tab + 1 .. terminator];
+    try validateRelativePath(path);
+    @memcpy(out[0..path.len], path);
+    return out[0..path.len];
+}
 
-    var lines = std.mem.splitScalar(u8, patch, '\n');
-    const first = lines.next() orelse return error.MalformedPatch;
-    const prefix = "diff --git ";
-    if (!std.mem.startsWith(u8, first, prefix)) return error.MalformedPatch;
-    var paths = std.mem.splitScalar(u8, first[prefix.len..], ' ');
-    const old_token = paths.next() orelse return error.MalformedPatch;
-    const new_token = paths.next() orelse return error.MalformedPatch;
-    if (paths.next() != null or !std.mem.startsWith(u8, old_token, "a/") or
-        !std.mem.startsWith(u8, new_token, "b/") or old_token.len <= 2 or new_token.len <= 2 or
-        !std.mem.eql(u8, old_token[2..], new_token[2..]))
-    {
-        return error.MalformedPatch;
-    }
-    const target_path = old_token[2..];
-    try validateRelativePath(target_path);
-
-    var line = lines.next() orelse return error.MalformedPatch;
-    if (std.mem.startsWith(u8, line, "index ")) {
-        line = lines.next() orelse return error.MalformedPatch;
-    }
-    try rejectMetadata(line);
-    if (!std.mem.startsWith(u8, line, "--- ") or !std.mem.eql(u8, line[4..], old_token)) {
-        return error.MalformedPatch;
-    }
-    line = lines.next() orelse return error.MalformedPatch;
-    if (!std.mem.startsWith(u8, line, "+++ ") or !std.mem.eql(u8, line[4..], new_token)) {
-        return error.MalformedPatch;
-    }
-
-    var saw_hunk = false;
-    var saw_body = false;
-    while (lines.next()) |body_line| {
-        if (body_line.len == 0) {
-            if (lines.next() != null) return error.MalformedPatch;
-            break;
-        }
-        if (std.mem.startsWith(u8, body_line, "diff --git ") or
-            std.mem.startsWith(u8, body_line, "index ") or
-            std.mem.startsWith(u8, body_line, "--- ") or
-            std.mem.startsWith(u8, body_line, "+++ "))
-        {
-            return error.MultipleFiles;
-        }
-        if (std.mem.startsWith(u8, body_line, "@@ ")) {
-            if (std.mem.indexOfPos(u8, body_line, 3, " @@") == null) return error.MalformedPatch;
-            saw_hunk = true;
-            continue;
-        }
-        if (!saw_hunk) {
-            try rejectMetadata(body_line);
-            return error.MalformedPatch;
-        }
-        if (body_line[0] != ' ' and body_line[0] != '+' and body_line[0] != '-' and
-            !std.mem.eql(u8, body_line, "\\ No newline at end of file"))
-        {
-            return error.MalformedPatch;
-        }
-        saw_body = true;
-    }
-    if (!saw_hunk or !saw_body) return error.MalformedPatch;
-    return target_path;
+fn decimalCount(bytes: []const u8) bool {
+    if (bytes.len == 0) return false;
+    for (bytes) |byte| if (byte < '0' or byte > '9') return false;
+    return true;
 }
 
 fn validateRelativePath(path: []const u8) !void {
-    if (path.len == 0 or path.len > max_path_size or path[0] == '/' or path[path.len - 1] == '/' or
-        std.mem.indexOfScalar(u8, path, '\\') != null or std.mem.indexOfScalar(u8, path, '\t') != null)
-    {
+    if (path.len == 0 or path.len > max_path_size or path[0] == '/' or path[path.len - 1] == '/') {
         return error.RepositoryEscape;
     }
     var components = std.mem.splitScalar(u8, path, '/');
@@ -385,32 +358,16 @@ fn validateRelativePath(path: []const u8) !void {
     }
 }
 
-fn rejectMetadata(line: []const u8) !void {
-    const unsupported = [_][]const u8{
-        "GIT binary patch",
-        "Binary files ",
-        "new file mode ",
-        "deleted file mode ",
-        "old mode ",
-        "new mode ",
-        "similarity index ",
-        "dissimilarity index ",
-        "rename from ",
-        "rename to ",
-        "copy from ",
-        "copy to ",
-    };
-    for (unsupported) |prefix| {
-        if (std.mem.startsWith(u8, line, prefix)) {
-            if (std.mem.startsWith(u8, prefix, "GIT binary") or std.mem.startsWith(u8, prefix, "Binary")) {
-                return error.BinaryPatch;
-            }
-            return error.UnsupportedSpecialFile;
-        }
-    }
+fn openRegularTarget(workspace: std.Io.Dir, io: std.Io, target_path: []const u8) !std.Io.File {
+    return openRegularTargetMode(workspace, io, target_path, .read_only);
 }
 
-fn openRegularTarget(workspace: std.Io.Dir, io: std.Io, target_path: []const u8) !std.Io.File {
+fn openRegularTargetMode(
+    workspace: std.Io.Dir,
+    io: std.Io,
+    target_path: []const u8,
+    mode: std.Io.File.OpenMode,
+) !std.Io.File {
     const separator = std.mem.lastIndexOfScalar(u8, target_path, '/');
     const parent_path = if (separator) |index| target_path[0..index] else "";
     const basename = if (separator) |index| target_path[index + 1 ..] else target_path;
@@ -435,6 +392,7 @@ fn openRegularTarget(workspace: std.Io.Dir, io: std.Io, target_path: []const u8)
     if (target_stat.kind == .sym_link) return error.SymlinkEscape;
     if (target_stat.kind != .file or target_stat.nlink != 1) return error.UnsupportedSpecialFile;
     const file = current.openFile(io, basename, .{
+        .mode = mode,
         .allow_directory = false,
         .follow_symlinks = false,
         .resolve_beneath = true,
@@ -476,7 +434,8 @@ fn prepareSnapshot(
     source_size: u64,
     target_path: []const u8,
     patch: []const u8,
-    test_hook: ?ValidationTestHook,
+    test_hook: ?PreparationTestHook,
+    apply_intent: ?Intent,
 ) !PreparedSnapshot {
     var temporary_root = try std.Io.Dir.cwd().openDir(io, "/private/tmp", .{});
     defer temporary_root.close(io);
@@ -513,21 +472,52 @@ fn prepareSnapshot(
     if (test_hook) |hook| try hook.call(.before_git);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "/private/tmp/{s}", .{name});
-    const term = try runGit(
+    const applied = try runGit(
         io,
         path,
         &.{ "apply", "--no-index", "--whitespace=nowarn", "-" },
         patch,
+        null,
     );
-    if (term != 0) return error.PatchNotApplicable;
+    if (applied.code != 0) return error.PatchNotApplicable;
     var target = try openRegularTarget(temporary, io, target_path);
     defer target.close(io);
     const stat = try target.stat(io);
     if (stat.kind != .file or stat.nlink != 1) return error.UnsupportedSpecialFile;
     if (stat.size > max_file_size) return error.PatchPostimageTooLarge;
+    if (stat.permissions != preimage_stat.permissions) return error.UnsupportedSpecialFile;
+    const postimage_digest = try hashFileAs(binding_digest.Postimage, io, target, stat.size);
+    if (apply_intent) |intent| {
+        if (!binding_digest.eql(binding_digest.Postimage, postimage_digest, intent.postimage_digest)) {
+            return error.PatchEffectUncertain;
+        }
+        const source_stat = try source.stat(io);
+        if (source_stat.kind != .file or source_stat.nlink != 1 or
+            source_stat.inode != intent.preimage_inode or
+            @intFromEnum(source_stat.permissions) != intent.file_mode or
+            source_stat.size > max_file_size)
+        {
+            return error.PatchPreimageMismatch;
+        }
+        const source_digest = try hashFileAs(binding_digest.Preimage, io, source, source_stat.size);
+        if (!binding_digest.eql(binding_digest.Preimage, source_digest, intent.preimage_digest)) {
+            return error.PatchPreimageMismatch;
+        }
+        try source.setLength(io, stat.size);
+        var buffer: [4096]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < stat.size) {
+            const remaining: usize = @intCast(@min(stat.size - offset, buffer.len));
+            const count = try target.readPositionalAll(io, buffer[0..remaining], offset);
+            if (count == 0) return error.PatchEffectUncertain;
+            try source.writePositionalAll(io, buffer[0..count], offset);
+            offset += count;
+        }
+        try source.sync(io);
+    }
     return .{
         .preimage_digest = preimage_digest,
-        .postimage_digest = try hashFileAs(binding_digest.Postimage, io, target, stat.size),
+        .postimage_digest = postimage_digest,
     };
 }
 
@@ -537,7 +527,7 @@ fn copyExactTarget(
     source_size: u64,
     destination_dir: std.Io.Dir,
     target_path: []const u8,
-    test_hook: ?ValidationTestHook,
+    test_hook: ?PreparationTestHook,
 ) !void {
     std.debug.assert(source_size <= max_file_size);
     if (std.mem.lastIndexOfScalar(u8, target_path, '/')) |separator| {
@@ -545,6 +535,8 @@ fn copyExactTarget(
     }
     var destination = try destination_dir.createFile(io, target_path, .{ .exclusive = true });
     defer destination.close(io);
+    const source_stat = try source.stat(io);
+    try destination.setPermissions(io, source_stat.permissions);
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;
     while (offset < source_size) {
@@ -561,16 +553,42 @@ fn copyExactTarget(
 }
 
 fn gitTracked(io: std.Io, workspace_path: []const u8, target_path: []const u8) !void {
-    const term = try runGit(io, workspace_path, &.{ "ls-files", "--error-unmatch", "--", target_path }, null);
-    if (term != 0) return error.NotTrackedRepositoryFile;
+    var output: [max_path_size + 2]u8 = undefined;
+    const result = try runGit(
+        io,
+        workspace_path,
+        &.{
+            "--literal-pathspecs",
+            "ls-files",
+            "-z",
+            "--error-unmatch",
+            "--format=%(path)",
+            "--",
+            target_path,
+        },
+        null,
+        &output,
+    );
+    if (result.code != 0 or result.stdout_len != target_path.len + 1 or
+        !std.mem.eql(u8, output[0..target_path.len], target_path) or
+        output[target_path.len] != 0)
+    {
+        return error.NotTrackedRepositoryFile;
+    }
 }
+
+const GitResult = struct {
+    code: u8,
+    stdout_len: usize,
+};
 
 fn runGit(
     io: std.Io,
     workspace_path: []const u8,
     arguments: []const []const u8,
     input: ?[]const u8,
-) !u8 {
+    stdout_buffer: ?[]u8,
+) !GitResult {
     var argv_buffer: [8][]const u8 = undefined;
     if (arguments.len + 1 > argv_buffer.len) return error.InvalidGitInvocation;
     argv_buffer[0] = "/usr/bin/git";
@@ -579,74 +597,153 @@ fn runGit(
     defer environment.deinit();
     try environment.put("PATH", "/usr/bin:/bin");
     try environment.put("LC_ALL", "C");
+    try environment.put("GIT_CONFIG_NOSYSTEM", "1");
+    try environment.put("GIT_CONFIG_GLOBAL", "/dev/null");
     var child = try std.process.spawn(io, .{
         .argv = argv_buffer[0 .. arguments.len + 1],
         .cwd = .{ .path = workspace_path },
         .environ_map = &environment,
         .stdin = if (input == null) .ignore else .pipe,
-        .stdout = .ignore,
+        .stdout = if (stdout_buffer == null) .ignore else .pipe,
         .stderr = .ignore,
     });
     errdefer {
         child.kill(io);
-        _ = child.wait(io) catch {};
     }
     if (input) |bytes| {
         try child.stdin.?.writeStreamingAll(io, bytes);
         child.stdin.?.close(io);
         child.stdin = null;
     }
+    var stdout_len: usize = 0;
+    if (stdout_buffer) |buffer| {
+        while (stdout_len < buffer.len) {
+            const count = child.stdout.?.readStreaming(io, &.{buffer[stdout_len..]}) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            if (count == 0) break;
+            stdout_len += count;
+        }
+        if (stdout_len == buffer.len) {
+            var extra: [1]u8 = undefined;
+            const count = child.stdout.?.readStreaming(io, &.{&extra}) catch |err| switch (err) {
+                error.EndOfStream => 0,
+                else => return err,
+            };
+            if (count != 0) {
+                return error.GitOutputTooLarge;
+            }
+        }
+        child.stdout.?.close(io);
+        child.stdout = null;
+    }
     const term = try child.wait(io);
-    return switch (term) {
-        .exited => |code| code,
-        else => 255,
+    return .{
+        .code = switch (term) {
+            .exited => |code| code,
+            else => 255,
+        },
+        .stdout_len = stdout_len,
     };
 }
 
-fn workspaceDigest(
-    workspace_path: []const u8,
-    target_path: []const u8,
-    preimage_digest: binding_digest.Preimage,
-    size: u64,
-    inode: std.Io.File.INode,
-) binding_digest.WorkspaceState {
-    var hasher = binding_digest.Hasher(binding_digest.WorkspaceState).init();
-    updateLengthPrefixed(binding_digest.WorkspaceState, &hasher, workspace_path);
-    updateLengthPrefixed(binding_digest.WorkspaceState, &hasher, target_path);
-    hasher.update(&preimage_digest.bytes);
-    var integers: [16]u8 = undefined;
-    std.mem.writeInt(u64, integers[0..8], size, .little);
-    std.mem.writeInt(u64, integers[8..16], @intCast(inode), .little);
-    hasher.update(&integers);
-    return hasher.final();
+fn observe(io: std.Io, intent: Intent, patch: []const u8) !Observation {
+    if (!binding_digest.eql(binding_digest.PatchIntent, intentDigest(intent), intent.intent_digest) or
+        !binding_digest.eql(binding_digest.PatchDescriptor, descriptorDigest(patch), intent.patch_digest))
+    {
+        return error.InvalidPatchIntent;
+    }
+    var target_buffer: [max_path_size]u8 = undefined;
+    const target_path = deriveTarget(io, patch, &target_buffer) catch return .invalid;
+    if (!std.mem.eql(u8, target_path, intent.target_path.slice())) return .invalid;
+    var canonical_workspace: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const canonical_length = std.Io.Dir.cwd().realPathFile(
+        io,
+        intent.workspace_path,
+        &canonical_workspace,
+    ) catch return .invalid;
+    if (!std.mem.eql(u8, intent.workspace_path, canonical_workspace[0..canonical_length])) {
+        return .invalid;
+    }
+    var workspace = std.Io.Dir.cwd().openDir(io, intent.workspace_path, .{}) catch return .invalid;
+    defer workspace.close(io);
+    var target = openRegularTarget(workspace, io, intent.target_path.slice()) catch return .invalid;
+    defer target.close(io);
+    const stat = target.stat(io) catch return .invalid;
+    if (stat.kind != .file or stat.nlink != 1 or stat.size > max_file_size or
+        @intFromEnum(stat.permissions) != intent.file_mode)
+    {
+        return .invalid;
+    }
+    gitTracked(io, intent.workspace_path, intent.target_path.slice()) catch return .invalid;
+    const preimage = hashFileAs(binding_digest.Preimage, io, target, stat.size) catch return .invalid;
+    if (binding_digest.eql(binding_digest.Preimage, preimage, intent.preimage_digest)) {
+        return if (stat.inode == intent.preimage_inode) .preimage else .diverged;
+    }
+    const postimage = hashFileAs(binding_digest.Postimage, io, target, stat.size) catch return .invalid;
+    if (binding_digest.eql(binding_digest.Postimage, postimage, intent.postimage_digest)) {
+        return if (stat.inode == intent.preimage_inode) .postimage else .diverged;
+    }
+    return .diverged;
 }
 
-fn intentDigest(
-    action: ActionContext,
-    workspace_path: []const u8,
-    target_path: []const u8,
-    patch_digest: binding_digest.PatchDescriptor,
-    preimage_digest: binding_digest.Preimage,
-    postimage_digest: binding_digest.Postimage,
-    size: u64,
-    inode: std.Io.File.INode,
-) binding_digest.PatchIntent {
+fn apply(io: std.Io, intent: Intent, patch: []const u8) !Observation {
+    if (try observe(io, intent, patch) != .preimage) return error.PatchPreimageMismatch;
+    var workspace = try std.Io.Dir.cwd().openDir(io, intent.workspace_path, .{});
+    defer workspace.close(io);
+    var target = try openRegularTargetMode(workspace, io, intent.target_path.slice(), .read_write);
+    defer target.close(io);
+    const stat = try target.stat(io);
+    _ = try prepareSnapshot(io, target, stat.size, intent.target_path.slice(), patch, null, intent);
+    const observed = try observe(io, intent, patch);
+    if (observed != .postimage) return error.PatchEffectUncertain;
+    return observed;
+}
+
+pub fn readyForAttempt(io: std.Io, intent: Intent, patch: []const u8) !bool {
+    return try observe(io, intent, patch) == .preimage;
+}
+
+pub fn reconcile(io: std.Io, intent: Intent, patch: []const u8) !Reconciliation {
+    return switch (try observe(io, intent, patch)) {
+        .postimage => .{ .status = .applied, .mutated = false },
+        .diverged, .invalid => .{ .status = .indeterminate, .mutated = false },
+        .preimage => blk: {
+            _ = apply(io, intent, patch) catch |err| switch (err) {
+                error.PatchPreimageMismatch => break :blk .{
+                    .status = .indeterminate,
+                    .mutated = false,
+                },
+                error.PatchEffectUncertain => break :blk .{
+                    .status = .indeterminate,
+                    .mutated = true,
+                },
+                else => return err,
+            };
+            break :blk .{
+                .status = if (try observe(io, intent, patch) == .postimage) .applied else .indeterminate,
+                .mutated = true,
+            };
+        },
+    };
+}
+
+fn intentDigest(intent: Intent) binding_digest.PatchIntent {
     var hasher = binding_digest.Hasher(binding_digest.PatchIntent).init();
     var integers: [32]u8 = @splat(0);
-    std.mem.writeInt(u64, integers[0..8], action.operation_id, .little);
-    std.mem.writeInt(u32, integers[8..12], action.operation_generation, .little);
-    std.mem.writeInt(u64, integers[16..24], action.patch_ref, .little);
-    std.mem.writeInt(u64, integers[24..32], size, .little);
+    std.mem.writeInt(u64, integers[0..8], intent.operation_id, .little);
+    std.mem.writeInt(u32, integers[8..12], intent.operation_generation, .little);
+    std.mem.writeInt(u32, integers[12..16], intent.file_mode, .little);
+    std.mem.writeInt(u64, integers[16..24], intent.patch_ref, .little);
+    std.mem.writeInt(u64, integers[24..32], @intCast(intent.preimage_inode), .little);
     hasher.update(&integers);
-    updateLengthPrefixed(binding_digest.PatchIntent, &hasher, workspace_path);
-    updateLengthPrefixed(binding_digest.PatchIntent, &hasher, target_path);
+    updateLengthPrefixed(binding_digest.PatchIntent, &hasher, intent.workspace_path);
+    updateLengthPrefixed(binding_digest.PatchIntent, &hasher, intent.target_path.slice());
     hasher.update("regular-file-single-link-v1\x00");
-    hasher.update(&patch_digest.bytes);
-    hasher.update(&preimage_digest.bytes);
-    hasher.update(&postimage_digest.bytes);
-    var inode_bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &inode_bytes, @intCast(inode), .little);
-    hasher.update(&inode_bytes);
+    hasher.update(&intent.patch_digest.bytes);
+    hasher.update(&intent.preimage_digest.bytes);
+    hasher.update(&intent.postimage_digest.bytes);
     return hasher.final();
 }
 
@@ -689,14 +786,13 @@ test "one exact tracked regular-file patch validates without mutation" {
         "@@ -1 +1 @@\n" ++
         "-old\n" ++
         "+new\n";
-    const validated = try validate(io, path, patch, testAction());
-    try std.testing.expectEqualStrings("note.txt", validated.target_path);
+    const validated = try prepare(io, path, patch, testAction());
+    try std.testing.expectEqualStrings("note.txt", validated.target_path.slice());
     try std.testing.expect(binding_digest.eql(
         binding_digest.PatchDescriptor,
         descriptorDigest(patch),
         validated.patch_digest,
     ));
-    try std.testing.expectEqual(@as(usize, 32), validated.workspace_digest.bytes.len);
     try std.testing.expectEqual(@as(usize, 32), validated.intent_digest.bytes.len);
     try std.testing.expectEqual(@as(usize, 32), validated.postimage_digest.bytes.len);
     try std.testing.expect(binding_digest.eql(
@@ -704,27 +800,51 @@ test "one exact tracked regular-file patch validates without mutation" {
         binding_digest.hash(binding_digest.Postimage, "new\n"),
         validated.postimage_digest,
     ));
-    const changed_generation = intentDigest(
-        .{ .operation_id = 11, .operation_generation = 2, .patch_ref = 13 },
-        path,
-        validated.target_path,
-        validated.patch_digest,
-        validated.preimage_digest,
-        validated.postimage_digest,
-        validated.preimage_size,
-        validated.preimage_inode,
-    );
+    var changed_intent = validated;
+    changed_intent.operation_generation = 2;
+    const changed_generation = intentDigest(changed_intent);
     try std.testing.expect(!binding_digest.eql(
         binding_digest.PatchIntent,
         validated.intent_digest,
         changed_generation,
     ));
-    try std.testing.expectEqual(@as(u64, 4), validated.preimage_size);
     var actual: [4]u8 = undefined;
     var file = try tmp.dir.openFile(io, "note.txt", .{});
     defer file.close(io);
     try std.testing.expectEqual(@as(usize, 4), try file.readPositionalAll(io, &actual, 0));
     try std.testing.expectEqualStrings("old\n", &actual);
+}
+
+test "prepare accepts Git-valid spaces and quoted path bytes" {
+    const io = std.testing.io;
+    const cases = [_]struct { target: []const u8, patch: []const u8 }{
+        .{
+            .target = "space name.txt",
+            .patch = "diff --git a/space name.txt b/space name.txt\n" ++
+                "index 3367afd..3e75765 100644\n" ++
+                "--- a/space name.txt\t\n+++ b/space name.txt\t\n" ++
+                "@@ -1 +1 @@\n-old\n+new\n",
+        },
+        .{
+            .target = "quote\"name.txt",
+            .patch = "diff --git \"a/quote\\\"name.txt\" \"b/quote\\\"name.txt\"\n" ++
+                "index 3367afd..3e75765 100644\n" ++
+                "--- \"a/quote\\\"name.txt\"\n+++ \"b/quote\\\"name.txt\"\n" ++
+                "@@ -1 +1 @@\n-old\n+new\n",
+        },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try writeTestFile(tmp.dir, io, case.target, "old\n");
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try canonicalTestPath(io, &tmp.sub_path, &path_buffer);
+        try expectGit(io, path, &.{ "init", "-q" });
+        try expectGit(io, path, &.{ "add", case.target });
+        const intent = try prepare(io, path, case.patch, testAction());
+        try std.testing.expectEqualStrings(case.target, intent.target_path.slice());
+        try expectTestFile(tmp.dir, io, case.target, "old\n");
+    }
 }
 
 test "patch preparation bounds both target and expected postimage bytes" {
@@ -764,11 +884,10 @@ test "patch preparation bounds both target and expected postimage bytes" {
         if (case.expected_error) |expected_error| {
             try std.testing.expectError(
                 expected_error,
-                validate(io, path, patch, testAction()),
+                prepare(io, path, patch, testAction()),
             );
         } else {
-            const validated = try validate(io, path, patch, testAction());
-            try std.testing.expectEqual(max_file_size, validated.preimage_size);
+            _ = try prepare(io, path, patch, testAction());
         }
         try expectSizedTestFileUnchanged(tmp.dir, io, "bounded.txt", case.target_size);
     }
@@ -801,7 +920,7 @@ test "patch preparation binds the exact bounded snapshot used by git" {
         " x\n";
     try std.testing.expectError(
         error.PreimageChangedDuringValidation,
-        validateWithTestHook(
+        prepareWithTestHook(
             io,
             path,
             patch,
@@ -845,7 +964,7 @@ test "patch preparation rejects concurrent growth before git sees the snapshot" 
         " x\n";
     try std.testing.expectError(
         error.PreimageChangedDuringRead,
-        validateWithTestHook(
+        prepareWithTestHook(
             io,
             path,
             patch,
@@ -857,55 +976,194 @@ test "patch preparation rejects concurrent growth before git sees the snapshot" 
     try expectSizedTestFileUnchanged(tmp.dir, io, "growing.txt", max_file_size + 1);
 }
 
-test "permission binding and typed result are canonical" {
-    const preimage = binding_digest.hash(binding_digest.Preimage, "preimage-7");
-    const expected: Binding = .{
-        .decision = .ask,
+test "one immutable Patch Intent and typed Result are canonical" {
+    var expected: Intent = .{
         .operation_id = 11,
         .operation_generation = 2,
-        .ownership_epoch = 3,
         .patch_ref = 4,
+        .workspace_path = "/tmp/workspace",
+        .target_path = try TargetPath.init("src/main.zig"),
         .patch_digest = binding_digest.hash(binding_digest.PatchDescriptor, "patch-5"),
-        .intent_digest = binding_digest.hash(binding_digest.PatchIntent, "intent-5"),
-        .workspace_digest = binding_digest.hash(binding_digest.WorkspaceState, "workspace-6"),
-        .preimage_size = 7,
+        .intent_digest = undefined,
         .preimage_inode = 8,
-        .preimage_digest = preimage,
+        .preimage_digest = binding_digest.hash(binding_digest.Preimage, "preimage-7"),
         .postimage_digest = binding_digest.hash(binding_digest.Postimage, "postimage-8"),
+        .file_mode = 0o644,
     };
-    var binding_bytes: [binding_size]u8 = undefined;
-    try encodeBinding(&binding_bytes, expected);
-    const decoded = try decodeBinding(&binding_bytes);
+    expected.intent_digest = intentDigest(expected);
+    var intent_bytes: [max_intent_size]u8 = undefined;
+    const encoded = try encodeIntent(&intent_bytes, expected);
+    const decoded = try decodeIntent(encoded);
     try std.testing.expectEqual(expected.operation_id, decoded.operation_id);
-    try std.testing.expectEqual(expected.decision, decoded.decision);
+    try std.testing.expectEqualStrings(expected.workspace_path, decoded.workspace_path);
     try std.testing.expect(binding_digest.eql(
         binding_digest.Preimage,
-        preimage,
+        expected.preimage_digest,
         decoded.preimage_digest,
     ));
 
     const expected_result: Result = .{
         .status = .stale,
-        .intent_digest = binding_digest.hash(binding_digest.PatchIntent, "intent-9"),
-        .expected_workspace_digest = binding_digest.hash(binding_digest.WorkspaceState, "workspace-10"),
-        .observed_workspace_digest = binding_digest.hash(binding_digest.WorkspaceState, "workspace-11"),
+        .intent_ref = 9,
+        .intent_digest = expected.intent_digest,
     };
     var result_bytes: [result_size]u8 = undefined;
     try encodeResult(&result_bytes, expected_result);
     const decoded_result = try decodeResult(&result_bytes);
     try std.testing.expectEqualDeep(expected_result, decoded_result);
-
-    const unavailable_result: Result = .{
-        .status = .stale,
-        .intent_digest = expected_result.intent_digest,
-        .expected_workspace_digest = expected_result.expected_workspace_digest,
-        .observed_workspace_digest = null,
-    };
-    try encodeResult(&result_bytes, unavailable_result);
-    try std.testing.expectEqualDeep(unavailable_result, try decodeResult(&result_bytes));
 }
 
-test "applicable control bytes validate but remain exact data" {
+test "observe and apply classify one authorized Git-backed Patch Intent" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTestFile(tmp.dir, io, "note.txt", "old\n");
+    var relative_buffer: [128]u8 = undefined;
+    const relative = try std.fmt.bufPrint(&relative_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_length = try std.Io.Dir.cwd().realPathFile(io, relative, &path_buffer);
+    const path = path_buffer[0..path_length];
+    try expectGit(io, path, &.{ "init", "-q" });
+    try expectGit(io, path, &.{ "add", "note.txt" });
+    const patch =
+        "diff --git a/note.txt b/note.txt\n" ++
+        "--- a/note.txt\n" ++
+        "+++ b/note.txt\n" ++
+        "@@ -1 +1 @@\n" ++
+        "-old\n" ++
+        "+new\n";
+    const intent = try prepare(io, path, patch, testAction());
+    try std.testing.expectEqual(Observation.preimage, try observe(io, intent, patch));
+    try std.testing.expectEqual(Observation.postimage, try apply(io, intent, patch));
+    try std.testing.expectEqual(Observation.postimage, try observe(io, intent, patch));
+    try expectTestFile(tmp.dir, io, "note.txt", "new\n");
+}
+
+test "replacement and wrong mode fail closed before mutation" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTestFile(tmp.dir, io, "note.txt", "old\n");
+    var relative_buffer: [128]u8 = undefined;
+    const relative = try std.fmt.bufPrint(&relative_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_length = try std.Io.Dir.cwd().realPathFile(io, relative, &path_buffer);
+    const path = path_buffer[0..path_length];
+    try expectGit(io, path, &.{ "init", "-q" });
+    try expectGit(io, path, &.{ "add", "note.txt" });
+    const patch =
+        "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n" ++
+        "@@ -1 +1 @@\n-old\n+new\n";
+    const intent = try prepare(io, path, patch, testAction());
+    try tmp.dir.rename("note.txt", tmp.dir, "old-note.txt", io);
+    try writeTestFile(tmp.dir, io, "note.txt", "old\n");
+    try std.testing.expectEqual(Observation.diverged, try observe(io, intent, patch));
+    try std.testing.expectError(error.PatchPreimageMismatch, apply(io, intent, patch));
+    var file = try tmp.dir.openFile(io, "note.txt", .{ .mode = .read_write });
+    try file.setPermissions(io, .fromMode(0o600));
+    file.close(io);
+    try std.testing.expectEqual(Observation.invalid, try observe(io, intent, patch));
+    try expectTestFile(tmp.dir, io, "note.txt", "old\n");
+}
+
+test "replacement containing the expected postimage is divergence" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTestFile(tmp.dir, io, "note.txt", "old\n");
+    var relative_buffer: [128]u8 = undefined;
+    const relative = try std.fmt.bufPrint(&relative_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_length = try std.Io.Dir.cwd().realPathFile(io, relative, &path_buffer);
+    const path = path_buffer[0..path_length];
+    try expectGit(io, path, &.{ "init", "-q" });
+    try expectGit(io, path, &.{ "add", "note.txt" });
+    const patch =
+        "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n" ++
+        "@@ -1 +1 @@\n-old\n+new\n";
+    const intent = try prepare(io, path, patch, testAction());
+    try tmp.dir.rename("note.txt", tmp.dir, "old-note.txt", io);
+    try writeTestFile(tmp.dir, io, "note.txt", "new\n");
+    try std.testing.expectEqual(Observation.diverged, try observe(io, intent, patch));
+}
+
+test "trackedness is the exact literal target rather than a Git pathspec" {
+    const io = std.testing.io;
+    for ([_]struct { target: []const u8, tracked: []const u8 }{
+        .{ .target = "note[1].txt", .tracked = "note1.txt" },
+        .{ .target = "tree", .tracked = "tree/leaf.txt" },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        if (std.mem.eql(u8, case.target, "tree")) try tmp.dir.createDir(io, "tree", .default_dir);
+        try writeTestFile(tmp.dir, io, case.tracked, "other\n");
+        var relative_buffer: [128]u8 = undefined;
+        const relative = try std.fmt.bufPrint(&relative_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path_length = try std.Io.Dir.cwd().realPathFile(io, relative, &path_buffer);
+        const path = path_buffer[0..path_length];
+        try expectGit(io, path, &.{ "init", "-q" });
+        try expectGit(io, path, &.{ "add", case.tracked });
+        if (std.mem.eql(u8, case.target, "tree")) try tmp.dir.deleteTree(io, "tree");
+        try writeTestFile(tmp.dir, io, case.target, "old\n");
+        var patch_buffer: [512]u8 = undefined;
+        const patch = try std.fmt.bufPrint(
+            &patch_buffer,
+            "diff --git a/{s} b/{s}\n--- a/{s}\n+++ b/{s}\n@@ -1 +1 @@\n-old\n+new\n",
+            .{ case.target, case.target, case.target, case.target },
+        );
+        try std.testing.expectError(
+            error.NotTrackedRepositoryFile,
+            prepare(io, path, patch, testAction()),
+        );
+        try expectTestFile(tmp.dir, io, case.target, "old\n");
+    }
+}
+
+test "dirty overlap, missing, untracked, symlink, and special substitution never write" {
+    const io = std.testing.io;
+    const Mutation = enum { dirty, missing, untracked, symlink, special };
+    for ([_]Mutation{ .dirty, .missing, .untracked, .symlink, .special }) |mutation| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try writeTestFile(tmp.dir, io, "note.txt", "old\n");
+        var relative_buffer: [128]u8 = undefined;
+        const relative = try std.fmt.bufPrint(&relative_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path_length = try std.Io.Dir.cwd().realPathFile(io, relative, &path_buffer);
+        const path = path_buffer[0..path_length];
+        try expectGit(io, path, &.{ "init", "-q" });
+        try expectGit(io, path, &.{ "add", "note.txt" });
+        const patch =
+            "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n" ++
+            "@@ -1 +1 @@\n-old\n+new\n";
+        const intent = try prepare(io, path, patch, testAction());
+        switch (mutation) {
+            .dirty => try writeTestFile(tmp.dir, io, "note.txt", "mine\n"),
+            .missing => try tmp.dir.rename("note.txt", tmp.dir, "missing.txt", io),
+            .untracked => try expectGit(io, path, &.{ "rm", "--cached", "-q", "note.txt" }),
+            .symlink => {
+                try tmp.dir.rename("note.txt", tmp.dir, "original.txt", io);
+                try tmp.dir.symLink(io, "original.txt", "note.txt", .{});
+            },
+            .special => {
+                try tmp.dir.rename("note.txt", tmp.dir, "original.txt", io);
+                try tmp.dir.hardLink("original.txt", tmp.dir, "note.txt", io, .{});
+            },
+        }
+        const observed = try observe(io, intent, patch);
+        try std.testing.expectEqual(
+            if (mutation == .dirty) Observation.diverged else Observation.invalid,
+            observed,
+        );
+        try std.testing.expectError(error.PatchPreimageMismatch, apply(io, intent, patch));
+        if (mutation == .dirty or mutation == .untracked) {
+            try expectTestFile(tmp.dir, io, "note.txt", if (mutation == .dirty) "mine\n" else "old\n");
+        }
+    }
+}
+
+test "applicable control bytes prepare but remain exact data" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -924,36 +1182,60 @@ test "applicable control bytes validate but remain exact data" {
         "@@ -1 +1 @@\n" ++
         "-old\x1b[2J\n" ++
         "+new\x1b[2J\n";
-    _ = try validate(io, path, patch, testAction());
+    _ = try prepare(io, path, patch, testAction());
     try expectTestFile(tmp.dir, io, "control.txt", "old\x1b[2J\n");
 }
 
-test "structural rejection classes fail before workspace access" {
+test "Git-derived policy rejects unsupported patch operations" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTestFile(tmp.dir, io, "a.txt", "old\n");
+    try writeTestFile(tmp.dir, io, "b.txt", "x\n");
+    try writeTestFile(tmp.dir, io, "a.bin", "\x00\x01\x02\x03");
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try canonicalTestPath(io, &tmp.sub_path, &path_buffer);
+    try expectGit(io, path, &.{ "init", "-q" });
+    try expectGit(io, path, &.{ "add", "a.txt", "b.txt", "a.bin" });
+
+    try std.testing.expectError(error.MalformedPatch, prepare(io, path, "not a patch\n", testAction()));
+    const binary =
+        "diff --git a/a.bin b/a.bin\n" ++
+        "index eaf36c1daccfdf325514461cd1a2ffbc139b5464..82ae0e33690b082386b8b25a3b10eba15c20285b 100644\n" ++
+        "GIT binary patch\nliteral 4\nLcmZQzWMKvX01^NR\n\nliteral 4\nLcmZQzWMT#Y01f~L\n\n";
+    try std.testing.expectError(error.BinaryPatch, prepare(io, path, binary, testAction()));
     const valid =
         "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n";
-    try std.testing.expectEqualStrings("a.txt", try validateStructure(valid));
-    try std.testing.expectError(error.MalformedPatch, validateStructure("not a patch\n"));
-    try std.testing.expectError(error.BinaryPatch, validateStructure(
-        "diff --git a/a.txt b/a.txt\nGIT binary patch\nliteral 0\n",
+    const second =
+        "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y\n";
+    try std.testing.expectError(error.MultipleFiles, prepare(io, path, valid ++ second, testAction()));
+    try std.testing.expectError(error.UnsupportedSpecialFile, prepare(
+        io,
+        path,
+        "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new\n",
+        testAction(),
     ));
-    try std.testing.expectError(error.MultipleFiles, validateStructure(
-        valid ++ "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y\n",
+    try std.testing.expectError(error.UnsupportedSpecialFile, prepare(
+        io,
+        path,
+        "diff --git a/a.txt b/a.txt\ndeleted file mode 100644\n--- a/a.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n",
+        testAction(),
     ));
-    try std.testing.expectError(error.MultipleFiles, validateStructure(
-        valid ++ "--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y\n",
+    try std.testing.expectError(error.UnsupportedSpecialFile, prepare(
+        io,
+        path,
+        "diff --git a/a.txt b/renamed.txt\nsimilarity index 100%\nrename from a.txt\nrename to renamed.txt\n",
+        testAction(),
     ));
-    try std.testing.expectError(error.PathTraversal, validateStructure(
-        "diff --git a/../a.txt b/../a.txt\n--- a/../a.txt\n+++ b/../a.txt\n@@ -1 +1 @@\n-x\n+y\n",
-    ));
-    try std.testing.expectError(error.RepositoryEscape, validateStructure(
-        "diff --git a//tmp/a b//tmp/a\n--- a//tmp/a\n+++ b//tmp/a\n@@ -1 +1 @@\n-x\n+y\n",
-    ));
-    try std.testing.expectError(error.UnsupportedSpecialFile, validateStructure(
-        "diff --git a/a.txt b/a.txt\nnew file mode 100644\n--- /dev/null\n+++ b/a.txt\n@@ -0,0 +1 @@\n+x\n",
+    try std.testing.expectError(error.UnsupportedSpecialFile, prepare(
+        io,
+        path,
+        "diff --git a/a.txt b/a.txt\nold mode 100644\nnew mode 100755\n",
+        testAction(),
     ));
     var oversized: [max_patch_size + 1]u8 = @splat('x');
     oversized[oversized.len - 1] = '\n';
-    try std.testing.expectError(error.PatchTooLarge, validateStructure(&oversized));
+    try std.testing.expectError(error.PatchTooLarge, prepare(io, path, &oversized, testAction()));
 }
 
 test "symlink target and symlink parent are rejected without changing bytes" {
@@ -973,16 +1255,16 @@ test "symlink target and symlink parent are rejected without changing bytes" {
     const path = path_buffer[0..path_length];
     const target_patch =
         "diff --git a/link.txt b/link.txt\n--- a/link.txt\n+++ b/link.txt\n@@ -1 +1 @@\n-outside\n+changed\n";
-    try std.testing.expectError(error.SymlinkEscape, validate(io, path, target_patch, testAction()));
+    try std.testing.expectError(error.SymlinkEscape, prepare(io, path, target_patch, testAction()));
     const hardlink_patch =
         "diff --git a/hard.txt b/hard.txt\n--- a/hard.txt\n+++ b/hard.txt\n@@ -1 +1 @@\n-outside\n+changed\n";
     try std.testing.expectError(
         error.UnsupportedSpecialFile,
-        validate(io, path, hardlink_patch, testAction()),
+        prepare(io, path, hardlink_patch, testAction()),
     );
     const parent_patch =
         "diff --git a/linked/note.txt b/linked/note.txt\n--- a/linked/note.txt\n+++ b/linked/note.txt\n@@ -1 +1 @@\n-old\n+changed\n";
-    try std.testing.expectError(error.SymlinkEscape, validate(io, path, parent_patch, testAction()));
+    try std.testing.expectError(error.SymlinkEscape, prepare(io, path, parent_patch, testAction()));
     try expectTestFile(tmp.dir, io, "outside.txt", "outside\n");
     try expectTestFile(tmp.dir, io, "real/note.txt", "old\n");
 }
@@ -1015,11 +1297,11 @@ const SnapshotRaceTestState = struct {
     mode: Mode,
     before_git_count: usize = 0,
 
-    fn hook(self: *SnapshotRaceTestState) ValidationTestHook {
+    fn hook(self: *SnapshotRaceTestState) PreparationTestHook {
         return .{ .context = self, .call_fn = call };
     }
 
-    fn call(context: *anyopaque, phase: ValidationTestPhase) !void {
+    fn call(context: *anyopaque, phase: PreparationTestPhase) !void {
         const self: *SnapshotRaceTestState = @ptrCast(@alignCast(context));
         var file = try self.dir.openFile(self.io, switch (self.mode) {
             .same_size_restore => "stable.txt",
@@ -1064,7 +1346,18 @@ fn expectTestFile(dir: std.Io.Dir, io: std.Io, path: []const u8, expected: []con
 }
 
 fn expectGit(io: std.Io, path: []const u8, arguments: []const []const u8) !void {
-    if (try runGit(io, path, arguments, null) != 0) return error.GitFixtureFailed;
+    if ((try runGit(io, path, arguments, null, null)).code != 0) return error.GitFixtureFailed;
+}
+
+fn canonicalTestPath(
+    io: std.Io,
+    sub_path: []const u8,
+    out: *[std.Io.Dir.max_path_bytes]u8,
+) ![]const u8 {
+    var relative_buffer: [128]u8 = undefined;
+    const relative = try std.fmt.bufPrint(&relative_buffer, ".zig-cache/tmp/{s}", .{sub_path});
+    const length = try std.Io.Dir.cwd().realPathFile(io, relative, out);
+    return out[0..length];
 }
 
 fn testAction() ActionContext {

@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
     try offeredPermissionDenialContinues(&layout, init.io, allocator);
     try restoredBashApprovalDispatchesExactDescriptor(&layout, init.io, allocator);
     try restoredPatchApprovalUsesExactDescriptor(&layout, init.io, allocator);
-    try approvedPatchThenShutdownEntersSettlement(&layout, init.io, allocator);
+    try approvedPatchCompletesOnce(&layout, init.io, allocator);
     try cancellationRegenerates(&layout, init.io, allocator);
     try uncommittedTaskCanBeReadmitted(&layout, init.io, allocator);
     try uncertainModelRetryUsesNewAttempt(&layout, init.io, allocator);
@@ -389,6 +389,12 @@ fn restoredPatchApprovalUsesExactDescriptor(
     if (restored.offer(.{ .permission = .{
         .operation_id = approval.operation_id,
         .operation_generation = approval.operation_generation,
+        .descriptor_digest = .{ .apply_patch = binding.hash(binding.PatchIntent, "stale-intent") },
+        .allow = true,
+    } }) != .invalid) return error.StalePatchAuthorizationAccepted;
+    if (restored.offer(.{ .permission = .{
+        .operation_id = approval.operation_id,
+        .operation_generation = approval.operation_generation,
         .descriptor_digest = approval.descriptor_digest orelse return error.ApprovalProjectionIncomplete,
         .allow = false,
     } }) != .accepted) return error.PermissionOfferRejected;
@@ -397,7 +403,7 @@ fn restoredPatchApprovalUsesExactDescriptor(
     try expectFinal(restored, &finished, answer);
 }
 
-fn approvedPatchThenShutdownEntersSettlement(
+fn approvedPatchCompletesOnce(
     layout: *Layout,
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -429,12 +435,13 @@ fn approvedPatchThenShutdownEntersSettlement(
         .tool = .apply_patch,
         .tool_arguments = patch,
         .final_answer = answer,
+        .expected_patch_status = .applied,
     };
     var owner = try harness.Harness.open(.{
         .runtime = layout.runtime,
         .mode = .{ .create = .{
             .workspace_path = layout.workspace_path,
-            .model = "fixture:approved-patch-shutdown",
+            .model = "fixture:approved-patch",
             .task = task,
             .provider = fixture.provider(),
         } },
@@ -453,9 +460,20 @@ fn approvedPatchThenShutdownEntersSettlement(
     } }) != .accepted) return error.PermissionOfferRejected;
     const deferred = try owner.drive();
     if (deferred.state != .waiting) return error.ApprovedPatchDidNotDefer;
-    if (owner.offer(.shutdown) != .accepted) return error.ShutdownOfferRejected;
-    const settling = try owner.drive();
-    if (settling.state != .cancelling) return error.ShutdownDidNotEnterSettlement;
+    var progress = try owner.drive();
+    for (0..5) |_| {
+        if (progress.state == .finished) break;
+        progress = try owner.drive();
+    }
+    try expectFinal(owner, &progress, answer);
+    var changed = try layout.workspace.openFile(io, "shutdown-approval.txt", .{});
+    defer changed.close(io);
+    var bytes: [4]u8 = undefined;
+    if (try changed.readPositionalAll(io, &bytes, 0) != bytes.len or
+        !std.mem.eql(u8, &bytes, "new\n"))
+    {
+        return error.ApprovedPatchDidNotApply;
+    }
 }
 
 fn approvalProjection(progress: *const harness.Progress) ?harness.Projection {

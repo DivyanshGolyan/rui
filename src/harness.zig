@@ -377,7 +377,6 @@ const HarnessState = struct {
                 ) catch |err| if (self.settlingControl() != null and switch (err) {
                     error.ToolCallDeferred,
                     error.SessionNeedsModel,
-                    error.PatchExecutionDeferred,
                     error.PatchApprovalRequired,
                     error.BashPossiblyExecuted,
                     => true,
@@ -593,7 +592,6 @@ const HarnessState = struct {
             error.SessionOperationPending => return .{ .state = .cancelling, .more = true },
             error.SessionNeedsModel,
             error.ToolCallDeferred,
-            error.PatchExecutionDeferred,
             error.PatchApprovalRequired,
             error.BashPossiblyExecuted,
             => {},
@@ -665,7 +663,6 @@ const HarnessState = struct {
             error.BashPossiblyExecuted => .{ .indeterminate, .waiting },
             error.SessionNeedsModel,
             error.ToolCallDeferred,
-            error.PatchExecutionDeferred,
             error.CompletionOffered,
             => .{ .outcome, .waiting },
             error.InjectedCrash => return err,
@@ -780,12 +777,12 @@ const HarnessState = struct {
         return .{ .context = self, .classify_fn = classifyBash, .ask_fn = requestBashPermission };
     }
 
-    fn classifyPatch(context: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!patch_tool.Decision {
+    fn classifyPatch(context: *anyopaque, _: patch_tool.Intent, _: []const u8) anyerror!patch_tool.Decision {
         const self: *HarnessState = @ptrCast(@alignCast(context));
         return if (self.config.permission_mode == .bypass) .allow else .ask;
     }
 
-    fn requestPatchPermission(_: *anyopaque, _: patch_tool.PermissionSubject, _: []const u8) anyerror!bool {
+    fn requestPatchPermission(_: *anyopaque, _: patch_tool.Intent, _: []const u8) anyerror!bool {
         return error.PermissionInputRequired;
     }
 
