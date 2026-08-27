@@ -3,6 +3,7 @@ set -eu
 fixture=$1
 root=$(mktemp -d "${TMPDIR:-/tmp}/onepage-patch-recovery.XXXXXX")
 trap 'rm -rf "$root"' EXIT
+root=$(cd "$root" && pwd -P)
 
 prepare_case() {
     case_name=$1
