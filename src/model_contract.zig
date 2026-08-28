@@ -9,13 +9,11 @@ pub const max_result_contract_size: usize = 1024;
 pub const max_tool_count: usize = 8;
 pub const max_bash_command_bytes: usize = 2048;
 pub const max_patch_input_bytes: usize = 16 * 1024;
-pub const max_bash_command_codepoints: usize = max_bash_command_bytes / 4;
-pub const max_patch_input_codepoints: usize = max_patch_input_bytes / 4;
-/// JSON Schema measures string length in Unicode code points. A control code
-/// point can require a six-byte JSON escape, so this bound covers the largest
-/// canonical representation admitted by the fixed patch schema.
+/// One admitted patch byte can require a six-byte JSON Unicode escape. Keep
+/// this transfer bound outside the Activation Slot so the full byte capacity
+/// survives canonical representation without increasing resident state.
 pub const max_tool_arguments_envelope_size: usize =
-    6 * max_patch_input_codepoints + "{\"patch\":\"\"}".len;
+    6 * max_patch_input_bytes + "{\"patch\":\"\"}".len;
 pub const max_prompt_size: usize = 2048;
 pub const max_input_text_size: usize = 4096;
 pub const max_choice_count: usize = 8;
@@ -52,9 +50,9 @@ pub const model_contract_bytes =
     "input_request.choice_label_bytes=1..256\n";
 
 const bash_schema =
-    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":512},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":100,\"maximum\":120000}},\"required\":[\"command\",\"timeout_ms\"],\"additionalProperties\":false}";
+    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Required non-empty valid UTF-8 text with at most 2048 bytes.\",\"minLength\":1,\"maxLength\":2048},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":100,\"maximum\":120000}},\"required\":[\"command\",\"timeout_ms\"],\"additionalProperties\":false}";
 const patch_schema =
-    "{\"type\":\"object\",\"properties\":{\"patch\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096}},\"required\":[\"patch\"],\"additionalProperties\":false}";
+    "{\"type\":\"object\",\"properties\":{\"patch\":{\"type\":\"string\",\"description\":\"Required non-empty valid UTF-8 text with at most 16384 bytes.\",\"minLength\":1,\"maxLength\":16384}},\"required\":[\"patch\"],\"additionalProperties\":false}";
 
 pub const default_catalog = [_]ToolDefinition{
     .{
@@ -186,27 +184,17 @@ pub fn utf8Valid(bytes: []const u8) bool {
 }
 
 pub fn validateBashCommand(command: []const u8) !void {
-    try validateUnicodeField(
-        command,
-        max_bash_command_bytes,
-        max_bash_command_codepoints,
-    );
+    try validateUnicodeField(command, max_bash_command_bytes);
 }
 
 pub fn validatePatchInput(patch: []const u8) !void {
-    try validateUnicodeField(
-        patch,
-        max_patch_input_bytes,
-        max_patch_input_codepoints,
-    );
+    try validateUnicodeField(patch, max_patch_input_bytes);
 }
 
-fn validateUnicodeField(bytes: []const u8, max_bytes: usize, max_codepoints: usize) !void {
+fn validateUnicodeField(bytes: []const u8, max_bytes: usize) !void {
     if (bytes.len == 0 or bytes.len > max_bytes or !utf8Valid(bytes)) {
         return error.InvalidToolText;
     }
-    const codepoints = std.unicode.utf8CountCodepoints(bytes) catch return error.InvalidToolText;
-    if (codepoints > max_codepoints) return error.InvalidToolText;
 }
 
 test "the default catalog has a stable digest and deterministic name mapping" {
@@ -237,15 +225,23 @@ test "canonical JSON rejects alternate and malformed encodings" {
     try std.testing.expect(!canonicalJson("{\"a\":1"));
 }
 
-test "default schemas expose the same code-point limits enforced by the Host" {
+test "serialized catalog schemas state the exact UTF-8 byte contract" {
     const BashSchema = struct {
         properties: struct {
-            command: struct { maxLength: usize },
+            command: struct {
+                description: []const u8,
+                minLength: usize,
+                maxLength: usize,
+            },
         },
     };
     const PatchSchema = struct {
         properties: struct {
-            patch: struct { maxLength: usize },
+            patch: struct {
+                description: []const u8,
+                minLength: usize,
+                maxLength: usize,
+            },
         },
     };
     var bash = try std.json.parseFromSlice(
@@ -255,9 +251,11 @@ test "default schemas expose the same code-point limits enforced by the Host" {
         .{ .ignore_unknown_fields = true },
     );
     defer bash.deinit();
-    try std.testing.expectEqual(
-        max_bash_command_codepoints,
-        bash.value.properties.command.maxLength,
+    try std.testing.expectEqual(@as(usize, 1), bash.value.properties.command.minLength);
+    try std.testing.expectEqual(max_bash_command_bytes, bash.value.properties.command.maxLength);
+    try std.testing.expectEqualStrings(
+        "Required non-empty valid UTF-8 text with at most 2048 bytes.",
+        bash.value.properties.command.description,
     );
     var patch = try std.json.parseFromSlice(
         PatchSchema,
@@ -266,8 +264,10 @@ test "default schemas expose the same code-point limits enforced by the Host" {
         .{ .ignore_unknown_fields = true },
     );
     defer patch.deinit();
-    try std.testing.expectEqual(
-        max_patch_input_codepoints,
-        patch.value.properties.patch.maxLength,
+    try std.testing.expectEqual(@as(usize, 1), patch.value.properties.patch.minLength);
+    try std.testing.expectEqual(max_patch_input_bytes, patch.value.properties.patch.maxLength);
+    try std.testing.expectEqualStrings(
+        "Required non-empty valid UTF-8 text with at most 16384 bytes.",
+        patch.value.properties.patch.description,
     );
 }

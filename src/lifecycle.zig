@@ -2599,27 +2599,24 @@ fn expectPatchArgumentBoundary(
     }
 }
 
-test "Tool Catalog code-point limits exactly match Host admission" {
+test "Tool Catalog preserves byte-bounded Unicode admission" {
     const allocator = std.testing.allocator;
     const envelope = try allocator.alloc(u8, model_contract.max_tool_arguments_envelope_size);
     defer allocator.free(envelope);
 
-    const bash_ascii_exact = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints, "x");
+    const bash_ascii_exact = try repeatedUtf8(allocator, model_contract.max_bash_command_bytes, "x");
     defer allocator.free(bash_ascii_exact);
-    const bash_ascii_over = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints + 1, "x");
+    const bash_ascii_over = try repeatedUtf8(allocator, model_contract.max_bash_command_bytes + 1, "x");
     defer allocator.free(bash_ascii_over);
-    const bash_unicode_exact = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints, "é");
+    const bash_unicode_exact = try repeatedUtf8(allocator, model_contract.max_bash_command_bytes / "é".len, "é");
     defer allocator.free(bash_unicode_exact);
-    const bash_unicode_over = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints + 1, "é");
+    const bash_unicode_over = try repeatedUtf8(allocator, model_contract.max_bash_command_bytes / "é".len + 1, "é");
     defer allocator.free(bash_unicode_over);
-    const bash_four_byte_exact = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints, "😀");
-    defer allocator.free(bash_four_byte_exact);
     try expectBashArgumentBoundary(allocator, envelope, bash_ascii_exact, true);
     try expectBashArgumentBoundary(allocator, envelope, bash_ascii_over, false);
     try expectBashArgumentBoundary(allocator, envelope, bash_unicode_exact, true);
     try expectBashArgumentBoundary(allocator, envelope, bash_unicode_over, false);
-    try expectBashArgumentBoundary(allocator, envelope, bash_four_byte_exact, true);
-    const escaped_bash = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints, "\x01");
+    const escaped_bash = try repeatedUtf8(allocator, model_contract.max_bash_command_bytes, "\x01");
     defer allocator.free(escaped_bash);
     const encoded_escaped_bash = try model_contract.encodeJson(envelope, .{
         .command = escaped_bash,
@@ -2628,23 +2625,20 @@ test "Tool Catalog code-point limits exactly match Host admission" {
     try std.testing.expect(encoded_escaped_bash.len <= model_contract.max_tool_arguments_envelope_size);
     try expectBashArgumentBoundary(allocator, envelope, escaped_bash, true);
 
-    const patch_ascii_exact = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints, "x");
+    const patch_ascii_exact = try repeatedUtf8(allocator, model_contract.max_patch_input_bytes, "x");
     defer allocator.free(patch_ascii_exact);
-    const patch_ascii_over = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints + 1, "x");
+    const patch_ascii_over = try repeatedUtf8(allocator, model_contract.max_patch_input_bytes + 1, "x");
     defer allocator.free(patch_ascii_over);
-    const patch_unicode_exact = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints, "é");
+    const patch_unicode_exact = try repeatedUtf8(allocator, model_contract.max_patch_input_bytes / "é".len, "é");
     defer allocator.free(patch_unicode_exact);
-    const patch_unicode_over = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints + 1, "é");
+    const patch_unicode_over = try repeatedUtf8(allocator, model_contract.max_patch_input_bytes / "é".len + 1, "é");
     defer allocator.free(patch_unicode_over);
-    const patch_four_byte_exact = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints, "😀");
-    defer allocator.free(patch_four_byte_exact);
     try expectPatchArgumentBoundary(allocator, envelope, patch_ascii_exact, true);
     try expectPatchArgumentBoundary(allocator, envelope, patch_ascii_over, false);
     try expectPatchArgumentBoundary(allocator, envelope, patch_unicode_exact, true);
     try expectPatchArgumentBoundary(allocator, envelope, patch_unicode_over, false);
-    try expectPatchArgumentBoundary(allocator, envelope, patch_four_byte_exact, true);
 
-    const escaped_patch = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints, "\x01");
+    const escaped_patch = try repeatedUtf8(allocator, model_contract.max_patch_input_bytes, "\x01");
     defer allocator.free(escaped_patch);
     const encoded_patch = try model_contract.encodeJson(envelope, .{ .patch = escaped_patch });
     try std.testing.expectEqual(
