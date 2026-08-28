@@ -79,9 +79,10 @@ may intentionally use arbitrary workload memory; that usage is reported separate
 to preserve the harness budget. OnePage still bounds its own output capture and durable publication path.
 
 The first agent slice now performs one real durable model turn through the product CLI. A fixture
-provider validates the request reconstructed from the conversation, writes a complete response spool,
-and wakes a restored Core. Core alone classifies the response as a Final Answer, which is
-then committed as an immutable conversation entry and reproduced by exact Session resume.
+provider validates the request reconstructed from the conversation, writes complete Captured Model
+Output, and notifies a restored Harness owner. Harness-owned Semantic Admission classifies the output,
+and Core applies the admitted Final Answer. The answer is then committed as an immutable conversation
+entry and reproduced by exact Session resume.
 
 ```sh
 zig build fixture-answer -Doptimize=ReleaseSmall
@@ -124,7 +125,7 @@ Authority covers its exact operation and descriptor binding. An explicit invocat
 mode admits validated calls without creating the request; it does not bypass validation, durability,
 patch preimage checks, or recovery rules.
 
-The planned #32 model-facing representation is provider-neutral. Conversation records generic text,
+The model-facing representation is provider-neutral. Conversation records generic text,
 tool-call, tool-result, and checkpoint entries; each model Operation binds an immutable bounded Tool
 Catalog and stable Tool Keys. Provider adapters translate that house request at the edge. Harness then
 maps only the two admitted V1 keys to concrete Actions, so adding a provider does not change durable
