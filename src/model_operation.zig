@@ -88,6 +88,66 @@ pub const ContentView = struct {
     }
 };
 
+pub const ToolDefinitionBuffer = struct {
+    key_bytes: [model_contract.max_tool_key_size]u8 = undefined,
+    provider_name_bytes: [model_contract.max_provider_tool_name_size]u8 = undefined,
+    description_bytes: [model_contract.max_description_size]u8 = undefined,
+    schema_bytes: [model_contract.max_schema_size]u8 = undefined,
+    result_contract_bytes: [model_contract.max_result_contract_size]u8 = undefined,
+    lengths: [5]u32 = @splat(0),
+
+    pub fn definition(self: *const ToolDefinitionBuffer) model_contract.ToolDefinition {
+        return .{
+            .key = self.key_bytes[0..self.lengths[0]],
+            .provider_tool_name = self.provider_name_bytes[0..self.lengths[1]],
+            .description = self.description_bytes[0..self.lengths[2]],
+            .input_schema = self.schema_bytes[0..self.lengths[3]],
+            .result_contract = self.result_contract_bytes[0..self.lengths[4]],
+        };
+    }
+
+    fn copyFrom(self: *ToolDefinitionBuffer, source_definition: model_contract.ToolDefinition) void {
+        const fields = .{
+            &self.key_bytes,
+            &self.provider_name_bytes,
+            &self.description_bytes,
+            &self.schema_bytes,
+            &self.result_contract_bytes,
+        };
+        const source = .{
+            source_definition.key,
+            source_definition.provider_tool_name,
+            source_definition.description,
+            source_definition.input_schema,
+            source_definition.result_contract,
+        };
+        inline for (fields, source, 0..) |target, bytes, index| {
+            @memcpy(target[0..bytes.len], bytes);
+            self.lengths[index] = @intCast(bytes.len);
+        }
+    }
+};
+
+pub const ToolCatalogCursor = struct {
+    source: RequestSource,
+    cursor: u64,
+    remaining: u16,
+
+    pub fn count(self: *const ToolCatalogCursor) u16 {
+        return self.remaining;
+    }
+
+    pub fn next(
+        self: *ToolCatalogCursor,
+        buffer: *ToolDefinitionBuffer,
+    ) !?model_contract.ToolDefinition {
+        if (self.remaining == 0) return null;
+        const definition = try decodeToolDefinition(self.source, &self.cursor, buffer);
+        self.remaining -= 1;
+        return definition;
+    }
+};
+
 pub const TextEntry = struct {
     entry_id: u64,
     parent_id: u64,
@@ -127,6 +187,8 @@ pub const RequestCursor = struct {
     source: RequestSource,
     model_name: [session_store.model_name_capacity]u8 = undefined,
     model_name_length: u16,
+    catalog_start: u64,
+    tool_count: u16,
     cursor: u64,
     total_entries: u32,
     remaining_entries: u32,
@@ -145,8 +207,12 @@ pub const RequestCursor = struct {
         return model_contract.model_contract_bytes;
     }
 
-    pub fn toolCatalog(_: *const RequestCursor) []const model_contract.ToolDefinition {
-        return &model_contract.default_catalog;
+    pub fn toolCatalog(self: *const RequestCursor) ToolCatalogCursor {
+        return .{
+            .source = self.source,
+            .cursor = self.catalog_start,
+            .remaining = self.tool_count,
+        };
     }
 
     pub fn entryCount(self: *const RequestCursor) u32 {
@@ -226,7 +292,7 @@ pub const RequestCursor = struct {
     }
 };
 
-fn openRequest(source: RequestSource) !RequestCursor {
+fn openRequest(source: RequestSource, selection: ?*CatalogSelection) !RequestCursor {
     if (source.length() < request_header_size) return error.TruncatedModelRequest;
     var header: [request_header_size]u8 = undefined;
     try readExact(source, 0, &header);
@@ -241,7 +307,7 @@ fn openRequest(source: RequestSource) !RequestCursor {
     const instructions_length = read(u32, &header, 20);
     const contract_length = read(u32, &header, 24);
     if (entry_count == 0 or entry_count > session_transition.max_transitions or
-        tool_count != model_contract.default_catalog.len or
+        tool_count == 0 or tool_count > model_contract.max_tool_count or
         model_length == 0 or model_length > session_store.model_name_capacity or
         instructions_length != model_contract.default_instructions.len or
         contract_length != model_contract.model_contract_bytes.len)
@@ -249,15 +315,15 @@ fn openRequest(source: RequestSource) !RequestCursor {
         return error.MalformedModelRequest;
     }
     const contract_digest = binding.hash(binding.ModelContract, model_contract.model_contract_bytes);
-    if (!std.mem.eql(u8, header[28..60], &model_contract.default_catalog_digest.bytes) or
-        !std.mem.eql(u8, header[60..92], &contract_digest.bytes))
-    {
+    if (!std.mem.eql(u8, header[60..92], &contract_digest.bytes)) {
         return error.MalformedModelRequest;
     }
 
     var request: RequestCursor = .{
         .source = source,
         .model_name_length = model_length,
+        .catalog_start = 0,
+        .tool_count = tool_count,
         .cursor = request_header_size,
         .total_entries = entry_count,
         .remaining_entries = entry_count,
@@ -270,33 +336,108 @@ fn openRequest(source: RequestSource) !RequestCursor {
     try expectBytes(source, request.cursor, model_contract.model_contract_bytes);
     request.cursor += contract_length;
 
-    for (model_contract.default_catalog) |definition| {
-        var tool_header: [tool_header_size]u8 = undefined;
-        try readExact(source, request.cursor, &tool_header);
-        const lengths = [_]usize{
-            read(u16, &tool_header, 0),
-            read(u16, &tool_header, 2),
-            read(u32, &tool_header, 4),
-            read(u32, &tool_header, 8),
-            read(u32, &tool_header, 12),
-        };
-        if (!allZero(tool_header[16..20])) return error.MalformedModelRequest;
-        request.cursor += tool_header_size;
-        const fields = [_][]const u8{
-            definition.key,
-            definition.provider_tool_name,
-            definition.description,
-            definition.input_schema,
-            definition.result_contract,
-        };
-        for (lengths, fields) |length, expected| {
-            if (length != expected.len) return error.MalformedModelRequest;
-            try expectBytes(source, request.cursor, expected);
-            request.cursor += length;
-        }
-    }
+    request.catalog_start = request.cursor;
+    const expected_catalog_digest: binding.ToolCatalog = .{ .bytes = header[28..60].* };
+    request.cursor = try validateCatalogEncoding(
+        source,
+        request.cursor,
+        tool_count,
+        expected_catalog_digest,
+        selection,
+    );
     if (request.cursor >= source.length()) return error.TruncatedModelRequest;
     return request;
+}
+
+const CatalogSelection = struct {
+    key: []const u8,
+    definition: *ToolDefinitionBuffer,
+    found: bool = false,
+};
+
+fn validateCatalogEncoding(
+    source: RequestSource,
+    start: u64,
+    tool_count: u16,
+    expected_digest: binding.ToolCatalog,
+    selection: ?*CatalogSelection,
+) !u64 {
+    if (selection) |selected| selected.found = false;
+    var cursor = start;
+    var definition_buffer: ToolDefinitionBuffer = .{};
+    var keys: [model_contract.max_tool_count][model_contract.max_tool_key_size]u8 = undefined;
+    var key_lengths: [model_contract.max_tool_count]u8 = @splat(0);
+    var names: [model_contract.max_tool_count][model_contract.max_provider_tool_name_size]u8 = undefined;
+    var name_lengths: [model_contract.max_tool_count]u8 = @splat(0);
+    var digest = model_contract.CatalogDigestBuilder.init(tool_count);
+    for (0..tool_count) |index| {
+        const definition = try decodeToolDefinition(source, &cursor, &definition_buffer);
+        model_contract.validateCatalog(&.{definition}) catch return error.MalformedModelRequest;
+        for (0..index) |earlier| {
+            if (std.mem.eql(u8, keys[earlier][0..key_lengths[earlier]], definition.key)) {
+                return error.MalformedModelRequest;
+            }
+            if (std.mem.eql(u8, names[earlier][0..name_lengths[earlier]], definition.provider_tool_name)) {
+                return error.MalformedModelRequest;
+            }
+        }
+        @memcpy(keys[index][0..definition.key.len], definition.key);
+        key_lengths[index] = @intCast(definition.key.len);
+        @memcpy(names[index][0..definition.provider_tool_name.len], definition.provider_tool_name);
+        name_lengths[index] = @intCast(definition.provider_tool_name.len);
+        digest.add(definition);
+        if (selection) |selected| {
+            if (std.mem.eql(u8, selected.key, definition.key)) {
+                selected.definition.copyFrom(definition);
+                selected.found = true;
+            }
+        }
+    }
+    if (!binding.eql(binding.ToolCatalog, digest.final(), expected_digest)) {
+        return error.MalformedModelRequest;
+    }
+    return cursor;
+}
+
+fn decodeToolDefinition(
+    source: RequestSource,
+    cursor: *u64,
+    buffer: *ToolDefinitionBuffer,
+) !model_contract.ToolDefinition {
+    var header: [tool_header_size]u8 = undefined;
+    try readExact(source, cursor.*, &header);
+    if (!allZero(header[16..20])) return error.MalformedModelRequest;
+    const lengths = [_]usize{
+        read(u16, &header, 0),
+        read(u16, &header, 2),
+        read(u32, &header, 4),
+        read(u32, &header, 8),
+        read(u32, &header, 12),
+    };
+    const capacities = [_]usize{
+        buffer.key_bytes.len,
+        buffer.provider_name_bytes.len,
+        buffer.description_bytes.len,
+        buffer.schema_bytes.len,
+        buffer.result_contract_bytes.len,
+    };
+    for (lengths, capacities) |length, capacity| {
+        if (length == 0 or length > capacity) return error.MalformedModelRequest;
+    }
+    cursor.* += tool_header_size;
+    const fields = .{
+        buffer.key_bytes[0..lengths[0]],
+        buffer.provider_name_bytes[0..lengths[1]],
+        buffer.description_bytes[0..lengths[2]],
+        buffer.schema_bytes[0..lengths[3]],
+        buffer.result_contract_bytes[0..lengths[4]],
+    };
+    inline for (fields, 0..) |field, index| {
+        try readExact(source, cursor.*, field);
+        cursor.* += lengths[index];
+        buffer.lengths[index] = @intCast(lengths[index]);
+    }
+    return buffer.definition();
 }
 
 fn decodeRequestToolCall(
@@ -464,7 +605,7 @@ pub const ProviderIo = struct {
             .context = self,
             .length_fn = requestLength,
             .read_fn = requestRead,
-        });
+        }, null);
     }
 
     pub fn responseCapability(self: *ProviderIo) ResponseWriter {
@@ -507,6 +648,38 @@ pub const ProviderIo = struct {
     }
 };
 
+const CatalogBlobSource = struct {
+    reader: *session_store.BlobReader,
+
+    fn length(context: *anyopaque) u64 {
+        const self: *CatalogBlobSource = @ptrCast(@alignCast(context));
+        return self.reader.length();
+    }
+
+    fn read(context: *anyopaque, offset: u64, out: []u8) anyerror![]const u8 {
+        const self: *CatalogBlobSource = @ptrCast(@alignCast(context));
+        return self.reader.readWindow(offset, out);
+    }
+};
+
+pub fn readToolDefinition(
+    session: *session_store.Session,
+    request_ref: u64,
+    key: []const u8,
+    buffer: *ToolDefinitionBuffer,
+) !?model_contract.ToolDefinition {
+    var reader = try session.openBlob(request_ref);
+    defer reader.close();
+    var blob_source: CatalogBlobSource = .{ .reader = &reader };
+    var selection: CatalogSelection = .{ .key = key, .definition = buffer };
+    _ = try openRequest(.{
+        .context = &blob_source,
+        .length_fn = CatalogBlobSource.length,
+        .read_fn = CatalogBlobSource.read,
+    }, &selection);
+    return if (selection.found) buffer.definition() else null;
+}
+
 fn capturedResponseLength(current: u32, appended: usize) !u32 {
     if (current > model_protocol.max_response_size or
         appended > model_protocol.max_response_size - @as(usize, current))
@@ -533,9 +706,26 @@ pub fn buildRequest(
     first_entry: u32,
     entry_count: u32,
 ) !binding.ModelDescriptor {
+    return buildRequestWithCatalog(
+        session,
+        request_ref,
+        first_entry,
+        entry_count,
+        &model_contract.default_catalog,
+    );
+}
+
+pub fn buildRequestWithCatalog(
+    session: *session_store.Session,
+    request_ref: u64,
+    first_entry: u32,
+    entry_count: u32,
+    catalog: []const model_contract.ToolDefinition,
+) !binding.ModelDescriptor {
     if (request_ref == 0 or first_entry == 0 or entry_count == 0) {
         return error.InvalidContextSelection;
     }
+    try model_contract.validateCatalog(catalog);
     const last = @as(u64, first_entry) + entry_count - 1;
     if (last > session.entryCount()) return error.InvalidContextSelection;
     const first = try session.readEntry(first_entry);
@@ -554,17 +744,17 @@ pub fn buildRequest(
     write(u16, &request_header, 8, version);
     write(u16, &request_header, 10, request_header_size);
     write(u32, &request_header, 12, entry_count);
-    write(u16, &request_header, 16, model_contract.default_catalog.len);
+    write(u16, &request_header, 16, @intCast(catalog.len));
     write(u16, &request_header, 18, @intCast(session.modelName().len));
     write(u32, &request_header, 20, model_contract.default_instructions.len);
     write(u32, &request_header, 24, model_contract.model_contract_bytes.len);
-    @memcpy(request_header[28..60], &model_contract.default_catalog_digest.bytes);
+    @memcpy(request_header[28..60], &model_contract.catalogDigest(catalog).bytes);
     @memcpy(request_header[60..92], &contract_digest.bytes);
     try appendHashed(&writer, &hasher, &request_header);
     try appendHashed(&writer, &hasher, session.modelName());
     try appendHashed(&writer, &hasher, model_contract.default_instructions);
     try appendHashed(&writer, &hasher, model_contract.model_contract_bytes);
-    for (model_contract.default_catalog) |definition| {
+    for (catalog) |definition| {
         var tool_header: [tool_header_size]u8 = @splat(0);
         write(u16, &tool_header, 0, @intCast(definition.key.len));
         write(u16, &tool_header, 2, @intCast(definition.provider_tool_name.len));

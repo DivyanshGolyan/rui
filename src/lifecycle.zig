@@ -34,6 +34,7 @@ pub const Host = HostWithCapacity(production_active_capacity);
 
 const SemanticValidationWorkspace = struct {
     response: [model_protocol.max_response_size]u8 = undefined,
+    tool_definition: model_operation.ToolDefinitionBuffer = .{},
     validation: model_protocol.ValidationScratch = .{},
 
     fn scrub(self: *SemanticValidationWorkspace) void {
@@ -231,6 +232,8 @@ const ModelCompletion = struct {
     attempt_id: u64,
     agent_generation: u32,
     operation_generation: u32,
+    request_ref: u64,
+    request_digest: binding.ModelDescriptor,
 };
 
 const ExecutableTool = enum { bash, apply_patch };
@@ -291,12 +294,10 @@ const Core = struct {
 
 fn commitCoreFacts(
     session: *session_store.Session,
-    core_state_buffer: []u8,
     core: *Core,
     facts: []const session_transition.Fact,
     reactivate: bool,
 ) !void {
-    _ = core_state_buffer;
     try core.suspendIntoState();
     _ = try session.commitSemantic(facts, &core.encoded_state);
     if (reactivate) try core.activate();
@@ -320,10 +321,8 @@ fn operationContext(
 
 fn restoreCoreFromLedger(
     session: *session_store.Session,
-    core_state_buffer: []u8,
     core: *Core,
 ) !void {
-    _ = core_state_buffer;
     var replay_context: u8 = 0;
     const replay = try session.inspectSemantic(&replay_context, ignoreFact);
     core.encoded_state = replay.last_core orelse return error.MissingLedgerCoreState;
@@ -345,6 +344,11 @@ const ModelSlot = struct {
 
     fn apply(context: *anyopaque, completion: ModelCompletion) anyerror!Prepared {
         const self: *ModelSlot = @ptrCast(@alignCast(context));
+        try model_operation.verifyRequestDigest(
+            self.session,
+            completion.request_ref,
+            completion.request_digest,
+        );
         var response = try self.session.openBlob(completion.result);
         defer response.close();
         if (response.length() > model_protocol.max_response_size) return error.ResponseTooLarge;
@@ -354,7 +358,14 @@ const ModelSlot = struct {
             completion.result_digest,
             self.scratch.response[0..length],
         );
-        const validated = model_protocol.admit(&self.scratch.validation, bytes);
+        const selected_key = model_protocol.toolKeyForCatalogLookup(bytes) catch null;
+        const definition = try model_operation.readToolDefinition(
+            self.session,
+            completion.request_ref,
+            selected_key orelse "",
+            &self.scratch.tool_definition,
+        );
+        const validated = model_protocol.admitWithDefinition(&self.scratch.validation, bytes, definition);
         const parsed = try validated.verify(bytes);
         var prepared: Prepared = .{};
         if (parsed.disposition == .tool_call) {
@@ -364,6 +375,7 @@ const ModelSlot = struct {
                 self.session,
                 self.workspace_path,
                 completion,
+                bytes[parsed.tool_key_offset..][0..parsed.tool_key_length],
                 admitted,
             );
         }
@@ -379,6 +391,7 @@ fn prepareToolAdmission(
     session: *session_store.Session,
     workspace_path: []const u8,
     completion: ModelCompletion,
+    key: []const u8,
     admitted: model_contract.AdmittedToolArguments,
 ) !ModelSlot.Prepared {
     const call_ref = (@as(u64, 1) << 59) | @as(u32, @truncate(completion.result));
@@ -390,8 +403,14 @@ fn prepareToolAdmission(
         .kind = call_entry.kind,
         .content_ref = call_ref,
     });
-    return switch (admitted) {
-        .bash => |arguments| blk: {
+    try storeToolCall(session, call_ref, key, admitted.json);
+    var prepared: ModelSlot.Prepared = .{};
+    prepared.facts[0] = conversation_fact;
+    prepared.fact_count = 1;
+    const executable = executableToolFromKey(key) catch return prepared;
+    return switch (executable) {
+        .bash => blk: {
+            const arguments = try admittedBashArguments(admitted.parsed);
             const tool_operation_id = (@as(u64, 1) << 63) | completion.operation_id;
             const descriptor_ref = (@as(u64, 1) << 62) | @as(u32, @truncate(completion.result));
             const descriptor: bash_tool.Descriptor = .{
@@ -404,7 +423,6 @@ fn prepareToolAdmission(
             var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
             const descriptor_bytes = try bash_tool.encodeDescriptor(&descriptor_buffer, descriptor);
             const digest = bash_tool.descriptorDigest(descriptor_bytes);
-            try storeToolCall(session, call_ref, model_contract.bash_key, arguments.json);
             try session.storeBlob(descriptor_ref, descriptor_bytes);
             const operation = operationContext(session, tool_operation_id, 1);
             break :blk .{ .facts = .{
@@ -413,19 +431,19 @@ fn prepareToolAdmission(
                 conversation_fact,
             }, .fact_count = 3 };
         },
-        .apply_patch => |arguments| blk: {
+        .apply_patch => blk: {
+            const arguments = try admittedPatchArguments(admitted.parsed);
             const tool_operation_id = (@as(u64, 3) << 62) | completion.operation_id;
             const response_ref: u32 = @truncate(completion.result);
             const patch_ref = (@as(u64, 1) << 60) | response_ref;
             const intent_ref = (@as(u64, 1) << 58) | response_ref;
-            const intent = try patch_tool.prepare(session.io, workspace_path, arguments.patch, .{
+            const intent = try patch_tool.prepare(session.io, workspace_path, arguments, .{
                 .operation_id = tool_operation_id,
                 .operation_generation = 1,
                 .patch_ref = patch_ref,
             });
-            try session.storeBlob(patch_ref, arguments.patch);
+            try session.storeBlob(patch_ref, arguments);
             try storePatchIntent(session, intent_ref, intent);
-            try storeToolCall(session, call_ref, model_contract.apply_patch_key, arguments.json);
             const operation = operationContext(session, tool_operation_id, 1);
             break :blk .{ .facts = .{
                 session_transition.operationSubmitted(operation, intent_ref, .{ .apply_patch = intent.intent_digest }, .consequential),
@@ -436,10 +454,50 @@ fn prepareToolAdmission(
     };
 }
 
+const AdmittedBashArguments = struct {
+    command: []const u8,
+    timeout_ms: u32,
+};
+
+fn admittedBashArguments(value: std.json.Value) !AdmittedBashArguments {
+    const object = switch (value) {
+        .object => |item| item,
+        else => return error.InvalidAdmittedBashArguments,
+    };
+    const command = switch (object.get("command") orelse return error.InvalidAdmittedBashArguments) {
+        .string => |item| item,
+        else => return error.InvalidAdmittedBashArguments,
+    };
+    const timeout = switch (object.get("timeout_ms") orelse return error.InvalidAdmittedBashArguments) {
+        .integer => |item| std.math.cast(u32, item) orelse return error.InvalidAdmittedBashArguments,
+        .float => |item| if (std.math.isFinite(item) and item >= 0 and
+            item <= std.math.maxInt(u32) and @trunc(item) == item)
+            @as(u32, @intFromFloat(item))
+        else
+            return error.InvalidAdmittedBashArguments,
+        else => return error.InvalidAdmittedBashArguments,
+    };
+    model_contract.validateBashCommand(command) catch return error.InvalidAdmittedBashArguments;
+    if (timeout < 100 or timeout > 120_000) return error.InvalidAdmittedBashArguments;
+    return .{ .command = command, .timeout_ms = timeout };
+}
+
+fn admittedPatchArguments(value: std.json.Value) ![]const u8 {
+    const object = switch (value) {
+        .object => |item| item,
+        else => return error.InvalidAdmittedPatchArguments,
+    };
+    const patch = switch (object.get("patch") orelse return error.InvalidAdmittedPatchArguments) {
+        .string => |item| item,
+        else => return error.InvalidAdmittedPatchArguments,
+    };
+    model_contract.validatePatchInput(patch) catch return error.InvalidAdmittedPatchArguments;
+    return patch;
+}
+
 pub fn advanceCreated(
     host: *Host,
     session: *session_store.Session,
-    core_state_buffer: []u8,
     config: RuntimeConfig,
     provider: ?model_operation.Provider,
 ) !u64 {
@@ -450,10 +508,8 @@ pub fn advanceCreated(
     const token = session.ownerToken();
     try core.initialize(session.agent_id);
     try core.reducer.startTask(session.activeLeafId());
-    if (core_state_buffer.len != core_state.encoded_size) return error.InvalidCoreStateBuffer;
     try commitCoreFacts(
         session,
-        core_state_buffer,
         &core,
         &.{session_transition.taskAdmitted(
             agentContext(session),
@@ -468,7 +524,6 @@ pub fn advanceCreated(
         token,
         &core,
         &core_open,
-        core_state_buffer,
         provider,
         1,
         config.completion_hook,
@@ -483,7 +538,6 @@ fn performModelTurn(
     token: session_store.OwnerToken,
     core: *Core,
     core_open: *bool,
-    core_state_buffer: []u8,
     provider: ?model_operation.Provider,
     model_sequence: u32,
     completion_hook: ?CompletionHook,
@@ -526,7 +580,6 @@ fn performModelTurn(
     };
     try commitCoreFacts(
         session,
-        core_state_buffer,
         core,
         &admission_facts,
         false,
@@ -550,7 +603,6 @@ fn retryModelAttempt(
     token: session_store.OwnerToken,
     core: *Core,
     core_open: *bool,
-    core_state_buffer: []u8,
     provider: ?model_operation.Provider,
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
@@ -610,7 +662,6 @@ fn retryModelAttempt(
     );
     try commitCoreFacts(
         session,
-        core_state_buffer,
         core,
         &.{attempt},
         false,
@@ -684,7 +735,6 @@ fn executeBashCall(
     token: session_store.OwnerToken,
     core: *Core,
     host: *Host,
-    core_state_buffer: []u8,
     ids: OperationIds,
     core_open: *bool,
     workspace_path: []const u8,
@@ -730,7 +780,7 @@ fn executeBashCall(
             .descriptor_ref = descriptor_ref,
             .descriptor_digest = .{ .bash = digest },
         });
-        try commitCoreFacts(session, core_state_buffer, core, &.{approval}, true);
+        try commitCoreFacts(session, core, &.{approval}, true);
         if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .bash,
             .operation_id = tool_operation_id,
@@ -758,7 +808,6 @@ fn executeBashCall(
     );
     try commitCoreFacts(
         session,
-        core_state_buffer,
         core,
         &.{attempt},
         false,
@@ -774,7 +823,7 @@ fn executeBashCall(
     try reach(fault, .after_bash_execution);
     core.* = try Core.open(&host.slots);
     core_open.* = true;
-    try restoreCoreFromLedger(session, core_state_buffer, core);
+    try restoreCoreFromLedger(session, core);
     defer execution.deinit();
     try storeBashResult(session, result_ref, execution);
     const result_digest = try blobDigest(session, result_ref);
@@ -798,7 +847,6 @@ fn executeBashCall(
 fn requestPatchPermission(
     session: *session_store.Session,
     core: *Core,
-    core_state_buffer: []u8,
     ids: OperationIds,
     permission_mode: PermissionMode,
     approval_required_hook: ?ApprovalRequiredHook,
@@ -835,7 +883,6 @@ fn requestPatchPermission(
         });
         try commitCoreFacts(
             session,
-            core_state_buffer,
             core,
             &.{approval},
             true,
@@ -887,7 +934,6 @@ pub fn advanceRestored(
     host: *Host,
     allocator: std.mem.Allocator,
     session: *session_store.Session,
-    core_state_buffer: []u8,
     config: RuntimeConfig,
     provider: ?model_operation.Provider,
 ) !u64 {
@@ -896,8 +942,7 @@ pub fn advanceRestored(
     var core_open = true;
     defer if (core_open) core.close();
     const token = session.ownerToken();
-    if (core_state_buffer.len != core_state.encoded_size) return error.InvalidCoreStateBuffer;
-    try restoreCoreFromLedger(session, core_state_buffer, &core);
+    try restoreCoreFromLedger(session, &core);
     var outcome = (try core.reducer.task()).phase;
     if (outcome == .awaiting_model) {
         if (durableCompletion(session, token, &core)) |completion| {
@@ -936,7 +981,6 @@ pub fn advanceRestored(
             @memcpy(admission_facts[2..][0..prepared.fact_count], prepared.facts[0..prepared.fact_count]);
             try commitCoreFacts(
                 session,
-                core_state_buffer,
                 &core,
                 admission_facts[0 .. 2 + prepared.fact_count],
                 true,
@@ -948,7 +992,6 @@ pub fn advanceRestored(
                 token,
                 &core,
                 &core_open,
-                core_state_buffer,
                 provider,
                 config.completion_hook,
                 config.fault,
@@ -961,7 +1004,6 @@ pub fn advanceRestored(
         return finalizeCandidate(
             session,
             &core,
-            core_state_buffer,
             null,
         );
     }
@@ -970,7 +1012,6 @@ pub fn advanceRestored(
             session,
             token,
             &core,
-            core_state_buffer,
             session.workspacePath(),
             config.completion_hook,
             config.fault,
@@ -996,7 +1037,6 @@ pub fn advanceRestored(
                         token,
                         &core,
                         host,
-                        core_state_buffer,
                         ids,
                         &core_open,
                         config.workspace_path,
@@ -1010,7 +1050,6 @@ pub fn advanceRestored(
                         try requestPatchPermission(
                             session,
                             &core,
-                            core_state_buffer,
                             ids,
                             config.permission_mode,
                             config.approval_required_hook,
@@ -1020,7 +1059,6 @@ pub fn advanceRestored(
                             session,
                             token,
                             &core,
-                            core_state_buffer,
                             config.workspace_path,
                             config.completion_hook,
                             config.fault,
@@ -1052,7 +1090,6 @@ pub fn advanceRestored(
         token,
         &core,
         &core_open,
-        core_state_buffer,
         provider orelse return error.SessionNeedsModel,
         2,
         config.completion_hook,
@@ -1064,7 +1101,6 @@ pub fn advanceRestored(
     const final_ref = try finalizeCandidate(
         session,
         &core,
-        core_state_buffer,
         null,
     );
     return final_ref;
@@ -1074,7 +1110,6 @@ pub fn resolvePermission(
     host: *Host,
     allocator: std.mem.Allocator,
     session: *session_store.Session,
-    core_state_buffer: []u8,
     decision: ApprovalRequired,
     allow: bool,
     provider: ?model_operation.Provider,
@@ -1083,11 +1118,10 @@ pub fn resolvePermission(
 ) !u64 {
     const io = session.io;
     const token = session.ownerToken();
-    if (core_state_buffer.len != core_state.encoded_size) return error.InvalidCoreStateBuffer;
     var core = try Core.open(&host.slots);
     var core_open = true;
     defer if (core_open) core.close();
-    try restoreCoreFromLedger(session, core_state_buffer, &core);
+    try restoreCoreFromLedger(session, &core);
     if ((try core.reducer.task()).phase != .awaiting_tool) return error.PermissionNoLongerRequired;
     const tool = try executableTool(session, &core.reducer);
     const observation = try core.reducer.operation();
@@ -1163,7 +1197,7 @@ pub fn resolvePermission(
                     descriptor.descriptor_ref,
                     descriptor.descriptor_digest,
                 );
-                try commitCoreFacts(session, core_state_buffer, &core, &.{attempt}, false);
+                try commitCoreFacts(session, &core, &.{attempt}, false);
                 core.close();
                 core_open = false;
                 execution = try bash_tool.executeDescriptor(
@@ -1174,7 +1208,7 @@ pub fn resolvePermission(
                 );
                 core = try Core.open(&host.slots);
                 core_open = true;
-                try restoreCoreFromLedger(session, core_state_buffer, &core);
+                try restoreCoreFromLedger(session, &core);
             } else {
                 execution = .{
                     .allocator = allocator,
@@ -1217,7 +1251,6 @@ pub fn resolvePermission(
             try reconcileBashResult(
                 session,
                 &core,
-                core_state_buffer,
                 toolResultFromRecord(terminal.result),
             );
         },
@@ -1254,7 +1287,6 @@ pub fn resolvePermission(
         host,
         allocator,
         session,
-        core_state_buffer,
         .{
             .workspace_path = session.workspacePath(),
             .bash_cancelled = cancellation,
@@ -1268,7 +1300,6 @@ pub fn acceptCompletion(
     host: *Host,
     allocator: std.mem.Allocator,
     session: *session_store.Session,
-    core_state_buffer: []u8,
     offered: completion_inbox.Envelope,
     config: RuntimeConfig,
     provider: ?model_operation.Provider,
@@ -1299,14 +1330,14 @@ pub fn acceptCompletion(
     if (offered.kind != std.meta.activeTag(attempt.descriptor_digest)) return error.StaleCompletion;
     if (history.result) |result| {
         if (resultAttemptId(result) != offered.attempt_id) {
-            return advanceRestored(host, allocator, session, core_state_buffer, config, provider);
+            return advanceRestored(host, allocator, session, config, provider);
         }
         if (result.result_ref != offered.result_ref or
             !binding.eql(binding.Result, result.result_digest, offered.result_digest))
         {
             return error.ConflictingCompletionEvidence;
         }
-        return advanceRestored(host, allocator, session, core_state_buffer, config, provider);
+        return advanceRestored(host, allocator, session, config, provider);
     }
     var inbox: InboxSearch = .{
         .session_id = offered.session_id,
@@ -1326,7 +1357,7 @@ pub fn acceptCompletion(
     {
         return error.ConflictingCompletionEvidence;
     }
-    return advanceRestored(host, allocator, session, core_state_buffer, config, provider);
+    return advanceRestored(host, allocator, session, config, provider);
 }
 
 const ToolRecovery = enum { none, ready, indeterminate, approval_required };
@@ -1335,18 +1366,16 @@ fn reconcileToolCall(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
-    core_state_buffer: []u8,
     workspace_path: []const u8,
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !ToolRecovery {
     return switch (try executableTool(session, &core.reducer)) {
-        .bash => reconcileBash(session, token, core, core_state_buffer),
+        .bash => reconcileBash(session, token, core),
         .apply_patch => reconcilePatch(
             session,
             token,
             core,
-            core_state_buffer,
             workspace_path,
             completion_hook,
             fault,
@@ -1358,7 +1387,6 @@ fn reconcileBash(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
-    core_state_buffer: []u8,
 ) !ToolRecovery {
     const model_observation = try core.reducer.operation();
     const operation_id = (@as(u64, 1) << 63) | model_observation.id;
@@ -1373,7 +1401,6 @@ fn reconcileBash(
         try reconcileBashResult(
             session,
             core,
-            core_state_buffer,
             toolResultFromRecord(result),
         );
         return if (result.class == .indeterminate)
@@ -1410,7 +1437,6 @@ fn reconcileBash(
         try reconcileBashResult(
             session,
             core,
-            core_state_buffer,
             toolResultFromRecord(denied.result),
         );
         return .ready;
@@ -1481,7 +1507,6 @@ fn reconcileBash(
     try reconcileBashResult(
         session,
         core,
-        core_state_buffer,
         toolResultFromRecord(result.result),
     );
     return if (result.result.class == .indeterminate)
@@ -1525,7 +1550,6 @@ fn reconcilePatch(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
-    core_state_buffer: []u8,
     workspace_path: []const u8,
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
@@ -1562,7 +1586,6 @@ fn reconcilePatch(
         try reconcileToolResult(
             session,
             core,
-            core_state_buffer,
             (@as(u64, 1) << 59) | response_ref,
             .apply_patch,
             toolResultFromRecord(settled),
@@ -1598,7 +1621,7 @@ fn reconcilePatch(
                 validated.descriptor_ref,
                 validated.descriptor_digest,
             );
-            try commitCoreFacts(session, core_state_buffer, core, &.{admitted}, false);
+            try commitCoreFacts(session, core, &.{admitted}, false);
             attempt = admitted.attempt_admitted;
             try reach(fault, .after_patch_attempt);
         }
@@ -1693,7 +1716,6 @@ fn reconcilePatch(
     try reconcileToolResult(
         session,
         core,
-        core_state_buffer,
         (@as(u64, 1) << 59) | response_ref,
         .apply_patch,
         toolResultFromRecord(terminal.result),
@@ -1739,19 +1761,17 @@ fn readPatchResultStatus(
 fn reconcileBashResult(
     session: *session_store.Session,
     core: *Core,
-    core_state_buffer: []u8,
     result: ToolResult,
 ) !void {
     const response_ref: u32 = @truncate(result.result);
     if (result.result != ((@as(u64, 1) << 61) | response_ref)) return error.InvalidToolResultReference;
     const call_ref = (@as(u64, 1) << 59) | response_ref;
-    try reconcileToolResult(session, core, core_state_buffer, call_ref, .bash, result);
+    try reconcileToolResult(session, core, call_ref, .bash, result);
 }
 
 fn reconcileToolResult(
     session: *session_store.Session,
     core: *Core,
-    core_state_buffer: []u8,
     call_ref: u64,
     tool: ExecutableTool,
     result: ToolResult,
@@ -1794,7 +1814,6 @@ fn reconcileToolResult(
     };
     try commitCoreFacts(
         session,
-        core_state_buffer,
         core,
         &applied_facts,
         true,
@@ -2002,6 +2021,16 @@ fn durableCompletion(
     }
     const attempt = accepted orelse return error.SessionOperationPending;
     const envelope = matched_envelope.?;
+    const descriptor = history.descriptor orelse return error.MissingModelDescriptor;
+    const request_digest = switch (descriptor.descriptor_digest) {
+        .model => |value| value,
+        else => return error.InvalidModelDescriptor,
+    };
+    if (attempt.descriptor_ref != descriptor.descriptor_ref or
+        !binding.descriptorEql(attempt.descriptor_digest, descriptor.descriptor_digest))
+    {
+        return error.InvalidModelDescriptor;
+    }
     if (!binding.eql(
         binding.Result,
         try blobDigest(session, envelope.result_ref),
@@ -2017,6 +2046,8 @@ fn durableCompletion(
         .attempt_id = attempt.attempt_id,
         .result = envelope.result_ref,
         .result_digest = envelope.result_digest,
+        .request_ref = descriptor.descriptor_ref,
+        .request_digest = request_digest,
     };
 }
 
@@ -2249,7 +2280,6 @@ fn detectIndeterminate(context: *anyopaque, fact: session_transition.Fact) anyer
 fn finalizeCandidate(
     session: *session_store.Session,
     core: *Core,
-    core_state_buffer: []u8,
     fault: ?FaultHook,
 ) !u64 {
     const task = try core.reducer.task();
@@ -2295,7 +2325,6 @@ fn finalizeCandidate(
     };
     try commitCoreFacts(
         session,
-        core_state_buffer,
         core,
         &final_facts,
         true,
@@ -2790,13 +2819,38 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
 
     var response: [model_protocol.max_response_size]u8 = undefined;
     var validation: model_protocol.ValidationScratch = undefined;
-    const generic = try model_protocol.encodeTool(&response, "fixture.inspect.v1", "{}");
-    try std.testing.expectError(
-        error.UnknownModelTool,
-        model_protocol.validate(&validation, generic),
+    const fixture_definition: model_contract.ToolDefinition = .{
+        .key = "fixture.inspect.v1",
+        .provider_tool_name = "fixture_inspect",
+        .description = "Inspect a fixture without execution authority.",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64}},\"required\":[\"query\"],\"additionalProperties\":false}",
+        .result_contract = "Bounded fixture text.",
+    };
+    const fixture_catalog = [_]model_contract.ToolDefinition{fixture_definition};
+    const arguments = " { \"query\" : \"status\" } ";
+    const generic = try model_protocol.encodeTool(&response, fixture_definition.key, arguments);
+    const validated = try model_protocol.validateWithCatalog(
+        &validation,
+        generic,
+        &fixture_catalog,
     );
-    try std.testing.expectEqual(core_state.TaskPhase.awaiting_model, (try core.reducer.task()).phase);
-    try std.testing.expectEqual(core_state.OperationPhase.accepted, (try core.reducer.operation()).phase);
+    _ = try core.reducer.applyModelResponse(
+        .{ .id = operation.id, .generation = operation.generation },
+        generic,
+        validated,
+        3,
+    );
+    try std.testing.expectEqual(core_state.TaskPhase.awaiting_tool, (try core.reducer.task()).phase);
+    const admitted = (try validated.admittedToolArguments(generic)).?;
+    var call_bytes: [conversation.call_header_size + model_contract.max_tool_key_size + 128]u8 = undefined;
+    const call = try conversation.encodeToolCall(&call_bytes, .{
+        .key = fixture_definition.key,
+        .arguments = admitted.json,
+    });
+    const decoded_call = try conversation.decodeToolCall(call);
+    try std.testing.expectEqualStrings(fixture_definition.key, decoded_call.key);
+    try std.testing.expectEqualStrings(arguments, decoded_call.arguments);
+    try std.testing.expectError(error.UnboundToolKey, executableToolFromKey(decoded_call.key));
 
     core.close();
     core = try Core.open(&host.slots);
@@ -2882,13 +2936,11 @@ test "model dispatch releases Core and rejects substituted request bytes" {
         }
     };
     var probe: SlotProbeProvider = .{ .host = &host };
-    var core_state_buffer: [core_state.encoded_size]u8 = undefined;
     try std.testing.expectError(
         error.CompletionOffered,
         advanceCreated(
             &host,
             &session,
-            &core_state_buffer,
             .{ .workspace_path = repo_path },
             probe.provider(),
         ),
@@ -2968,11 +3020,24 @@ fn expectBashArgumentBoundary(
     });
     var scratch: model_contract.StrictToolJsonScratch = .{};
     if (accepted) {
-        _ = try model_contract.admitToolArguments(&scratch, model_contract.bash_key, encoded);
+        const admitted = try model_contract.admitToolArguments(
+            &scratch,
+            model_contract.default_catalog[0],
+            encoded,
+        );
+        _ = try admittedBashArguments(admitted.parsed);
     } else {
+        const admitted = model_contract.admitToolArguments(
+            &scratch,
+            model_contract.default_catalog[0],
+            encoded,
+        ) catch |err| switch (err) {
+            error.InvalidToolArguments => return,
+            else => return err,
+        };
         try std.testing.expectError(
-            error.InvalidToolArguments,
-            model_contract.admitToolArguments(&scratch, model_contract.bash_key, encoded),
+            error.InvalidAdmittedBashArguments,
+            admittedBashArguments(admitted.parsed),
         );
     }
 }
@@ -2985,11 +3050,24 @@ fn expectPatchArgumentBoundary(
     const encoded = try model_contract.encodeJson(envelope, .{ .patch = patch });
     var scratch: model_contract.StrictToolJsonScratch = .{};
     if (accepted) {
-        _ = try model_contract.admitToolArguments(&scratch, model_contract.apply_patch_key, encoded);
+        const admitted = try model_contract.admitToolArguments(
+            &scratch,
+            model_contract.default_catalog[1],
+            encoded,
+        );
+        _ = try admittedPatchArguments(admitted.parsed);
     } else {
+        const admitted = model_contract.admitToolArguments(
+            &scratch,
+            model_contract.default_catalog[1],
+            encoded,
+        ) catch |err| switch (err) {
+            error.InvalidToolArguments => return,
+            else => return err,
+        };
         try std.testing.expectError(
-            error.InvalidToolArguments,
-            model_contract.admitToolArguments(&scratch, model_contract.apply_patch_key, encoded),
+            error.InvalidAdmittedPatchArguments,
+            admittedPatchArguments(admitted.parsed),
         );
     }
 }
@@ -2997,10 +3075,10 @@ fn expectPatchArgumentBoundary(
 test "Host owns one semantic validation workspace independent of Activation Slot capacity" {
     var host: Host = .{};
     const HostFour = HostWithCapacity(4);
-    try std.testing.expectEqual(@as(usize, 250_152), semantic_validation_workspace_size);
-    try std.testing.expectEqual(@as(usize, 250_168), @sizeOf(SemanticValidationWorkspacePool));
-    try std.testing.expectEqual(@as(usize, 258_544), @sizeOf(Host));
-    try std.testing.expectEqual(@as(usize, 283_648), @sizeOf(HostFour));
+    try std.testing.expectEqual(@as(usize, 256_424), semantic_validation_workspace_size);
+    try std.testing.expectEqual(@as(usize, 256_440), @sizeOf(SemanticValidationWorkspacePool));
+    try std.testing.expectEqual(@as(usize, 264_816), @sizeOf(Host));
+    try std.testing.expectEqual(@as(usize, 289_920), @sizeOf(HostFour));
     try std.testing.expectEqual(@as(usize, 8_360), @sizeOf(core_image.ActivationSlot));
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
@@ -3085,7 +3163,7 @@ test "Tool Catalog preserves byte-bounded Unicode admission" {
     var decode_scratch: model_contract.StrictToolJsonScratch = .{};
     _ = try model_contract.admitToolArguments(
         &decode_scratch,
-        model_contract.apply_patch_key,
+        model_contract.default_catalog[1],
         encoded_patch,
     );
     const response_buffer = try allocator.alloc(u8, model_protocol.max_response_size);

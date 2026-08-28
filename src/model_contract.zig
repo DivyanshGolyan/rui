@@ -95,10 +95,17 @@ pub fn validateToolKey(key: []const u8) !void {
 
 /// Validate the one immutable built-in catalog once during Host startup.
 pub fn validateBuiltinCatalog() !void {
-    if (default_catalog.len == 0 or default_catalog.len > max_tool_count) {
+    try validateCatalog(&default_catalog);
+    if (!binding.eql(binding.ToolCatalog, catalogDigest(&default_catalog), default_catalog_digest)) {
+        return error.InvalidToolCatalogDigest;
+    }
+}
+
+pub fn validateCatalog(catalog: []const ToolDefinition) !void {
+    if (catalog.len == 0 or catalog.len > max_tool_count) {
         return error.InvalidToolCatalog;
     }
-    for (default_catalog, 0..) |definition, index| {
+    for (catalog, 0..) |definition, index| {
         try validateToolKey(definition.key);
         if (definition.provider_tool_name.len == 0 or
             definition.provider_tool_name.len > max_provider_tool_name_size or
@@ -111,23 +118,24 @@ pub fn validateBuiltinCatalog() !void {
         {
             return error.InvalidToolCatalog;
         }
-        for (default_catalog[0..index]) |earlier| {
+        for (catalog[0..index]) |earlier| {
             if (std.mem.eql(u8, earlier.key, definition.key)) return error.DuplicateToolKey;
             if (std.mem.eql(u8, earlier.provider_tool_name, definition.provider_tool_name)) {
                 return error.AmbiguousProviderToolName;
             }
         }
     }
-    if (!binding.eql(binding.ToolCatalog, builtinCatalogDigest(), default_catalog_digest)) {
-        return error.InvalidToolCatalogDigest;
-    }
 }
 
 pub fn keyForProviderName(name: []const u8) ![]const u8 {
+    return keyForProviderNameInCatalog(&default_catalog, name);
+}
+
+pub fn keyForProviderNameInCatalog(catalog: []const ToolDefinition, name: []const u8) ![]const u8 {
     if (name.len == 0 or name.len > max_provider_tool_name_size or !utf8Valid(name)) {
         return error.UnknownProviderToolName;
     }
-    for (default_catalog) |definition| {
+    for (catalog) |definition| {
         if (std.mem.eql(u8, definition.provider_tool_name, name)) {
             return definition.key;
         }
@@ -135,27 +143,49 @@ pub fn keyForProviderName(name: []const u8) ![]const u8 {
     return error.UnknownProviderToolName;
 }
 
-fn builtinCatalogDigest() binding.ToolCatalog {
-    var hasher = binding.Hasher(binding.ToolCatalog).init();
-    var count: [2]u8 = undefined;
-    std.mem.writeInt(u16, &count, @intCast(default_catalog.len), .little);
-    hasher.update(&count);
-    for (default_catalog) |definition| {
-        hashField(&hasher, definition.key);
-        hashField(&hasher, definition.provider_tool_name);
-        hashField(&hasher, definition.description);
-        hashField(&hasher, definition.input_schema);
-        hashField(&hasher, definition.result_contract);
+pub fn definitionForKey(catalog: []const ToolDefinition, key: []const u8) ?ToolDefinition {
+    for (catalog) |definition| {
+        if (std.mem.eql(u8, definition.key, key)) return definition;
     }
-    return hasher.final();
+    return null;
 }
 
-fn hashField(hasher: *binding.Hasher(binding.ToolCatalog), bytes: []const u8) void {
-    var length: [4]u8 = undefined;
-    std.mem.writeInt(u32, &length, @intCast(bytes.len), .little);
-    hasher.update(&length);
-    hasher.update(bytes);
+pub fn catalogDigest(catalog: []const ToolDefinition) binding.ToolCatalog {
+    var builder = CatalogDigestBuilder.init(catalog.len);
+    for (catalog) |definition| builder.add(definition);
+    return builder.final();
 }
+
+pub const CatalogDigestBuilder = struct {
+    hasher: binding.Hasher(binding.ToolCatalog),
+
+    pub fn init(count_value: usize) CatalogDigestBuilder {
+        var hasher = binding.Hasher(binding.ToolCatalog).init();
+        var count: [2]u8 = undefined;
+        std.mem.writeInt(u16, &count, @intCast(count_value), .little);
+        hasher.update(&count);
+        return .{ .hasher = hasher };
+    }
+
+    pub fn add(self: *CatalogDigestBuilder, definition: ToolDefinition) void {
+        self.addField(definition.key);
+        self.addField(definition.provider_tool_name);
+        self.addField(definition.description);
+        self.addField(definition.input_schema);
+        self.addField(definition.result_contract);
+    }
+
+    pub fn final(self: *CatalogDigestBuilder) binding.ToolCatalog {
+        return self.hasher.final();
+    }
+
+    fn addField(self: *CatalogDigestBuilder, bytes: []const u8) void {
+        var length: [4]u8 = undefined;
+        std.mem.writeInt(u32, &length, @intCast(bytes.len), .little);
+        self.hasher.update(&length);
+        self.hasher.update(bytes);
+    }
+};
 
 /// Exact tool-argument bytes admitted under StrictToolJsonV1. The slice points
 /// into the immutable capture or caller-owned storage; admission never rewrites
@@ -196,20 +226,9 @@ pub const StrictToolJsonScratch = struct {
     arena: StrictToolJsonArena = undefined,
 };
 
-pub const BashArguments = struct {
+pub const AdmittedToolArguments = struct {
     json: StrictToolJson,
-    command: []const u8,
-    timeout_ms: u32,
-};
-
-pub const PatchArguments = struct {
-    json: StrictToolJson,
-    patch: []const u8,
-};
-
-pub const AdmittedToolArguments = union(enum) {
-    bash: BashArguments,
-    apply_patch: PatchArguments,
+    parsed: std.json.Value,
 };
 
 /// Validate exact bytes once under the generic StrictToolJsonV1 profile.
@@ -257,10 +276,10 @@ pub fn strictToolJsonFromEvidence(
     return .{ .value = bytes, .proof = evidence_value };
 }
 
-/// Apply the Operation-bound closed V1 tool schema to a strict JSON value.
+/// Apply the selected Operation-bound catalog schema to exact JSON bytes.
 pub fn admitToolArguments(
     scratch: *StrictToolJsonScratch,
-    key: []const u8,
+    definition: ToolDefinition,
     bytes: []const u8,
 ) !AdmittedToolArguments {
     try preflightStrictToolJson(scratch, bytes);
@@ -279,37 +298,166 @@ pub fn admitToolArguments(
         .value = bytes,
         .proof = strictToolJsonEvidence(bytes),
     };
-    if (std.mem.eql(u8, key, bash_key)) {
-        const object = switch (parsed.value) {
-            .object => |value| value,
-            else => return error.InvalidToolArguments,
-        };
-        if (object.count() != 2) return error.InvalidToolArguments;
-        const command = switch (object.get("command") orelse return error.InvalidToolArguments) {
+    var schema = std.json.parseFromSlice(std.json.Value, fixed.allocator(), definition.input_schema, .{
+        .max_value_len = max_schema_size,
+        .allocate = .alloc_always,
+        .duplicate_field_behavior = .@"error",
+    }) catch return error.InvalidToolSchema;
+    defer schema.deinit();
+    validateAgainstInputSchema(schema.value, parsed.value) catch return error.InvalidToolArguments;
+    return .{ .json = json, .parsed = parsed.value };
+}
+
+fn validateAgainstInputSchema(schema_value: std.json.Value, argument_value: std.json.Value) !void {
+    const schema = switch (schema_value) {
+        .object => |value| value,
+        else => return error.InvalidToolSchema,
+    };
+    try requireOnlyFields(schema, &.{ "type", "properties", "required", "additionalProperties" });
+    const root_type = switch (schema.get("type") orelse return error.InvalidToolSchema) {
+        .string => |value| value,
+        else => return error.InvalidToolSchema,
+    };
+    if (!std.mem.eql(u8, root_type, "object")) return error.InvalidToolSchema;
+    const properties = switch (schema.get("properties") orelse return error.InvalidToolSchema) {
+        .object => |value| value,
+        else => return error.InvalidToolSchema,
+    };
+    if (properties.count() > max_json_members) return error.InvalidToolSchema;
+    const required = switch (schema.get("required") orelse return error.InvalidToolSchema) {
+        .array => |value| value,
+        else => return error.InvalidToolSchema,
+    };
+    const additional = switch (schema.get("additionalProperties") orelse return error.InvalidToolSchema) {
+        .bool => |value| value,
+        else => return error.InvalidToolSchema,
+    };
+    if (additional or required.items.len > properties.count()) return error.InvalidToolSchema;
+    const arguments = switch (argument_value) {
+        .object => |value| value,
+        else => return error.InvalidToolArguments,
+    };
+
+    for (required.items, 0..) |item, index| {
+        const name = switch (item) {
             .string => |value| value,
-            else => return error.InvalidToolArguments,
+            else => return error.InvalidToolSchema,
         };
-        const timeout_ms = try jsonU32(
-            object.get("timeout_ms") orelse return error.InvalidToolArguments,
-        );
-        validateBashCommand(command) catch return error.InvalidToolArguments;
-        if (timeout_ms < 100 or timeout_ms > 120_000) return error.InvalidToolArguments;
-        return .{ .bash = .{ .json = json, .command = command, .timeout_ms = timeout_ms } };
+        if (properties.get(name) == null) return error.InvalidToolSchema;
+        for (required.items[0..index]) |earlier| {
+            const earlier_name = switch (earlier) {
+                .string => |value| value,
+                else => return error.InvalidToolSchema,
+            };
+            if (std.mem.eql(u8, earlier_name, name)) return error.InvalidToolSchema;
+        }
+        if (arguments.get(name) == null) return error.InvalidToolArguments;
     }
-    if (std.mem.eql(u8, key, apply_patch_key)) {
-        const object = switch (parsed.value) {
-            .object => |value| value,
-            else => return error.InvalidToolArguments,
-        };
-        if (object.count() != 1) return error.InvalidToolArguments;
-        const patch = switch (object.get("patch") orelse return error.InvalidToolArguments) {
-            .string => |value| value,
-            else => return error.InvalidToolArguments,
-        };
-        validatePatchInput(patch) catch return error.InvalidToolArguments;
-        return .{ .apply_patch = .{ .json = json, .patch = patch } };
+
+    var argument_iterator = arguments.iterator();
+    while (argument_iterator.next()) |entry| {
+        const property_schema = properties.get(entry.key_ptr.*) orelse
+            return error.InvalidToolArguments;
+        try validatePropertySchema(property_schema, entry.value_ptr.*);
     }
-    return error.UnknownModelTool;
+    var property_iterator = properties.iterator();
+    while (property_iterator.next()) |entry| {
+        try validatePropertySchema(entry.value_ptr.*, null);
+    }
+}
+
+fn validatePropertySchema(schema_value: std.json.Value, maybe_value: ?std.json.Value) !void {
+    const schema = switch (schema_value) {
+        .object => |value| value,
+        else => return error.InvalidToolSchema,
+    };
+    const type_name = switch (schema.get("type") orelse return error.InvalidToolSchema) {
+        .string => |value| value,
+        else => return error.InvalidToolSchema,
+    };
+    if (std.mem.eql(u8, type_name, "string")) {
+        try requireOnlyFields(schema, &.{ "type", "description", "minLength", "maxLength" });
+        const minimum = try schemaNatural(schema.get("minLength"), 0);
+        const maximum = try schemaNatural(schema.get("maxLength"), max_tool_arguments_envelope_size);
+        if (minimum > maximum) return error.InvalidToolSchema;
+        if (maybe_value) |value| {
+            const text = switch (value) {
+                .string => |string| string,
+                else => return error.InvalidToolArguments,
+            };
+            const length = std.unicode.utf8CountCodepoints(text) catch return error.InvalidToolArguments;
+            if (length < minimum or length > maximum) return error.InvalidToolArguments;
+        }
+        return;
+    }
+    if (std.mem.eql(u8, type_name, "integer")) {
+        try requireOnlyFields(schema, &.{ "type", "description", "minimum", "maximum" });
+        const minimum = try schemaInteger(schema.get("minimum"), -max_safe_integer);
+        const maximum = try schemaInteger(schema.get("maximum"), max_safe_integer);
+        if (minimum > maximum) return error.InvalidToolSchema;
+        if (maybe_value) |value| {
+            const integer = try jsonInteger(value);
+            if (integer < minimum or integer > maximum) return error.InvalidToolArguments;
+        }
+        return;
+    }
+    if (std.mem.eql(u8, type_name, "boolean")) {
+        try requireOnlyFields(schema, &.{ "type", "description" });
+        if (maybe_value) |value| switch (value) {
+            .bool => {},
+            else => return error.InvalidToolArguments,
+        };
+        return;
+    }
+    return error.InvalidToolSchema;
+}
+
+fn requireOnlyFields(object: std.json.ObjectMap, allowed: []const []const u8) !void {
+    var iterator = object.iterator();
+    while (iterator.next()) |entry| {
+        var known = false;
+        for (allowed) |name| {
+            if (std.mem.eql(u8, entry.key_ptr.*, name)) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) return error.InvalidToolSchema;
+    }
+}
+
+fn schemaNatural(value: ?std.json.Value, default: usize) !usize {
+    const actual = value orelse return default;
+    return switch (actual) {
+        .integer => |integer| std.math.cast(usize, integer) orelse error.InvalidToolSchema,
+        else => error.InvalidToolSchema,
+    };
+}
+
+fn schemaInteger(value: ?std.json.Value, default: i64) !i64 {
+    const actual = value orelse return default;
+    return switch (actual) {
+        .integer => |integer| if (integer >= -max_safe_integer and integer <= max_safe_integer)
+            integer
+        else
+            error.InvalidToolSchema,
+        else => error.InvalidToolSchema,
+    };
+}
+
+fn jsonInteger(value: std.json.Value) !i64 {
+    return switch (value) {
+        .integer => |integer| if (integer >= -max_safe_integer and integer <= max_safe_integer)
+            integer
+        else
+            error.InvalidToolArguments,
+        .float => |number| if (std.math.isFinite(number) and number >= -max_safe_integer and
+            number <= max_safe_integer and @trunc(number) == number)
+            @intFromFloat(number)
+        else
+            error.InvalidToolArguments,
+        else => error.InvalidToolArguments,
+    };
 }
 
 fn preflightStrictToolJson(scratch: *StrictToolJsonScratch, bytes: []const u8) !void {
@@ -411,7 +559,7 @@ fn validateUnicodeField(bytes: []const u8, max_bytes: usize) !void {
 
 test "the default catalog has a stable digest and deterministic name mapping" {
     try validateBuiltinCatalog();
-    try std.testing.expectEqualSlices(u8, &default_catalog_digest.bytes, &builtinCatalogDigest().bytes);
+    try std.testing.expectEqualSlices(u8, &default_catalog_digest.bytes, &catalogDigest(&default_catalog).bytes);
     try std.testing.expectEqualStrings(
         apply_patch_key,
         try keyForProviderName("apply_patch"),
@@ -426,15 +574,41 @@ test "StrictToolJsonV1 accepts noncanonical exact bytes and distinguishes identi
     var scratch: StrictToolJsonScratch = undefined;
     const first_bytes = " { \"timeout_ms\" : 1000, \"command\" : \"true\" } ";
     const second_bytes = "{\"command\":\"true\",\"timeout_ms\":1000}";
-    const first = try admitToolArguments(&scratch, bash_key, first_bytes);
-    const second = try admitToolArguments(&scratch, bash_key, second_bytes);
-    try std.testing.expectEqualStrings(first_bytes, first.bash.json.bytes());
-    try std.testing.expectEqualStrings(second_bytes, second.bash.json.bytes());
+    const first = try admitToolArguments(&scratch, default_catalog[0], first_bytes);
+    const second = try admitToolArguments(&scratch, default_catalog[0], second_bytes);
+    try std.testing.expectEqualStrings(first_bytes, first.json.bytes());
+    try std.testing.expectEqualStrings(second_bytes, second.json.bytes());
     try std.testing.expect(!std.mem.eql(
         u8,
-        &first.bash.json.evidence().digest,
-        &second.bash.json.evidence().digest,
+        &first.json.evidence().digest,
+        &second.json.evidence().digest,
     ));
+}
+
+test "StrictToolJsonV1 applies an arbitrary catalog definition without execution knowledge" {
+    const definition: ToolDefinition = .{
+        .key = "fixture.inspect.v1",
+        .provider_tool_name = "fixture_inspect",
+        .description = "Inspect one fixture value.",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":6},\"fresh\":{\"type\":\"boolean\"}},\"required\":[\"query\"],\"additionalProperties\":false}",
+        .result_contract = "Bounded fixture text.",
+    };
+    var scratch: StrictToolJsonScratch = undefined;
+    const exact = " { \"fresh\" : true, \"query\" : \"status\" } ";
+    const admitted = try admitToolArguments(&scratch, definition, exact);
+    try std.testing.expectEqualStrings(exact, admitted.json.bytes());
+    try std.testing.expectError(
+        error.InvalidToolArguments,
+        admitToolArguments(&scratch, definition, "{\"query\":1}"),
+    );
+    try std.testing.expectError(
+        error.InvalidToolArguments,
+        admitToolArguments(&scratch, definition, "{\"query\":\"status!\"}"),
+    );
+    try std.testing.expectError(
+        error.InvalidToolArguments,
+        admitToolArguments(&scratch, definition, "{\"query\":\"ok\",\"unknown\":true}"),
+    );
 }
 
 test "StrictToolJsonV1 rejects malformed duplicate deep and many-member values" {
@@ -485,7 +659,7 @@ test "StrictToolJsonV1 rejects malformed duplicate deep and many-member values" 
     );
     try std.testing.expectError(
         error.InvalidToolArguments,
-        admitToolArguments(&scratch, bash_key, "{\"command\":1,\"timeout_ms\":1000}"),
+        admitToolArguments(&scratch, default_catalog[0], "{\"command\":1,\"timeout_ms\":1000}"),
     );
 }
 

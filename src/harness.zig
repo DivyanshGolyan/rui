@@ -188,7 +188,6 @@ const HarnessState = struct {
     session: ?session_store.Session = null,
     session_projection_pending: bool = false,
     final_ref: u64 = 0,
-    core_state_buffer: [core_state.encoded_size]u8 = undefined,
     projection_generation: u64 = 0,
     awaiting_approval: ?lifecycle.ApprovalRequired = null,
     settling_control: ?lifecycle.Control = null,
@@ -353,7 +352,6 @@ const HarnessState = struct {
                     self.lease.execution,
                     self.lease.allocator,
                     session,
-                    &self.core_state_buffer,
                     expected,
                     decision.allow,
                     provider,
@@ -374,7 +372,6 @@ const HarnessState = struct {
                     self.lease.execution,
                     self.lease.allocator,
                     session,
-                    &self.core_state_buffer,
                     completion,
                     self.runtimeConfig(),
                     self.config.provider,
@@ -403,7 +400,6 @@ const HarnessState = struct {
             self.final_ref = lifecycle.advanceCreated(
                 self.lease.execution,
                 session,
-                &self.core_state_buffer,
                 self.runtimeConfig(),
                 self.config.provider orelse return error.SessionNeedsModel,
             ) catch |err| return self.classifyLifecycleError(err, progress);
@@ -419,7 +415,6 @@ const HarnessState = struct {
                     self.final_ref = lifecycle.advanceCreated(
                         self.lease.execution,
                         session,
-                        &self.core_state_buffer,
                         self.runtimeConfig(),
                         self.config.provider orelse return error.SessionNeedsModel,
                     ) catch |err| return self.classifyLifecycleError(err, progress);
@@ -434,7 +429,6 @@ const HarnessState = struct {
                 self.lease.execution,
                 self.lease.allocator,
                 session,
-                &self.core_state_buffer,
                 self.runtimeConfig(),
                 self.config.provider,
             ) catch |err| return self.classifyLifecycleError(err, progress);
@@ -562,7 +556,6 @@ const HarnessState = struct {
             self.lease.execution,
             self.lease.allocator,
             session,
-            &self.core_state_buffer,
             approval,
             false,
             null,
@@ -589,7 +582,6 @@ const HarnessState = struct {
             self.lease.execution,
             self.lease.allocator,
             session,
-            &self.core_state_buffer,
             self.runtimeConfig(),
             null,
         ) catch |err| switch (err) {
@@ -858,6 +850,10 @@ fn openTestRuntimeConfigured(
         path,
         .{ .storage = config },
     );
+}
+
+test "Harness owner retains only live lifecycle state" {
+    try std.testing.expectEqual(@as(usize, 8_112), @sizeOf(HarnessState));
 }
 
 test "open retains no Activation Slot and offer transfers one bounded input" {

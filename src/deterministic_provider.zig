@@ -457,7 +457,15 @@ test "deterministic Provider decodes the exact immutable request" {
     var semantic_request = try large_io.request();
     try std.testing.expectEqual(@as(u32, 9), semantic_request.entryCount());
     try std.testing.expectEqualStrings("fixture:answer", semantic_request.modelName());
-    try std.testing.expectEqual(model_contract.default_catalog.len, semantic_request.toolCatalog().len);
+    var catalog = semantic_request.toolCatalog();
+    try std.testing.expectEqual(model_contract.default_catalog.len, catalog.count());
+    var definition_buffer: model_operation.ToolDefinitionBuffer = .{};
+    for (model_contract.default_catalog) |expected| {
+        const definition = (try catalog.next(&definition_buffer)).?;
+        try std.testing.expectEqualStrings(expected.key, definition.key);
+        try std.testing.expectEqualStrings(expected.input_schema, definition.input_schema);
+    }
+    try std.testing.expect((try catalog.next(&definition_buffer)) == null);
     const first_late = (try semantic_request.next()).?;
     const first_late_text = switch (first_late) {
         .assistant_text => |text| text,
@@ -478,4 +486,40 @@ test "deterministic Provider decodes the exact immutable request" {
     var large_request_blob = try session.openBlob(1300);
     defer large_request_blob.close();
     try std.testing.expect(large_request_blob.length() > 32 * 1024);
+
+    const fixture_catalog = [_]model_contract.ToolDefinition{.{
+        .key = "fixture.inspect.v1",
+        .provider_tool_name = "fixture_inspect",
+        .description = "Inspect one fixture value.",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64}},\"required\":[\"query\"],\"additionalProperties\":false}",
+        .result_contract = "Bounded fixture text.",
+    }};
+    const fixture_digest = try model_operation.buildRequestWithCatalog(
+        &session,
+        1400,
+        1,
+        1,
+        &fixture_catalog,
+    );
+    try model_operation.verifyRequestDigest(&session, 1400, fixture_digest);
+    var fixture_catalog_storage: model_operation.ToolDefinitionBuffer = .{};
+    const restored_catalog_definition = (try model_operation.readToolDefinition(
+        &session,
+        1400,
+        fixture_catalog[0].key,
+        &fixture_catalog_storage,
+    )).?;
+    try std.testing.expectEqualStrings(fixture_catalog[0].key, restored_catalog_definition.key);
+    try std.testing.expectEqualStrings(
+        fixture_catalog[0].input_schema,
+        restored_catalog_definition.input_schema,
+    );
+    var fixture_io = try model_operation.ProviderIo.open(&session, 1400, 1401);
+    defer fixture_io.close();
+    var fixture_request = try fixture_io.request();
+    var fixture_cursor = fixture_request.toolCatalog();
+    var fixture_definition_buffer: model_operation.ToolDefinitionBuffer = .{};
+    const restored_definition = (try fixture_cursor.next(&fixture_definition_buffer)).?;
+    try std.testing.expectEqualStrings(fixture_catalog[0].key, restored_definition.key);
+    try std.testing.expect((try fixture_cursor.next(&fixture_definition_buffer)) == null);
 }

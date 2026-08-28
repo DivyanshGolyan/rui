@@ -187,7 +187,15 @@ pub fn validate(
     scratch: *ValidationScratch,
     bytes: []const u8,
 ) !*const Validated {
-    const decoded = try decodeWithScratch(&scratch.json, bytes);
+    return validateWithCatalog(scratch, bytes, &contract.default_catalog);
+}
+
+pub fn validateWithCatalog(
+    scratch: *ValidationScratch,
+    bytes: []const u8,
+    catalog: []const contract.ToolDefinition,
+) !*const Validated {
+    const decoded = try decodeWithScratch(&scratch.json, bytes, catalog);
     const result_digest = binding.hash(binding.Result, bytes);
     const byte_length: u32 = @intCast(bytes.len);
     const record = scratch.record();
@@ -207,7 +215,15 @@ pub fn admit(
     scratch: *ValidationScratch,
     bytes: []const u8,
 ) *const Validated {
-    const decoded = decodeWithScratch(&scratch.json, bytes) catch |err| Decoded{
+    return admitWithCatalog(scratch, bytes, &contract.default_catalog);
+}
+
+pub fn admitWithCatalog(
+    scratch: *ValidationScratch,
+    bytes: []const u8,
+    catalog: []const contract.ToolDefinition,
+) *const Validated {
+    const decoded = decodeWithScratch(&scratch.json, bytes, catalog) catch |err| Decoded{
         .parsed = failed(switch (err) {
             error.UnknownModelTool => .unknown_tool,
             else => if (bytes.len == 0) .empty else .malformed,
@@ -223,6 +239,46 @@ pub fn admit(
     return @ptrCast(record);
 }
 
+pub fn toolKeyForCatalogLookup(bytes: []const u8) !?[]const u8 {
+    if (bytes.len < header_size or bytes.len > max_response_size or
+        !std.mem.eql(u8, bytes[0..magic.len], magic) or read(u16, bytes, 8) != version or
+        read(u16, bytes, 10) != header_size)
+    {
+        return error.MalformedModelResponse;
+    }
+    const disposition = std.enums.fromInt(Disposition, bytes[12]) orelse
+        return error.MalformedModelResponse;
+    const first_length: usize = read(u32, bytes, 16);
+    const second_length: usize = read(u32, bytes, 20);
+    if (first_length > bytes.len - header_size or
+        second_length > bytes.len - header_size - first_length or
+        header_size + first_length + second_length != bytes.len)
+    {
+        return error.MalformedModelResponse;
+    }
+    if (disposition != .tool_call) return null;
+    if (bytes[13] != @intFromEnum(Failure.none) or bytes[14] != 0 or bytes[15] != 0 or
+        first_length == 0 or second_length == 0)
+    {
+        return error.MalformedModelResponse;
+    }
+    const key = bytes[header_size..][0..first_length];
+    contract.validateToolKey(key) catch return error.MalformedModelResponse;
+    return key;
+}
+
+pub fn admitWithDefinition(
+    scratch: *ValidationScratch,
+    bytes: []const u8,
+    definition: ?contract.ToolDefinition,
+) *const Validated {
+    if (definition) |selected| {
+        const catalog = [_]contract.ToolDefinition{selected};
+        return admitWithCatalog(scratch, bytes, &catalog);
+    }
+    return admitWithCatalog(scratch, bytes, &.{});
+}
+
 const Decoded = struct {
     parsed: Parsed,
     tool_arguments: ?contract.AdmittedToolArguments = null,
@@ -231,6 +287,7 @@ const Decoded = struct {
 fn decodeWithScratch(
     scratch: *contract.StrictToolJsonScratch,
     bytes: []const u8,
+    catalog: []const contract.ToolDefinition,
 ) !Decoded {
     if (bytes.len < header_size or bytes.len > max_response_size or
         !std.mem.eql(u8, bytes[0..magic.len], magic) or read(u16, bytes, 8) != version or
@@ -262,13 +319,11 @@ fn decodeWithScratch(
                 return error.MalformedModelResponse;
             }
             contract.validateToolKey(first) catch return error.MalformedModelResponse;
-            const admitted = contract.admitToolArguments(scratch, first, second) catch |err| switch (err) {
-                error.UnknownModelTool => return error.UnknownModelTool,
-                else => return error.MalformedModelResponse,
-            };
-            const evidence = switch (admitted) {
-                inline else => |value| value.json.evidence(),
-            };
+            const definition = contract.definitionForKey(catalog, first) orelse
+                return error.UnknownModelTool;
+            const admitted = contract.admitToolArguments(scratch, definition, second) catch
+                return error.MalformedModelResponse;
+            const evidence = admitted.json.evidence();
             return .{ .parsed = .{
                 .disposition = .tool_call,
                 .tool_key_offset = header_size,
