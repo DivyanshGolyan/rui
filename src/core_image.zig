@@ -58,9 +58,6 @@ pub const Response = struct {
     text: ContentWindow,
     tool_key: ContentWindow,
     arguments: ContentWindow,
-    input_shape: u8,
-    option_count: u8,
-    options: ContentWindow,
 };
 
 pub const Task = struct {
@@ -228,9 +225,6 @@ pub const Core = struct {
             .text = state.response_text,
             .tool_key = state.response_tool_key,
             .arguments = state.response_arguments,
-            .input_shape = state.response_input_shape,
-            .option_count = state.response_option_count,
-            .options = state.response_options,
         };
     }
 
@@ -292,12 +286,9 @@ pub const Core = struct {
         self.state.response_ref = 0;
         self.state.response_disposition = .failure;
         self.state.response_failure = .none;
-        self.state.response_input_shape = 0;
-        self.state.response_option_count = 0;
         self.state.response_text = .{};
         self.state.response_tool_key = .{};
         self.state.response_arguments = .{};
-        self.state.response_options = .{};
         self.state.task_phase = .awaiting_model;
         return prepared;
     }
@@ -324,10 +315,10 @@ pub const Core = struct {
         self.state.response_ref = response_ref;
         self.state.response_disposition = parsed.disposition;
         self.state.response_failure = parsed.failure;
-        self.state.response_text = .{
+        self.state.response_text = if (parsed.disposition == .final_answer) .{
             .offset = parsed.text_offset,
             .length = parsed.text_length,
-        };
+        } else .{};
         self.state.response_tool_key = .{
             .offset = parsed.tool_key_offset,
             .length = parsed.tool_key_length,
@@ -335,12 +326,6 @@ pub const Core = struct {
         self.state.response_arguments = .{
             .offset = parsed.arguments_offset,
             .length = parsed.arguments_length,
-        };
-        self.state.response_input_shape = if (parsed.input_shape) |shape| @intFromEnum(shape) else 0;
-        self.state.response_option_count = parsed.option_count;
-        self.state.response_options = .{
-            .offset = parsed.options_offset,
-            .length = parsed.options_length,
         };
         self.state.task_phase = switch (parsed.disposition) {
             .final_answer => .final_candidate,
@@ -557,7 +542,7 @@ test "oversized truncated and malformed responses preserve accepted operation st
     try std.testing.expectEqualDeep(before, try core.operation());
 
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const encoded = try model_protocol.encodeText(&response_buffer, .complete, "valid");
+    const encoded = try model_protocol.encodeText(&response_buffer, "valid");
     try std.testing.expectError(
         error.MalformedModelResponse,
         core.applyModelResponse(
@@ -610,7 +595,7 @@ test "complete slot lifecycle is compiler checked to expose no allocator seam" {
     const operation_value = try core.beginModelOperation(2, 1);
     try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
     var response_bytes: [model_protocol.max_response_size]u8 = undefined;
-    const response = try model_protocol.encodeText(&response_bytes, .complete, "done");
+    const response = try model_protocol.encodeText(&response_bytes, "done");
     _ = try core.applyModelResponse(
         .{ .id = operation_value.id, .generation = operation_value.generation },
         response,

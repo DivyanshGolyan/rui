@@ -172,7 +172,6 @@ const RequestHistory = struct {
 pub const Fixture = struct {
     expected_task: ?[]const u8,
     final_answer: []const u8,
-    status: model_protocol.Status = .complete,
     finish_response: bool = true,
     calls: u32 = 0,
 
@@ -194,7 +193,7 @@ pub const Fixture = struct {
         if (self.expected_task) |expected_task| try expectEntry(entries[0], .user_text, expected_task);
 
         var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-        const encoded = try model_protocol.encodeText(&response_buffer, self.status, self.final_answer);
+        const encoded = try model_protocol.encodeText(&response_buffer, self.final_answer);
         try response.append(encoded);
         if (self.finish_response) try response.finish();
     }
@@ -249,7 +248,7 @@ pub const ToolFixture = struct {
                         return error.UnexpectedFixtureToolStatus;
                     },
                 }
-                break :blk try model_protocol.encodeText(&encoded_buffer, .complete, self.final_answer);
+                break :blk try model_protocol.encodeText(&encoded_buffer, self.final_answer);
             },
             else => return error.UnexpectedFixtureCall,
         };
@@ -315,7 +314,7 @@ pub const RepairFixture = struct {
             7 => blk: {
                 try self.expectPrefix(history, 7);
                 try expectBashResult(history[6], .success, 0);
-                break :blk try model_protocol.encodeText(&encoded_buffer, .complete, self.final_answer);
+                break :blk try model_protocol.encodeText(&encoded_buffer, self.final_answer);
             },
             else => return error.UnexpectedRepairHistory,
         };

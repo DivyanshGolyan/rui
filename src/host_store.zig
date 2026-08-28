@@ -16,7 +16,7 @@ pub const max_workspace_path_bytes: usize = 1024;
 pub const max_model_bytes: usize = 128;
 
 comptime {
-    std.debug.assert(max_transition_payload == 996);
+    std.debug.assert(max_transition_payload == 980);
 }
 
 const session_schema =
@@ -38,7 +38,7 @@ const transition_schema =
     \\CREATE TABLE session_transition (
     \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
     \\    sequence INTEGER NOT NULL CHECK (sequence > 0),
-    \\    payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 996),
+    \\    payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 980),
     \\    record_digest BLOB NOT NULL CHECK (length(record_digest) = 32),
     \\    PRIMARY KEY (session_id, sequence),
     \\    FOREIGN KEY (session_id) REFERENCES session (session_id)

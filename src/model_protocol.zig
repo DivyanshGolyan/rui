@@ -9,7 +9,6 @@ pub const max_response_size = header_size + contract.max_tool_key_size +
 pub const version: u16 = 2;
 const magic = "ONERSP2\x00";
 
-pub const Status = enum(u8) { complete = 1, length_truncated = 2, aborted = 3, provider_error = 4 };
 pub const Disposition = enum(u8) { final_answer = 1, tool_call = 2, input_request = 3, failure = 4 };
 pub const Failure = enum(u8) {
     none = 0,
@@ -40,13 +39,7 @@ pub const Parsed = struct {
 
 pub const Choice = struct { id: []const u8, label: []const u8 };
 
-pub fn encodeText(out: []u8, status: Status, text: []const u8) ![]const u8 {
-    if (status != .complete) return encodeFailure(out, switch (status) {
-        .length_truncated => .truncated,
-        .aborted => .aborted,
-        .provider_error => .provider_error,
-        .complete => unreachable,
-    });
+pub fn encodeText(out: []u8, text: []const u8) ![]const u8 {
     if (text.len == 0 or text.len > max_assistant_text_size or !contract.utf8Valid(text)) {
         return error.InvalidAssistantText;
     }
@@ -249,7 +242,7 @@ fn read(comptime T: type, input: []const u8, offset: usize) T {
 
 test "complete normalized responses cover every V1 disposition" {
     var bytes: [max_response_size]u8 = undefined;
-    try std.testing.expectEqual(Disposition.final_answer, parse(try encodeText(&bytes, .complete, "done")).disposition);
+    try std.testing.expectEqual(Disposition.final_answer, parse(try encodeText(&bytes, "done")).disposition);
     const tool = parse(try encodeTool(&bytes, "fixture.tool", "{\"value\":1}"));
     try std.testing.expectEqual(Disposition.tool_call, tool.disposition);
     try std.testing.expectEqualStrings("fixture.tool", bytes[tool.tool_key_offset..][0..tool.tool_key_length]);
@@ -276,7 +269,7 @@ test "hostile normalized responses fail before authorizing effects" {
     const current = try encodeTool(&bytes, "fixture.tool", "{}");
     std.mem.writeInt(u16, bytes[8..10], version - 1, .little);
     try std.testing.expectEqual(Failure.malformed, parse(current).failure);
-    try std.testing.expectEqual(Failure.truncated, parse(try encodeText(&bytes, .length_truncated, "ignored")).failure);
+    try std.testing.expectEqual(Failure.truncated, parse(try encodeFailure(&bytes, .truncated)).failure);
     const choices = [_]Choice{
         .{ .id = "same", .label = "First" },
         .{ .id = "same", .label = "Second" },

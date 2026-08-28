@@ -296,7 +296,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             try core.acceptOperation(.{ .id = second.id, .generation = second.generation });
             expected.operation_phase = .accepted;
             try expectStateAndRestore(&core, expected, poison);
-            const final = try model_protocol.encodeText(&response_buffer, .complete, "ok");
+            const final = try model_protocol.encodeText(&response_buffer, "ok");
             const interpreted_final = try core.applyModelResponse(
                 .{ .id = second.id, .generation = second.generation },
                 final,
@@ -318,7 +318,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             expected.final_entry_id = active_leaf_id + 3;
             expected.task_phase = .finished;
         } else {
-            const final = try model_protocol.encodeText(&response_buffer, .complete, "ok");
+            const final = try model_protocol.encodeText(&response_buffer, "ok");
             before = try canonicalState(&core);
             try expectRejectedPreserves(
                 &core,
@@ -459,9 +459,6 @@ fn responseView(state: core_state.State) core_image.Response {
         .text = state.response_text,
         .tool_key = state.response_tool_key,
         .arguments = state.response_arguments,
-        .input_shape = state.response_input_shape,
-        .option_count = state.response_option_count,
-        .options = state.response_options,
     };
 }
 

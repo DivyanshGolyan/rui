@@ -1212,7 +1212,6 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
             var buffer: [64]u8 = undefined;
             const encoded = try model_protocol.encodeText(
                 &buffer,
-                .complete,
                 "done",
             );
             try response.append(encoded);
@@ -1267,7 +1266,6 @@ test "known provider failure is one durable terminal Result" {
             var buffer: [64]u8 = undefined;
             const encoded = try model_protocol.encodeText(
                 &buffer,
-                .complete,
                 "must not win",
             );
             try response.append(encoded);
@@ -1392,6 +1390,22 @@ test "input request fails terminally until the durable interaction layer exists"
     const durable_core = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
     try std.testing.expectEqual(core_state.TaskPhase.failed, durable_core.task_phase);
     try std.testing.expectEqual(model_protocol.Disposition.input_request, durable_core.response_disposition);
+    try std.testing.expect(durable_core.response_ref != 0);
+    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_text);
+    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_tool_key);
+    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_arguments);
+    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    const response_bytes = try owner_state.session.?.readBlob(
+        durable_core.response_ref,
+        0,
+        &response_buffer,
+    );
+    const decoded_response = try model_protocol.decode(response_bytes);
+    try std.testing.expectEqual(model_protocol.Disposition.input_request, decoded_response.disposition);
+    try std.testing.expectEqualStrings(
+        "Which migration should I use?",
+        response_bytes[decoded_response.text_offset..][0..decoded_response.text_length],
+    );
     try std.testing.expectEqual(@as(u64, 1), owner_state.session.?.entryCount());
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
     owner.close();

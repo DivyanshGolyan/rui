@@ -2409,7 +2409,7 @@ test "restored response metadata reads the exact durable content window" {
     const response_ref: u64 = 2001;
     const answer = "the restored window comes from durable response bytes";
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const encoded_response = try model_protocol.encodeText(&response_buffer, .complete, answer);
+    const encoded_response = try model_protocol.encodeText(&response_buffer, answer);
     try session.storeBlob(response_ref, encoded_response);
     const descriptor_ref: u64 = 2000;
     const descriptor_bytes = "restored response test descriptor";
@@ -2469,7 +2469,7 @@ test "restored response metadata reads the exact durable content window" {
     var blob_path: [64]u8 = undefined;
     const response_path = try std.fmt.bufPrint(&blob_path, "blobs/{x:0>16}.blob", .{response_ref});
     try session.dir.deleteFile(io, response_path);
-    const substituted = try model_protocol.encodeText(&response_buffer, .complete, "substituted final answer");
+    const substituted = try model_protocol.encodeText(&response_buffer, "substituted final answer");
     try session.storeBlob(response_ref, substituted);
     try std.testing.expectError(
         error.CompletionResultDigestMismatch,

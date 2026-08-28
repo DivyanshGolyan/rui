@@ -2,7 +2,7 @@ const std = @import("std");
 const model_protocol = @import("model_protocol.zig");
 
 pub const schema_version: u16 = 2;
-pub const encoded_size: usize = 160;
+pub const encoded_size: usize = 144;
 
 const magic = "ONECORE\x00";
 const checksum_offset = encoded_size - @sizeOf(u32);
@@ -46,13 +46,10 @@ pub const State = extern struct {
     task_phase: TaskPhase = .idle,
     response_disposition: model_protocol.Disposition = .failure,
     response_failure: model_protocol.Failure = .none,
-    response_input_shape: u8 = 0,
-    response_option_count: u8 = 0,
     context: ContentWindow = .{},
     response_text: ContentWindow = .{},
     response_tool_key: ContentWindow = .{},
     response_arguments: ContentWindow = .{},
-    response_options: ContentWindow = .{},
 };
 
 comptime {
@@ -88,8 +85,6 @@ pub fn encode(out: []u8, state: State) !void {
     out[61] = @intFromEnum(state.task_phase);
     out[62] = @intFromEnum(state.response_disposition);
     out[63] = @intFromEnum(state.response_failure);
-    out[64] = state.response_input_shape;
-    out[65] = state.response_option_count;
     write(u64, out, 68, state.operation_result);
     write(u64, out, 76, state.operation_sequence);
     write(u64, out, 84, state.active_leaf_id);
@@ -99,7 +94,6 @@ pub fn encode(out: []u8, state: State) !void {
     writeWindow(out, 116, state.response_text);
     writeWindow(out, 124, state.response_arguments);
     writeWindow(out, 132, state.response_tool_key);
-    writeWindow(out, 140, state.response_options);
     rewriteChecksum(out);
 }
 
@@ -109,10 +103,7 @@ pub fn decode(input: []const u8) !State {
     if (read(u16, input, 8) != schema_version) return error.UnsupportedSchema;
     if (read(u16, input, 10) != encoded_size) return error.InvalidCoreStateLength;
     if (read(u32, input, 12) != 0) return error.UnsupportedCoreStateFlags;
-    for (input[66..68]) |byte| if (byte != 0) return error.NonzeroCoreStateReservedByte;
-    for (input[148..checksum_offset]) |byte| {
-        if (byte != 0) return error.NonzeroCoreStateReservedByte;
-    }
+    for (input[64..68]) |byte| if (byte != 0) return error.NonzeroCoreStateReservedByte;
     if (read(u32, input, checksum_offset) != std.hash.Crc32.hash(input[0..checksum_offset])) {
         return error.CoreStateChecksumMismatch;
     }
@@ -129,8 +120,6 @@ pub fn decode(input: []const u8) !State {
         .task_phase = try taskPhase(input[61]),
         .response_disposition = try responseDisposition(input[62]),
         .response_failure = try responseFailure(input[63]),
-        .response_input_shape = input[64],
-        .response_option_count = input[65],
         .operation_result = read(u64, input, 68),
         .operation_sequence = read(u64, input, 76),
         .active_leaf_id = read(u64, input, 84),
@@ -140,7 +129,6 @@ pub fn decode(input: []const u8) !State {
         .response_text = readWindow(input, 116),
         .response_arguments = readWindow(input, 124),
         .response_tool_key = readWindow(input, 132),
-        .response_options = readWindow(input, 140),
     };
     try validate(state);
     return state;
@@ -154,7 +142,6 @@ fn validate(state: State) !void {
     try validateWindow(state.response_text, model_protocol.max_response_size);
     try validateWindow(state.response_tool_key, model_protocol.max_response_size);
     try validateWindow(state.response_arguments, model_protocol.max_response_size);
-    try validateWindow(state.response_options, model_protocol.max_response_size);
     try validateTask(state);
     try validateResponse(state);
 }
@@ -229,10 +216,8 @@ fn validateTask(state: State) !void {
 fn validateResponse(state: State) !void {
     if (state.response_ref == 0) {
         if (state.response_disposition != .failure or
-            state.response_failure != .none or state.response_input_shape != 0 or
-            state.response_option_count != 0 or state.response_text.length != 0 or
-            state.response_tool_key.length != 0 or state.response_arguments.length != 0 or
-            state.response_options.length != 0)
+            state.response_failure != .none or state.response_text.length != 0 or
+            state.response_tool_key.length != 0 or state.response_arguments.length != 0)
         {
             return error.InvalidResponseState;
         }
@@ -250,31 +235,31 @@ fn validateResponse(state: State) !void {
     switch (state.task_phase) {
         .final_candidate, .finished => {
             if (state.response_disposition != .final_answer or
-                state.response_failure != .none or state.response_input_shape != 0 or
-                state.response_option_count != 0 or state.response_text.length == 0 or
-                state.response_tool_key.length != 0 or state.response_arguments.length != 0 or
-                state.response_options.length != 0)
+                state.response_failure != .none or state.response_text.length == 0 or
+                state.response_tool_key.length != 0 or state.response_arguments.length != 0)
             {
                 return error.InvalidResponseState;
             }
         },
         .awaiting_tool, .ready => {
             if (state.response_disposition != .tool_call or
-                state.response_failure != .none or state.response_input_shape != 0 or
-                state.response_option_count != 0 or state.response_tool_key.length == 0 or
-                state.response_arguments.length == 0 or state.response_text.length != 0 or
-                state.response_options.length != 0)
+                state.response_failure != .none or state.response_tool_key.length == 0 or
+                state.response_arguments.length == 0 or state.response_text.length != 0)
             {
                 return error.InvalidResponseState;
             }
         },
         .failed => {
             switch (state.response_disposition) {
-                .input_request => try validateInputResponse(state),
-                .failure => if (state.response_failure == .none or state.response_input_shape != 0 or
-                    state.response_option_count != 0 or state.response_tool_key.length != 0 or
-                    state.response_text.length != 0 or state.response_arguments.length != 0 or
-                    state.response_options.length != 0)
+                .input_request => if (state.response_failure != .none or
+                    state.response_tool_key.length != 0 or state.response_text.length != 0 or
+                    state.response_arguments.length != 0)
+                {
+                    return error.InvalidResponseState;
+                },
+                .failure => if (state.response_failure == .none or
+                    state.response_tool_key.length != 0 or state.response_text.length != 0 or
+                    state.response_arguments.length != 0)
                 {
                     return error.InvalidResponseState;
                 },
@@ -282,21 +267,6 @@ fn validateResponse(state: State) !void {
             }
         },
         .idle, .awaiting_model => return error.InvalidResponseState,
-    }
-}
-
-fn validateInputResponse(state: State) !void {
-    if (state.response_disposition != .input_request or
-        state.response_failure != .none or state.response_input_shape == 0 or
-        state.response_text.length == 0 or state.response_tool_key.length != 0 or
-        state.response_arguments.length != 0 or
-        (state.response_input_shape == 1 and
-            (state.response_option_count != 0 or state.response_options.length != 0)) or
-        (state.response_input_shape == 2 and
-            (state.response_option_count == 0 or state.response_options.length == 0)) or
-        state.response_input_shape > 2)
-    {
-        return error.InvalidResponseState;
     }
 }
 
@@ -435,7 +405,7 @@ test "Core State rejects every unknown enum and overflowing bounded window" {
         .{ .offset = 61, .value = 7, .expected = error.UnknownTaskPhase },
         .{ .offset = 62, .value = 0xff, .expected = error.UnknownResponseDisposition },
         .{ .offset = 63, .value = 0xff, .expected = error.UnknownResponseFailure },
-        .{ .offset = 64, .value = 0xff, .expected = error.InvalidResponseState },
+        .{ .offset = 64, .value = 0xff, .expected = error.NonzeroCoreStateReservedByte },
     };
     for (cases) |case| {
         var changed = encoded;
@@ -504,7 +474,7 @@ test "Core State rejects impossible task and response relationships" {
     try std.testing.expectError(error.InvalidTaskState, decode(&encoded));
 
     try encode(&encoded, valid);
-    encoded[64] = 1;
+    writeWindow(&encoded, 132, .{ .offset = 1, .length = 1 });
     rewriteChecksum(&encoded);
     try std.testing.expectError(error.InvalidResponseState, decode(&encoded));
 

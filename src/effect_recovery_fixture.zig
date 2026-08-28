@@ -105,7 +105,7 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
     if (audit.count != 2) return error.ModelAttemptCountMismatch;
 
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const response = try model_protocol.encodeText(&response_buffer, .complete, "late original response");
+    const response = try model_protocol.encodeText(&response_buffer, "late original response");
     const result_ref = (@as(u64, 1) << 54) | (audit.ids[0] & ((@as(u64, 1) << 54) - 1));
     try restored.session.storeBlob(result_ref, response);
     const envelope = completion_inbox.bind(.{
