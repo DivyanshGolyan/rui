@@ -34,6 +34,9 @@ jobs:
       - name: Prepare Zig cache
         run: mkdir -p .zig-cache/tmp
 
+      - name: Fetch dependencies
+        run: zig build --fetch=all
+
       - name: Check source and artifacts
         run: zig build check --summary all
 
