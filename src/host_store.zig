@@ -1,13 +1,14 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const completion_inbox = @import("completion_inbox.zig");
+const persisted_format = @import("persisted_format.zig");
 const session_transition = @import("session_transition.zig");
 
 const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
-pub const schema_version: u32 = 4;
+pub const schema_version: u32 = persisted_format.epoch;
 pub const application_id: u32 = 0x4f4e5047; // "ONPG"
 pub const max_path_bytes: usize = 1024;
 pub const max_transition_payload: usize = session_transition.max_payload_size;

@@ -1,6 +1,10 @@
 const std = @import("std");
+const persisted_format = @import("src/persisted_format.zig");
 
-const fixture_state_namespace = ".zig-cache/onepage-fixture-v3-";
+const fixture_state_namespace = std.fmt.comptimePrint(
+    ".zig-cache/onepage-fixture-format-v{d}-",
+    .{persisted_format.epoch},
+);
 
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
