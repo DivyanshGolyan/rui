@@ -391,11 +391,15 @@ const AdmittedPatch = struct {
     patch_length: u32,
 };
 
-fn executableTool(session: *session_store.Session, core: *const core_image.Core) !ExecutableTool {
-    const response = try core.response();
-    var key_buffer: [model_contract.max_tool_key_size]u8 = undefined;
-    const key = try readResponseWindow(session, core, response, response.tool_key, &key_buffer);
-    return executableToolFromKey(key);
+fn admittedExecutableTool(
+    session: *session_store.Session,
+    core: *const core_image.Core,
+) !?ExecutableTool {
+    const observation = try core.operation();
+    if (observation.id > std.math.maxInt(u32)) return error.InvalidModelOperationIdentity;
+    var search: ExecutableToolSearch = .{ .model_operation_id = observation.id };
+    _ = try session.inspectSemantic(&search, ExecutableToolSearch.applyFact);
+    return search.tool;
 }
 
 fn executableToolFromKey(key: []const u8) !ExecutableTool {
@@ -403,6 +407,39 @@ fn executableToolFromKey(key: []const u8) !ExecutableTool {
     if (std.mem.eql(u8, key, model_contract.apply_patch_key)) return .apply_patch;
     return error.UnboundToolKey;
 }
+
+const ExecutableToolSearch = struct {
+    model_operation_id: u64,
+    tool: ?ExecutableTool = null,
+
+    fn applyFact(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
+        const self: *ExecutableToolSearch = @ptrCast(@alignCast(context));
+        const record = switch (fact) {
+            .operation_submitted => |value| value,
+            else => return,
+        };
+        if (record.operation.generation != 1 or record.recovery_class != .consequential) return;
+        const candidate: ExecutableTool = if (record.operation.operation_id ==
+            ((@as(u64, 1) << 63) | self.model_operation_id))
+            .bash
+        else if (record.operation.operation_id ==
+            ((@as(u64, 3) << 62) | self.model_operation_id))
+            .apply_patch
+        else
+            return;
+        const digest_matches = switch (record.descriptor_digest) {
+            .bash => candidate == .bash,
+            .apply_patch => candidate == .apply_patch,
+            .model => false,
+        };
+        if (!digest_matches) return error.InvalidActionDescriptor;
+        if (self.tool) |existing| {
+            if (existing != candidate) return error.ConflictingActionDescriptors;
+        } else {
+            self.tool = candidate;
+        }
+    }
+};
 
 fn finalReference(response_ref: u64) u64 {
     return (@as(u64, 1) << 63) | response_ref;
@@ -1027,7 +1064,9 @@ fn executeBashCall(
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !void {
-    if (try executableTool(session, &core.reducer) != .bash) {
+    const tool = try admittedExecutableTool(session, &core.reducer) orelse
+        return error.UnsupportedTool;
+    if (tool != .bash) {
         return error.UnsupportedTool;
     }
     const tool_operation_id = (@as(u64, 1) << 63) | ids.operation_id;
@@ -1325,7 +1364,9 @@ pub fn advanceRestored(
                     .response_ref = @truncate(observation.result_ref),
                     .final_ref = finalReference(observation.result_ref),
                 };
-                switch (try executableTool(session, &core.reducer)) {
+                const tool = try admittedExecutableTool(session, &core.reducer) orelse
+                    return error.UnboundToolKey;
+                switch (tool) {
                     .bash => try executeBashCall(
                         io,
                         allocator,
@@ -1420,7 +1461,8 @@ pub fn resolvePermission(
     defer if (core_open) core.close();
     try restoreCoreFromLedger(session, &core);
     if ((try core.reducer.task()).phase != .awaiting_tool) return error.PermissionNoLongerRequired;
-    const tool = try executableTool(session, &core.reducer);
+    const tool = try admittedExecutableTool(session, &core.reducer) orelse
+        return error.PermissionNoLongerRequired;
     const observation = try core.reducer.operation();
     const expected_operation_id = switch (tool) {
         .bash => (@as(u64, 1) << 63) | observation.id,
@@ -1668,7 +1710,9 @@ fn reconcileToolCall(
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !ToolRecovery {
-    return switch (try executableTool(session, &core.reducer)) {
+    const tool = try admittedExecutableTool(session, &core.reducer) orelse
+        return error.UnboundToolKey;
+    return switch (tool) {
         .bash => reconcileBash(session, token, core),
         .apply_patch => reconcilePatch(
             host,
@@ -3108,6 +3152,46 @@ fn modelFailure(value: u32) anyerror {
         8 => error.UnknownModelTool,
         else => error.UnknownModelFailure,
     };
+}
+
+test "committed typed child descriptors select execution without captured output" {
+    const model_operation_id: u64 = 41;
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 7,
+        .agent_generation = agent_generation,
+        .ownership_epoch = 1,
+    };
+    const generic: ExecutableToolSearch = .{ .model_operation_id = model_operation_id };
+    try std.testing.expectEqual(@as(?ExecutableTool, null), generic.tool);
+
+    var bash: ExecutableToolSearch = .{ .model_operation_id = model_operation_id };
+    try ExecutableToolSearch.applyFact(&bash, session_transition.operationSubmitted(
+        .{ .agent = agent, .operation_id = (@as(u64, 1) << 63) | model_operation_id, .generation = 1 },
+        91,
+        .{ .bash = binding.hash(binding.BashDescriptor, "bash descriptor") },
+        .consequential,
+    ));
+    try std.testing.expectEqual(ExecutableTool.bash, bash.tool.?);
+
+    var patch: ExecutableToolSearch = .{ .model_operation_id = model_operation_id };
+    try ExecutableToolSearch.applyFact(&patch, session_transition.operationSubmitted(
+        .{ .agent = agent, .operation_id = (@as(u64, 3) << 62) | model_operation_id, .generation = 1 },
+        92,
+        .{ .apply_patch = binding.hash(binding.PatchIntent, "patch intent") },
+        .consequential,
+    ));
+    try std.testing.expectEqual(ExecutableTool.apply_patch, patch.tool.?);
+
+    var mismatched: ExecutableToolSearch = .{ .model_operation_id = model_operation_id };
+    try std.testing.expectError(
+        error.InvalidActionDescriptor,
+        ExecutableToolSearch.applyFact(&mismatched, session_transition.operationSubmitted(
+            .{ .agent = agent, .operation_id = (@as(u64, 1) << 63) | model_operation_id, .generation = 1 },
+            93,
+            .{ .apply_patch = binding.hash(binding.PatchIntent, "wrong kind") },
+            .consequential,
+        )),
+    );
 }
 
 test "generic tool and input dispositions cannot bypass the closed Action mapping" {
