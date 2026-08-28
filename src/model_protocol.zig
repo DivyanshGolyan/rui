@@ -58,11 +58,9 @@ pub const ValidationScratch = struct {
 /// Borrowed opaque evidence that the exact response bytes and every semantic
 /// field passed the complete validator. The record lives in caller-reserved
 /// ValidationScratch and remains valid only until that scratch is reused.
-pub const Validated = struct {
-    record: *const ValidationRecord,
-
-    pub fn verify(self: Validated, bytes: []const u8) !Parsed {
-        const record = self.record;
+pub const Validated = opaque {
+    pub fn verify(self: *const Validated, bytes: []const u8) !Parsed {
+        const record: *const ValidationRecord = @ptrCast(@alignCast(self));
         if (bytes.len != record.byte_length or
             !binding.eql(binding.Result, binding.hash(binding.Result, bytes), record.result_digest) or
             !binding.eql(
@@ -188,7 +186,7 @@ pub fn decode(scratch: *ValidationScratch, bytes: []const u8) !Parsed {
 pub fn validate(
     scratch: *ValidationScratch,
     bytes: []const u8,
-) !Validated {
+) !*const Validated {
     const parsed = try decodeWithScratch(&scratch.json, bytes);
     const result_digest = binding.hash(binding.Result, bytes);
     const byte_length: u32 = @intCast(bytes.len);
@@ -199,7 +197,7 @@ pub fn validate(
         .byte_length = byte_length,
         .semantic_digest = validationDigest(parsed, result_digest, byte_length),
     };
-    return .{ .record = record };
+    return @ptrCast(record);
 }
 
 fn decodeWithScratch(
@@ -376,6 +374,11 @@ test "complete normalized responses cover every V1 disposition" {
 }
 
 test "validated response evidence is compact and byte exact" {
+    const is_opaque = switch (@typeInfo(Validated)) {
+        .@"opaque" => true,
+        else => false,
+    };
+    try std.testing.expect(is_opaque);
     var first_buffer: [128]u8 = undefined;
     var second_buffer: [128]u8 = undefined;
     var scratch: ValidationScratch = undefined;
@@ -384,7 +387,7 @@ test "validated response evidence is compact and byte exact" {
     const proof = try validate(&scratch, first);
     try std.testing.expectEqual(Disposition.tool_call, (try proof.verify(first)).disposition);
     try std.testing.expectError(error.InvalidModelResponseEvidence, proof.verify(second));
-    try std.testing.expect(@sizeOf(Validated) < 128);
+    try std.testing.expectEqual(@sizeOf(*const anyopaque), @sizeOf(@TypeOf(proof)));
 }
 
 test "validated response rejects every mutated semantic field" {
@@ -396,12 +399,13 @@ test "validated response rejects every mutated semantic field" {
     const Mutator = struct {
         fn expectRejected(
             encoded: []const u8,
-            original: Validated,
+            original: *const Validated,
             comptime mutate: fn (*Parsed) void,
         ) !void {
-            var record = original.record.*;
+            const original_record: *const ValidationRecord = @ptrCast(@alignCast(original));
+            var record = original_record.*;
             mutate(&record.parsed);
-            const forged: Validated = .{ .record = &record };
+            const forged: *const Validated = @ptrCast(&record);
             try std.testing.expectError(error.InvalidModelResponseEvidence, forged.verify(encoded));
         }
 
@@ -411,16 +415,22 @@ test "validated response rejects every mutated semantic field" {
         fn failure(parsed: *Parsed) void {
             parsed.failure = .provider_error;
         }
-        fn textWindow(parsed: *Parsed) void {
+        fn textOffset(parsed: *Parsed) void {
             parsed.text_offset = header_size;
+        }
+        fn textLength(parsed: *Parsed) void {
             parsed.text_length = 1;
         }
-        fn toolWindow(parsed: *Parsed) void {
+        fn toolOffset(parsed: *Parsed) void {
             parsed.tool_key_offset += 1;
+        }
+        fn toolLength(parsed: *Parsed) void {
             parsed.tool_key_length -= 1;
         }
-        fn argumentWindow(parsed: *Parsed) void {
+        fn argumentOffset(parsed: *Parsed) void {
             parsed.arguments_offset += 1;
+        }
+        fn argumentLength(parsed: *Parsed) void {
             parsed.arguments_length -= 1;
         }
         fn argumentEvidence(parsed: *Parsed) void {
@@ -429,21 +439,34 @@ test "validated response rejects every mutated semantic field" {
         fn argumentEvidenceLength(parsed: *Parsed) void {
             parsed.arguments_evidence.length -= 1;
         }
-        fn callMetadata(parsed: *Parsed) void {
+        fn inputShape(parsed: *Parsed) void {
+            parsed.input_shape = .text;
+        }
+        fn optionCount(parsed: *Parsed) void {
             parsed.option_count = 1;
+        }
+        fn optionsOffset(parsed: *Parsed) void {
             parsed.options_offset = header_size;
+        }
+        fn optionsLength(parsed: *Parsed) void {
             parsed.options_length = 1;
         }
     };
 
     try Mutator.expectRejected(response, validated, Mutator.disposition);
     try Mutator.expectRejected(response, validated, Mutator.failure);
-    try Mutator.expectRejected(response, validated, Mutator.textWindow);
-    try Mutator.expectRejected(response, validated, Mutator.toolWindow);
-    try Mutator.expectRejected(response, validated, Mutator.argumentWindow);
+    try Mutator.expectRejected(response, validated, Mutator.textOffset);
+    try Mutator.expectRejected(response, validated, Mutator.textLength);
+    try Mutator.expectRejected(response, validated, Mutator.toolOffset);
+    try Mutator.expectRejected(response, validated, Mutator.toolLength);
+    try Mutator.expectRejected(response, validated, Mutator.argumentOffset);
+    try Mutator.expectRejected(response, validated, Mutator.argumentLength);
     try Mutator.expectRejected(response, validated, Mutator.argumentEvidence);
     try Mutator.expectRejected(response, validated, Mutator.argumentEvidenceLength);
-    try Mutator.expectRejected(response, validated, Mutator.callMetadata);
+    try Mutator.expectRejected(response, validated, Mutator.inputShape);
+    try Mutator.expectRejected(response, validated, Mutator.optionCount);
+    try Mutator.expectRejected(response, validated, Mutator.optionsOffset);
+    try Mutator.expectRejected(response, validated, Mutator.optionsLength);
 }
 
 test "hostile normalized responses fail before authorizing effects" {

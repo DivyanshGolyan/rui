@@ -16,6 +16,7 @@ const session_transition = @import("session_transition.zig");
 const agent_generation: u32 = 1;
 const production_active_capacity: usize = 1;
 const ProductionSlotPool = core_image.SlotPool(production_active_capacity);
+const ProductionScratchPool = OwnerScratchPool(production_active_capacity);
 
 comptime {
     std.debug.assert(model_contract.max_patch_input_bytes == patch_tool.max_patch_size);
@@ -25,7 +26,7 @@ comptime {
 /// startup and pass it through every agent lifecycle entry point.
 pub const Host = struct {
     slots: ProductionSlotPool = .{},
-    owner_scratch: [production_active_capacity]OwnerScratch = @splat(.{}),
+    scratch: ProductionScratchPool = .{},
 };
 
 const OwnerScratch = struct {
@@ -49,6 +50,68 @@ const OwnerScratch = struct {
 };
 
 const owner_scratch_size = @sizeOf(OwnerScratch);
+
+const OwnerScratchLease = struct {
+    workspace: *OwnerScratch,
+    context: *anyopaque,
+    index: usize,
+    generation: u64,
+    release_fn: *const fn (*anyopaque, usize, u64, *OwnerScratch) error{StaleScratchLease}!void,
+    borrowed: bool = true,
+
+    fn release(self: *OwnerScratchLease) error{StaleScratchLease}!void {
+        if (!self.borrowed) return;
+        try self.release_fn(self.context, self.index, self.generation, self.workspace);
+        self.borrowed = false;
+    }
+};
+
+fn OwnerScratchPool(comptime capacity: usize) type {
+    if (capacity == 0) @compileError("an owner scratch pool cannot be empty");
+    return struct {
+        const Self = @This();
+
+        workspaces: [capacity]OwnerScratch = @splat(.{}),
+        occupied: [capacity]bool = @splat(false),
+        generations: [capacity]u64 = @splat(0),
+
+        fn borrow(self: *Self) !OwnerScratchLease {
+            for (&self.occupied, 0..) |*is_occupied, index| {
+                if (is_occupied.*) continue;
+                if (self.generations[index] == std.math.maxInt(u64)) continue;
+                is_occupied.* = true;
+                self.generations[index] += 1;
+                self.workspaces[index].scrub();
+                return .{
+                    .workspace = &self.workspaces[index],
+                    .context = self,
+                    .index = index,
+                    .generation = self.generations[index],
+                    .release_fn = releaseLease,
+                };
+            }
+            return error.OwnerScratchCapacityExhausted;
+        }
+
+        fn releaseLease(
+            context: *anyopaque,
+            index: usize,
+            generation: u64,
+            workspace: *OwnerScratch,
+        ) error{StaleScratchLease}!void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (index >= capacity or
+                !self.occupied[index] or
+                self.generations[index] != generation or
+                workspace != &self.workspaces[index])
+            {
+                return error.StaleScratchLease;
+            }
+            workspace.scrub();
+            self.occupied[index] = false;
+        }
+    };
+}
 
 comptime {
     std.debug.assert(owner_scratch_size ==
@@ -117,9 +180,9 @@ pub fn recoverSemanticWindow(
 ) !session_store.RecoveryProgress {
     var core = try Core.open(&host.slots);
     defer core.close();
-    const scratch = &host.owner_scratch[core.lease.index];
-    defer scratch.scrub();
-    return session.recoverSemanticWindow(frame_budget, scratch.canonicalJsonWorkspace());
+    var scratch = try host.scratch.borrow();
+    defer scratch.release() catch unreachable;
+    return session.recoverSemanticWindow(frame_budget, scratch.workspace.canonicalJsonWorkspace());
 }
 
 const ControlSearch = struct {
@@ -299,7 +362,6 @@ const ModelSlot = struct {
 
     fn apply(context: *anyopaque, completion: ModelCompletion) anyerror!void {
         const self: *ModelSlot = @ptrCast(@alignCast(context));
-        defer self.scratch.scrub();
         var response = try self.session.openBlob(completion.result);
         defer response.close();
         if (response.length() == 0) return error.EmptyModelResponse;
@@ -351,7 +413,7 @@ pub fn advanceCreated(
         &core,
         &core_open,
         core_state_buffer,
-        &host.owner_scratch[core.lease.index],
+        host,
         provider,
         1,
         config.completion_hook,
@@ -367,7 +429,7 @@ fn performModelTurn(
     core: *Core,
     core_open: *bool,
     core_state_buffer: []u8,
-    scratch: *OwnerScratch,
+    host: *Host,
     provider: ?model_operation.Provider,
     model_sequence: u32,
     completion_hook: ?CompletionHook,
@@ -408,6 +470,8 @@ fn performModelTurn(
             0,
         ),
     };
+    var scratch = try host.scratch.borrow();
+    errdefer scratch.release() catch unreachable;
     try commitCoreFacts(
         session,
         core_state_buffer,
@@ -415,7 +479,9 @@ fn performModelTurn(
         &admission_facts,
         false,
     );
-    try dispatchModelAttempt(session, token, next_provider, scratch, .{
+    core.close();
+    core_open.* = false;
+    try dispatchModelAttempt(session, token, next_provider, &scratch, .{
         .request_ref = ids.request_ref,
         .request_digest = request_digest,
         .response_ref = ids.response_ref,
@@ -423,8 +489,6 @@ fn performModelTurn(
         .operation_generation = operation_generation,
         .attempt_id = ids.attempt_id,
     }, completion_hook, fault);
-    core.close();
-    core_open.* = false;
     return error.CompletionExpected;
 }
 
@@ -435,7 +499,7 @@ fn retryModelAttempt(
     core: *Core,
     core_open: *bool,
     core_state_buffer: []u8,
-    scratch: *OwnerScratch,
+    host: *Host,
     provider: ?model_operation.Provider,
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
@@ -493,6 +557,8 @@ fn retryModelAttempt(
         descriptor.descriptor_digest,
         history.attempt_count,
     );
+    var scratch = try host.scratch.borrow();
+    errdefer scratch.release() catch unreachable;
     try commitCoreFacts(
         session,
         core_state_buffer,
@@ -500,7 +566,9 @@ fn retryModelAttempt(
         &.{attempt},
         false,
     );
-    try dispatchModelAttempt(session, token, next_provider, scratch, .{
+    core.close();
+    core_open.* = false;
+    return dispatchModelAttempt(session, token, next_provider, &scratch, .{
         .request_ref = descriptor.descriptor_ref,
         .request_digest = request_digest,
         .response_ref = response_ref,
@@ -508,26 +576,24 @@ fn retryModelAttempt(
         .operation_generation = operation.generation,
         .attempt_id = attempt_id,
     }, completion_hook, fault);
-    core.close();
-    core_open.* = false;
 }
 
 fn dispatchModelAttempt(
     session: *session_store.Session,
     token: session_store.OwnerToken,
     provider: model_operation.Provider,
-    scratch: *OwnerScratch,
+    scratch: *OwnerScratchLease,
     dispatch: ModelDispatch,
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !void {
-    defer scratch.scrub();
+    defer scratch.release() catch unreachable;
     try model_operation.verifyRequestDigest(session, dispatch.request_ref, dispatch.request_digest);
     var provider_io = try model_operation.ProviderIo.open(
         session,
         dispatch.request_ref,
         dispatch.response_ref,
-        scratch.canonicalJsonWorkspace(),
+        scratch.workspace.canonicalJsonWorkspace(),
     );
     defer provider_io.close();
     var result_ref = dispatch.response_ref;
@@ -625,8 +691,9 @@ fn executeBashCall(
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !void {
-    const scratch = &host.owner_scratch[core.lease.index];
-    defer scratch.scrub();
+    var scratch_lease = try host.scratch.borrow();
+    defer scratch_lease.release() catch unreachable;
+    const scratch = scratch_lease.workspace;
     const response = try core.reducer.response();
     if (try executableTool(session, &core.reducer) != .bash) {
         return error.UnsupportedTool;
@@ -736,7 +803,7 @@ fn executeBashCall(
         false,
     );
     const admitted_descriptor = try bash_tool.decodeDescriptor(descriptor_bytes);
-    scratch.scrub();
+    try scratch_lease.release();
     core.close();
     core_open.* = false;
     var execution = try bash_tool.executeDescriptor(
@@ -771,7 +838,7 @@ fn executeBashCall(
 
 fn requestPatchPermission(
     io: std.Io,
-    scratch: *OwnerScratch,
+    host: *Host,
     session: *session_store.Session,
     core: *Core,
     core_state_buffer: []u8,
@@ -781,7 +848,9 @@ fn requestPatchPermission(
     approval_required_hook: ?ApprovalRequiredHook,
     fault: ?FaultHook,
 ) !void {
-    defer scratch.scrub();
+    var scratch_lease = try host.scratch.borrow();
+    defer scratch_lease.release() catch unreachable;
+    const scratch = scratch_lease.workspace;
     const response = try core.reducer.response();
     const arguments_length = response.arguments.length;
     if (arguments_length == 0 or
@@ -915,12 +984,16 @@ pub fn advanceRestored(
     var outcome = (try core.reducer.task()).phase;
     if (outcome == .awaiting_model) {
         if (durableCompletion(session, token, &core)) |completion| {
-            var slot: ModelSlot = .{
-                .core = &core,
-                .session = session,
-                .scratch = &host.owner_scratch[core.lease.index],
-            };
-            try ModelSlot.apply(&slot, completion);
+            {
+                var scratch = try host.scratch.borrow();
+                defer scratch.release() catch unreachable;
+                var slot: ModelSlot = .{
+                    .core = &core,
+                    .session = session,
+                    .scratch = scratch.workspace,
+                };
+                try ModelSlot.apply(&slot, completion);
+            }
             const applied = session_transition.resultApplied(.{
                 .operation = operationContext(session, completion.operation_id, completion.operation_generation),
                 .attempt_id = 0,
@@ -943,7 +1016,7 @@ pub fn advanceRestored(
                 &core,
                 &core_open,
                 core_state_buffer,
-                &host.owner_scratch[core.lease.index],
+                host,
                 provider,
                 config.completion_hook,
                 config.fault,
@@ -1004,7 +1077,7 @@ pub fn advanceRestored(
                     .apply_patch => {
                         try requestPatchPermission(
                             io,
-                            &host.owner_scratch[core.lease.index],
+                            host,
                             session,
                             &core,
                             core_state_buffer,
@@ -1051,7 +1124,7 @@ pub fn advanceRestored(
         &core,
         &core_open,
         core_state_buffer,
-        &host.owner_scratch[core.lease.index],
+        host,
         provider orelse return error.SessionNeedsModel,
         2,
         config.completion_hook,
@@ -2841,7 +2914,7 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
     try std.testing.expectError(error.UnboundToolKey, executableToolFromKey(""));
 }
 
-test "model dispatch rejects a substituted request under the bound reference" {
+test "model dispatch releases Core and rejects substituted request bytes" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2883,6 +2956,44 @@ test "model dispatch rejects a substituted request under the bound reference" {
         .task = "Check the request binding",
     });
     defer session.close();
+
+    var host: Host = .{};
+    const SlotProbeProvider = struct {
+        host: *Host,
+        observed_released_slot: bool = false,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            var lease = try self.host.slots.borrow();
+            defer lease.release() catch unreachable;
+            self.observed_released_slot = true;
+            var bytes: [model_protocol.header_size + "done".len]u8 = undefined;
+            try response.append(try model_protocol.encodeText(&bytes, "done"));
+            try response.finish();
+        }
+    };
+    var probe: SlotProbeProvider = .{ .host = &host };
+    var core_state_buffer: [core_state.encoded_size]u8 = undefined;
+    try std.testing.expectError(
+        error.CompletionOffered,
+        advanceCreated(
+            &host,
+            &session,
+            &core_state_buffer,
+            .{ .workspace_path = repo_path },
+            probe.provider(),
+        ),
+    );
+    try std.testing.expect(probe.observed_released_slot);
+
     const request_digest = try model_operation.buildRequest(&session, 1001, 1, 1);
     var request_blob = try session.openBlob(1001);
     const request_length: usize = @intCast(request_blob.length());
@@ -2912,7 +3023,7 @@ test "model dispatch rejects a substituted request under the bound reference" {
         }
     };
     var fixture: CountingProvider = .{};
-    var scratch: OwnerScratch = .{};
+    var scratch = try host.scratch.borrow();
     try std.testing.expectError(
         error.ModelRequestDigestMismatch,
         dispatchModelAttempt(
@@ -2985,18 +3096,35 @@ fn expectPatchArgumentBoundary(
 test "Host reserves and scrubs one complete owner workspace per Activation Slot" {
     var host: Host = .{};
     try std.testing.expectEqual(@as(usize, 344_300), owner_scratch_size);
-    try std.testing.expectEqual(@as(usize, 352_680), @sizeOf(Host));
+    try std.testing.expectEqual(@as(usize, 352_688), @sizeOf(Host));
     try std.testing.expectEqual(
         production_active_capacity * owner_scratch_size,
-        @sizeOf(@TypeOf(host.owner_scratch)),
+        @sizeOf(@TypeOf(host.scratch.workspaces)),
     );
     try std.testing.expectEqual(
         @sizeOf(ProductionSlotPool),
-        @offsetOf(Host, "owner_scratch"),
+        @offsetOf(Host, "scratch"),
     );
-    @memset(std.mem.asBytes(&host.owner_scratch[0]), 0xa5);
-    host.owner_scratch[0].scrub();
-    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&host.owner_scratch[0]), 0));
+    var lease = try host.scratch.borrow();
+    @memset(std.mem.asBytes(lease.workspace), 0xa5);
+    try std.testing.expectError(error.OwnerScratchCapacityExhausted, host.scratch.borrow());
+    try lease.release();
+    var reused = try host.scratch.borrow();
+    defer reused.release() catch unreachable;
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(reused.workspace), 0));
+}
+
+test "stale copied owner scratch lease cannot scrub a new borrower" {
+    var host: Host = .{};
+    var original = try host.scratch.borrow();
+    var stale = original;
+    try original.release();
+
+    var current = try host.scratch.borrow();
+    defer current.release() catch unreachable;
+    current.workspace.response[0] = 0xa5;
+    try std.testing.expectError(error.StaleScratchLease, stale.release());
+    try std.testing.expectEqual(@as(u8, 0xa5), current.workspace.response[0]);
 }
 
 test "Tool Catalog preserves byte-bounded Unicode admission" {

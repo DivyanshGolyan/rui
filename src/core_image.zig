@@ -318,7 +318,7 @@ pub const Core = struct {
         self: *Core,
         identity_value: OperationIdentity,
         response_bytes: []const u8,
-        validated: model_protocol.Validated,
+        validated: *const model_protocol.Validated,
         response_ref: u64,
     ) !Response {
         try self.requireOperation(identity_value, .accepted);
