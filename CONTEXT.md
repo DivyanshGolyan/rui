@@ -167,7 +167,7 @@ One immutable node in a conversation, linked to its parent entry or to the root.
 _Avoid_: Message, record, event
 
 **Tool Call**:
-A provider-neutral Conversation Entry selecting one Tool Key with bounded canonical JSON arguments. Its entry identity pairs it with the immediate child Tool Result.
+A provider-neutral Conversation Entry selecting one Tool Key with exact bounded strict JSON arguments admitted under a named Validation Profile and the model Operation's Tool Catalog. Its entry identity pairs it with the immediate child Tool Result.
 _Avoid_: Action, provider wire call, executable authority
 
 **Tool Result**:
@@ -241,12 +241,28 @@ One reusable, fixed-capacity resident workspace containing decoded Core State an
 _Avoid_: Agent, Core State, execution page, checkpoint
 
 **Active Capacity**:
-The startup-fixed number of transferable Active Credits supported by the V1 Host Runtime. Each credit is owned by exactly one live Harness, admitted external Attempt, or closure handoff; an Activation Slot is borrowed only while its Harness drives Core.
-_Avoid_: Session population, scheduler, dynamic concurrency
+The startup-fixed number of transferable Active Credits supported by the V1 Host Runtime. It bounds active semantic work, not every stage-specific transport, effect, or validation resource; an Activation Slot is borrowed only while a Harness drives Core.
+_Avoid_: Session population, total process memory, resource bundle, dynamic concurrency
 
 **Active Credit**:
 One volatile Host Runtime capacity credit that transfers between a live Harness, its committed admitted external Attempt, and the closure handoff that applies terminal evidence. It never establishes Session authority.
-_Avoid_: Authorization, Runtime lease, ownership epoch, durable semaphore
+_Avoid_: Authorization, Runtime lease, ownership epoch, durable semaphore, preallocated memory bundle
+
+**Semantic Admission**:
+The bounded Host-owned step that validates one Captured Model Output and atomically commits either its typed Result meaning or a typed terminal failure into the Session Ledger.
+_Avoid_: provider parsing, blob publication, Completion notification, Conversation replay
+
+**Semantic Validation Capacity**:
+The fixed number of Captured Model Outputs the Host may semantically admit at once.
+_Avoid_: Active Capacity, provider concurrency, per-Agent scratch
+
+**Validation Profile**:
+The versioned strict-data rules under which exact model tool arguments are admitted, including syntax, duplicate-field, depth, structural, type, and size bounds.
+_Avoid_: canonical JSON, Tool Catalog, input schema
+
+**Strict Tool JSON V1**:
+The V1 Validation Profile for exact model tool-argument bytes. It rejects invalid UTF-8, malformed JSON, duplicate fields, excessive depth or structure, schema mismatch, and size overflow without requiring a canonical spelling of an otherwise valid value.
+_Avoid_: canonical JSON, semantic-equivalence identity, provider validation
 
 **Workflow Evaluation Capacity**:
 The maximum number of live workflow evaluator subprocesses. V1 fixes it at one independently of Active Capacity.
@@ -267,6 +283,10 @@ _Avoid_: Operation, retry, request
 **Result**:
 The durable, typed outcome of a completed operation that the agent can use in a later decision.
 _Avoid_: Completion, output, response
+
+**Captured Model Output**:
+The immutable bounded bytes published by a model adapter for one Attempt before their provider-neutral meaning is admitted. They are durable evidence but not a Result or Conversation authority.
+_Avoid_: Result, admitted response, provider wire stream, Conversation Entry
 
 **Indeterminate Result**:
 A Result stating that an Attempt may have affected external state but its terminal effect cannot be proved. It is evidence for the Agent's next decision, not an automatic retry, User escalation, or terminal Job outcome.

@@ -57,6 +57,8 @@ evaluator instead of checkpointing JavaScript continuation state.
 [ADR-0015](docs/adr/0015-expose-a-protocol-independent-run-service.md) makes the durable Run Service
 the public semantic seam, separates User role from authority, and keeps the CLI and future industry
 protocols as adapters.
+[ADR-0016](docs/adr/0016-separate-captured-output-from-semantic-admission.md) keeps provider capture
+non-authoritative and shares bounded semantic-validation scratch independently of Active Capacity.
 
 The fixed-credit harness spike established a 1.5 KiB-bounded native owner with nonblocking task,
 completion, permission, cancellation, and shutdown admission; durable-before-apply ordering;
@@ -238,3 +240,4 @@ Architectural decisions:
 - [`docs/adr/0013-bound-orchestration-memory-not-workload-memory.md`](docs/adr/0013-bound-orchestration-memory-not-workload-memory.md)
 - [`docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md`](docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md)
 - [`docs/adr/0015-expose-a-protocol-independent-run-service.md`](docs/adr/0015-expose-a-protocol-independent-run-service.md)
+- [`docs/adr/0016-separate-captured-output-from-semantic-admission.md`](docs/adr/0016-separate-captured-output-from-semantic-admission.md)
