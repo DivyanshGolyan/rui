@@ -133,21 +133,25 @@ fn encode(
 }
 
 pub fn parse(bytes: []const u8) Parsed {
+    return decode(bytes) catch failed(.malformed);
+}
+
+pub fn decode(bytes: []const u8) !Parsed {
     if (bytes.len < header_size or bytes.len > max_response_size or
         !std.mem.eql(u8, bytes[0..magic.len], magic) or read(u16, bytes, 8) != version or
         read(u16, bytes, 10) != header_size)
     {
-        return failed(.malformed);
+        return error.MalformedModelResponse;
     }
-    const disposition = std.enums.fromInt(Disposition, bytes[12]) orelse return failed(.malformed);
-    const reason = std.enums.fromInt(Failure, bytes[13]) orelse return failed(.malformed);
+    const disposition = std.enums.fromInt(Disposition, bytes[12]) orelse return error.MalformedModelResponse;
+    const reason = std.enums.fromInt(Failure, bytes[13]) orelse return error.MalformedModelResponse;
     const first_length: usize = read(u32, bytes, 16);
     const second_length: usize = read(u32, bytes, 20);
     if (first_length > bytes.len - header_size or
         second_length > bytes.len - header_size - first_length or
         header_size + first_length + second_length != bytes.len)
     {
-        return failed(.malformed);
+        return error.MalformedModelResponse;
     }
     const first = bytes[header_size..][0..first_length];
     const second = bytes[header_size + first_length ..];
@@ -155,15 +159,15 @@ pub fn parse(bytes: []const u8) Parsed {
         .final_answer => {
             if (reason != .none or bytes[14] != 0 or bytes[15] != 0 or first.len == 0 or
                 first.len > max_assistant_text_size or
-                second.len != 0 or !contract.utf8Valid(first)) return failed(.malformed);
+                second.len != 0 or !contract.utf8Valid(first)) return error.MalformedModelResponse;
             return .{ .disposition = .final_answer, .text_offset = header_size, .text_length = @intCast(first.len) };
         },
         .tool_call => {
             if (reason != .none or bytes[14] != 0 or bytes[15] != 0 or second.len == 0) {
-                return failed(.malformed);
+                return error.MalformedModelResponse;
             }
-            contract.validateToolKey(first) catch return failed(.malformed);
-            if (!contract.canonicalJson(second)) return failed(.malformed);
+            contract.validateToolKey(first) catch return error.MalformedModelResponse;
+            if (!contract.canonicalJson(second)) return error.MalformedModelResponse;
             return .{
                 .disposition = .tool_call,
                 .tool_key_offset = header_size,
@@ -172,29 +176,29 @@ pub fn parse(bytes: []const u8) Parsed {
                 .arguments_length = @intCast(second.len),
             };
         },
-        .input_request => return parseInput(bytes, first, second, reason),
+        .input_request => return try decodeInput(bytes, first, second, reason),
         .failure => {
             if (reason == .none or bytes[14] != 0 or bytes[15] != 0 or first.len != 0 or second.len != 0) {
-                return failed(.malformed);
+                return error.MalformedModelResponse;
             }
             return failed(reason);
         },
     }
 }
 
-fn parseInput(bytes: []const u8, prompt: []const u8, options: []const u8, reason: Failure) Parsed {
+fn decodeInput(bytes: []const u8, prompt: []const u8, options: []const u8, reason: Failure) !Parsed {
     if (reason != .none or prompt.len == 0 or prompt.len > contract.max_prompt_size or
-        !contract.utf8Valid(prompt)) return failed(.malformed);
-    const shape = std.enums.fromInt(contract.InputShape, bytes[14]) orelse return failed(.malformed);
+        !contract.utf8Valid(prompt)) return error.MalformedModelResponse;
+    const shape = std.enums.fromInt(contract.InputShape, bytes[14]) orelse return error.MalformedModelResponse;
     const count = bytes[15];
     switch (shape) {
-        .text => if (count != 0 or options.len != 0) return failed(.malformed),
+        .text => if (count != 0 or options.len != 0) return error.MalformedModelResponse,
         .single_choice => {
-            if (count == 0 or count > contract.max_choice_count) return failed(.malformed);
+            if (count == 0 or count > contract.max_choice_count) return error.MalformedModelResponse;
             var cursor: usize = 0;
             var ids: [contract.max_choice_count][]const u8 = undefined;
             for (0..count) |index| {
-                if (cursor > options.len or options.len - cursor < 4) return failed(.malformed);
+                if (cursor > options.len or options.len - cursor < 4) return error.MalformedModelResponse;
                 const id_length: usize = read(u16, options, cursor);
                 const label_length: usize = read(u16, options, cursor + 2);
                 cursor += 4;
@@ -202,16 +206,16 @@ fn parseInput(bytes: []const u8, prompt: []const u8, options: []const u8, reason
                     label_length == 0 or label_length > contract.max_choice_label_size or
                     id_length > options.len - cursor or label_length > options.len - cursor - id_length)
                 {
-                    return failed(.malformed);
+                    return error.MalformedModelResponse;
                 }
                 const id = options[cursor..][0..id_length];
                 const label = options[cursor + id_length ..][0..label_length];
-                if (!contract.utf8Valid(id) or !contract.utf8Valid(label)) return failed(.malformed);
-                for (ids[0..index]) |earlier| if (std.mem.eql(u8, earlier, id)) return failed(.malformed);
+                if (!contract.utf8Valid(id) or !contract.utf8Valid(label)) return error.MalformedModelResponse;
+                for (ids[0..index]) |earlier| if (std.mem.eql(u8, earlier, id)) return error.MalformedModelResponse;
                 ids[index] = id;
                 cursor += id_length + label_length;
             }
-            if (cursor != options.len) return failed(.malformed);
+            if (cursor != options.len) return error.MalformedModelResponse;
         },
     }
     return .{
@@ -265,6 +269,7 @@ test "hostile normalized responses fail before authorizing effects" {
     const encoded = try encodeTool(&bytes, "fixture.tool", "{}");
     bytes[20] = 0xff;
     try std.testing.expectEqual(Failure.malformed, parse(encoded).failure);
+    try std.testing.expectError(error.MalformedModelResponse, decode(encoded));
     const current = try encodeTool(&bytes, "fixture.tool", "{}");
     std.mem.writeInt(u16, bytes[8..10], version - 1, .little);
     try std.testing.expectEqual(Failure.malformed, parse(current).failure);

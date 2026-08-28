@@ -307,34 +307,20 @@ pub const Core = struct {
         self.state.operation_phase = .accepted;
     }
 
-    pub fn completeOperation(
+    pub fn applyModelResponse(
         self: *Core,
         identity_value: OperationIdentity,
-        result_ref: u64,
-    ) !void {
-        try self.requireOperation(identity_value, .accepted);
-        if (result_ref == 0) return error.InvalidResultReference;
-        self.state.operation_result = result_ref;
-        self.state.operation_phase = .completed;
-    }
-
-    pub fn interpretModelResponse(
-        self: *Core,
         response_bytes: []const u8,
         response_ref: u64,
     ) !Response {
-        try self.requireActive();
+        try self.requireOperation(identity_value, .accepted);
+        if (response_ref == 0) return error.InvalidResultReference;
         if (response_bytes.len == 0) return error.EmptyModelResponse;
         if (response_bytes.len > model_protocol.max_response_size) return error.ResponseCapacityExceeded;
-        const state = self.state.*;
-        if (state.task_phase != .awaiting_model or
-            state.operation_phase != .completed or
-            state.operation_result != response_ref or response_ref == 0)
-        {
-            return error.IllegalModelResponseTransition;
-        }
-
-        const parsed = model_protocol.parse(response_bytes);
+        if (self.state.task_phase != .awaiting_model) return error.IllegalModelResponseTransition;
+        const parsed = try model_protocol.decode(response_bytes);
+        self.state.operation_result = response_ref;
+        self.state.operation_phase = .completed;
         self.state.response_ref = response_ref;
         self.state.response_disposition = parsed.disposition;
         self.state.response_failure = parsed.failure;
@@ -439,8 +425,7 @@ comptime {
     assertNoAllocatorParameter(Core.submitOperation);
     assertNoAllocatorParameter(Core.beginModelOperation);
     assertNoAllocatorParameter(Core.acceptOperation);
-    assertNoAllocatorParameter(Core.completeOperation);
-    assertNoAllocatorParameter(Core.interpretModelResponse);
+    assertNoAllocatorParameter(Core.applyModelResponse);
     assertNoAllocatorParameter(Core.commitFinalAnswer);
     assertNoAllocatorParameter(Core.commitToolResult);
     assertNoAllocatorParameter(Core.suspendInto);
@@ -547,7 +532,7 @@ test "failed activation leaves no prior slot bytes reachable" {
     for (std.mem.asBytes(&slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
 
-test "capacity and stale generation rejections preserve prior Core State" {
+test "oversized truncated and malformed responses preserve accepted operation state" {
     var slot: ActivationSlot = undefined;
     var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
     try core.startTask(1);
@@ -557,15 +542,40 @@ test "capacity and stale generation rejections preserve prior Core State" {
         core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation + 1 }),
     );
     try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
-    try core.completeOperation(
-        .{ .id = operation_value.id, .generation = operation_value.generation },
-        99,
-    );
     const before = try core.operation();
     var oversized: [model_protocol.max_response_size + 1]u8 = @splat(1);
     try std.testing.expectError(
         error.ResponseCapacityExceeded,
-        core.interpretModelResponse(&oversized, 99),
+        core.applyModelResponse(
+            .{ .id = operation_value.id, .generation = operation_value.generation },
+            &oversized,
+            99,
+        ),
+    );
+    try std.testing.expectEqualDeep(before, try core.operation());
+
+    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    const encoded = try model_protocol.encodeText(&response_buffer, .complete, "valid");
+    try std.testing.expectError(
+        error.MalformedModelResponse,
+        core.applyModelResponse(
+            .{ .id = operation_value.id, .generation = operation_value.generation },
+            encoded[0 .. encoded.len - 1],
+            99,
+        ),
+    );
+    try std.testing.expectEqualDeep(before, try core.operation());
+
+    var malformed: [model_protocol.max_response_size]u8 = undefined;
+    @memcpy(malformed[0..encoded.len], encoded);
+    malformed[0] = 'X';
+    try std.testing.expectError(
+        error.MalformedModelResponse,
+        core.applyModelResponse(
+            .{ .id = operation_value.id, .generation = operation_value.generation },
+            malformed[0..encoded.len],
+            99,
+        ),
     );
     try std.testing.expectEqualDeep(before, try core.operation());
 }
@@ -578,7 +588,6 @@ test "responses retain only validated metadata and durable content windows" {
     const operation = try core.beginModelOperation(2, 1);
     const identity: OperationIdentity = .{ .id = operation.id, .generation = operation.generation };
     try core.acceptOperation(identity);
-    try core.completeOperation(identity, 3);
 
     var value: [model_protocol.max_resident_response_size]u8 = @splat('x');
     var arguments_buffer: [model_protocol.max_resident_response_size + 32]u8 = undefined;
@@ -587,7 +596,7 @@ test "responses retain only validated metadata and durable content windows" {
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     const response = try model_protocol.encodeTool(&response_buffer, "fixture.large.v1", arguments);
     try std.testing.expect(response.len > model_protocol.max_resident_response_size);
-    const parsed = try core.interpretModelResponse(response, 3);
+    const parsed = try core.applyModelResponse(identity, response, 3);
     try std.testing.expectEqual(@as(u32, @intCast(arguments.len)), parsed.arguments.length);
     try std.testing.expectEqual(@as(u64, 3), parsed.content_ref);
 }
@@ -598,13 +607,13 @@ test "complete slot lifecycle is compiler checked to expose no allocator seam" {
     try core.startTask(1);
     const operation_value = try core.beginModelOperation(2, 1);
     try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
-    try core.completeOperation(
-        .{ .id = operation_value.id, .generation = operation_value.generation },
-        3,
-    );
     var response_bytes: [model_protocol.max_response_size]u8 = undefined;
     const response = try model_protocol.encodeText(&response_bytes, .complete, "done");
-    _ = try core.interpretModelResponse(response, 3);
+    _ = try core.applyModelResponse(
+        .{ .id = operation_value.id, .generation = operation_value.generation },
+        response,
+        3,
+    );
     var encoded: [core_state.encoded_size]u8 = undefined;
     try core.suspendInto(&encoded);
 

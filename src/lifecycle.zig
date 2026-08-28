@@ -147,6 +147,7 @@ const ModelCompletion = struct {
     operation_id: u64,
     ownership_epoch: u64,
     result: u64,
+    result_digest: binding.Result,
     agent_generation: u32,
     operation_generation: u32,
 };
@@ -156,7 +157,7 @@ const ExecutableTool = enum { bash, apply_patch };
 fn executableTool(session: *session_store.Session, core: *const core_image.Core) !ExecutableTool {
     const response = try core.response();
     var key_buffer: [model_contract.max_tool_key_size]u8 = undefined;
-    const key = try readResponseWindow(session, response, response.tool_key, &key_buffer);
+    const key = try readResponseWindow(session, core, response, response.tool_key, &key_buffer);
     return executableToolFromKey(key);
 }
 
@@ -256,18 +257,21 @@ const ModelSlot = struct {
 
     fn apply(context: *anyopaque, completion: ModelCompletion) anyerror!void {
         const self: *ModelSlot = @ptrCast(@alignCast(context));
-        try self.core.reducer.completeOperation(.{
-            .id = completion.operation_id,
-            .generation = completion.operation_generation,
-        }, completion.result);
         var response = try self.session.openBlob(completion.result);
         defer response.close();
+        if (response.length() == 0) return error.EmptyModelResponse;
         if (response.length() > model_protocol.max_response_size) return error.ResponseTooLarge;
         const length: usize = @intCast(response.length());
         var buffer: [model_protocol.max_response_size]u8 = undefined;
-        const bytes = try response.readWindow(0, buffer[0..length]);
-        if (bytes.len != length) return error.TruncatedModelResponse;
-        _ = try self.core.reducer.interpretModelResponse(bytes, completion.result);
+        const bytes = try readAndVerifyModelResponse(
+            &response,
+            completion.result_digest,
+            buffer[0..length],
+        );
+        _ = try self.core.reducer.applyModelResponse(.{
+            .id = completion.operation_id,
+            .generation = completion.operation_generation,
+        }, bytes, completion.result);
     }
 };
 
@@ -578,7 +582,7 @@ fn executeBashCall(
     }
     const arguments_buffer = try allocator.alloc(u8, arguments_length);
     defer allocator.free(arguments_buffer);
-    const arguments = try readResponseWindow(session, response, response.arguments, arguments_buffer);
+    const arguments = try readResponseWindow(session, &core.reducer, response, response.arguments, arguments_buffer);
     var parsed = try parseBashArguments(allocator, arguments);
     defer parsed.deinit();
     const call: bash_tool.Call = .{
@@ -719,7 +723,7 @@ fn requestPatchPermission(
     }
     const arguments_buffer = try allocator.alloc(u8, arguments_length);
     defer allocator.free(arguments_buffer);
-    const arguments = try readResponseWindow(session, response, response.arguments, arguments_buffer);
+    const arguments = try readResponseWindow(session, &core.reducer, response, response.arguments, arguments_buffer);
     var parsed = try parsePatchArguments(allocator, arguments);
     defer parsed.deinit();
     const patch = parsed.value.patch;
@@ -844,7 +848,7 @@ pub fn advanceRestored(
                 .operation = operationContext(session, completion.operation_id, completion.operation_generation),
                 .attempt_id = 0,
                 .result_ref = completion.result,
-                .result_digest = try blobDigest(session, completion.result),
+                .result_digest = completion.result_digest,
                 .recovery_class = .none,
             });
             try commitCoreFacts(
@@ -1958,6 +1962,7 @@ fn durableCompletion(
         .operation_generation = operation_generation,
         .ownership_epoch = accepted.operation.agent.ownership_epoch,
         .result = completed.result_ref,
+        .result_digest = completed.result_digest,
     };
 }
 
@@ -2199,7 +2204,7 @@ fn finalizeCandidate(
         return error.FinalAnswerNotCandidate;
     }
     var final_buffer: [model_protocol.max_assistant_text_size]u8 = undefined;
-    const expected = try readResponseWindow(session, response, response.text, &final_buffer);
+    const expected = try readResponseWindow(session, &core.reducer, response, response.text, &final_buffer);
     if (expected.len == 0) {
         return error.InvalidFinalAnswerRange;
     }
@@ -2288,13 +2293,27 @@ fn readBoundedBlob(
 
 fn readResponseWindow(
     session: *session_store.Session,
+    core: *const core_image.Core,
     response: core_image.Response,
     window: core_image.ContentWindow,
     out: []u8,
 ) ![]const u8 {
     if (window.length == 0 or window.length > out.len) return error.InvalidModelResponseWindow;
+    const operation = try core.operation();
+    var history: FactSearch = .{
+        .operation_id = operation.id,
+        .generation = operation.generation,
+        .recovery_class = .model,
+    };
+    _ = try session.inspectSemantic(&history, FactSearch.applyFact);
+    const committed = history.result orelse return error.MissingModelResult;
+    if (committed.result_ref != response.content_ref) return error.ModelResultReferenceMismatch;
     var reader = try session.openBlob(response.content_ref);
     defer reader.close();
+    if (reader.length() == 0 or reader.length() > model_protocol.max_response_size) {
+        return error.ResponseTooLarge;
+    }
+    try verifyModelResponse(&reader, committed.result_digest);
     const start: u64 = window.offset;
     const length: u64 = window.length;
     if (start > reader.length() or length > reader.length() - start) {
@@ -2303,6 +2322,42 @@ fn readResponseWindow(
     const bytes = try reader.readWindow(start, out[0..window.length]);
     if (bytes.len != window.length) return error.TruncatedModelResponse;
     return bytes;
+}
+
+fn readAndVerifyModelResponse(
+    reader: *session_store.BlobReader,
+    expected_digest: binding.Result,
+    out: []u8,
+) ![]const u8 {
+    if (reader.length() != out.len) return error.TruncatedModelResponse;
+    var hasher = binding.Hasher(binding.Result).init();
+    var offset: usize = 0;
+    while (offset < out.len) {
+        const bytes = try reader.readWindow(offset, out[offset..][0..@min(4096, out.len - offset)]);
+        if (bytes.len == 0) return error.TruncatedModelResponse;
+        hasher.update(bytes);
+        offset += bytes.len;
+    }
+    if (!binding.eql(binding.Result, hasher.final(), expected_digest)) {
+        return error.CompletionResultDigestMismatch;
+    }
+    return out;
+}
+
+fn verifyModelResponse(reader: *session_store.BlobReader, expected_digest: binding.Result) !void {
+    var window: [4096]u8 = undefined;
+    var hasher = binding.Hasher(binding.Result).init();
+    var offset: u64 = 0;
+    while (offset < reader.length()) {
+        const wanted: usize = @intCast(@min(reader.length() - offset, window.len));
+        const bytes = try reader.readWindow(offset, window[0..wanted]);
+        if (bytes.len != wanted) return error.TruncatedModelResponse;
+        hasher.update(bytes);
+        offset += bytes.len;
+    }
+    if (!binding.eql(binding.Result, hasher.final(), expected_digest)) {
+        return error.CompletionResultDigestMismatch;
+    }
 }
 
 test "restored response metadata reads the exact durable content window" {
@@ -2353,9 +2408,15 @@ test "restored response metadata reads the exact durable content window" {
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     const encoded_response = try model_protocol.encodeText(&response_buffer, .complete, answer);
     try session.storeBlob(response_ref, encoded_response);
+    const descriptor_ref: u64 = 2000;
+    const descriptor_bytes = "restored response test descriptor";
+    try session.storeBlob(descriptor_ref, descriptor_bytes);
+    const descriptor_digest: binding.Descriptor = .{
+        .model = binding.hash(binding.ModelDescriptor, descriptor_bytes),
+    };
 
     var initial_slot: core_image.ActivationSlot = undefined;
-    var initial = try core_image.Core.initialize(&initial_slot, .{ .agent_id = 7, .generation = 1 });
+    var initial = try core_image.Core.initialize(&initial_slot, .{ .agent_id = session.agent_id, .generation = 1 });
     try initial.startTask(1);
     const operation = try initial.beginModelOperation(2, 1);
     const identity: core_image.OperationIdentity = .{
@@ -2363,8 +2424,32 @@ test "restored response metadata reads the exact durable content window" {
         .generation = operation.generation,
     };
     try initial.acceptOperation(identity);
-    try initial.completeOperation(identity, response_ref);
-    _ = try initial.interpretModelResponse(encoded_response, response_ref);
+    const ledger_operation = operationContext(&session, operation.id, operation.generation);
+    const response_digest = binding.hash(binding.Result, encoded_response);
+    _ = try session.commitSemantic(&.{
+        session_transition.operationSubmitted(ledger_operation, descriptor_ref, descriptor_digest, .model),
+        session_transition.modelAttemptAdmitted(ledger_operation, 9, descriptor_ref, descriptor_digest, 0),
+    }, null);
+    try session.publishCompletionEvidence(completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = session.session_id,
+        .ownership_epoch = session.ownership_epoch,
+        .agent_id = session.agent_id,
+        .agent_generation = agent_generation,
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = 9,
+        .result_ref = response_ref,
+        .result_digest = response_digest,
+    }));
+    _ = try session.commitSemantic(&.{session_transition.result(.{
+        .operation = ledger_operation,
+        .result_ref = response_ref,
+        .result_digest = response_digest,
+        .class = .ordinary,
+        .evidence = .{ .durable = .{ .model = 9 } },
+    })}, null);
+    _ = try initial.applyModelResponse(identity, encoded_response, response_ref);
     var encoded_state: [core_state.encoded_size]u8 = undefined;
     try initial.suspendInto(&encoded_state);
 
@@ -2375,7 +2460,107 @@ test "restored response metadata reads the exact durable content window" {
     var answer_buffer: [model_protocol.max_assistant_text_size]u8 = undefined;
     try std.testing.expectEqualStrings(
         answer,
-        try readResponseWindow(&session, response, response.text, &answer_buffer),
+        try readResponseWindow(&session, &restored, response, response.text, &answer_buffer),
+    );
+
+    var blob_path: [64]u8 = undefined;
+    const response_path = try std.fmt.bufPrint(&blob_path, "blobs/{x:0>16}.blob", .{response_ref});
+    try session.dir.deleteFile(io, response_path);
+    const substituted = try model_protocol.encodeText(&response_buffer, .complete, "substituted final answer");
+    try session.storeBlob(response_ref, substituted);
+    try std.testing.expectError(
+        error.CompletionResultDigestMismatch,
+        readResponseWindow(&session, &restored, response, response.text, &answer_buffer),
+    );
+}
+
+test "restored tool arguments reject same-reference substitution and oversized blobs" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "sessions", .default_dir);
+    var database_path_buffer: [160]u8 = undefined;
+    const database_path = try std.fmt.bufPrint(
+        &database_path_buffer,
+        ".zig-cache/tmp/{s}/tool-window-test.sqlite3",
+        .{tmp.sub_path},
+    );
+    var storage = try host_store.StorageOwner.open(io, database_path, .{});
+    defer storage.close();
+    var sessions = try tmp.dir.openDir(io, "sessions", .{});
+    defer sessions.close(io);
+    var session = try session_store.Session.create(sessions, &storage, io, .{
+        .workspace_path = ".",
+        .model = "fixture:window",
+        .task = "Recover tool arguments",
+    });
+    defer session.close();
+
+    const response_ref: u64 = 3001;
+    const descriptor_ref: u64 = 3000;
+    const descriptor_bytes = "tool window descriptor";
+    try session.storeBlob(descriptor_ref, descriptor_bytes);
+    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    const original = try model_protocol.encodeTool(&response_buffer, model_contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}");
+    try session.storeBlob(response_ref, original);
+
+    var slot: core_image.ActivationSlot = undefined;
+    var core = try core_image.Core.initialize(&slot, .{ .agent_id = session.agent_id, .generation = 1 });
+    defer core.abandon();
+    try core.startTask(1);
+    const operation = try core.beginModelOperation(3, 1);
+    const identity: core_image.OperationIdentity = .{ .id = operation.id, .generation = operation.generation };
+    try core.acceptOperation(identity);
+    _ = try core.applyModelResponse(identity, original, response_ref);
+    const context = operationContext(&session, operation.id, operation.generation);
+    const descriptor_digest: binding.Descriptor = .{ .model = binding.hash(binding.ModelDescriptor, descriptor_bytes) };
+    const response_digest = binding.hash(binding.Result, original);
+    _ = try session.commitSemantic(&.{
+        session_transition.operationSubmitted(context, descriptor_ref, descriptor_digest, .model),
+        session_transition.modelAttemptAdmitted(context, 10, descriptor_ref, descriptor_digest, 0),
+    }, null);
+    try session.publishCompletionEvidence(completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = session.session_id,
+        .ownership_epoch = session.ownership_epoch,
+        .agent_id = session.agent_id,
+        .agent_generation = agent_generation,
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = 10,
+        .result_ref = response_ref,
+        .result_digest = response_digest,
+    }));
+    _ = try session.commitSemantic(&.{session_transition.result(.{
+        .operation = context,
+        .result_ref = response_ref,
+        .result_digest = response_digest,
+        .class = .ordinary,
+        .evidence = .{ .durable = .{ .model = 10 } },
+    })}, null);
+    const response = try core.response();
+    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "{\"command\":\"true\",\"timeout_ms\":1000}",
+        try readResponseWindow(&session, &core, response, response.arguments, &arguments_buffer),
+    );
+
+    var path_buffer: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "blobs/{x:0>16}.blob", .{response_ref});
+    try session.dir.deleteFile(io, path);
+    const replacement = try model_protocol.encodeTool(&response_buffer, model_contract.bash_key, "{\"command\":\"false\",\"timeout_ms\":1000}");
+    try session.storeBlob(response_ref, replacement);
+    try std.testing.expectError(
+        error.CompletionResultDigestMismatch,
+        readResponseWindow(&session, &core, response, response.arguments, &arguments_buffer),
+    );
+
+    try session.dir.deleteFile(io, path);
+    var oversized: [model_protocol.max_response_size + 1]u8 = @splat('x');
+    try session.storeBlob(response_ref, &oversized);
+    try std.testing.expectError(
+        error.ResponseTooLarge,
+        readResponseWindow(&session, &core, response, response.arguments, &arguments_buffer),
     );
 }
 
@@ -2507,11 +2692,14 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
     try core.reducer.startTask(1);
     const operation = try core.reducer.beginModelOperation(2, 1);
     try core.reducer.acceptOperation(.{ .id = operation.id, .generation = operation.generation });
-    try core.reducer.completeOperation(.{ .id = operation.id, .generation = operation.generation }, 3);
 
     var response: [model_protocol.max_response_size]u8 = undefined;
     const generic = try model_protocol.encodeTool(&response, "fixture.inspect.v1", "{}");
-    _ = try core.reducer.interpretModelResponse(generic, 3);
+    _ = try core.reducer.applyModelResponse(
+        .{ .id = operation.id, .generation = operation.generation },
+        generic,
+        3,
+    );
     try std.testing.expectError(error.UnboundToolKey, executableToolFromKey("fixture.inspect.v1"));
 
     core.close();
@@ -2520,9 +2708,12 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
     try core.reducer.startTask(1);
     const input_operation = try core.reducer.beginModelOperation(5, 1);
     try core.reducer.acceptOperation(.{ .id = input_operation.id, .generation = input_operation.generation });
-    try core.reducer.completeOperation(.{ .id = input_operation.id, .generation = input_operation.generation }, 6);
     const input = try model_protocol.encodeInputText(&response, "Which migration should I use?");
-    _ = try core.reducer.interpretModelResponse(input, 6);
+    _ = try core.reducer.applyModelResponse(
+        .{ .id = input_operation.id, .generation = input_operation.generation },
+        input,
+        6,
+    );
     try std.testing.expectEqual(core_state.TaskPhase.awaiting_input, (try core.reducer.task()).phase);
     try std.testing.expectError(error.UnboundToolKey, executableToolFromKey(""));
 }

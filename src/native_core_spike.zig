@@ -204,10 +204,10 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 before,
                 expected,
                 error.IllegalOperationTransition,
-                core.completeOperation(.{
+                discardResponse(core.applyModelResponse(.{
                     .id = operation.id,
                     .generation = operation.generation,
-                }, 9),
+                }, "invalid", 9)),
                 poison,
             );
         }
@@ -230,22 +230,14 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             before,
             expected,
             error.InvalidResultReference,
-            core.completeOperation(.{
+            discardResponse(core.applyModelResponse(.{
                 .id = operation.id,
                 .generation = operation.generation,
-            }, 0),
+            }, "invalid", 0)),
             poison,
         );
 
         const response_ref: u64 = 2000 + trace_index;
-        try core.completeOperation(.{
-            .id = operation.id,
-            .generation = operation.generation,
-        }, response_ref);
-        expected.operation_result = response_ref;
-        expected.operation_phase = .completed;
-        try expectStateAndRestore(&core, expected, poison);
-
         var response_buffer: [model_protocol.max_response_size]u8 = undefined;
         if (trace_index % 2 == 0) {
             const response = try model_protocol.encodeTool(&response_buffer, model_contract.bash_key, "{}");
@@ -254,11 +246,19 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 &core,
                 before,
                 expected,
-                error.IllegalModelResponseTransition,
-                discardResponse(core.interpretModelResponse(response, response_ref + 1)),
+                error.StaleOperation,
+                discardResponse(core.applyModelResponse(.{
+                    .id = operation.id,
+                    .generation = operation.generation + 1,
+                }, response, response_ref + 1)),
                 poison,
             );
-            const interpreted = try core.interpretModelResponse(response, response_ref);
+            const interpreted = try core.applyModelResponse(.{
+                .id = operation.id,
+                .generation = operation.generation,
+            }, response, response_ref);
+            expected.operation_result = response_ref;
+            expected.operation_phase = .completed;
             expected.response_ref = response_ref;
             expected.response_disposition = .tool_call;
             expected.response_tool_key = .{
@@ -296,15 +296,14 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             try core.acceptOperation(.{ .id = second.id, .generation = second.generation });
             expected.operation_phase = .accepted;
             try expectStateAndRestore(&core, expected, poison);
-            try core.completeOperation(
+            const final = try model_protocol.encodeText(&response_buffer, .complete, "ok");
+            const interpreted_final = try core.applyModelResponse(
                 .{ .id = second.id, .generation = second.generation },
+                final,
                 response_ref + 1000,
             );
             expected.operation_result = response_ref + 1000;
             expected.operation_phase = .completed;
-            try expectStateAndRestore(&core, expected, poison);
-            const final = try model_protocol.encodeText(&response_buffer, .complete, "ok");
-            const interpreted_final = try core.interpretModelResponse(final, response_ref + 1000);
             expected.response_ref = response_ref + 1000;
             expected.response_disposition = .final_answer;
             expected.response_text = .{
@@ -325,11 +324,19 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 &core,
                 before,
                 expected,
-                error.IllegalModelResponseTransition,
-                discardResponse(core.interpretModelResponse(final, response_ref + 1)),
+                error.StaleOperation,
+                discardResponse(core.applyModelResponse(.{
+                    .id = operation.id,
+                    .generation = operation.generation + 1,
+                }, final, response_ref + 1)),
                 poison,
             );
-            const interpreted = try core.interpretModelResponse(final, response_ref);
+            const interpreted = try core.applyModelResponse(.{
+                .id = operation.id,
+                .generation = operation.generation,
+            }, final, response_ref);
+            expected.operation_result = response_ref;
+            expected.operation_phase = .completed;
             expected.response_ref = response_ref;
             expected.response_disposition = .final_answer;
             expected.response_text = .{
