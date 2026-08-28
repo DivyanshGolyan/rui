@@ -114,7 +114,7 @@ pub fn validateCatalog(catalog: []const ToolDefinition) !void {
             definition.result_contract.len == 0 or
             definition.result_contract.len > max_result_contract_size or
             !utf8Valid(definition.provider_tool_name) or !utf8Valid(definition.description) or
-            !utf8Valid(definition.result_contract) or !validJson(definition.input_schema))
+            !utf8Valid(definition.result_contract) or !validInputSchema(definition.input_schema))
         {
             return error.InvalidToolCatalog;
         }
@@ -287,7 +287,7 @@ pub fn admitToolArguments(
     return .{ .json = json, .parsed = parsed.value };
 }
 
-fn validateAgainstInputSchema(schema_value: std.json.Value, argument_value: std.json.Value) !void {
+fn validateAgainstInputSchema(schema_value: std.json.Value, maybe_arguments: ?std.json.Value) !void {
     const schema = switch (schema_value) {
         .object => |value| value,
         else => return error.InvalidToolSchema,
@@ -312,10 +312,10 @@ fn validateAgainstInputSchema(schema_value: std.json.Value, argument_value: std.
         else => return error.InvalidToolSchema,
     };
     if (additional or required.items.len > properties.count()) return error.InvalidToolSchema;
-    const arguments = switch (argument_value) {
+    const arguments = if (maybe_arguments) |argument_value| switch (argument_value) {
         .object => |value| value,
         else => return error.InvalidToolArguments,
-    };
+    } else null;
 
     for (required.items, 0..) |item, index| {
         const name = switch (item) {
@@ -330,18 +330,23 @@ fn validateAgainstInputSchema(schema_value: std.json.Value, argument_value: std.
             };
             if (std.mem.eql(u8, earlier_name, name)) return error.InvalidToolSchema;
         }
-        if (arguments.get(name) == null) return error.InvalidToolArguments;
+        if (arguments) |values| {
+            if (values.get(name) == null) return error.InvalidToolArguments;
+        }
     }
 
-    var argument_iterator = arguments.iterator();
-    while (argument_iterator.next()) |entry| {
-        const property_schema = properties.get(entry.key_ptr.*) orelse
-            return error.InvalidToolArguments;
-        try validatePropertySchema(property_schema, entry.value_ptr.*);
+    if (arguments) |values| {
+        var argument_iterator = values.iterator();
+        while (argument_iterator.next()) |entry| {
+            if (properties.get(entry.key_ptr.*) == null) return error.InvalidToolArguments;
+        }
     }
     var property_iterator = properties.iterator();
     while (property_iterator.next()) |entry| {
-        try validatePropertySchema(entry.value_ptr.*, null);
+        try validatePropertySchema(
+            entry.value_ptr.*,
+            if (arguments) |values| values.get(entry.key_ptr.*) else null,
+        );
     }
 }
 
@@ -352,6 +357,10 @@ fn validatePropertySchema(schema_value: std.json.Value, maybe_value: ?std.json.V
     };
     const type_name = switch (schema.get("type") orelse return error.InvalidToolSchema) {
         .string => |value| value,
+        else => return error.InvalidToolSchema,
+    };
+    if (schema.get("description")) |description| switch (description) {
+        .string => {},
         else => return error.InvalidToolSchema,
     };
     if (std.mem.eql(u8, type_name, "string")) {
@@ -496,7 +505,7 @@ fn jsonU32(value: std.json.Value) !u32 {
     };
 }
 
-fn validJson(bytes: []const u8) bool {
+fn validInputSchema(bytes: []const u8) bool {
     if (bytes.len == 0 or bytes.len > max_schema_size or !utf8Valid(bytes)) return false;
     var arena_bytes: [max_schema_size + 8 * 1024]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
@@ -506,6 +515,7 @@ fn validJson(bytes: []const u8) bool {
         .duplicate_field_behavior = .@"error",
     }) catch return false;
     defer parsed.deinit();
+    validateAgainstInputSchema(parsed.value, null) catch return false;
     return true;
 }
 
@@ -573,6 +583,7 @@ test "StrictToolJsonV1 applies an arbitrary catalog definition without execution
         .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":6},\"fresh\":{\"type\":\"boolean\"}},\"required\":[\"query\"],\"additionalProperties\":false}",
         .result_contract = "Bounded fixture text.",
     };
+    try validateCatalog(&.{definition});
     var scratch: StrictToolJsonScratch = undefined;
     const exact = " { \"fresh\" : true, \"query\" : \"status\" } ";
     const admitted = try admitToolArguments(&scratch, definition, exact);
@@ -589,6 +600,27 @@ test "StrictToolJsonV1 applies an arbitrary catalog definition without execution
         error.InvalidToolArguments,
         admitToolArguments(&scratch, definition, "{\"query\":\"ok\",\"unknown\":true}"),
     );
+}
+
+test "Tool Catalog rejects schemas outside the admitted vocabulary" {
+    const unsupported = [_][]const u8{
+        "{\"type\":\"array\",\"items\":{\"type\":\"string\"}}",
+        "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"array\"}},\"required\":[],\"additionalProperties\":false}",
+        "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"enum\":[\"a\"]}},\"required\":[],\"additionalProperties\":false}",
+        "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"description\":1}},\"required\":[],\"additionalProperties\":false}",
+        "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":true}",
+        "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false,\"$ref\":\"#\"}",
+    };
+    for (unsupported) |schema| {
+        const definition: ToolDefinition = .{
+            .key = "fixture.unsupported.v1",
+            .provider_tool_name = "fixture_unsupported",
+            .description = "Unsupported schema fixture.",
+            .input_schema = schema,
+            .result_contract = "Bounded fixture text.",
+        };
+        try std.testing.expectError(error.InvalidToolCatalog, validateCatalog(&.{definition}));
+    }
 }
 
 test "StrictToolJsonV1 rejects malformed duplicate deep and many-member values" {
