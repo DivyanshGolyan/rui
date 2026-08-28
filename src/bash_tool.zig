@@ -1,12 +1,13 @@
 const std = @import("std");
 const binding = @import("binding.zig");
+const model_contract = @import("model_contract.zig");
 
 pub const version: u16 = 1;
 pub const call_header_size = 16;
 pub const descriptor_version: u16 = 1;
 pub const descriptor_header_size = 32;
 pub const result_header_size = 32;
-pub const max_command_size = 2048;
+pub const max_command_size = model_contract.max_bash_command_bytes;
 pub const max_workspace_path_size = 1024;
 pub const max_descriptor_size = descriptor_header_size + 2 * max_workspace_path_size +
     environment_authority.len + max_command_size;
@@ -444,7 +445,9 @@ pub fn decodeResultHeader(bytes: []const u8, total_length: u64) !ResultHeader {
         .stdout_length = read(u32, bytes, 16),
         .stderr_length = read(u32, bytes, 20),
     };
-    if (result_header_size + @as(u64, header.stdout_length) + header.stderr_length != total_length) {
+    if (header.stdout_length > max_output_size or header.stderr_length > max_output_size or
+        result_header_size + @as(u64, header.stdout_length) + header.stderr_length != total_length)
+    {
         return error.InvalidBashResult;
     }
     return header;
@@ -460,9 +463,9 @@ fn emptyExecution(allocator: std.mem.Allocator, status: Status) !Execution {
 }
 
 fn validate(call: Call) !void {
-    if (call.command.len == 0 or call.command.len > max_command_size or
-        call.timeout_ms < min_timeout_ms or call.timeout_ms > max_timeout_ms or
-        std.mem.indexOfScalar(u8, call.command, 0) != null or !std.unicode.utf8ValidateSlice(call.command))
+    model_contract.validateBashCommand(call.command) catch return error.InvalidBashCall;
+    if (call.timeout_ms < min_timeout_ms or call.timeout_ms > max_timeout_ms or
+        std.mem.indexOfScalar(u8, call.command, 0) != null)
     {
         return error.InvalidBashCall;
     }
@@ -617,6 +620,35 @@ test "truncation and cancellation are distinct typed results" {
     defer cancelled.deinit();
     try cancel_future.await(io);
     try std.testing.expectEqual(Status.cancelled, cancelled.status);
+}
+
+test "Bash result decoding enforces each output bound independently" {
+    var header: [result_header_size]u8 = undefined;
+    const execution: Execution = .{
+        .allocator = std.testing.allocator,
+        .status = .success,
+        .stdout = &.{},
+        .stderr = &.{},
+    };
+    _ = try encodeResultHeader(&header, execution);
+    write(u32, &header, 16, max_output_size);
+    write(u32, &header, 20, max_output_size);
+    const exact = try decodeResultHeader(&header, result_header_size + 2 * max_output_size);
+    try std.testing.expectEqual(@as(u32, max_output_size), exact.stdout_length);
+    try std.testing.expectEqual(@as(u32, max_output_size), exact.stderr_length);
+
+    write(u32, &header, 16, max_output_size + 1);
+    write(u32, &header, 20, 0);
+    try std.testing.expectError(
+        error.InvalidBashResult,
+        decodeResultHeader(&header, result_header_size + max_output_size + 1),
+    );
+    write(u32, &header, 16, 0);
+    write(u32, &header, 20, max_output_size + 1);
+    try std.testing.expectError(
+        error.InvalidBashResult,
+        decodeResultHeader(&header, result_header_size + max_output_size + 1),
+    );
 }
 
 fn cancelAfter(io: std.Io, cancellation: *std.atomic.Value(bool)) !void {

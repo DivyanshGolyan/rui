@@ -17,7 +17,7 @@ const agent_generation: u32 = 1;
 const ProductionSlotPool = core_image.SlotPool(1);
 
 comptime {
-    std.debug.assert(model_contract.max_patch_input_size == patch_tool.max_patch_size);
+    std.debug.assert(model_contract.max_patch_input_bytes == patch_tool.max_patch_size);
 }
 
 /// Process-owned bounded activation capacity. Construct this once at host
@@ -545,11 +545,7 @@ fn parsePatchArguments(
     var parsed = std.json.parseFromSlice(PatchArguments, allocator, arguments, .{}) catch
         return error.InvalidPatchArguments;
     errdefer parsed.deinit();
-    if (parsed.value.patch.len == 0 or parsed.value.patch.len > patch_tool.max_patch_size or
-        !std.unicode.utf8ValidateSlice(parsed.value.patch))
-    {
-        return error.InvalidPatchArguments;
-    }
+    model_contract.validatePatchInput(parsed.value.patch) catch return error.InvalidPatchArguments;
     return parsed;
 }
 
@@ -2558,45 +2554,105 @@ test "model dispatch rejects a substituted request under the bound reference" {
     try std.testing.expectEqual(@as(u32, 0), fixture.calls);
 }
 
-test "tool argument envelopes preserve exact decoded field bounds under escaping" {
+fn repeatedUtf8(
+    allocator: std.mem.Allocator,
+    codepoint_count: usize,
+    codepoint: []const u8,
+) ![]u8 {
+    const bytes = try allocator.alloc(u8, codepoint_count * codepoint.len);
+    for (0..codepoint_count) |index| {
+        @memcpy(bytes[index * codepoint.len ..][0..codepoint.len], codepoint);
+    }
+    return bytes;
+}
+
+fn expectBashArgumentBoundary(
+    allocator: std.mem.Allocator,
+    envelope: []u8,
+    command: []const u8,
+    accepted: bool,
+) !void {
+    const encoded = try model_contract.encodeJson(envelope, .{
+        .command = command,
+        .timeout_ms = bash_tool.max_timeout_ms,
+    });
+    if (accepted) {
+        var parsed = try parseBashArguments(allocator, encoded);
+        parsed.deinit();
+    } else {
+        try std.testing.expectError(error.InvalidBashArguments, parseBashArguments(allocator, encoded));
+    }
+}
+
+fn expectPatchArgumentBoundary(
+    allocator: std.mem.Allocator,
+    envelope: []u8,
+    patch: []const u8,
+    accepted: bool,
+) !void {
+    const encoded = try model_contract.encodeJson(envelope, .{ .patch = patch });
+    if (accepted) {
+        var parsed = try parsePatchArguments(allocator, encoded);
+        parsed.deinit();
+    } else {
+        try std.testing.expectError(error.InvalidPatchArguments, parsePatchArguments(allocator, encoded));
+    }
+}
+
+test "Tool Catalog code-point limits exactly match Host admission" {
     const allocator = std.testing.allocator;
-    const exact_command = try allocator.alloc(u8, bash_tool.max_command_size);
-    defer allocator.free(exact_command);
-    @memset(exact_command, 1);
-    const one_past_command = try allocator.alloc(u8, bash_tool.max_command_size + 1);
-    defer allocator.free(one_past_command);
-    @memset(one_past_command, 'x');
-    const exact_patch = try allocator.alloc(u8, patch_tool.max_patch_size);
-    defer allocator.free(exact_patch);
-    @memset(exact_patch, 1);
-    const one_past_patch = try allocator.alloc(u8, patch_tool.max_patch_size + 1);
-    defer allocator.free(one_past_patch);
-    @memset(one_past_patch, 'x');
     const envelope = try allocator.alloc(u8, model_contract.max_tool_arguments_envelope_size);
     defer allocator.free(envelope);
 
-    const encoded_command = try model_contract.encodeJson(envelope, .{
-        .command = exact_command,
+    const bash_ascii_exact = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints, "x");
+    defer allocator.free(bash_ascii_exact);
+    const bash_ascii_over = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints + 1, "x");
+    defer allocator.free(bash_ascii_over);
+    const bash_unicode_exact = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints, "é");
+    defer allocator.free(bash_unicode_exact);
+    const bash_unicode_over = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints + 1, "é");
+    defer allocator.free(bash_unicode_over);
+    const bash_four_byte_exact = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints, "😀");
+    defer allocator.free(bash_four_byte_exact);
+    try expectBashArgumentBoundary(allocator, envelope, bash_ascii_exact, true);
+    try expectBashArgumentBoundary(allocator, envelope, bash_ascii_over, false);
+    try expectBashArgumentBoundary(allocator, envelope, bash_unicode_exact, true);
+    try expectBashArgumentBoundary(allocator, envelope, bash_unicode_over, false);
+    try expectBashArgumentBoundary(allocator, envelope, bash_four_byte_exact, true);
+    const escaped_bash = try repeatedUtf8(allocator, model_contract.max_bash_command_codepoints, "\x01");
+    defer allocator.free(escaped_bash);
+    const encoded_escaped_bash = try model_contract.encodeJson(envelope, .{
+        .command = escaped_bash,
         .timeout_ms = bash_tool.max_timeout_ms,
     });
-    var parsed_command = try parseBashArguments(allocator, encoded_command);
-    parsed_command.deinit();
-    const encoded_command_over = try model_contract.encodeJson(envelope, .{
-        .command = one_past_command,
-        .timeout_ms = bash_tool.max_timeout_ms,
-    });
-    try std.testing.expectError(
-        error.InvalidBashArguments,
-        parseBashArguments(allocator, encoded_command_over),
-    );
+    try std.testing.expect(encoded_escaped_bash.len <= model_contract.max_tool_arguments_envelope_size);
+    try expectBashArgumentBoundary(allocator, envelope, escaped_bash, true);
 
-    const encoded_patch = try model_contract.encodeJson(envelope, .{ .patch = exact_patch });
+    const patch_ascii_exact = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints, "x");
+    defer allocator.free(patch_ascii_exact);
+    const patch_ascii_over = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints + 1, "x");
+    defer allocator.free(patch_ascii_over);
+    const patch_unicode_exact = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints, "é");
+    defer allocator.free(patch_unicode_exact);
+    const patch_unicode_over = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints + 1, "é");
+    defer allocator.free(patch_unicode_over);
+    const patch_four_byte_exact = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints, "😀");
+    defer allocator.free(patch_four_byte_exact);
+    try expectPatchArgumentBoundary(allocator, envelope, patch_ascii_exact, true);
+    try expectPatchArgumentBoundary(allocator, envelope, patch_ascii_over, false);
+    try expectPatchArgumentBoundary(allocator, envelope, patch_unicode_exact, true);
+    try expectPatchArgumentBoundary(allocator, envelope, patch_unicode_over, false);
+    try expectPatchArgumentBoundary(allocator, envelope, patch_four_byte_exact, true);
+
+    const escaped_patch = try repeatedUtf8(allocator, model_contract.max_patch_input_codepoints, "\x01");
+    defer allocator.free(escaped_patch);
+    const encoded_patch = try model_contract.encodeJson(envelope, .{ .patch = escaped_patch });
     try std.testing.expectEqual(
         model_contract.max_tool_arguments_envelope_size,
         encoded_patch.len,
     );
-    var parsed_patch = try parsePatchArguments(allocator, encoded_patch);
-    parsed_patch.deinit();
+    var parsed_escaped = try parsePatchArguments(allocator, encoded_patch);
+    parsed_escaped.deinit();
     const response_buffer = try allocator.alloc(u8, model_protocol.max_response_size);
     defer allocator.free(response_buffer);
     const response = try model_protocol.encodeTool(
@@ -2607,11 +2663,6 @@ test "tool argument envelopes preserve exact decoded field bounds under escaping
     try std.testing.expectEqual(
         model_protocol.Disposition.tool_call,
         model_protocol.parse(response).disposition,
-    );
-    const encoded_patch_over = try model_contract.encodeJson(envelope, .{ .patch = one_past_patch });
-    try std.testing.expectError(
-        error.InvalidPatchArguments,
-        parsePatchArguments(allocator, encoded_patch_over),
     );
 }
 
