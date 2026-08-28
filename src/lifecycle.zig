@@ -882,10 +882,6 @@ pub fn advanceRestored(
             null,
         );
     }
-    // Issue #38 owns the atomic Conversation append and durable Interaction
-    // Request. Until that layer exists, the normalized disposition terminates
-    // explicitly instead of exposing an unbacked waiting state.
-    if (outcome == .awaiting_input) return error.InteractionRequestLayerRequired;
     if (outcome == .awaiting_tool) {
         switch (try reconcileToolCall(
             session,

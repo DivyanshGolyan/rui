@@ -22,7 +22,6 @@ pub const TaskPhase = enum(u8) {
     awaiting_tool = 4,
     finished = 5,
     failed = 6,
-    awaiting_input = 7,
 };
 
 pub const ContentWindow = extern struct {
@@ -210,7 +209,7 @@ fn validateTask(state: State) !void {
                 return error.InvalidModelContext;
             }
         },
-        .final_candidate, .awaiting_tool, .awaiting_input, .failed => {
+        .final_candidate, .awaiting_tool, .failed => {
             if (state.active_leaf_id == 0 or state.final_entry_id != 0 or
                 state.operation_phase != .completed)
             {
@@ -239,7 +238,7 @@ fn validateResponse(state: State) !void {
         }
         switch (state.task_phase) {
             .idle, .ready, .awaiting_model => {},
-            .final_candidate, .awaiting_tool, .awaiting_input, .finished, .failed => {
+            .final_candidate, .awaiting_tool, .finished, .failed => {
                 return error.InvalidResponseState;
             },
         }
@@ -269,7 +268,6 @@ fn validateResponse(state: State) !void {
                 return error.InvalidResponseState;
             }
         },
-        .awaiting_input => try validateInputResponse(state),
         .failed => {
             switch (state.response_disposition) {
                 .input_request => try validateInputResponse(state),
@@ -328,7 +326,6 @@ fn taskPhase(value: u8) !TaskPhase {
         4 => .awaiting_tool,
         5 => .finished,
         6 => .failed,
-        7 => .awaiting_input,
         else => error.UnknownTaskPhase,
     };
 }
@@ -433,16 +430,16 @@ test "Core State rejects unsupported schema enums truncation and checksum corrup
 test "Core State rejects every unknown enum and overflowing bounded window" {
     var encoded: [encoded_size]u8 = undefined;
     try encode(&encoded, .{ .agent_id = 1, .agent_generation = 1, .accumulator = 1 });
-    const cases = [_]struct { offset: usize, expected: anyerror }{
-        .{ .offset = 60, .expected = error.UnknownOperationPhase },
-        .{ .offset = 61, .expected = error.UnknownTaskPhase },
-        .{ .offset = 62, .expected = error.UnknownResponseDisposition },
-        .{ .offset = 63, .expected = error.UnknownResponseFailure },
-        .{ .offset = 64, .expected = error.InvalidResponseState },
+    const cases = [_]struct { offset: usize, value: u8, expected: anyerror }{
+        .{ .offset = 60, .value = 0xff, .expected = error.UnknownOperationPhase },
+        .{ .offset = 61, .value = 7, .expected = error.UnknownTaskPhase },
+        .{ .offset = 62, .value = 0xff, .expected = error.UnknownResponseDisposition },
+        .{ .offset = 63, .value = 0xff, .expected = error.UnknownResponseFailure },
+        .{ .offset = 64, .value = 0xff, .expected = error.InvalidResponseState },
     };
     for (cases) |case| {
         var changed = encoded;
-        changed[case.offset] = 0xff;
+        changed[case.offset] = case.value;
         rewriteChecksum(&changed);
         try std.testing.expectError(case.expected, decode(&changed));
     }
