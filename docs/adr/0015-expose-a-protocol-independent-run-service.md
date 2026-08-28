@@ -1,0 +1,7 @@
+# ADR-0015: Expose a protocol-independent Run Service
+
+Status: accepted
+
+OnePage exposes durable Workflow Runs through one native Run Service rather than making its CLI, Harness, or an industry wire protocol the canonical boundary. The service separates committed queries, acknowledged updates, fenced advancement, explicit cancellation, and immutable content reads; its `RunSnapshot` is a revisioned read model while durable Run, Job, Session, interaction, and ledger facts remain authoritative. V1 ships only a local CLI adapter: versioned JSON schemas define the complete `RunSnapshot` output and `InteractionResponseBatch` input, while Markdown is a deterministic bounded model-facing view of the snapshot. MCP Tasks, ACP, A2A, event streaming, and a daemon remain adapters or deployment choices for later evidence, so they cannot distort the V1 lifecycle.
+
+Run creation uses a Caller-supplied idempotency key, mutating operations define replay semantics, and Interaction Requests are immutable and freshness-bound by their own identities rather than a whole-Run compare-and-swap. `User` remains a Conversation role; Caller, Principal, delegated Authority, and Authorization remain separate. Run-owned immutable content references survive Harness and evaluator teardown and are readable through the same service. Foreground process death detaches without cancelling the Run; only an explicit durable cancellation request has that authority.

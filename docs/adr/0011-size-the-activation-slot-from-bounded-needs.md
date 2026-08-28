@@ -1,6 +1,6 @@
 # Size the Activation Slot from bounded needs
 
-OnePage reserves each Activation Slot at its actual compile-time size and carries no filler to reach a memorable page boundary. The slot contains only decoded Core State and named bounded scratch required by the production Core. V1 fails the build when `@sizeOf(ActivationSlot) > 32 * 1024`; this ceiling is a guardrail, not a target allocation or permission to fall back to the heap.
+OnePage reserves each Activation Slot at its actual compile-time size and carries no filler to reach a memorable page boundary. The slot contains only decoded Core State and named bounded scratch required by the production Core. V1 fails the build when `@sizeOf(ActivationSlot) > 32 * 1024`; this release ceiling is a guardrail, not a target allocation, timeless architectural constant, or permission to fall back to the heap. Fixed bounded activation memory proportional to `active_capacity` is the durable invariant; a later release may change the numeric ceiling only through measurement and an explicit replacement decision.
 
 The Host Runtime reserves `@sizeOf(ActivationSlot) * active_capacity` bytes for the slot pool at startup. Verification reports the actual slot size, named component sizes, occupied high-water bytes, pool reservation, virtual size, physical resident memory, SQLite memory, adapter buffers, subprocesses, and durable bytes separately. Density measurements dirty and release slots before measuring so zero-filled or untouched virtual mappings cannot masquerade as physical savings.
 

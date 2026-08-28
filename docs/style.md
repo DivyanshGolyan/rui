@@ -24,10 +24,11 @@ deferred explicitly.
 | Area | Required discipline |
 | --- | --- |
 | Core | No I/O, general-purpose allocation, recursion, or reentrant activation. Use one compile-time-bounded Activation Slot and bounded work. |
-| Harness | After `open`, use caller-owned bounded storage for owner-loop state. Only `drive` advances Core; `offer` remains nonblocking and allocation-free. |
+| Harness | After `open`, use Host-owned bounded storage for owner-loop state. Only `drive` advances Core; `offer` remains nonblocking and allocation-free. |
 | Host Store | Route all access through the Storage Owner. Treat every durable value as hostile input; use bounded canonical payloads, indexed SQL, fixed-width identities, and prepare-commit-publish ordering. |
+| Run Service | Keep queries pure, updates acknowledged and safely retriable under their operation-specific contracts, advancement fenced, content immutable, and Run Snapshots derived from committed facts. Implement both checked-in JSON schemas exactly, keep caller-defined Unicode Job Keys separate from shell-safe system IDs, and represent truncation only through a Content Reference preview. Never expose Harness generations or storage mechanics. |
 | Adapters | Allocation is permitted only when bounded and fallible. External effects begin only after durable Attempt admission. |
-| CLI | Allocation is permitted only when bounded and fallible. Sanitize hostile output and keep Session policy inside Harness. |
+| CLI | Allocation is permitted only when bounded and fallible. Compose Run Service operations, derive Markdown only from normative JSON, sanitize hostile output, and own no Run or Session policy. |
 | Tests and tooling | May allocate freely within host limits, but must exercise production bounds and failure behavior rather than replacing them. |
 
 ## Mandatory rules
@@ -45,9 +46,11 @@ deferred explicitly.
   data must not encode the current concrete tool inventory, but do not turn that data contract into a
   runtime registry, plugin surface, generic effect executor, scheduler, terminal framework, or
   maintenance subsystem.
-- Keep the native Zig Host Runtime as the sole agent runtime. A workflow evaluator is a disposable
-  caller: it may submit and observe keyed Jobs, but it must not own Sessions, providers, tools,
-  permissions, recovery, or a durable DAG.
+- Keep the native Zig Host Runtime as the sole owner of Workflow Runs and the sole agent runtime. The
+  protocol-independent Run Service is the public semantic boundary; the CLI only composes its
+  operations and renders results. A Workflow Evaluator is a disposable Host-managed mechanism: it
+  receives one immutable Evaluation Generation and returns one terminal evaluation outcome, but it
+  must not own durable state, Sessions, providers, tools, permissions, recovery, or a durable DAG.
 - A change that adds an architectural surface must name the current consumer, ownership boundary,
   resource bound, failure contract, and simpler alternative rejected. Cross-cutting additions require an
   accepted ADR. Missing justification is a standards violation.
@@ -82,7 +85,18 @@ deferred explicitly.
 - Never reenter Core from a callback. One `drive` quantum completes before another Activation begins.
 - Never deliver a provider, tool, or Job completion into a live workflow evaluation. Evaluations see
   one immutable run-local Visibility Snapshot and return a complete blocked set before exit.
+- Keep Workflow Run and Session states distinct. Use `Blocked` for a Run awaiting Jobs, `Awaiting User`
+  for a Session with an open supported Interaction Request, and `In-flight` for a Session with an admitted external
+  Attempt. Do not expose an unqualified `waiting` state.
 - Route external input through `offer` and apply it through `drive`.
+- Keep `User`, Caller, Principal, Authority, and Authorization separate. Conversation role never grants
+  execution authority. Bind permission freshness to one immutable request identity and exact descriptor,
+  not an unrelated whole-Run revision.
+- Make every mutating Run operation safe to retry after a lost acknowledgement. Require a Caller Run
+  Key for creation, accept identical response replay, reject conflicting replay, and keep cancellation
+  idempotent.
+- Permit exactly one fenced Run driver. Inspection is a pure committed read and notification or rendering
+  is never an authority-bearing update path.
 - Treat `offer` acceptance as volatile custody. Only a committed Host Store transaction acknowledges a
   semantic fact.
 - Prepare and validate complete transitions before commit. After commit, publish without new semantic
@@ -96,13 +110,18 @@ deferred explicitly.
 - Acquire the bounded Workspace Effect Fence before admitting Bash or patch, retain it through
   terminal-evidence application, and reconstruct it from durable non-terminal effect Attempts before
   new admission. Never infer that arbitrary Bash is read-only.
+- Never automatically redispatch an indeterminate Bash Attempt or force it into User escalation. Commit
+  the Result, append its Tool Result to Conversation, and let the Agent choose its next action. Use a
+  terminal `JobIndeterminate` only when the Session cannot safely reach a more reliable Outcome.
 - Let a resource owner retain and validate its own fence. Do not make callers retrieve an ownership token
   from an object merely to pass it back to that object's methods.
 - Serialize acquisition against destruction for top-level owning handles. A retained-child count protects
   existing children; it does not turn an unretained raw pointer into a concurrent weak reference.
 - Return resource-owning modules through opaque pointer-stable handles. Do not expose copyable values
-  containing mutexes, file handles, leases, or close authority. Public Projections are data-only and
-  reopen content through the live owning Harness.
+  containing mutexes, file handles, leases, or close authority. Harness Projections are data-only and
+  reopen content only through the live owning Harness.
+- Reserve `Projection` for generation-scoped Harness output. Public observation uses a committed
+  `RunSnapshot`; it materializes Run-owned immutable content before Harness or evaluator teardown.
 - Represent multi-phase recovery with a tagged state. Do not keep booleans beside cursor fields whose
   validity depends on those booleans.
 - Keep every production query indexed and bounded in input bytes, rows, result bytes, temporary work,
@@ -127,7 +146,7 @@ deferred explicitly.
   admission and again before application.
 - Initialize buffers deliberately before observation and scrub reusable storage before transfer to a new
   owner.
-- Bind Authorization to the exact immutable Action and Workspace evidence that the user or bypass mode
+- Bind Authorization to the exact immutable Action and Workspace evidence that the User or bypass mode
   authorized.
 - Treat workflow source and JavaScript-to-native conversion as hostile boundaries. Use source only,
   reject imports and ambient capabilities, reject accessors and proxies without invoking them, and
@@ -140,7 +159,9 @@ deferred explicitly.
 - Handle every error. An intentionally ignored cleanup error needs an explanation at the narrowest
   shared wrapper that establishes why suppression is safe; callers of that wrapper need not repeat it.
 - Test both positive and negative space: malformed records, stale generations, truncated input, capacity
-  exhaustion, duplicates, replay, and every correctness-sensitive crash boundary.
+  exhaustion, duplicates, replay, and every correctness-sensitive crash boundary. A crash claim requires
+  immediate test-subprocess termination that bypasses ordinary error handling and deferred cleanup;
+  returning an injected error is useful fault evidence but is not crash evidence.
 - Never infer that an uncertain external effect did not happen because evidence is absent.
 
 ### Keep code legible
