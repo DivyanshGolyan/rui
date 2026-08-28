@@ -57,7 +57,7 @@ pub const model_contract_bytes =
     "input_request.choice_label_bytes=1..256\n";
 
 const bash_schema =
-    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Required non-empty valid UTF-8 text with at most 2048 bytes.\",\"minLength\":1,\"maxLength\":2048},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":100,\"maximum\":120000}},\"required\":[\"command\",\"timeout_ms\"],\"additionalProperties\":false}";
+    "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Required non-empty valid UTF-8 text without NUL bytes and with at most 2048 bytes.\",\"minLength\":1,\"maxLength\":2048},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":100,\"maximum\":120000}},\"required\":[\"command\",\"timeout_ms\"],\"additionalProperties\":false}";
 const patch_schema =
     "{\"type\":\"object\",\"properties\":{\"patch\":{\"type\":\"string\",\"description\":\"Required non-empty valid UTF-8 text with at most 16384 bytes.\",\"minLength\":1,\"maxLength\":16384}},\"required\":[\"patch\"],\"additionalProperties\":false}";
 
@@ -79,10 +79,10 @@ pub const default_catalog = [_]ToolDefinition{
 };
 
 pub const default_catalog_digest: binding.ToolCatalog = .{ .bytes = .{
-    0xd1, 0x4f, 0x19, 0x76, 0x0f, 0x81, 0x1b, 0x54,
-    0x1e, 0x35, 0xda, 0x8f, 0x11, 0x97, 0xe7, 0xf3,
-    0xc4, 0x5b, 0xc3, 0x5e, 0xfd, 0xe1, 0xc8, 0x85,
-    0xe4, 0x05, 0x9e, 0x8d, 0x2f, 0xdd, 0x44, 0x83,
+    0x06, 0xd9, 0xb7, 0x2a, 0xa3, 0x67, 0x80, 0x1e,
+    0xda, 0xf1, 0x9d, 0xb5, 0x17, 0xa1, 0x86, 0xdc,
+    0x40, 0xdd, 0x5f, 0x47, 0x69, 0x0d, 0xcc, 0x48,
+    0x64, 0x5a, 0x1c, 0x1a, 0x93, 0xff, 0xbd, 0x12,
 } };
 
 pub fn validateToolKey(key: []const u8) !void {
@@ -545,6 +545,7 @@ pub fn utf8Valid(bytes: []const u8) bool {
 
 pub fn validateBashCommand(command: []const u8) !void {
     try validateUnicodeField(command, max_bash_command_bytes);
+    if (std.mem.indexOfScalar(u8, command, 0) != null) return error.InvalidToolText;
 }
 
 pub fn validatePatchInput(patch: []const u8) !void {
@@ -716,7 +717,7 @@ test "serialized catalog schemas state the exact UTF-8 byte contract" {
     try std.testing.expectEqual(@as(usize, 1), bash.value.properties.command.minLength);
     try std.testing.expectEqual(max_bash_command_bytes, bash.value.properties.command.maxLength);
     try std.testing.expectEqualStrings(
-        "Required non-empty valid UTF-8 text with at most 2048 bytes.",
+        "Required non-empty valid UTF-8 text without NUL bytes and with at most 2048 bytes.",
         bash.value.properties.command.description,
     );
     var patch = try std.json.parseFromSlice(
@@ -732,4 +733,8 @@ test "serialized catalog schemas state the exact UTF-8 byte contract" {
         "Required non-empty valid UTF-8 text with at most 16384 bytes.",
         patch.value.properties.patch.description,
     );
+}
+
+test "Bash command admission rejects NUL bytes" {
+    try std.testing.expectError(error.InvalidToolText, validateBashCommand("true\x00"));
 }

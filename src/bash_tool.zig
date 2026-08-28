@@ -464,9 +464,7 @@ fn emptyExecution(allocator: std.mem.Allocator, status: Status) !Execution {
 
 fn validate(call: Call) !void {
     model_contract.validateBashCommand(call.command) catch return error.InvalidBashCall;
-    if (call.timeout_ms < min_timeout_ms or call.timeout_ms > max_timeout_ms or
-        std.mem.indexOfScalar(u8, call.command, 0) != null)
-    {
+    if (call.timeout_ms < min_timeout_ms or call.timeout_ms > max_timeout_ms) {
         return error.InvalidBashCall;
     }
 }

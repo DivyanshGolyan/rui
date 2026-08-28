@@ -1488,7 +1488,7 @@ test "malformed captured output becomes one durable terminal failure" {
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }
 
-test "built-in byte-limit rejection becomes one durable terminal failure" {
+test "built-in argument rejection becomes one durable terminal failure" {
     const ToolProvider = struct {
         key: []const u8,
         arguments: []const u8,
@@ -1527,6 +1527,14 @@ test "built-in byte-limit rejection becomes one durable terminal failure" {
     defer allocator.free(bash_buffer);
     const patch_buffer = try allocator.alloc(u8, model_contract.max_tool_arguments_envelope_size);
     defer allocator.free(patch_buffer);
+    const nul_buffer = try allocator.alloc(u8, model_contract.max_tool_arguments_envelope_size);
+    defer allocator.free(nul_buffer);
+    const nul_command = [_]u8{ 't', 'r', 'u', 'e', 0 };
+    const nul_arguments = try model_contract.encodeJson(nul_buffer, .{
+        .command = nul_command[0..],
+        .timeout_ms = bash_tool.max_timeout_ms,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, nul_arguments, "\\u0000") != null);
     const cases = [_]struct { key: []const u8, arguments: []const u8 }{
         .{
             .key = model_contract.bash_key,
@@ -1538,6 +1546,10 @@ test "built-in byte-limit rejection becomes one durable terminal failure" {
         .{
             .key = model_contract.apply_patch_key,
             .arguments = try model_contract.encodeJson(patch_buffer, .{ .patch = patch }),
+        },
+        .{
+            .key = model_contract.bash_key,
+            .arguments = nul_arguments,
         },
     };
 
@@ -1552,7 +1564,11 @@ test "built-in byte-limit rejection becomes one durable terminal failure" {
             .mode = .{ .create = .{
                 .workspace_path = ".",
                 .model = "fixture:built-in-byte-rejection",
-                .task = if (index == 0) "reject oversized Bash bytes" else "reject oversized patch bytes",
+                .task = switch (index) {
+                    0 => "reject oversized Bash bytes",
+                    1 => "reject oversized patch bytes",
+                    else => "reject a Bash NUL byte",
+                },
                 .provider = provider.provider(),
             } },
         });
