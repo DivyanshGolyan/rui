@@ -249,9 +249,8 @@ fn openRequest(source: RequestSource) !RequestCursor {
     {
         return error.MalformedModelRequest;
     }
-    const catalog_digest = try model_contract.catalogDigest(&model_contract.default_catalog);
     const contract_digest = binding.hash(binding.ModelContract, model_contract.model_contract_bytes);
-    if (!std.mem.eql(u8, header[28..60], &catalog_digest.bytes) or
+    if (!std.mem.eql(u8, header[28..60], &model_contract.default_catalog_digest.bytes) or
         !std.mem.eql(u8, header[60..92], &contract_digest.bytes))
     {
         return error.MalformedModelRequest;
@@ -272,7 +271,6 @@ fn openRequest(source: RequestSource) !RequestCursor {
     try expectBytes(source, request.cursor, model_contract.model_contract_bytes);
     request.cursor += contract_length;
 
-    try model_contract.validateCatalog(&model_contract.default_catalog);
     for (model_contract.default_catalog) |definition| {
         var tool_header: [tool_header_size]u8 = undefined;
         try readExact(source, request.cursor, &tool_header);
@@ -522,7 +520,6 @@ pub fn buildRequest(
         return error.ContextSplitsToolPair;
     }
 
-    const catalog_digest = try model_contract.catalogDigest(&model_contract.default_catalog);
     const contract_digest = binding.hash(binding.ModelContract, model_contract.model_contract_bytes);
 
     var writer = try session.beginBlob(request_ref);
@@ -537,7 +534,7 @@ pub fn buildRequest(
     write(u16, &request_header, 18, @intCast(session.modelName().len));
     write(u32, &request_header, 20, model_contract.default_instructions.len);
     write(u32, &request_header, 24, model_contract.model_contract_bytes.len);
-    @memcpy(request_header[28..60], &catalog_digest.bytes);
+    @memcpy(request_header[28..60], &model_contract.default_catalog_digest.bytes);
     @memcpy(request_header[60..92], &contract_digest.bytes);
     try appendHashed(&writer, &hasher, &request_header);
     try appendHashed(&writer, &hasher, session.modelName());

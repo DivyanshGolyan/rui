@@ -883,11 +883,10 @@ pub const Session = struct {
         kind: EntryKind,
         content_ref: u64,
         fault: ?FaultHook,
-        workspace: ?CanonicalJsonWorkspace,
     ) !ConversationEntry {
         if (content_ref == 0) return error.InvalidContentReference;
         try self.ensureUsable();
-        return self.appendAuthorized(kind, content_ref, fault, workspace) catch |err| {
+        return self.appendAuthorized(kind, content_ref, fault) catch |err| {
             self.failed = true;
             return err;
         };
@@ -898,11 +897,9 @@ pub const Session = struct {
         kind: EntryKind,
         content_ref: u64,
         fault: ?FaultHook,
-        workspace: ?CanonicalJsonWorkspace,
     ) !ConversationEntry {
         const conversation_head = self.resident.conversation_head_id;
         if (conversation_head == std.math.maxInt(u64)) return error.EntryIdentityExhausted;
-        try self.validateConversationBlob(kind, content_ref, conversation_head, workspace);
 
         const entry: ConversationEntry = .{
             .kind = kind,
@@ -1163,7 +1160,9 @@ pub const Session = struct {
             .attempt_admitted => |value| try validateBlob(blobs, self.io, value.descriptor_ref),
             .authorization => |value| try validateBlob(blobs, self.io, value.permission_ref),
             .result => |value| try validateBlob(blobs, self.io, value.result_ref),
-            .conversation_advanced => |value| try validateBlob(blobs, self.io, value.content_ref),
+            // validatePreparedConversationEntry opens the Conversation blob,
+            // verifies its SHA-256 envelope, and validates its semantics.
+            .conversation_advanced => {},
             .outcome => |value| try validateBlob(blobs, self.io, value.content_ref),
             .result_applied => |value| try validateBlob(blobs, self.io, value.result_ref),
             .approval_required => |value| {
@@ -2843,7 +2842,7 @@ test "conversation advances only after its Ledger fact commits" {
     var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 20));
     defer created.close();
     try created.storeBlob(900, "The test is fixed.");
-    const assistant = try created.appendConversation(.assistant_text, 900, null, null);
+    const assistant = try created.appendConversation(.assistant_text, 900, null);
 
     try std.testing.expectEqual(@as(u64, 2), assistant.entry_id);
     try std.testing.expectEqual(@as(u64, 1), assistant.parent_id);
@@ -2869,6 +2868,32 @@ test "conversation advances only after its Ledger fact commits" {
         "The test is fixed.",
         try created.readBlob(900, 0, &response_buffer),
     );
+}
+
+test "prepared Conversation content is validated at commit" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 35));
+    defer created.close();
+    try created.storeBlob(900, &.{ 0xff, 0xfe });
+    const assistant = try created.appendConversation(.assistant_text, 900, null);
+
+    try std.testing.expectError(
+        error.InvalidConversationContent,
+        created.commitSemantic(&.{session_transition.conversationAdvanced(.{
+            .agent = .{
+                .agent_id = created.agent_id,
+                .agent_generation = 1,
+                .ownership_epoch = created.ownership_epoch,
+            },
+            .entry_id = assistant.entry_id,
+            .parent_id = assistant.parent_id,
+            .kind = assistant.kind,
+            .content_ref = assistant.content_ref,
+        })}, null, null),
+    );
+    try std.testing.expectEqual(@as(u64, 1), created.activeLeafId());
 }
 
 test "conversation grammar rejects orphaned and unpaired tool entries during recovery" {
@@ -3004,7 +3029,7 @@ test "resume leaves an uncommitted conversation record invisible" {
         created.appendConversation(.assistant_text, 901, .{
             .context = &marker,
             .reached = AppendCrash.reached,
-        }, null),
+        }),
     );
     try std.testing.expectEqual(@as(u64, 1), created.activeLeafId());
     try std.testing.expectError(error.SessionUnavailable, created.authorize(created.ownerToken()));

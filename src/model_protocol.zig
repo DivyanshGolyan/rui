@@ -43,7 +43,6 @@ const ValidationRecord = struct {
     parsed: Parsed,
     result_digest: binding.Result,
     byte_length: u32,
-    semantic_digest: binding.ModelResponseValidation,
 };
 
 pub const ValidationScratch = struct {
@@ -62,12 +61,7 @@ pub const Validated = opaque {
     pub fn verify(self: *const Validated, bytes: []const u8) !Parsed {
         const record: *const ValidationRecord = @ptrCast(@alignCast(self));
         if (bytes.len != record.byte_length or
-            !binding.eql(binding.Result, binding.hash(binding.Result, bytes), record.result_digest) or
-            !binding.eql(
-                binding.ModelResponseValidation,
-                validationDigest(record.parsed, record.result_digest, record.byte_length),
-                record.semantic_digest,
-            ))
+            !binding.eql(binding.Result, binding.hash(binding.Result, bytes), record.result_digest))
         {
             return error.InvalidModelResponseEvidence;
         }
@@ -195,7 +189,6 @@ pub fn validate(
         .parsed = parsed,
         .result_digest = result_digest,
         .byte_length = byte_length,
-        .semantic_digest = validationDigest(parsed, result_digest, byte_length),
     };
     return @ptrCast(record);
 }
@@ -309,41 +302,6 @@ fn failed(reason: Failure) Parsed {
     return .{ .disposition = .failure, .failure = reason };
 }
 
-fn validationDigest(
-    parsed: Parsed,
-    result_digest: binding.Result,
-    byte_length: u32,
-) binding.ModelResponseValidation {
-    var hasher = binding.Hasher(binding.ModelResponseValidation).init();
-    hasher.update(&result_digest.bytes);
-    hashInt(&hasher, u32, byte_length);
-    hashInt(&hasher, u8, @intFromEnum(parsed.disposition));
-    hashInt(&hasher, u8, @intFromEnum(parsed.failure));
-    hashInt(&hasher, u32, parsed.text_offset);
-    hashInt(&hasher, u32, parsed.text_length);
-    hashInt(&hasher, u32, parsed.tool_key_offset);
-    hashInt(&hasher, u32, parsed.tool_key_length);
-    hashInt(&hasher, u32, parsed.arguments_offset);
-    hashInt(&hasher, u32, parsed.arguments_length);
-    hasher.update(&parsed.arguments_evidence.digest);
-    hashInt(&hasher, u32, parsed.arguments_evidence.length);
-    hashInt(&hasher, u8, if (parsed.input_shape) |shape| @intFromEnum(shape) else 0);
-    hashInt(&hasher, u8, parsed.option_count);
-    hashInt(&hasher, u32, parsed.options_offset);
-    hashInt(&hasher, u32, parsed.options_length);
-    return hasher.final();
-}
-
-fn hashInt(
-    hasher: *binding.Hasher(binding.ModelResponseValidation),
-    comptime T: type,
-    value: T,
-) void {
-    var bytes: [@sizeOf(T)]u8 = undefined;
-    std.mem.writeInt(T, &bytes, value, .little);
-    hasher.update(&bytes);
-}
-
 fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
     std.mem.writeInt(T, out[offset..][0..@sizeOf(T)], value, .little);
 }
@@ -388,85 +346,6 @@ test "validated response evidence is compact and byte exact" {
     try std.testing.expectEqual(Disposition.tool_call, (try proof.verify(first)).disposition);
     try std.testing.expectError(error.InvalidModelResponseEvidence, proof.verify(second));
     try std.testing.expectEqual(@sizeOf(*const anyopaque), @sizeOf(@TypeOf(proof)));
-}
-
-test "validated response rejects every mutated semantic field" {
-    var bytes: [128]u8 = undefined;
-    var scratch: ValidationScratch = undefined;
-    const response = try encodeTool(&scratch.json.arena, &bytes, "fixture.tool", "{\"value\":1}");
-    const validated = try validate(&scratch, response);
-
-    const Mutator = struct {
-        fn expectRejected(
-            encoded: []const u8,
-            original: *const Validated,
-            comptime mutate: fn (*Parsed) void,
-        ) !void {
-            const original_record: *const ValidationRecord = @ptrCast(@alignCast(original));
-            var record = original_record.*;
-            mutate(&record.parsed);
-            const forged: *const Validated = @ptrCast(&record);
-            try std.testing.expectError(error.InvalidModelResponseEvidence, forged.verify(encoded));
-        }
-
-        fn disposition(parsed: *Parsed) void {
-            parsed.disposition = .final_answer;
-        }
-        fn failure(parsed: *Parsed) void {
-            parsed.failure = .provider_error;
-        }
-        fn textOffset(parsed: *Parsed) void {
-            parsed.text_offset = header_size;
-        }
-        fn textLength(parsed: *Parsed) void {
-            parsed.text_length = 1;
-        }
-        fn toolOffset(parsed: *Parsed) void {
-            parsed.tool_key_offset += 1;
-        }
-        fn toolLength(parsed: *Parsed) void {
-            parsed.tool_key_length -= 1;
-        }
-        fn argumentOffset(parsed: *Parsed) void {
-            parsed.arguments_offset += 1;
-        }
-        fn argumentLength(parsed: *Parsed) void {
-            parsed.arguments_length -= 1;
-        }
-        fn argumentEvidence(parsed: *Parsed) void {
-            parsed.arguments_evidence.digest[0] ^= 1;
-        }
-        fn argumentEvidenceLength(parsed: *Parsed) void {
-            parsed.arguments_evidence.length -= 1;
-        }
-        fn inputShape(parsed: *Parsed) void {
-            parsed.input_shape = .text;
-        }
-        fn optionCount(parsed: *Parsed) void {
-            parsed.option_count = 1;
-        }
-        fn optionsOffset(parsed: *Parsed) void {
-            parsed.options_offset = header_size;
-        }
-        fn optionsLength(parsed: *Parsed) void {
-            parsed.options_length = 1;
-        }
-    };
-
-    try Mutator.expectRejected(response, validated, Mutator.disposition);
-    try Mutator.expectRejected(response, validated, Mutator.failure);
-    try Mutator.expectRejected(response, validated, Mutator.textOffset);
-    try Mutator.expectRejected(response, validated, Mutator.textLength);
-    try Mutator.expectRejected(response, validated, Mutator.toolOffset);
-    try Mutator.expectRejected(response, validated, Mutator.toolLength);
-    try Mutator.expectRejected(response, validated, Mutator.argumentOffset);
-    try Mutator.expectRejected(response, validated, Mutator.argumentLength);
-    try Mutator.expectRejected(response, validated, Mutator.argumentEvidence);
-    try Mutator.expectRejected(response, validated, Mutator.argumentEvidenceLength);
-    try Mutator.expectRejected(response, validated, Mutator.inputShape);
-    try Mutator.expectRejected(response, validated, Mutator.optionCount);
-    try Mutator.expectRejected(response, validated, Mutator.optionsOffset);
-    try Mutator.expectRejected(response, validated, Mutator.optionsLength);
 }
 
 test "hostile normalized responses fail before authorizing effects" {

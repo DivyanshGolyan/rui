@@ -737,7 +737,7 @@ fn executeBashCall(
     );
     try session.storeBlob(descriptor_ref, descriptor_bytes);
     const workspace = scratch.canonicalJsonWorkspace();
-    const call_entry = try session.appendConversation(.tool_call, call_ref, null, workspace);
+    const call_entry = try session.appendConversation(.tool_call, call_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
     const descriptor_facts = [_]session_transition.Fact{
         session_transition.operationSubmitted(
@@ -884,7 +884,7 @@ fn requestPatchPermission(
         canonical_arguments,
     );
     const workspace = scratch.canonicalJsonWorkspace();
-    const call_entry = try session.appendConversation(.tool_call, call_ref, null, workspace);
+    const call_entry = try session.appendConversation(.tool_call, call_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
     const descriptor_facts = [_]session_transition.Fact{
         session_transition.operationSubmitted(
@@ -1838,7 +1838,7 @@ fn reconcileToolResult(
     } else if (active.kind == .tool_call and active.content_ref == call_ref) {
         call_entry = active;
         try storeVisibleToolResult(session, tool, result.result, visible_ref, call_entry.entry_id);
-        result_entry = try session.appendConversation(.tool_result, visible_ref, null, null);
+        result_entry = try session.appendConversation(.tool_result, visible_ref, null);
     } else {
         return error.ToolConversationMismatch;
     }
@@ -2380,7 +2380,7 @@ fn finalizeCandidate(
 
     var entry = try session.readEntry(session.activeLeafId());
     if (entry.kind != .assistant_text or entry.content_ref != final_ref) {
-        entry = try session.appendConversation(.assistant_text, final_ref, null, null);
+        entry = try session.appendConversation(.assistant_text, final_ref, null);
     }
     try reach(fault, .after_assistant_entry);
     try core.reducer.commitFinalAnswer(entry.entry_id);
@@ -3095,8 +3095,8 @@ fn expectPatchArgumentBoundary(
 
 test "Host reserves and scrubs one complete owner workspace per Activation Slot" {
     var host: Host = .{};
-    try std.testing.expectEqual(@as(usize, 344_300), owner_scratch_size);
-    try std.testing.expectEqual(@as(usize, 352_688), @sizeOf(Host));
+    try std.testing.expectEqual(@as(usize, 344_268), owner_scratch_size);
+    try std.testing.expectEqual(@as(usize, 352_656), @sizeOf(Host));
     try std.testing.expectEqual(
         production_active_capacity * owner_scratch_size,
         @sizeOf(@TypeOf(host.scratch.workspaces)),

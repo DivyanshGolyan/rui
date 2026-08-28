@@ -1,6 +1,7 @@
 const std = @import("std");
 const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
+const model_contract = @import("model_contract.zig");
 const session_store = @import("session.zig");
 
 pub const Config = struct {
@@ -93,6 +94,7 @@ pub const HostRuntime = opaque {
         config: Config,
     ) !*HostRuntime {
         if (state_path.len == 0) return error.InvalidStatePath;
+        try model_contract.validateBuiltinCatalog();
         if (runtime_open.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
             return error.HostRuntimeAlreadyOpen;
         }

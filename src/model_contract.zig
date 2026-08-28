@@ -73,6 +73,13 @@ pub const default_catalog = [_]ToolDefinition{
     },
 };
 
+pub const default_catalog_digest: binding.ToolCatalog = .{ .bytes = .{
+    0xd1, 0x4f, 0x19, 0x76, 0x0f, 0x81, 0x1b, 0x54,
+    0x1e, 0x35, 0xda, 0x8f, 0x11, 0x97, 0xe7, 0xf3,
+    0xc4, 0x5b, 0xc3, 0x5e, 0xfd, 0xe1, 0xc8, 0x85,
+    0xe4, 0x05, 0x9e, 0x8d, 0x2f, 0xdd, 0x44, 0x83,
+} };
+
 pub fn validateToolKey(key: []const u8) !void {
     if (key.len == 0 or key.len > max_tool_key_size) return error.InvalidToolKey;
     for (key) |byte| {
@@ -81,9 +88,12 @@ pub fn validateToolKey(key: []const u8) !void {
     }
 }
 
-pub fn validateCatalog(catalog: []const ToolDefinition) !void {
-    if (catalog.len == 0 or catalog.len > max_tool_count) return error.InvalidToolCatalog;
-    for (catalog, 0..) |definition, index| {
+/// Validate the one immutable built-in catalog once during Host startup.
+pub fn validateBuiltinCatalog() !void {
+    if (default_catalog.len == 0 or default_catalog.len > max_tool_count) {
+        return error.InvalidToolCatalog;
+    }
+    for (default_catalog, 0..) |definition, index| {
         try validateToolKey(definition.key);
         if (definition.provider_tool_name.len == 0 or
             definition.provider_tool_name.len > max_provider_tool_name_size or
@@ -96,37 +106,36 @@ pub fn validateCatalog(catalog: []const ToolDefinition) !void {
         {
             return error.InvalidToolCatalog;
         }
-        for (catalog[0..index]) |earlier| {
+        for (default_catalog[0..index]) |earlier| {
             if (std.mem.eql(u8, earlier.key, definition.key)) return error.DuplicateToolKey;
             if (std.mem.eql(u8, earlier.provider_tool_name, definition.provider_tool_name)) {
                 return error.AmbiguousProviderToolName;
             }
         }
     }
+    if (!binding.eql(binding.ToolCatalog, builtinCatalogDigest(), default_catalog_digest)) {
+        return error.InvalidToolCatalogDigest;
+    }
 }
 
-pub fn keyForProviderName(catalog: []const ToolDefinition, name: []const u8) ![]const u8 {
-    try validateCatalog(catalog);
+pub fn keyForProviderName(name: []const u8) ![]const u8 {
     if (name.len == 0 or name.len > max_provider_tool_name_size or !utf8Valid(name)) {
         return error.UnknownProviderToolName;
     }
-    var match: ?[]const u8 = null;
-    for (catalog) |definition| {
+    for (default_catalog) |definition| {
         if (std.mem.eql(u8, definition.provider_tool_name, name)) {
-            if (match != null) return error.AmbiguousProviderToolName;
-            match = definition.key;
+            return definition.key;
         }
     }
-    return match orelse error.UnknownProviderToolName;
+    return error.UnknownProviderToolName;
 }
 
-pub fn catalogDigest(catalog: []const ToolDefinition) !binding.ToolCatalog {
-    try validateCatalog(catalog);
+fn builtinCatalogDigest() binding.ToolCatalog {
     var hasher = binding.Hasher(binding.ToolCatalog).init();
     var count: [2]u8 = undefined;
-    std.mem.writeInt(u16, &count, @intCast(catalog.len), .little);
+    std.mem.writeInt(u16, &count, @intCast(default_catalog.len), .little);
     hasher.update(&count);
-    for (catalog) |definition| {
+    for (default_catalog) |definition| {
         hashField(&hasher, definition.key);
         hashField(&hasher, definition.provider_tool_name);
         hashField(&hasher, definition.description);
@@ -331,25 +340,16 @@ fn validateUnicodeField(bytes: []const u8, max_bytes: usize) !void {
 }
 
 test "the default catalog has a stable digest and deterministic name mapping" {
-    const first = try catalogDigest(&default_catalog);
-    const second = try catalogDigest(&default_catalog);
-    try std.testing.expectEqualSlices(u8, &first.bytes, &second.bytes);
+    try validateBuiltinCatalog();
+    try std.testing.expectEqualSlices(u8, &default_catalog_digest.bytes, &builtinCatalogDigest().bytes);
     try std.testing.expectEqualStrings(
         apply_patch_key,
-        try keyForProviderName(&default_catalog, "apply_patch"),
+        try keyForProviderName("apply_patch"),
     );
     try std.testing.expectError(
         error.UnknownProviderToolName,
-        keyForProviderName(&default_catalog, "unknown"),
+        keyForProviderName("unknown"),
     );
-}
-
-test "duplicate and ambiguous catalog definitions fail closed" {
-    const duplicate_keys = [_]ToolDefinition{ default_catalog[0], default_catalog[0] };
-    try std.testing.expectError(error.DuplicateToolKey, validateCatalog(&duplicate_keys));
-    var ambiguous = default_catalog;
-    ambiguous[1].provider_tool_name = ambiguous[0].provider_tool_name;
-    try std.testing.expectError(error.AmbiguousProviderToolName, validateCatalog(&ambiguous));
 }
 
 test "canonical JSON has one recursive object order" {

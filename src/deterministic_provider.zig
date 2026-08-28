@@ -413,7 +413,7 @@ test "deterministic Provider decodes the exact immutable request" {
         .arguments = "{\"path\":\"README.md\"}",
     });
     try session.storeBlob(1100, call_bytes);
-    const call_entry = try session.appendConversation(.tool_call, 1100, null, workspace);
+    const call_entry = try session.appendConversation(.tool_call, 1100, null);
     _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
         .agent = .{
             .agent_id = session.agent_id,
@@ -434,7 +434,7 @@ test "deterministic Provider decodes the exact immutable request" {
         .content = "status=observed",
     });
     try session.storeBlob(1102, result_bytes);
-    const result_entry = try session.appendConversation(.tool_result, 1102, null, null);
+    const result_entry = try session.appendConversation(.tool_result, 1102, null);
     _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
         .agent = .{
             .agent_id = session.agent_id,
@@ -453,7 +453,7 @@ test "deterministic Provider decodes the exact immutable request" {
         const content_ref: u64 = 1200 + index;
         const content: []const u8 = if (index == 0) &large_content else "later context";
         try session.storeBlob(content_ref, content);
-        const entry = try session.appendConversation(.assistant_text, content_ref, null, null);
+        const entry = try session.appendConversation(.assistant_text, content_ref, null);
         _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
             .agent = .{
                 .agent_id = session.agent_id,
