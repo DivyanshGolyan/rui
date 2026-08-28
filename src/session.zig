@@ -673,7 +673,9 @@ pub const Session = struct {
         try config.identities.validate();
         if (config.workspace_path.len == 0 or config.workspace_path.len > workspace_path_capacity or
             config.model.len == 0 or config.model.len > model_name_capacity or
-            !std.unicode.utf8ValidateSlice(config.model) or config.task.len == 0)
+            !std.unicode.utf8ValidateSlice(config.model) or
+            config.task.len == 0 or config.task.len > conversation.max_result_content_size or
+            !std.unicode.utf8ValidateSlice(config.task))
         {
             return error.InvalidSessionMetadata;
         }
@@ -1578,6 +1580,47 @@ test "Session creation rejects a non-UTF-8 model identity" {
     try std.testing.expectError(
         error.InvalidSessionMetadata,
         Session.createExact(layout.sessions, &layout.storage, io, config),
+    );
+}
+
+test "Session creation enforces recoverable root task content" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+
+    var exact_task: [conversation.max_result_content_size]u8 = @splat('x');
+    var exact = testConfig(layout.workspacePath(), 20);
+    exact.task = &exact_task;
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, exact);
+    created.close();
+    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 20);
+    defer restored.session.close();
+    const recovered = try restored.session.recoverSemanticWindow(8);
+    try std.testing.expect(!recovered.more);
+    try std.testing.expectEqual(@as(u64, 1), restored.session.entryCount());
+
+    var oversized_task: [conversation.max_result_content_size + 1]u8 = @splat('x');
+    var oversized = testConfig(layout.workspacePath(), 30);
+    oversized.task = &oversized_task;
+    try std.testing.expectError(
+        error.InvalidSessionMetadata,
+        Session.createExact(layout.sessions, &layout.storage, io, oversized),
+    );
+    var name_buffer: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.FileNotFound,
+        layout.sessions.access(io, sessionName(30, &name_buffer), .{}),
+    );
+
+    var invalid_utf8 = testConfig(layout.workspacePath(), 40);
+    invalid_utf8.task = "\xff";
+    try std.testing.expectError(
+        error.InvalidSessionMetadata,
+        Session.createExact(layout.sessions, &layout.storage, io, invalid_utf8),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        layout.sessions.access(io, sessionName(40, &name_buffer), .{}),
     );
 }
 
