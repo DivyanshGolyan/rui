@@ -31,6 +31,9 @@ jobs:
       - name: Verify Zig version
         run: test "$(zig version)" = "0.16.0"
 
+      - name: Prepare Zig cache
+        run: mkdir -p .zig-cache/tmp
+
       - name: Check source and artifacts
         run: zig build check --summary all
 
