@@ -215,6 +215,8 @@ pub const StrictToolJsonScratch = struct {
 
 pub const AdmittedToolArguments = struct {
     json: StrictToolJson,
+    /// Borrowed from StrictToolJsonScratch until the next admission using the
+    /// same scratch. The caller must convert required fields before reuse.
     parsed: std.json.Value,
 };
 
@@ -263,28 +265,26 @@ pub fn admitToolArguments(
 ) !AdmittedToolArguments {
     try preflightStrictToolJson(scratch, bytes);
     var fixed = std.heap.FixedBufferAllocator.init(&scratch.arena);
-    var parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), bytes, .{
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, fixed.allocator(), bytes, .{
         .max_value_len = max_tool_arguments_envelope_size,
         .allocate = .alloc_always,
         .duplicate_field_behavior = .@"error",
     }) catch return error.InvalidToolArguments;
-    defer parsed.deinit();
     var tokens: usize = 0;
     var members: usize = 0;
-    countJsonStructure(parsed.value, 1, &tokens, &members) catch
+    countJsonStructure(parsed, 1, &tokens, &members) catch
         return error.InvalidStrictToolJson;
     const json: StrictToolJson = .{
         .value = bytes,
         .proof = strictToolJsonDigest(bytes),
     };
-    var schema = std.json.parseFromSlice(std.json.Value, fixed.allocator(), definition.input_schema, .{
+    const schema = std.json.parseFromSliceLeaky(std.json.Value, fixed.allocator(), definition.input_schema, .{
         .max_value_len = max_schema_size,
         .allocate = .alloc_always,
         .duplicate_field_behavior = .@"error",
     }) catch return error.InvalidToolSchema;
-    defer schema.deinit();
-    validateAgainstInputSchema(schema.value, parsed.value) catch return error.InvalidToolArguments;
-    return .{ .json = json, .parsed = parsed.value };
+    validateAgainstInputSchema(schema, parsed) catch return error.InvalidToolArguments;
+    return .{ .json = json, .parsed = parsed };
 }
 
 fn validateAgainstInputSchema(schema_value: std.json.Value, maybe_arguments: ?std.json.Value) !void {
@@ -573,6 +573,21 @@ test "StrictToolJsonV1 accepts noncanonical exact bytes and distinguishes identi
         &first.json.evidence().bytes,
         &second.json.evidence().bytes,
     ));
+}
+
+test "admitted tool arguments remain readable through immediate conversion" {
+    var scratch: StrictToolJsonScratch = undefined;
+    const admitted = try admitToolArguments(
+        &scratch,
+        default_catalog[0],
+        "{\"command\":\"true\",\"timeout_ms\":1000}",
+    );
+    const object = switch (admitted.parsed) {
+        .object => |value| value,
+        else => return error.ExpectedObject,
+    };
+    try std.testing.expectEqualStrings("true", object.get("command").?.string);
+    try std.testing.expectEqual(@as(i64, 1000), object.get("timeout_ms").?.integer);
 }
 
 test "StrictToolJsonV1 applies an arbitrary catalog definition without execution knowledge" {
