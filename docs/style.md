@@ -70,6 +70,10 @@ deferred explicitly.
 - Assign every substantial resident resource to the narrowest stage that needs it. Name the capacity
   that multiplies it, whether it survives a wait, and why it cannot be shared or reconstructed. Active
   Capacity multiplies only resources that every concurrent semantic activation can actually retain.
+- Optimize representations in multiplier order. Eliminate resident state proportional to Dormant
+  Sessions before shrinking Active-Credit state, and shrink per-Active-Credit state before shared
+  Host scratch. Report the incremental slope for each multiplier; a small isolated type is not evidence
+  of a small system.
 - Borrow reconstructible scratch only after its input is durable when the lifecycle permits it, release
   it before provider, subprocess, permission, or workflow waits, and give closure work priority over new
   admission. Do not preallocate one bundle of every possible parser, connection, stack, and subprocess
@@ -78,6 +82,11 @@ deferred explicitly.
   Keep fixed private stage permits out of the public configuration until a product consumer needs them.
 - Stream or spool variable content directly into its durable or final bounded owner. Do not retain a
   complete value and then allocate another complete encoding solely to transfer it between modules.
+- Once stored content is immutable, do not retain unused growth capacity. Prefer one bounded packed
+  representation with validated offsets over repeated independently allocated lists when measurement
+  shows that pointer, allocator-bin, padding, or locality costs are material. Inspect tagged-union size
+  in every repeated resident collection, but do not add indirection to a singleton or rare path without
+  measured whole-stage benefit.
 - Destroy consumed resource-owning handles. Do not retain full closed objects until host shutdown to
   make duplicate use appear safe; stale use is a caller error unless a bounded handle table is itself a
   product requirement.

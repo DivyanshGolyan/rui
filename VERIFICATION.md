@@ -127,6 +127,10 @@ Operational tests enforce maximum page count by filling a transaction until admi
 
 Every density and product run reports these categories separately:
 
+- for every resident stage, the capacity that multiplies it, occupied count, requested allocation
+  bytes, allocator-observed bytes where available, allocation count, reusable reservation, and
+  high-water use; distinguish live payload from spare capacity, alignment, allocator rounding, and
+  fragmentation rather than inferring process cost from `@sizeOf` alone;
 - actual Activation Slot size and production-used components, exact configured reservation, and occupied high-water bytes;
 - native executor stack and thread count;
 - live Harness ingress, Completion, adapter-record, and recovery buffers; allocator bytes before and after repeated open/close cycles;
@@ -135,7 +139,7 @@ Every density and product run reports these categories separately:
 - model transport permit count, userspace, virtual-stack, idle-pool, and kernel-socket memory; bounded capture windows;
 - effect permit count and adapter-owned bounded state separately from model-requested subprocess memory;
 - workflow evaluator process count, engine heap limit and high water, native bridge arena, source and protocol bytes, visible Job-result bytes, evaluation CPU and wall time, cumulative replay count, and parent-observed physical footprint;
-- whole-process virtual size, physical RSS or platform physical-footprint measure, compressed memory where available, and measurement conditions after slots have been dirtied and released;
+- whole-process virtual size, physical RSS or platform physical-footprint measure, compressed memory where available, and measurement conditions after warm-up, steady-state occupancy, and slots have been dirtied and released;
 - model-requested subprocess-tree RSS where available, labelled as workload memory rather than a OnePage bound;
 - Host Store, immutable content, free-page, index, and spool disk bytes;
 - Workflow Runs, Jobs, logical Sessions, runnable, resident, Awaiting User, blocked-set, and In-flight counts;
@@ -168,5 +172,6 @@ Before the V1 demonstration is considered credible:
 - repeated Harness open and consuming close under one Host Runtime leaves no allocation proportional to historical handle count;
 - every fixed Slot buffer has a production use and the activation path retains no avoidable duplicate full-response buffer;
 - the live transport satisfies its measured normal and guarded per-call memory budgets, or the documented capacity is reduced to the measured envelope;
-- density results include raw machine-readable measurements and a concise published table for 0, 100, 1,000, and 10,000 Dormant Sessions at fixed `active_capacity`, then `active_capacity` 1, 10, and 100 at fixed durable population; a 100,000-Session point is optional stress evidence.
+- density results include raw machine-readable measurements and a concise published table for 0, 100, 1,000, and 10,000 Dormant Sessions at fixed `active_capacity`, then `active_capacity` 1, 10, and 100 at fixed durable population; a 100,000-Session point is optional stress evidence. Report the incremental resident slope for both sweeps, and fail if Dormant population creates a resident Host handle, index, object, or other allocation proportional to its count;
+- representative final-answer, tool-call, maximally escaped, maximum-depth, and large-output mixes report allocation count and bytes, steady-state RSS, activation and semantic-admission latency, and throughput. Compare these as one release gate so a smaller representation cannot silently buy unacceptable CPU work, copying, or cache-locality regressions;
 - `zig build check` discovers every stable first-party Zig source through a production, test, or self-maintaining declaration-coverage root without adding a parallel manual inventory.
