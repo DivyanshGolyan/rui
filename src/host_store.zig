@@ -15,6 +15,11 @@ pub const max_transition_payload: usize = session_transition.max_payload_size;
 pub const max_workspace_path_bytes: usize = 1024;
 pub const max_model_bytes: usize = 128;
 
+const install_schema_version = std.fmt.comptimePrint(
+    "PRAGMA user_version={d}",
+    .{schema_version},
+);
+
 comptime {
     std.debug.assert(max_transition_payload == 980);
 }
@@ -1087,7 +1092,7 @@ pub const StorageOwner = struct {
         }
         self.execute(completion_index_schema) catch |err| return err;
         self.execute("PRAGMA application_id=1330532423") catch |err| return err;
-        self.execute("PRAGMA user_version=4") catch |err| return err;
+        self.execute(install_schema_version) catch |err| return err;
         self.execute("COMMIT") catch |err| {
             self.rollbackOrPoison();
             return err;
@@ -1678,7 +1683,10 @@ test "matching identity cannot hide an incomplete or unhardened schema" {
     const database = maybe_database orelse return error.HostStoreOpenFailed;
     try expectOk(c.sqlite3_exec(
         database,
-        "CREATE TABLE session (session_id BLOB); PRAGMA application_id=1330532423; PRAGMA user_version=4",
+        std.fmt.comptimePrint(
+            "CREATE TABLE session (session_id BLOB); PRAGMA application_id=1330532423; PRAGMA user_version={d}",
+            .{schema_version},
+        ),
         null,
         null,
         null,
