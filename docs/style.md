@@ -26,7 +26,7 @@ deferred explicitly.
 | Core | No I/O, general-purpose allocation, recursion, or reentrant activation. Use one compile-time-bounded Activation Slot and bounded work. |
 | Harness | After `open`, use Host-owned bounded storage for owner-loop state. Only `drive` advances Core; `offer` remains nonblocking and allocation-free. |
 | Host Store | Route all access through the Storage Owner. Treat every durable value as hostile input; use bounded canonical payloads, indexed SQL, fixed-width identities, and prepare-commit-publish ordering. |
-| Run Service | Keep queries pure, updates acknowledged and safely retriable under their operation-specific contracts, advancement fenced, content immutable, and Run Snapshots derived from committed facts. Never expose Harness generations or storage mechanics. |
+| Run Service | Keep queries pure, updates acknowledged and safely retriable under their operation-specific contracts, advancement fenced, content immutable, and Run Snapshots derived from committed facts. Implement both checked-in JSON schemas exactly, keep caller-defined Unicode Job Keys separate from shell-safe system IDs, and represent truncation only through a Content Reference preview. Never expose Harness generations or storage mechanics. |
 | Adapters | Allocation is permitted only when bounded and fallible. External effects begin only after durable Attempt admission. |
 | CLI | Allocation is permitted only when bounded and fallible. Compose Run Service operations, derive Markdown only from normative JSON, sanitize hostile output, and own no Run or Session policy. |
 | Tests and tooling | May allocate freely within host limits, but must exercise production bounds and failure behavior rather than replacing them. |

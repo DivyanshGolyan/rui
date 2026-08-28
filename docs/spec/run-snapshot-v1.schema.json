@@ -63,6 +63,12 @@
       "type": "string",
       "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,127}$"
     },
+    "job_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Caller-defined Job Key: 1-128 Unicode scalar values and at most 512 UTF-8 bytes. The byte bound and rejection of lone surrogates are enforced by the production decoder."
+    },
     "decimal_string": {
       "type": "string",
       "pattern": "^(0|[1-9][0-9]*)$"
@@ -181,7 +187,7 @@
       "required": ["id", "key", "state", "session_id"],
       "properties": {
         "id": { "$ref": "#/$defs/opaque_id" },
-        "key": { "$ref": "#/$defs/opaque_id" },
+        "key": { "$ref": "#/$defs/job_key" },
         "state": {
           "enum": [
             "pending",
@@ -288,7 +294,9 @@
           "minItems": 1,
           "maxItems": 8,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/opaque_id" }
+          "items": {
+            "enum": ["allow_once", "deny"]
+          }
         },
         "required_authority": { "$ref": "#/$defs/opaque_id" }
       }
@@ -382,21 +390,19 @@
     "inline_text": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "text", "truncated"],
+      "required": ["type", "text"],
       "properties": {
         "type": { "const": "inline_text" },
-        "text": { "$ref": "#/$defs/bounded_text" },
-        "truncated": { "type": "boolean" }
+        "text": { "$ref": "#/$defs/bounded_text" }
       }
     },
     "inline_json": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "value", "truncated"],
+      "required": ["type", "value"],
       "properties": {
         "type": { "const": "inline_json" },
-        "value": { "$ref": "#/$defs/workflow_value" },
-        "truncated": { "type": "boolean" }
+        "value": { "$ref": "#/$defs/workflow_value" }
       }
     },
     "content_ref": {

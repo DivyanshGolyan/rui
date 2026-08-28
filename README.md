@@ -37,7 +37,8 @@ from one ordered Session Ledger inside a bounded host-wide SQLite Host Store.
 
 [`PRODUCT.md`](PRODUCT.md), [`ARCHITECTURE.md`](ARCHITECTURE.md),
 [`VERIFICATION.md`](VERIFICATION.md), and the
-[`RunSnapshot` V1 schema](docs/spec/run-snapshot-v1.schema.json) are normative. Historical spikes and research remain evidence,
+[`RunSnapshot` V1 schema](docs/spec/run-snapshot-v1.schema.json) and
+[`InteractionResponseBatch` V1 schema](docs/spec/interaction-response-batch-v1.schema.json) are normative. Historical spikes and research remain evidence,
 but they do not override those documents or accepted ADRs.
 
 [`docs/style.md`](docs/style.md) defines the scoped engineering rules and canonical compiler-backed

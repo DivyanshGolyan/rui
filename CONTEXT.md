@@ -86,6 +86,10 @@ _Avoid_: JavaScript process, Session, continuation, durable heap
 A Caller-supplied stable idempotency key unique within one Host Store that creates or reattaches one Workflow Run when all bound inputs match.
 _Avoid_: Run identity, Job Key, display name
 
+**Job Key**:
+A Caller-defined identity for one Job within a Workflow Run. It contains 1–128 Unicode scalar values, is at most 512 UTF-8 bytes, and is not a shell-safe system identifier.
+_Avoid_: Run Key, Job identity, opaque ID
+
 **Run Service**:
 The protocol-independent semantic interface for creating, inspecting, advancing, responding to, cancelling, and reading immutable content from Workflow Runs.
 _Avoid_: CLI, Harness, wire protocol, daemon
@@ -127,7 +131,7 @@ A durable answer to one open Interaction Request. Every response is checked for 
 _Avoid_: User message, signal, Permission Decision
 
 **Content Reference**:
-An opaque Run-scoped identity for immutable bounded content retained for at least as long as its containing Run remains inspectable.
+An opaque Run-scoped identity for complete immutable bounded content retained for at least as long as its containing Run remains inspectable. Its optional preview is not the authoritative content.
 _Avoid_: Harness content reference, Workspace path, blob path
 
 **Artifact**:
