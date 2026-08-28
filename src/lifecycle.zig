@@ -329,33 +329,33 @@ fn performModelTurn(
     const operation = try core.reducer.beginModelOperation(ids.operation_id, model_sequence);
     const context = try core.reducer.modelContext();
     const operation_generation = operation.generation;
-    const descriptor = try model_operation.buildRequest(
+    const request_digest = try model_operation.buildRequest(
         session,
         ids.request_ref,
         context.first_entry,
         context.entry_count,
     );
-    try model_operation.verifyRequestDigest(session, descriptor.request_ref, descriptor.digest);
+    try model_operation.verifyRequestDigest(session, ids.request_ref, request_digest);
     try core.reducer.acceptOperation(.{ .id = ids.operation_id, .generation = operation_generation });
     const operation_context = operationContext(session, ids.operation_id, operation_generation);
     const admission_facts = [_]session_transition.Fact{
         session_transition.operationSubmitted(
             operation_context,
             ids.request_ref,
-            .{ .model = descriptor.digest },
+            .{ .model = request_digest },
             .none,
         ),
         session_transition.operationAccepted(
             operation_context,
             ids.request_ref,
-            .{ .model = descriptor.digest },
+            .{ .model = request_digest },
             .none,
         ),
         session_transition.modelAttemptAdmitted(
             operation_context,
             ids.attempt_id,
             ids.request_ref,
-            .{ .model = descriptor.digest },
+            .{ .model = request_digest },
             0,
         ),
     };
@@ -370,8 +370,8 @@ fn performModelTurn(
     core_open.* = false;
 
     try dispatchModelAttempt(session, token, next_provider, .{
-        .request_ref = descriptor.request_ref,
-        .request_digest = descriptor.digest,
+        .request_ref = ids.request_ref,
+        .request_digest = request_digest,
         .response_ref = ids.response_ref,
         .operation_id = ids.operation_id,
         .operation_generation = operation_generation,
@@ -854,11 +854,6 @@ pub fn advanceRestored(
                 &.{applied},
                 true,
             );
-            try stageDurableResponse(
-                session,
-                &core,
-                try core.reducer.response(),
-            );
         } else |err| switch (err) {
             error.SessionOperationPending => try retryModelAttempt(
                 io,
@@ -885,7 +880,6 @@ pub fn advanceRestored(
     }
     if (outcome == .awaiting_input) return error.InputRequestDisposition;
     if (outcome == .awaiting_tool) {
-        try stageDurableResponse(session, &core, try core.reducer.response());
         switch (try reconcileToolCall(
             session,
             token,
@@ -1008,7 +1002,6 @@ pub fn resolvePermission(
     defer if (core_open) core.close();
     try restoreCoreFromLedger(session, core_state_buffer, &core);
     if ((try core.reducer.task()).phase != .awaiting_tool) return error.PermissionNoLongerRequired;
-    try stageDurableResponse(session, &core, try core.reducer.response());
     const tool = try executableTool(session, &core.reducer);
     const observation = try core.reducer.operation();
     const expected_operation_id = switch (tool) {
@@ -2205,9 +2198,8 @@ fn finalizeCandidate(
     if (task.phase != .final_candidate or response.disposition != .final_answer) {
         return error.FinalAnswerNotCandidate;
     }
-    try stageDurableResponse(session, core, response);
-    var final_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const expected = try core.reducer.copyResponseWindow(response.text, &final_buffer);
+    var final_buffer: [model_protocol.max_assistant_text_size]u8 = undefined;
+    const expected = try readResponseWindow(session, response, response.text, &final_buffer);
     if (expected.len == 0) {
         return error.InvalidFinalAnswerRange;
     }
@@ -2250,23 +2242,6 @@ fn finalizeCandidate(
         true,
     );
     return final_ref;
-}
-
-fn stageDurableResponse(
-    session: *session_store.Session,
-    core: *Core,
-    response: core_image.Response,
-) !void {
-    var blob = try session.openBlob(response.content_ref);
-    defer blob.close();
-    if (blob.length() == 0 or blob.length() > model_protocol.max_response_size) {
-        return error.ResponseTooLarge;
-    }
-    var buffer: [model_protocol.max_response_size]u8 = undefined;
-    const length: usize = @intCast(blob.length());
-    const bytes = try blob.readWindow(0, buffer[0..length]);
-    if (bytes.len != length) return error.TruncatedModelResponse;
-    try core.reducer.stageResponse(bytes, response.content_ref);
 }
 
 fn reach(fault: ?FaultHook, boundary: FaultBoundary) !void {
@@ -2328,6 +2303,80 @@ fn readResponseWindow(
     const bytes = try reader.readWindow(start, out[0..window.length]);
     if (bytes.len != window.length) return error.TruncatedModelResponse;
     return bytes;
+}
+
+test "restored response metadata reads the exact durable content window" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "sessions", .default_dir);
+    try tmp.dir.createDir(io, "repo", .default_dir);
+    var repo = try tmp.dir.openDir(io, "repo", .{});
+    defer repo.close(io);
+    try repo.createDir(io, ".git", .default_dir);
+    var git = try repo.openDir(io, ".git", .{});
+    defer git.close(io);
+    try git.createDir(io, "objects", .default_dir);
+    try git.createDir(io, "refs", .default_dir);
+    var config = try git.createFile(io, "config", .{});
+    defer config.close(io);
+    try config.writePositionalAll(io, "[core]\n\trepositoryformatversion = 0\n", 0);
+    var head = try git.createFile(io, "HEAD", .{});
+    defer head.close(io);
+    try head.writePositionalAll(io, "ref: refs/heads/main\n", 0);
+
+    var repo_path_buffer: [160]u8 = undefined;
+    const repo_path = try std.fmt.bufPrint(
+        &repo_path_buffer,
+        ".zig-cache/tmp/{s}/repo",
+        .{tmp.sub_path},
+    );
+    var database_path_buffer: [160]u8 = undefined;
+    const database_path = try std.fmt.bufPrint(
+        &database_path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var sessions = try tmp.dir.openDir(io, "sessions", .{});
+    defer sessions.close(io);
+    var storage = try host_store.StorageOwner.open(io, database_path, .{});
+    defer storage.close();
+    var session = try session_store.Session.create(sessions, &storage, io, .{
+        .workspace_path = repo_path,
+        .model = "fixture:window",
+        .task = "Recover the final answer window",
+    });
+    defer session.close();
+
+    const response_ref: u64 = 2001;
+    const answer = "the restored window comes from durable response bytes";
+    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    const encoded_response = try model_protocol.encodeText(&response_buffer, .complete, answer);
+    try session.storeBlob(response_ref, encoded_response);
+
+    var initial_slot: core_image.ActivationSlot = undefined;
+    var initial = try core_image.Core.initialize(&initial_slot, .{ .agent_id = 7, .generation = 1 });
+    try initial.startTask(1);
+    const operation = try initial.beginModelOperation(2, 1);
+    const identity: core_image.OperationIdentity = .{
+        .id = operation.id,
+        .generation = operation.generation,
+    };
+    try initial.acceptOperation(identity);
+    try initial.completeOperation(identity, response_ref);
+    _ = try initial.interpretModelResponse(encoded_response, response_ref);
+    var encoded_state: [core_state.encoded_size]u8 = undefined;
+    try initial.suspendInto(&encoded_state);
+
+    var restored_slot: core_image.ActivationSlot = undefined;
+    var restored = try core_image.Core.activate(&restored_slot, &encoded_state);
+    defer restored.abandon();
+    const response = try restored.response();
+    var answer_buffer: [model_protocol.max_assistant_text_size]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        answer,
+        try readResponseWindow(&session, response, response.text, &answer_buffer),
+    );
 }
 
 fn storeToolCall(
@@ -2520,19 +2569,35 @@ test "model dispatch rejects a substituted request under the bound reference" {
         .task = "Check the request binding",
     });
     defer session.close();
-    const descriptor = try model_operation.buildRequest(&session, 1001, 1, 1);
+    const request_digest = try model_operation.buildRequest(&session, 1001, 1, 1);
+    var request_blob = try session.openBlob(1001);
+    const request_length: usize = @intCast(request_blob.length());
+    request_blob.close();
     var request: [32 * 1024]u8 = undefined;
-    const original = try session.readBlob(1001, 0, request[0..@intCast(descriptor.length)]);
+    const original = try session.readBlob(1001, 0, request[0..request_length]);
     request[model_operation.request_header_size] ^= 1;
     var blob_path: [32]u8 = undefined;
     const substituted_path = try std.fmt.bufPrint(&blob_path, "blobs/{x:0>16}.blob", .{@as(u64, 1001)});
     try session.dir.deleteFile(io, substituted_path);
     try session.storeBlob(1001, original);
 
-    var fixture: model_operation.Fixture = .{
-        .expected_task = null,
-        .final_answer = "must not dispatch",
+    const CountingProvider = struct {
+        calls: u32 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestReader,
+            _: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+        }
     };
+    var fixture: CountingProvider = .{};
     try std.testing.expectError(
         error.ModelRequestDigestMismatch,
         dispatchModelAttempt(
@@ -2541,7 +2606,7 @@ test "model dispatch rejects a substituted request under the bound reference" {
             fixture.provider(),
             .{
                 .request_ref = 1001,
-                .request_digest = descriptor.digest,
+                .request_digest = request_digest,
                 .response_ref = 1002,
                 .operation_id = 1003,
                 .operation_generation = 1,

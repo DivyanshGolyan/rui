@@ -6,7 +6,6 @@ const session_transition = @import("session_transition.zig");
 pub const slot_ceiling = 32 * 1024;
 pub const slot_alignment = 8;
 pub const parser_scratch_size = 4 * 1024;
-pub const response_scratch_size = model_protocol.max_resident_response_size;
 pub const transition_scratch_size = 4 * 1024;
 
 pub const State = core_state.State;
@@ -18,7 +17,6 @@ pub const TaskPhase = core_state.TaskPhase;
 pub const ActivationSlot = extern struct {
     state: State,
     parser_scratch: [parser_scratch_size]u8,
-    response_scratch: [response_scratch_size]u8,
     transition_scratch: [transition_scratch_size]u8,
 };
 
@@ -150,9 +148,7 @@ pub fn SlotPool(comptime capacity: usize) type {
 pub const Core = struct {
     slot: *ActivationSlot,
     state: *State,
-    response_scratch: *[response_scratch_size]u8,
     active: bool = true,
-    staged_response_length: u32 = 0,
 
     pub fn initialize(slot: *ActivationSlot, identity_value: Identity) !Core {
         if (identity_value.agent_id == 0) return error.InvalidAgentIdentity;
@@ -166,7 +162,6 @@ pub const Core = struct {
         return .{
             .slot = slot,
             .state = &slot.state,
-            .response_scratch = &slot.response_scratch,
         };
     }
 
@@ -177,7 +172,6 @@ pub const Core = struct {
         return .{
             .slot = slot,
             .state = &slot.state,
-            .response_scratch = &slot.response_scratch,
         };
     }
 
@@ -186,14 +180,12 @@ pub const Core = struct {
         try core_state.encode(encoded, self.state.*);
         scrub(self.slot);
         self.active = false;
-        self.staged_response_length = 0;
     }
 
     pub fn abandon(self: *Core) void {
         if (!self.active) return;
         scrub(self.slot);
         self.active = false;
-        self.staged_response_length = 0;
     }
 
     pub fn identity(self: *const Core) !Identity {
@@ -307,7 +299,6 @@ pub const Core = struct {
         self.state.response_arguments = .{};
         self.state.response_options = .{};
         self.state.task_phase = .awaiting_model;
-        self.staged_response_length = 0;
         return prepared;
     }
 
@@ -344,12 +335,6 @@ pub const Core = struct {
         }
 
         const parsed = model_protocol.parse(response_bytes);
-        if (response_bytes.len <= self.response_scratch.len) {
-            @memcpy(self.response_scratch[0..response_bytes.len], response_bytes);
-            self.staged_response_length = @intCast(response_bytes.len);
-        } else {
-            self.staged_response_length = 0;
-        }
         self.state.response_ref = response_ref;
         self.state.response_disposition = parsed.disposition;
         self.state.response_failure = parsed.failure;
@@ -378,58 +363,6 @@ pub const Core = struct {
             .failure => .failed,
         };
         return self.response();
-    }
-
-    /// Restages immutable response content after activation without changing Core State.
-    pub fn stageResponse(self: *Core, response_bytes: []const u8, response_ref: u64) !void {
-        try self.requireActive();
-        if (response_bytes.len == 0) return error.EmptyModelResponse;
-        if (response_bytes.len > model_protocol.max_response_size) return error.ResponseCapacityExceeded;
-        if (self.state.response_ref != response_ref or response_ref == 0) {
-            return error.ResponseIdentityMismatch;
-        }
-        const parsed = model_protocol.parse(response_bytes);
-        const expected = try self.response();
-        if (parsed.disposition != expected.disposition or
-            parsed.failure != expected.failure or
-            parsed.text_offset != expected.text.offset or
-            parsed.text_length != expected.text.length or
-            parsed.tool_key_offset != expected.tool_key.offset or
-            parsed.tool_key_length != expected.tool_key.length or
-            parsed.arguments_offset != expected.arguments.offset or
-            parsed.arguments_length != expected.arguments.length or
-            (if (parsed.input_shape) |shape| @intFromEnum(shape) else 0) != expected.input_shape or
-            parsed.option_count != expected.option_count or
-            parsed.options_offset != expected.options.offset or
-            parsed.options_length != expected.options.length)
-        {
-            return error.ResponseContentMismatch;
-        }
-        if (response_bytes.len <= self.response_scratch.len) {
-            @memcpy(self.response_scratch[0..response_bytes.len], response_bytes);
-            self.staged_response_length = @intCast(response_bytes.len);
-        } else {
-            self.staged_response_length = 0;
-        }
-    }
-
-    pub fn copyResponseWindow(
-        self: *const Core,
-        window: ContentWindow,
-        out: []u8,
-    ) ![]const u8 {
-        try self.requireActive();
-        if (window.length == 0) return "";
-        const start: usize = window.offset;
-        const length: usize = window.length;
-        if (length > out.len) return error.ResponseWindowCapacityExceeded;
-        if (start > self.staged_response_length or
-            length > self.staged_response_length - start)
-        {
-            return error.ResponseWindowUnavailable;
-        }
-        @memcpy(out[0..length], self.response_scratch[start..][0..length]);
-        return out[0..length];
     }
 
     pub fn commitFinalAnswer(self: *Core, entry_id: u64) !void {
@@ -497,10 +430,8 @@ comptime {
     std.debug.assert(@sizeOf(ActivationSlot) == slot_size);
     std.debug.assert(@alignOf(ActivationSlot) == slot_alignment);
     std.debug.assert(@offsetOf(ActivationSlot, "parser_scratch") == @sizeOf(State));
-    std.debug.assert(@offsetOf(ActivationSlot, "response_scratch") ==
-        @sizeOf(State) + parser_scratch_size);
     std.debug.assert(@offsetOf(ActivationSlot, "transition_scratch") ==
-        @sizeOf(State) + parser_scratch_size + response_scratch_size);
+        @sizeOf(State) + parser_scratch_size);
     assertNoAllocatorParameter(Core.initialize);
     assertNoAllocatorParameter(Core.activate);
     assertNoAllocatorParameter(Core.deliver);
@@ -510,8 +441,6 @@ comptime {
     assertNoAllocatorParameter(Core.acceptOperation);
     assertNoAllocatorParameter(Core.completeOperation);
     assertNoAllocatorParameter(Core.interpretModelResponse);
-    assertNoAllocatorParameter(Core.stageResponse);
-    assertNoAllocatorParameter(Core.copyResponseWindow);
     assertNoAllocatorParameter(Core.commitFinalAnswer);
     assertNoAllocatorParameter(Core.commitToolResult);
     assertNoAllocatorParameter(Core.suspendInto);
@@ -641,7 +570,7 @@ test "capacity and stale generation rejections preserve prior Core State" {
     try std.testing.expectEqualDeep(before, try core.operation());
 }
 
-test "large tool responses retain only durable content windows outside the Activation Slot" {
+test "responses retain only validated metadata and durable content windows" {
     var slot: ActivationSlot = undefined;
     var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
     defer core.abandon();
@@ -651,21 +580,16 @@ test "large tool responses retain only durable content windows outside the Activ
     try core.acceptOperation(identity);
     try core.completeOperation(identity, 3);
 
-    var value: [response_scratch_size]u8 = @splat('x');
-    var arguments_buffer: [response_scratch_size + 32]u8 = undefined;
+    var value: [model_protocol.max_resident_response_size]u8 = @splat('x');
+    var arguments_buffer: [model_protocol.max_resident_response_size + 32]u8 = undefined;
     const contract = @import("model_contract.zig");
     const arguments = try contract.encodeJson(&arguments_buffer, .{ .value = &value });
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     const response = try model_protocol.encodeTool(&response_buffer, "fixture.large.v1", arguments);
-    try std.testing.expect(response.len > response_scratch_size);
+    try std.testing.expect(response.len > model_protocol.max_resident_response_size);
     const parsed = try core.interpretModelResponse(response, 3);
     try std.testing.expectEqual(@as(u32, @intCast(arguments.len)), parsed.arguments.length);
-    try std.testing.expectEqual(@as(u32, 0), core.staged_response_length);
-    var copy: [response_scratch_size + 32]u8 = undefined;
-    try std.testing.expectError(
-        error.ResponseWindowUnavailable,
-        core.copyResponseWindow(parsed.arguments, &copy),
-    );
+    try std.testing.expectEqual(@as(u64, 3), parsed.content_ref);
 }
 
 test "complete slot lifecycle is compiler checked to expose no allocator seam" {
@@ -687,7 +611,6 @@ test "complete slot lifecycle is compiler checked to expose no allocator seam" {
     var reused_slot: ActivationSlot = undefined;
     @memset(std.mem.asBytes(&reused_slot), 0xff);
     var restored = try Core.activate(&reused_slot, &encoded);
-    try restored.stageResponse(response, 3);
     try restored.commitFinalAnswer(2);
     try restored.suspendInto(&encoded);
 }
@@ -718,7 +641,7 @@ test "fixed slot pool returns closed capacity and scrubs before reuse" {
 
 test "the filler-free Activation Slot and widened transaction scratch stay bounded" {
     try std.testing.expectEqual(
-        @sizeOf(State) + parser_scratch_size + response_scratch_size + transition_scratch_size,
+        @sizeOf(State) + parser_scratch_size + transition_scratch_size,
         @sizeOf(ActivationSlot),
     );
     try std.testing.expect(@sizeOf(ActivationSlot) <= slot_ceiling);

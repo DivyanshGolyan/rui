@@ -3,6 +3,7 @@ const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
 const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
+const deterministic_provider = @import("deterministic_provider.zig");
 const host_runtime = @import("host_runtime.zig");
 const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
@@ -858,7 +859,7 @@ test "open retains no Activation Slot and offer transfers one bounded input" {
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
     defer runtime.close() catch unreachable;
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
@@ -895,7 +896,7 @@ test "Harness close is idempotent and releases one Runtime lease" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
@@ -917,8 +918,8 @@ test "Runtime close waits for every opaque Harness lease" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
-    var first_fixture: model_operation.Fixture = .{ .expected_task = "first", .final_answer = "done" };
-    var second_fixture: model_operation.Fixture = .{ .expected_task = "second", .final_answer = "done" };
+    var first_fixture: deterministic_provider.Fixture = .{ .expected_task = "first", .final_answer = "done" };
+    var second_fixture: deterministic_provider.Fixture = .{ .expected_task = "second", .final_answer = "done" };
     const first = try Harness.open(.{
         .runtime = runtime,
         .mode = .{ .create = .{
@@ -949,7 +950,7 @@ test "restore withholds projections until the configured recovery quantum reache
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
     defer runtime.close() catch unreachable;
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
@@ -1008,7 +1009,7 @@ test "restore publishes Session identity before reconciling Completion evidence"
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
     defer runtime.close() catch unreachable;
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
@@ -1079,7 +1080,7 @@ test "failed Host Store recovery makes the live Harness unavailable" {
     var read_fault: ReadFault = .{};
     const runtime = try openTestRuntimeConfigured(&tmp, .{ .fault = read_fault.hook() });
     defer runtime.close() catch unreachable;
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
@@ -1144,7 +1145,7 @@ test "shutdown denies Approval Required before closing" {
         .command = "printf forbidden",
         .timeout_ms = 5000,
     });
-    var fixture: model_operation.ToolFixture = .{
+    var fixture: deterministic_provider.ToolFixture = .{
         .expected_task = "task",
         .tool_arguments = call,
         .final_answer = "done",
