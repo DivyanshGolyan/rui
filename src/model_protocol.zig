@@ -32,7 +32,7 @@ pub const Parsed = struct {
     tool_key_length: u32 = 0,
     arguments_offset: u32 = 0,
     arguments_length: u32 = 0,
-    arguments_evidence: contract.StrictToolJsonEvidence = .{},
+    arguments_digest: binding.StrictToolJsonV1 = .{ .bytes = @splat(0) },
     input_shape: ?contract.InputShape = null,
     option_count: u8 = 0,
     options_offset: u32 = 0,
@@ -367,7 +367,7 @@ fn decodeWithScratch(
                 .tool_key_length = @intCast(first.len),
                 .arguments_offset = @intCast(header_size + first.len),
                 .arguments_length = @intCast(second.len),
-                .arguments_evidence = evidence,
+                .arguments_digest = evidence,
             }, .tool_arguments = admitted };
         },
         .input_request => return .{ .parsed = try decodeInput(bytes, first, second, reason) },
@@ -571,9 +571,9 @@ test "tool response identity preserves exact noncanonical arguments" {
     try std.testing.expect(!std.mem.eql(u8, first_encoded, second_encoded));
     var scratch: ValidationScratch = undefined;
     const first_admitted = try decode(&scratch, first_encoded);
-    const first_digest = first_admitted.arguments_evidence.digest;
+    const first_digest = first_admitted.arguments_digest;
     const second_admitted = try decode(&scratch, second_encoded);
-    try std.testing.expect(!std.mem.eql(u8, &first_digest, &second_admitted.arguments_evidence.digest));
+    try std.testing.expect(!binding.eql(binding.StrictToolJsonV1, first_digest, second_admitted.arguments_digest));
     const malformed = try encodeTool(&first, contract.bash_key, "{\"command\":\"true\",\"command\":\"false\",\"timeout_ms\":1000}");
     try std.testing.expectError(error.MalformedModelResponse, decode(&scratch, malformed));
 }

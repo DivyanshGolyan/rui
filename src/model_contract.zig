@@ -192,27 +192,14 @@ pub const CatalogDigestBuilder = struct {
 /// whitespace, object order, string escapes, or number spelling.
 pub const StrictToolJson = struct {
     value: []const u8,
-    proof: StrictToolJsonEvidence,
+    proof: binding.StrictToolJsonV1,
 
     pub fn bytes(self: StrictToolJson) []const u8 {
         return self.value;
     }
 
-    pub fn evidence(self: StrictToolJson) StrictToolJsonEvidence {
+    pub fn evidence(self: StrictToolJson) binding.StrictToolJsonV1 {
         return self.proof;
-    }
-};
-
-pub const StrictToolJsonEvidence = extern struct {
-    digest: [32]u8 = @splat(0),
-    length: u32 = 0,
-
-    pub fn empty(self: StrictToolJsonEvidence) bool {
-        return self.length == 0 and std.mem.allEqual(u8, &self.digest, 0);
-    }
-
-    pub fn validForLength(self: StrictToolJsonEvidence, length: u32) bool {
-        return length != 0 and self.length == length;
     }
 };
 
@@ -248,32 +235,24 @@ pub fn validateStrictToolJson(
     var members: usize = 0;
     countJsonStructure(parsed.value, 1, &tokens, &members) catch
         return error.InvalidStrictToolJson;
-    return .{ .value = bytes, .proof = strictToolJsonEvidence(bytes) };
+    return .{ .value = bytes, .proof = strictToolJsonDigest(bytes) };
 }
 
-pub fn strictToolJsonEvidence(bytes: []const u8) StrictToolJsonEvidence {
-    return .{
-        .digest = binding.hash(binding.StrictToolJsonV1, bytes).bytes,
-        .length = @intCast(bytes.len),
-    };
+pub fn strictToolJsonDigest(bytes: []const u8) binding.StrictToolJsonV1 {
+    return binding.hash(binding.StrictToolJsonV1, bytes);
 }
 
 /// Reopen already-admitted exact bytes without parsing them again.
 pub fn strictToolJsonFromEvidence(
     bytes: []const u8,
-    evidence_value: StrictToolJsonEvidence,
+    digest: binding.StrictToolJsonV1,
 ) !StrictToolJson {
     if (bytes.len == 0 or bytes.len > max_tool_arguments_envelope_size or
-        bytes.len != evidence_value.length or
-        !binding.eql(
-            binding.StrictToolJsonV1,
-            .{ .bytes = strictToolJsonEvidence(bytes).digest },
-            .{ .bytes = evidence_value.digest },
-        ))
+        !binding.eql(binding.StrictToolJsonV1, strictToolJsonDigest(bytes), digest))
     {
         return error.InvalidStrictToolJsonEvidence;
     }
-    return .{ .value = bytes, .proof = evidence_value };
+    return .{ .value = bytes, .proof = digest };
 }
 
 /// Apply the selected Operation-bound catalog schema to exact JSON bytes.
@@ -296,7 +275,7 @@ pub fn admitToolArguments(
         return error.InvalidStrictToolJson;
     const json: StrictToolJson = .{
         .value = bytes,
-        .proof = strictToolJsonEvidence(bytes),
+        .proof = strictToolJsonDigest(bytes),
     };
     var schema = std.json.parseFromSlice(std.json.Value, fixed.allocator(), definition.input_schema, .{
         .max_value_len = max_schema_size,
@@ -581,8 +560,8 @@ test "StrictToolJsonV1 accepts noncanonical exact bytes and distinguishes identi
     try std.testing.expectEqualStrings(second_bytes, second.json.bytes());
     try std.testing.expect(!std.mem.eql(
         u8,
-        &first.json.evidence().digest,
-        &second.json.evidence().digest,
+        &first.json.evidence().bytes,
+        &second.json.evidence().bytes,
     ));
 }
 
@@ -677,15 +656,10 @@ test "StrictToolJsonV1 evidence reopens exact admitted bytes without parsing" {
     );
 }
 
-test "StrictToolJsonV1 evidence distinguishes absence from an all-zero digest" {
-    const absent: StrictToolJsonEvidence = .{};
-    const zero_digest_value: StrictToolJsonEvidence = .{
-        .digest = @splat(0),
-        .length = 2,
-    };
-    try std.testing.expect(absent.empty());
-    try std.testing.expect(!zero_digest_value.empty());
-    try std.testing.expect(zero_digest_value.validForLength(2));
+test "StrictToolJsonV1 identity has no empty digest sentinel" {
+    const zero_digest: binding.StrictToolJsonV1 = .{ .bytes = @splat(0) };
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(@TypeOf(zero_digest)));
+    try std.testing.expect(std.mem.allEqual(u8, &zero_digest.bytes, 0));
 }
 
 test "serialized catalog schemas state the exact UTF-8 byte contract" {

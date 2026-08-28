@@ -28,7 +28,7 @@ Workflow code cannot observe physical Job completion order: V1 supports determin
 `Promise.all` and `Promise.allSettled` and does not expose `Promise.race` or `Promise.any`.
 The target architecture separates compact, canonically encoded Core State from transient
 Activation Slot scratch. Core State's encoded size is derived from `core_state.encoded_size` and is
-currently 180 bytes; authoritative semantic transactions
+currently 176 bytes; authoritative semantic transactions
 carry it directly. Activation decodes that state into one Host-owned slot containing only named
 bounded scratch; V1 removes sizing filler and enforces a 32 KiB ceiling. Suspension scrubs the
 complete slot. A fixed Host-owned pool returns closed capacity instead of allocating a

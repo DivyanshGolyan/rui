@@ -1,9 +1,10 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 
-pub const schema_version: u16 = 4;
-pub const encoded_size: usize = 180;
+pub const schema_version: u16 = 5;
+pub const encoded_size: usize = 176;
 
 const magic = "ONECORE\x00";
 const checksum_offset = encoded_size - @sizeOf(u32);
@@ -51,7 +52,7 @@ pub const State = extern struct {
     response_text: ContentWindow = .{},
     response_tool_key: ContentWindow = .{},
     response_arguments: ContentWindow = .{},
-    response_arguments_evidence: model_contract.StrictToolJsonEvidence = .{},
+    response_arguments_digest: binding.StrictToolJsonV1 = .{ .bytes = @splat(0) },
 };
 
 comptime {
@@ -96,8 +97,7 @@ pub fn encode(out: []u8, state: State) !void {
     writeWindow(out, 116, state.response_text);
     writeWindow(out, 124, state.response_arguments);
     writeWindow(out, 132, state.response_tool_key);
-    @memcpy(out[140..172], &state.response_arguments_evidence.digest);
-    write(u32, out, 172, state.response_arguments_evidence.length);
+    @memcpy(out[140..172], &state.response_arguments_digest.bytes);
     rewriteChecksum(out);
 }
 
@@ -133,10 +133,7 @@ pub fn decode(input: []const u8) !State {
         .response_text = readWindow(input, 116),
         .response_arguments = readWindow(input, 124),
         .response_tool_key = readWindow(input, 132),
-        .response_arguments_evidence = .{
-            .digest = input[140..172].*,
-            .length = read(u32, input, 172),
-        },
+        .response_arguments_digest = .{ .bytes = input[140..172].* },
     };
     try validate(state);
     return state;
@@ -225,8 +222,7 @@ fn validateResponse(state: State) !void {
     if (state.response_ref == 0) {
         if (state.response_disposition != .failure or
             state.response_failure != .none or state.response_text.length != 0 or
-            state.response_tool_key.length != 0 or state.response_arguments.length != 0 or
-            !state.response_arguments_evidence.empty())
+            state.response_tool_key.length != 0 or state.response_arguments.length != 0)
         {
             return error.InvalidResponseState;
         }
@@ -245,8 +241,7 @@ fn validateResponse(state: State) !void {
         .final_candidate, .finished => {
             if (state.response_disposition != .final_answer or
                 state.response_failure != .none or state.response_text.length == 0 or
-                state.response_tool_key.length != 0 or state.response_arguments.length != 0 or
-                !state.response_arguments_evidence.empty())
+                state.response_tool_key.length != 0 or state.response_arguments.length != 0)
             {
                 return error.InvalidResponseState;
             }
@@ -254,8 +249,7 @@ fn validateResponse(state: State) !void {
         .awaiting_tool, .ready => {
             if (state.response_disposition != .tool_call or
                 state.response_failure != .none or state.response_tool_key.length == 0 or
-                state.response_arguments.length == 0 or state.response_text.length != 0 or
-                !state.response_arguments_evidence.validForLength(state.response_arguments.length))
+                state.response_arguments.length == 0 or state.response_text.length != 0)
             {
                 return error.InvalidResponseState;
             }
@@ -264,15 +258,13 @@ fn validateResponse(state: State) !void {
             switch (state.response_disposition) {
                 .input_request => if (state.response_failure != .none or
                     state.response_tool_key.length != 0 or state.response_text.length != 0 or
-                    state.response_arguments.length != 0 or
-                    !state.response_arguments_evidence.empty())
+                    state.response_arguments.length != 0)
                 {
                     return error.InvalidResponseState;
                 },
                 .failure => if (state.response_failure == .none or
                     state.response_tool_key.length != 0 or state.response_text.length != 0 or
-                    state.response_arguments.length != 0 or
-                    !state.response_arguments_evidence.empty())
+                    state.response_arguments.length != 0)
                 {
                     return error.InvalidResponseState;
                 },
@@ -381,7 +373,7 @@ test "canonical Core State vector round trips deterministically" {
         .response_text = .{},
         .response_tool_key = .{ .offset = 24, .length = 7 },
         .response_arguments = .{ .offset = 31, .length = 32 },
-        .response_arguments_evidence = model_contract.strictToolJsonEvidence("00000000000000000000000000000000"),
+        .response_arguments_digest = model_contract.strictToolJsonDigest("00000000000000000000000000000000"),
     };
     var first: [encoded_size]u8 = undefined;
     var second: [encoded_size]u8 = undefined;
@@ -392,7 +384,7 @@ test "canonical Core State vector round trips deterministically" {
     try std.testing.expectEqualDeep(state, restored);
 }
 
-test "Core State keeps all-zero strict JSON digests distinct from absent evidence" {
+test "Core State uses the arguments window for presence even with an all-zero digest" {
     var state: State = .{
         .agent_id = 1,
         .agent_generation = 1,
@@ -409,14 +401,14 @@ test "Core State keeps all-zero strict JSON digests distinct from absent evidenc
         .context = .{ .offset = 1, .length = 1 },
         .response_tool_key = .{ .offset = 24, .length = 4 },
         .response_arguments = .{ .offset = 28, .length = 2 },
-        .response_arguments_evidence = .{ .digest = @splat(0), .length = 2 },
+        .response_arguments_digest = .{ .bytes = @splat(0) },
     };
     var encoded: [encoded_size]u8 = undefined;
     try encode(&encoded, state);
     const restored = try decode(&encoded);
-    try std.testing.expectEqualSlices(u8, &@as([32]u8, @splat(0)), &restored.response_arguments_evidence.digest);
+    try std.testing.expectEqualSlices(u8, &@as([32]u8, @splat(0)), &restored.response_arguments_digest.bytes);
 
-    state.response_arguments_evidence = .{};
+    state.response_arguments = .{};
     try std.testing.expectError(error.InvalidResponseState, encode(&encoded, state));
 }
 

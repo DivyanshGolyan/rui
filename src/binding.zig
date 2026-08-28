@@ -3,7 +3,7 @@ const std = @import("std");
 pub const Sha256 = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 
 fn Semantic(comptime domain_name: []const u8) type {
-    return struct {
+    return extern struct {
         bytes: Sha256,
 
         pub const domain = domain_name;

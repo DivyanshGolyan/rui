@@ -462,15 +462,17 @@ fn decodeRequestToolCall(
     };
     try readContentExact(encoded, conversation.call_header_size, call.key_bytes[0..header.key_length]);
     model_contract.validateToolKey(call.key()) catch return error.MalformedModelRequest;
-    try validateStrictToolJsonIdentity(call.arguments, header.arguments_evidence);
+    try validateStrictToolJsonIdentity(call.arguments, header.arguments_digest);
     return .{ .tool_call = call };
 }
 
 fn validateStrictToolJsonIdentity(
     content: ContentView,
-    evidence: model_contract.StrictToolJsonEvidence,
+    digest: binding.StrictToolJsonV1,
 ) !void {
-    if (!evidence.validForLength(@intCast(content.length()))) return error.MalformedModelRequest;
+    if (content.length() == 0 or content.length() > model_contract.max_tool_arguments_envelope_size) {
+        return error.MalformedModelRequest;
+    }
     var hasher = binding.Hasher(binding.StrictToolJsonV1).init();
     var window: [request_window_size]u8 = undefined;
     var offset: u64 = 0;
@@ -483,7 +485,7 @@ fn validateStrictToolJsonIdentity(
     if (!binding.eql(
         binding.StrictToolJsonV1,
         hasher.final(),
-        .{ .bytes = evidence.digest },
+        digest,
     )) return error.MalformedModelRequest;
 }
 

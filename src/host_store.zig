@@ -21,7 +21,7 @@ const install_schema_version = std.fmt.comptimePrint(
 );
 
 comptime {
-    std.debug.assert(max_transition_payload == 1016);
+    std.debug.assert(max_transition_payload == 1012);
 }
 
 const session_schema =
@@ -43,7 +43,7 @@ const transition_schema =
     \\CREATE TABLE session_transition (
     \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
     \\    sequence INTEGER NOT NULL CHECK (sequence > 0),
-    \\    payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 1016),
+    \\    payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 1012),
     \\    record_digest BLOB NOT NULL CHECK (length(record_digest) = 32),
     \\    PRIMARY KEY (session_id, sequence),
     \\    FOREIGN KEY (session_id) REFERENCES session (session_id)

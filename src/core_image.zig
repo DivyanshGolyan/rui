@@ -65,7 +65,7 @@ pub const Response = struct {
 pub const StrictToolJsonWindow = struct {
     offset: u32,
     length: u32,
-    evidence: model_contract.StrictToolJsonEvidence,
+    digest: binding.StrictToolJsonV1,
 
     pub fn contentWindow(self: StrictToolJsonWindow) ContentWindow {
         return .{ .offset = self.offset, .length = self.length };
@@ -239,7 +239,7 @@ pub const Core = struct {
             .arguments = .{
                 .offset = state.response_arguments.offset,
                 .length = state.response_arguments.length,
-                .evidence = state.response_arguments_evidence,
+                .digest = state.response_arguments_digest,
             },
         };
     }
@@ -305,7 +305,7 @@ pub const Core = struct {
         self.state.response_text = .{};
         self.state.response_tool_key = .{};
         self.state.response_arguments = .{};
-        self.state.response_arguments_evidence = .{};
+        self.state.response_arguments_digest = .{ .bytes = @splat(0) };
         self.state.task_phase = .awaiting_model;
         return prepared;
     }
@@ -349,7 +349,7 @@ pub const Core = struct {
             .offset = parsed.arguments_offset,
             .length = parsed.arguments_length,
         };
-        self.state.response_arguments_evidence = parsed.arguments_evidence;
+        self.state.response_arguments_digest = parsed.arguments_digest;
         self.state.task_phase = switch (parsed.disposition) {
             .final_answer => .final_candidate,
             .tool_call => .awaiting_tool,

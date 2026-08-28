@@ -2710,7 +2710,7 @@ fn readAdmittedResponseArguments(
         response.arguments.contentWindow(),
         out,
     );
-    return model_contract.strictToolJsonFromEvidence(bytes, response.arguments.evidence);
+    return model_contract.strictToolJsonFromEvidence(bytes, response.arguments.digest);
 }
 
 fn readAndVerifyModelResponse(
@@ -3371,12 +3371,12 @@ fn expectPatchArgumentBoundary(
 test "Host owns one semantic validation workspace independent of Activation Slot capacity" {
     var host: Host = .{};
     const HostFour = HostWithCapacity(4);
-    try std.testing.expectEqual(@as(usize, 256_424), semantic_validation_workspace_size);
-    try std.testing.expectEqual(@as(usize, 256_448), @sizeOf(SemanticValidationWorkspacePool));
+    try std.testing.expectEqual(@as(usize, 256_416), semantic_validation_workspace_size);
+    try std.testing.expectEqual(@as(usize, 256_440), @sizeOf(SemanticValidationWorkspacePool));
     try std.testing.expectEqual(@as(usize, 16_384), @sizeOf(PatchWorkspace));
     try std.testing.expectEqual(@as(usize, 16_408), @sizeOf(PatchWorkspacePool));
-    try std.testing.expectEqual(@as(usize, 281_232), @sizeOf(Host));
-    try std.testing.expectEqual(@as(usize, 306_336), @sizeOf(HostFour));
+    try std.testing.expectEqual(@as(usize, 281_224), @sizeOf(Host));
+    try std.testing.expectEqual(@as(usize, 306_328), @sizeOf(HostFour));
     try std.testing.expectEqual(@as(usize, 8_360), @sizeOf(core_image.ActivationSlot));
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
@@ -3410,9 +3410,9 @@ test "Host resource ledger measures each fixed scratch stage" {
     try std.testing.expectEqual(@as(usize, model_protocol.max_response_size), initial.semantic_validation.response_bytes);
     try std.testing.expectEqual(@sizeOf(model_operation.ToolDefinitionBuffer), initial.semantic_validation.tool_definition_bytes);
     try std.testing.expectEqual(@sizeOf(model_protocol.ValidationScratch), initial.semantic_validation.validation_scratch_bytes);
-    try std.testing.expectEqual(@as(usize, 256_424), initial.semantic_validation.workspace_bytes);
+    try std.testing.expectEqual(@as(usize, 256_416), initial.semantic_validation.workspace_bytes);
     try std.testing.expectEqual(@as(usize, 24), initial.semantic_validation.pool_overhead_bytes);
-    try std.testing.expectEqual(@as(usize, 256_448), initial.semantic_validation.reservation_bytes);
+    try std.testing.expectEqual(@as(usize, 256_440), initial.semantic_validation.reservation_bytes);
     try std.testing.expectEqual(@as(usize, 0), initial.semantic_validation.occupied_count);
     try std.testing.expectEqual(@as(usize, 0), initial.semantic_validation.occupied_high_water_count);
     try std.testing.expectEqual(@as(u64, 0), initial.semantic_validation.acquisition_count);

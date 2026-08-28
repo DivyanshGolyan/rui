@@ -345,7 +345,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 .offset = model_protocol.header_size + model_contract.bash_key.len,
                 .length = arguments.len,
             };
-            expected.response_arguments_evidence = model_contract.strictToolJsonEvidence(arguments);
+            expected.response_arguments_digest = model_contract.strictToolJsonDigest(arguments);
             expected.task_phase = .awaiting_tool;
             try expectResponse(interpreted, expected);
             try expectStateAndRestore(&core, expected, poison);
@@ -367,7 +367,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             expected.response_text = .{};
             expected.response_tool_key = .{};
             expected.response_arguments = .{};
-            expected.response_arguments_evidence = .{};
+            expected.response_arguments_digest = .{ .bytes = @splat(0) };
             expected.task_phase = .awaiting_model;
             try expectOperation(second, expected);
             try expectStateAndRestore(&core, expected, poison);
@@ -543,7 +543,7 @@ fn responseView(state: core_state.State) core_image.Response {
         .arguments = .{
             .offset = state.response_arguments.offset,
             .length = state.response_arguments.length,
-            .evidence = state.response_arguments_evidence,
+            .digest = state.response_arguments_digest,
         },
     };
 }

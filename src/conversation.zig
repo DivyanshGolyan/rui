@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const contract = @import("model_contract.zig");
 
 pub const call_header_size: usize = 48;
@@ -28,7 +29,7 @@ pub const ToolResult = struct {
 pub const ToolCallHeader = struct {
     key_length: u16,
     arguments_length: u32,
-    arguments_evidence: contract.StrictToolJsonEvidence,
+    arguments_digest: binding.StrictToolJsonV1,
 };
 
 pub const ToolResultHeader = struct {
@@ -60,11 +61,10 @@ pub fn encodeToolCallHeader(
     out: []u8,
     key_length: usize,
     arguments_length: usize,
-    arguments_evidence: contract.StrictToolJsonEvidence,
+    arguments_digest: binding.StrictToolJsonV1,
 ) ![]const u8 {
     if (out.len < call_header_size or key_length == 0 or key_length > contract.max_tool_key_size or
-        arguments_length == 0 or arguments_length > contract.max_tool_arguments_envelope_size or
-        !arguments_evidence.validForLength(@intCast(arguments_length)))
+        arguments_length == 0 or arguments_length > contract.max_tool_arguments_envelope_size)
     {
         return error.InvalidToolCall;
     }
@@ -73,7 +73,7 @@ pub fn encodeToolCallHeader(
     write(u16, out, 8, call_version);
     write(u16, out, 10, @intCast(key_length));
     write(u32, out, 12, @intCast(arguments_length));
-    @memcpy(out[16..48], &arguments_evidence.digest);
+    @memcpy(out[16..48], &arguments_digest.bytes);
     return out[0..call_header_size];
 }
 
@@ -87,15 +87,11 @@ pub fn decodeToolCallHeader(bytes: []const u8, total_length: u64) !ToolCallHeade
     const header: ToolCallHeader = .{
         .key_length = read(u16, bytes, 10),
         .arguments_length = read(u32, bytes, 12),
-        .arguments_evidence = .{
-            .digest = bytes[16..48].*,
-            .length = read(u32, bytes, 12),
-        },
+        .arguments_digest = .{ .bytes = bytes[16..48].* },
     };
     if (header.key_length == 0 or header.key_length > contract.max_tool_key_size or
         header.arguments_length == 0 or
         header.arguments_length > contract.max_tool_arguments_envelope_size or
-        !header.arguments_evidence.validForLength(header.arguments_length) or
         call_header_size + @as(u64, header.key_length) + header.arguments_length != total_length)
     {
         return error.InvalidToolCall;
@@ -107,7 +103,7 @@ pub fn decodeToolCall(bytes: []const u8) !ToolCall {
     const header = try decodeToolCallHeader(bytes, bytes.len);
     const key_length: usize = header.key_length;
     const arguments = bytes[call_header_size + key_length ..];
-    _ = try contract.strictToolJsonFromEvidence(arguments, header.arguments_evidence);
+    _ = try contract.strictToolJsonFromEvidence(arguments, header.arguments_digest);
     const call: ToolCall = .{
         .key = bytes[call_header_size..][0..key_length],
         .arguments = arguments,

@@ -990,7 +990,7 @@ pub const Session = struct {
                 if (!binding.eql(
                     binding.StrictToolJsonV1,
                     hasher.final(),
-                    .{ .bytes = header.arguments_evidence.digest },
+                    header.arguments_digest,
                 )) return error.InvalidConversationContent;
             },
             .tool_result => {
@@ -2971,7 +2971,7 @@ test "tool-call recovery trusts admitted exact-byte identity without reparsing J
         &call,
         key.len,
         admitted_arguments.len,
-        model_contract.strictToolJsonEvidence(admitted_arguments),
+        model_contract.strictToolJsonDigest(admitted_arguments),
     );
     @memcpy(call[conversation.call_header_size..][0..key.len], key);
     @memcpy(call[conversation.call_header_size + key.len ..], admitted_arguments);
