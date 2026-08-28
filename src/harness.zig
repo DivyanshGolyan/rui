@@ -706,6 +706,7 @@ const HarnessState = struct {
             error.EmptyModelResponse,
             error.MultipleModelTools,
             error.UnknownModelFailure,
+            error.InteractionRequestLayerRequired,
             => true,
             else => false,
         };
@@ -1335,5 +1336,77 @@ test "known provider failure is one durable terminal Result" {
     _ = try restored.drive();
     const regenerated = try restored.drive();
     try std.testing.expectEqual(State.failed, regenerated.state);
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+}
+
+test "input request fails terminally until the durable interaction layer exists" {
+    const IgnoreFacts = struct {
+        fn apply(_: *anyopaque, _: session_transition.Fact) !void {}
+    };
+    const InputProvider = struct {
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestReader,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var buffer: [model_protocol.max_response_size]u8 = undefined;
+            const encoded = try model_protocol.encodeInputText(&buffer, "Which migration should I use?");
+            try response.append(encoded);
+            try response.finish();
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var provider: InputProvider = .{};
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:input-request",
+            .task = "task",
+            .provider = provider.provider(),
+        } },
+    });
+    _ = try owner.drive();
+    const owner_state = harnessState(owner);
+    const session_id = owner_state.session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    const waiting = try owner.drive();
+    try std.testing.expectEqual(State.waiting, waiting.state);
+    const failed = try owner.drive();
+    try std.testing.expectEqual(State.failed, failed.state);
+    try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
+    var ignored: u8 = 0;
+    const ledger = try owner_state.session.?.inspectSemantic(&ignored, IgnoreFacts.apply);
+    const durable_core = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
+    try std.testing.expectEqual(core_state.TaskPhase.failed, durable_core.task_phase);
+    try std.testing.expectEqual(model_protocol.Disposition.input_request, durable_core.response_disposition);
+    try std.testing.expectEqual(@as(u64, 1), owner_state.session.?.entryCount());
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+    owner.close();
+
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .provider = provider.provider(),
+        } },
+    });
+    defer restored.close();
+    _ = try restored.drive();
+    const regenerated = try restored.drive();
+    try std.testing.expectEqual(State.failed, regenerated.state);
+    try std.testing.expectEqual(@as(u64, 1), harnessState(restored).session.?.entryCount());
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }

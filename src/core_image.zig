@@ -345,7 +345,9 @@ pub const Core = struct {
         self.state.task_phase = switch (parsed.disposition) {
             .final_answer => .final_candidate,
             .tool_call => .awaiting_tool,
-            .input_request => .awaiting_input,
+            // Issue #38 replaces this terminal boundary with the atomic
+            // Conversation and durable Interaction Request transition.
+            .input_request => .failed,
             .failure => .failed,
         };
         return self.response();

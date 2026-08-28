@@ -224,7 +224,7 @@ fn decodeInput(bytes: []const u8, prompt: []const u8, options: []const u8, reaso
         .text_length = @intCast(prompt.len),
         .input_shape = shape,
         .option_count = count,
-        .options_offset = @intCast(header_size + prompt.len),
+        .options_offset = if (options.len == 0) 0 else @intCast(header_size + prompt.len),
         .options_length = @intCast(options.len),
     };
 }
@@ -253,7 +253,10 @@ test "complete normalized responses cover every V1 disposition" {
     const tool = parse(try encodeTool(&bytes, "fixture.tool", "{\"value\":1}"));
     try std.testing.expectEqual(Disposition.tool_call, tool.disposition);
     try std.testing.expectEqualStrings("fixture.tool", bytes[tool.tool_key_offset..][0..tool.tool_key_length]);
-    try std.testing.expectEqual(Disposition.input_request, parse(try encodeInputText(&bytes, "Which migration should I use?")).disposition);
+    const text_input = parse(try encodeInputText(&bytes, "Which migration should I use?"));
+    try std.testing.expectEqual(Disposition.input_request, text_input.disposition);
+    try std.testing.expectEqual(@as(u32, 0), text_input.options_offset);
+    try std.testing.expectEqual(@as(u32, 0), text_input.options_length);
     const choices = [_]Choice{
         .{ .id = "existing", .label = "Use the existing migration" },
         .{ .id = "new", .label = "Create a new migration" },

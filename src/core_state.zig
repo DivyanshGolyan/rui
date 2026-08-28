@@ -269,31 +269,36 @@ fn validateResponse(state: State) !void {
                 return error.InvalidResponseState;
             }
         },
-        .awaiting_input => {
-            if (state.response_disposition != .input_request or
-                state.response_failure != .none or state.response_input_shape == 0 or
-                state.response_text.length == 0 or state.response_tool_key.length != 0 or
-                state.response_arguments.length != 0 or
-                (state.response_input_shape == 1 and
-                    (state.response_option_count != 0 or state.response_options.length != 0)) or
-                (state.response_input_shape == 2 and
-                    (state.response_option_count == 0 or state.response_options.length == 0)) or
-                state.response_input_shape > 2)
-            {
-                return error.InvalidResponseState;
-            }
-        },
+        .awaiting_input => try validateInputResponse(state),
         .failed => {
-            if (state.response_disposition != .failure or
-                state.response_failure == .none or state.response_input_shape != 0 or
-                state.response_option_count != 0 or state.response_tool_key.length != 0 or
-                state.response_text.length != 0 or state.response_arguments.length != 0 or
-                state.response_options.length != 0)
-            {
-                return error.InvalidResponseState;
+            switch (state.response_disposition) {
+                .input_request => try validateInputResponse(state),
+                .failure => if (state.response_failure == .none or state.response_input_shape != 0 or
+                    state.response_option_count != 0 or state.response_tool_key.length != 0 or
+                    state.response_text.length != 0 or state.response_arguments.length != 0 or
+                    state.response_options.length != 0)
+                {
+                    return error.InvalidResponseState;
+                },
+                else => return error.InvalidResponseState,
             }
         },
         .idle, .awaiting_model => return error.InvalidResponseState,
+    }
+}
+
+fn validateInputResponse(state: State) !void {
+    if (state.response_disposition != .input_request or
+        state.response_failure != .none or state.response_input_shape == 0 or
+        state.response_text.length == 0 or state.response_tool_key.length != 0 or
+        state.response_arguments.length != 0 or
+        (state.response_input_shape == 1 and
+            (state.response_option_count != 0 or state.response_options.length != 0)) or
+        (state.response_input_shape == 2 and
+            (state.response_option_count == 0 or state.response_options.length == 0)) or
+        state.response_input_shape > 2)
+    {
+        return error.InvalidResponseState;
     }
 }
 

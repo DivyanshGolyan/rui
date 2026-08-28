@@ -19,6 +19,12 @@ closed. An `input_request` instead atomically commits assistant prompt text and 
 Request; it creates no Action, Attempt, Authorization, or external effect. OnePage does not add runtime tool registration, MCP execution, plugins, or a generic effect
 executor before a concrete product use requires them.
 
+Issue #38 owns that atomic Conversation and Interaction Request transition. Before that layer is
+available, the lifecycle validates and isolates a complete `input_request`, creates no Action or
+Conversation entry, and commits a terminal Core phase reported as `InteractionRequestLayerRequired`.
+It preserves the normalized response metadata but must not expose an awaiting-input state that has no
+durable request or response path.
+
 The split is necessary now because both the deterministic fixture and Codex Provider must
 consume the same request without understanding tool-specific durable encodings. It preserves a small
 provider seam while retaining ADR-0005's closed V1 product surface and ADR-0010's simplicity rule.

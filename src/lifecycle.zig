@@ -882,7 +882,10 @@ pub fn advanceRestored(
             null,
         );
     }
-    if (outcome == .awaiting_input) return error.InputRequestDisposition;
+    // Issue #38 owns the atomic Conversation append and durable Interaction
+    // Request. Until that layer exists, the normalized disposition terminates
+    // explicitly instead of exposing an unbacked waiting state.
+    if (outcome == .awaiting_input) return error.InteractionRequestLayerRequired;
     if (outcome == .awaiting_tool) {
         switch (try reconcileToolCall(
             session,
@@ -952,7 +955,11 @@ pub fn advanceRestored(
             },
         }
     }
-    if (outcome == .failed) return modelFailure(@intFromEnum((try core.reducer.response()).failure));
+    if (outcome == .failed) {
+        const response = try core.reducer.response();
+        if (response.disposition == .input_request) return error.InteractionRequestLayerRequired;
+        return modelFailure(@intFromEnum(response.failure));
+    }
     if (outcome == .finished) {
         const entry_id = (try core.reducer.task()).final_entry_id;
         if (entry_id != session.activeLeafId()) return error.FinalEntryMismatch;
@@ -2714,7 +2721,7 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
         input,
         6,
     );
-    try std.testing.expectEqual(core_state.TaskPhase.awaiting_input, (try core.reducer.task()).phase);
+    try std.testing.expectEqual(core_state.TaskPhase.failed, (try core.reducer.task()).phase);
     try std.testing.expectError(error.UnboundToolKey, executableToolFromKey(""));
 }
 
