@@ -1410,7 +1410,7 @@ pub fn advanceRestored(
     if (outcome == .failed) {
         const response = try core.reducer.response();
         if (response.disposition == .input_request) return error.InteractionRequestLayerRequired;
-        return modelFailure(@intFromEnum(response.failure));
+        return error.TerminalModelFailure;
     }
     if (outcome == .finished) {
         const entry_id = (try core.reducer.task()).final_entry_id;
@@ -3138,20 +3138,6 @@ fn allocateOperationIds(io: std.Io, session: *const session_store.Session) !Oper
         if (distinct) return ids;
     }
     return error.OperationIdentityAllocationExhausted;
-}
-
-fn modelFailure(value: u32) anyerror {
-    return switch (value) {
-        1 => error.ModelResponseTruncated,
-        2 => error.ModelResponseAborted,
-        3 => error.ModelProviderFailed,
-        4 => error.MalformedModelResponse,
-        5 => error.EmptyModelResponse,
-        6 => error.MultipleModelOutputs,
-        7 => error.ModelResponseOversized,
-        8 => error.UnknownModelTool,
-        else => error.UnknownModelFailure,
-    };
 }
 
 test "committed typed child descriptors select execution without captured output" {

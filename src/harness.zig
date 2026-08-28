@@ -592,7 +592,7 @@ const HarnessState = struct {
             error.BashPossiblyExecuted,
             => {},
             else => {
-                if (!isModelFailure(err)) {
+                if (!isTerminalLifecycleFailure(err)) {
                     self.setState(.unavailable);
                     return err;
                 }
@@ -648,7 +648,7 @@ const HarnessState = struct {
             },
             else => {},
         }
-        if (isModelFailure(err)) {
+        if (isTerminalLifecycleFailure(err)) {
             self.setState(.failed);
             result.state = .failed;
             result.projections[0] = self.failureProjection();
@@ -694,21 +694,9 @@ const HarnessState = struct {
         return result;
     }
 
-    fn isModelFailure(err: anyerror) bool {
-        return switch (err) {
-            error.ModelResponseTruncated,
-            error.ModelResponseAborted,
-            error.ModelProviderFailed,
-            error.MalformedModelResponse,
-            error.EmptyModelResponse,
-            error.MultipleModelOutputs,
-            error.ModelResponseOversized,
-            error.UnknownModelTool,
-            error.UnknownModelFailure,
-            error.InteractionRequestLayerRequired,
-            => true,
-            else => false,
-        };
+    fn isTerminalLifecycleFailure(err: anyerror) bool {
+        return err == error.TerminalModelFailure or
+            err == error.InteractionRequestLayerRequired;
     }
 
     fn failureProjection(self: *HarnessState) Projection {
@@ -1490,7 +1478,7 @@ test "malformed captured output becomes one durable terminal failure" {
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }
 
-test "every committed model failure produces the failed Harness projection" {
+test "typed durable model failures share one failed Harness projection" {
     const Candidate = union(enum) {
         failure: model_protocol.Failure,
         unknown_tool,
