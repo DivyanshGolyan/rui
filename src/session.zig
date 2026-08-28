@@ -564,6 +564,10 @@ pub const BlobReader = struct {
         return self.reader.meta.length;
     }
 
+    pub fn digest(self: *const BlobReader) binding.Blob {
+        return self.reader.meta.digest;
+    }
+
     pub fn readWindow(self: *BlobReader, offset: u64, out: []u8) ![]const u8 {
         if (!self.open) return error.BlobReaderClosed;
         try self.session.ensureUsable();
@@ -577,6 +581,45 @@ pub const BlobReader = struct {
         self.open = false;
     }
 };
+
+fn readExactConversationWindow(reader: *BlobReader, offset: u64, out: []u8) !void {
+    if ((try reader.readWindow(offset, out)).len != out.len) return error.InvalidConversationContent;
+}
+
+fn validateUtf8ConversationWindows(reader: *BlobReader, start: u64, length: u64) !void {
+    var window: [4096]u8 = undefined;
+    var sequence: [4]u8 = undefined;
+    var sequence_length: u3 = 0;
+    var sequence_size: u3 = 0;
+    var consumed: u64 = 0;
+    while (consumed < length) {
+        const wanted: usize = @intCast(@min(length - consumed, window.len));
+        const bytes = try reader.readWindow(start + consumed, window[0..wanted]);
+        if (bytes.len != wanted) return error.InvalidConversationContent;
+        for (bytes) |byte| {
+            if (sequence_length == 0) {
+                const size = std.unicode.utf8ByteSequenceLength(byte) catch
+                    return error.InvalidConversationContent;
+                if (size == 1) continue;
+                sequence[0] = byte;
+                sequence_length = 1;
+                sequence_size = @intCast(size);
+            } else {
+                sequence[sequence_length] = byte;
+                sequence_length += 1;
+                if (sequence_length == sequence_size) {
+                    if (!std.unicode.utf8ValidateSlice(sequence[0..sequence_size])) {
+                        return error.InvalidConversationContent;
+                    }
+                    sequence_length = 0;
+                    sequence_size = 0;
+                }
+            }
+        }
+        consumed += bytes.len;
+    }
+    if (sequence_length != 0) return error.InvalidConversationContent;
+}
 
 pub const Session = struct {
     io: std.Io,
@@ -629,7 +672,8 @@ pub const Session = struct {
     ) !Session {
         try config.identities.validate();
         if (config.workspace_path.len == 0 or config.workspace_path.len > workspace_path_capacity or
-            config.model.len == 0 or config.model.len > model_name_capacity or config.task.len == 0)
+            config.model.len == 0 or config.model.len > model_name_capacity or
+            !std.unicode.utf8ValidateSlice(config.model) or config.task.len == 0)
         {
             return error.InvalidSessionMetadata;
         }
@@ -905,25 +949,48 @@ pub const Session = struct {
         defer reader.close();
         const maximum: usize = switch (kind) {
             .tool_call => conversation.call_header_size + model_contract.max_tool_key_size +
-                model_contract.max_arguments_size,
+                model_contract.max_tool_arguments_envelope_size,
             .tool_result => conversation.result_header_size + conversation.max_result_content_size,
             .user_text, .assistant_text, .context_checkpoint => conversation.max_result_content_size,
         };
         if (reader.length() == 0 or reader.length() > maximum) return error.InvalidConversationContent;
-        var bytes: [conversation.result_header_size + conversation.max_result_content_size]u8 = undefined;
-        const length: usize = @intCast(reader.length());
-        const content = try reader.readWindow(0, bytes[0..length]);
-        if (content.len != length) return error.InvalidConversationContent;
         switch (kind) {
-            .tool_call => _ = conversation.decodeToolCall(content) catch return error.InvalidConversationContent,
+            .tool_call => {
+                var header_bytes: [conversation.call_header_size]u8 = undefined;
+                try readExactConversationWindow(&reader, 0, &header_bytes);
+                const header = conversation.decodeToolCallHeader(&header_bytes, reader.length()) catch
+                    return error.InvalidConversationContent;
+                var key: [model_contract.max_tool_key_size]u8 = undefined;
+                try readExactConversationWindow(
+                    &reader,
+                    conversation.call_header_size,
+                    key[0..header.key_length],
+                );
+                model_contract.validateToolKey(key[0..header.key_length]) catch
+                    return error.InvalidConversationContent;
+                var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+                try readExactConversationWindow(
+                    &reader,
+                    conversation.call_header_size + @as(u64, header.key_length),
+                    arguments[0..header.arguments_length],
+                );
+                if (!model_contract.canonicalJson(arguments[0..header.arguments_length])) {
+                    return error.InvalidConversationContent;
+                }
+            },
             .tool_result => {
-                const result = conversation.decodeToolResult(content) catch
+                var header_bytes: [conversation.result_header_size]u8 = undefined;
+                try readExactConversationWindow(&reader, 0, &header_bytes);
+                const result = conversation.decodeToolResultHeader(&header_bytes, reader.length()) catch
                     return error.InvalidConversationContent;
                 if (result.parent_id != parent_id) return error.InvalidConversationParent;
+                try validateUtf8ConversationWindows(
+                    &reader,
+                    conversation.result_header_size,
+                    result.content_length,
+                );
             },
-            .user_text, .assistant_text, .context_checkpoint => if (!std.unicode.utf8ValidateSlice(content)) {
-                return error.InvalidConversationContent;
-            },
+            .user_text, .assistant_text, .context_checkpoint => try validateUtf8ConversationWindows(&reader, 0, reader.length()),
         }
     }
 
@@ -1500,6 +1567,18 @@ fn initTestGitWorktree(dir: std.Io.Dir, io: std.Io) !void {
     var head = try git_dir.createFile(io, "HEAD", .{});
     defer head.close(io);
     try head.writePositionalAll(io, "ref: refs/heads/main\n", 0);
+}
+
+test "Session creation rejects a non-UTF-8 model identity" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var config = testConfig(layout.workspacePath(), 15);
+    config.model = "fixture:\xff";
+    try std.testing.expectError(
+        error.InvalidSessionMetadata,
+        Session.createExact(layout.sessions, &layout.storage, io, config),
+    );
 }
 
 const TestLayout = struct {
@@ -2759,6 +2838,29 @@ test "conversation grammar rejects orphaned and unpaired tool entries during rec
     try std.testing.expectError(
         error.InvalidConversationGrammar,
         awaiting_result.applyingLedger(non_result, 1, 1),
+    );
+}
+
+test "Conversation UTF-8 validation carries split sequences across bounded windows" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 25));
+    defer created.close();
+    var content: [4098]u8 = @splat('a');
+    @memcpy(content[4095..], "€");
+    try created.storeBlob(990, &content);
+    var valid = try created.openBlob(990);
+    defer valid.close();
+    try validateUtf8ConversationWindows(&valid, 0, valid.length());
+
+    content[4096] = 'x';
+    try created.storeBlob(991, &content);
+    var invalid = try created.openBlob(991);
+    defer invalid.close();
+    try std.testing.expectError(
+        error.InvalidConversationContent,
+        validateUtf8ConversationWindows(&invalid, 0, invalid.length()),
     );
 }
 

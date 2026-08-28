@@ -2,12 +2,17 @@ const std = @import("std");
 const binding = @import("binding.zig");
 
 pub const max_tool_key_size: usize = 32;
-pub const max_provider_name_size: usize = 64;
+pub const max_provider_tool_name_size: usize = 64;
 pub const max_description_size: usize = 1024;
 pub const max_schema_size: usize = 4096;
 pub const max_result_contract_size: usize = 1024;
 pub const max_tool_count: usize = 8;
-pub const max_arguments_size: usize = 16 * 1024;
+pub const max_patch_input_size: usize = 16 * 1024;
+/// One decoded patch byte can require a six-byte JSON Unicode escape. The
+/// envelope bound therefore preserves the full advertised patch capability
+/// even for the maximally escaped canonical representation.
+pub const max_tool_arguments_envelope_size: usize =
+    6 * max_patch_input_size + "{\"patch\":\"\"}".len;
 pub const max_prompt_size: usize = 2048;
 pub const max_input_text_size: usize = 4096;
 pub const max_choice_count: usize = 8;
@@ -24,7 +29,7 @@ pub const InputShape = enum(u8) {
 
 pub const ToolDefinition = struct {
     key: []const u8,
-    provider_name: []const u8,
+    provider_tool_name: []const u8,
     description: []const u8,
     input_schema: []const u8,
     result_contract: []const u8,
@@ -51,14 +56,14 @@ const patch_schema =
 pub const default_catalog = [_]ToolDefinition{
     .{
         .key = bash_key,
-        .provider_name = "bash",
+        .provider_tool_name = "bash",
         .description = "Run one bounded Bash command in the Job Workspace.",
         .input_schema = bash_schema,
         .result_contract = "Bounded UTF-8 text containing status, exit code, and base64 stdout and stderr.",
     },
     .{
         .key = apply_patch_key,
-        .provider_name = "apply_patch",
+        .provider_tool_name = "apply_patch",
         .description = "Apply one bounded patch to one regular file in the Job Workspace.",
         .input_schema = patch_schema,
         .result_contract = "Bounded UTF-8 text containing the patch disposition.",
@@ -77,20 +82,20 @@ pub fn validateCatalog(catalog: []const ToolDefinition) !void {
     if (catalog.len == 0 or catalog.len > max_tool_count) return error.InvalidToolCatalog;
     for (catalog, 0..) |definition, index| {
         try validateToolKey(definition.key);
-        if (definition.provider_name.len == 0 or
-            definition.provider_name.len > max_provider_name_size or
+        if (definition.provider_tool_name.len == 0 or
+            definition.provider_tool_name.len > max_provider_tool_name_size or
             definition.description.len == 0 or definition.description.len > max_description_size or
             definition.input_schema.len == 0 or definition.input_schema.len > max_schema_size or
             definition.result_contract.len == 0 or
             definition.result_contract.len > max_result_contract_size or
-            !utf8Valid(definition.provider_name) or !utf8Valid(definition.description) or
+            !utf8Valid(definition.provider_tool_name) or !utf8Valid(definition.description) or
             !utf8Valid(definition.result_contract) or !canonicalJson(definition.input_schema))
         {
             return error.InvalidToolCatalog;
         }
         for (catalog[0..index]) |earlier| {
             if (std.mem.eql(u8, earlier.key, definition.key)) return error.DuplicateToolKey;
-            if (std.mem.eql(u8, earlier.provider_name, definition.provider_name)) {
+            if (std.mem.eql(u8, earlier.provider_tool_name, definition.provider_tool_name)) {
                 return error.AmbiguousProviderToolName;
             }
         }
@@ -99,12 +104,12 @@ pub fn validateCatalog(catalog: []const ToolDefinition) !void {
 
 pub fn keyForProviderName(catalog: []const ToolDefinition, name: []const u8) ![]const u8 {
     try validateCatalog(catalog);
-    if (name.len == 0 or name.len > max_provider_name_size or !utf8Valid(name)) {
+    if (name.len == 0 or name.len > max_provider_tool_name_size or !utf8Valid(name)) {
         return error.UnknownProviderToolName;
     }
     var match: ?[]const u8 = null;
     for (catalog) |definition| {
-        if (std.mem.eql(u8, definition.provider_name, name)) {
+        if (std.mem.eql(u8, definition.provider_tool_name, name)) {
             if (match != null) return error.AmbiguousProviderToolName;
             match = definition.key;
         }
@@ -120,7 +125,7 @@ pub fn catalogDigest(catalog: []const ToolDefinition) !binding.ToolCatalog {
     hasher.update(&count);
     for (catalog) |definition| {
         hashField(&hasher, definition.key);
-        hashField(&hasher, definition.provider_name);
+        hashField(&hasher, definition.provider_tool_name);
         hashField(&hasher, definition.description);
         hashField(&hasher, definition.input_schema);
         hashField(&hasher, definition.result_contract);
@@ -136,19 +141,34 @@ fn hashField(hasher: *binding.Hasher(binding.ToolCatalog), bytes: []const u8) vo
 }
 
 pub fn canonicalJson(bytes: []const u8) bool {
-    if (bytes.len == 0 or bytes.len > max_arguments_size or !utf8Valid(bytes)) return false;
-    var arena_bytes: [48 * 1024]u8 = undefined;
+    if (bytes.len == 0 or bytes.len > max_tool_arguments_envelope_size or !utf8Valid(bytes)) return false;
+    var arena_bytes: [max_tool_arguments_envelope_size + 48 * 1024]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
     var parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), bytes, .{
-        .max_value_len = max_arguments_size,
+        .max_value_len = max_tool_arguments_envelope_size,
         .allocate = .alloc_always,
     }) catch return false;
     defer parsed.deinit();
-    var canonical: [max_arguments_size]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&canonical);
-    std.json.Stringify.value(parsed.value, .{}, &writer) catch return false;
-    return std.mem.eql(u8, writer.buffered(), bytes);
+    var hash_buffer: [4096]u8 = undefined;
+    var canonical = std.Io.Writer.Hashing(CountingSha256).initHasher(.{}, &hash_buffer);
+    std.json.Stringify.value(parsed.value, .{}, &canonical.writer) catch return false;
+    canonical.writer.flush() catch return false;
+    var expected: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &expected, .{});
+    var actual: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    canonical.hasher.hash.final(&actual);
+    return canonical.hasher.length == bytes.len and std.mem.eql(u8, &actual, &expected);
 }
+
+const CountingSha256 = struct {
+    hash: std.crypto.hash.sha2.Sha256 = .init(.{}),
+    length: usize = 0,
+
+    pub fn update(self: *CountingSha256, bytes: []const u8) void {
+        self.hash.update(bytes);
+        self.length += bytes.len;
+    }
+};
 
 pub fn encodeJson(out: []u8, value: anytype) ![]const u8 {
     var writer = std.Io.Writer.fixed(out);
@@ -180,7 +200,7 @@ test "duplicate and ambiguous catalog definitions fail closed" {
     const duplicate_keys = [_]ToolDefinition{ default_catalog[0], default_catalog[0] };
     try std.testing.expectError(error.DuplicateToolKey, validateCatalog(&duplicate_keys));
     var ambiguous = default_catalog;
-    ambiguous[1].provider_name = ambiguous[0].provider_name;
+    ambiguous[1].provider_tool_name = ambiguous[0].provider_tool_name;
     try std.testing.expectError(error.AmbiguousProviderToolName, validateCatalog(&ambiguous));
 }
 

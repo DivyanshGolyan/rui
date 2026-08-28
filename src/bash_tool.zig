@@ -68,6 +68,13 @@ pub const ResultView = struct {
     stderr: []const u8,
 };
 
+pub const ResultHeader = struct {
+    status: Status,
+    exit_code: u8,
+    stdout_length: u32,
+    stderr_length: u32,
+};
+
 pub const Control = struct {
     cancelled: ?*const std.atomic.Value(bool) = null,
     bash_path: []const u8 = "/bin/bash",
@@ -377,7 +384,20 @@ fn terminateGroup(child: *std.process.Child, io: std.Io) void {
 pub fn encodeResult(out: []u8, execution: Execution) ![]const u8 {
     const total = result_header_size + execution.stdout.len + execution.stderr.len;
     if (total > out.len) return error.ResultBufferTooSmall;
-    @memset(out[0..total], 0);
+    _ = try encodeResultHeader(out[0..result_header_size], execution);
+    const stdout_end = result_header_size + execution.stdout.len;
+    @memcpy(out[result_header_size..stdout_end], execution.stdout);
+    @memcpy(out[stdout_end..total], execution.stderr);
+    return out[0..total];
+}
+
+pub fn encodeResultHeader(out: []u8, execution: Execution) ![]const u8 {
+    if (out.len < result_header_size or execution.stdout.len > max_output_size or
+        execution.stderr.len > max_output_size)
+    {
+        return error.InvalidBashResult;
+    }
+    @memset(out[0..result_header_size], 0);
     @memcpy(out[0..result_magic.len], result_magic);
     write(u16, out, 8, version);
     write(u16, out, 10, result_header_size);
@@ -385,24 +405,20 @@ pub fn encodeResult(out: []u8, execution: Execution) ![]const u8 {
     out[13] = execution.exit_code;
     write(u32, out, 16, @intCast(execution.stdout.len));
     write(u32, out, 20, @intCast(execution.stderr.len));
-    const stdout_end = result_header_size + execution.stdout.len;
-    @memcpy(out[result_header_size..stdout_end], execution.stdout);
-    @memcpy(out[stdout_end..total], execution.stderr);
-    return out[0..total];
+    return out[0..result_header_size];
 }
 
 pub fn decodeResult(bytes: []const u8) !ResultView {
-    const status = try decodeResultHeader(bytes, bytes.len);
-    const stdout_length: usize = read(u32, bytes, 16);
+    const header = try decodeResultHeader(bytes, bytes.len);
     return .{
-        .status = status,
-        .exit_code = bytes[13],
-        .stdout = bytes[result_header_size..][0..stdout_length],
-        .stderr = bytes[result_header_size + stdout_length ..],
+        .status = header.status,
+        .exit_code = header.exit_code,
+        .stdout = bytes[result_header_size..][0..header.stdout_length],
+        .stderr = bytes[result_header_size + header.stdout_length ..],
     };
 }
 
-pub fn decodeResultHeader(bytes: []const u8, total_length: u64) !Status {
+pub fn decodeResultHeader(bytes: []const u8, total_length: u64) !ResultHeader {
     if (bytes.len < result_header_size or
         !std.mem.eql(u8, bytes[0..result_magic.len], result_magic) or
         read(u16, bytes, 8) != version or read(u16, bytes, 10) != result_header_size or
@@ -422,12 +438,16 @@ pub fn decodeResultHeader(bytes: []const u8, total_length: u64) !Status {
         9 => .spawn_error,
         else => return error.InvalidBashResult,
     };
-    const stdout_length: u64 = read(u32, bytes, 16);
-    const stderr_length: u64 = read(u32, bytes, 20);
-    if (result_header_size + stdout_length + stderr_length != total_length) {
+    const header: ResultHeader = .{
+        .status = status,
+        .exit_code = bytes[13],
+        .stdout_length = read(u32, bytes, 16),
+        .stderr_length = read(u32, bytes, 20),
+    };
+    if (result_header_size + @as(u64, header.stdout_length) + header.stderr_length != total_length) {
         return error.InvalidBashResult;
     }
-    return status;
+    return header;
 }
 
 fn emptyExecution(allocator: std.mem.Allocator, status: Status) !Execution {

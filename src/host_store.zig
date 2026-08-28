@@ -377,7 +377,8 @@ pub const StorageOwner = struct {
         try descriptor.identities.validate();
         if (descriptor.workspace_path.len == 0 or
             descriptor.workspace_path.len > max_workspace_path_bytes or
-            descriptor.model.len == 0 or descriptor.model.len > max_model_bytes)
+            descriptor.model.len == 0 or descriptor.model.len > max_model_bytes or
+            !std.unicode.utf8ValidateSlice(descriptor.model))
         {
             return error.InvalidSessionMetadata;
         }
@@ -478,6 +479,7 @@ pub const StorageOwner = struct {
             workspace_pointer[0..stored.workspace_path_length],
         );
         @memcpy(stored.model[0..stored.model_length], model_pointer[0..stored.model_length]);
+        if (!std.unicode.utf8ValidateSlice(stored.modelName())) return error.CorruptHostStore;
         if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
         return stored;
     }
@@ -1705,6 +1707,35 @@ test "installed schema retains the exact V1 keys constraints and completion inde
     try owner.expectSchemaSql("table", "conversation_entry", conversation_schema);
     try owner.expectSchemaSql("table", "completion_inbox", completion_schema);
     try owner.expectSchemaSql("index", "completion_inbox_by_session", completion_index_schema);
+}
+
+test "model identity is valid UTF-8 before write and after hostile persistence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+    const identity: SessionIdentity = .{ .session_id = 11, .agent_id = 12, .task_id = 13, .branch_id = 14 };
+    try std.testing.expectError(
+        error.InvalidSessionMetadata,
+        owner.createSessionWithMetadata(.{
+            .identities = identity,
+            .workspace_path = ".",
+            .model = "fixture:\xff",
+        }, initialTransaction(identity)),
+    );
+    try owner.createSessionWithMetadata(.{
+        .identities = identity,
+        .workspace_path = ".",
+        .model = "fixture:valid",
+    }, initialTransaction(identity));
+    try owner.execute("UPDATE session SET model=CAST(X'FF' AS TEXT)");
+    try std.testing.expectError(error.CorruptHostStore, owner.readSession(identity.session_id));
 }
 
 test "admission rolls back before consuming the closure reserve" {

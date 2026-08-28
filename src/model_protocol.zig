@@ -1,8 +1,11 @@
 const std = @import("std");
 const contract = @import("model_contract.zig");
 
-pub const max_response_size = 20 * 1024;
 pub const header_size = 24;
+pub const max_resident_response_size = 20 * 1024;
+pub const max_assistant_text_size = max_resident_response_size - header_size;
+pub const max_response_size = header_size + contract.max_tool_key_size +
+    contract.max_tool_arguments_envelope_size;
 pub const version: u16 = 2;
 const magic = "ONERSP2\x00";
 
@@ -44,7 +47,9 @@ pub fn encodeText(out: []u8, status: Status, text: []const u8) ![]const u8 {
         .provider_error => .provider_error,
         .complete => unreachable,
     });
-    if (text.len == 0 or !contract.utf8Valid(text)) return error.InvalidAssistantText;
+    if (text.len == 0 or text.len > max_assistant_text_size or !contract.utf8Valid(text)) {
+        return error.InvalidAssistantText;
+    }
     return encode(out, .final_answer, .none, 0, 0, text, "");
 }
 
@@ -149,6 +154,7 @@ pub fn parse(bytes: []const u8) Parsed {
     switch (disposition) {
         .final_answer => {
             if (reason != .none or bytes[14] != 0 or bytes[15] != 0 or first.len == 0 or
+                first.len > max_assistant_text_size or
                 second.len != 0 or !contract.utf8Valid(first)) return failed(.malformed);
             return .{ .disposition = .final_answer, .text_offset = header_size, .text_length = @intCast(first.len) };
         },

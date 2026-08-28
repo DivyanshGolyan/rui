@@ -109,7 +109,7 @@ const RequestHistory = struct {
             cursor += tool_header_size;
             const fields = [_][]const u8{
                 definition.key,
-                definition.provider_name,
+                definition.provider_tool_name,
                 definition.description,
                 definition.input_schema,
                 definition.result_contract,
@@ -184,6 +184,27 @@ pub const Descriptor = struct {
     tool_catalog_digest: binding.ToolCatalog,
     model_contract_digest: binding.ModelContract,
 };
+
+pub fn verifyRequestDigest(
+    session: *session_store.Session,
+    request_ref: u64,
+    expected: binding.ModelDescriptor,
+) !void {
+    var request = try session.openBlob(request_ref);
+    defer request.close();
+    var hasher = binding.Hasher(binding.ModelDescriptor).init();
+    var window: [request_window_size]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < request.length()) {
+        const bytes = try request.readWindow(offset, &window);
+        if (bytes.len == 0) return error.TruncatedModelRequest;
+        hasher.update(bytes);
+        offset += bytes.len;
+    }
+    if (!binding.eql(binding.ModelDescriptor, hasher.final(), expected)) {
+        return error.ModelRequestDigestMismatch;
+    }
+}
 
 pub const Provider = struct {
     context: *anyopaque,
@@ -340,13 +361,13 @@ pub fn buildRequest(
     for (model_contract.default_catalog) |definition| {
         var tool_header: [tool_header_size]u8 = @splat(0);
         write(u16, &tool_header, 0, @intCast(definition.key.len));
-        write(u16, &tool_header, 2, @intCast(definition.provider_name.len));
+        write(u16, &tool_header, 2, @intCast(definition.provider_tool_name.len));
         write(u32, &tool_header, 4, @intCast(definition.description.len));
         write(u32, &tool_header, 8, @intCast(definition.input_schema.len));
         write(u32, &tool_header, 12, @intCast(definition.result_contract.len));
         try appendHashed(&writer, &hasher, &total, &tool_header);
         try appendHashed(&writer, &hasher, &total, definition.key);
-        try appendHashed(&writer, &hasher, &total, definition.provider_name);
+        try appendHashed(&writer, &hasher, &total, definition.provider_tool_name);
         try appendHashed(&writer, &hasher, &total, definition.description);
         try appendHashed(&writer, &hasher, &total, definition.input_schema);
         try appendHashed(&writer, &hasher, &total, definition.result_contract);
@@ -463,7 +484,7 @@ pub const ToolFixture = struct {
             0 => blk: {
                 if (entries.len != 1) return error.UnexpectedFixtureRequest;
                 try expectEntry(entries[0], .user_text, self.expected_task);
-                var arguments: [model_contract.max_arguments_size]u8 = undefined;
+                var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
                     &encoded_buffer,
                     fixtureToolKey(self.tool),
@@ -528,7 +549,7 @@ pub const RepairFixture = struct {
         const encoded = switch (history.len) {
             1 => blk: {
                 try expectEntry(history[0], .user_text, self.expected_task);
-                var arguments: [model_contract.max_arguments_size]u8 = undefined;
+                var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
                     &encoded_buffer,
                     model_contract.bash_key,
@@ -538,7 +559,7 @@ pub const RepairFixture = struct {
             3 => blk: {
                 try self.expectPrefix(history, 3);
                 try expectBashResult(history[2], .nonzero_exit, 1);
-                var arguments: [model_contract.max_arguments_size]u8 = undefined;
+                var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
                     &encoded_buffer,
                     model_contract.apply_patch_key,
@@ -548,7 +569,7 @@ pub const RepairFixture = struct {
             5 => blk: {
                 try self.expectPrefix(history, 5);
                 try expectPatchResult(history[4], .applied);
-                var arguments: [model_contract.max_arguments_size]u8 = undefined;
+                var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
                     &encoded_buffer,
                     model_contract.bash_key,
@@ -609,7 +630,7 @@ fn expectToolCall(entry: RequestEntry, tool: FixtureTool, raw: []const u8) !void
     if (entry.kind != .tool_call) return error.ToolCallMissingFromContext;
     const call = try conversation.decodeToolCall(entry.content);
     if (!std.mem.eql(u8, call.key, fixtureToolKey(tool))) return error.ToolCallMissingFromContext;
-    var expected: [model_contract.max_arguments_size]u8 = undefined;
+    var expected: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
     if (!std.mem.eql(u8, call.arguments, try fixtureArguments(tool, raw, &expected))) {
         return error.ToolCallMissingFromContext;
     }
@@ -729,6 +750,13 @@ test "request reconstruction walks durable entries through bounded windows" {
         u8,
         try session.readBlob(descriptor.request_ref, 0, first_request[0..@intCast(descriptor.length)]),
         try session.readBlob(reconstructed.request_ref, 0, second_request[0..@intCast(reconstructed.length)]),
+    );
+    try verifyRequestDigest(&session, descriptor.request_ref, descriptor.digest);
+    first_request[request_header_size] ^= 1;
+    try session.storeBlob(1004, first_request[0..@intCast(descriptor.length)]);
+    try std.testing.expectError(
+        error.ModelRequestDigestMismatch,
+        verifyRequestDigest(&session, 1004, descriptor.digest),
     );
 
     var fixture: Fixture = .{

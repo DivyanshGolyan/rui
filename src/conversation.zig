@@ -20,44 +20,72 @@ pub const ToolResult = struct {
     content: []const u8,
 };
 
+pub const ToolCallHeader = struct {
+    key_length: u16,
+    arguments_length: u32,
+};
+
+pub const ToolResultHeader = struct {
+    parent_id: u64,
+    is_error: bool,
+    content_length: u32,
+};
+
 pub fn encodeToolCall(out: []u8, call: ToolCall) ![]const u8 {
     try contract.validateToolKey(call.key);
     if (!contract.canonicalJson(call.arguments)) return error.InvalidToolArguments;
     const total = call_header_size + call.key.len + call.arguments.len;
     if (total > out.len) return error.ToolCallTooLarge;
-    @memset(out[0..total], 0);
-    @memcpy(out[0..call_magic.len], call_magic);
-    write(u16, out, 8, call_version);
-    write(u16, out, 10, @intCast(call.key.len));
-    write(u32, out, 12, @intCast(call.arguments.len));
+    _ = try encodeToolCallHeader(out[0..call_header_size], call.key.len, call.arguments.len);
     @memcpy(out[call_header_size..][0..call.key.len], call.key);
     @memcpy(out[call_header_size + call.key.len .. total], call.arguments);
     return out[0..total];
 }
 
-pub fn decodeToolCall(bytes: []const u8) !ToolCall {
+pub fn encodeToolCallHeader(out: []u8, key_length: usize, arguments_length: usize) ![]const u8 {
+    if (out.len < call_header_size or key_length == 0 or key_length > contract.max_tool_key_size or
+        arguments_length == 0 or arguments_length > contract.max_tool_arguments_envelope_size)
+    {
+        return error.InvalidToolCall;
+    }
+    @memset(out[0..call_header_size], 0);
+    @memcpy(out[0..call_magic.len], call_magic);
+    write(u16, out, 8, call_version);
+    write(u16, out, 10, @intCast(key_length));
+    write(u32, out, 12, @intCast(arguments_length));
+    return out[0..call_header_size];
+}
+
+pub fn decodeToolCallHeader(bytes: []const u8, total_length: u64) !ToolCallHeader {
     if (bytes.len < call_header_size or
         !std.mem.eql(u8, bytes[0..call_magic.len], call_magic) or
         read(u16, bytes, 8) != call_version)
     {
         return error.InvalidToolCall;
     }
-    const key_length: usize = read(u16, bytes, 10);
-    const arguments_length: usize = read(u32, bytes, 12);
-    if (key_length > bytes.len - call_header_size or
-        arguments_length > bytes.len - call_header_size - key_length or
-        call_header_size + key_length + arguments_length != bytes.len)
+    const header: ToolCallHeader = .{
+        .key_length = read(u16, bytes, 10),
+        .arguments_length = read(u32, bytes, 12),
+    };
+    if (header.key_length == 0 or header.key_length > contract.max_tool_key_size or
+        header.arguments_length == 0 or
+        header.arguments_length > contract.max_tool_arguments_envelope_size or
+        call_header_size + @as(u64, header.key_length) + header.arguments_length != total_length)
     {
         return error.InvalidToolCall;
     }
+    return header;
+}
+
+pub fn decodeToolCall(bytes: []const u8) !ToolCall {
+    const header = try decodeToolCallHeader(bytes, bytes.len);
+    const key_length: usize = header.key_length;
     const call: ToolCall = .{
         .key = bytes[call_header_size..][0..key_length],
         .arguments = bytes[call_header_size + key_length ..],
     };
     try contract.validateToolKey(call.key);
     if (!contract.canonicalJson(call.arguments)) return error.InvalidToolCall;
-    var canonical: [call_header_size + contract.max_tool_key_size + contract.max_arguments_size]u8 = undefined;
-    if (!std.mem.eql(u8, try encodeToolCall(&canonical, call), bytes)) return error.InvalidToolCall;
     return call;
 }
 
@@ -89,31 +117,56 @@ pub fn finishToolResult(
         return error.InvalidToolResult;
     }
     const total = result_header_size + content_length;
+    _ = try encodeToolResultHeader(out[0..result_header_size], parent_id, is_error, content_length);
+    return out[0..total];
+}
+
+pub fn encodeToolResultHeader(
+    out: []u8,
+    parent_id: u64,
+    is_error: bool,
+    content_length: usize,
+) ![]const u8 {
+    if (out.len < result_header_size or parent_id == 0 or content_length == 0 or
+        content_length > max_result_content_size)
+    {
+        return error.InvalidToolResult;
+    }
     @memset(out[0..result_header_size], 0);
     @memcpy(out[0..result_magic.len], result_magic);
     write(u16, out, 8, result_version);
     out[10] = @intFromBool(is_error);
     write(u64, out, 12, parent_id);
     write(u32, out, 20, @intCast(content_length));
-    return out[0..total];
+    return out[0..result_header_size];
 }
 
-pub fn decodeToolResult(bytes: []const u8) !ToolResult {
+pub fn decodeToolResultHeader(bytes: []const u8, total_length: u64) !ToolResultHeader {
     if (bytes.len < result_header_size or
         !std.mem.eql(u8, bytes[0..result_magic.len], result_magic) or
         read(u16, bytes, 8) != result_version or bytes[11] != 0 or bytes[10] > 1)
     {
         return error.InvalidToolResult;
     }
-    const content_length: usize = read(u32, bytes, 20);
-    if (content_length == 0 or content_length > max_result_content_size or
-        result_header_size + content_length != bytes.len)
+    const header: ToolResultHeader = .{
+        .parent_id = read(u64, bytes, 12),
+        .is_error = bytes[10] == 1,
+        .content_length = read(u32, bytes, 20),
+    };
+    if (header.parent_id == 0 or header.content_length == 0 or
+        header.content_length > max_result_content_size or
+        result_header_size + @as(u64, header.content_length) != total_length)
     {
         return error.InvalidToolResult;
     }
+    return header;
+}
+
+pub fn decodeToolResult(bytes: []const u8) !ToolResult {
+    const header = try decodeToolResultHeader(bytes, bytes.len);
     const result: ToolResult = .{
-        .parent_id = read(u64, bytes, 12),
-        .is_error = bytes[10] == 1,
+        .parent_id = header.parent_id,
+        .is_error = header.is_error,
         .content = bytes[result_header_size..],
     };
     if (result.parent_id == 0 or !contract.utf8Valid(result.content)) return error.InvalidToolResult;

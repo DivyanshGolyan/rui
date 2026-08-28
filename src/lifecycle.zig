@@ -5,6 +5,7 @@ const completion_inbox = @import("completion_inbox.zig");
 const conversation = @import("conversation.zig");
 const core_image = @import("core_image.zig");
 const core_state = @import("core_state.zig");
+const host_store = @import("host_store.zig");
 const model_operation = @import("model_operation.zig");
 const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
@@ -14,6 +15,10 @@ const session_transition = @import("session_transition.zig");
 
 const agent_generation: u32 = 1;
 const ProductionSlotPool = core_image.SlotPool(1);
+
+comptime {
+    std.debug.assert(model_contract.max_patch_input_size == patch_tool.max_patch_size);
+}
 
 /// Process-owned bounded activation capacity. Construct this once at host
 /// startup and pass it through every agent lifecycle entry point.
@@ -130,6 +135,7 @@ const OperationIds = struct {
 
 const ModelDispatch = struct {
     request_ref: u64,
+    request_digest: binding.ModelDescriptor,
     response_ref: u64,
     operation_id: u64,
     operation_generation: u32,
@@ -147,10 +153,14 @@ const ModelCompletion = struct {
 
 const ExecutableTool = enum { bash, apply_patch };
 
-fn executableTool(core: *const core_image.Core) !ExecutableTool {
+fn executableTool(session: *session_store.Session, core: *const core_image.Core) !ExecutableTool {
     const response = try core.response();
     var key_buffer: [model_contract.max_tool_key_size]u8 = undefined;
-    const key = try core.copyResponseWindow(response.tool_key, &key_buffer);
+    const key = try readResponseWindow(session, response, response.tool_key, &key_buffer);
+    return executableToolFromKey(key);
+}
+
+fn executableToolFromKey(key: []const u8) !ExecutableTool {
     if (std.mem.eql(u8, key, model_contract.bash_key)) return .bash;
     if (std.mem.eql(u8, key, model_contract.apply_patch_key)) return .apply_patch;
     return error.UnboundToolKey;
@@ -325,6 +335,7 @@ fn performModelTurn(
         context.first_entry,
         context.entry_count,
     );
+    try model_operation.verifyRequestDigest(session, descriptor.request_ref, descriptor.digest);
     try core.reducer.acceptOperation(.{ .id = ids.operation_id, .generation = operation_generation });
     const operation_context = operationContext(session, ids.operation_id, operation_generation);
     const admission_facts = [_]session_transition.Fact{
@@ -360,6 +371,7 @@ fn performModelTurn(
 
     try dispatchModelAttempt(session, token, next_provider, .{
         .request_ref = descriptor.request_ref,
+        .request_digest = descriptor.digest,
         .response_ref = ids.response_ref,
         .operation_id = ids.operation_id,
         .operation_generation = operation_generation,
@@ -410,6 +422,11 @@ fn retryModelAttempt(
         return error.CompletionOffered;
     }
     const next_provider = provider orelse return error.SessionOperationPending;
+    const request_digest = switch (descriptor.descriptor_digest) {
+        .model => |digest| digest,
+        else => return error.InvalidModelDescriptor,
+    };
+    try model_operation.verifyRequestDigest(session, descriptor.descriptor_ref, request_digest);
     var attempt_id: u64 = 0;
     var response_ref: u32 = 0;
     for (0..8) |_| {
@@ -439,6 +456,7 @@ fn retryModelAttempt(
 
     return dispatchModelAttempt(session, token, next_provider, .{
         .request_ref = descriptor.descriptor_ref,
+        .request_digest = request_digest,
         .response_ref = response_ref,
         .operation_id = operation.id,
         .operation_generation = operation.generation,
@@ -454,6 +472,7 @@ fn dispatchModelAttempt(
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !void {
+    try model_operation.verifyRequestDigest(session, dispatch.request_ref, dispatch.request_digest);
     var provider_io = try model_operation.ProviderIo.open(
         session,
         dispatch.request_ref,
@@ -495,6 +514,45 @@ fn dispatchModelAttempt(
     return error.CompletionOffered;
 }
 
+const BashArguments = struct { command: []const u8, timeout_ms: u32 };
+const PatchArguments = struct { patch: []const u8 };
+
+fn parseBashArguments(
+    allocator: std.mem.Allocator,
+    arguments: []const u8,
+) !std.json.Parsed(BashArguments) {
+    if (arguments.len == 0 or arguments.len > model_contract.max_tool_arguments_envelope_size) {
+        return error.InvalidBashArguments;
+    }
+    var parsed = std.json.parseFromSlice(BashArguments, allocator, arguments, .{}) catch
+        return error.InvalidBashArguments;
+    errdefer parsed.deinit();
+    var validation: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
+    _ = bash_tool.encodeCall(&validation, .{
+        .command = parsed.value.command,
+        .timeout_ms = parsed.value.timeout_ms,
+    }) catch return error.InvalidBashArguments;
+    return parsed;
+}
+
+fn parsePatchArguments(
+    allocator: std.mem.Allocator,
+    arguments: []const u8,
+) !std.json.Parsed(PatchArguments) {
+    if (arguments.len == 0 or arguments.len > model_contract.max_tool_arguments_envelope_size) {
+        return error.InvalidPatchArguments;
+    }
+    var parsed = std.json.parseFromSlice(PatchArguments, allocator, arguments, .{}) catch
+        return error.InvalidPatchArguments;
+    errdefer parsed.deinit();
+    if (parsed.value.patch.len == 0 or parsed.value.patch.len > patch_tool.max_patch_size or
+        !std.unicode.utf8ValidateSlice(parsed.value.patch))
+    {
+        return error.InvalidPatchArguments;
+    }
+    return parsed;
+}
+
 fn executeBashCall(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -513,23 +571,19 @@ fn executeBashCall(
     fault: ?FaultHook,
 ) !void {
     const response = try core.reducer.response();
-    if (try executableTool(&core.reducer) != .bash) {
+    if (try executableTool(session, &core.reducer) != .bash) {
         return error.UnsupportedTool;
     }
     const arguments_length = response.arguments.length;
-    if (arguments_length == 0 or arguments_length > bash_tool.call_header_size + bash_tool.max_command_size or
-        arguments_length > model_protocol.max_response_size)
+    if (arguments_length == 0 or
+        arguments_length > model_contract.max_tool_arguments_envelope_size)
     {
         return error.InvalidBashCallRange;
     }
-    var arguments_buffer: [model_contract.max_arguments_size]u8 = undefined;
-    const arguments = try core.reducer.copyResponseWindow(
-        response.arguments,
-        &arguments_buffer,
-    );
-    const ParsedBash = struct { command: []const u8, timeout_ms: u32 };
-    var parsed = std.json.parseFromSlice(ParsedBash, allocator, arguments, .{}) catch
-        return error.InvalidBashArguments;
+    const arguments_buffer = try allocator.alloc(u8, arguments_length);
+    defer allocator.free(arguments_buffer);
+    const arguments = try readResponseWindow(session, response, response.arguments, arguments_buffer);
+    var parsed = try parseBashArguments(allocator, arguments);
     defer parsed.deinit();
     const call: bash_tool.Call = .{
         .command = parsed.value.command,
@@ -549,15 +603,7 @@ fn executeBashCall(
     const call_ref = (@as(u64, 1) << 59) | ids.response_ref;
     const descriptor_ref = (@as(u64, 1) << 62) | ids.response_ref;
     const result_ref = (@as(u64, 1) << 61) | ids.response_ref;
-    var call_content_buffer: [
-        conversation.call_header_size + model_contract.max_tool_key_size +
-            model_contract.max_arguments_size
-    ]u8 = undefined;
-    const call_content = try conversation.encodeToolCall(&call_content_buffer, .{
-        .key = model_contract.bash_key,
-        .arguments = arguments,
-    });
-    try session.storeBlob(call_ref, call_content);
+    try storeToolCall(session, call_ref, model_contract.bash_key, arguments);
     try session.storeBlob(descriptor_ref, descriptor_bytes);
     const call_entry = try session.appendConversation(.tool_call, call_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
@@ -637,10 +683,7 @@ fn executeBashCall(
     core_open.* = true;
     try restoreCoreFromLedger(session, core_state_buffer, core);
     defer execution.deinit();
-    const result_buffer = try allocator.alloc(u8, bash_tool.result_header_size + 2 * bash_tool.max_output_size);
-    defer allocator.free(result_buffer);
-    const encoded_result = try bash_tool.encodeResult(result_buffer, execution);
-    try session.storeBlob(result_ref, encoded_result);
+    try storeBashResult(session, result_ref, execution);
     const result_digest = try blobDigest(session, result_ref);
     const evidence = completion_inbox.bind(.{
         .kind = .bash,
@@ -673,19 +716,17 @@ fn requestPatchPermission(
 ) !void {
     const response = try core.reducer.response();
     const arguments_length = response.arguments.length;
-    if (arguments_length == 0 or arguments_length > patch_tool.max_patch_size or
-        arguments_length > model_protocol.max_response_size)
+    if (arguments_length == 0 or
+        arguments_length > model_contract.max_tool_arguments_envelope_size)
     {
         return error.InvalidPatchRange;
     }
-    var arguments_buffer: [model_contract.max_arguments_size]u8 = undefined;
-    const arguments = try core.reducer.copyResponseWindow(response.arguments, &arguments_buffer);
-    const ParsedPatch = struct { patch: []const u8 };
-    var parsed = std.json.parseFromSlice(ParsedPatch, allocator, arguments, .{}) catch
-        return error.InvalidPatchArguments;
+    const arguments_buffer = try allocator.alloc(u8, arguments_length);
+    defer allocator.free(arguments_buffer);
+    const arguments = try readResponseWindow(session, response, response.arguments, arguments_buffer);
+    var parsed = try parsePatchArguments(allocator, arguments);
     defer parsed.deinit();
     const patch = parsed.value.patch;
-    if (patch.len == 0 or patch.len > patch_tool.max_patch_size) return error.InvalidPatchRange;
     const tool_operation_id = (@as(u64, 3) << 62) | ids.operation_id;
     const patch_ref = (@as(u64, 1) << 60) | ids.response_ref;
     const call_ref = (@as(u64, 1) << 59) | ids.response_ref;
@@ -697,15 +738,7 @@ fn requestPatchPermission(
     });
     try session.storeBlob(patch_ref, patch);
     try storePatchIntent(session, intent_ref, intent);
-    var call_content_buffer: [
-        conversation.call_header_size + model_contract.max_tool_key_size +
-            model_contract.max_arguments_size
-    ]u8 = undefined;
-    const call_content = try conversation.encodeToolCall(&call_content_buffer, .{
-        .key = model_contract.apply_patch_key,
-        .arguments = arguments,
-    });
-    try session.storeBlob(call_ref, call_content);
+    try storeToolCall(session, call_ref, model_contract.apply_patch_key, arguments);
     const call_entry = try session.appendConversation(.tool_call, call_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
     const descriptor_facts = [_]session_transition.Fact{
@@ -771,6 +804,21 @@ fn storePatchIntent(
 ) !void {
     var bytes: [patch_tool.max_intent_size]u8 = undefined;
     try session.storeBlob(intent_ref, try patch_tool.encodeIntent(&bytes, intent));
+}
+
+fn storeBashResult(
+    session: *session_store.Session,
+    result_ref: u64,
+    execution: bash_tool.Execution,
+) !void {
+    var header: [bash_tool.result_header_size]u8 = undefined;
+    const header_bytes = try bash_tool.encodeResultHeader(&header, execution);
+    var writer = try session.beginBlob(result_ref);
+    errdefer writer.abort();
+    try writer.append(header_bytes);
+    try writer.append(execution.stdout);
+    try writer.append(execution.stderr);
+    try writer.finish();
 }
 
 pub fn advanceRestored(
@@ -864,7 +912,7 @@ pub fn advanceRestored(
                     .response_ref = @truncate(observation.result_ref),
                     .final_ref = finalReference(observation.result_ref),
                 };
-                switch (try executableTool(&core.reducer)) {
+                switch (try executableTool(session, &core.reducer)) {
                     .bash => try executeBashCall(
                         io,
                         allocator,
@@ -965,7 +1013,7 @@ pub fn resolvePermission(
     try restoreCoreFromLedger(session, core_state_buffer, &core);
     if ((try core.reducer.task()).phase != .awaiting_tool) return error.PermissionNoLongerRequired;
     try stageDurableResponse(session, &core, try core.reducer.response());
-    const tool = try executableTool(&core.reducer);
+    const tool = try executableTool(session, &core.reducer);
     const observation = try core.reducer.operation();
     const expected_operation_id = switch (tool) {
         .bash => (@as(u64, 1) << 63) | observation.id,
@@ -1060,10 +1108,7 @@ pub fn resolvePermission(
                 };
             }
             defer execution.deinit();
-            const result_buffer = try allocator.alloc(u8, bash_tool.result_header_size + 2 * bash_tool.max_output_size);
-            defer allocator.free(result_buffer);
-            const encoded = try bash_tool.encodeResult(result_buffer, execution);
-            try session.storeBlob(result_ref, encoded);
+            try storeBashResult(session, result_ref, execution);
             const result_digest = try blobDigest(session, result_ref);
             if (allow) {
                 const evidence = completion_inbox.bind(.{
@@ -1219,7 +1264,7 @@ fn reconcileToolCall(
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !ToolRecovery {
-    return switch (try executableTool(&core.reducer)) {
+    return switch (try executableTool(session, &core.reducer)) {
         .bash => reconcileBash(session, token, core, core_state_buffer),
         .apply_patch => reconcilePatch(
             session,
@@ -1379,7 +1424,7 @@ fn readBashStatus(
     var header: [bash_tool.result_header_size]u8 = undefined;
     const bytes = try reader.readWindow(0, &header);
     if (bytes.len != header.len) return error.TruncatedBashResult;
-    return bash_tool.decodeResultHeader(&header, reader.length());
+    return (try bash_tool.decodeResultHeader(&header, reader.length())).status;
 }
 
 fn toolResultFromRecord(result: session_transition.ResultRecord) ToolResult {
@@ -1687,38 +1732,136 @@ fn storeVisibleToolResult(
     visible_ref: u64,
     parent_id: u64,
 ) !void {
-    var encoded_buffer: [conversation.result_header_size + conversation.max_result_content_size]u8 = undefined;
-    var writer = std.Io.Writer.fixed(encoded_buffer[conversation.result_header_size..]);
-    var is_error = false;
+    var existing_length: ?u64 = null;
+    var existing_digest: binding.Blob = undefined;
+    var blob_writer: ?session_store.BlobWriter = null;
+    var existing = session.openBlob(visible_ref) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            blob_writer = try session.beginBlob(visible_ref);
+            break :blk null;
+        },
+        else => return err,
+    };
+    if (existing) |*reader| {
+        existing_length = reader.length();
+        existing_digest = reader.digest();
+        reader.close();
+    }
+    defer if (blob_writer) |*writer| writer.abort();
+
+    var target: VisibleResultTarget = .{
+        .writer = if (blob_writer) |*writer| writer else null,
+    };
+    try emitVisibleToolResult(session, tool, durable_ref, parent_id, &target);
+    if (blob_writer) |*writer| {
+        try writer.finish();
+        blob_writer = null;
+    } else if (existing_length.? != target.length or
+        !binding.eql(binding.Blob, existing_digest, target.hasher.final()))
+    {
+        return error.BlobContentMismatch;
+    }
+}
+
+const VisibleResultTarget = struct {
+    writer: ?*session_store.BlobWriter,
+    hasher: binding.Hasher(binding.Blob) = .init(),
+    length: u64 = 0,
+
+    fn append(self: *VisibleResultTarget, bytes: []const u8) !void {
+        if (self.length + bytes.len > conversation.result_header_size +
+            conversation.max_result_content_size) return error.ToolResultTooLarge;
+        if (self.writer) |writer| try writer.append(bytes);
+        self.hasher.update(bytes);
+        self.length += bytes.len;
+    }
+};
+
+fn emitVisibleToolResult(
+    session: *session_store.Session,
+    tool: ExecutableTool,
+    durable_ref: u64,
+    parent_id: u64,
+    target: *VisibleResultTarget,
+) !void {
     switch (tool) {
         .bash => {
-            var durable: [bash_tool.result_header_size + 2 * bash_tool.max_output_size]u8 = undefined;
-            const bytes = try readBoundedBlob(session, durable_ref, &durable);
-            const result = try bash_tool.decodeResult(bytes);
-            is_error = result.status != .success;
-            try writer.print("status={s}\nexit_code={d}\nstdout_base64=", .{
+            var durable = try session.openBlob(durable_ref);
+            defer durable.close();
+            var durable_header: [bash_tool.result_header_size]u8 = undefined;
+            const header_bytes = try durable.readWindow(0, &durable_header);
+            if (header_bytes.len != durable_header.len) return error.TruncatedBlob;
+            const result = try bash_tool.decodeResultHeader(&durable_header, durable.length());
+            var prefix_buffer: [96]u8 = undefined;
+            const prefix = try std.fmt.bufPrint(&prefix_buffer, "status={s}\nexit_code={d}\nstdout_base64=", .{
                 bashStatusName(result.status),
                 result.exit_code,
             });
-            try std.base64.standard.Encoder.encodeWriter(&writer, result.stdout);
-            try writer.writeAll("\nstderr_base64=");
-            try std.base64.standard.Encoder.encodeWriter(&writer, result.stderr);
+            const separator = "\nstderr_base64=";
+            const content_length = prefix.len +
+                std.base64.standard.Encoder.calcSize(result.stdout_length) + separator.len +
+                std.base64.standard.Encoder.calcSize(result.stderr_length);
+            var visible_header: [conversation.result_header_size]u8 = undefined;
+            try target.append(try conversation.encodeToolResultHeader(
+                &visible_header,
+                parent_id,
+                result.status != .success,
+                content_length,
+            ));
+            try target.append(prefix);
+            try appendBase64Windowed(
+                &durable,
+                bash_tool.result_header_size,
+                result.stdout_length,
+                target,
+            );
+            try target.append(separator);
+            try appendBase64Windowed(
+                &durable,
+                bash_tool.result_header_size + @as(u64, result.stdout_length),
+                result.stderr_length,
+                target,
+            );
         },
         .apply_patch => {
             var durable: [patch_tool.result_size]u8 = undefined;
             try readExactBlob(session, durable_ref, &durable);
             const result = try patch_tool.decodeResult(&durable);
-            is_error = result.status != .applied;
-            try writer.print("status={s}", .{patchStatusName(result.status)});
+            var content_buffer: [64]u8 = undefined;
+            const content = try std.fmt.bufPrint(&content_buffer, "status={s}", .{patchStatusName(result.status)});
+            var visible_header: [conversation.result_header_size]u8 = undefined;
+            try target.append(try conversation.encodeToolResultHeader(
+                &visible_header,
+                parent_id,
+                result.status != .applied,
+                content.len,
+            ));
+            try target.append(content);
         },
     }
-    const encoded = try conversation.finishToolResult(
-        &encoded_buffer,
-        parent_id,
-        is_error,
-        writer.buffered().len,
-    );
-    try storeOrExpectBlob(session, visible_ref, encoded);
+}
+
+fn appendBase64Windowed(
+    reader: *session_store.BlobReader,
+    start: u64,
+    length: u32,
+    target: *VisibleResultTarget,
+) !void {
+    const input_window_size = 4095;
+    var input: [input_window_size]u8 = undefined;
+    var output: [std.base64.standard.Encoder.calcSize(input_window_size)]u8 = undefined;
+    var consumed: u64 = 0;
+    while (consumed < length) {
+        const remaining = @as(u64, length) - consumed;
+        const wanted: usize = @intCast(@min(remaining, input.len));
+        const bytes = try reader.readWindow(start + consumed, input[0..wanted]);
+        if (bytes.len != wanted) return error.TruncatedBlob;
+        try target.append(std.base64.standard.Encoder.encode(
+            output[0..std.base64.standard.Encoder.calcSize(bytes.len)],
+            bytes,
+        ));
+        consumed += bytes.len;
+    }
 }
 
 fn bashStatusName(status: bash_tool.Status) []const u8 {
@@ -2172,6 +2315,61 @@ fn readBoundedBlob(
     return bytes;
 }
 
+fn readResponseWindow(
+    session: *session_store.Session,
+    response: core_image.Response,
+    window: core_image.ContentWindow,
+    out: []u8,
+) ![]const u8 {
+    if (window.length == 0 or window.length > out.len) return error.InvalidModelResponseWindow;
+    var reader = try session.openBlob(response.content_ref);
+    defer reader.close();
+    const start: u64 = window.offset;
+    const length: u64 = window.length;
+    if (start > reader.length() or length > reader.length() - start) {
+        return error.InvalidModelResponseWindow;
+    }
+    const bytes = try reader.readWindow(start, out[0..window.length]);
+    if (bytes.len != window.length) return error.TruncatedModelResponse;
+    return bytes;
+}
+
+fn storeToolCall(
+    session: *session_store.Session,
+    reference: u64,
+    key: []const u8,
+    arguments: []const u8,
+) !void {
+    try model_contract.validateToolKey(key);
+    if (!model_contract.canonicalJson(arguments)) return error.InvalidToolArguments;
+    var header: [conversation.call_header_size]u8 = undefined;
+    const header_bytes = try conversation.encodeToolCallHeader(&header, key.len, arguments.len);
+    var hasher = binding.Hasher(binding.Blob).init();
+    hasher.update(header_bytes);
+    hasher.update(key);
+    hasher.update(arguments);
+    const expected_length = header_bytes.len + key.len + arguments.len;
+
+    var existing = session.openBlob(reference) catch |err| switch (err) {
+        error.FileNotFound => {
+            var writer = try session.beginBlob(reference);
+            errdefer writer.abort();
+            try writer.append(header_bytes);
+            try writer.append(key);
+            try writer.append(arguments);
+            try writer.finish();
+            return;
+        },
+        else => return err,
+    };
+    defer existing.close();
+    if (existing.length() != expected_length or
+        !binding.eql(binding.Blob, existing.digest(), hasher.final()))
+    {
+        return error.BlobContentMismatch;
+    }
+}
+
 fn storeOrExpectBlob(
     session: *session_store.Session,
     reference: u64,
@@ -2269,7 +2467,7 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
     var response: [model_protocol.max_response_size]u8 = undefined;
     const generic = try model_protocol.encodeTool(&response, "fixture.inspect.v1", "{}");
     _ = try core.reducer.interpretModelResponse(generic, 3);
-    try std.testing.expectError(error.UnboundToolKey, executableTool(&core.reducer));
+    try std.testing.expectError(error.UnboundToolKey, executableToolFromKey("fixture.inspect.v1"));
 
     core.close();
     core = try Core.open(&host.slots);
@@ -2281,7 +2479,140 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
     const input = try model_protocol.encodeInputText(&response, "Which migration should I use?");
     _ = try core.reducer.interpretModelResponse(input, 6);
     try std.testing.expectEqual(core_state.TaskPhase.awaiting_input, (try core.reducer.task()).phase);
-    try std.testing.expectError(error.UnboundToolKey, executableTool(&core.reducer));
+    try std.testing.expectError(error.UnboundToolKey, executableToolFromKey(""));
+}
+
+test "model dispatch rejects a substituted request under the bound reference" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "sessions", .default_dir);
+    try tmp.dir.createDir(io, "repo", .default_dir);
+    var repo = try tmp.dir.openDir(io, "repo", .{});
+    defer repo.close(io);
+    try repo.createDir(io, ".git", .default_dir);
+    var git = try repo.openDir(io, ".git", .{});
+    defer git.close(io);
+    try git.createDir(io, "objects", .default_dir);
+    try git.createDir(io, "refs", .default_dir);
+    var config = try git.createFile(io, "config", .{});
+    defer config.close(io);
+    try config.writePositionalAll(io, "[core]\n\trepositoryformatversion = 0\n", 0);
+    var head = try git.createFile(io, "HEAD", .{});
+    defer head.close(io);
+    try head.writePositionalAll(io, "ref: refs/heads/main\n", 0);
+
+    var repo_path_buffer: [160]u8 = undefined;
+    const repo_path = try std.fmt.bufPrint(
+        &repo_path_buffer,
+        ".zig-cache/tmp/{s}/repo",
+        .{tmp.sub_path},
+    );
+    var database_path_buffer: [160]u8 = undefined;
+    const database_path = try std.fmt.bufPrint(
+        &database_path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var sessions = try tmp.dir.openDir(io, "sessions", .{});
+    defer sessions.close(io);
+    var storage = try host_store.StorageOwner.open(io, database_path, .{});
+    defer storage.close();
+    var session = try session_store.Session.create(sessions, &storage, io, .{
+        .workspace_path = repo_path,
+        .model = "fixture:bound",
+        .task = "Check the request binding",
+    });
+    defer session.close();
+    const descriptor = try model_operation.buildRequest(&session, 1001, 1, 1);
+    var request: [32 * 1024]u8 = undefined;
+    const original = try session.readBlob(1001, 0, request[0..@intCast(descriptor.length)]);
+    request[model_operation.request_header_size] ^= 1;
+    var blob_path: [32]u8 = undefined;
+    const substituted_path = try std.fmt.bufPrint(&blob_path, "blobs/{x:0>16}.blob", .{@as(u64, 1001)});
+    try session.dir.deleteFile(io, substituted_path);
+    try session.storeBlob(1001, original);
+
+    var fixture: model_operation.Fixture = .{
+        .expected_task = null,
+        .final_answer = "must not dispatch",
+    };
+    try std.testing.expectError(
+        error.ModelRequestDigestMismatch,
+        dispatchModelAttempt(
+            &session,
+            session.ownerToken(),
+            fixture.provider(),
+            .{
+                .request_ref = 1001,
+                .request_digest = descriptor.digest,
+                .response_ref = 1002,
+                .operation_id = 1003,
+                .operation_generation = 1,
+                .attempt_id = 1004,
+            },
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(u32, 0), fixture.calls);
+}
+
+test "tool argument envelopes preserve exact decoded field bounds under escaping" {
+    const allocator = std.testing.allocator;
+    const exact_command = try allocator.alloc(u8, bash_tool.max_command_size);
+    defer allocator.free(exact_command);
+    @memset(exact_command, 1);
+    const one_past_command = try allocator.alloc(u8, bash_tool.max_command_size + 1);
+    defer allocator.free(one_past_command);
+    @memset(one_past_command, 'x');
+    const exact_patch = try allocator.alloc(u8, patch_tool.max_patch_size);
+    defer allocator.free(exact_patch);
+    @memset(exact_patch, 1);
+    const one_past_patch = try allocator.alloc(u8, patch_tool.max_patch_size + 1);
+    defer allocator.free(one_past_patch);
+    @memset(one_past_patch, 'x');
+    const envelope = try allocator.alloc(u8, model_contract.max_tool_arguments_envelope_size);
+    defer allocator.free(envelope);
+
+    const encoded_command = try model_contract.encodeJson(envelope, .{
+        .command = exact_command,
+        .timeout_ms = bash_tool.max_timeout_ms,
+    });
+    var parsed_command = try parseBashArguments(allocator, encoded_command);
+    parsed_command.deinit();
+    const encoded_command_over = try model_contract.encodeJson(envelope, .{
+        .command = one_past_command,
+        .timeout_ms = bash_tool.max_timeout_ms,
+    });
+    try std.testing.expectError(
+        error.InvalidBashArguments,
+        parseBashArguments(allocator, encoded_command_over),
+    );
+
+    const encoded_patch = try model_contract.encodeJson(envelope, .{ .patch = exact_patch });
+    try std.testing.expectEqual(
+        model_contract.max_tool_arguments_envelope_size,
+        encoded_patch.len,
+    );
+    var parsed_patch = try parsePatchArguments(allocator, encoded_patch);
+    parsed_patch.deinit();
+    const response_buffer = try allocator.alloc(u8, model_protocol.max_response_size);
+    defer allocator.free(response_buffer);
+    const response = try model_protocol.encodeTool(
+        response_buffer,
+        model_contract.apply_patch_key,
+        encoded_patch,
+    );
+    try std.testing.expectEqual(
+        model_protocol.Disposition.tool_call,
+        model_protocol.parse(response).disposition,
+    );
+    const encoded_patch_over = try model_contract.encodeJson(envelope, .{ .patch = one_past_patch });
+    try std.testing.expectError(
+        error.InvalidPatchArguments,
+        parsePatchArguments(allocator, encoded_patch_over),
+    );
 }
 
 test "Completion Inbox search never crosses evidence kinds" {
