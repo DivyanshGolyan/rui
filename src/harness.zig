@@ -701,7 +701,9 @@ const HarnessState = struct {
             error.ModelProviderFailed,
             error.MalformedModelResponse,
             error.EmptyModelResponse,
-            error.MultipleModelTools,
+            error.MultipleModelOutputs,
+            error.ModelResponseOversized,
+            error.UnknownModelTool,
             error.UnknownModelFailure,
             error.InteractionRequestLayerRequired,
             => true,
@@ -1486,6 +1488,90 @@ test "malformed captured output becomes one durable terminal failure" {
     const regenerated = try restored.drive();
     try std.testing.expectEqual(State.failed, regenerated.state);
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
+}
+
+test "every committed model failure produces the failed Harness projection" {
+    const Candidate = union(enum) {
+        failure: model_protocol.Failure,
+        unknown_tool,
+    };
+    const FailureProvider = struct {
+        candidate: Candidate,
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var buffer: [model_protocol.max_response_size]u8 = undefined;
+            const encoded = switch (self.candidate) {
+                .failure => |failure| try model_protocol.encodeFailure(&buffer, failure),
+                .unknown_tool => try model_protocol.encodeTool(
+                    &buffer,
+                    "fixture.unknown.v1",
+                    "{}",
+                ),
+            };
+            try response.append(encoded);
+            try response.finish();
+        }
+    };
+    const cases = [_]struct {
+        candidate: Candidate,
+        expected: model_protocol.Failure,
+    }{
+        .{ .candidate = .{ .failure = .truncated }, .expected = .truncated },
+        .{ .candidate = .{ .failure = .aborted }, .expected = .aborted },
+        .{ .candidate = .{ .failure = .provider_error }, .expected = .provider_error },
+        .{ .candidate = .{ .failure = .malformed }, .expected = .malformed },
+        .{ .candidate = .{ .failure = .empty }, .expected = .empty },
+        .{ .candidate = .{ .failure = .multiple_outputs }, .expected = .multiple_outputs },
+        .{ .candidate = .{ .failure = .oversized }, .expected = .oversized },
+        .{ .candidate = .unknown_tool, .expected = .unknown_tool },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    for (cases) |case| {
+        var provider: FailureProvider = .{ .candidate = case.candidate };
+        var owner = try Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .create = .{
+                .workspace_path = ".",
+                .model = "fixture:model-failure-classification",
+                .task = "task",
+                .provider = provider.provider(),
+            } },
+        });
+        _ = try owner.drive();
+        try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+        _ = try owner.drive();
+        const failed = try owner.drive();
+        try std.testing.expectEqual(State.failed, failed.state);
+        try std.testing.expectEqual(@as(u8, 1), failed.projection_count);
+        try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
+        try std.testing.expectEqual(@as(u8, 1), provider.calls);
+
+        var ignored: u8 = 0;
+        const ledger = try harnessState(owner).session.?.inspectSemantic(
+            &ignored,
+            struct {
+                fn ignore(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
+            }.ignore,
+        );
+        const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
+        try std.testing.expectEqual(case.expected, state.response_failure);
+        owner.close();
+    }
 }
 
 test "built-in argument rejection becomes one durable terminal failure" {
