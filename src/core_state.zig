@@ -2,7 +2,7 @@ const std = @import("std");
 const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 
-pub const schema_version: u16 = 3;
+pub const schema_version: u16 = 4;
 pub const encoded_size: usize = 180;
 
 const magic = "ONECORE\x00";
@@ -51,7 +51,7 @@ pub const State = extern struct {
     response_text: ContentWindow = .{},
     response_tool_key: ContentWindow = .{},
     response_arguments: ContentWindow = .{},
-    response_arguments_evidence: model_contract.CanonicalJsonEvidence = .{},
+    response_arguments_evidence: model_contract.StrictToolJsonEvidence = .{},
 };
 
 comptime {
@@ -381,7 +381,7 @@ test "canonical Core State vector round trips deterministically" {
         .response_text = .{},
         .response_tool_key = .{ .offset = 24, .length = 7 },
         .response_arguments = .{ .offset = 31, .length = 32 },
-        .response_arguments_evidence = model_contract.canonicalJsonEvidence("00000000000000000000000000000000"),
+        .response_arguments_evidence = model_contract.strictToolJsonEvidence("00000000000000000000000000000000"),
     };
     var first: [encoded_size]u8 = undefined;
     var second: [encoded_size]u8 = undefined;
@@ -392,7 +392,7 @@ test "canonical Core State vector round trips deterministically" {
     try std.testing.expectEqualDeep(state, restored);
 }
 
-test "Core State keeps all-zero canonical digests distinct from absent evidence" {
+test "Core State keeps all-zero strict JSON digests distinct from absent evidence" {
     var state: State = .{
         .agent_id = 1,
         .agent_generation = 1,

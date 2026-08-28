@@ -58,15 +58,15 @@ pub const Response = struct {
     failure: model_protocol.Failure,
     text: ContentWindow,
     tool_key: ContentWindow,
-    arguments: CanonicalJsonWindow,
+    arguments: StrictToolJsonWindow,
 };
 
-pub const CanonicalJsonWindow = struct {
+pub const StrictToolJsonWindow = struct {
     offset: u32,
     length: u32,
-    evidence: model_contract.CanonicalJsonEvidence,
+    evidence: model_contract.StrictToolJsonEvidence,
 
-    pub fn contentWindow(self: CanonicalJsonWindow) ContentWindow {
+    pub fn contentWindow(self: StrictToolJsonWindow) ContentWindow {
         return .{ .offset = self.offset, .length = self.length };
     }
 };
@@ -323,10 +323,14 @@ pub const Core = struct {
     ) !Response {
         try self.requireOperation(identity_value, .accepted);
         if (response_ref == 0) return error.InvalidResultReference;
-        if (response_bytes.len == 0) return error.EmptyModelResponse;
         if (response_bytes.len > model_protocol.max_response_size) return error.ResponseCapacityExceeded;
         if (self.state.task_phase != .awaiting_model) return error.IllegalModelResponseTransition;
         const parsed = try validated.verify(response_bytes);
+        if (response_bytes.len == 0 and
+            !(parsed.disposition == .failure and parsed.failure == .empty))
+        {
+            return error.EmptyModelResponse;
+        }
         self.state.operation_result = response_ref;
         self.state.operation_phase = .completed;
         self.state.response_ref = response_ref;
@@ -599,19 +603,12 @@ test "responses retain only validated metadata and durable content windows" {
     const identity: OperationIdentity = .{ .id = operation.id, .generation = operation.generation };
     try core.acceptOperation(identity);
 
-    var value: [model_protocol.max_resident_response_size]u8 = @splat('x');
-    var raw_arguments: [model_protocol.max_resident_response_size + 32]u8 = undefined;
-    var arguments_buffer: [model_protocol.max_resident_response_size + 32]u8 = undefined;
+    var value: [model_contract.max_patch_input_bytes]u8 = @splat(0x01);
+    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
     var validation: model_protocol.ValidationScratch = undefined;
-    const contract = @import("model_contract.zig");
-    const arguments = try contract.encodeJson(
-        &validation.json.arena,
-        &raw_arguments,
-        &arguments_buffer,
-        .{ .value = &value },
-    );
+    const arguments = try model_contract.encodeJson(&arguments_buffer, .{ .patch = &value });
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const response = try model_protocol.encodeTool(&validation.json.arena, &response_buffer, "fixture.large.v1", arguments);
+    const response = try model_protocol.encodeTool(&response_buffer, model_contract.apply_patch_key, arguments);
     try std.testing.expect(response.len > model_protocol.max_resident_response_size);
     const parsed = try core.applyModelResponse(
         identity,

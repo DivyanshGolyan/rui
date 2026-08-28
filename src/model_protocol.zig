@@ -7,8 +7,8 @@ pub const max_resident_response_size = 20 * 1024;
 pub const max_assistant_text_size = max_resident_response_size - header_size;
 pub const max_response_size = header_size + contract.max_tool_key_size +
     contract.max_tool_arguments_envelope_size;
-pub const version: u16 = 2;
-const magic = "ONERSP2\x00";
+pub const version: u16 = 3;
+const magic = "ONERSP3\x00";
 
 pub const Disposition = enum(u8) { final_answer = 1, tool_call = 2, input_request = 3, failure = 4 };
 pub const Failure = enum(u8) {
@@ -32,7 +32,7 @@ pub const Parsed = struct {
     tool_key_length: u32 = 0,
     arguments_offset: u32 = 0,
     arguments_length: u32 = 0,
-    arguments_evidence: contract.CanonicalJsonEvidence = .{},
+    arguments_evidence: contract.StrictToolJsonEvidence = .{},
     input_shape: ?contract.InputShape = null,
     option_count: u8 = 0,
     options_offset: u32 = 0,
@@ -41,12 +41,13 @@ pub const Parsed = struct {
 
 const ValidationRecord = struct {
     parsed: Parsed,
+    tool_arguments: ?contract.AdmittedToolArguments,
     result_digest: binding.Result,
     byte_length: u32,
 };
 
 pub const ValidationScratch = struct {
-    json: contract.CanonicalJsonScratch = .{},
+    json: contract.StrictToolJsonScratch = .{},
     record_bytes: [@sizeOf(ValidationRecord)]u8 align(@alignOf(ValidationRecord)) = undefined,
 
     fn record(self: *ValidationScratch) *ValidationRecord {
@@ -67,6 +68,15 @@ pub const Validated = opaque {
         }
         return record.parsed;
     }
+
+    pub fn admittedToolArguments(
+        self: *const Validated,
+        bytes: []const u8,
+    ) !?contract.AdmittedToolArguments {
+        _ = try self.verify(bytes);
+        const record: *const ValidationRecord = @ptrCast(@alignCast(self));
+        return record.tool_arguments;
+    }
 };
 
 pub const Choice = struct { id: []const u8, label: []const u8 };
@@ -79,19 +89,15 @@ pub fn encodeText(out: []u8, text: []const u8) ![]const u8 {
 }
 
 pub fn encodeTool(
-    arena: *contract.CanonicalJsonArena,
     out: []u8,
     tool_key: []const u8,
     arguments: []const u8,
 ) ![]const u8 {
     try contract.validateToolKey(tool_key);
-    if (out.len < header_size + tool_key.len) return error.ResponseTooLarge;
-    const canonical = contract.canonicalizeJson(
-        arena,
-        out[header_size + tool_key.len ..],
-        arguments,
-    ) catch return error.InvalidToolArguments;
-    return encode(out, .tool_call, .none, 0, 0, tool_key, canonical.bytes());
+    if (arguments.len == 0 or arguments.len > contract.max_tool_arguments_envelope_size) {
+        return error.InvalidToolArguments;
+    }
+    return encode(out, .tool_call, .none, 0, 0, tool_key, arguments);
 }
 
 pub fn encodeInputText(out: []u8, prompt: []const u8) ![]const u8 {
@@ -181,22 +187,51 @@ pub fn validate(
     scratch: *ValidationScratch,
     bytes: []const u8,
 ) !*const Validated {
-    const parsed = try decodeWithScratch(&scratch.json, bytes);
+    const decoded = try decodeWithScratch(&scratch.json, bytes);
     const result_digest = binding.hash(binding.Result, bytes);
     const byte_length: u32 = @intCast(bytes.len);
     const record = scratch.record();
     record.* = .{
-        .parsed = parsed,
+        .parsed = decoded.parsed,
+        .tool_arguments = decoded.tool_arguments,
         .result_digest = result_digest,
         .byte_length = byte_length,
     };
     return @ptrCast(record);
 }
 
-fn decodeWithScratch(
-    scratch: *contract.CanonicalJsonScratch,
+/// Admit one bounded immutable capture. Syntactically or semantically invalid
+/// provider output becomes a typed terminal failure bound to the exact capture
+/// bytes; callers do not retry parsing the same evidence on recovery.
+pub fn admit(
+    scratch: *ValidationScratch,
     bytes: []const u8,
-) !Parsed {
+) *const Validated {
+    const decoded = decodeWithScratch(&scratch.json, bytes) catch |err| Decoded{
+        .parsed = failed(switch (err) {
+            error.UnknownModelTool => .unknown_tool,
+            else => if (bytes.len == 0) .empty else .malformed,
+        }),
+    };
+    const record = scratch.record();
+    record.* = .{
+        .parsed = decoded.parsed,
+        .tool_arguments = decoded.tool_arguments,
+        .result_digest = binding.hash(binding.Result, bytes),
+        .byte_length = @intCast(bytes.len),
+    };
+    return @ptrCast(record);
+}
+
+const Decoded = struct {
+    parsed: Parsed,
+    tool_arguments: ?contract.AdmittedToolArguments = null,
+};
+
+fn decodeWithScratch(
+    scratch: *contract.StrictToolJsonScratch,
+    bytes: []const u8,
+) !Decoded {
     if (bytes.len < header_size or bytes.len > max_response_size or
         !std.mem.eql(u8, bytes[0..magic.len], magic) or read(u16, bytes, 8) != version or
         read(u16, bytes, 10) != header_size)
@@ -220,31 +255,35 @@ fn decodeWithScratch(
             if (reason != .none or bytes[14] != 0 or bytes[15] != 0 or first.len == 0 or
                 first.len > max_assistant_text_size or
                 second.len != 0 or !contract.utf8Valid(first)) return error.MalformedModelResponse;
-            return .{ .disposition = .final_answer, .text_offset = header_size, .text_length = @intCast(first.len) };
+            return .{ .parsed = .{ .disposition = .final_answer, .text_offset = header_size, .text_length = @intCast(first.len) } };
         },
         .tool_call => {
             if (reason != .none or bytes[14] != 0 or bytes[15] != 0 or second.len == 0) {
                 return error.MalformedModelResponse;
             }
             contract.validateToolKey(first) catch return error.MalformedModelResponse;
-            if (!contract.canonicalJson(scratch, second)) {
-                return error.MalformedModelResponse;
-            }
-            return .{
+            const admitted = contract.admitToolArguments(scratch, first, second) catch |err| switch (err) {
+                error.UnknownModelTool => return error.UnknownModelTool,
+                else => return error.MalformedModelResponse,
+            };
+            const evidence = switch (admitted) {
+                inline else => |value| value.json.evidence(),
+            };
+            return .{ .parsed = .{
                 .disposition = .tool_call,
                 .tool_key_offset = header_size,
                 .tool_key_length = @intCast(first.len),
                 .arguments_offset = @intCast(header_size + first.len),
                 .arguments_length = @intCast(second.len),
-                .arguments_evidence = contract.canonicalJsonEvidence(second),
-            };
+                .arguments_evidence = evidence,
+            }, .tool_arguments = admitted };
         },
-        .input_request => return try decodeInput(bytes, first, second, reason),
+        .input_request => return .{ .parsed = try decodeInput(bytes, first, second, reason) },
         .failure => {
             if (reason == .none or bytes[14] != 0 or bytes[15] != 0 or first.len != 0 or second.len != 0) {
                 return error.MalformedModelResponse;
             }
-            return failed(reason);
+            return .{ .parsed = failed(reason) };
         },
     }
 }
@@ -310,13 +349,13 @@ fn read(comptime T: type, input: []const u8, offset: usize) T {
     return std.mem.readInt(T, input[offset..][0..@sizeOf(T)], .little);
 }
 
-test "complete normalized responses cover every V1 disposition" {
+test "complete captured responses cover every V1 disposition" {
     var bytes: [max_response_size]u8 = undefined;
     var scratch: ValidationScratch = undefined;
     try std.testing.expectEqual(Disposition.final_answer, parse(&scratch, try encodeText(&bytes, "done")).disposition);
-    const tool = parse(&scratch, try encodeTool(&scratch.json.arena, &bytes, "fixture.tool", "{\"value\":1}"));
+    const tool = parse(&scratch, try encodeTool(&bytes, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}"));
     try std.testing.expectEqual(Disposition.tool_call, tool.disposition);
-    try std.testing.expectEqualStrings("fixture.tool", bytes[tool.tool_key_offset..][0..tool.tool_key_length]);
+    try std.testing.expectEqualStrings(contract.bash_key, bytes[tool.tool_key_offset..][0..tool.tool_key_length]);
     const text_input = parse(&scratch, try encodeInputText(&bytes, "Which migration should I use?"));
     try std.testing.expectEqual(Disposition.input_request, text_input.disposition);
     try std.testing.expectEqual(@as(u32, 0), text_input.options_offset);
@@ -340,22 +379,22 @@ test "validated response evidence is compact and byte exact" {
     var first_buffer: [128]u8 = undefined;
     var second_buffer: [128]u8 = undefined;
     var scratch: ValidationScratch = undefined;
-    const first = try encodeTool(&scratch.json.arena, &first_buffer, "fixture.tool", "{\"value\":1}");
-    const second = try encodeTool(&scratch.json.arena, &second_buffer, "fixture.tool", "{\"value\":2}");
+    const first = try encodeTool(&first_buffer, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}");
+    const second = try encodeTool(&second_buffer, contract.bash_key, "{\"command\":\"false\",\"timeout_ms\":1000}");
     const proof = try validate(&scratch, first);
     try std.testing.expectEqual(Disposition.tool_call, (try proof.verify(first)).disposition);
     try std.testing.expectError(error.InvalidModelResponseEvidence, proof.verify(second));
     try std.testing.expectEqual(@sizeOf(*const anyopaque), @sizeOf(@TypeOf(proof)));
 }
 
-test "hostile normalized responses fail before authorizing effects" {
+test "hostile captured responses fail before authorizing effects" {
     var bytes: [max_response_size]u8 = undefined;
     var scratch: ValidationScratch = undefined;
-    const encoded = try encodeTool(&scratch.json.arena, &bytes, "fixture.tool", "{}");
+    const encoded = try encodeTool(&bytes, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}");
     bytes[20] = 0xff;
     try std.testing.expectEqual(Failure.malformed, parse(&scratch, encoded).failure);
     try std.testing.expectError(error.MalformedModelResponse, decode(&scratch, encoded));
-    const current = try encodeTool(&scratch.json.arena, &bytes, "fixture.tool", "{}");
+    const current = try encodeTool(&bytes, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}");
     std.mem.writeInt(u16, bytes[8..10], version - 1, .little);
     try std.testing.expectEqual(Failure.malformed, parse(&scratch, current).failure);
     try std.testing.expectEqual(Failure.truncated, parse(&scratch, try encodeFailure(&bytes, .truncated)).failure);
@@ -366,25 +405,45 @@ test "hostile normalized responses fail before authorizing effects" {
     try std.testing.expectError(error.DuplicateInputChoice, encodeInputChoice(&bytes, "Choose", &choices));
 }
 
-test "tool response identity uses canonical arguments" {
+test "semantic admission binds malformed and unknown captures as typed failures" {
+    var scratch: ValidationScratch = .{};
+    const malformed = "not a response";
+    const malformed_proof = admit(&scratch, malformed);
+    const malformed_result = try malformed_proof.verify(malformed);
+    try std.testing.expectEqual(Disposition.failure, malformed_result.disposition);
+    try std.testing.expectEqual(Failure.malformed, malformed_result.failure);
+
+    var response: [max_response_size]u8 = undefined;
+    const unknown = try encodeTool(&response, "fixture.unknown.v1", "{}");
+    const unknown_proof = admit(&scratch, unknown);
+    const unknown_result = try unknown_proof.verify(unknown);
+    try std.testing.expectEqual(Disposition.failure, unknown_result.disposition);
+    try std.testing.expectEqual(Failure.unknown_tool, unknown_result.failure);
+    try std.testing.expectError(
+        error.InvalidModelResponseEvidence,
+        unknown_proof.verify("substituted"),
+    );
+}
+
+test "tool response identity preserves exact noncanonical arguments" {
     var first: [max_response_size]u8 = undefined;
     var second: [max_response_size]u8 = undefined;
-    var arena: contract.CanonicalJsonArena = undefined;
     const first_encoded = try encodeTool(
-        &arena,
         &first,
-        "fixture.tool",
-        "{\"z\":-0.0,\"a\":{\"text\":\"\\u0061\",\"number\":1e0}}",
+        contract.bash_key,
+        " { \"timeout_ms\" : 1000, \"command\" : \"true\" } ",
     );
     const second_encoded = try encodeTool(
-        &arena,
         &second,
-        "fixture.tool",
-        "{\"a\":{\"number\":1,\"text\":\"a\"},\"z\":0}",
+        contract.bash_key,
+        "{\"command\":\"true\",\"timeout_ms\":1000}",
     );
-    try std.testing.expectEqualSlices(u8, first_encoded, second_encoded);
-    try std.testing.expectError(
-        error.InvalidToolArguments,
-        encodeTool(&arena, &first, "fixture.tool", "{\"a\":1,\"a\":2}"),
-    );
+    try std.testing.expect(!std.mem.eql(u8, first_encoded, second_encoded));
+    var scratch: ValidationScratch = undefined;
+    const first_admitted = try decode(&scratch, first_encoded);
+    const first_digest = first_admitted.arguments_evidence.digest;
+    const second_admitted = try decode(&scratch, second_encoded);
+    try std.testing.expect(!std.mem.eql(u8, &first_digest, &second_admitted.arguments_evidence.digest));
+    const malformed = try encodeTool(&first, contract.bash_key, "{\"command\":\"true\",\"command\":\"false\",\"timeout_ms\":1000}");
+    try std.testing.expectError(error.MalformedModelResponse, decode(&scratch, malformed));
 }

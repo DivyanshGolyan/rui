@@ -62,7 +62,6 @@ pub const ToolFixture = struct {
         const self: *ToolFixture = @ptrCast(@alignCast(context));
         var request = request_value;
         var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
-        var arena: model_contract.CanonicalJsonArena = undefined;
         const encoded = switch (self.calls) {
             0 => blk: {
                 if (request.entryCount() != 1) return error.UnexpectedFixtureRequest;
@@ -70,16 +69,15 @@ pub const ToolFixture = struct {
                 try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
-                    &arena,
                     &encoded_buffer,
                     fixtureToolKey(self.tool),
-                    try fixtureArguments(&arena, self.tool, self.tool_arguments, &arguments),
+                    try fixtureArguments(self.tool, self.tool_arguments, &arguments),
                 );
             },
             1 => blk: {
                 if (request.entryCount() != 3) return error.ToolResultMissingFromContext;
                 try expectText((try request.next()).?, .user_text, self.expected_task);
-                try expectToolCall(&arena, (try request.next()).?, self.tool, self.tool_arguments);
+                try expectToolCall((try request.next()).?, self.tool, self.tool_arguments);
                 const result = switch ((try request.next()).?) {
                     .tool_result => |result| result,
                     else => return error.ToolResultMissingFromContext,
@@ -124,45 +122,41 @@ pub const RepairFixture = struct {
         var request = request_value;
 
         var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
-        var arena: model_contract.CanonicalJsonArena = undefined;
         const encoded = switch (request.entryCount()) {
             1 => blk: {
                 try expectText((try request.next()).?, .user_text, self.expected_task);
                 try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
-                    &arena,
                     &encoded_buffer,
                     model_contract.bash_key,
-                    try fixtureArguments(&arena, .bash, self.bash_call, &arguments),
+                    try fixtureArguments(.bash, self.bash_call, &arguments),
                 );
             },
             3 => blk: {
-                try self.expectPrefix(&arena, &request, 3);
+                try self.expectPrefix(&request, 3);
                 try expectBashResult((try request.next()).?, .nonzero_exit, 1);
                 try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
-                    &arena,
                     &encoded_buffer,
                     model_contract.apply_patch_key,
-                    try fixtureArguments(&arena, .apply_patch, self.patch, &arguments),
+                    try fixtureArguments(.apply_patch, self.patch, &arguments),
                 );
             },
             5 => blk: {
-                try self.expectPrefix(&arena, &request, 5);
+                try self.expectPrefix(&request, 5);
                 try expectPatchResult((try request.next()).?, .applied);
                 try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
-                    &arena,
                     &encoded_buffer,
                     model_contract.bash_key,
-                    try fixtureArguments(&arena, .bash, self.bash_call, &arguments),
+                    try fixtureArguments(.bash, self.bash_call, &arguments),
                 );
             },
             7 => blk: {
-                try self.expectPrefix(&arena, &request, 7);
+                try self.expectPrefix(&request, 7);
                 try expectBashResult((try request.next()).?, .success, 0);
                 try expectEnd(&request);
                 break :blk try model_protocol.encodeText(&encoded_buffer, self.final_answer);
@@ -175,20 +169,19 @@ pub const RepairFixture = struct {
 
     fn expectPrefix(
         self: *const RepairFixture,
-        arena: *model_contract.CanonicalJsonArena,
         request: *model_operation.RequestCursor,
         count: usize,
     ) !void {
         if (request.entryCount() != count) return error.UnexpectedRepairHistory;
         try expectText((try request.next()).?, .user_text, self.expected_task);
-        try expectToolCall(arena, (try request.next()).?, .bash, self.bash_call);
+        try expectToolCall((try request.next()).?, .bash, self.bash_call);
         if (count >= 5) {
             try expectBashResult((try request.next()).?, .nonzero_exit, 1);
-            try expectToolCall(arena, (try request.next()).?, .apply_patch, self.patch);
+            try expectToolCall((try request.next()).?, .apply_patch, self.patch);
         }
         if (count >= 7) {
             try expectPatchResult((try request.next()).?, .applied);
-            try expectToolCall(arena, (try request.next()).?, .bash, self.bash_call);
+            try expectToolCall((try request.next()).?, .bash, self.bash_call);
         }
     }
 };
@@ -201,26 +194,23 @@ fn fixtureToolKey(tool: FixtureTool) []const u8 {
 }
 
 fn fixtureArguments(
-    arena: *model_contract.CanonicalJsonArena,
     tool: FixtureTool,
     raw: []const u8,
     out: []u8,
 ) ![]const u8 {
-    var raw_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
     return switch (tool) {
         .bash => blk: {
             const call = try bash_tool.decodeCall(raw);
-            break :blk try model_contract.encodeJson(arena, &raw_buffer, out, .{
+            break :blk try model_contract.encodeJson(out, .{
                 .command = call.command,
                 .timeout_ms = call.timeout_ms,
             });
         },
-        .apply_patch => model_contract.encodeJson(arena, &raw_buffer, out, .{ .patch = raw }),
+        .apply_patch => model_contract.encodeJson(out, .{ .patch = raw }),
     };
 }
 
 fn expectToolCall(
-    arena: *model_contract.CanonicalJsonArena,
     entry: model_operation.RequestEntry,
     tool: FixtureTool,
     raw: []const u8,
@@ -231,7 +221,7 @@ fn expectToolCall(
     };
     if (!std.mem.eql(u8, call.key(), fixtureToolKey(tool))) return error.ToolCallMissingFromContext;
     var expected: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-    if (!try contentEquals(call.arguments, try fixtureArguments(arena, tool, raw, &expected))) {
+    if (!try contentEquals(call.arguments, try fixtureArguments(tool, raw, &expected))) {
         return error.ToolCallMissingFromContext;
     }
 }
@@ -380,13 +370,7 @@ test "deterministic Provider decodes the exact immutable request" {
         .expected_task = "Explain the repository",
         .final_answer = "This repository contains one bounded agent core.",
     };
-    var json_input: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-    var json_scratch: model_contract.CanonicalJsonScratch = undefined;
-    const workspace: session_store.CanonicalJsonWorkspace = .{
-        .input = &json_input,
-        .scratch = &json_scratch,
-    };
-    var provider_io = try model_operation.ProviderIo.open(&session, 1001, 1002, workspace);
+    var provider_io = try model_operation.ProviderIo.open(&session, 1001, 1002);
     defer provider_io.close();
     const provider = fixture.provider();
     try provider.dispatch(provider.context, try provider_io.request(), provider_io.responseCapability());
@@ -408,9 +392,10 @@ test "deterministic Provider decodes the exact immutable request" {
     try std.testing.expectError(error.ModelRequestDigestMismatch, model_operation.verifyRequestDigest(&session, 1004, digest));
 
     var call_buffer: [128]u8 = undefined;
-    const call_bytes = try conversation.encodeToolCall(&json_scratch.arena, &call_buffer, .{
+    var json_scratch: model_contract.StrictToolJsonScratch = undefined;
+    const call_bytes = try conversation.encodeToolCall(&call_buffer, .{
         .key = "fixture.inspect.v1",
-        .arguments = "{\"path\":\"README.md\"}",
+        .arguments = try model_contract.validateStrictToolJson(&json_scratch, "{\"path\":\"README.md\"}"),
     });
     try session.storeBlob(1100, call_bytes);
     const call_entry = try session.appendConversation(.tool_call, 1100, null);
@@ -424,7 +409,7 @@ test "deterministic Provider decodes the exact immutable request" {
         .parent_id = call_entry.parent_id,
         .kind = call_entry.kind,
         .content_ref = call_entry.content_ref,
-    })}, null, workspace);
+    })}, null);
     try std.testing.expectError(error.ContextSplitsToolPair, model_operation.buildRequest(&session, 1101, 1, 2));
 
     var result_buffer: [128]u8 = undefined;
@@ -445,7 +430,7 @@ test "deterministic Provider decodes the exact immutable request" {
         .parent_id = result_entry.parent_id,
         .kind = result_entry.kind,
         .content_ref = result_entry.content_ref,
-    })}, null, null);
+    })}, null);
     try std.testing.expectError(error.ContextSplitsToolPair, model_operation.buildRequest(&session, 1103, 3, 1));
 
     var large_content: [40 * 1024]u8 = @splat('x');
@@ -464,10 +449,10 @@ test "deterministic Provider decodes the exact immutable request" {
             .parent_id = entry.parent_id,
             .kind = entry.kind,
             .content_ref = entry.content_ref,
-        })}, null, null);
+        })}, null);
     }
     _ = try model_operation.buildRequest(&session, 1300, 4, 9);
-    var large_io = try model_operation.ProviderIo.open(&session, 1300, 1301, workspace);
+    var large_io = try model_operation.ProviderIo.open(&session, 1300, 1301);
     defer large_io.close();
     var semantic_request = try large_io.request();
     try std.testing.expectEqual(@as(u32, 9), semantic_request.entryCount());

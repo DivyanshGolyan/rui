@@ -150,14 +150,14 @@ Instead:
 
 - make `RequestReader` expose a documented provider-neutral semantic request protocol rather than raw Conversation blobs;
 - have the concrete host adapter own OAuth/API-key lookup, refresh, endpoint, HTTP transport, streaming assembly, and wire conversion;
-- have the adapter write one documented complete normalized response: assistant text, Tool Key plus bounded canonical JSON arguments, or typed failure;
+- have the adapter write one documented complete captured response: assistant text, Tool Key plus bounded exact JSON arguments, or typed failure;
 - keep credential references and secrets outside Session content and Core state.
 
 The concrete adapter can close over a host-owned credential service and model selection. The Core does not need to know that Codex uses ChatGPT OAuth while another provider uses an API key.
 
 ### `model_protocol` is an adequate V1 terminal disposition, not a complete adapter protocol
 
-The current response protocol normalizes one text answer or one `bash`/`apply_patch` call plus a small terminal status. That couples the Provider contract to the current host executors. Replace those tags with one Tool Key and bounded canonical JSON arguments.
+The response protocol carries one text answer or one Tool Key plus bounded exact JSON arguments under `StrictToolJsonV1`, or a small terminal status. The closed Host mapping, rather than the Provider contract, decides whether that admitted Tool Key is executable.
 
 Do not push transport data into Core. Define two levels:
 

@@ -1,17 +1,22 @@
 const std = @import("std");
 const contract = @import("model_contract.zig");
 
-pub const call_header_size: usize = 16;
+pub const call_header_size: usize = 48;
 pub const result_header_size: usize = 24;
 pub const max_result_content_size: usize = 180 * 1024;
-pub const call_version: u16 = 1;
+pub const call_version: u16 = 2;
 pub const result_version: u16 = 1;
-const call_magic = "ONETCL2\x00";
+const call_magic = "ONETCL3\x00";
 const result_magic = "ONETRS2\x00";
 
 pub const ToolCall = struct {
     key: []const u8,
     arguments: []const u8,
+};
+
+pub const AdmittedToolCall = struct {
+    key: []const u8,
+    arguments: contract.StrictToolJson,
 };
 
 pub const ToolResult = struct {
@@ -23,6 +28,7 @@ pub const ToolResult = struct {
 pub const ToolCallHeader = struct {
     key_length: u16,
     arguments_length: u32,
+    arguments_evidence: contract.StrictToolJsonEvidence,
 };
 
 pub const ToolResultHeader = struct {
@@ -32,28 +38,33 @@ pub const ToolResultHeader = struct {
 };
 
 pub fn encodeToolCall(
-    arena: *contract.CanonicalJsonArena,
     out: []u8,
-    call: ToolCall,
+    call: AdmittedToolCall,
 ) ![]const u8 {
     try contract.validateToolKey(call.key);
-    if (out.len < call_header_size + call.key.len) return error.ToolCallTooLarge;
-    const canonical = contract.canonicalizeJson(
-        arena,
-        out[call_header_size + call.key.len ..],
-        call.arguments,
-    ) catch return error.InvalidToolArguments;
-    const arguments = canonical.bytes();
+    const arguments = call.arguments.bytes();
     const total = call_header_size + call.key.len + arguments.len;
     if (total > out.len) return error.ToolCallTooLarge;
-    _ = try encodeToolCallHeader(out[0..call_header_size], call.key.len, arguments.len);
+    _ = try encodeToolCallHeader(
+        out[0..call_header_size],
+        call.key.len,
+        arguments.len,
+        call.arguments.evidence(),
+    );
     @memcpy(out[call_header_size..][0..call.key.len], call.key);
+    @memcpy(out[call_header_size + call.key.len .. total], arguments);
     return out[0..total];
 }
 
-pub fn encodeToolCallHeader(out: []u8, key_length: usize, arguments_length: usize) ![]const u8 {
+pub fn encodeToolCallHeader(
+    out: []u8,
+    key_length: usize,
+    arguments_length: usize,
+    arguments_evidence: contract.StrictToolJsonEvidence,
+) ![]const u8 {
     if (out.len < call_header_size or key_length == 0 or key_length > contract.max_tool_key_size or
-        arguments_length == 0 or arguments_length > contract.max_tool_arguments_envelope_size)
+        arguments_length == 0 or arguments_length > contract.max_tool_arguments_envelope_size or
+        !arguments_evidence.validForLength(@intCast(arguments_length)))
     {
         return error.InvalidToolCall;
     }
@@ -62,6 +73,7 @@ pub fn encodeToolCallHeader(out: []u8, key_length: usize, arguments_length: usiz
     write(u16, out, 8, call_version);
     write(u16, out, 10, @intCast(key_length));
     write(u32, out, 12, @intCast(arguments_length));
+    @memcpy(out[16..48], &arguments_evidence.digest);
     return out[0..call_header_size];
 }
 
@@ -75,10 +87,15 @@ pub fn decodeToolCallHeader(bytes: []const u8, total_length: u64) !ToolCallHeade
     const header: ToolCallHeader = .{
         .key_length = read(u16, bytes, 10),
         .arguments_length = read(u32, bytes, 12),
+        .arguments_evidence = .{
+            .digest = bytes[16..48].*,
+            .length = read(u32, bytes, 12),
+        },
     };
     if (header.key_length == 0 or header.key_length > contract.max_tool_key_size or
         header.arguments_length == 0 or
         header.arguments_length > contract.max_tool_arguments_envelope_size or
+        !header.arguments_evidence.validForLength(header.arguments_length) or
         call_header_size + @as(u64, header.key_length) + header.arguments_length != total_length)
     {
         return error.InvalidToolCall;
@@ -86,15 +103,16 @@ pub fn decodeToolCallHeader(bytes: []const u8, total_length: u64) !ToolCallHeade
     return header;
 }
 
-pub fn decodeToolCall(scratch: *contract.CanonicalJsonScratch, bytes: []const u8) !ToolCall {
+pub fn decodeToolCall(bytes: []const u8) !ToolCall {
     const header = try decodeToolCallHeader(bytes, bytes.len);
     const key_length: usize = header.key_length;
+    const arguments = bytes[call_header_size + key_length ..];
+    _ = try contract.strictToolJsonFromEvidence(arguments, header.arguments_evidence);
     const call: ToolCall = .{
         .key = bytes[call_header_size..][0..key_length],
-        .arguments = bytes[call_header_size + key_length ..],
+        .arguments = arguments,
     };
     try contract.validateToolKey(call.key);
-    if (!contract.canonicalJson(scratch, call.arguments)) return error.InvalidToolCall;
     return call;
 }
 
@@ -192,35 +210,36 @@ fn read(comptime T: type, input: []const u8, offset: usize) T {
 
 test "arbitrary Tool Keys round trip without execution meaning" {
     var bytes: [128]u8 = undefined;
-    var scratch: contract.CanonicalJsonScratch = undefined;
-    const encoded = try encodeToolCall(&scratch.arena, &bytes, .{ .key = "fixture.inspect.v1", .arguments = "{\"path\":\"README.md\"}" });
-    const decoded = try decodeToolCall(&scratch, encoded);
+    var scratch: contract.StrictToolJsonScratch = undefined;
+    const arguments = try contract.validateStrictToolJson(&scratch, " { \"path\" : \"README.md\" } ");
+    const encoded = try encodeToolCall(&bytes, .{ .key = "fixture.inspect.v1", .arguments = arguments });
+    const decoded = try decodeToolCall(encoded);
     try std.testing.expectEqualStrings("fixture.inspect.v1", decoded.key);
-    try std.testing.expectEqualStrings("{\"path\":\"README.md\"}", decoded.arguments);
+    try std.testing.expectEqualStrings(" { \"path\" : \"README.md\" } ", decoded.arguments);
+    const last = encoded.len - 1;
+    const original_last = bytes[last];
+    bytes[last] = if (original_last == ' ') '\n' else ' ';
+    try std.testing.expectError(error.InvalidStrictToolJsonEvidence, decodeToolCall(encoded));
+    bytes[last] = original_last;
     std.mem.writeInt(u16, bytes[8..10], call_version - 1, .little);
-    try std.testing.expectError(error.InvalidToolCall, decodeToolCall(&scratch, encoded));
+    try std.testing.expectError(error.InvalidToolCall, decodeToolCall(encoded));
 }
 
-test "tool calls persist only normalized canonical arguments" {
+test "tool calls persist exact admitted argument bytes" {
     var first: [256]u8 = undefined;
     var second: [256]u8 = undefined;
-    var arena: contract.CanonicalJsonArena = undefined;
-    const first_encoded = try encodeToolCall(&arena, &first, .{
+    var scratch: contract.StrictToolJsonScratch = undefined;
+    const first_arguments = try contract.validateStrictToolJson(&scratch, " { \"z\" : -0.0, \"a\" : { \"text\" : \"\\u0061\", \"number\" : 1e0 } } ");
+    const second_arguments = try contract.validateStrictToolJson(&scratch, "{\"a\":{\"number\":1,\"text\":\"a\"},\"z\":0}");
+    const first_encoded = try encodeToolCall(&first, .{
         .key = "fixture.inspect.v1",
-        .arguments = "{\"z\":-0.0,\"a\":{\"text\":\"\\u0061\",\"number\":1e0}}",
+        .arguments = first_arguments,
     });
-    const second_encoded = try encodeToolCall(&arena, &second, .{
+    const second_encoded = try encodeToolCall(&second, .{
         .key = "fixture.inspect.v1",
-        .arguments = "{\"a\":{\"number\":1,\"text\":\"a\"},\"z\":0}",
+        .arguments = second_arguments,
     });
-    try std.testing.expectEqualSlices(u8, first_encoded, second_encoded);
-    try std.testing.expectError(
-        error.InvalidToolArguments,
-        encodeToolCall(&arena, &first, .{
-            .key = "fixture.inspect.v1",
-            .arguments = "{\"a\":1,\"a\":2}",
-        }),
-    );
+    try std.testing.expect(!std.mem.eql(u8, first_encoded, second_encoded));
 }
 
 test "tool results bind their immediate parent call" {

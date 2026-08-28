@@ -3,11 +3,13 @@ const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
 const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
+const conversation = @import("conversation.zig");
 const deterministic_provider = @import("deterministic_provider.zig");
 const host_runtime = @import("host_runtime.zig");
 const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
 const model_operation = @import("model_operation.zig");
+const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
@@ -975,7 +977,7 @@ test "restore withholds projections until the configured recovery quantum reache
             .agent_id = session.agent_id,
             .agent_generation = 1,
             .ownership_epoch = session.ownership_epoch,
-        }, index + 1, index + 1)}, null, null);
+        }, index + 1, index + 1)}, null);
     }
     created.close();
 
@@ -1112,7 +1114,7 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         descriptor.operation_submitted.descriptor_ref,
         "operation descriptor",
     );
-    _ = try session.commitSemantic(&.{descriptor}, null, null);
+    _ = try session.commitSemantic(&.{descriptor}, null);
     created.close();
     read_fault.armed = true;
 
@@ -1332,6 +1334,156 @@ test "known provider failure is one durable terminal Result" {
             .session_id = session_id,
             .provider = provider.provider(),
         } },
+    });
+    defer restored.close();
+    _ = try restored.drive();
+    const regenerated = try restored.drive();
+    try std.testing.expectEqual(State.failed, regenerated.state);
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+}
+
+test "captured noncanonical tool call closes once after crash without redispatch" {
+    const exact_arguments = "{ \"timeout_ms\" : 1000, \"command\" : \"true\" }";
+    const ToolProvider = struct {
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var buffer: [model_protocol.max_response_size]u8 = undefined;
+            const encoded = try model_protocol.encodeTool(
+                &buffer,
+                "bash.v1",
+                exact_arguments,
+            );
+            try response.append(encoded);
+            try response.finish();
+        }
+    };
+    const CrashAfterCapture = struct {
+        armed: bool = true,
+
+        fn reached(context: *anyopaque, boundary: FaultBoundary) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.armed and boundary == .after_completion_inbox) {
+                self.armed = false;
+                return error.InjectedCrash;
+            }
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var provider: ToolProvider = .{};
+    var crash: CrashAfterCapture = .{};
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:captured-tool-replay",
+            .task = "task",
+            .provider = provider.provider(),
+            .fault = .{ .context = &crash, .reached = CrashAfterCapture.reached },
+        } },
+    });
+    _ = try owner.drive();
+    const session_id = harnessState(owner).session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    try std.testing.expectError(error.InjectedCrash, owner.drive());
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+    owner.close();
+
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .provider = provider.provider(),
+        } },
+    });
+    defer restored.close();
+    _ = try restored.drive();
+    const waiting = try restored.drive();
+    try std.testing.expectEqual(State.waiting, waiting.state);
+    try std.testing.expectEqual(ProjectionKind.approval_required, waiting.projections[0].kind);
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+
+    const session = &harnessState(restored).session.?;
+    const call_entry = try session.readEntry(session.activeLeafId());
+    try std.testing.expectEqual(session_store.EntryKind.tool_call, call_entry.kind);
+    var call_bytes: [
+        conversation.call_header_size + model_contract.max_tool_key_size +
+            model_contract.max_tool_arguments_envelope_size
+    ]u8 = undefined;
+    const encoded_call = try session.readBlob(call_entry.content_ref, 0, &call_bytes);
+    const call = try conversation.decodeToolCall(encoded_call);
+    try std.testing.expectEqualStrings("bash.v1", call.key);
+    try std.testing.expectEqualStrings(exact_arguments, call.arguments);
+}
+
+test "malformed captured output becomes one durable terminal failure" {
+    const MalformedProvider = struct {
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            try response.append("not a model response");
+            try response.finish();
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var provider: MalformedProvider = .{};
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:malformed-capture",
+            .task = "task",
+            .provider = provider.provider(),
+        } },
+    });
+    _ = try owner.drive();
+    const session_id = harnessState(owner).session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    _ = try owner.drive();
+    const failed = try owner.drive();
+    try std.testing.expectEqual(State.failed, failed.state);
+    var ignored: u8 = 0;
+    const ledger = try harnessState(owner).session.?.inspectSemantic(
+        &ignored,
+        struct {
+            fn ignore(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
+        }.ignore,
+    );
+    const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
+    try std.testing.expectEqual(model_protocol.Failure.malformed, state.response_failure);
+    owner.close();
+
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{ .session_id = session_id, .provider = provider.provider() } },
     });
     defer restored.close();
     _ = try restored.drive();

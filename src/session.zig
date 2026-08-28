@@ -42,13 +42,6 @@ pub const ConversationEntry = struct {
     sequence: u64,
 };
 
-/// Borrowed fixed storage for validating a maximum-size canonical tool-call
-/// envelope. Production callers obtain it from the active Host owner slot.
-pub const CanonicalJsonWorkspace = struct {
-    input: []u8,
-    scratch: *model_contract.CanonicalJsonScratch,
-};
-
 pub const Restored = struct {
     session: Session,
 };
@@ -922,7 +915,6 @@ pub const Session = struct {
     fn validatePreparedConversationEntry(
         self: *Session,
         fact: session_transition.Fact,
-        workspace: ?CanonicalJsonWorkspace,
     ) !void {
         const advanced = fact.conversation_advanced;
         const conversation_head = self.resident.conversation_head_id;
@@ -935,13 +927,12 @@ pub const Session = struct {
         {
             return error.ConversationLedgerMismatch;
         }
-        try self.validateConversationBlob(entry.kind, entry.content_ref, entry.parent_id, workspace);
+        try self.validateConversationBlob(entry.kind, entry.content_ref, entry.parent_id);
     }
 
     fn verifyConversationEntry(
         self: *Session,
         advanced: session_transition.ConversationRecord,
-        workspace: CanonicalJsonWorkspace,
     ) !void {
         const entry = try self.loadEntry(advanced.entry_id);
         if (entry.entry_id != advanced.entry_id or entry.sequence != advanced.entry_id or
@@ -952,7 +943,7 @@ pub const Session = struct {
         {
             return error.ConversationLedgerMismatch;
         }
-        try self.validateConversationBlob(entry.kind, entry.content_ref, entry.parent_id, workspace);
+        try self.validateConversationBlob(entry.kind, entry.content_ref, entry.parent_id);
     }
 
     fn validateConversationBlob(
@@ -960,7 +951,6 @@ pub const Session = struct {
         kind: EntryKind,
         content_ref: u64,
         parent_id: u64,
-        workspace: ?CanonicalJsonWorkspace,
     ) !void {
         var reader = try self.openBlob(content_ref);
         defer reader.close();
@@ -985,19 +975,23 @@ pub const Session = struct {
                 );
                 model_contract.validateToolKey(key[0..header.key_length]) catch
                     return error.InvalidConversationContent;
-                const validation = workspace orelse return error.CanonicalJsonWorkspaceRequired;
-                if (validation.input.len < header.arguments_length) {
-                    return error.CanonicalJsonWorkspaceTooSmall;
+                var hasher = binding.Hasher(binding.StrictToolJsonV1).init();
+                var arguments_offset: u64 = conversation.call_header_size + header.key_length;
+                var remaining: u64 = header.arguments_length;
+                var window: [4096]u8 = undefined;
+                while (remaining != 0) {
+                    const wanted: usize = @intCast(@min(remaining, window.len));
+                    const bytes = try reader.readWindow(arguments_offset, window[0..wanted]);
+                    if (bytes.len != wanted) return error.InvalidConversationContent;
+                    hasher.update(bytes);
+                    arguments_offset += bytes.len;
+                    remaining -= bytes.len;
                 }
-                const arguments = validation.input[0..header.arguments_length];
-                try readExactConversationWindow(
-                    &reader,
-                    conversation.call_header_size + @as(u64, header.key_length),
-                    arguments,
-                );
-                if (!model_contract.canonicalJson(validation.scratch, arguments)) {
-                    return error.InvalidConversationContent;
-                }
+                if (!binding.eql(
+                    binding.StrictToolJsonV1,
+                    hasher.final(),
+                    .{ .bytes = header.arguments_evidence.digest },
+                )) return error.InvalidConversationContent;
             },
             .tool_result => {
                 var header_bytes: [conversation.result_header_size]u8 = undefined;
@@ -1089,7 +1083,6 @@ pub const Session = struct {
         self: *Session,
         facts: []const session_transition.Fact,
         encoded_core: ?[]const u8,
-        workspace: ?CanonicalJsonWorkspace,
     ) !u64 {
         try self.ensureUsable();
         if (self.recovery != .ready) return error.SessionRecoveryIncomplete;
@@ -1107,7 +1100,7 @@ pub const Session = struct {
         defer blobs.close(self.io);
         for (facts) |fact| {
             if (fact.kind() == .conversation_advanced) {
-                try self.validatePreparedConversationEntry(fact, workspace);
+                try self.validatePreparedConversationEntry(fact);
             }
             try self.validatePreparedBlobReferences(blobs, fact);
         }
@@ -1191,7 +1184,6 @@ pub const Session = struct {
     pub fn recoverSemanticWindow(
         self: *Session,
         frame_budget: u8,
-        workspace: CanonicalJsonWorkspace,
     ) !RecoveryProgress {
         try self.ensureUsable();
         if (frame_budget == 0) return error.InvalidRecoveryQuantum;
@@ -1226,7 +1218,7 @@ pub const Session = struct {
                     );
                     const transaction = stored.transaction;
                     for (transaction.factSlice()) |fact| switch (fact) {
-                        .conversation_advanced => |advanced| try self.verifyConversationEntry(advanced, workspace),
+                        .conversation_advanced => |advanced| try self.verifyConversationEntry(advanced),
                         .task_admitted,
                         .operation_submitted,
                         .operation_accepted,
@@ -1620,7 +1612,7 @@ test "Session creation enforces recoverable root task content" {
     created.close();
     var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 20);
     defer restored.session.close();
-    const recovered = try restored.session.recoverSemanticWindow(8, layout.jsonWorkspace());
+    const recovered = try restored.session.recoverSemanticWindow(8);
     try std.testing.expect(!recovered.more);
     try std.testing.expectEqual(@as(u64, 1), restored.session.entryCount());
 
@@ -1656,8 +1648,6 @@ const TestLayout = struct {
     workspace: std.Io.Dir,
     workspace_path: [128]u8,
     workspace_path_len: u8,
-    json_input: [model_contract.max_tool_arguments_envelope_size]u8 = undefined,
-    json_scratch: model_contract.CanonicalJsonScratch = .{},
 
     fn init(io: std.Io) !TestLayout {
         var tmp = std.testing.tmpDir(.{});
@@ -1693,10 +1683,6 @@ const TestLayout = struct {
 
     fn workspacePath(self: *const TestLayout) []const u8 {
         return self.workspace_path[0..self.workspace_path_len];
-    }
-
-    fn jsonWorkspace(self: *TestLayout) CanonicalJsonWorkspace {
-        return .{ .input = &self.json_input, .scratch = &self.json_scratch };
     }
 
     fn deinit(self: *TestLayout, io: std.Io) void {
@@ -1821,7 +1807,7 @@ test "create and exact resume preserve distinct identities and one owner" {
     }, restored.session.projection());
     try std.testing.expectError(error.StaleOwner, restored.session.authorize(first_token));
     try restored.session.authorize(restored.session.ownerToken());
-    const recovered = try restored.session.recoverSemanticWindow(8, layout.jsonWorkspace());
+    const recovered = try restored.session.recoverSemanticWindow(8);
     try std.testing.expect(!recovered.more);
     try std.testing.expectEqualDeep(live_resident, restored.session.resident);
 
@@ -1950,7 +1936,7 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
                 .none,
             ),
             admitted,
-        }, null, null);
+        }, null);
         const first = completion_inbox.bind(.{
             .kind = case.kind,
             .session_id = created.session_id,
@@ -1974,7 +1960,7 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
             io,
             session_id,
         )).session;
-        while ((try restored.recoverSemanticWindow(32, layout.jsonWorkspace())).more) {}
+        while ((try restored.recoverSemanticWindow(32)).more) {}
         const conflicting_result_ref = 230 + index;
         try restored.storeBlob(conflicting_result_ref, "cross epoch evidence");
         const cross_epoch = completion_inbox.bind(.{
@@ -2062,7 +2048,7 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
                 descriptor_ref,
                 case.descriptor,
             ),
-        }, null, null);
+        }, null);
         try created.publishCompletionEvidence(completion_inbox.bind(.{
             .kind = case.correct_kind,
             .session_id = created.session_id,
@@ -2082,7 +2068,7 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
             .result_digest = testResultDigest("wrong-kind result"),
             .class = .ordinary,
             .evidence = .{ .durable = case.result_evidence },
-        })}, null, null);
+        })}, null);
         const wrong = completion_inbox.bind(.{
             .kind = case.wrong_kind,
             .session_id = created.session_id,
@@ -2166,7 +2152,7 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
                 descriptor_ref,
                 case.descriptor,
             ),
-        }, null, null);
+        }, null);
         try created.publishCompletionEvidence(completion_inbox.bind(.{
             .kind = case.correct_kind,
             .session_id = created.session_id,
@@ -2185,7 +2171,7 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
             .result_digest = testResultDigest("lost wrong-kind result"),
             .class = .ordinary,
             .evidence = .{ .durable = case.result_evidence },
-        })}, null, null);
+        })}, null);
         const wrong = completion_inbox.bind(.{
             .kind = case.wrong_kind,
             .session_id = created.session_id,
@@ -2210,7 +2196,7 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
         defer restored.close();
         try std.testing.expectError(
             error.CompletionEvidenceKindMismatch,
-            restored.recoverSemanticWindow(32, layout.jsonWorkspace()),
+            restored.recoverSemanticWindow(32),
         );
         for (restored.resident.inbox.entries) |entry| try std.testing.expect(entry == null);
         const pending = try layout.storage.readCompletion(session_id, inbox_id);
@@ -2243,7 +2229,7 @@ test "late evidence audits against the first terminal Result sequence" {
         session_transition.operationSubmitted(operation, 201, descriptor, .none),
         session_transition.modelAttemptAdmitted(operation, 211, 201, descriptor, 0),
         session_transition.modelAttemptAdmitted(operation, 212, 201, descriptor, 1),
-    }, null, null);
+    }, null);
     try created.publishCompletionEvidence(completion_inbox.bind(.{
         .kind = .model,
         .session_id = created.session_id,
@@ -2262,12 +2248,12 @@ test "late evidence audits against the first terminal Result sequence" {
         .result_digest = testResultDigest("winning result"),
         .class = .ordinary,
         .evidence = .{ .durable = .{ .model = 212 } },
-    })}, null, null);
+    })}, null);
     _ = try created.commitSemantic(&.{session_transition.outcome(
         operation.agent,
         301,
         203,
-    )}, null, null);
+    )}, null);
 
     try created.publishCompletionEvidence(completion_inbox.bind(.{
         .kind = .model,
@@ -2377,7 +2363,7 @@ test "late evidence for a prior Operation audits through durable history" {
             case.descriptor_a,
             @intCast(index),
         );
-        _ = try created.commitSemantic(&admission, null, null);
+        _ = try created.commitSemantic(&admission, null);
         try created.publishCompletionEvidence(completion_inbox.bind(.{
             .kind = case.kind,
             .session_id = created.session_id,
@@ -2397,7 +2383,7 @@ test "late evidence for a prior Operation audits through durable history" {
             .result_digest = testResultDigest("winning result"),
             .class = .ordinary,
             .evidence = .{ .durable = testDurableEvidence(case.kind, winner_attempt) },
-        })}, null, null);
+        })}, null);
         _ = try created.commitSemantic(&.{
             session_transition.operationSubmitted(
                 operation_b,
@@ -2413,7 +2399,7 @@ test "late evidence for a prior Operation audits through durable history" {
                 case.descriptor_b,
                 0,
             ),
-        }, null, null);
+        }, null);
         const sequence_before_late = try layout.storage.sessionHead(session_id);
         const projection_before_late = created.projection();
 
@@ -2498,18 +2484,17 @@ test "late evidence for a prior Operation audits through durable history" {
         defer restored.close();
         const ledger_recovery = try restored.recoverSemanticWindow(
             @intCast(sequence_before_late),
-            layout.jsonWorkspace(),
         );
         try std.testing.expectEqual(@as(u8, @intCast(sequence_before_late)), ledger_recovery.processed);
         try std.testing.expect(ledger_recovery.more);
-        const first_history_window = try restored.recoverSemanticWindow(2, layout.jsonWorkspace());
+        const first_history_window = try restored.recoverSemanticWindow(2);
         try std.testing.expectEqual(@as(u8, 2), first_history_window.processed);
         try std.testing.expect(first_history_window.more);
         try std.testing.expectEqual(
             @as(?u64, null),
             (try layout.storage.readCompletion(session_id, recovered_inbox_id)).consumed_by_sequence,
         );
-        while ((try restored.recoverSemanticWindow(32, layout.jsonWorkspace())).more) {}
+        while ((try restored.recoverSemanticWindow(32)).more) {}
         const recovered_audit = try layout.storage.readCompletion(session_id, recovered_inbox_id);
         try std.testing.expectEqual(terminal_sequence, recovered_audit.consumed_by_sequence.?);
         try std.testing.expectEqualDeep(recovered_late, recovered_audit.envelope);
@@ -2611,7 +2596,7 @@ test "recovery advances only within the configured Session Ledger quantum" {
             .agent_id = created.agent_id,
             .agent_generation = 1,
             .ownership_epoch = created.ownership_epoch,
-        }, index + 1, index + 1)}, null, null);
+        }, index + 1, index + 1)}, null);
     }
     created.close();
 
@@ -2622,14 +2607,14 @@ test "recovery advances only within the configured Session Ledger quantum" {
         80,
     )).session;
     defer restored.close();
-    const first = try restored.recoverSemanticWindow(2, layout.jsonWorkspace());
+    const first = try restored.recoverSemanticWindow(2);
     try std.testing.expectEqual(@as(u8, 2), first.processed);
     try std.testing.expect(first.more);
     try std.testing.expectEqual(@as(u64, 2), restored.resident.semantic.last_sequence);
-    const second = try restored.recoverSemanticWindow(2, layout.jsonWorkspace());
+    const second = try restored.recoverSemanticWindow(2);
     try std.testing.expectEqual(@as(u8, 2), second.processed);
     try std.testing.expect(second.more);
-    const last = try restored.recoverSemanticWindow(2, layout.jsonWorkspace());
+    const last = try restored.recoverSemanticWindow(2);
     try std.testing.expectEqual(@as(u8, 2), last.processed);
     try std.testing.expect(!last.more);
     try std.testing.expectEqual(@as(u64, 6), restored.resident.semantic.last_sequence);
@@ -2652,7 +2637,6 @@ test "semantic commits reject missing immutable blob references before advancing
             .operation_id = 100,
             .generation = 1,
         }, 999, testDescriptor("123"), .none)},
-        null,
         null,
     ));
     try std.testing.expectEqual(@as(u64, 1), created.resident.semantic.last_sequence);
@@ -2858,7 +2842,7 @@ test "conversation advances only after its Ledger fact commits" {
         .parent_id = assistant.parent_id,
         .kind = assistant.kind,
         .content_ref = assistant.content_ref,
-    })}, null, null);
+    })}, null);
     try std.testing.expectEqual(@as(u64, 2), created.activeLeafId());
     const stored = try created.readEntry(2);
     try std.testing.expectEqualDeep(assistant, stored);
@@ -2891,7 +2875,7 @@ test "prepared Conversation content is validated at commit" {
             .parent_id = assistant.parent_id,
             .kind = assistant.kind,
             .content_ref = assistant.content_ref,
-        })}, null, null),
+        })}, null),
     );
     try std.testing.expectEqual(@as(u64, 1), created.activeLeafId());
 }
@@ -2968,7 +2952,7 @@ test "Conversation UTF-8 validation carries split sequences across bounded windo
     );
 }
 
-test "tool-call validation requires the caller-owned canonical workspace" {
+test "tool-call recovery trusts admitted exact-byte identity without reparsing JSON" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
@@ -2981,34 +2965,25 @@ test "tool-call validation requires the caller-owned canonical workspace" {
     defer created.close();
 
     const key = "fixture.inspect.v1";
-    const patch_input: [model_contract.max_patch_input_bytes]u8 = @splat(0x01);
-    var raw_arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-    var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-    const encoded_arguments = try model_contract.encodeJson(
-        &layout.json_scratch.arena,
-        &raw_arguments,
-        &arguments,
-        .{ .patch = &patch_input },
+    const admitted_arguments = "{ \"command\" : \"echo exact bytes\", \"timeout_ms\" : 1000 }";
+    var call: [conversation.call_header_size + key.len + admitted_arguments.len]u8 = undefined;
+    _ = try conversation.encodeToolCallHeader(
+        &call,
+        key.len,
+        admitted_arguments.len,
+        model_contract.strictToolJsonEvidence(admitted_arguments),
     );
-    try std.testing.expectEqual(arguments.len, encoded_arguments.len);
-    var call: [conversation.call_header_size + key.len + arguments.len]u8 = undefined;
-    _ = try conversation.encodeToolCallHeader(&call, key.len, arguments.len);
     @memcpy(call[conversation.call_header_size..][0..key.len], key);
-    @memcpy(call[conversation.call_header_size + key.len ..], encoded_arguments);
+    @memcpy(call[conversation.call_header_size + key.len ..], admitted_arguments);
     try created.storeBlob(901, &call);
+    try created.validateConversationBlob(.tool_call, 901, 1);
+
+    call[0] = 0;
+    try created.storeBlob(902, &call);
     try std.testing.expectError(
-        error.CanonicalJsonWorkspaceRequired,
-        created.validateConversationBlob(.tool_call, 901, 1, null),
+        error.InvalidConversationContent,
+        created.validateConversationBlob(.tool_call, 902, 1),
     );
-    var tiny_input: [1]u8 = undefined;
-    try std.testing.expectError(
-        error.CanonicalJsonWorkspaceTooSmall,
-        created.validateConversationBlob(.tool_call, 901, 1, .{
-            .input = &tiny_input,
-            .scratch = &layout.json_scratch,
-        }),
-    );
-    try created.validateConversationBlob(.tool_call, 901, 1, layout.jsonWorkspace());
 }
 
 const AppendCrash = struct {
@@ -3038,7 +3013,7 @@ test "resume leaves an uncommitted conversation record invisible" {
     var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 30);
     defer restored.session.close();
     try std.testing.expectEqual(@as(u64, 0), restored.session.activeLeafId());
-    _ = try restored.session.recoverSemanticWindow(8, layout.jsonWorkspace());
+    _ = try restored.session.recoverSemanticWindow(8);
     try std.testing.expectEqual(@as(u64, 1), restored.session.activeLeafId());
     try std.testing.expectEqual(@as(u64, 1), restored.session.entryCount());
     try std.testing.expectError(error.InvalidEntrySequence, restored.session.readEntry(2));
