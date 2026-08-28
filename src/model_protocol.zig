@@ -48,8 +48,12 @@ pub fn encodeText(out: []u8, text: []const u8) ![]const u8 {
 
 pub fn encodeTool(out: []u8, tool_key: []const u8, arguments: []const u8) ![]const u8 {
     try contract.validateToolKey(tool_key);
-    if (!contract.canonicalJson(arguments)) return error.InvalidToolArguments;
-    return encode(out, .tool_call, .none, 0, 0, tool_key, arguments);
+    if (out.len < header_size + tool_key.len) return error.ResponseTooLarge;
+    const canonical = contract.canonicalizeJson(
+        out[header_size + tool_key.len ..],
+        arguments,
+    ) catch return error.InvalidToolArguments;
+    return encode(out, .tool_call, .none, 0, 0, tool_key, canonical.bytes());
 }
 
 pub fn encodeInputText(out: []u8, prompt: []const u8) ![]const u8 {
@@ -110,7 +114,7 @@ fn encode(
 ) ![]const u8 {
     const total = header_size + first.len + second.len;
     if (total > out.len or total > max_response_size) return error.ResponseTooLarge;
-    @memset(out[0..total], 0);
+    @memset(out[0..header_size], 0);
     @memcpy(out[0..magic.len], magic);
     write(u16, out, 8, version);
     write(u16, out, 10, header_size);
@@ -121,7 +125,9 @@ fn encode(
     write(u32, out, 16, @intCast(first.len));
     write(u32, out, 20, @intCast(second.len));
     @memcpy(out[header_size..][0..first.len], first);
-    @memcpy(out[header_size + first.len .. total], second);
+    if (second.ptr != out[header_size + first.len ..].ptr) {
+        @memcpy(out[header_size + first.len .. total], second);
+    }
     return out[0..total];
 }
 
@@ -275,4 +281,24 @@ test "hostile normalized responses fail before authorizing effects" {
         .{ .id = "same", .label = "Second" },
     };
     try std.testing.expectError(error.DuplicateInputChoice, encodeInputChoice(&bytes, "Choose", &choices));
+}
+
+test "tool response identity uses canonical arguments" {
+    var first: [max_response_size]u8 = undefined;
+    var second: [max_response_size]u8 = undefined;
+    const first_encoded = try encodeTool(
+        &first,
+        "fixture.tool",
+        "{\"z\":-0.0,\"a\":{\"text\":\"\\u0061\",\"number\":1e0}}",
+    );
+    const second_encoded = try encodeTool(
+        &second,
+        "fixture.tool",
+        "{\"a\":{\"number\":1,\"text\":\"a\"},\"z\":0}",
+    );
+    try std.testing.expectEqualSlices(u8, first_encoded, second_encoded);
+    try std.testing.expectError(
+        error.InvalidToolArguments,
+        encodeTool(&first, "fixture.tool", "{\"a\":1,\"a\":2}"),
+    );
 }

@@ -1,8 +1,10 @@
 const std = @import("std");
 const binding = @import("binding.zig");
+const conversation = @import("conversation.zig");
 const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 const session_store = @import("session.zig");
+const session_transition = @import("session_transition.zig");
 
 pub const request_header_size = 92;
 pub const tool_header_size = 20;
@@ -37,24 +39,371 @@ pub const Provider = struct {
     context: *anyopaque,
     dispatch: *const fn (
         *anyopaque,
-        RequestReader,
+        RequestCursor,
         ResponseWriter,
     ) anyerror!void,
 };
 
-pub const RequestReader = struct {
+const RequestSource = struct {
     context: *anyopaque,
     length_fn: *const fn (*anyopaque) u64,
     read_fn: *const fn (*anyopaque, u64, []u8) anyerror![]const u8,
 
-    pub fn length(self: RequestReader) u64 {
+    fn length(self: RequestSource) u64 {
         return self.length_fn(self.context);
     }
 
-    pub fn readWindow(self: RequestReader, offset: u64, out: []u8) ![]const u8 {
+    fn readWindow(self: RequestSource, offset: u64, out: []u8) ![]const u8 {
         return self.read_fn(self.context, offset, out);
     }
 };
+
+pub const EntryKind = enum { user_text, assistant_text, tool_call, tool_result, context_checkpoint };
+
+pub const ContentView = struct {
+    source: RequestSource,
+    start: u64,
+    length_value: u64,
+
+    pub fn length(self: ContentView) u64 {
+        return self.length_value;
+    }
+
+    /// Fills one caller-owned window, stitching short reads from the immutable
+    /// request blob without exposing its offsets or framing.
+    pub fn readWindow(self: ContentView, offset: u64, out: []u8) ![]const u8 {
+        if (offset > self.length_value) return error.InvalidRequestContentOffset;
+        const wanted: usize = @intCast(@min(self.length_value - offset, out.len));
+        var filled: usize = 0;
+        while (filled < wanted) {
+            const bytes = try self.source.readWindow(
+                self.start + offset + filled,
+                out[filled..wanted],
+            );
+            if (bytes.len == 0 or bytes.len > wanted - filled) return error.TruncatedModelRequest;
+            if (bytes.ptr != out[filled..].ptr) @memcpy(out[filled..][0..bytes.len], bytes);
+            filled += bytes.len;
+        }
+        return out[0..filled];
+    }
+};
+
+pub const TextEntry = struct {
+    entry_id: u64,
+    parent_id: u64,
+    content: ContentView,
+};
+
+pub const ToolCallEntry = struct {
+    entry_id: u64,
+    parent_id: u64,
+    key_bytes: [model_contract.max_tool_key_size]u8,
+    key_length: u8,
+    arguments: ContentView,
+
+    pub fn key(self: *const ToolCallEntry) []const u8 {
+        return self.key_bytes[0..self.key_length];
+    }
+};
+
+pub const ToolResultEntry = struct {
+    entry_id: u64,
+    call_entry_id: u64,
+    is_error: bool,
+    content: ContentView,
+};
+
+pub const RequestEntry = union(EntryKind) {
+    user_text: TextEntry,
+    assistant_text: TextEntry,
+    tool_call: ToolCallEntry,
+    tool_result: ToolResultEntry,
+    context_checkpoint: TextEntry,
+};
+
+/// One validated, streaming view of the provider-neutral semantic request.
+/// Providers never receive the durable request wire or Conversation envelope.
+pub const RequestCursor = struct {
+    source: RequestSource,
+    model_name: [session_store.model_name_capacity]u8 = undefined,
+    model_name_length: u16,
+    cursor: u64,
+    total_entries: u32,
+    remaining_entries: u32,
+    previous_entry_id: u64 = 0,
+    previous_kind: ?EntryKind = null,
+
+    pub fn modelName(self: *const RequestCursor) []const u8 {
+        return self.model_name[0..self.model_name_length];
+    }
+
+    pub fn instructions(_: *const RequestCursor) []const u8 {
+        return model_contract.default_instructions;
+    }
+
+    pub fn modelContract(_: *const RequestCursor) []const u8 {
+        return model_contract.model_contract_bytes;
+    }
+
+    pub fn toolCatalog(_: *const RequestCursor) []const model_contract.ToolDefinition {
+        return &model_contract.default_catalog;
+    }
+
+    pub fn entryCount(self: *const RequestCursor) u32 {
+        return self.total_entries;
+    }
+
+    pub fn next(self: *RequestCursor) !?RequestEntry {
+        if (self.remaining_entries == 0) {
+            if (self.previous_kind == .tool_call) return error.ContextSplitsToolPair;
+            if (self.cursor != self.source.length()) return error.MalformedModelRequest;
+            return null;
+        }
+        var header: [entry_header_size]u8 = undefined;
+        if (self.cursor > self.source.length() or
+            self.source.length() - self.cursor < entry_header_size)
+        {
+            return error.TruncatedModelRequest;
+        }
+        try readExact(self.source, self.cursor, &header);
+        if (!allZero(header[1..8])) return error.MalformedModelRequest;
+        const kind: EntryKind = switch (header[0]) {
+            1 => .user_text,
+            2 => .assistant_text,
+            3 => .tool_call,
+            4 => .tool_result,
+            5 => .context_checkpoint,
+            else => return error.MalformedModelRequest,
+        };
+        const entry_id = read(u64, &header, 8);
+        const parent_id = read(u64, &header, 16);
+        const encoded_length = read(u64, &header, 24);
+        if (entry_id == 0 or parent_id == std.math.maxInt(u64) or parent_id + 1 != entry_id or
+            encoded_length == 0 or
+            encoded_length > self.source.length() - self.cursor - entry_header_size)
+        {
+            return error.MalformedModelRequest;
+        }
+        if (self.previous_entry_id != 0 and
+            (self.previous_entry_id == std.math.maxInt(u64) or
+                entry_id != self.previous_entry_id + 1 or parent_id != self.previous_entry_id))
+        {
+            return error.MalformedModelRequest;
+        }
+        if (self.previous_entry_id == 0 and kind == .tool_result) return error.ContextSplitsToolPair;
+        if (self.previous_kind == .tool_call and kind != .tool_result) return error.InvalidToolAdjacency;
+        if (kind == .tool_result and self.previous_kind != .tool_call) return error.InvalidToolAdjacency;
+
+        const encoded_start = self.cursor + entry_header_size;
+        const encoded = ContentView{
+            .source = self.source,
+            .start = encoded_start,
+            .length_value = encoded_length,
+        };
+        const entry = switch (kind) {
+            .user_text, .assistant_text, .context_checkpoint => blk: {
+                if (encoded_length > conversation.max_result_content_size) return error.ModelRequestContentTooLarge;
+                try validateUtf8(encoded);
+                const text: TextEntry = .{ .entry_id = entry_id, .parent_id = parent_id, .content = encoded };
+                break :blk switch (kind) {
+                    .user_text => RequestEntry{ .user_text = text },
+                    .assistant_text => RequestEntry{ .assistant_text = text },
+                    .context_checkpoint => RequestEntry{ .context_checkpoint = text },
+                    else => unreachable,
+                };
+            },
+            .tool_call => try decodeRequestToolCall(encoded, entry_id, parent_id),
+            .tool_result => try decodeRequestToolResult(encoded, entry_id, parent_id),
+        };
+        self.cursor = encoded_start + encoded_length;
+        self.remaining_entries -= 1;
+        self.previous_entry_id = entry_id;
+        self.previous_kind = kind;
+        if (self.remaining_entries == 0 and self.cursor != self.source.length()) {
+            return error.MalformedModelRequest;
+        }
+        return entry;
+    }
+};
+
+fn openRequest(source: RequestSource) !RequestCursor {
+    if (source.length() < request_header_size) return error.TruncatedModelRequest;
+    var header: [request_header_size]u8 = undefined;
+    try readExact(source, 0, &header);
+    if (!std.mem.eql(u8, header[0..request_magic.len], request_magic) or
+        read(u16, &header, 8) != version or read(u16, &header, 10) != request_header_size)
+    {
+        return error.UnsupportedModelRequest;
+    }
+    const entry_count = read(u32, &header, 12);
+    const tool_count = read(u16, &header, 16);
+    const model_length = read(u16, &header, 18);
+    const instructions_length = read(u32, &header, 20);
+    const contract_length = read(u32, &header, 24);
+    if (entry_count == 0 or entry_count > session_transition.max_transitions or
+        tool_count != model_contract.default_catalog.len or
+        model_length == 0 or model_length > session_store.model_name_capacity or
+        instructions_length != model_contract.default_instructions.len or
+        contract_length != model_contract.model_contract_bytes.len)
+    {
+        return error.MalformedModelRequest;
+    }
+    const catalog_digest = try model_contract.catalogDigest(&model_contract.default_catalog);
+    const contract_digest = binding.hash(binding.ModelContract, model_contract.model_contract_bytes);
+    if (!std.mem.eql(u8, header[28..60], &catalog_digest.bytes) or
+        !std.mem.eql(u8, header[60..92], &contract_digest.bytes))
+    {
+        return error.MalformedModelRequest;
+    }
+
+    var request: RequestCursor = .{
+        .source = source,
+        .model_name_length = model_length,
+        .cursor = request_header_size,
+        .total_entries = entry_count,
+        .remaining_entries = entry_count,
+    };
+    try readExact(source, request.cursor, request.model_name[0..model_length]);
+    if (!model_contract.utf8Valid(request.modelName())) return error.MalformedModelRequest;
+    request.cursor += model_length;
+    try expectBytes(source, request.cursor, model_contract.default_instructions);
+    request.cursor += instructions_length;
+    try expectBytes(source, request.cursor, model_contract.model_contract_bytes);
+    request.cursor += contract_length;
+
+    try model_contract.validateCatalog(&model_contract.default_catalog);
+    for (model_contract.default_catalog) |definition| {
+        var tool_header: [tool_header_size]u8 = undefined;
+        try readExact(source, request.cursor, &tool_header);
+        const lengths = [_]usize{
+            read(u16, &tool_header, 0),
+            read(u16, &tool_header, 2),
+            read(u32, &tool_header, 4),
+            read(u32, &tool_header, 8),
+            read(u32, &tool_header, 12),
+        };
+        if (!allZero(tool_header[16..20])) return error.MalformedModelRequest;
+        request.cursor += tool_header_size;
+        const fields = [_][]const u8{
+            definition.key,
+            definition.provider_tool_name,
+            definition.description,
+            definition.input_schema,
+            definition.result_contract,
+        };
+        for (lengths, fields) |length, expected| {
+            if (length != expected.len) return error.MalformedModelRequest;
+            try expectBytes(source, request.cursor, expected);
+            request.cursor += length;
+        }
+    }
+    if (request.cursor >= source.length()) return error.TruncatedModelRequest;
+    return request;
+}
+
+fn decodeRequestToolCall(
+    encoded: ContentView,
+    entry_id: u64,
+    parent_id: u64,
+) !RequestEntry {
+    var header_bytes: [conversation.call_header_size]u8 = undefined;
+    try readContentExact(encoded, 0, &header_bytes);
+    const header = conversation.decodeToolCallHeader(&header_bytes, encoded.length()) catch
+        return error.MalformedModelRequest;
+    var call: ToolCallEntry = .{
+        .entry_id = entry_id,
+        .parent_id = parent_id,
+        .key_bytes = undefined,
+        .key_length = @intCast(header.key_length),
+        .arguments = .{
+            .source = encoded.source,
+            .start = encoded.start + conversation.call_header_size + header.key_length,
+            .length_value = header.arguments_length,
+        },
+    };
+    try readContentExact(encoded, conversation.call_header_size, call.key_bytes[0..header.key_length]);
+    model_contract.validateToolKey(call.key()) catch return error.MalformedModelRequest;
+    var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+    try readContentExact(call.arguments, 0, arguments[0..header.arguments_length]);
+    _ = model_contract.canonicalJsonValue(arguments[0..header.arguments_length]) catch
+        return error.MalformedModelRequest;
+    return .{ .tool_call = call };
+}
+
+fn decodeRequestToolResult(
+    encoded: ContentView,
+    entry_id: u64,
+    parent_id: u64,
+) !RequestEntry {
+    var header_bytes: [conversation.result_header_size]u8 = undefined;
+    try readContentExact(encoded, 0, &header_bytes);
+    const header = conversation.decodeToolResultHeader(&header_bytes, encoded.length()) catch
+        return error.MalformedModelRequest;
+    if (header.parent_id != parent_id) return error.InvalidToolAdjacency;
+    const content: ContentView = .{
+        .source = encoded.source,
+        .start = encoded.start + conversation.result_header_size,
+        .length_value = header.content_length,
+    };
+    try validateUtf8(content);
+    return .{ .tool_result = .{
+        .entry_id = entry_id,
+        .call_entry_id = parent_id,
+        .is_error = header.is_error,
+        .content = content,
+    } };
+}
+
+fn validateUtf8(content: ContentView) !void {
+    var bytes: [request_window_size + 3]u8 = undefined;
+    var carry: usize = 0;
+    var offset: u64 = 0;
+    while (offset < content.length()) {
+        const read_bytes = try content.readWindow(offset, bytes[carry..]);
+        if (read_bytes.len == 0) return error.TruncatedModelRequest;
+        offset += read_bytes.len;
+        const total = carry + read_bytes.len;
+        if (offset == content.length()) {
+            if (!model_contract.utf8Valid(bytes[0..total])) return error.MalformedModelRequest;
+            return;
+        }
+        var suffix: usize = 0;
+        while (suffix <= @min(@as(usize, 3), total) and
+            !model_contract.utf8Valid(bytes[0 .. total - suffix])) : (suffix += 1)
+        {}
+        if (suffix > @min(@as(usize, 3), total)) return error.MalformedModelRequest;
+        if (suffix != 0) @memcpy(bytes[0..suffix], bytes[total - suffix .. total]);
+        carry = suffix;
+    }
+    return error.TruncatedModelRequest;
+}
+
+fn readContentExact(content: ContentView, offset: u64, out: []u8) !void {
+    if ((try content.readWindow(offset, out)).len != out.len) return error.TruncatedModelRequest;
+}
+
+fn readExact(source: RequestSource, offset: u64, out: []u8) !void {
+    const view: ContentView = .{ .source = source, .start = 0, .length_value = source.length() };
+    try readContentExact(view, offset, out);
+}
+
+fn expectBytes(source: RequestSource, offset: u64, expected: []const u8) !void {
+    var window: [request_window_size]u8 = undefined;
+    var consumed: usize = 0;
+    while (consumed < expected.len) {
+        const count = @min(window.len, expected.len - consumed);
+        try readExact(source, offset + consumed, window[0..count]);
+        if (!std.mem.eql(u8, window[0..count], expected[consumed..][0..count])) {
+            return error.MalformedModelRequest;
+        }
+        consumed += count;
+    }
+}
+
+fn allZero(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte != 0) return false;
+    return true;
+}
 
 pub const ResponseWriter = struct {
     context: *anyopaque,
@@ -74,7 +423,7 @@ pub const ResponseWriter = struct {
 /// capabilities. Providers can read one immutable request and append one
 /// predetermined response; they receive no Session or owner authority.
 pub const ProviderIo = struct {
-    request: session_store.BlobReader,
+    request_blob: session_store.BlobReader,
     response: session_store.BlobWriter,
 
     pub fn open(
@@ -82,19 +431,19 @@ pub const ProviderIo = struct {
         request_ref: u64,
         response_ref: u64,
     ) !ProviderIo {
-        var request = try session.openBlob(request_ref);
-        errdefer request.close();
+        var request_blob = try session.openBlob(request_ref);
+        errdefer request_blob.close();
         const response = try session.beginBlob(response_ref);
-        return .{ .request = request, .response = response };
+        return .{ .request_blob = request_blob, .response = response };
     }
 
     pub fn close(self: *ProviderIo) void {
-        self.request.close();
+        self.request_blob.close();
         self.response.abort();
     }
 
-    pub fn requestCapability(self: *ProviderIo) RequestReader {
-        return .{ .context = self, .length_fn = requestLength, .read_fn = requestRead };
+    pub fn request(self: *ProviderIo) !RequestCursor {
+        return openRequest(.{ .context = self, .length_fn = requestLength, .read_fn = requestRead });
     }
 
     pub fn responseCapability(self: *ProviderIo) ResponseWriter {
@@ -116,12 +465,12 @@ pub const ProviderIo = struct {
 
     fn requestLength(context: *anyopaque) u64 {
         const self: *ProviderIo = @ptrCast(@alignCast(context));
-        return self.request.length();
+        return self.request_blob.length();
     }
 
     fn requestRead(context: *anyopaque, offset: u64, out: []u8) anyerror![]const u8 {
         const self: *ProviderIo = @ptrCast(@alignCast(context));
-        return self.request.readWindow(offset, out);
+        return self.request_blob.readWindow(offset, out);
     }
 
     fn responseAppend(context: *anyopaque, bytes: []const u8) anyerror!void {
@@ -236,4 +585,35 @@ fn appendHashed(
 
 fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
     std.mem.writeInt(T, out[offset..][0..@sizeOf(T)], value, .little);
+}
+
+fn read(comptime T: type, input: []const u8, offset: usize) T {
+    return std.mem.readInt(T, input[offset..][0..@sizeOf(T)], .little);
+}
+
+test "semantic content views stitch bounded short reads" {
+    const ShortSource = struct {
+        bytes: []const u8,
+
+        fn length(context: *anyopaque) u64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.bytes.len;
+        }
+
+        fn readWindow(context: *anyopaque, offset: u64, out: []u8) anyerror![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (offset >= self.bytes.len) return out[0..0];
+            const count = @min(@as(usize, 3), @min(out.len, self.bytes.len - @as(usize, @intCast(offset))));
+            @memcpy(out[0..count], self.bytes[@intCast(offset)..][0..count]);
+            return out[0..count];
+        }
+    };
+    var short: ShortSource = .{ .bytes = "prefixsemantic-suffix" };
+    const view: ContentView = .{
+        .source = .{ .context = &short, .length_fn = ShortSource.length, .read_fn = ShortSource.readWindow },
+        .start = "prefix".len,
+        .length_value = "semantic".len,
+    };
+    var out: ["semantic".len]u8 = undefined;
+    try std.testing.expectEqualStrings("semantic", try view.readWindow(0, &out));
 }

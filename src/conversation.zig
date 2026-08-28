@@ -33,12 +33,16 @@ pub const ToolResultHeader = struct {
 
 pub fn encodeToolCall(out: []u8, call: ToolCall) ![]const u8 {
     try contract.validateToolKey(call.key);
-    if (!contract.canonicalJson(call.arguments)) return error.InvalidToolArguments;
-    const total = call_header_size + call.key.len + call.arguments.len;
+    if (out.len < call_header_size + call.key.len) return error.ToolCallTooLarge;
+    const canonical = contract.canonicalizeJson(
+        out[call_header_size + call.key.len ..],
+        call.arguments,
+    ) catch return error.InvalidToolArguments;
+    const arguments = canonical.bytes();
+    const total = call_header_size + call.key.len + arguments.len;
     if (total > out.len) return error.ToolCallTooLarge;
-    _ = try encodeToolCallHeader(out[0..call_header_size], call.key.len, call.arguments.len);
+    _ = try encodeToolCallHeader(out[0..call_header_size], call.key.len, arguments.len);
     @memcpy(out[call_header_size..][0..call.key.len], call.key);
-    @memcpy(out[call_header_size + call.key.len .. total], call.arguments);
     return out[0..total];
 }
 
@@ -189,6 +193,27 @@ test "arbitrary Tool Keys round trip without execution meaning" {
     try std.testing.expectEqualStrings("{\"path\":\"README.md\"}", decoded.arguments);
     std.mem.writeInt(u16, bytes[8..10], call_version - 1, .little);
     try std.testing.expectError(error.InvalidToolCall, decodeToolCall(encoded));
+}
+
+test "tool calls persist only normalized canonical arguments" {
+    var first: [256]u8 = undefined;
+    var second: [256]u8 = undefined;
+    const first_encoded = try encodeToolCall(&first, .{
+        .key = "fixture.inspect.v1",
+        .arguments = "{\"z\":-0.0,\"a\":{\"text\":\"\\u0061\",\"number\":1e0}}",
+    });
+    const second_encoded = try encodeToolCall(&second, .{
+        .key = "fixture.inspect.v1",
+        .arguments = "{\"a\":{\"number\":1,\"text\":\"a\"},\"z\":0}",
+    });
+    try std.testing.expectEqualSlices(u8, first_encoded, second_encoded);
+    try std.testing.expectError(
+        error.InvalidToolArguments,
+        encodeToolCall(&first, .{
+            .key = "fixture.inspect.v1",
+            .arguments = "{\"a\":1,\"a\":2}",
+        }),
+    );
 }
 
 test "tool results bind their immediate parent call" {

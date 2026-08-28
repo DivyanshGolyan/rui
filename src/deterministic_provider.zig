@@ -10,165 +10,6 @@ const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 const session_transition = @import("session_transition.zig");
 
-const fixture_entry_capacity = 7;
-const fixture_request_capacity = 32 * 1024;
-const request_magic = "ONEREQ2\x00";
-
-const RequestEntry = struct {
-    kind: session_store.EntryKind,
-    entry_id: u64,
-    parent_id: u64,
-    content: []const u8,
-};
-
-/// One bounded interpretation of the durable request wire format for the
-/// deterministic Provider adapter. Production providers do not depend on it.
-const RequestHistory = struct {
-    bytes: [fixture_request_capacity]u8,
-    entries: [fixture_entry_capacity]RequestEntry,
-    entry_count: usize,
-
-    fn decode(self: *RequestHistory, request: model_operation.RequestReader) !void {
-        const length = request.length();
-        if (length < model_operation.request_header_size or length > self.bytes.len) {
-            return error.UnexpectedFixtureRequest;
-        }
-        const byte_count: usize = @intCast(length);
-        var offset: usize = 0;
-        while (offset < byte_count) {
-            const bytes = try request.readWindow(offset, self.bytes[offset..byte_count]);
-            if (bytes.len == 0 or bytes.len > byte_count - offset) {
-                return error.UnexpectedFixtureRequest;
-            }
-            if (bytes.ptr != self.bytes[offset..].ptr) {
-                @memcpy(self.bytes[offset..][0..bytes.len], bytes);
-            }
-            offset += bytes.len;
-        }
-
-        const durable = self.bytes[0..byte_count];
-        if (!std.mem.eql(u8, durable[0..request_magic.len], request_magic) or
-            read(u16, durable, 8) != model_operation.version or
-            read(u16, durable, 10) != model_operation.request_header_size)
-        {
-            return error.UnexpectedFixtureRequest;
-        }
-        const count: usize = @intCast(read(u32, durable, 12));
-        if (count == 0 or count > self.entries.len) return error.UnexpectedFixtureRequest;
-        const tool_count: usize = read(u16, durable, 16);
-        const model_length: usize = read(u16, durable, 18);
-        const instructions_length: usize = read(u32, durable, 20);
-        const model_contract_length: usize = read(u32, durable, 24);
-        if (model_length == 0 or model_length > session_store.model_name_capacity or
-            tool_count != model_contract.default_catalog.len or
-            instructions_length != model_contract.default_instructions.len or
-            model_contract_length != model_contract.model_contract_bytes.len or
-            !std.mem.eql(u8, durable[28..60], &(try model_contract.catalogDigest(&model_contract.default_catalog)).bytes) or
-            !std.mem.eql(u8, durable[60..92], &binding.hash(binding.ModelContract, model_contract.model_contract_bytes).bytes))
-        {
-            return error.UnexpectedFixtureRequest;
-        }
-
-        var cursor: usize = model_operation.request_header_size;
-        if (model_length > durable.len - cursor or
-            !model_contract.utf8Valid(durable[cursor..][0..model_length]))
-        {
-            return error.UnexpectedFixtureRequest;
-        }
-        cursor += model_length;
-        if (instructions_length > durable.len - cursor or
-            !std.mem.eql(u8, durable[cursor..][0..instructions_length], model_contract.default_instructions))
-        {
-            return error.UnexpectedFixtureRequest;
-        }
-        cursor += instructions_length;
-        if (model_contract_length > durable.len - cursor or
-            !std.mem.eql(u8, durable[cursor..][0..model_contract_length], model_contract.model_contract_bytes))
-        {
-            return error.UnexpectedFixtureRequest;
-        }
-        cursor += model_contract_length;
-        for (model_contract.default_catalog) |definition| {
-            if (cursor > durable.len or durable.len - cursor < model_operation.tool_header_size) {
-                return error.UnexpectedFixtureRequest;
-            }
-            const lengths = [_]usize{
-                read(u16, durable, cursor),
-                read(u16, durable, cursor + 2),
-                read(u32, durable, cursor + 4),
-                read(u32, durable, cursor + 8),
-                read(u32, durable, cursor + 12),
-            };
-            if (read(u32, durable, cursor + 16) != 0) return error.UnexpectedFixtureRequest;
-            cursor += model_operation.tool_header_size;
-            const fields = [_][]const u8{
-                definition.key,
-                definition.provider_tool_name,
-                definition.description,
-                definition.input_schema,
-                definition.result_contract,
-            };
-            for (lengths, fields) |field_length, expected| {
-                if (field_length != expected.len or field_length > durable.len - cursor or
-                    !std.mem.eql(u8, durable[cursor..][0..field_length], expected))
-                {
-                    return error.UnexpectedFixtureRequest;
-                }
-                cursor += field_length;
-            }
-        }
-        for (0..count) |index| {
-            if (cursor > durable.len or durable.len - cursor < model_operation.entry_header_size) {
-                return error.UnexpectedFixtureRequest;
-            }
-            const header = durable[cursor..][0..model_operation.entry_header_size];
-            const kind: session_store.EntryKind = switch (header[0]) {
-                1 => .user_text,
-                2 => .assistant_text,
-                3 => .tool_call,
-                4 => .tool_result,
-                5 => .context_checkpoint,
-                else => return error.UnexpectedFixtureRequest,
-            };
-            const content_length = read(u64, header, 24);
-            const entry_id = read(u64, header, 8);
-            const parent_id = read(u64, header, 16);
-            if (entry_id != index + 1 or parent_id != index or
-                content_length > durable.len - cursor - model_operation.entry_header_size)
-            {
-                return error.UnexpectedFixtureRequest;
-            }
-            const content_start = cursor + model_operation.entry_header_size;
-            const content_end = content_start + @as(usize, @intCast(content_length));
-            self.entries[index] = .{
-                .kind = kind,
-                .entry_id = entry_id,
-                .parent_id = parent_id,
-                .content = self.bytes[content_start..content_end],
-            };
-            if (kind == .tool_call) _ = conversation.decodeToolCall(self.entries[index].content) catch
-                return error.UnexpectedFixtureRequest;
-            if (kind == .tool_result) {
-                const result = conversation.decodeToolResult(self.entries[index].content) catch
-                    return error.UnexpectedFixtureRequest;
-                if (result.parent_id != parent_id or index == 0 or
-                    self.entries[index - 1].kind != .tool_call or
-                    self.entries[index - 1].entry_id != parent_id)
-                {
-                    return error.UnexpectedFixtureRequest;
-                }
-            }
-            cursor = content_end;
-        }
-        if (cursor != durable.len) return error.UnexpectedFixtureRequest;
-        self.entry_count = count;
-    }
-
-    fn slice(self: *const RequestHistory) []const RequestEntry {
-        return self.entries[0..self.entry_count];
-    }
-};
-
 pub const Fixture = struct {
     expected_task: ?[]const u8,
     final_answer: []const u8,
@@ -181,16 +22,15 @@ pub const Fixture = struct {
 
     fn dispatch(
         context: *anyopaque,
-        request: model_operation.RequestReader,
+        request_value: model_operation.RequestCursor,
         response: model_operation.ResponseWriter,
     ) anyerror!void {
         const self: *Fixture = @ptrCast(@alignCast(context));
         self.calls += 1;
-        var history: RequestHistory = undefined;
-        try history.decode(request);
-        const entries = history.slice();
-        if (entries[0].kind != .user_text) return error.UnexpectedFixtureRequest;
-        if (self.expected_task) |expected_task| try expectEntry(entries[0], .user_text, expected_task);
+        var request = request_value;
+        const first = (try request.next()) orelse return error.UnexpectedFixtureRequest;
+        if (self.expected_task) |expected_task| try expectText(first, .user_text, expected_task);
+        while (try request.next()) |_| {}
 
         var response_buffer: [model_protocol.max_response_size]u8 = undefined;
         const encoded = try model_protocol.encodeText(&response_buffer, self.final_answer);
@@ -216,18 +56,17 @@ pub const ToolFixture = struct {
 
     fn dispatch(
         context: *anyopaque,
-        request: model_operation.RequestReader,
+        request_value: model_operation.RequestCursor,
         response: model_operation.ResponseWriter,
     ) anyerror!void {
         const self: *ToolFixture = @ptrCast(@alignCast(context));
-        var history: RequestHistory = undefined;
-        try history.decode(request);
-        const entries = history.slice();
+        var request = request_value;
         var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
         const encoded = switch (self.calls) {
             0 => blk: {
-                if (entries.len != 1) return error.UnexpectedFixtureRequest;
-                try expectEntry(entries[0], .user_text, self.expected_task);
+                if (request.entryCount() != 1) return error.UnexpectedFixtureRequest;
+                try expectText((try request.next()).?, .user_text, self.expected_task);
+                try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
                     &encoded_buffer,
@@ -236,15 +75,19 @@ pub const ToolFixture = struct {
                 );
             },
             1 => blk: {
-                if (entries.len != 3) return error.ToolResultMissingFromContext;
-                try expectEntry(entries[0], .user_text, self.expected_task);
-                try expectToolCall(entries[1], self.tool, self.tool_arguments);
-                const result = try conversation.decodeToolResult(entries[2].content);
+                if (request.entryCount() != 3) return error.ToolResultMissingFromContext;
+                try expectText((try request.next()).?, .user_text, self.expected_task);
+                try expectToolCall((try request.next()).?, self.tool, self.tool_arguments);
+                const result = switch ((try request.next()).?) {
+                    .tool_result => |result| result,
+                    else => return error.ToolResultMissingFromContext,
+                };
+                try expectEnd(&request);
                 switch (self.tool) {
-                    .bash => if (!std.mem.startsWith(u8, result.content, try bashStatusPrefix(self.expected_tool_status))) {
+                    .bash => if (!try contentStartsWith(result.content, try bashStatusPrefix(self.expected_tool_status))) {
                         return error.UnexpectedFixtureToolStatus;
                     },
-                    .apply_patch => if (!std.mem.eql(u8, result.content, try patchStatusText(self.expected_patch_status))) {
+                    .apply_patch => if (!try contentEquals(result.content, try patchStatusText(self.expected_patch_status))) {
                         return error.UnexpectedFixtureToolStatus;
                     },
                 }
@@ -272,18 +115,17 @@ pub const RepairFixture = struct {
 
     fn dispatch(
         context: *anyopaque,
-        request: model_operation.RequestReader,
+        request_value: model_operation.RequestCursor,
         response: model_operation.ResponseWriter,
     ) anyerror!void {
         const self: *RepairFixture = @ptrCast(@alignCast(context));
-        var decoded: RequestHistory = undefined;
-        try decoded.decode(request);
-        const history = decoded.slice();
+        var request = request_value;
 
         var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
-        const encoded = switch (history.len) {
+        const encoded = switch (request.entryCount()) {
             1 => blk: {
-                try expectEntry(history[0], .user_text, self.expected_task);
+                try expectText((try request.next()).?, .user_text, self.expected_task);
+                try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
                     &encoded_buffer,
@@ -292,8 +134,9 @@ pub const RepairFixture = struct {
                 );
             },
             3 => blk: {
-                try self.expectPrefix(history, 3);
-                try expectBashResult(history[2], .nonzero_exit, 1);
+                try self.expectPrefix(&request, 3);
+                try expectBashResult((try request.next()).?, .nonzero_exit, 1);
+                try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
                     &encoded_buffer,
@@ -302,8 +145,9 @@ pub const RepairFixture = struct {
                 );
             },
             5 => blk: {
-                try self.expectPrefix(history, 5);
-                try expectPatchResult(history[4], .applied);
+                try self.expectPrefix(&request, 5);
+                try expectPatchResult((try request.next()).?, .applied);
+                try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
                 break :blk try model_protocol.encodeTool(
                     &encoded_buffer,
@@ -312,8 +156,9 @@ pub const RepairFixture = struct {
                 );
             },
             7 => blk: {
-                try self.expectPrefix(history, 7);
-                try expectBashResult(history[6], .success, 0);
+                try self.expectPrefix(&request, 7);
+                try expectBashResult((try request.next()).?, .success, 0);
+                try expectEnd(&request);
                 break :blk try model_protocol.encodeText(&encoded_buffer, self.final_answer);
             },
             else => return error.UnexpectedRepairHistory,
@@ -322,17 +167,17 @@ pub const RepairFixture = struct {
         try response.finish();
     }
 
-    fn expectPrefix(self: *const RepairFixture, entries: []const RequestEntry, count: usize) !void {
-        if (entries.len != count) return error.UnexpectedRepairHistory;
-        try expectEntry(entries[0], .user_text, self.expected_task);
-        try expectToolCall(entries[1], .bash, self.bash_call);
+    fn expectPrefix(self: *const RepairFixture, request: *model_operation.RequestCursor, count: usize) !void {
+        if (request.entryCount() != count) return error.UnexpectedRepairHistory;
+        try expectText((try request.next()).?, .user_text, self.expected_task);
+        try expectToolCall((try request.next()).?, .bash, self.bash_call);
         if (count >= 5) {
-            try expectBashResult(entries[2], .nonzero_exit, 1);
-            try expectToolCall(entries[3], .apply_patch, self.patch);
+            try expectBashResult((try request.next()).?, .nonzero_exit, 1);
+            try expectToolCall((try request.next()).?, .apply_patch, self.patch);
         }
         if (count >= 7) {
-            try expectPatchResult(entries[4], .applied);
-            try expectToolCall(entries[5], .bash, self.bash_call);
+            try expectPatchResult((try request.next()).?, .applied);
+            try expectToolCall((try request.next()).?, .bash, self.bash_call);
         }
     }
 };
@@ -357,12 +202,14 @@ fn fixtureArguments(tool: FixtureTool, raw: []const u8, out: []u8) ![]const u8 {
     };
 }
 
-fn expectToolCall(entry: RequestEntry, tool: FixtureTool, raw: []const u8) !void {
-    if (entry.kind != .tool_call) return error.ToolCallMissingFromContext;
-    const call = try conversation.decodeToolCall(entry.content);
-    if (!std.mem.eql(u8, call.key, fixtureToolKey(tool))) return error.ToolCallMissingFromContext;
+fn expectToolCall(entry: model_operation.RequestEntry, tool: FixtureTool, raw: []const u8) !void {
+    const call = switch (entry) {
+        .tool_call => |call| call,
+        else => return error.ToolCallMissingFromContext,
+    };
+    if (!std.mem.eql(u8, call.key(), fixtureToolKey(tool))) return error.ToolCallMissingFromContext;
     var expected: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-    if (!std.mem.eql(u8, call.arguments, try fixtureArguments(tool, raw, &expected))) {
+    if (!try contentEquals(call.arguments, try fixtureArguments(tool, raw, &expected))) {
         return error.ToolCallMissingFromContext;
     }
 }
@@ -390,28 +237,77 @@ fn patchStatusText(status: patch_tool.ResultStatus) ![]const u8 {
     };
 }
 
-fn expectEntry(entry: RequestEntry, kind: session_store.EntryKind, content: []const u8) !void {
-    if (entry.kind != kind or !std.mem.eql(u8, entry.content, content)) {
-        return error.UnexpectedRepairHistory;
-    }
+fn expectText(entry: model_operation.RequestEntry, kind: model_operation.EntryKind, content: []const u8) !void {
+    const actual = switch (entry) {
+        .user_text => |value| if (kind == .user_text) value.content else return error.UnexpectedRepairHistory,
+        .assistant_text => |value| if (kind == .assistant_text) value.content else return error.UnexpectedRepairHistory,
+        .context_checkpoint => |value| if (kind == .context_checkpoint) value.content else return error.UnexpectedRepairHistory,
+        else => return error.UnexpectedRepairHistory,
+    };
+    if (!try contentEquals(actual, content)) return error.UnexpectedRepairHistory;
 }
 
-fn expectBashResult(entry: RequestEntry, status: bash_tool.Status, exit_code: u8) !void {
-    if (entry.kind != .tool_result) return error.UnexpectedRepairHistory;
-    const result = try conversation.decodeToolResult(entry.content);
+fn expectBashResult(entry: model_operation.RequestEntry, status: bash_tool.Status, exit_code: u8) !void {
+    const result = switch (entry) {
+        .tool_result => |result| result,
+        else => return error.UnexpectedRepairHistory,
+    };
     var expected: [96]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&expected, "{s}\nexit_code={d}\n", .{ try bashStatusPrefix(status), exit_code });
-    if (!std.mem.startsWith(u8, result.content, prefix)) return error.UnexpectedRepairHistory;
+    if (!try contentStartsWith(result.content, prefix)) return error.UnexpectedRepairHistory;
 }
 
-fn expectPatchResult(entry: RequestEntry, status: patch_tool.ResultStatus) !void {
-    if (entry.kind != .tool_result) return error.UnexpectedRepairHistory;
-    const result = try conversation.decodeToolResult(entry.content);
-    if (!std.mem.eql(u8, result.content, try patchStatusText(status))) return error.UnexpectedRepairHistory;
+fn expectPatchResult(entry: model_operation.RequestEntry, status: patch_tool.ResultStatus) !void {
+    const result = switch (entry) {
+        .tool_result => |result| result,
+        else => return error.UnexpectedRepairHistory,
+    };
+    if (!try contentEquals(result.content, try patchStatusText(status))) return error.UnexpectedRepairHistory;
 }
 
-fn read(comptime T: type, input: []const u8, offset: usize) T {
-    return std.mem.readInt(T, input[offset..][0..@sizeOf(T)], .little);
+fn expectEnd(request: *model_operation.RequestCursor) !void {
+    if (try request.next() != null) return error.UnexpectedFixtureRequest;
+}
+
+fn contentEquals(content: model_operation.ContentView, expected: []const u8) !bool {
+    if (content.length() != expected.len) return false;
+    var window: [model_operation.request_window_size]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < expected.len) {
+        const actual = try content.readWindow(offset, &window);
+        if (actual.len == 0 or !std.mem.eql(u8, actual, expected[offset..][0..actual.len])) return false;
+        offset += actual.len;
+    }
+    return true;
+}
+
+fn contentStartsWith(content: model_operation.ContentView, expected: []const u8) !bool {
+    if (content.length() < expected.len) return false;
+    var window: [model_operation.request_window_size]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < expected.len) {
+        const count = @min(window.len, expected.len - offset);
+        const actual = try content.readWindow(offset, window[0..count]);
+        if (actual.len != count or !std.mem.eql(u8, actual, expected[offset..][0..count])) return false;
+        offset += count;
+    }
+    return true;
+}
+
+fn expectBlobReadersEqual(
+    first: *session_store.BlobReader,
+    second: *session_store.BlobReader,
+) !void {
+    if (first.length() != second.length()) return error.RequestLengthMismatch;
+    var first_window: [model_operation.request_window_size]u8 = undefined;
+    var second_window: [model_operation.request_window_size]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < first.length()) {
+        const first_bytes = try first.readWindow(offset, &first_window);
+        const second_bytes = try second.readWindow(offset, second_window[0..first_bytes.len]);
+        try std.testing.expectEqualSlices(u8, first_bytes, second_bytes);
+        offset += first_bytes.len;
+    }
 }
 
 test "deterministic Provider decodes the exact immutable request" {
@@ -457,13 +353,7 @@ test "deterministic Provider decodes the exact immutable request" {
     var second_request = try session.openBlob(1003);
     defer second_request.close();
     try std.testing.expectEqual(first_request.length(), second_request.length());
-    var first_bytes: [fixture_request_capacity]u8 = undefined;
-    var second_bytes: [fixture_request_capacity]u8 = undefined;
-    try std.testing.expectEqualSlices(
-        u8,
-        try first_request.readWindow(0, first_bytes[0..@intCast(first_request.length())]),
-        try second_request.readWindow(0, second_bytes[0..@intCast(second_request.length())]),
-    );
+    try expectBlobReadersEqual(&first_request, &second_request);
     var fixture: Fixture = .{
         .expected_task = "Explain the repository",
         .final_answer = "This repository contains one bounded agent core.",
@@ -471,14 +361,15 @@ test "deterministic Provider decodes the exact immutable request" {
     var provider_io = try model_operation.ProviderIo.open(&session, 1001, 1002);
     defer provider_io.close();
     const provider = fixture.provider();
-    try provider.dispatch(provider.context, provider_io.requestCapability(), provider_io.responseCapability());
+    try provider.dispatch(provider.context, try provider_io.request(), provider_io.responseCapability());
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     const response = try session.readBlob(1002, 0, &response_buffer);
     try std.testing.expectEqual(model_protocol.Disposition.final_answer, model_protocol.parse(response).disposition);
 
     var request = try session.openBlob(1001);
     defer request.close();
-    var first: [fixture_request_capacity]u8 = undefined;
+    var first: [model_operation.request_window_size]u8 = undefined;
+    try std.testing.expect(request.length() <= first.len);
     const original = try request.readWindow(0, first[0..@intCast(request.length())]);
     first[model_operation.request_header_size] ^= 1;
     try session.storeBlob(1004, original);
@@ -524,4 +415,50 @@ test "deterministic Provider decodes the exact immutable request" {
         .content_ref = result_entry.content_ref,
     })}, null);
     try std.testing.expectError(error.ContextSplitsToolPair, model_operation.buildRequest(&session, 1103, 3, 1));
+
+    var large_content: [40 * 1024]u8 = @splat('x');
+    for (0..9) |index| {
+        const content_ref: u64 = 1200 + index;
+        const content: []const u8 = if (index == 0) &large_content else "later context";
+        try session.storeBlob(content_ref, content);
+        const entry = try session.appendConversation(.assistant_text, content_ref, null);
+        _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
+            .agent = .{
+                .agent_id = session.agent_id,
+                .agent_generation = 1,
+                .ownership_epoch = session.ownership_epoch,
+            },
+            .entry_id = entry.entry_id,
+            .parent_id = entry.parent_id,
+            .kind = entry.kind,
+            .content_ref = entry.content_ref,
+        })}, null);
+    }
+    _ = try model_operation.buildRequest(&session, 1300, 4, 9);
+    var large_io = try model_operation.ProviderIo.open(&session, 1300, 1301);
+    defer large_io.close();
+    var semantic_request = try large_io.request();
+    try std.testing.expectEqual(@as(u32, 9), semantic_request.entryCount());
+    try std.testing.expectEqualStrings("fixture:answer", semantic_request.modelName());
+    try std.testing.expectEqual(model_contract.default_catalog.len, semantic_request.toolCatalog().len);
+    const first_late = (try semantic_request.next()).?;
+    const first_late_text = switch (first_late) {
+        .assistant_text => |text| text,
+        else => return error.UnexpectedSemanticEntry,
+    };
+    try std.testing.expectEqual(@as(u64, 4), first_late_text.entry_id);
+    try std.testing.expectEqual(@as(u64, large_content.len), first_late_text.content.length());
+    var large_window: [model_operation.request_window_size]u8 = undefined;
+    var large_offset: u64 = 0;
+    while (large_offset < first_late_text.content.length()) {
+        const bytes = try first_late_text.content.readWindow(large_offset, &large_window);
+        try std.testing.expect(bytes.len != 0);
+        large_offset += bytes.len;
+    }
+    var semantic_count: u32 = 1;
+    while (try semantic_request.next()) |_| semantic_count += 1;
+    try std.testing.expectEqual(@as(u32, 9), semantic_count);
+    var large_request_blob = try session.openBlob(1300);
+    defer large_request_blob.close();
+    try std.testing.expect(large_request_blob.length() > 32 * 1024);
 }

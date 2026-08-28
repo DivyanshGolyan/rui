@@ -487,7 +487,7 @@ fn dispatchModelAttempt(
     var provider_failed = false;
     provider.dispatch(
         provider.context,
-        provider_io.requestCapability(),
+        try provider_io.request(),
         provider_io.responseCapability(),
     ) catch {
         result_ref = try provider_io.publishProviderFailure(
@@ -603,7 +603,12 @@ fn executeBashCall(
     const call_ref = (@as(u64, 1) << 59) | ids.response_ref;
     const descriptor_ref = (@as(u64, 1) << 62) | ids.response_ref;
     const result_ref = (@as(u64, 1) << 61) | ids.response_ref;
-    try storeToolCall(session, call_ref, model_contract.bash_key, arguments);
+    try storeToolCall(
+        session,
+        call_ref,
+        model_contract.bash_key,
+        try model_contract.canonicalJsonValue(arguments),
+    );
     try session.storeBlob(descriptor_ref, descriptor_bytes);
     const call_entry = try session.appendConversation(.tool_call, call_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
@@ -738,7 +743,12 @@ fn requestPatchPermission(
     });
     try session.storeBlob(patch_ref, patch);
     try storePatchIntent(session, intent_ref, intent);
-    try storeToolCall(session, call_ref, model_contract.apply_patch_key, arguments);
+    try storeToolCall(
+        session,
+        call_ref,
+        model_contract.apply_patch_key,
+        try model_contract.canonicalJsonValue(arguments),
+    );
     const call_entry = try session.appendConversation(.tool_call, call_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
     const descriptor_facts = [_]session_transition.Fact{
@@ -2571,10 +2581,10 @@ fn storeToolCall(
     session: *session_store.Session,
     reference: u64,
     key: []const u8,
-    arguments: []const u8,
+    canonical_arguments: model_contract.CanonicalJson,
 ) !void {
     try model_contract.validateToolKey(key);
-    if (!model_contract.canonicalJson(arguments)) return error.InvalidToolArguments;
+    const arguments = canonical_arguments.bytes();
     var header: [conversation.call_header_size]u8 = undefined;
     const header_bytes = try conversation.encodeToolCallHeader(&header, key.len, arguments.len);
     var hasher = binding.Hasher(binding.Blob).init();
@@ -2784,7 +2794,7 @@ test "model dispatch rejects a substituted request under the bound reference" {
 
         fn dispatch(
             context: *anyopaque,
-            _: model_operation.RequestReader,
+            _: model_operation.RequestCursor,
             _: model_operation.ResponseWriter,
         ) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context));

@@ -19,6 +19,8 @@ pub const max_input_text_size: usize = 4096;
 pub const max_choice_count: usize = 8;
 pub const max_choice_id_size: usize = 64;
 pub const max_choice_label_size: usize = 256;
+pub const max_json_depth: usize = 32;
+pub const max_safe_integer: i64 = (1 << 53) - 1;
 
 pub const bash_key = "bash.v1";
 pub const apply_patch_key = "apply_patch.v1";
@@ -90,7 +92,7 @@ pub fn validateCatalog(catalog: []const ToolDefinition) !void {
             definition.result_contract.len == 0 or
             definition.result_contract.len > max_result_contract_size or
             !utf8Valid(definition.provider_tool_name) or !utf8Valid(definition.description) or
-            !utf8Valid(definition.result_contract) or !canonicalJson(definition.input_schema))
+            !utf8Valid(definition.result_contract) or !validJson(definition.input_schema))
         {
             return error.InvalidToolCatalog;
         }
@@ -141,24 +143,106 @@ fn hashField(hasher: *binding.Hasher(binding.ToolCatalog), bytes: []const u8) vo
     hasher.update(bytes);
 }
 
-pub fn canonicalJson(bytes: []const u8) bool {
-    if (bytes.len == 0 or bytes.len > max_tool_arguments_envelope_size or !utf8Valid(bytes)) return false;
+/// The only tool-argument representation accepted by model and Conversation
+/// encoders. The slice points into storage owned by the caller of
+/// `canonicalizeJson` or `canonicalJsonValue`.
+pub const CanonicalJson = struct {
+    value: []const u8,
+
+    pub fn bytes(self: CanonicalJson) []const u8 {
+        return self.value;
+    }
+};
+
+pub fn canonicalizeJson(out: []u8, bytes: []const u8) !CanonicalJson {
+    if (bytes.len == 0 or bytes.len > max_tool_arguments_envelope_size or !utf8Valid(bytes)) {
+        return error.InvalidCanonicalJson;
+    }
     var arena_bytes: [max_tool_arguments_envelope_size + 48 * 1024]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
     var parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), bytes, .{
         .max_value_len = max_tool_arguments_envelope_size,
         .allocate = .alloc_always,
-    }) catch return false;
+        .duplicate_field_behavior = .@"error",
+    }) catch return error.InvalidCanonicalJson;
     defer parsed.deinit();
+    normalizeJsonValue(&parsed.value, 0) catch return error.InvalidCanonicalJson;
+    var writer = std.Io.Writer.fixed(out);
+    std.json.Stringify.value(parsed.value, .{}, &writer) catch return error.JsonTooLarge;
+    return .{ .value = writer.buffered() };
+}
+
+pub fn canonicalJsonValue(bytes: []const u8) !CanonicalJson {
+    if (!canonicalJson(bytes)) return error.InvalidCanonicalJson;
+    return .{ .value = bytes };
+}
+
+pub fn canonicalJson(bytes: []const u8) bool {
+    if (bytes.len == 0 or bytes.len > max_tool_arguments_envelope_size or !utf8Valid(bytes)) return false;
+    var normalized_bytes: [max_tool_arguments_envelope_size]u8 = undefined;
+    const normalized = canonicalizeJson(&normalized_bytes, bytes) catch return false;
     var hash_buffer: [4096]u8 = undefined;
-    var canonical = std.Io.Writer.Hashing(CountingSha256).initHasher(.{}, &hash_buffer);
-    std.json.Stringify.value(parsed.value, .{}, &canonical.writer) catch return false;
-    canonical.writer.flush() catch return false;
+    var hashing = std.Io.Writer.Hashing(CountingSha256).initHasher(.{}, &hash_buffer);
+    hashing.writer.writeAll(normalized.bytes()) catch return false;
+    hashing.writer.flush() catch return false;
     var expected: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &expected, .{});
     var actual: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    canonical.hasher.hash.final(&actual);
-    return canonical.hasher.length == bytes.len and std.mem.eql(u8, &actual, &expected);
+    hashing.hasher.hash.final(&actual);
+    return hashing.hasher.length == bytes.len and std.mem.eql(u8, &actual, &expected);
+}
+
+fn validJson(bytes: []const u8) bool {
+    if (bytes.len == 0 or bytes.len > max_schema_size or !utf8Valid(bytes)) return false;
+    var arena_bytes: [max_schema_size + 8 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
+    var parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), bytes, .{
+        .max_value_len = max_schema_size,
+        .allocate = .alloc_always,
+        .duplicate_field_behavior = .@"error",
+    }) catch return false;
+    defer parsed.deinit();
+    return true;
+}
+
+fn normalizeJsonValue(value: *std.json.Value, depth: usize) !void {
+    if (depth > max_json_depth) return error.JsonTooDeep;
+    switch (value.*) {
+        .null, .bool, .string => {},
+        .integer => |integer| {
+            if (integer < -max_safe_integer or integer > max_safe_integer) {
+                return error.UnsupportedJsonNumber;
+            }
+        },
+        .float => |number| {
+            if (!std.math.isFinite(number) or
+                number < -@as(f64, @floatFromInt(max_safe_integer)) or
+                number > @as(f64, @floatFromInt(max_safe_integer)))
+            {
+                return error.UnsupportedJsonNumber;
+            }
+            if (number == 0) {
+                value.* = .{ .integer = 0 };
+            } else if (@trunc(number) == number) {
+                value.* = .{ .integer = @intFromFloat(number) };
+            }
+        },
+        .number_string => return error.UnsupportedJsonNumber,
+        .array => |*array| for (array.items) |*item| {
+            try normalizeJsonValue(item, depth + 1);
+        },
+        .object => |*object| {
+            for (object.values()) |*item| try normalizeJsonValue(item, depth + 1);
+            const Sort = struct {
+                keys: [][]const u8,
+
+                pub fn lessThan(self: @This(), left: usize, right: usize) bool {
+                    return std.mem.order(u8, self.keys[left], self.keys[right]) == .lt;
+                }
+            };
+            object.sort(Sort{ .keys = object.keys() });
+        },
+    }
 }
 
 const CountingSha256 = struct {
@@ -172,11 +256,10 @@ const CountingSha256 = struct {
 };
 
 pub fn encodeJson(out: []u8, value: anytype) ![]const u8 {
-    var writer = std.Io.Writer.fixed(out);
+    var raw: [max_tool_arguments_envelope_size]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&raw);
     std.json.Stringify.value(value, .{}, &writer) catch return error.JsonTooLarge;
-    const encoded = writer.buffered();
-    if (!canonicalJson(encoded)) return error.InvalidCanonicalJson;
-    return encoded;
+    return (try canonicalizeJson(out, writer.buffered())).bytes();
 }
 
 pub fn utf8Valid(bytes: []const u8) bool {
@@ -219,10 +302,36 @@ test "duplicate and ambiguous catalog definitions fail closed" {
     try std.testing.expectError(error.AmbiguousProviderToolName, validateCatalog(&ambiguous));
 }
 
-test "canonical JSON rejects alternate and malformed encodings" {
+test "canonical JSON has one recursive object order" {
     try std.testing.expect(canonicalJson("{\"a\":1}"));
     try std.testing.expect(!canonicalJson("{ \"a\": 1 }"));
     try std.testing.expect(!canonicalJson("{\"a\":1"));
+    var first: [128]u8 = undefined;
+    var second: [128]u8 = undefined;
+    const canonical_first = try canonicalizeJson(&first, "{\"z\":0,\"a\":{\"y\":2,\"x\":1}}");
+    const canonical_second = try canonicalizeJson(&second, "{\"a\":{\"x\":1,\"y\":2},\"z\":0}");
+    try std.testing.expectEqualStrings(canonical_first.bytes(), canonical_second.bytes());
+    try std.testing.expectEqualStrings("{\"a\":{\"x\":1,\"y\":2},\"z\":0}", canonical_first.bytes());
+}
+
+test "canonical JSON rejects duplicate keys and normalizes strings and numbers" {
+    var out: [128]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidCanonicalJson,
+        canonicalizeJson(&out, "{\"a\":1,\"a\":2}"),
+    );
+    const canonical = try canonicalizeJson(
+        &out,
+        "{\"escaped\":\"\\u0061\\/b\",\"negative_zero\":-0.0,\"whole\":1e0,\"fraction\":1.50}",
+    );
+    try std.testing.expectEqualStrings(
+        "{\"escaped\":\"a/b\",\"fraction\":1.5,\"negative_zero\":0,\"whole\":1}",
+        canonical.bytes(),
+    );
+    try std.testing.expectError(
+        error.InvalidCanonicalJson,
+        canonicalizeJson(&out, "9007199254740992"),
+    );
 }
 
 test "serialized catalog schemas state the exact UTF-8 byte contract" {

@@ -1204,7 +1204,7 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
 
         fn dispatch(
             context: *anyopaque,
-            _: model_operation.RequestReader,
+            _: model_operation.RequestCursor,
             response: model_operation.ResponseWriter,
         ) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -1258,7 +1258,7 @@ test "known provider failure is one durable terminal Result" {
 
         fn dispatch(
             context: *anyopaque,
-            _: model_operation.RequestReader,
+            _: model_operation.RequestCursor,
             response: model_operation.ResponseWriter,
         ) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -1350,7 +1350,7 @@ test "input request fails terminally until the durable interaction layer exists"
 
         fn dispatch(
             context: *anyopaque,
-            _: model_operation.RequestReader,
+            _: model_operation.RequestCursor,
             response: model_operation.ResponseWriter,
         ) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context));
