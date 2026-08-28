@@ -191,7 +191,7 @@ pub fn decodeResult(bytes: *const [result_size]u8) !Result {
     return result;
 }
 
-fn descriptorDigest(patch: []const u8) binding_digest.PatchDescriptor {
+pub fn patchDigest(patch: []const u8) binding_digest.PatchDescriptor {
     return binding_digest.hash(binding_digest.PatchDescriptor, patch);
 }
 
@@ -262,7 +262,7 @@ fn prepareWithTestHook(
         .patch_ref = action.patch_ref,
         .workspace_path = workspace_path,
         .target_path = try TargetPath.init(target_path),
-        .patch_digest = descriptorDigest(patch),
+        .patch_digest = patchDigest(patch),
         .intent_digest = undefined,
         .preimage_digest = prepared.preimage_digest,
         .postimage_digest = prepared.postimage_digest,
@@ -630,7 +630,7 @@ fn runGit(
 
 fn observe(io: std.Io, intent: Intent, patch: []const u8) !Observation {
     if (!binding_digest.eql(binding_digest.PatchIntent, intentDigest(intent), intent.intent_digest) or
-        !binding_digest.eql(binding_digest.PatchDescriptor, descriptorDigest(patch), intent.patch_digest))
+        !binding_digest.eql(binding_digest.PatchDescriptor, patchDigest(patch), intent.patch_digest))
     {
         return error.InvalidPatchIntent;
     }
@@ -770,7 +770,7 @@ test "one exact tracked regular-file patch validates without mutation" {
     try std.testing.expectEqualStrings("note.txt", validated.target_path.slice());
     try std.testing.expect(binding_digest.eql(
         binding_digest.PatchDescriptor,
-        descriptorDigest(patch),
+        patchDigest(patch),
         validated.patch_digest,
     ));
     try std.testing.expectEqual(@as(usize, 32), validated.intent_digest.bytes.len);

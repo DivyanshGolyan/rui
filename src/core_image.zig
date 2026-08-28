@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const core_state = @import("core_state.zig");
 const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
@@ -317,16 +318,16 @@ pub const Core = struct {
     pub fn applyModelResponse(
         self: *Core,
         identity_value: OperationIdentity,
-        response_bytes: []const u8,
-        validated: *const model_protocol.Validated,
+        admission: model_protocol.Admission,
         response_ref: u64,
+        result_digest: binding.Result,
     ) !Response {
         try self.requireOperation(identity_value, .accepted);
         if (response_ref == 0) return error.InvalidResultReference;
-        if (response_bytes.len > model_protocol.max_response_size) return error.ResponseCapacityExceeded;
+        if (admission.byte_length > model_protocol.max_response_size) return error.ResponseCapacityExceeded;
         if (self.state.task_phase != .awaiting_model) return error.IllegalModelResponseTransition;
-        const parsed = try validated.verify(response_bytes);
-        if (response_bytes.len == 0 and
+        const parsed = try admission.verify(result_digest);
+        if (admission.byte_length == 0 and
             !(parsed.disposition == .failure and parsed.failure == .empty))
         {
             return error.EmptyModelResponse;
@@ -541,7 +542,7 @@ test "failed activation leaves no prior slot bytes reachable" {
     for (std.mem.asBytes(&slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
 
-test "oversized truncated and malformed responses preserve accepted operation state" {
+test "oversized admission preserves accepted operation state" {
     var slot: ActivationSlot = undefined;
     var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
     try core.startTask(1);
@@ -555,15 +556,16 @@ test "oversized truncated and malformed responses preserve accepted operation st
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     var validation: model_protocol.ValidationScratch = undefined;
     const encoded = try model_protocol.encodeText(&response_buffer, "valid");
-    const valid_evidence = try model_protocol.validate(&validation, encoded);
-    var oversized: [model_protocol.max_response_size + 1]u8 = @splat(1);
+    const validated = try model_protocol.validate(&validation, encoded);
+    var oversized = try validated.admission(encoded);
+    oversized.byte_length = model_protocol.max_response_size + 1;
     try std.testing.expectError(
         error.ResponseCapacityExceeded,
         core.applyModelResponse(
             .{ .id = operation_value.id, .generation = operation_value.generation },
-            &oversized,
-            valid_evidence,
+            oversized,
             99,
+            binding.hash(binding.Result, encoded),
         ),
     );
     try std.testing.expectEqualDeep(before, try core.operation());
@@ -572,23 +574,9 @@ test "oversized truncated and malformed responses preserve accepted operation st
         error.InvalidModelResponseEvidence,
         core.applyModelResponse(
             .{ .id = operation_value.id, .generation = operation_value.generation },
-            encoded[0 .. encoded.len - 1],
-            valid_evidence,
+            try validated.admission(encoded),
             99,
-        ),
-    );
-    try std.testing.expectEqualDeep(before, try core.operation());
-
-    var malformed: [model_protocol.max_response_size]u8 = undefined;
-    @memcpy(malformed[0..encoded.len], encoded);
-    malformed[0] = 'X';
-    try std.testing.expectError(
-        error.InvalidModelResponseEvidence,
-        core.applyModelResponse(
-            .{ .id = operation_value.id, .generation = operation_value.generation },
-            malformed[0..encoded.len],
-            valid_evidence,
-            99,
+            binding.hash(binding.Result, "substituted"),
         ),
     );
     try std.testing.expectEqualDeep(before, try core.operation());
@@ -612,9 +600,9 @@ test "responses retain only validated metadata and durable content windows" {
     try std.testing.expect(response.len > model_protocol.max_resident_response_size);
     const parsed = try core.applyModelResponse(
         identity,
-        response,
-        try model_protocol.validate(&validation, response),
+        try (try model_protocol.validate(&validation, response)).admission(response),
         3,
+        binding.hash(binding.Result, response),
     );
     try std.testing.expectEqual(@as(u32, @intCast(arguments.len)), parsed.arguments.length);
     try std.testing.expectEqual(@as(u64, 3), parsed.content_ref);
@@ -631,9 +619,9 @@ test "complete slot lifecycle is compiler checked to expose no allocator seam" {
     const response = try model_protocol.encodeText(&response_bytes, "done");
     _ = try core.applyModelResponse(
         .{ .id = operation_value.id, .generation = operation_value.generation },
-        response,
-        try model_protocol.validate(&validation, response),
+        try (try model_protocol.validate(&validation, response)).admission(response),
         3,
+        binding.hash(binding.Result, response),
     );
     var encoded: [core_state.encoded_size]u8 = undefined;
     try core.suspendInto(&encoded);

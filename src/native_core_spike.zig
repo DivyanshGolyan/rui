@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const core_image = @import("core_image.zig");
 const core_state = @import("core_state.zig");
 const model_contract = @import("model_contract.zig");
@@ -207,7 +208,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 discardResponse(core.applyModelResponse(.{
                     .id = operation.id,
                     .generation = operation.generation,
-                }, "invalid", undefined, 9)),
+                }, undefined, 9, undefined)),
                 poison,
             );
         }
@@ -233,7 +234,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             discardResponse(core.applyModelResponse(.{
                 .id = operation.id,
                 .generation = operation.generation,
-            }, "invalid", undefined, 0)),
+            }, undefined, 0, undefined)),
             poison,
         );
 
@@ -247,6 +248,8 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 model_contract.bash_key,
                 arguments,
             );
+            const response_digest = binding.hash(binding.Result, response);
+            const admission = try (try model_protocol.validate(&validation, response)).admission(response);
             before = try canonicalState(&core);
             try expectRejectedPreserves(
                 &core,
@@ -256,13 +259,13 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 discardResponse(core.applyModelResponse(.{
                     .id = operation.id,
                     .generation = operation.generation + 1,
-                }, response, try model_protocol.validate(&validation, response), response_ref + 1)),
+                }, admission, response_ref + 1, response_digest)),
                 poison,
             );
             const interpreted = try core.applyModelResponse(.{
                 .id = operation.id,
                 .generation = operation.generation,
-            }, response, try model_protocol.validate(&validation, response), response_ref);
+            }, admission, response_ref, response_digest);
             expected.operation_result = response_ref;
             expected.operation_phase = .completed;
             expected.response_ref = response_ref;
@@ -305,11 +308,12 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             expected.operation_phase = .accepted;
             try expectStateAndRestore(&core, expected, poison);
             const final = try model_protocol.encodeText(&response_buffer, "ok");
+            const final_digest = binding.hash(binding.Result, final);
             const interpreted_final = try core.applyModelResponse(
                 .{ .id = second.id, .generation = second.generation },
-                final,
-                try model_protocol.validate(&validation, final),
+                try (try model_protocol.validate(&validation, final)).admission(final),
                 response_ref + 1000,
+                final_digest,
             );
             expected.operation_result = response_ref + 1000;
             expected.operation_phase = .completed;
@@ -328,6 +332,8 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             expected.task_phase = .finished;
         } else {
             const final = try model_protocol.encodeText(&response_buffer, "ok");
+            const final_digest = binding.hash(binding.Result, final);
+            const admission = try (try model_protocol.validate(&validation, final)).admission(final);
             before = try canonicalState(&core);
             try expectRejectedPreserves(
                 &core,
@@ -337,13 +343,13 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 discardResponse(core.applyModelResponse(.{
                     .id = operation.id,
                     .generation = operation.generation + 1,
-                }, final, try model_protocol.validate(&validation, final), response_ref + 1)),
+                }, admission, response_ref + 1, final_digest)),
                 poison,
             );
             const interpreted = try core.applyModelResponse(.{
                 .id = operation.id,
                 .generation = operation.generation,
-            }, final, try model_protocol.validate(&validation, final), response_ref);
+            }, admission, response_ref, final_digest);
             expected.operation_result = response_ref;
             expected.operation_phase = .completed;
             expected.response_ref = response_ref;

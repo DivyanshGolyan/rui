@@ -46,6 +46,22 @@ const ValidationRecord = struct {
     byte_length: u32,
 };
 
+/// Compact semantic authority copied out of reconstructible validation
+/// scratch before later preparation can wait. It contains no parsed JSON
+/// pointers or response bytes.
+pub const Admission = struct {
+    parsed_value: Parsed,
+    result_digest: binding.Result,
+    byte_length: u32,
+
+    pub fn verify(self: Admission, expected_digest: binding.Result) !Parsed {
+        if (!binding.eql(binding.Result, self.result_digest, expected_digest)) {
+            return error.InvalidModelResponseEvidence;
+        }
+        return self.parsed_value;
+    }
+};
+
 pub const ValidationScratch = struct {
     json: contract.StrictToolJsonScratch = .{},
     record_bytes: [@sizeOf(ValidationRecord)]u8 align(@alignOf(ValidationRecord)) = undefined,
@@ -76,6 +92,16 @@ pub const Validated = opaque {
         _ = try self.verify(bytes);
         const record: *const ValidationRecord = @ptrCast(@alignCast(self));
         return record.tool_arguments;
+    }
+
+    pub fn admission(self: *const Validated, bytes: []const u8) !Admission {
+        const parsed = try self.verify(bytes);
+        const record: *const ValidationRecord = @ptrCast(@alignCast(self));
+        return .{
+            .parsed_value = parsed,
+            .result_digest = record.result_digest,
+            .byte_length = record.byte_length,
+        };
     }
 
     /// Replace a generically admitted tool call with the capture-bound terminal
@@ -507,6 +533,26 @@ test "host rejection preserves exact capture identity as a typed failure" {
     try std.testing.expectEqual(Failure.malformed, failure.failure);
     try std.testing.expectError(error.InvalidModelResponseEvidence, rejected.verify("substituted"));
     try std.testing.expectError(error.ExpectedAdmittedToolCall, rejected.rejectToolCall(captured));
+}
+
+test "compact admission survives validation scratch reuse" {
+    var first_buffer: [max_response_size]u8 = undefined;
+    var second_buffer: [max_response_size]u8 = undefined;
+    const first = try encodeText(&first_buffer, "first");
+    const second = try encodeText(&second_buffer, "second");
+    var scratch: ValidationScratch = .{};
+    const admission_value = try (try validate(&scratch, first)).admission(first);
+    _ = try validate(&scratch, second);
+
+    try std.testing.expectEqual(
+        Disposition.final_answer,
+        (try admission_value.verify(binding.hash(binding.Result, first))).disposition,
+    );
+    try std.testing.expectError(
+        error.InvalidModelResponseEvidence,
+        admission_value.verify(binding.hash(binding.Result, second)),
+    );
+    try std.testing.expect(@sizeOf(Admission) < @sizeOf(ValidationScratch));
 }
 
 test "tool response identity preserves exact noncanonical arguments" {

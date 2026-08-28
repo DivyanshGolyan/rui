@@ -27,6 +27,7 @@ fn HostWithCapacity(comptime active_capacity: usize) type {
     return struct {
         slots: core_image.SlotPool(active_capacity) = .{},
         semantic_validation: SemanticValidationWorkspacePool = .{},
+        patch_preparation: PatchPreparationWorkspacePool = .{},
     };
 }
 
@@ -89,6 +90,56 @@ const SemanticValidationWorkspacePool = struct {
         }
         workspace.scrub();
         self.occupied = false;
+    }
+};
+
+/// One decoded admitted patch retained only across patch intent preparation.
+/// This fixed Host stage does not scale with Active Capacity, and the semantic
+/// validator is released before this workspace can enter a subprocess wait.
+const PatchPreparationWorkspace = struct {
+    patch: [patch_tool.max_patch_size]u8 = undefined,
+
+    fn scrub(self: *PatchPreparationWorkspace) void {
+        @memset(&self.patch, 0);
+    }
+};
+
+const PatchPreparationWorkspaceLease = struct {
+    workspace: *PatchPreparationWorkspace,
+    owner: *PatchPreparationWorkspacePool,
+    generation: u64,
+    borrowed: bool = true,
+
+    fn release(self: *PatchPreparationWorkspaceLease) !void {
+        if (!self.borrowed) return;
+        if (!self.owner.occupied or self.owner.generation != self.generation or
+            self.workspace != &self.owner.workspace)
+        {
+            return error.StalePatchPreparationLease;
+        }
+        self.workspace.scrub();
+        self.owner.occupied = false;
+        self.borrowed = false;
+    }
+};
+
+const PatchPreparationWorkspacePool = struct {
+    workspace: PatchPreparationWorkspace = .{},
+    occupied: bool = false,
+    generation: u64 = 0,
+
+    fn borrow(self: *PatchPreparationWorkspacePool) !PatchPreparationWorkspaceLease {
+        if (self.occupied or self.generation == std.math.maxInt(u64)) {
+            return error.PatchPreparationWorkspaceBusy;
+        }
+        self.occupied = true;
+        self.generation += 1;
+        self.workspace.scrub();
+        return .{
+            .workspace = &self.workspace,
+            .owner = self,
+            .generation = self.generation,
+        };
     }
 };
 
@@ -238,6 +289,12 @@ const ModelCompletion = struct {
 
 const ExecutableTool = enum { bash, apply_patch };
 
+const AdmittedPatch = struct {
+    patch_ref: u64,
+    patch_digest: binding.PatchDescriptor,
+    patch_length: u32,
+};
+
 fn executableTool(session: *session_store.Session, core: *const core_image.Core) !ExecutableTool {
     const response = try core.response();
     var key_buffer: [model_contract.max_tool_key_size]u8 = undefined;
@@ -332,17 +389,31 @@ fn restoreCoreFromLedger(
 fn ignoreFact(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
 
 const ModelSlot = struct {
-    core: *Core,
     session: *session_store.Session,
     scratch: *SemanticValidationWorkspace,
     workspace_path: []const u8,
 
-    const Prepared = struct {
+    const PreparedFacts = struct {
         facts: [3]session_transition.Fact = undefined,
         fact_count: u8 = 0,
     };
 
-    fn apply(context: *anyopaque, completion: ModelCompletion) anyerror!Prepared {
+    const Tool = union(enum) {
+        none,
+        generic,
+        bash: struct {
+            descriptor_ref: u64,
+            descriptor_digest: binding.BashDescriptor,
+        },
+        apply_patch: AdmittedPatch,
+    };
+
+    const Admission = struct {
+        response: model_protocol.Admission,
+        tool: Tool = .none,
+    };
+
+    fn admit(context: *anyopaque, completion: ModelCompletion) anyerror!Admission {
         const self: *ModelSlot = @ptrCast(@alignCast(context));
         try model_operation.verifyRequestDigest(
             self.session,
@@ -367,7 +438,7 @@ const ModelSlot = struct {
         );
         var validated = model_protocol.admitWithDefinition(&self.scratch.validation, bytes, definition);
         var parsed = try validated.verify(bytes);
-        var prepared: Prepared = .{};
+        var tool: Tool = .none;
         if (parsed.disposition == .tool_call) {
             const admitted = (try validated.admittedToolArguments(bytes)) orelse
                 return error.MissingAdmittedToolArguments;
@@ -382,33 +453,118 @@ const ModelSlot = struct {
                 },
             };
             if (parsed.disposition == .tool_call) {
-                prepared = try prepareToolAdmission(
-                    self.session,
-                    self.workspace_path,
-                    completion,
-                    key,
-                    admitted.json,
-                    executable,
-                );
+                const call_ref = toolCallReference(completion);
+                try storeToolCall(self.session, call_ref, key, admitted.json);
+                tool = try self.admitTool(completion, executable);
             }
         }
-        _ = try self.core.reducer.applyModelResponse(.{
-            .id = completion.operation_id,
-            .generation = completion.operation_generation,
-        }, bytes, validated, completion.result);
-        return prepared;
+        return .{ .response = try validated.admission(bytes), .tool = tool };
+    }
+
+    fn admitTool(
+        self: *ModelSlot,
+        completion: ModelCompletion,
+        executable: ?ExecutableArguments,
+    ) !Tool {
+        const arguments = executable orelse return .generic;
+        return switch (arguments) {
+            .bash => |bash| blk: {
+                const tool_operation_id = (@as(u64, 1) << 63) | completion.operation_id;
+                const descriptor_ref = (@as(u64, 1) << 62) | @as(u32, @truncate(completion.result));
+                const descriptor: bash_tool.Descriptor = .{
+                    .operation_id = tool_operation_id,
+                    .operation_generation = 1,
+                    .workspace_path = self.workspace_path,
+                    .working_directory = self.workspace_path,
+                    .call = .{ .command = bash.command, .timeout_ms = bash.timeout_ms },
+                };
+                var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
+                const descriptor_bytes = try bash_tool.encodeDescriptor(&descriptor_buffer, descriptor);
+                const digest = bash_tool.descriptorDigest(descriptor_bytes);
+                try self.session.storeBlob(descriptor_ref, descriptor_bytes);
+                break :blk .{ .bash = .{
+                    .descriptor_ref = descriptor_ref,
+                    .descriptor_digest = digest,
+                } };
+            },
+            .apply_patch => |patch| blk: {
+                const patch_ref = (@as(u64, 1) << 60) | @as(u32, @truncate(completion.result));
+                try self.session.storeBlob(patch_ref, patch);
+                break :blk .{ .apply_patch = .{
+                    .patch_ref = patch_ref,
+                    .patch_digest = patch_tool.patchDigest(patch),
+                    .patch_length = @intCast(patch.len),
+                } };
+            },
+        };
     }
 };
 
 fn prepareToolAdmission(
+    host: *Host,
     session: *session_store.Session,
     workspace_path: []const u8,
     completion: ModelCompletion,
-    key: []const u8,
-    admitted_json: model_contract.StrictToolJson,
-    executable: ?ExecutableArguments,
-) !ModelSlot.Prepared {
-    const call_ref = (@as(u64, 1) << 59) | @as(u32, @truncate(completion.result));
+    tool: ModelSlot.Tool,
+) !ModelSlot.PreparedFacts {
+    switch (tool) {
+        .none => return .{},
+        else => {},
+    }
+    var prepared: ModelSlot.PreparedFacts = .{};
+    switch (tool) {
+        .none => unreachable,
+        .generic => {},
+        .bash => |bash| {
+            const operation = operationContext(
+                session,
+                (@as(u64, 1) << 63) | completion.operation_id,
+                1,
+            );
+            prepared.facts[0] = session_transition.operationSubmitted(
+                operation,
+                bash.descriptor_ref,
+                .{ .bash = bash.descriptor_digest },
+                .consequential,
+            );
+            prepared.facts[1] = session_transition.operationAccepted(
+                operation,
+                bash.descriptor_ref,
+                .{ .bash = bash.descriptor_digest },
+                .consequential,
+            );
+            prepared.fact_count = 2;
+        },
+        .apply_patch => |patch| {
+            var workspace = try host.patch_preparation.borrow();
+            defer workspace.release() catch unreachable;
+            const patch_bytes = try readAdmittedPatch(session, patch, &workspace.workspace.patch);
+            std.debug.assert(!host.semantic_validation.occupied);
+            const tool_operation_id = (@as(u64, 3) << 62) | completion.operation_id;
+            const intent_ref = (@as(u64, 1) << 58) | @as(u32, @truncate(completion.result));
+            const intent = try patch_tool.prepare(session.io, workspace_path, patch_bytes, .{
+                .operation_id = tool_operation_id,
+                .operation_generation = 1,
+                .patch_ref = patch.patch_ref,
+            });
+            try storePatchIntent(session, intent_ref, intent);
+            const operation = operationContext(session, tool_operation_id, 1);
+            prepared.facts[0] = session_transition.operationSubmitted(
+                operation,
+                intent_ref,
+                .{ .apply_patch = intent.intent_digest },
+                .consequential,
+            );
+            prepared.facts[1] = session_transition.operationAccepted(
+                operation,
+                intent_ref,
+                .{ .apply_patch = intent.intent_digest },
+                .consequential,
+            );
+            prepared.fact_count = 2;
+        },
+    }
+    const call_ref = toolCallReference(completion);
     const call_entry = try session.appendConversation(.tool_call, call_ref, null);
     const conversation_fact = session_transition.conversationAdvanced(.{
         .agent = agentContext(session),
@@ -417,53 +573,38 @@ fn prepareToolAdmission(
         .kind = call_entry.kind,
         .content_ref = call_ref,
     });
-    try storeToolCall(session, call_ref, key, admitted_json);
-    var prepared: ModelSlot.Prepared = .{};
-    prepared.facts[0] = conversation_fact;
-    prepared.fact_count = 1;
-    const arguments = executable orelse return prepared;
-    return switch (arguments) {
-        .bash => |bash| blk: {
-            const tool_operation_id = (@as(u64, 1) << 63) | completion.operation_id;
-            const descriptor_ref = (@as(u64, 1) << 62) | @as(u32, @truncate(completion.result));
-            const descriptor: bash_tool.Descriptor = .{
-                .operation_id = tool_operation_id,
-                .operation_generation = 1,
-                .workspace_path = workspace_path,
-                .working_directory = workspace_path,
-                .call = .{ .command = bash.command, .timeout_ms = bash.timeout_ms },
-            };
-            var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
-            const descriptor_bytes = try bash_tool.encodeDescriptor(&descriptor_buffer, descriptor);
-            const digest = bash_tool.descriptorDigest(descriptor_bytes);
-            try session.storeBlob(descriptor_ref, descriptor_bytes);
-            const operation = operationContext(session, tool_operation_id, 1);
-            break :blk .{ .facts = .{
-                session_transition.operationSubmitted(operation, descriptor_ref, .{ .bash = digest }, .consequential),
-                session_transition.operationAccepted(operation, descriptor_ref, .{ .bash = digest }, .consequential),
-                conversation_fact,
-            }, .fact_count = 3 };
-        },
-        .apply_patch => |patch| blk: {
-            const tool_operation_id = (@as(u64, 3) << 62) | completion.operation_id;
-            const response_ref: u32 = @truncate(completion.result);
-            const patch_ref = (@as(u64, 1) << 60) | response_ref;
-            const intent_ref = (@as(u64, 1) << 58) | response_ref;
-            const intent = try patch_tool.prepare(session.io, workspace_path, patch, .{
-                .operation_id = tool_operation_id,
-                .operation_generation = 1,
-                .patch_ref = patch_ref,
-            });
-            try session.storeBlob(patch_ref, patch);
-            try storePatchIntent(session, intent_ref, intent);
-            const operation = operationContext(session, tool_operation_id, 1);
-            break :blk .{ .facts = .{
-                session_transition.operationSubmitted(operation, intent_ref, .{ .apply_patch = intent.intent_digest }, .consequential),
-                session_transition.operationAccepted(operation, intent_ref, .{ .apply_patch = intent.intent_digest }, .consequential),
-                conversation_fact,
-            }, .fact_count = 3 };
-        },
-    };
+    prepared.facts[prepared.fact_count] = conversation_fact;
+    prepared.fact_count += 1;
+    return prepared;
+}
+
+fn toolCallReference(completion: ModelCompletion) u64 {
+    return (@as(u64, 1) << 59) | @as(u32, @truncate(completion.result));
+}
+
+fn readAdmittedPatch(
+    session: *session_store.Session,
+    admitted: AdmittedPatch,
+    out: *[patch_tool.max_patch_size]u8,
+) ![]const u8 {
+    var reader = try session.openBlob(admitted.patch_ref);
+    defer reader.close();
+    if (reader.length() != admitted.patch_length or reader.length() > out.len) {
+        return error.InvalidAdmittedPatchBlob;
+    }
+    const length: usize = @intCast(reader.length());
+    var offset: usize = 0;
+    while (offset < length) {
+        const bytes = try reader.readWindow(offset, out[offset..length]);
+        if (bytes.len == 0 or bytes.len > length - offset) return error.TruncatedAdmittedPatchBlob;
+        if (bytes.ptr != out[offset..].ptr) @memcpy(out[offset..][0..bytes.len], bytes);
+        offset += bytes.len;
+    }
+    const patch = out[0..length];
+    if (!binding.eql(binding.PatchDescriptor, patch_tool.patchDigest(patch), admitted.patch_digest)) {
+        return error.InvalidAdmittedPatchBlob;
+    }
+    return patch;
 }
 
 const AdmittedBashArguments = struct {
@@ -974,15 +1115,27 @@ pub fn advanceRestored(
     var outcome = (try core.reducer.task()).phase;
     if (outcome == .awaiting_model) {
         if (durableCompletion(session, token, &core)) |completion| {
-            var scratch = try host.semantic_validation.borrow();
-            defer scratch.release() catch unreachable;
-            var slot: ModelSlot = .{
-                .core = &core,
-                .session = session,
-                .scratch = scratch.workspace,
-                .workspace_path = config.workspace_path,
+            const admission = blk: {
+                var scratch = try host.semantic_validation.borrow();
+                defer scratch.release() catch unreachable;
+                var slot: ModelSlot = .{
+                    .session = session,
+                    .scratch = scratch.workspace,
+                    .workspace_path = config.workspace_path,
+                };
+                break :blk try ModelSlot.admit(&slot, completion);
             };
-            const prepared = try ModelSlot.apply(&slot, completion);
+            const prepared = try prepareToolAdmission(
+                host,
+                session,
+                config.workspace_path,
+                completion,
+                admission.tool,
+            );
+            _ = try core.reducer.applyModelResponse(.{
+                .id = completion.operation_id,
+                .generation = completion.operation_generation,
+            }, admission.response, completion.result, completion.result_digest);
             var evidence_agent = agentContext(session);
             evidence_agent.ownership_epoch = completion.ownership_epoch;
             const terminal = session_transition.result(.{
@@ -2579,9 +2732,9 @@ test "restored response metadata reads the exact durable content window" {
     })}, null);
     _ = try initial.applyModelResponse(
         identity,
-        encoded_response,
-        try model_protocol.validate(&validation, encoded_response),
+        try (try model_protocol.validate(&validation, encoded_response)).admission(encoded_response),
         response_ref,
+        response_digest,
     );
     var encoded_state: [core_state.encoded_size]u8 = undefined;
     try initial.suspendInto(&encoded_state);
@@ -2649,15 +2802,15 @@ test "restored tool arguments reject same-reference substitution and oversized b
     const operation = try core.beginModelOperation(3, 1);
     const identity: core_image.OperationIdentity = .{ .id = operation.id, .generation = operation.generation };
     try core.acceptOperation(identity);
+    const response_digest = binding.hash(binding.Result, original);
     _ = try core.applyModelResponse(
         identity,
-        original,
-        try model_protocol.validate(&validation, original),
+        try (try model_protocol.validate(&validation, original)).admission(original),
         response_ref,
+        response_digest,
     );
     const context = operationContext(&session, operation.id, operation.generation);
     const descriptor_digest: binding.Descriptor = .{ .model = binding.hash(binding.ModelDescriptor, descriptor_bytes) };
-    const response_digest = binding.hash(binding.Result, original);
     _ = try session.commitSemantic(&.{
         session_transition.operationSubmitted(context, descriptor_ref, descriptor_digest, .model),
         session_transition.modelAttemptAdmitted(context, 10, descriptor_ref, descriptor_digest, 0),
@@ -2864,9 +3017,9 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
     );
     _ = try core.reducer.applyModelResponse(
         .{ .id = operation.id, .generation = operation.generation },
-        generic,
-        validated,
+        try validated.admission(generic),
         3,
+        binding.hash(binding.Result, generic),
     );
     try std.testing.expectEqual(core_state.TaskPhase.awaiting_tool, (try core.reducer.task()).phase);
     const admitted = (try validated.admittedToolArguments(generic)).?;
@@ -2889,9 +3042,9 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
     const input = try model_protocol.encodeInputText(&response, "Which migration should I use?");
     _ = try core.reducer.applyModelResponse(
         .{ .id = input_operation.id, .generation = input_operation.generation },
-        input,
-        try model_protocol.validate(&validation, input),
+        try (try model_protocol.validate(&validation, input)).admission(input),
         6,
+        binding.hash(binding.Result, input),
     );
     try std.testing.expectEqual(core_state.TaskPhase.failed, (try core.reducer.task()).phase);
     try std.testing.expectError(error.UnboundToolKey, executableToolFromKey(""));
@@ -3111,8 +3264,10 @@ test "Host owns one semantic validation workspace independent of Activation Slot
     const HostFour = HostWithCapacity(4);
     try std.testing.expectEqual(@as(usize, 256_424), semantic_validation_workspace_size);
     try std.testing.expectEqual(@as(usize, 256_440), @sizeOf(SemanticValidationWorkspacePool));
-    try std.testing.expectEqual(@as(usize, 264_816), @sizeOf(Host));
-    try std.testing.expectEqual(@as(usize, 289_920), @sizeOf(HostFour));
+    try std.testing.expectEqual(@as(usize, 16_384), @sizeOf(PatchPreparationWorkspace));
+    try std.testing.expectEqual(@as(usize, 16_400), @sizeOf(PatchPreparationWorkspacePool));
+    try std.testing.expectEqual(@as(usize, 281_216), @sizeOf(Host));
+    try std.testing.expectEqual(@as(usize, 306_320), @sizeOf(HostFour));
     try std.testing.expectEqual(@as(usize, 8_360), @sizeOf(core_image.ActivationSlot));
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
@@ -3121,6 +3276,10 @@ test "Host owns one semantic validation workspace independent of Activation Slot
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
         @sizeOf(@TypeOf(@as(HostFour, .{}).semantic_validation)),
+    );
+    try std.testing.expectEqual(
+        @sizeOf(PatchPreparationWorkspacePool),
+        @sizeOf(@TypeOf(host.patch_preparation)),
     );
     try std.testing.expectEqual(
         @sizeOf(ProductionSlotPool),
@@ -3135,6 +3294,22 @@ test "Host owns one semantic validation workspace independent of Activation Slot
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(reused.workspace), 0));
 }
 
+test "patch preparation capacity does not retain semantic validation capacity" {
+    var host: Host = .{};
+    var patch = try host.patch_preparation.borrow();
+    defer patch.release() catch unreachable;
+    patch.workspace.patch[0] = 0xa5;
+
+    var validation = try host.semantic_validation.borrow();
+    try std.testing.expect(host.patch_preparation.occupied);
+    try validation.release();
+    try std.testing.expectEqual(@as(u8, 0xa5), patch.workspace.patch[0]);
+    try std.testing.expectError(
+        error.PatchPreparationWorkspaceBusy,
+        host.patch_preparation.borrow(),
+    );
+}
+
 test "stale copied semantic validation lease cannot scrub a new borrower" {
     var host: Host = .{};
     var original = try host.semantic_validation.borrow();
@@ -3146,6 +3321,19 @@ test "stale copied semantic validation lease cannot scrub a new borrower" {
     current.workspace.response[0] = 0xa5;
     try std.testing.expectError(error.StaleSemanticValidationLease, stale.release());
     try std.testing.expectEqual(@as(u8, 0xa5), current.workspace.response[0]);
+}
+
+test "stale copied patch preparation lease cannot scrub a new borrower" {
+    var host: Host = .{};
+    var original = try host.patch_preparation.borrow();
+    var stale = original;
+    try original.release();
+
+    var current = try host.patch_preparation.borrow();
+    defer current.release() catch unreachable;
+    current.workspace.patch[0] = 0xa5;
+    try std.testing.expectError(error.StalePatchPreparationLease, stale.release());
+    try std.testing.expectEqual(@as(u8, 0xa5), current.workspace.patch[0]);
 }
 
 test "Tool Catalog preserves byte-bounded Unicode admission" {
