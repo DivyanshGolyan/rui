@@ -57,9 +57,12 @@ pub const Response = struct {
     content_ref: u64,
     disposition: model_protocol.Disposition,
     failure: model_protocol.Failure,
-    tool: model_protocol.Tool,
     text: ContentWindow,
+    tool_key: ContentWindow,
     arguments: ContentWindow,
+    input_shape: u8,
+    option_count: u8,
+    options: ContentWindow,
 };
 
 pub const Task = struct {
@@ -230,9 +233,12 @@ pub const Core = struct {
             .content_ref = state.response_ref,
             .disposition = state.response_disposition,
             .failure = state.response_failure,
-            .tool = state.response_tool,
             .text = state.response_text,
+            .tool_key = state.response_tool_key,
             .arguments = state.response_arguments,
+            .input_shape = state.response_input_shape,
+            .option_count = state.response_option_count,
+            .options = state.response_options,
         };
     }
 
@@ -294,9 +300,12 @@ pub const Core = struct {
         self.state.response_ref = 0;
         self.state.response_disposition = .failure;
         self.state.response_failure = .none;
-        self.state.response_tool = .none;
+        self.state.response_input_shape = 0;
+        self.state.response_option_count = 0;
         self.state.response_text = .{};
+        self.state.response_tool_key = .{};
         self.state.response_arguments = .{};
+        self.state.response_options = .{};
         self.state.task_phase = .awaiting_model;
         self.staged_response_length = 0;
         return prepared;
@@ -340,18 +349,28 @@ pub const Core = struct {
         self.state.response_ref = response_ref;
         self.state.response_disposition = parsed.disposition;
         self.state.response_failure = parsed.failure;
-        self.state.response_tool = parsed.tool;
         self.state.response_text = .{
             .offset = parsed.text_offset,
             .length = parsed.text_length,
+        };
+        self.state.response_tool_key = .{
+            .offset = parsed.tool_key_offset,
+            .length = parsed.tool_key_length,
         };
         self.state.response_arguments = .{
             .offset = parsed.arguments_offset,
             .length = parsed.arguments_length,
         };
+        self.state.response_input_shape = if (parsed.input_shape) |shape| @intFromEnum(shape) else 0;
+        self.state.response_option_count = parsed.option_count;
+        self.state.response_options = .{
+            .offset = parsed.options_offset,
+            .length = parsed.options_length,
+        };
         self.state.task_phase = switch (parsed.disposition) {
             .final_answer => .final_candidate,
             .tool_call => .awaiting_tool,
+            .input_request => .awaiting_input,
             .failure => .failed,
         };
         return self.response();
@@ -369,11 +388,16 @@ pub const Core = struct {
         const expected = try self.response();
         if (parsed.disposition != expected.disposition or
             parsed.failure != expected.failure or
-            parsed.tool != expected.tool or
             parsed.text_offset != expected.text.offset or
             parsed.text_length != expected.text.length or
+            parsed.tool_key_offset != expected.tool_key.offset or
+            parsed.tool_key_length != expected.tool_key.length or
             parsed.arguments_offset != expected.arguments.offset or
-            parsed.arguments_length != expected.arguments.length)
+            parsed.arguments_length != expected.arguments.length or
+            (if (parsed.input_shape) |shape| @intFromEnum(shape) else 0) != expected.input_shape or
+            parsed.option_count != expected.option_count or
+            parsed.options_offset != expected.options.offset or
+            parsed.options_length != expected.options.length)
         {
             return error.ResponseContentMismatch;
         }

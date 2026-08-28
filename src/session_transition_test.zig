@@ -143,6 +143,26 @@ test "a malformed flat wire record never becomes a typed fact" {
     );
 }
 
+test "superseded transition payload versions are rejected instead of migrated" {
+    const fact = transition.taskAdmitted(.{
+        .agent_id = 7,
+        .agent_generation = 1,
+        .ownership_epoch = 2,
+    }, 31, 31);
+    var first: [transition.max_payload_size]u8 = undefined;
+    var second: [transition.max_payload_size]u8 = undefined;
+    var transaction: transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    transaction.facts[0] = fact;
+    const encoded = try transition.encode(&first, transaction);
+    const decoded = try transition.decode(1, encoded);
+    try std.testing.expectEqualSlices(u8, encoded, try transition.encode(&second, decoded));
+    std.mem.writeInt(u16, first[0..2], transition.payload_version - 1, .little);
+    try std.testing.expectError(
+        error.UnsupportedTransitionPayloadVersion,
+        transition.decode(1, encoded),
+    );
+}
+
 test "unused flags are rejected for task admission and Outcome" {
     const agent: transition.AgentContext = .{
         .agent_id = 7,

@@ -1,36 +1,13 @@
 const std = @import("std");
+const contract = @import("model_contract.zig");
 
-pub const max_response_size = 16 * 1024;
-pub const header_size = 8;
-pub const item_header_size = 8;
-pub const version: u8 = 1;
+pub const max_response_size = 20 * 1024;
+pub const header_size = 24;
+pub const version: u16 = 2;
+const magic = "ONERSP2\x00";
 
-const magic: u32 = 0x5352504f;
-
-pub const Status = enum(u8) {
-    complete = 1,
-    length_truncated = 2,
-    aborted = 3,
-    provider_error = 4,
-};
-
-pub const ItemKind = enum(u8) {
-    text = 1,
-    tool_call = 2,
-};
-
-pub const Tool = enum(u8) {
-    none = 0,
-    bash = 1,
-    apply_patch = 2,
-};
-
-pub const Disposition = enum(u8) {
-    final_answer = 1,
-    tool_call = 2,
-    failure = 3,
-};
-
+pub const Status = enum(u8) { complete = 1, length_truncated = 2, aborted = 3, provider_error = 4 };
+pub const Disposition = enum(u8) { final_answer = 1, tool_call = 2, input_request = 3, failure = 4 };
 pub const Failure = enum(u8) {
     none = 0,
     truncated = 1,
@@ -38,7 +15,9 @@ pub const Failure = enum(u8) {
     provider_error = 3,
     malformed = 4,
     empty = 5,
-    multiple_tools = 6,
+    multiple_outputs = 6,
+    oversized = 7,
+    unknown_tool = 8,
 };
 
 pub const Parsed = struct {
@@ -46,188 +25,208 @@ pub const Parsed = struct {
     failure: Failure = .none,
     text_offset: u32 = 0,
     text_length: u32 = 0,
-    tool: Tool = .none,
+    tool_key_offset: u32 = 0,
+    tool_key_length: u32 = 0,
     arguments_offset: u32 = 0,
     arguments_length: u32 = 0,
+    input_shape: ?contract.InputShape = null,
+    option_count: u8 = 0,
+    options_offset: u32 = 0,
+    options_length: u32 = 0,
 };
 
+pub const Choice = struct { id: []const u8, label: []const u8 };
+
 pub fn encodeText(out: []u8, status: Status, text: []const u8) ![]const u8 {
-    const total = if (text.len == 0) header_size else header_size + item_header_size + text.len;
-    if (total > out.len or total > max_response_size) return error.ResponseTooLarge;
-    @memset(out[0..total], 0);
-    write(u32, out, 0, magic);
-    out[4] = version;
-    out[5] = @intFromEnum(status);
-    out[6] = if (text.len == 0) 0 else 1;
-    if (text.len == 0) return out[0..total];
-    out[header_size] = @intFromEnum(ItemKind.text);
-    out[header_size + 1] = @intFromEnum(Tool.none);
-    write(u32, out, header_size + 4, @intCast(text.len));
-    @memcpy(out[header_size + item_header_size .. total], text);
-    return out[0..total];
+    if (status != .complete) return encodeFailure(out, switch (status) {
+        .length_truncated => .truncated,
+        .aborted => .aborted,
+        .provider_error => .provider_error,
+        .complete => unreachable,
+    });
+    if (text.len == 0 or !contract.utf8Valid(text)) return error.InvalidAssistantText;
+    return encode(out, .final_answer, .none, 0, 0, text, "");
 }
 
-pub fn encodeTool(out: []u8, tool: Tool, arguments: []const u8) ![]const u8 {
-    if (tool == .none or arguments.len == 0) return error.InvalidToolCall;
-    const total = header_size + item_header_size + arguments.len;
+pub fn encodeTool(out: []u8, tool_key: []const u8, arguments: []const u8) ![]const u8 {
+    try contract.validateToolKey(tool_key);
+    if (!contract.canonicalJson(arguments)) return error.InvalidToolArguments;
+    return encode(out, .tool_call, .none, 0, 0, tool_key, arguments);
+}
+
+pub fn encodeInputText(out: []u8, prompt: []const u8) ![]const u8 {
+    try validatePrompt(prompt);
+    return encode(out, .input_request, .none, @intFromEnum(contract.InputShape.text), 0, prompt, "");
+}
+
+pub fn encodeInputChoice(out: []u8, prompt: []const u8, choices: []const Choice) ![]const u8 {
+    try validatePrompt(prompt);
+    if (choices.len == 0 or choices.len > contract.max_choice_count) return error.InvalidInputChoices;
+    var option_bytes: [
+        contract.max_choice_count *
+            (4 + contract.max_choice_id_size + contract.max_choice_label_size)
+    ]u8 = undefined;
+    var cursor: usize = 0;
+    for (choices, 0..) |choice, index| {
+        if (choice.id.len == 0 or choice.id.len > contract.max_choice_id_size or
+            choice.label.len == 0 or choice.label.len > contract.max_choice_label_size or
+            !contract.utf8Valid(choice.id) or !contract.utf8Valid(choice.label))
+        {
+            return error.InvalidInputChoices;
+        }
+        for (choices[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier.id, choice.id)) return error.DuplicateInputChoice;
+        }
+        write(u16, &option_bytes, cursor, @intCast(choice.id.len));
+        write(u16, &option_bytes, cursor + 2, @intCast(choice.label.len));
+        cursor += 4;
+        @memcpy(option_bytes[cursor..][0..choice.id.len], choice.id);
+        cursor += choice.id.len;
+        @memcpy(option_bytes[cursor..][0..choice.label.len], choice.label);
+        cursor += choice.label.len;
+    }
+    return encode(
+        out,
+        .input_request,
+        .none,
+        @intFromEnum(contract.InputShape.single_choice),
+        @intCast(choices.len),
+        prompt,
+        option_bytes[0..cursor],
+    );
+}
+
+pub fn encodeFailure(out: []u8, reason: Failure) ![]const u8 {
+    if (reason == .none) return error.InvalidProviderFailure;
+    return encode(out, .failure, reason, 0, 0, "", "");
+}
+
+fn encode(
+    out: []u8,
+    disposition: Disposition,
+    reason: Failure,
+    shape: u8,
+    option_count: u8,
+    first: []const u8,
+    second: []const u8,
+) ![]const u8 {
+    const total = header_size + first.len + second.len;
     if (total > out.len or total > max_response_size) return error.ResponseTooLarge;
     @memset(out[0..total], 0);
-    write(u32, out, 0, magic);
-    out[4] = version;
-    out[5] = @intFromEnum(Status.complete);
-    out[6] = 1;
-    out[header_size] = @intFromEnum(ItemKind.tool_call);
-    out[header_size + 1] = @intFromEnum(tool);
-    write(u32, out, header_size + 4, @intCast(arguments.len));
-    @memcpy(out[header_size + item_header_size .. total], arguments);
+    @memcpy(out[0..magic.len], magic);
+    write(u16, out, 8, version);
+    write(u16, out, 10, header_size);
+    out[12] = @intFromEnum(disposition);
+    out[13] = @intFromEnum(reason);
+    out[14] = shape;
+    out[15] = option_count;
+    write(u32, out, 16, @intCast(first.len));
+    write(u32, out, 20, @intCast(second.len));
+    @memcpy(out[header_size..][0..first.len], first);
+    @memcpy(out[header_size + first.len .. total], second);
     return out[0..total];
 }
 
 pub fn parse(bytes: []const u8) Parsed {
-    if (bytes.len < header_size or bytes.len > max_response_size) return malformed();
-    if (read(u32, bytes, 0) != magic or bytes[4] != version or bytes[7] != 0) {
-        return malformed();
+    if (bytes.len < header_size or bytes.len > max_response_size or
+        !std.mem.eql(u8, bytes[0..magic.len], magic) or read(u16, bytes, 8) != version or
+        read(u16, bytes, 10) != header_size)
+    {
+        return failed(.malformed);
     }
-    const status: Status = switch (bytes[5]) {
-        1 => .complete,
-        2 => .length_truncated,
-        3 => .aborted,
-        4 => .provider_error,
-        else => return malformed(),
-    };
-    switch (status) {
-        .length_truncated => return failure(.truncated),
-        .aborted => return failure(.aborted),
-        .provider_error => return failure(.provider_error),
-        .complete => {},
+    const disposition = std.enums.fromInt(Disposition, bytes[12]) orelse return failed(.malformed);
+    const reason = std.enums.fromInt(Failure, bytes[13]) orelse return failed(.malformed);
+    const first_length: usize = read(u32, bytes, 16);
+    const second_length: usize = read(u32, bytes, 20);
+    if (first_length > bytes.len - header_size or
+        second_length > bytes.len - header_size - first_length or
+        header_size + first_length + second_length != bytes.len)
+    {
+        return failed(.malformed);
     }
-
-    const item_count = bytes[6];
-    if (item_count == 0) return failure(.empty);
-    var cursor: usize = header_size;
-    var text_offset: u32 = 0;
-    var text_length: u32 = 0;
-    var text_count: u8 = 0;
-    var tool_count: u8 = 0;
-    var tool: Tool = .none;
-    var arguments_offset: u32 = 0;
-    var arguments_length: u32 = 0;
-    for (0..item_count) |_| {
-        if (cursor > bytes.len or item_header_size > bytes.len - cursor) return malformed();
-        const kind: ItemKind = switch (bytes[cursor]) {
-            1 => .text,
-            2 => .tool_call,
-            else => return malformed(),
-        };
-        const item_tool: Tool = switch (bytes[cursor + 1]) {
-            0 => .none,
-            1 => .bash,
-            2 => .apply_patch,
-            else => return malformed(),
-        };
-        if (read(u16, bytes, cursor + 2) != 0) return malformed();
-        const payload_length: usize = read(u32, bytes, cursor + 4);
-        cursor += item_header_size;
-        if (payload_length == 0 or payload_length > bytes.len - cursor) return malformed();
-        const payload = bytes[cursor .. cursor + payload_length];
-        switch (kind) {
-            .text => {
-                if (!utf8Valid(payload)) return malformed();
-                if (item_tool != .none or text_count != 0) return malformed();
-                text_count = 1;
-                text_offset = @intCast(cursor);
-                text_length = @intCast(payload_length);
-            },
-            .tool_call => {
-                if (item_tool == .none) return malformed();
-                tool_count += 1;
-                if (tool_count > 1) return failure(.multiple_tools);
-                tool = item_tool;
-                arguments_offset = @intCast(cursor);
-                arguments_length = @intCast(payload_length);
-            },
-        }
-        cursor += payload_length;
+    const first = bytes[header_size..][0..first_length];
+    const second = bytes[header_size + first_length ..];
+    switch (disposition) {
+        .final_answer => {
+            if (reason != .none or bytes[14] != 0 or bytes[15] != 0 or first.len == 0 or
+                second.len != 0 or !contract.utf8Valid(first)) return failed(.malformed);
+            return .{ .disposition = .final_answer, .text_offset = header_size, .text_length = @intCast(first.len) };
+        },
+        .tool_call => {
+            if (reason != .none or bytes[14] != 0 or bytes[15] != 0 or second.len == 0) {
+                return failed(.malformed);
+            }
+            contract.validateToolKey(first) catch return failed(.malformed);
+            if (!contract.canonicalJson(second)) return failed(.malformed);
+            return .{
+                .disposition = .tool_call,
+                .tool_key_offset = header_size,
+                .tool_key_length = @intCast(first.len),
+                .arguments_offset = @intCast(header_size + first.len),
+                .arguments_length = @intCast(second.len),
+            };
+        },
+        .input_request => return parseInput(bytes, first, second, reason),
+        .failure => {
+            if (reason == .none or bytes[14] != 0 or bytes[15] != 0 or first.len != 0 or second.len != 0) {
+                return failed(.malformed);
+            }
+            return failed(reason);
+        },
     }
-    if (cursor != bytes.len) return malformed();
-    if (tool_count == 1) return .{
-        .disposition = .tool_call,
-        .text_offset = text_offset,
-        .text_length = text_length,
-        .tool = tool,
-        .arguments_offset = arguments_offset,
-        .arguments_length = arguments_length,
+}
+
+fn parseInput(bytes: []const u8, prompt: []const u8, options: []const u8, reason: Failure) Parsed {
+    if (reason != .none or prompt.len == 0 or prompt.len > contract.max_prompt_size or
+        !contract.utf8Valid(prompt)) return failed(.malformed);
+    const shape = std.enums.fromInt(contract.InputShape, bytes[14]) orelse return failed(.malformed);
+    const count = bytes[15];
+    switch (shape) {
+        .text => if (count != 0 or options.len != 0) return failed(.malformed),
+        .single_choice => {
+            if (count == 0 or count > contract.max_choice_count) return failed(.malformed);
+            var cursor: usize = 0;
+            var ids: [contract.max_choice_count][]const u8 = undefined;
+            for (0..count) |index| {
+                if (cursor > options.len or options.len - cursor < 4) return failed(.malformed);
+                const id_length: usize = read(u16, options, cursor);
+                const label_length: usize = read(u16, options, cursor + 2);
+                cursor += 4;
+                if (id_length == 0 or id_length > contract.max_choice_id_size or
+                    label_length == 0 or label_length > contract.max_choice_label_size or
+                    id_length > options.len - cursor or label_length > options.len - cursor - id_length)
+                {
+                    return failed(.malformed);
+                }
+                const id = options[cursor..][0..id_length];
+                const label = options[cursor + id_length ..][0..label_length];
+                if (!contract.utf8Valid(id) or !contract.utf8Valid(label)) return failed(.malformed);
+                for (ids[0..index]) |earlier| if (std.mem.eql(u8, earlier, id)) return failed(.malformed);
+                ids[index] = id;
+                cursor += id_length + label_length;
+            }
+            if (cursor != options.len) return failed(.malformed);
+        },
+    }
+    return .{
+        .disposition = .input_request,
+        .text_offset = header_size,
+        .text_length = @intCast(prompt.len),
+        .input_shape = shape,
+        .option_count = count,
+        .options_offset = @intCast(header_size + prompt.len),
+        .options_length = @intCast(options.len),
     };
-    if (text_count == 1) return .{
-        .disposition = .final_answer,
-        .text_offset = text_offset,
-        .text_length = text_length,
-    };
-    return failure(.empty);
 }
 
-test "malformed payload length cannot overflow the parser" {
-    var bytes: [header_size + item_header_size]u8 = @splat(0);
-    write(u32, &bytes, 0, magic);
-    bytes[4] = version;
-    bytes[5] = @intFromEnum(Status.complete);
-    bytes[6] = 1;
-    bytes[header_size] = @intFromEnum(ItemKind.text);
-    write(u32, &bytes, header_size + 4, std.math.maxInt(u32));
-    try std.testing.expectEqual(Failure.malformed, parse(&bytes).failure);
+fn validatePrompt(prompt: []const u8) !void {
+    if (prompt.len == 0 or prompt.len > contract.max_prompt_size or !contract.utf8Valid(prompt)) {
+        return error.InvalidInputPrompt;
+    }
 }
 
-test "one binary tool call is accepted without becoming final text" {
-    var bytes: [128]u8 = undefined;
-    const encoded = try encodeTool(&bytes, .bash, "\x01\x00\xff");
-    const parsed = parse(encoded);
-    try std.testing.expectEqual(Disposition.tool_call, parsed.disposition);
-    try std.testing.expectEqual(Tool.bash, parsed.tool);
-    try std.testing.expectEqual(@as(u32, 3), parsed.arguments_length);
-}
-
-fn malformed() Parsed {
-    return failure(.malformed);
-}
-
-fn failure(reason: Failure) Parsed {
+fn failed(reason: Failure) Parsed {
     return .{ .disposition = .failure, .failure = reason };
-}
-
-inline fn utf8Valid(bytes: []const u8) bool {
-    var index: usize = 0;
-    while (index < bytes.len) {
-        const first = bytes[index];
-        if (first < 0x80) {
-            index += 1;
-            continue;
-        }
-        const length: usize = if (first >= 0xc2 and first <= 0xdf)
-            2
-        else if (first >= 0xe0 and first <= 0xef)
-            3
-        else if (first >= 0xf0 and first <= 0xf4)
-            4
-        else
-            return false;
-        if (index + length > bytes.len) return false;
-        const second = bytes[index + 1];
-        if (second & 0xc0 != 0x80) return false;
-        if (length >= 3) {
-            const third = bytes[index + 2];
-            if (third & 0xc0 != 0x80) return false;
-            if (first == 0xe0 and second < 0xa0) return false;
-            if (first == 0xed and second >= 0xa0) return false;
-        }
-        if (length == 4) {
-            const fourth = bytes[index + 3];
-            if (fourth & 0xc0 != 0x80) return false;
-            if (first == 0xf0 and second < 0x90) return false;
-            if (first == 0xf4 and second >= 0x90) return false;
-        }
-        index += length;
-    }
-    return true;
 }
 
 fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
@@ -238,44 +237,35 @@ fn read(comptime T: type, input: []const u8, offset: usize) T {
     return std.mem.readInt(T, input[offset..][0..@sizeOf(T)], .little);
 }
 
-test "a complete text item is a Final Answer" {
-    var bytes: [128]u8 = undefined;
-    const encoded = try encodeText(&bytes, .complete, "The parser is fixed.");
-    const parsed = parse(encoded);
-    try std.testing.expectEqual(Disposition.final_answer, parsed.disposition);
-    try std.testing.expectEqualStrings(
-        "The parser is fixed.",
-        encoded[parsed.text_offset..][0..parsed.text_length],
-    );
+test "complete normalized responses cover every V1 disposition" {
+    var bytes: [max_response_size]u8 = undefined;
+    try std.testing.expectEqual(Disposition.final_answer, parse(try encodeText(&bytes, .complete, "done")).disposition);
+    const tool = parse(try encodeTool(&bytes, "fixture.tool", "{\"value\":1}"));
+    try std.testing.expectEqual(Disposition.tool_call, tool.disposition);
+    try std.testing.expectEqualStrings("fixture.tool", bytes[tool.tool_key_offset..][0..tool.tool_key_length]);
+    try std.testing.expectEqual(Disposition.input_request, parse(try encodeInputText(&bytes, "Which migration should I use?")).disposition);
+    const choices = [_]Choice{
+        .{ .id = "existing", .label = "Use the existing migration" },
+        .{ .id = "new", .label = "Create a new migration" },
+    };
+    const input = parse(try encodeInputChoice(&bytes, "Choose one", &choices));
+    try std.testing.expectEqual(contract.InputShape.single_choice, input.input_shape.?);
+    try std.testing.expectEqual(@as(u8, 2), input.option_count);
+    try std.testing.expectEqual(Failure.provider_error, parse(try encodeFailure(&bytes, .provider_error)).failure);
 }
 
-test "incomplete and empty responses are typed failures" {
-    var bytes: [128]u8 = undefined;
-    const truncated = try encodeText(&bytes, .length_truncated, "partial");
-    try std.testing.expectEqual(Failure.truncated, parse(truncated).failure);
-    const empty = try encodeText(&bytes, .complete, "");
-    try std.testing.expectEqual(Failure.empty, parse(empty).failure);
-}
-
-test "malformed and multiple tool responses cannot become Final Answers" {
-    var bytes: [128]u8 = undefined;
-    const encoded = try encodeText(&bytes, .complete, "answer");
-    bytes[4] = 9;
+test "hostile normalized responses fail before authorizing effects" {
+    var bytes: [max_response_size]u8 = undefined;
+    const encoded = try encodeTool(&bytes, "fixture.tool", "{}");
+    bytes[20] = 0xff;
     try std.testing.expectEqual(Failure.malformed, parse(encoded).failure);
-
-    @memset(&bytes, 0);
-    write(u32, &bytes, 0, magic);
-    bytes[4] = version;
-    bytes[5] = @intFromEnum(Status.complete);
-    bytes[6] = 2;
-    var cursor: usize = header_size;
-    for (0..2) |_| {
-        bytes[cursor] = @intFromEnum(ItemKind.tool_call);
-        bytes[cursor + 1] = @intFromEnum(Tool.bash);
-        write(u32, &bytes, cursor + 4, 2);
-        cursor += item_header_size;
-        @memcpy(bytes[cursor..][0..2], "{}");
-        cursor += 2;
-    }
-    try std.testing.expectEqual(Failure.multiple_tools, parse(bytes[0..cursor]).failure);
+    const current = try encodeTool(&bytes, "fixture.tool", "{}");
+    std.mem.writeInt(u16, bytes[8..10], version - 1, .little);
+    try std.testing.expectEqual(Failure.malformed, parse(current).failure);
+    try std.testing.expectEqual(Failure.truncated, parse(try encodeText(&bytes, .length_truncated, "ignored")).failure);
+    const choices = [_]Choice{
+        .{ .id = "same", .label = "First" },
+        .{ .id = "same", .label = "Second" },
+    };
+    try std.testing.expectError(error.DuplicateInputChoice, encodeInputChoice(&bytes, "Choose", &choices));
 }

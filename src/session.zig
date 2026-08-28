@@ -1,12 +1,15 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const blob_store = @import("blob_store.zig");
+const conversation = @import("conversation.zig");
+const model_contract = @import("model_contract.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const core_state = @import("core_state.zig");
 const host_store = @import("host_store.zig");
 const session_transition = @import("session_transition.zig");
 
 pub const workspace_path_capacity = 1024;
+pub const model_name_capacity = host_store.max_model_bytes;
 const lock_path = "owner.lock";
 const blobs_path = "blobs";
 
@@ -415,6 +418,7 @@ const ResidentState = struct {
     semantic: SemanticIndex = .{},
     inbox: InboxIndex = .{},
     conversation_head_id: u64 = 0,
+    conversation_head_kind: ?EntryKind = null,
 
     fn applyingLedger(
         self: ResidentState,
@@ -442,7 +446,19 @@ const ResidentState = struct {
                 {
                     return error.ConversationLedgerGap;
                 }
+                if (next.conversation_head_kind == null) {
+                    if (advanced.entry_id != 1 or advanced.parent_id != 0 or
+                        advanced.kind != .user_text) return error.InvalidConversationGrammar;
+                } else {
+                    const parent_kind = next.conversation_head_kind.?;
+                    if ((parent_kind == .tool_call) != (advanced.kind == .tool_result) or
+                        (advanced.kind == .tool_call and parent_kind == .tool_call))
+                    {
+                        return error.InvalidConversationGrammar;
+                    }
+                }
                 next.conversation_head_id = advanced.entry_id;
+                next.conversation_head_kind = advanced.kind;
             },
             .task_admitted,
             .operation_submitted,
@@ -577,6 +593,8 @@ pub const Session = struct {
     recovery: Recovery = .ready,
     workspace_path: [workspace_path_capacity]u8 = undefined,
     workspace_path_length: u16,
+    model_name: [model_name_capacity]u8 = undefined,
+    model_name_length: u8,
     open: bool = true,
     failed: bool = false,
 
@@ -611,7 +629,7 @@ pub const Session = struct {
     ) !Session {
         try config.identities.validate();
         if (config.workspace_path.len == 0 or config.workspace_path.len > workspace_path_capacity or
-            config.model.len == 0 or config.task.len == 0)
+            config.model.len == 0 or config.model.len > model_name_capacity or config.task.len == 0)
         {
             return error.InvalidSessionMetadata;
         }
@@ -665,7 +683,7 @@ pub const Session = struct {
                 .agent = agent,
                 .entry_id = 1,
                 .parent_id = 0,
-                .kind = .user,
+                .kind = .user_text,
                 .content_ref = config.identities.task_id,
             },
         );
@@ -681,8 +699,10 @@ pub const Session = struct {
             .branch_id = config.identities.branch_id,
             .ownership_epoch = 1,
             .workspace_path_length = @intCast(canonical_workspace.len),
+            .model_name_length = @intCast(config.model.len),
         };
         @memcpy(created.workspace_path[0..canonical_workspace.len], canonical_workspace);
+        @memcpy(created.model_name[0..config.model.len], config.model);
         created.resident = try created.resident.applyingLedger(initial, created.agent_id, created.ownership_epoch);
 
         try storage.createSessionWithMetadata(.{
@@ -750,9 +770,11 @@ pub const Session = struct {
             .branch_id = stored.identities.branch_id,
             .ownership_epoch = stored.ownership_epoch,
             .workspace_path_length = stored.workspace_path_length,
+            .model_name_length = stored.model_length,
             .recovery = if (recovery_complete) .ready else .pending,
         };
         @memcpy(session.workspace_path[0..stored.workspace_path_length], stored.workspacePath());
+        @memcpy(session.model_name[0..stored.model_length], stored.modelName());
         return session;
     }
 
@@ -762,6 +784,10 @@ pub const Session = struct {
 
     pub fn workspacePath(self: *const Session) []const u8 {
         return self.workspace_path[0..self.workspace_path_length];
+    }
+
+    pub fn modelName(self: *const Session) []const u8 {
+        return self.model_name[0..self.model_name_length];
     }
 
     pub fn recoveryIsEmpty(self: *Session) !bool {
@@ -821,6 +847,7 @@ pub const Session = struct {
     ) !ConversationEntry {
         const conversation_head = self.resident.conversation_head_id;
         if (conversation_head == std.math.maxInt(u64)) return error.EntryIdentityExhausted;
+        try self.validateConversationBlob(kind, content_ref, conversation_head);
 
         const entry: ConversationEntry = .{
             .kind = kind,
@@ -852,6 +879,7 @@ pub const Session = struct {
         {
             return error.ConversationLedgerMismatch;
         }
+        try self.validateConversationBlob(entry.kind, entry.content_ref, entry.parent_id);
     }
 
     fn verifyConversationEntry(self: *Session, advanced: session_transition.ConversationRecord) !void {
@@ -863,6 +891,39 @@ pub const Session = struct {
             entry.session_id != self.session_id or entry.task_id != self.task_id)
         {
             return error.ConversationLedgerMismatch;
+        }
+        try self.validateConversationBlob(entry.kind, entry.content_ref, entry.parent_id);
+    }
+
+    fn validateConversationBlob(
+        self: *Session,
+        kind: EntryKind,
+        content_ref: u64,
+        parent_id: u64,
+    ) !void {
+        var reader = try self.openBlob(content_ref);
+        defer reader.close();
+        const maximum: usize = switch (kind) {
+            .tool_call => conversation.call_header_size + model_contract.max_tool_key_size +
+                model_contract.max_arguments_size,
+            .tool_result => conversation.result_header_size + conversation.max_result_content_size,
+            .user_text, .assistant_text, .context_checkpoint => conversation.max_result_content_size,
+        };
+        if (reader.length() == 0 or reader.length() > maximum) return error.InvalidConversationContent;
+        var bytes: [conversation.result_header_size + conversation.max_result_content_size]u8 = undefined;
+        const length: usize = @intCast(reader.length());
+        const content = try reader.readWindow(0, bytes[0..length]);
+        if (content.len != length) return error.InvalidConversationContent;
+        switch (kind) {
+            .tool_call => _ = conversation.decodeToolCall(content) catch return error.InvalidConversationContent,
+            .tool_result => {
+                const result = conversation.decodeToolResult(content) catch
+                    return error.InvalidConversationContent;
+                if (result.parent_id != parent_id) return error.InvalidConversationParent;
+            },
+            .user_text, .assistant_text, .context_checkpoint => if (!std.unicode.utf8ValidateSlice(content)) {
+                return error.InvalidConversationContent;
+            },
         }
     }
 
@@ -1612,7 +1673,7 @@ test "create and exact resume preserve distinct identities and one owner" {
     try std.testing.expectEqualDeep(live_resident, restored.session.resident);
 
     const root = try restored.session.readEntry(1);
-    try std.testing.expectEqual(EntryKind.user, root.kind);
+    try std.testing.expectEqual(EntryKind.user_text, root.kind);
     try std.testing.expectEqual(@as(u64, 0), root.parent_id);
     try std.testing.expectEqual(restored.session.task_id, root.content_ref);
     var task_buffer: [64]u8 = undefined;
@@ -2624,7 +2685,7 @@ test "conversation advances only after its Ledger fact commits" {
     var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 20));
     defer created.close();
     try created.storeBlob(900, "The test is fixed.");
-    const assistant = try created.appendConversation(.assistant, 900, null);
+    const assistant = try created.appendConversation(.assistant_text, 900, null);
 
     try std.testing.expectEqual(@as(u64, 2), assistant.entry_id);
     try std.testing.expectEqual(@as(u64, 1), assistant.parent_id);
@@ -2652,6 +2713,55 @@ test "conversation advances only after its Ledger fact commits" {
     );
 }
 
+test "conversation grammar rejects orphaned and unpaired tool entries during recovery" {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 1,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    var root: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    root.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = agent,
+        .entry_id = 1,
+        .parent_id = 0,
+        .kind = .user_text,
+        .content_ref = 10,
+    });
+    const resident = try (ResidentState{}).applyingLedger(root, 1, 1);
+
+    var orphan: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    orphan.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = agent,
+        .entry_id = 2,
+        .parent_id = 1,
+        .kind = .tool_result,
+        .content_ref = 11,
+    });
+    try std.testing.expectError(error.InvalidConversationGrammar, resident.applyingLedger(orphan, 1, 1));
+
+    var call: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    call.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = agent,
+        .entry_id = 2,
+        .parent_id = 1,
+        .kind = .tool_call,
+        .content_ref = 12,
+    });
+    const awaiting_result = try resident.applyingLedger(call, 1, 1);
+    var non_result: session_transition.Transaction = .{ .sequence = 3, .fact_count = 1 };
+    non_result.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = agent,
+        .entry_id = 3,
+        .parent_id = 2,
+        .kind = .assistant_text,
+        .content_ref = 13,
+    });
+    try std.testing.expectError(
+        error.InvalidConversationGrammar,
+        awaiting_result.applyingLedger(non_result, 1, 1),
+    );
+}
+
 const AppendCrash = struct {
     fn reached(_: *anyopaque, boundary: AppendBoundary) anyerror!void {
         if (boundary == .after_entry_sync) return error.InjectedCrash;
@@ -2664,9 +2774,10 @@ test "resume leaves an uncommitted conversation record invisible" {
     defer layout.deinit(io);
     var marker: u8 = 0;
     var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 30));
+    try created.storeBlob(901, "uncommitted assistant text");
     try std.testing.expectError(
         error.InjectedCrash,
-        created.appendConversation(.tool_result, 901, .{
+        created.appendConversation(.assistant_text, 901, .{
             .context = &marker,
             .reached = AppendCrash.reached,
         }),

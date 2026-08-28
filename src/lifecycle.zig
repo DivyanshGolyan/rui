@@ -2,9 +2,11 @@ const std = @import("std");
 const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
 const completion_inbox = @import("completion_inbox.zig");
+const conversation = @import("conversation.zig");
 const core_image = @import("core_image.zig");
 const core_state = @import("core_state.zig");
 const model_operation = @import("model_operation.zig");
+const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
@@ -142,6 +144,17 @@ const ModelCompletion = struct {
     agent_generation: u32,
     operation_generation: u32,
 };
+
+const ExecutableTool = enum { bash, apply_patch };
+
+fn executableTool(core: *const core_image.Core) !ExecutableTool {
+    const response = try core.response();
+    var key_buffer: [model_contract.max_tool_key_size]u8 = undefined;
+    const key = try core.copyResponseWindow(response.tool_key, &key_buffer);
+    if (std.mem.eql(u8, key, model_contract.bash_key)) return .bash;
+    if (std.mem.eql(u8, key, model_contract.apply_patch_key)) return .apply_patch;
+    return error.UnboundToolKey;
+}
 
 fn finalReference(response_ref: u64) u64 {
     return (@as(u64, 1) << 63) | response_ref;
@@ -500,7 +513,7 @@ fn executeBashCall(
     fault: ?FaultHook,
 ) !void {
     const response = try core.reducer.response();
-    if (response.tool != .bash) {
+    if (try executableTool(&core.reducer) != .bash) {
         return error.UnsupportedTool;
     }
     const arguments_length = response.arguments.length;
@@ -509,12 +522,19 @@ fn executeBashCall(
     {
         return error.InvalidBashCallRange;
     }
-    var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
-    const call_bytes = try core.reducer.copyResponseWindow(
+    var arguments_buffer: [model_contract.max_arguments_size]u8 = undefined;
+    const arguments = try core.reducer.copyResponseWindow(
         response.arguments,
-        &call_buffer,
+        &arguments_buffer,
     );
-    const call = try bash_tool.decodeCall(call_bytes);
+    const ParsedBash = struct { command: []const u8, timeout_ms: u32 };
+    var parsed = std.json.parseFromSlice(ParsedBash, allocator, arguments, .{}) catch
+        return error.InvalidBashArguments;
+    defer parsed.deinit();
+    const call: bash_tool.Call = .{
+        .command = parsed.value.command,
+        .timeout_ms = parsed.value.timeout_ms,
+    };
     const tool_operation_id = (@as(u64, 1) << 63) | ids.operation_id;
     const descriptor: bash_tool.Descriptor = .{
         .operation_id = tool_operation_id,
@@ -529,9 +549,17 @@ fn executeBashCall(
     const call_ref = (@as(u64, 1) << 59) | ids.response_ref;
     const descriptor_ref = (@as(u64, 1) << 62) | ids.response_ref;
     const result_ref = (@as(u64, 1) << 61) | ids.response_ref;
-    try session.storeBlob(call_ref, call_bytes);
+    var call_content_buffer: [
+        conversation.call_header_size + model_contract.max_tool_key_size +
+            model_contract.max_arguments_size
+    ]u8 = undefined;
+    const call_content = try conversation.encodeToolCall(&call_content_buffer, .{
+        .key = model_contract.bash_key,
+        .arguments = arguments,
+    });
+    try session.storeBlob(call_ref, call_content);
     try session.storeBlob(descriptor_ref, descriptor_bytes);
-    const call_entry = try session.appendConversation(.assistant, call_ref, null);
+    const call_entry = try session.appendConversation(.tool_call, call_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
     const descriptor_facts = [_]session_transition.Fact{
         session_transition.operationSubmitted(
@@ -633,6 +661,7 @@ fn executeBashCall(
 
 fn requestPatchPermission(
     io: std.Io,
+    allocator: std.mem.Allocator,
     session: *session_store.Session,
     core: *Core,
     core_state_buffer: []u8,
@@ -649,10 +678,17 @@ fn requestPatchPermission(
     {
         return error.InvalidPatchRange;
     }
-    var patch_buffer: [patch_tool.max_patch_size]u8 = undefined;
-    const patch = try core.reducer.copyResponseWindow(response.arguments, &patch_buffer);
+    var arguments_buffer: [model_contract.max_arguments_size]u8 = undefined;
+    const arguments = try core.reducer.copyResponseWindow(response.arguments, &arguments_buffer);
+    const ParsedPatch = struct { patch: []const u8 };
+    var parsed = std.json.parseFromSlice(ParsedPatch, allocator, arguments, .{}) catch
+        return error.InvalidPatchArguments;
+    defer parsed.deinit();
+    const patch = parsed.value.patch;
+    if (patch.len == 0 or patch.len > patch_tool.max_patch_size) return error.InvalidPatchRange;
     const tool_operation_id = (@as(u64, 3) << 62) | ids.operation_id;
     const patch_ref = (@as(u64, 1) << 60) | ids.response_ref;
+    const call_ref = (@as(u64, 1) << 59) | ids.response_ref;
     const intent_ref = (@as(u64, 1) << 58) | ids.response_ref;
     const intent = try patch_tool.prepare(io, workspace_path, patch, .{
         .operation_id = tool_operation_id,
@@ -661,7 +697,16 @@ fn requestPatchPermission(
     });
     try session.storeBlob(patch_ref, patch);
     try storePatchIntent(session, intent_ref, intent);
-    const call_entry = try session.appendConversation(.assistant, patch_ref, null);
+    var call_content_buffer: [
+        conversation.call_header_size + model_contract.max_tool_key_size +
+            model_contract.max_arguments_size
+    ]u8 = undefined;
+    const call_content = try conversation.encodeToolCall(&call_content_buffer, .{
+        .key = model_contract.apply_patch_key,
+        .arguments = arguments,
+    });
+    try session.storeBlob(call_ref, call_content);
+    const call_entry = try session.appendConversation(.tool_call, call_ref, null);
     const operation_context = operationContext(session, tool_operation_id, 1);
     const descriptor_facts = [_]session_transition.Fact{
         session_transition.operationSubmitted(
@@ -681,7 +726,7 @@ fn requestPatchPermission(
             .entry_id = call_entry.entry_id,
             .parent_id = call_entry.parent_id,
             .kind = call_entry.kind,
-            .content_ref = patch_ref,
+            .content_ref = call_ref,
         }),
     };
     _ = try session.commitSemantic(&descriptor_facts, null);
@@ -794,7 +839,9 @@ pub fn advanceRestored(
             null,
         );
     }
+    if (outcome == .awaiting_input) return error.InputRequestDisposition;
     if (outcome == .awaiting_tool) {
+        try stageDurableResponse(session, &core, try core.reducer.response());
         switch (try reconcileToolCall(
             session,
             token,
@@ -817,7 +864,7 @@ pub fn advanceRestored(
                     .response_ref = @truncate(observation.result_ref),
                     .final_ref = finalReference(observation.result_ref),
                 };
-                switch ((try core.reducer.response()).tool) {
+                switch (try executableTool(&core.reducer)) {
                     .bash => try executeBashCall(
                         io,
                         allocator,
@@ -838,6 +885,7 @@ pub fn advanceRestored(
                     .apply_patch => {
                         try requestPatchPermission(
                             io,
+                            allocator,
                             session,
                             &core,
                             core_state_buffer,
@@ -857,7 +905,6 @@ pub fn advanceRestored(
                             config.fault,
                         );
                     },
-                    else => return error.UnsupportedTool,
                 }
                 outcome = (try core.reducer.task()).phase;
             },
@@ -868,7 +915,7 @@ pub fn advanceRestored(
         const entry_id = (try core.reducer.task()).final_entry_id;
         if (entry_id != session.activeLeafId()) return error.FinalEntryMismatch;
         const entry = try session.readEntry(entry_id);
-        if (entry.kind != .assistant) return error.InvalidFinalEntry;
+        if (entry.kind != .assistant_text) return error.InvalidFinalEntry;
         return entry.content_ref;
     }
     if (outcome != .ready) return error.SessionNotReadyForModel;
@@ -917,12 +964,12 @@ pub fn resolvePermission(
     defer if (core_open) core.close();
     try restoreCoreFromLedger(session, core_state_buffer, &core);
     if ((try core.reducer.task()).phase != .awaiting_tool) return error.PermissionNoLongerRequired;
-    const response = try core.reducer.response();
+    try stageDurableResponse(session, &core, try core.reducer.response());
+    const tool = try executableTool(&core.reducer);
     const observation = try core.reducer.operation();
-    const expected_operation_id = switch (response.tool) {
+    const expected_operation_id = switch (tool) {
         .bash => (@as(u64, 1) << 63) | observation.id,
         .apply_patch => (@as(u64, 3) << 62) | observation.id,
-        else => return error.UnsupportedTool,
     };
     if (decision.operation_id != expected_operation_id or
         decision.operation_generation != 1)
@@ -948,7 +995,7 @@ pub fn resolvePermission(
         return error.PermissionNoLongerRequired;
     }
 
-    switch (response.tool) {
+    switch (tool) {
         .bash => {
             const operation_context = operationContext(session, expected_operation_id, 1);
             var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
@@ -1035,28 +1082,23 @@ pub fn resolvePermission(
                 if (completion_hook) |hook| try hook.offered(hook.context, evidence);
                 return error.CompletionOffered;
             }
-            const result_entry = try session.appendConversation(.tool_result, result_ref, null);
-            try core.reducer.commitToolResult(session.activeLeafId(), result_entry.entry_id);
-            const facts = [_]session_transition.Fact{
-                session_transition.result(.{
-                    .operation = operation_context,
-                    .result_ref = result_ref,
-                    .result_digest = result_digest,
-                    .class = if (execution.status == .indeterminate) .indeterminate else .ordinary,
-                    .evidence = if (attempt_id == 0)
-                        .{ .immediate = .consequential }
-                    else
-                        .{ .durable = .{ .bash = attempt_id } },
-                }),
-                session_transition.conversationAdvanced(.{
-                    .agent = agentContext(session),
-                    .entry_id = result_entry.entry_id,
-                    .parent_id = result_entry.parent_id,
-                    .kind = result_entry.kind,
-                    .content_ref = result_ref,
-                }),
-            };
-            try commitCoreFacts(session, core_state_buffer, &core, &facts, false);
+            const terminal = session_transition.result(.{
+                .operation = operation_context,
+                .result_ref = result_ref,
+                .result_digest = result_digest,
+                .class = if (execution.status == .indeterminate) .indeterminate else .ordinary,
+                .evidence = if (attempt_id == 0)
+                    .{ .immediate = .consequential }
+                else
+                    .{ .durable = .{ .bash = attempt_id } },
+            });
+            _ = try session.commitSemantic(&.{terminal}, null);
+            try reconcileBashResult(
+                session,
+                &core,
+                core_state_buffer,
+                toolResultFromRecord(terminal.result),
+            );
         },
         .apply_patch => {
             var intent_bytes: [patch_tool.max_intent_size]u8 = undefined;
@@ -1083,7 +1125,6 @@ pub fn resolvePermission(
             });
             _ = try session.commitSemantic(&.{authorization}, null);
         },
-        else => unreachable,
     }
     core.close();
     core_open = false;
@@ -1178,7 +1219,7 @@ fn reconcileToolCall(
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !ToolRecovery {
-    return switch ((try core.reducer.response()).tool) {
+    return switch (try executableTool(&core.reducer)) {
         .bash => reconcileBash(session, token, core, core_state_buffer),
         .apply_patch => reconcilePatch(
             session,
@@ -1189,7 +1230,6 @@ fn reconcileToolCall(
             completion_hook,
             fault,
         ),
-        else => error.UnsupportedTool,
     };
 }
 
@@ -1402,7 +1442,8 @@ fn reconcilePatch(
             session,
             core,
             core_state_buffer,
-            patch_ref,
+            (@as(u64, 1) << 59) | response_ref,
+            .apply_patch,
             toolResultFromRecord(settled),
         );
         return .ready;
@@ -1532,7 +1573,8 @@ fn reconcilePatch(
         session,
         core,
         core_state_buffer,
-        patch_ref,
+        (@as(u64, 1) << 59) | response_ref,
+        .apply_patch,
         toolResultFromRecord(terminal.result),
     );
     return .ready;
@@ -1582,29 +1624,32 @@ fn reconcileBashResult(
     const response_ref: u32 = @truncate(result.result);
     if (result.result != ((@as(u64, 1) << 61) | response_ref)) return error.InvalidToolResultReference;
     const call_ref = (@as(u64, 1) << 59) | response_ref;
-    try reconcileToolResult(session, core, core_state_buffer, call_ref, result);
+    try reconcileToolResult(session, core, core_state_buffer, call_ref, .bash, result);
 }
 
 fn reconcileToolResult(
     session: *session_store.Session,
     core: *Core,
     core_state_buffer: []u8,
-    descriptor_ref: u64,
+    call_ref: u64,
+    tool: ExecutableTool,
     result: ToolResult,
 ) !void {
+    const visible_ref = (@as(u64, 1) << 55) | @as(u32, @truncate(result.result));
     const active = try session.readEntry(session.activeLeafId());
     var call_entry: session_store.ConversationEntry = undefined;
     var result_entry: session_store.ConversationEntry = undefined;
-    if (active.kind == .tool_result and active.content_ref == result.result) {
+    if (active.kind == .tool_result and active.content_ref == visible_ref) {
         result_entry = active;
         call_entry = try session.readEntry(active.parent_id);
-    } else if (active.kind == .assistant and active.content_ref == descriptor_ref) {
+    } else if (active.kind == .tool_call and active.content_ref == call_ref) {
         call_entry = active;
-        result_entry = try session.appendConversation(.tool_result, result.result, null);
+        try storeVisibleToolResult(session, tool, result.result, visible_ref, call_entry.entry_id);
+        result_entry = try session.appendConversation(.tool_result, visible_ref, null);
     } else {
         return error.ToolConversationMismatch;
     }
-    if (call_entry.kind != .assistant or call_entry.content_ref != descriptor_ref or
+    if (call_entry.kind != .tool_call or call_entry.content_ref != call_ref or
         result_entry.parent_id != call_entry.entry_id)
     {
         return error.ToolConversationMismatch;
@@ -1623,7 +1668,7 @@ fn reconcileToolResult(
             .entry_id = result_entry.entry_id,
             .parent_id = result_entry.parent_id,
             .kind = result_entry.kind,
-            .content_ref = result.result,
+            .content_ref = visible_ref,
         }),
     };
     try commitCoreFacts(
@@ -1633,6 +1678,70 @@ fn reconcileToolResult(
         &applied_facts,
         true,
     );
+}
+
+fn storeVisibleToolResult(
+    session: *session_store.Session,
+    tool: ExecutableTool,
+    durable_ref: u64,
+    visible_ref: u64,
+    parent_id: u64,
+) !void {
+    var encoded_buffer: [conversation.result_header_size + conversation.max_result_content_size]u8 = undefined;
+    var writer = std.Io.Writer.fixed(encoded_buffer[conversation.result_header_size..]);
+    var is_error = false;
+    switch (tool) {
+        .bash => {
+            var durable: [bash_tool.result_header_size + 2 * bash_tool.max_output_size]u8 = undefined;
+            const bytes = try readBoundedBlob(session, durable_ref, &durable);
+            const result = try bash_tool.decodeResult(bytes);
+            is_error = result.status != .success;
+            try writer.print("status={s}\nexit_code={d}\nstdout_base64=", .{
+                bashStatusName(result.status),
+                result.exit_code,
+            });
+            try std.base64.standard.Encoder.encodeWriter(&writer, result.stdout);
+            try writer.writeAll("\nstderr_base64=");
+            try std.base64.standard.Encoder.encodeWriter(&writer, result.stderr);
+        },
+        .apply_patch => {
+            var durable: [patch_tool.result_size]u8 = undefined;
+            try readExactBlob(session, durable_ref, &durable);
+            const result = try patch_tool.decodeResult(&durable);
+            is_error = result.status != .applied;
+            try writer.print("status={s}", .{patchStatusName(result.status)});
+        },
+    }
+    const encoded = try conversation.finishToolResult(
+        &encoded_buffer,
+        parent_id,
+        is_error,
+        writer.buffered().len,
+    );
+    try storeOrExpectBlob(session, visible_ref, encoded);
+}
+
+fn bashStatusName(status: bash_tool.Status) []const u8 {
+    return switch (status) {
+        .success => "success",
+        .nonzero_exit => "nonzero_exit",
+        .timeout => "timeout",
+        .cancelled => "cancelled",
+        .missing_executable => "missing_executable",
+        .truncated => "truncated",
+        .denied => "denied",
+        .indeterminate => "indeterminate",
+        .spawn_error => "spawn_error",
+    };
+}
+
+fn patchStatusName(status: patch_tool.ResultStatus) []const u8 {
+    return switch (status) {
+        .denied => "denied",
+        .stale => "stale",
+        .applied => "applied",
+        .indeterminate => "indeterminate",
+    };
 }
 
 fn durableCompletion(
@@ -1979,8 +2088,8 @@ fn finalizeCandidate(
     try reach(fault, .after_final_blob);
 
     var entry = try session.readEntry(session.activeLeafId());
-    if (entry.kind != .assistant or entry.content_ref != final_ref) {
-        entry = try session.appendConversation(.assistant, final_ref, null);
+    if (entry.kind != .assistant_text or entry.content_ref != final_ref) {
+        entry = try session.appendConversation(.assistant_text, final_ref, null);
     }
     try reach(fault, .after_assistant_entry);
     try core.reducer.commitFinalAnswer(entry.entry_id);
@@ -2140,9 +2249,39 @@ fn modelFailure(value: u32) anyerror {
         3 => error.ModelProviderFailed,
         4 => error.MalformedModelResponse,
         5 => error.EmptyModelResponse,
-        6 => error.MultipleModelTools,
+        6 => error.MultipleModelOutputs,
+        7 => error.ModelResponseOversized,
+        8 => error.UnknownModelTool,
         else => error.UnknownModelFailure,
     };
+}
+
+test "generic tool and input dispositions cannot bypass the closed Action mapping" {
+    var host: Host = .{};
+    var core = try Core.open(&host.slots);
+    defer core.close();
+    try core.initialize(1);
+    try core.reducer.startTask(1);
+    const operation = try core.reducer.beginModelOperation(2, 1);
+    try core.reducer.acceptOperation(.{ .id = operation.id, .generation = operation.generation });
+    try core.reducer.completeOperation(.{ .id = operation.id, .generation = operation.generation }, 3);
+
+    var response: [model_protocol.max_response_size]u8 = undefined;
+    const generic = try model_protocol.encodeTool(&response, "fixture.inspect.v1", "{}");
+    _ = try core.reducer.interpretModelResponse(generic, 3);
+    try std.testing.expectError(error.UnboundToolKey, executableTool(&core.reducer));
+
+    core.close();
+    core = try Core.open(&host.slots);
+    try core.initialize(4);
+    try core.reducer.startTask(1);
+    const input_operation = try core.reducer.beginModelOperation(5, 1);
+    try core.reducer.acceptOperation(.{ .id = input_operation.id, .generation = input_operation.generation });
+    try core.reducer.completeOperation(.{ .id = input_operation.id, .generation = input_operation.generation }, 6);
+    const input = try model_protocol.encodeInputText(&response, "Which migration should I use?");
+    _ = try core.reducer.interpretModelResponse(input, 6);
+    try std.testing.expectEqual(core_state.TaskPhase.awaiting_input, (try core.reducer.task()).phase);
+    try std.testing.expectError(error.UnboundToolKey, executableTool(&core.reducer));
 }
 
 test "Completion Inbox search never crosses evidence kinds" {

@@ -2,7 +2,7 @@ const std = @import("std");
 const binding = @import("binding.zig");
 const core_state = @import("core_state.zig");
 
-pub const payload_version: u16 = 4;
+pub const payload_version: u16 = 5;
 pub const max_facts: usize = 8;
 pub const max_transitions: u32 = 32_768;
 pub const max_operation_attempts: usize = 8;
@@ -41,10 +41,11 @@ pub const ResultClass = enum(u8) {
 };
 
 pub const ConversationKind = enum(u8) {
-    user = 1,
-    assistant = 2,
-    tool_result = 3,
-    context_checkpoint = 4,
+    user_text = 1,
+    assistant_text = 2,
+    tool_call = 3,
+    tool_result = 4,
+    context_checkpoint = 5,
 };
 
 pub const DurableResultEvidence = union(binding.DescriptorKind) {

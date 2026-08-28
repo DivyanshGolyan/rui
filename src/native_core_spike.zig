@@ -1,6 +1,7 @@
 const std = @import("std");
 const core_image = @import("core_image.zig");
 const core_state = @import("core_state.zig");
+const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 const c = @cImport({
     @cInclude("libproc.h");
@@ -247,7 +248,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
 
         var response_buffer: [model_protocol.max_response_size]u8 = undefined;
         if (trace_index % 2 == 0) {
-            const response = try model_protocol.encodeTool(&response_buffer, .bash, "pwd");
+            const response = try model_protocol.encodeTool(&response_buffer, model_contract.bash_key, "{}");
             before = try canonicalState(&core);
             try expectRejectedPreserves(
                 &core,
@@ -260,10 +261,13 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             const interpreted = try core.interpretModelResponse(response, response_ref);
             expected.response_ref = response_ref;
             expected.response_disposition = .tool_call;
-            expected.response_tool = .bash;
+            expected.response_tool_key = .{
+                .offset = model_protocol.header_size,
+                .length = model_contract.bash_key.len,
+            };
             expected.response_arguments = .{
-                .offset = model_protocol.header_size + model_protocol.item_header_size,
-                .length = 3,
+                .offset = model_protocol.header_size + model_contract.bash_key.len,
+                .length = 2,
             };
             expected.task_phase = .awaiting_tool;
             try expectResponse(interpreted, expected);
@@ -283,8 +287,8 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             expected.response_ref = 0;
             expected.response_disposition = .failure;
             expected.response_failure = .none;
-            expected.response_tool = .none;
             expected.response_text = .{};
+            expected.response_tool_key = .{};
             expected.response_arguments = .{};
             expected.task_phase = .awaiting_model;
             try expectOperation(second, expected);
@@ -304,7 +308,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             expected.response_ref = response_ref + 1000;
             expected.response_disposition = .final_answer;
             expected.response_text = .{
-                .offset = model_protocol.header_size + model_protocol.item_header_size,
+                .offset = model_protocol.header_size,
                 .length = 2,
             };
             expected.task_phase = .final_candidate;
@@ -329,7 +333,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             expected.response_ref = response_ref;
             expected.response_disposition = .final_answer;
             expected.response_text = .{
-                .offset = model_protocol.header_size + model_protocol.item_header_size,
+                .offset = model_protocol.header_size,
                 .length = 2,
             };
             expected.task_phase = .final_candidate;
@@ -445,9 +449,12 @@ fn responseView(state: core_state.State) core_image.Response {
         .content_ref = state.response_ref,
         .disposition = state.response_disposition,
         .failure = state.response_failure,
-        .tool = state.response_tool,
         .text = state.response_text,
+        .tool_key = state.response_tool_key,
         .arguments = state.response_arguments,
+        .input_shape = state.response_input_shape,
+        .option_count = state.response_option_count,
+        .options = state.response_options,
     };
 }
 

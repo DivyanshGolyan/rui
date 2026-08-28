@@ -7,7 +7,7 @@ const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
-pub const schema_version: u32 = 3;
+pub const schema_version: u32 = 4;
 pub const application_id: u32 = 0x4f4e5047; // "ONPG"
 pub const max_path_bytes: usize = 1024;
 pub const max_transition_payload: usize = session_transition.max_payload_size;
@@ -1084,7 +1084,7 @@ pub const StorageOwner = struct {
         }
         self.execute(completion_index_schema) catch |err| return err;
         self.execute("PRAGMA application_id=1330532423") catch |err| return err;
-        self.execute("PRAGMA user_version=3") catch |err| return err;
+        self.execute("PRAGMA user_version=4") catch |err| return err;
         self.execute("COMMIT") catch |err| {
             self.rollbackOrPoison();
             return err;
@@ -1238,7 +1238,7 @@ fn initialTransaction(identity: SessionIdentity) session_transition.Transaction 
         .agent = agent,
         .entry_id = 1,
         .parent_id = 0,
-        .kind = .user,
+        .kind = .user_text,
         .content_ref = identity.task_id,
     });
     return transaction;
@@ -1260,7 +1260,7 @@ fn validateTransactionIdentity(
         return error.InvalidInitialTransition;
     }
     const root = transaction.facts[0].conversation_advanced;
-    if (root.entry_id != 1 or root.parent_id != 0 or root.kind != .user or
+    if (root.entry_id != 1 or root.parent_id != 0 or root.kind != .user_text or
         root.content_ref != identity.task_id)
     {
         return error.InvalidInitialTransition;
@@ -1675,7 +1675,7 @@ test "matching identity cannot hide an incomplete or unhardened schema" {
     const database = maybe_database orelse return error.HostStoreOpenFailed;
     try expectOk(c.sqlite3_exec(
         database,
-        "CREATE TABLE session (session_id BLOB); PRAGMA application_id=1330532423; PRAGMA user_version=3",
+        "CREATE TABLE session (session_id BLOB); PRAGMA application_id=1330532423; PRAGMA user_version=4",
         null,
         null,
         null,
