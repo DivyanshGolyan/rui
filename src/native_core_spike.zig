@@ -316,7 +316,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 arguments,
             );
             const response_digest = binding.hash(binding.Result, response);
-            const admission = try (try model_protocol.validate(&validation, response)).admission(response);
+            const admission = model_protocol.admit(&validation, response).admission;
             before = try canonicalState(&core);
             try expectRejectedPreserves(
                 &core,
@@ -378,7 +378,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             const final_digest = binding.hash(binding.Result, final);
             const interpreted_final = try core.applyModelResponse(
                 .{ .id = second.id, .generation = second.generation },
-                try (try model_protocol.validate(&validation, final)).admission(final),
+                model_protocol.admit(&validation, final).admission,
                 response_ref + 1000,
                 final_digest,
             );
@@ -400,7 +400,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
         } else {
             const final = try model_protocol.encodeText(&response_buffer, "ok");
             const final_digest = binding.hash(binding.Result, final);
-            const admission = try (try model_protocol.validate(&validation, final)).admission(final);
+            const admission = model_protocol.admit(&validation, final).admission;
             before = try canonicalState(&core);
             try expectRejectedPreserves(
                 &core,

@@ -509,6 +509,22 @@ const ModelSlot = struct {
         tool: Tool = .none,
     };
 
+    const DefinitionSelection = struct {
+        session: *session_store.Session,
+        request_ref: u64,
+        buffer: *model_operation.ToolDefinitionBuffer,
+
+        fn resolve(context: *anyopaque, key: []const u8) anyerror!?model_contract.ToolDefinition {
+            const self: *DefinitionSelection = @ptrCast(@alignCast(context));
+            return model_operation.readToolDefinition(
+                self.session,
+                self.request_ref,
+                key,
+                self.buffer,
+            );
+        }
+    };
+
     fn admit(context: *anyopaque, completion: ModelCompletion) anyerror!Admission {
         const self: *ModelSlot = @ptrCast(@alignCast(context));
         try model_operation.verifyRequestDigest(
@@ -520,31 +536,33 @@ const ModelSlot = struct {
         defer response.close();
         if (response.length() > model_protocol.max_response_size) return error.ResponseTooLarge;
         const length: usize = @intCast(response.length());
-        const bytes = try readAndVerifyModelResponse(
-            &response,
+        const bytes = try readModelResponse(&response, self.scratch.response[0..length]);
+        var selection: DefinitionSelection = .{
+            .session = self.session,
+            .request_ref = completion.request_ref,
+            .buffer = &self.scratch.tool_definition,
+        };
+        var captured = model_protocol.admitCaptured(
+            &self.scratch.validation,
+            bytes,
             completion.result_digest,
-            self.scratch.response[0..length],
-        );
-        const selected_key = model_protocol.toolKeyForCatalogLookup(bytes) catch null;
-        const definition = try model_operation.readToolDefinition(
-            self.session,
-            completion.request_ref,
-            selected_key orelse "",
-            &self.scratch.tool_definition,
-        );
-        var validated = model_protocol.admitWithDefinition(&self.scratch.validation, bytes, definition);
-        var parsed = try validated.verify(bytes);
+            .{ .context = &selection, .resolve_fn = DefinitionSelection.resolve },
+        ) catch |err| switch (err) {
+            error.InvalidModelResponseEvidence => return error.CompletionResultDigestMismatch,
+            else => return err,
+        };
+        var parsed = captured.admission.parsed_value;
         var tool: Tool = .none;
         if (parsed.disposition == .tool_call) {
-            const admitted = (try validated.admittedToolArguments(bytes)) orelse
+            const admitted = captured.tool_arguments orelse
                 return error.MissingAdmittedToolArguments;
             const key = bytes[parsed.tool_key_offset..][0..parsed.tool_key_length];
             const executable = admitExecutableArguments(key, admitted.parsed) catch |err| switch (err) {
                 error.InvalidAdmittedBashArguments,
                 error.InvalidAdmittedPatchArguments,
                 => blk: {
-                    validated = try validated.rejectToolCall(bytes);
-                    parsed = try validated.verify(bytes);
+                    try captured.rejectToolCall();
+                    parsed = captured.admission.parsed_value;
                     break :blk null;
                 },
             };
@@ -554,7 +572,7 @@ const ModelSlot = struct {
                 tool = try self.admitTool(completion, executable);
             }
         }
-        return .{ .response = try validated.admission(bytes), .tool = tool };
+        return .{ .response = captured.admission, .tool = tool };
     }
 
     fn admitTool(
@@ -2713,22 +2731,16 @@ fn readAdmittedResponseArguments(
     return model_contract.strictToolJsonFromEvidence(bytes, response.arguments.digest);
 }
 
-fn readAndVerifyModelResponse(
+fn readModelResponse(
     reader: *session_store.BlobReader,
-    expected_digest: binding.Result,
     out: []u8,
 ) ![]const u8 {
     if (reader.length() != out.len) return error.TruncatedModelResponse;
-    var hasher = binding.Hasher(binding.Result).init();
     var offset: usize = 0;
     while (offset < out.len) {
         const bytes = try reader.readWindow(offset, out[offset..][0..@min(4096, out.len - offset)]);
         if (bytes.len == 0) return error.TruncatedModelResponse;
-        hasher.update(bytes);
         offset += bytes.len;
-    }
-    if (!binding.eql(binding.Result, hasher.final(), expected_digest)) {
-        return error.CompletionResultDigestMismatch;
     }
     return out;
 }
@@ -2841,7 +2853,7 @@ test "restored response metadata reads the exact durable content window" {
     })}, null);
     _ = try initial.applyModelResponse(
         identity,
-        try (try model_protocol.validate(&validation, encoded_response)).admission(encoded_response),
+        model_protocol.admit(&validation, encoded_response).admission,
         response_ref,
         response_digest,
     );
@@ -2914,7 +2926,7 @@ test "restored tool arguments reject same-reference substitution and oversized b
     const response_digest = binding.hash(binding.Result, original);
     _ = try core.applyModelResponse(
         identity,
-        try (try model_protocol.validate(&validation, original)).admission(original),
+        model_protocol.admit(&validation, original).admission,
         response_ref,
         response_digest,
     );
@@ -3119,19 +3131,19 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
     const fixture_catalog = [_]model_contract.ToolDefinition{fixture_definition};
     const arguments = " { \"query\" : \"status\" } ";
     const generic = try model_protocol.encodeTool(&response, fixture_definition.key, arguments);
-    const validated = try model_protocol.validateWithCatalog(
+    const captured = model_protocol.admitWithCatalog(
         &validation,
         generic,
         &fixture_catalog,
     );
     _ = try core.reducer.applyModelResponse(
         .{ .id = operation.id, .generation = operation.generation },
-        try validated.admission(generic),
+        captured.admission,
         3,
         binding.hash(binding.Result, generic),
     );
     try std.testing.expectEqual(core_state.TaskPhase.awaiting_tool, (try core.reducer.task()).phase);
-    const admitted = (try validated.admittedToolArguments(generic)).?;
+    const admitted = captured.tool_arguments.?;
     var call_bytes: [conversation.call_header_size + model_contract.max_tool_key_size + 128]u8 = undefined;
     const call = try conversation.encodeToolCall(&call_bytes, .{
         .key = fixture_definition.key,
@@ -3151,7 +3163,7 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
     const input = try model_protocol.encodeInputText(&response, "Which migration should I use?");
     _ = try core.reducer.applyModelResponse(
         .{ .id = input_operation.id, .generation = input_operation.generation },
-        try (try model_protocol.validate(&validation, input)).admission(input),
+        model_protocol.admit(&validation, input).admission,
         6,
         binding.hash(binding.Result, input),
     );
@@ -3371,12 +3383,12 @@ fn expectPatchArgumentBoundary(
 test "Host owns one semantic validation workspace independent of Activation Slot capacity" {
     var host: Host = .{};
     const HostFour = HostWithCapacity(4);
-    try std.testing.expectEqual(@as(usize, 256_416), semantic_validation_workspace_size);
-    try std.testing.expectEqual(@as(usize, 256_440), @sizeOf(SemanticValidationWorkspacePool));
+    try std.testing.expectEqual(@as(usize, 256_200), semantic_validation_workspace_size);
+    try std.testing.expectEqual(@as(usize, 256_224), @sizeOf(SemanticValidationWorkspacePool));
     try std.testing.expectEqual(@as(usize, 16_384), @sizeOf(PatchWorkspace));
     try std.testing.expectEqual(@as(usize, 16_408), @sizeOf(PatchWorkspacePool));
-    try std.testing.expectEqual(@as(usize, 281_224), @sizeOf(Host));
-    try std.testing.expectEqual(@as(usize, 306_328), @sizeOf(HostFour));
+    try std.testing.expectEqual(@as(usize, 281_008), @sizeOf(Host));
+    try std.testing.expectEqual(@as(usize, 306_112), @sizeOf(HostFour));
     try std.testing.expectEqual(@as(usize, 8_360), @sizeOf(core_image.ActivationSlot));
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
@@ -3410,9 +3422,9 @@ test "Host resource ledger measures each fixed scratch stage" {
     try std.testing.expectEqual(@as(usize, model_protocol.max_response_size), initial.semantic_validation.response_bytes);
     try std.testing.expectEqual(@sizeOf(model_operation.ToolDefinitionBuffer), initial.semantic_validation.tool_definition_bytes);
     try std.testing.expectEqual(@sizeOf(model_protocol.ValidationScratch), initial.semantic_validation.validation_scratch_bytes);
-    try std.testing.expectEqual(@as(usize, 256_416), initial.semantic_validation.workspace_bytes);
+    try std.testing.expectEqual(@as(usize, 256_200), initial.semantic_validation.workspace_bytes);
     try std.testing.expectEqual(@as(usize, 24), initial.semantic_validation.pool_overhead_bytes);
-    try std.testing.expectEqual(@as(usize, 256_440), initial.semantic_validation.reservation_bytes);
+    try std.testing.expectEqual(@as(usize, 256_224), initial.semantic_validation.reservation_bytes);
     try std.testing.expectEqual(@as(usize, 0), initial.semantic_validation.occupied_count);
     try std.testing.expectEqual(@as(usize, 0), initial.semantic_validation.occupied_high_water_count);
     try std.testing.expectEqual(@as(u64, 0), initial.semantic_validation.acquisition_count);

@@ -556,8 +556,8 @@ test "oversized admission preserves accepted operation state" {
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     var validation: model_protocol.ValidationScratch = undefined;
     const encoded = try model_protocol.encodeText(&response_buffer, "valid");
-    const validated = try model_protocol.validate(&validation, encoded);
-    var oversized = try validated.admission(encoded);
+    const admitted = model_protocol.admit(&validation, encoded);
+    var oversized = admitted.admission;
     oversized.byte_length = model_protocol.max_response_size + 1;
     try std.testing.expectError(
         error.ResponseCapacityExceeded,
@@ -574,7 +574,7 @@ test "oversized admission preserves accepted operation state" {
         error.InvalidModelResponseEvidence,
         core.applyModelResponse(
             .{ .id = operation_value.id, .generation = operation_value.generation },
-            try validated.admission(encoded),
+            admitted.admission,
             99,
             binding.hash(binding.Result, "substituted"),
         ),
@@ -600,7 +600,7 @@ test "responses retain only validated metadata and durable content windows" {
     try std.testing.expect(response.len > model_protocol.max_resident_response_size);
     const parsed = try core.applyModelResponse(
         identity,
-        try (try model_protocol.validate(&validation, response)).admission(response),
+        model_protocol.admit(&validation, response).admission,
         3,
         binding.hash(binding.Result, response),
     );
@@ -619,7 +619,7 @@ test "complete slot lifecycle is compiler checked to expose no allocator seam" {
     const response = try model_protocol.encodeText(&response_bytes, "done");
     _ = try core.applyModelResponse(
         .{ .id = operation_value.id, .generation = operation_value.generation },
-        try (try model_protocol.validate(&validation, response)).admission(response),
+        model_protocol.admit(&validation, response).admission,
         3,
         binding.hash(binding.Result, response),
     );

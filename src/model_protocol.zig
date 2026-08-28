@@ -39,13 +39,6 @@ pub const Parsed = struct {
     options_length: u32 = 0,
 };
 
-const ValidationRecord = struct {
-    parsed: Parsed,
-    tool_arguments: ?contract.AdmittedToolArguments,
-    result_digest: binding.Result,
-    byte_length: u32,
-};
-
 /// Compact semantic authority copied out of reconstructible validation
 /// scratch before later preparation can wait. It contains no parsed JSON
 /// pointers or response bytes.
@@ -64,55 +57,35 @@ pub const Admission = struct {
 
 pub const ValidationScratch = struct {
     json: contract.StrictToolJsonScratch = .{},
-    record_bytes: [@sizeOf(ValidationRecord)]u8 align(@alignOf(ValidationRecord)) = undefined,
-
-    fn record(self: *ValidationScratch) *ValidationRecord {
-        return @ptrCast(&self.record_bytes);
-    }
 };
 
-/// Borrowed opaque evidence that the exact response bytes and every semantic
-/// field passed the complete validator. The record lives in caller-reserved
-/// ValidationScratch and remains valid only until that scratch is reused.
-pub const Validated = opaque {
-    pub fn verify(self: *const Validated, bytes: []const u8) !Parsed {
-        const record: *const ValidationRecord = @ptrCast(@alignCast(self));
-        if (bytes.len != record.byte_length or
-            !binding.eql(binding.Result, binding.hash(binding.Result, bytes), record.result_digest))
-        {
-            return error.InvalidModelResponseEvidence;
-        }
-        return record.parsed;
-    }
-
-    pub fn admittedToolArguments(
-        self: *const Validated,
-        bytes: []const u8,
-    ) !?contract.AdmittedToolArguments {
-        _ = try self.verify(bytes);
-        const record: *const ValidationRecord = @ptrCast(@alignCast(self));
-        return record.tool_arguments;
-    }
-
-    pub fn admission(self: *const Validated, bytes: []const u8) !Admission {
-        const parsed = try self.verify(bytes);
-        const record: *const ValidationRecord = @ptrCast(@alignCast(self));
-        return .{
-            .parsed_value = parsed,
-            .result_digest = record.result_digest,
-            .byte_length = record.byte_length,
-        };
-    }
+/// Complete one-pass result. `tool_arguments` borrows the caller-owned
+/// validation scratch and is consumed before that scratch is released;
+/// `admission` is the compact durable authority that survives it.
+pub const CapturedAdmission = struct {
+    admission: Admission,
+    tool_arguments: ?contract.AdmittedToolArguments = null,
 
     /// Replace a generically admitted tool call with the capture-bound terminal
     /// failure used when the Host's closed executable mapping rejects it.
-    pub fn rejectToolCall(self: *const Validated, bytes: []const u8) !*const Validated {
-        const parsed = try self.verify(bytes);
-        if (parsed.disposition != .tool_call) return error.ExpectedAdmittedToolCall;
-        const record: *ValidationRecord = @ptrCast(@alignCast(@constCast(self)));
-        record.parsed = failed(.malformed);
-        record.tool_arguments = null;
-        return self;
+    pub fn rejectToolCall(self: *CapturedAdmission) !void {
+        if (self.admission.parsed_value.disposition != .tool_call) {
+            return error.ExpectedAdmittedToolCall;
+        }
+        self.admission.parsed_value = failed(.malformed);
+        self.tool_arguments = null;
+    }
+};
+
+/// Resolves only the Tool Definition selected by the already-inspected capture.
+/// The decoder remains private; callers provide the Operation-bound catalog
+/// ownership seam without receiving a reusable parser object.
+pub const DefinitionResolver = struct {
+    context: *anyopaque,
+    resolve_fn: *const fn (*anyopaque, []const u8) anyerror!?contract.ToolDefinition,
+
+    fn resolve(self: DefinitionResolver, key: []const u8) !?contract.ToolDefinition {
+        return self.resolve_fn(self.context, key);
     }
 };
 
@@ -217,41 +190,15 @@ pub fn parse(scratch: *ValidationScratch, bytes: []const u8) Parsed {
 }
 
 pub fn decode(scratch: *ValidationScratch, bytes: []const u8) !Parsed {
-    return (try validate(scratch, bytes)).verify(bytes);
+    return (try decodeWithCatalog(&scratch.json, bytes, &contract.default_catalog)).parsed;
 }
 
-pub fn validate(
-    scratch: *ValidationScratch,
-    bytes: []const u8,
-) !*const Validated {
-    return validateWithCatalog(scratch, bytes, &contract.default_catalog);
-}
-
-pub fn validateWithCatalog(
-    scratch: *ValidationScratch,
-    bytes: []const u8,
-    catalog: []const contract.ToolDefinition,
-) !*const Validated {
-    const decoded = try decodeWithScratch(&scratch.json, bytes, catalog);
-    const result_digest = binding.hash(binding.Result, bytes);
-    const byte_length: u32 = @intCast(bytes.len);
-    const record = scratch.record();
-    record.* = .{
-        .parsed = decoded.parsed,
-        .tool_arguments = decoded.tool_arguments,
-        .result_digest = result_digest,
-        .byte_length = byte_length,
-    };
-    return @ptrCast(record);
-}
-
-/// Admit one bounded immutable capture. Syntactically or semantically invalid
-/// provider output becomes a typed terminal failure bound to the exact capture
-/// bytes; callers do not retry parsing the same evidence on recovery.
+/// Admit one bounded capture against the built-in catalog. The capture digest
+/// and envelope framing are each computed once.
 pub fn admit(
     scratch: *ValidationScratch,
     bytes: []const u8,
-) *const Validated {
+) CapturedAdmission {
     return admitWithCatalog(scratch, bytes, &contract.default_catalog);
 }
 
@@ -259,24 +206,49 @@ pub fn admitWithCatalog(
     scratch: *ValidationScratch,
     bytes: []const u8,
     catalog: []const contract.ToolDefinition,
-) *const Validated {
-    const decoded = decodeWithScratch(&scratch.json, bytes, catalog) catch |err| Decoded{
-        .parsed = failed(switch (err) {
-            error.UnknownModelTool => .unknown_tool,
-            else => if (bytes.len == 0) .empty else .malformed,
-        }),
-    };
-    const record = scratch.record();
-    record.* = .{
-        .parsed = decoded.parsed,
-        .tool_arguments = decoded.tool_arguments,
-        .result_digest = binding.hash(binding.Result, bytes),
-        .byte_length = @intCast(bytes.len),
-    };
-    return @ptrCast(record);
+) CapturedAdmission {
+    const result_digest = binding.hash(binding.Result, bytes);
+    return admitWithCatalogDigest(scratch, bytes, catalog, result_digest);
 }
 
-pub fn toolKeyForCatalogLookup(bytes: []const u8) !?[]const u8 {
+/// Admit immutable captured evidence against the selected Operation-bound Tool
+/// Catalog. Exact capture identity is consumed once before any inspected field
+/// is authoritative; invalid provider output becomes a typed terminal failure.
+pub fn admitCaptured(
+    scratch: *ValidationScratch,
+    bytes: []const u8,
+    expected_digest: binding.Result,
+    resolver: DefinitionResolver,
+) !CapturedAdmission {
+    const actual_digest = binding.hash(binding.Result, bytes);
+    if (!binding.eql(binding.Result, actual_digest, expected_digest)) {
+        return error.InvalidModelResponseEvidence;
+    }
+    const inspected = inspect(bytes) catch |err| return typedFailure(bytes, expected_digest, err);
+    const decoded = finishWithResolver(&scratch.json, inspected, resolver) catch |err|
+        return switch (err) {
+            error.UnknownModelTool => typedFailure(bytes, expected_digest, err),
+            error.MalformedModelResponse => typedFailure(bytes, expected_digest, err),
+            else => err,
+        };
+    return completeAdmission(decoded, expected_digest, bytes.len);
+}
+
+const Decoded = struct {
+    parsed: Parsed,
+    tool_arguments: ?contract.AdmittedToolArguments = null,
+};
+
+const Inspected = struct {
+    disposition: Disposition,
+    reason: Failure,
+    shape: u8,
+    option_count: u8,
+    first: []const u8,
+    second: []const u8,
+};
+
+fn inspect(bytes: []const u8) !Inspected {
     if (bytes.len < header_size or bytes.len > max_response_size or
         !std.mem.eql(u8, bytes[0..magic.len], magic) or read(u16, bytes, 8) != version or
         read(u16, bytes, 10) != header_size)
@@ -285,6 +257,8 @@ pub fn toolKeyForCatalogLookup(bytes: []const u8) !?[]const u8 {
     }
     const disposition = std.enums.fromInt(Disposition, bytes[12]) orelse
         return error.MalformedModelResponse;
+    const reason = std.enums.fromInt(Failure, bytes[13]) orelse
+        return error.MalformedModelResponse;
     const first_length: usize = read(u32, bytes, 16);
     const second_length: usize = read(u32, bytes, 20);
     if (first_length > bytes.len - header_size or
@@ -293,72 +267,71 @@ pub fn toolKeyForCatalogLookup(bytes: []const u8) !?[]const u8 {
     {
         return error.MalformedModelResponse;
     }
-    if (disposition != .tool_call) return null;
-    if (bytes[13] != @intFromEnum(Failure.none) or bytes[14] != 0 or bytes[15] != 0 or
-        first_length == 0 or second_length == 0)
-    {
-        return error.MalformedModelResponse;
-    }
-    const key = bytes[header_size..][0..first_length];
-    contract.validateToolKey(key) catch return error.MalformedModelResponse;
-    return key;
+    return .{
+        .disposition = disposition,
+        .reason = reason,
+        .shape = bytes[14],
+        .option_count = bytes[15],
+        .first = bytes[header_size..][0..first_length],
+        .second = bytes[header_size + first_length ..],
+    };
 }
 
-pub fn admitWithDefinition(
-    scratch: *ValidationScratch,
-    bytes: []const u8,
-    definition: ?contract.ToolDefinition,
-) *const Validated {
-    if (definition) |selected| {
-        const catalog = [_]contract.ToolDefinition{selected};
-        return admitWithCatalog(scratch, bytes, &catalog);
-    }
-    return admitWithCatalog(scratch, bytes, &.{});
-}
-
-const Decoded = struct {
-    parsed: Parsed,
-    tool_arguments: ?contract.AdmittedToolArguments = null,
-};
-
-fn decodeWithScratch(
+fn decodeWithCatalog(
     scratch: *contract.StrictToolJsonScratch,
     bytes: []const u8,
     catalog: []const contract.ToolDefinition,
 ) !Decoded {
-    if (bytes.len < header_size or bytes.len > max_response_size or
-        !std.mem.eql(u8, bytes[0..magic.len], magic) or read(u16, bytes, 8) != version or
-        read(u16, bytes, 10) != header_size)
-    {
-        return error.MalformedModelResponse;
-    }
-    const disposition = std.enums.fromInt(Disposition, bytes[12]) orelse return error.MalformedModelResponse;
-    const reason = std.enums.fromInt(Failure, bytes[13]) orelse return error.MalformedModelResponse;
-    const first_length: usize = read(u32, bytes, 16);
-    const second_length: usize = read(u32, bytes, 20);
-    if (first_length > bytes.len - header_size or
-        second_length > bytes.len - header_size - first_length or
-        header_size + first_length + second_length != bytes.len)
-    {
-        return error.MalformedModelResponse;
-    }
-    const first = bytes[header_size..][0..first_length];
-    const second = bytes[header_size + first_length ..];
-    switch (disposition) {
+    const inspected = try inspect(bytes);
+    return finishWithCatalog(scratch, inspected, catalog);
+}
+
+fn finishWithCatalog(
+    scratch: *contract.StrictToolJsonScratch,
+    inspected: Inspected,
+    catalog: []const contract.ToolDefinition,
+) !Decoded {
+    const definition = if (inspected.disposition == .tool_call)
+        contract.definitionForKey(catalog, inspected.first)
+    else
+        null;
+    return finish(scratch, inspected, definition);
+}
+
+fn finishWithResolver(
+    scratch: *contract.StrictToolJsonScratch,
+    inspected: Inspected,
+    resolver: DefinitionResolver,
+) !Decoded {
+    const definition = if (inspected.disposition == .tool_call)
+        try resolver.resolve(inspected.first)
+    else
+        null;
+    return finish(scratch, inspected, definition);
+}
+
+fn finish(
+    scratch: *contract.StrictToolJsonScratch,
+    inspected: Inspected,
+    definition: ?contract.ToolDefinition,
+) !Decoded {
+    const first = inspected.first;
+    const second = inspected.second;
+    switch (inspected.disposition) {
         .final_answer => {
-            if (reason != .none or bytes[14] != 0 or bytes[15] != 0 or first.len == 0 or
+            if (inspected.reason != .none or inspected.shape != 0 or inspected.option_count != 0 or first.len == 0 or
                 first.len > max_assistant_text_size or
                 second.len != 0 or !contract.utf8Valid(first)) return error.MalformedModelResponse;
             return .{ .parsed = .{ .disposition = .final_answer, .text_offset = header_size, .text_length = @intCast(first.len) } };
         },
         .tool_call => {
-            if (reason != .none or bytes[14] != 0 or bytes[15] != 0 or second.len == 0) {
+            if (inspected.reason != .none or inspected.shape != 0 or inspected.option_count != 0 or second.len == 0) {
                 return error.MalformedModelResponse;
             }
             contract.validateToolKey(first) catch return error.MalformedModelResponse;
-            const definition = contract.definitionForKey(catalog, first) orelse
-                return error.UnknownModelTool;
-            const admitted = contract.admitToolArguments(scratch, definition, second) catch
+            const selected = definition orelse return error.UnknownModelTool;
+            if (!std.mem.eql(u8, selected.key, first)) return error.UnknownModelTool;
+            const admitted = contract.admitToolArguments(scratch, selected, second) catch
                 return error.MalformedModelResponse;
             const evidence = admitted.json.evidence();
             return .{ .parsed = .{
@@ -370,21 +343,76 @@ fn decodeWithScratch(
                 .arguments_digest = evidence,
             }, .tool_arguments = admitted };
         },
-        .input_request => return .{ .parsed = try decodeInput(bytes, first, second, reason) },
+        .input_request => return .{ .parsed = try decodeInput(
+            first,
+            second,
+            inspected.reason,
+            inspected.shape,
+            inspected.option_count,
+        ) },
         .failure => {
-            if (reason == .none or bytes[14] != 0 or bytes[15] != 0 or first.len != 0 or second.len != 0) {
+            if (inspected.reason == .none or inspected.shape != 0 or inspected.option_count != 0 or first.len != 0 or second.len != 0) {
                 return error.MalformedModelResponse;
             }
-            return .{ .parsed = failed(reason) };
+            return .{ .parsed = failed(inspected.reason) };
         },
     }
 }
 
-fn decodeInput(bytes: []const u8, prompt: []const u8, options: []const u8, reason: Failure) !Parsed {
+fn admitWithCatalogDigest(
+    scratch: *ValidationScratch,
+    bytes: []const u8,
+    catalog: []const contract.ToolDefinition,
+    result_digest: binding.Result,
+) CapturedAdmission {
+    const decoded = decodeWithCatalog(&scratch.json, bytes, catalog) catch |err|
+        return typedFailure(bytes, result_digest, err);
+    return completeAdmission(decoded, result_digest, bytes.len);
+}
+
+fn completeAdmission(decoded: Decoded, result_digest: binding.Result, byte_length: usize) CapturedAdmission {
+    return .{
+        .admission = .{
+            .parsed_value = decoded.parsed,
+            .result_digest = result_digest,
+            .byte_length = @intCast(byte_length),
+        },
+        .tool_arguments = decoded.tool_arguments,
+    };
+}
+
+fn typedFailure(bytes: []const u8, result_digest: binding.Result, err: anyerror) CapturedAdmission {
+    return completeAdmission(.{ .parsed = failed(switch (err) {
+        error.UnknownModelTool => .unknown_tool,
+        else => if (bytes.len == 0) .empty else .malformed,
+    }) }, result_digest, bytes.len);
+}
+
+const TestCatalogResolver = struct {
+    catalog: []const contract.ToolDefinition,
+    calls: u8 = 0,
+
+    fn resolve(context: *anyopaque, key: []const u8) anyerror!?contract.ToolDefinition {
+        const self: *TestCatalogResolver = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        return contract.definitionForKey(self.catalog, key);
+    }
+
+    fn capability(self: *TestCatalogResolver) DefinitionResolver {
+        return .{ .context = self, .resolve_fn = resolve };
+    }
+};
+
+fn decodeInput(
+    prompt: []const u8,
+    options: []const u8,
+    reason: Failure,
+    shape_byte: u8,
+    count: u8,
+) !Parsed {
     if (reason != .none or prompt.len == 0 or prompt.len > contract.max_prompt_size or
         !contract.utf8Valid(prompt)) return error.MalformedModelResponse;
-    const shape = std.enums.fromInt(contract.InputShape, bytes[14]) orelse return error.MalformedModelResponse;
-    const count = bytes[15];
+    const shape = std.enums.fromInt(contract.InputShape, shape_byte) orelse return error.MalformedModelResponse;
     switch (shape) {
         .text => if (count != 0 or options.len != 0) return error.MalformedModelResponse,
         .single_choice => {
@@ -462,21 +490,27 @@ test "complete captured responses cover every V1 disposition" {
     try std.testing.expectEqual(Failure.provider_error, parse(&scratch, try encodeFailure(&bytes, .provider_error)).failure);
 }
 
-test "validated response evidence is compact and byte exact" {
-    const is_opaque = switch (@typeInfo(Validated)) {
-        .@"opaque" => true,
-        else => false,
-    };
-    try std.testing.expect(is_opaque);
+test "captured admission consumes exact response identity once" {
     var first_buffer: [128]u8 = undefined;
     var second_buffer: [128]u8 = undefined;
     var scratch: ValidationScratch = undefined;
     const first = try encodeTool(&first_buffer, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}");
     const second = try encodeTool(&second_buffer, contract.bash_key, "{\"command\":\"false\",\"timeout_ms\":1000}");
-    const proof = try validate(&scratch, first);
-    try std.testing.expectEqual(Disposition.tool_call, (try proof.verify(first)).disposition);
-    try std.testing.expectError(error.InvalidModelResponseEvidence, proof.verify(second));
-    try std.testing.expectEqual(@sizeOf(*const anyopaque), @sizeOf(@TypeOf(proof)));
+    var resolver: TestCatalogResolver = .{ .catalog = &contract.default_catalog };
+    const expected = binding.hash(binding.Result, first);
+    const admitted = try admitCaptured(&scratch, first, expected, resolver.capability());
+    try std.testing.expectEqual(Disposition.tool_call, admitted.admission.parsed_value.disposition);
+    try std.testing.expectEqual(@as(u8, 1), resolver.calls);
+    try std.testing.expectError(
+        error.InvalidModelResponseEvidence,
+        admitCaptured(&scratch, second, expected, resolver.capability()),
+    );
+    first_buffer[first.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.InvalidModelResponseEvidence,
+        admitCaptured(&scratch, first, expected, resolver.capability()),
+    );
+    try std.testing.expectEqual(@as(u8, 1), resolver.calls);
 }
 
 test "hostile captured responses fail before authorizing effects" {
@@ -500,39 +534,39 @@ test "hostile captured responses fail before authorizing effects" {
 test "semantic admission binds malformed and unknown captures as typed failures" {
     var scratch: ValidationScratch = .{};
     const malformed = "not a response";
-    const malformed_proof = admit(&scratch, malformed);
-    const malformed_result = try malformed_proof.verify(malformed);
+    const malformed_result = admit(&scratch, malformed).admission.parsed_value;
     try std.testing.expectEqual(Disposition.failure, malformed_result.disposition);
     try std.testing.expectEqual(Failure.malformed, malformed_result.failure);
 
     var response: [max_response_size]u8 = undefined;
     const unknown = try encodeTool(&response, "fixture.unknown.v1", "{}");
     const unknown_proof = admit(&scratch, unknown);
-    const unknown_result = try unknown_proof.verify(unknown);
+    const unknown_result = unknown_proof.admission.parsed_value;
     try std.testing.expectEqual(Disposition.failure, unknown_result.disposition);
     try std.testing.expectEqual(Failure.unknown_tool, unknown_result.failure);
-    try std.testing.expectError(
-        error.InvalidModelResponseEvidence,
-        unknown_proof.verify("substituted"),
-    );
+    try std.testing.expectError(error.InvalidModelResponseEvidence, unknown_proof.admission.verify(
+        binding.hash(binding.Result, "substituted"),
+    ));
 }
 
 test "host rejection preserves exact capture identity as a typed failure" {
     var response: [max_response_size]u8 = undefined;
-    const captured = try encodeTool(
+    const capture = try encodeTool(
         &response,
         contract.bash_key,
         "{\"command\":\"true\",\"timeout_ms\":1000}",
     );
     var scratch: ValidationScratch = .{};
-    const admitted = admit(&scratch, captured);
-    try std.testing.expectEqual(Disposition.tool_call, (try admitted.verify(captured)).disposition);
-    const rejected = try admitted.rejectToolCall(captured);
-    const failure = try rejected.verify(captured);
+    var admitted = admit(&scratch, capture);
+    try std.testing.expectEqual(Disposition.tool_call, admitted.admission.parsed_value.disposition);
+    try admitted.rejectToolCall();
+    const failure = admitted.admission.parsed_value;
     try std.testing.expectEqual(Disposition.failure, failure.disposition);
     try std.testing.expectEqual(Failure.malformed, failure.failure);
-    try std.testing.expectError(error.InvalidModelResponseEvidence, rejected.verify("substituted"));
-    try std.testing.expectError(error.ExpectedAdmittedToolCall, rejected.rejectToolCall(captured));
+    try std.testing.expectError(error.InvalidModelResponseEvidence, admitted.admission.verify(
+        binding.hash(binding.Result, "substituted"),
+    ));
+    try std.testing.expectError(error.ExpectedAdmittedToolCall, admitted.rejectToolCall());
 }
 
 test "compact admission survives validation scratch reuse" {
@@ -541,8 +575,8 @@ test "compact admission survives validation scratch reuse" {
     const first = try encodeText(&first_buffer, "first");
     const second = try encodeText(&second_buffer, "second");
     var scratch: ValidationScratch = .{};
-    const admission_value = try (try validate(&scratch, first)).admission(first);
-    _ = try validate(&scratch, second);
+    const admission_value = admit(&scratch, first).admission;
+    _ = admit(&scratch, second);
 
     try std.testing.expectEqual(
         Disposition.final_answer,
