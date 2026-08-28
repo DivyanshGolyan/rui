@@ -168,24 +168,27 @@ pub const CanonicalJsonEvidence = extern struct {
     }
 
     pub fn validForLength(self: CanonicalJsonEvidence, length: u32) bool {
-        return length != 0 and self.length == length and
-            !std.mem.allEqual(u8, &self.digest, 0);
+        return length != 0 and self.length == length;
     }
 };
 
 pub const canonical_json_arena_size = max_tool_arguments_envelope_size + 48 * 1024;
+pub const CanonicalJsonArena = [canonical_json_arena_size]u8;
 
 /// Host-owned workspace for canonical JSON validation. Production owner-loop
-/// callers reserve one instance per Activation Slot; convenience entry points
-/// use the same exact bounded shape on their caller's stack.
+/// callers reserve one instance per Activation Slot; every other caller must
+/// provide and therefore account for the same exact bounded shape.
 pub const CanonicalJsonScratch = struct {
-    arena: [canonical_json_arena_size]u8 = undefined,
+    arena: CanonicalJsonArena = undefined,
     normalized: [max_tool_arguments_envelope_size]u8 = undefined,
 };
 
-pub fn canonicalizeJson(out: []u8, bytes: []const u8) !CanonicalJson {
-    var arena: [canonical_json_arena_size]u8 = undefined;
-    return canonicalizeJsonWithArena(out, bytes, &arena);
+pub fn canonicalizeJson(
+    arena: *CanonicalJsonArena,
+    out: []u8,
+    bytes: []const u8,
+) !CanonicalJson {
+    return canonicalizeJsonWithArena(out, bytes, arena);
 }
 
 fn canonicalizeJsonWithArena(out: []u8, bytes: []const u8, arena: []u8) !CanonicalJson {
@@ -206,17 +209,12 @@ fn canonicalizeJsonWithArena(out: []u8, bytes: []const u8, arena: []u8) !Canonic
     return .{ .value = value, .proof = canonicalJsonEvidence(value) };
 }
 
-pub fn canonicalJsonValue(bytes: []const u8) !CanonicalJson {
-    if (!canonicalJson(bytes)) return error.InvalidCanonicalJson;
+pub fn canonicalJsonValue(scratch: *CanonicalJsonScratch, bytes: []const u8) !CanonicalJson {
+    if (!canonicalJson(scratch, bytes)) return error.InvalidCanonicalJson;
     return .{ .value = bytes, .proof = canonicalJsonEvidence(bytes) };
 }
 
-pub fn canonicalJson(bytes: []const u8) bool {
-    var scratch: CanonicalJsonScratch = undefined;
-    return canonicalJsonWithScratch(&scratch, bytes);
-}
-
-pub fn canonicalJsonWithScratch(scratch: *CanonicalJsonScratch, bytes: []const u8) bool {
+pub fn canonicalJson(scratch: *CanonicalJsonScratch, bytes: []const u8) bool {
     if (bytes.len == 0 or bytes.len > max_tool_arguments_envelope_size or !utf8Valid(bytes)) return false;
     const normalized = canonicalizeJsonWithArena(
         &scratch.normalized,
@@ -303,11 +301,15 @@ fn normalizeJsonValue(value: *std.json.Value, depth: usize) !void {
     }
 }
 
-pub fn encodeJson(out: []u8, value: anytype) ![]const u8 {
-    var raw: [max_tool_arguments_envelope_size]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&raw);
+pub fn encodeJson(
+    arena: *CanonicalJsonArena,
+    raw: []u8,
+    out: []u8,
+    value: anytype,
+) ![]const u8 {
+    var writer = std.Io.Writer.fixed(raw);
     std.json.Stringify.value(value, .{}, &writer) catch return error.JsonTooLarge;
-    return (try canonicalizeJson(out, writer.buffered())).bytes();
+    return (try canonicalizeJson(arena, out, writer.buffered())).bytes();
 }
 
 pub fn utf8Valid(bytes: []const u8) bool {
@@ -351,24 +353,27 @@ test "duplicate and ambiguous catalog definitions fail closed" {
 }
 
 test "canonical JSON has one recursive object order" {
-    try std.testing.expect(canonicalJson("{\"a\":1}"));
-    try std.testing.expect(!canonicalJson("{ \"a\": 1 }"));
-    try std.testing.expect(!canonicalJson("{\"a\":1"));
+    var scratch: CanonicalJsonScratch = undefined;
+    try std.testing.expect(canonicalJson(&scratch, "{\"a\":1}"));
+    try std.testing.expect(!canonicalJson(&scratch, "{ \"a\": 1 }"));
+    try std.testing.expect(!canonicalJson(&scratch, "{\"a\":1"));
     var first: [128]u8 = undefined;
     var second: [128]u8 = undefined;
-    const canonical_first = try canonicalizeJson(&first, "{\"z\":0,\"a\":{\"y\":2,\"x\":1}}");
-    const canonical_second = try canonicalizeJson(&second, "{\"a\":{\"x\":1,\"y\":2},\"z\":0}");
+    const canonical_first = try canonicalizeJson(&scratch.arena, &first, "{\"z\":0,\"a\":{\"y\":2,\"x\":1}}");
+    const canonical_second = try canonicalizeJson(&scratch.arena, &second, "{\"a\":{\"x\":1,\"y\":2},\"z\":0}");
     try std.testing.expectEqualStrings(canonical_first.bytes(), canonical_second.bytes());
     try std.testing.expectEqualStrings("{\"a\":{\"x\":1,\"y\":2},\"z\":0}", canonical_first.bytes());
 }
 
 test "canonical JSON rejects duplicate keys and normalizes strings and numbers" {
     var out: [128]u8 = undefined;
+    var arena: CanonicalJsonArena = undefined;
     try std.testing.expectError(
         error.InvalidCanonicalJson,
-        canonicalizeJson(&out, "{\"a\":1,\"a\":2}"),
+        canonicalizeJson(&arena, &out, "{\"a\":1,\"a\":2}"),
     );
     const canonical = try canonicalizeJson(
+        &arena,
         &out,
         "{\"escaped\":\"\\u0061\\/b\",\"negative_zero\":-0.0,\"whole\":1e0,\"fraction\":1.50}",
     );
@@ -378,13 +383,14 @@ test "canonical JSON rejects duplicate keys and normalizes strings and numbers" 
     );
     try std.testing.expectError(
         error.InvalidCanonicalJson,
-        canonicalizeJson(&out, "9007199254740992"),
+        canonicalizeJson(&arena, &out, "9007199254740992"),
     );
 }
 
 test "canonical JSON evidence binds exact canonical bytes" {
     var out: [64]u8 = undefined;
-    const canonical = try canonicalizeJson(&out, "{\"a\":1}");
+    var arena: CanonicalJsonArena = undefined;
+    const canonical = try canonicalizeJson(&arena, &out, "{\"a\":1}");
     try std.testing.expectEqualStrings(
         canonical.bytes(),
         (try canonicalJsonFromEvidence(canonical.bytes(), canonical.evidence())).bytes(),
@@ -393,6 +399,17 @@ test "canonical JSON evidence binds exact canonical bytes" {
         error.InvalidCanonicalJsonEvidence,
         canonicalJsonFromEvidence("{\"a\":2}", canonical.evidence()),
     );
+}
+
+test "canonical JSON evidence distinguishes absence from an all-zero digest" {
+    const absent: CanonicalJsonEvidence = .{};
+    const zero_digest_value: CanonicalJsonEvidence = .{
+        .digest = @splat(0),
+        .length = 2,
+    };
+    try std.testing.expect(absent.empty());
+    try std.testing.expect(!zero_digest_value.empty());
+    try std.testing.expect(zero_digest_value.validForLength(2));
 }
 
 test "serialized catalog schemas state the exact UTF-8 byte contract" {

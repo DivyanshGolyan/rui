@@ -39,21 +39,41 @@ pub const Parsed = struct {
     options_length: u32 = 0,
 };
 
-/// Compact proof that response bytes passed the complete house-response
-/// validator before entering Core. Core rebinds the proof to the exact bytes
-/// with bounded hashing; it never parses JSON or allocates.
-pub const Validated = struct {
+const ValidationRecord = struct {
     parsed: Parsed,
     result_digest: binding.Result,
     byte_length: u32,
+    semantic_digest: binding.ModelResponseValidation,
+};
+
+pub const ValidationScratch = struct {
+    json: contract.CanonicalJsonScratch = .{},
+    record_bytes: [@sizeOf(ValidationRecord)]u8 align(@alignOf(ValidationRecord)) = undefined,
+
+    fn record(self: *ValidationScratch) *ValidationRecord {
+        return @ptrCast(&self.record_bytes);
+    }
+};
+
+/// Borrowed opaque evidence that the exact response bytes and every semantic
+/// field passed the complete validator. The record lives in caller-reserved
+/// ValidationScratch and remains valid only until that scratch is reused.
+pub const Validated = struct {
+    record: *const ValidationRecord,
 
     pub fn verify(self: Validated, bytes: []const u8) !Parsed {
-        if (bytes.len != self.byte_length or
-            !binding.eql(binding.Result, binding.hash(binding.Result, bytes), self.result_digest))
+        const record = self.record;
+        if (bytes.len != record.byte_length or
+            !binding.eql(binding.Result, binding.hash(binding.Result, bytes), record.result_digest) or
+            !binding.eql(
+                binding.ModelResponseValidation,
+                validationDigest(record.parsed, record.result_digest, record.byte_length),
+                record.semantic_digest,
+            ))
         {
             return error.InvalidModelResponseEvidence;
         }
-        return self.parsed;
+        return record.parsed;
     }
 };
 
@@ -66,10 +86,16 @@ pub fn encodeText(out: []u8, text: []const u8) ![]const u8 {
     return encode(out, .final_answer, .none, 0, 0, text, "");
 }
 
-pub fn encodeTool(out: []u8, tool_key: []const u8, arguments: []const u8) ![]const u8 {
+pub fn encodeTool(
+    arena: *contract.CanonicalJsonArena,
+    out: []u8,
+    tool_key: []const u8,
+    arguments: []const u8,
+) ![]const u8 {
     try contract.validateToolKey(tool_key);
     if (out.len < header_size + tool_key.len) return error.ResponseTooLarge;
     const canonical = contract.canonicalizeJson(
+        arena,
         out[header_size + tool_key.len ..],
         arguments,
     ) catch return error.InvalidToolArguments;
@@ -151,29 +177,29 @@ fn encode(
     return out[0..total];
 }
 
-pub fn parse(bytes: []const u8) Parsed {
-    return decode(bytes) catch failed(.malformed);
+pub fn parse(scratch: *ValidationScratch, bytes: []const u8) Parsed {
+    return decode(scratch, bytes) catch failed(.malformed);
 }
 
-pub fn decode(bytes: []const u8) !Parsed {
-    var scratch: contract.CanonicalJsonScratch = undefined;
-    return (try validate(&scratch, bytes)).parsed;
+pub fn decode(scratch: *ValidationScratch, bytes: []const u8) !Parsed {
+    return (try validate(scratch, bytes)).verify(bytes);
 }
 
 pub fn validate(
-    scratch: *contract.CanonicalJsonScratch,
+    scratch: *ValidationScratch,
     bytes: []const u8,
 ) !Validated {
-    return .{
-        .parsed = try decodeWithScratch(scratch, bytes),
-        .result_digest = binding.hash(binding.Result, bytes),
-        .byte_length = @intCast(bytes.len),
+    const parsed = try decodeWithScratch(&scratch.json, bytes);
+    const result_digest = binding.hash(binding.Result, bytes);
+    const byte_length: u32 = @intCast(bytes.len);
+    const record = scratch.record();
+    record.* = .{
+        .parsed = parsed,
+        .result_digest = result_digest,
+        .byte_length = byte_length,
+        .semantic_digest = validationDigest(parsed, result_digest, byte_length),
     };
-}
-
-pub fn validated(bytes: []const u8) !Validated {
-    var scratch: contract.CanonicalJsonScratch = undefined;
-    return validate(&scratch, bytes);
+    return .{ .record = record };
 }
 
 fn decodeWithScratch(
@@ -210,7 +236,7 @@ fn decodeWithScratch(
                 return error.MalformedModelResponse;
             }
             contract.validateToolKey(first) catch return error.MalformedModelResponse;
-            if (!contract.canonicalJsonWithScratch(scratch, second)) {
+            if (!contract.canonicalJson(scratch, second)) {
                 return error.MalformedModelResponse;
             }
             return .{
@@ -285,6 +311,41 @@ fn failed(reason: Failure) Parsed {
     return .{ .disposition = .failure, .failure = reason };
 }
 
+fn validationDigest(
+    parsed: Parsed,
+    result_digest: binding.Result,
+    byte_length: u32,
+) binding.ModelResponseValidation {
+    var hasher = binding.Hasher(binding.ModelResponseValidation).init();
+    hasher.update(&result_digest.bytes);
+    hashInt(&hasher, u32, byte_length);
+    hashInt(&hasher, u8, @intFromEnum(parsed.disposition));
+    hashInt(&hasher, u8, @intFromEnum(parsed.failure));
+    hashInt(&hasher, u32, parsed.text_offset);
+    hashInt(&hasher, u32, parsed.text_length);
+    hashInt(&hasher, u32, parsed.tool_key_offset);
+    hashInt(&hasher, u32, parsed.tool_key_length);
+    hashInt(&hasher, u32, parsed.arguments_offset);
+    hashInt(&hasher, u32, parsed.arguments_length);
+    hasher.update(&parsed.arguments_evidence.digest);
+    hashInt(&hasher, u32, parsed.arguments_evidence.length);
+    hashInt(&hasher, u8, if (parsed.input_shape) |shape| @intFromEnum(shape) else 0);
+    hashInt(&hasher, u8, parsed.option_count);
+    hashInt(&hasher, u32, parsed.options_offset);
+    hashInt(&hasher, u32, parsed.options_length);
+    return hasher.final();
+}
+
+fn hashInt(
+    hasher: *binding.Hasher(binding.ModelResponseValidation),
+    comptime T: type,
+    value: T,
+) void {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
 fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
     std.mem.writeInt(T, out[offset..][0..@sizeOf(T)], value, .little);
 }
@@ -295,11 +356,12 @@ fn read(comptime T: type, input: []const u8, offset: usize) T {
 
 test "complete normalized responses cover every V1 disposition" {
     var bytes: [max_response_size]u8 = undefined;
-    try std.testing.expectEqual(Disposition.final_answer, parse(try encodeText(&bytes, "done")).disposition);
-    const tool = parse(try encodeTool(&bytes, "fixture.tool", "{\"value\":1}"));
+    var scratch: ValidationScratch = undefined;
+    try std.testing.expectEqual(Disposition.final_answer, parse(&scratch, try encodeText(&bytes, "done")).disposition);
+    const tool = parse(&scratch, try encodeTool(&scratch.json.arena, &bytes, "fixture.tool", "{\"value\":1}"));
     try std.testing.expectEqual(Disposition.tool_call, tool.disposition);
     try std.testing.expectEqualStrings("fixture.tool", bytes[tool.tool_key_offset..][0..tool.tool_key_length]);
-    const text_input = parse(try encodeInputText(&bytes, "Which migration should I use?"));
+    const text_input = parse(&scratch, try encodeInputText(&bytes, "Which migration should I use?"));
     try std.testing.expectEqual(Disposition.input_request, text_input.disposition);
     try std.testing.expectEqual(@as(u32, 0), text_input.options_offset);
     try std.testing.expectEqual(@as(u32, 0), text_input.options_length);
@@ -307,33 +369,94 @@ test "complete normalized responses cover every V1 disposition" {
         .{ .id = "existing", .label = "Use the existing migration" },
         .{ .id = "new", .label = "Create a new migration" },
     };
-    const input = parse(try encodeInputChoice(&bytes, "Choose one", &choices));
+    const input = parse(&scratch, try encodeInputChoice(&bytes, "Choose one", &choices));
     try std.testing.expectEqual(contract.InputShape.single_choice, input.input_shape.?);
     try std.testing.expectEqual(@as(u8, 2), input.option_count);
-    try std.testing.expectEqual(Failure.provider_error, parse(try encodeFailure(&bytes, .provider_error)).failure);
+    try std.testing.expectEqual(Failure.provider_error, parse(&scratch, try encodeFailure(&bytes, .provider_error)).failure);
 }
 
 test "validated response evidence is compact and byte exact" {
     var first_buffer: [128]u8 = undefined;
     var second_buffer: [128]u8 = undefined;
-    const first = try encodeTool(&first_buffer, "fixture.tool", "{\"value\":1}");
-    const second = try encodeTool(&second_buffer, "fixture.tool", "{\"value\":2}");
-    const proof = try validated(first);
+    var scratch: ValidationScratch = undefined;
+    const first = try encodeTool(&scratch.json.arena, &first_buffer, "fixture.tool", "{\"value\":1}");
+    const second = try encodeTool(&scratch.json.arena, &second_buffer, "fixture.tool", "{\"value\":2}");
+    const proof = try validate(&scratch, first);
     try std.testing.expectEqual(Disposition.tool_call, (try proof.verify(first)).disposition);
     try std.testing.expectError(error.InvalidModelResponseEvidence, proof.verify(second));
     try std.testing.expect(@sizeOf(Validated) < 128);
 }
 
+test "validated response rejects every mutated semantic field" {
+    var bytes: [128]u8 = undefined;
+    var scratch: ValidationScratch = undefined;
+    const response = try encodeTool(&scratch.json.arena, &bytes, "fixture.tool", "{\"value\":1}");
+    const validated = try validate(&scratch, response);
+
+    const Mutator = struct {
+        fn expectRejected(
+            encoded: []const u8,
+            original: Validated,
+            comptime mutate: fn (*Parsed) void,
+        ) !void {
+            var record = original.record.*;
+            mutate(&record.parsed);
+            const forged: Validated = .{ .record = &record };
+            try std.testing.expectError(error.InvalidModelResponseEvidence, forged.verify(encoded));
+        }
+
+        fn disposition(parsed: *Parsed) void {
+            parsed.disposition = .final_answer;
+        }
+        fn failure(parsed: *Parsed) void {
+            parsed.failure = .provider_error;
+        }
+        fn textWindow(parsed: *Parsed) void {
+            parsed.text_offset = header_size;
+            parsed.text_length = 1;
+        }
+        fn toolWindow(parsed: *Parsed) void {
+            parsed.tool_key_offset += 1;
+            parsed.tool_key_length -= 1;
+        }
+        fn argumentWindow(parsed: *Parsed) void {
+            parsed.arguments_offset += 1;
+            parsed.arguments_length -= 1;
+        }
+        fn argumentEvidence(parsed: *Parsed) void {
+            parsed.arguments_evidence.digest[0] ^= 1;
+        }
+        fn argumentEvidenceLength(parsed: *Parsed) void {
+            parsed.arguments_evidence.length -= 1;
+        }
+        fn callMetadata(parsed: *Parsed) void {
+            parsed.option_count = 1;
+            parsed.options_offset = header_size;
+            parsed.options_length = 1;
+        }
+    };
+
+    try Mutator.expectRejected(response, validated, Mutator.disposition);
+    try Mutator.expectRejected(response, validated, Mutator.failure);
+    try Mutator.expectRejected(response, validated, Mutator.textWindow);
+    try Mutator.expectRejected(response, validated, Mutator.toolWindow);
+    try Mutator.expectRejected(response, validated, Mutator.argumentWindow);
+    try Mutator.expectRejected(response, validated, Mutator.argumentEvidence);
+    try Mutator.expectRejected(response, validated, Mutator.argumentEvidenceLength);
+    try Mutator.expectRejected(response, validated, Mutator.callMetadata);
+}
+
 test "hostile normalized responses fail before authorizing effects" {
     var bytes: [max_response_size]u8 = undefined;
-    const encoded = try encodeTool(&bytes, "fixture.tool", "{}");
+    var scratch: ValidationScratch = undefined;
+    const encoded = try encodeTool(&scratch.json.arena, &bytes, "fixture.tool", "{}");
     bytes[20] = 0xff;
-    try std.testing.expectEqual(Failure.malformed, parse(encoded).failure);
-    try std.testing.expectError(error.MalformedModelResponse, decode(encoded));
-    const current = try encodeTool(&bytes, "fixture.tool", "{}");
+    try std.testing.expectEqual(Failure.malformed, parse(&scratch, encoded).failure);
+    try std.testing.expectError(error.MalformedModelResponse, decode(&scratch, encoded));
+    const current = try encodeTool(&scratch.json.arena, &bytes, "fixture.tool", "{}");
     std.mem.writeInt(u16, bytes[8..10], version - 1, .little);
-    try std.testing.expectEqual(Failure.malformed, parse(current).failure);
-    try std.testing.expectEqual(Failure.truncated, parse(try encodeFailure(&bytes, .truncated)).failure);
+    try std.testing.expectEqual(Failure.malformed, parse(&scratch, current).failure);
+    try std.testing.expectEqual(Failure.truncated, parse(&scratch, try encodeFailure(&bytes, .truncated)).failure);
     const choices = [_]Choice{
         .{ .id = "same", .label = "First" },
         .{ .id = "same", .label = "Second" },
@@ -344,12 +467,15 @@ test "hostile normalized responses fail before authorizing effects" {
 test "tool response identity uses canonical arguments" {
     var first: [max_response_size]u8 = undefined;
     var second: [max_response_size]u8 = undefined;
+    var arena: contract.CanonicalJsonArena = undefined;
     const first_encoded = try encodeTool(
+        &arena,
         &first,
         "fixture.tool",
         "{\"z\":-0.0,\"a\":{\"text\":\"\\u0061\",\"number\":1e0}}",
     );
     const second_encoded = try encodeTool(
+        &arena,
         &second,
         "fixture.tool",
         "{\"a\":{\"number\":1,\"text\":\"a\"},\"z\":0}",
@@ -357,6 +483,6 @@ test "tool response identity uses canonical arguments" {
     try std.testing.expectEqualSlices(u8, first_encoded, second_encoded);
     try std.testing.expectError(
         error.InvalidToolArguments,
-        encodeTool(&first, "fixture.tool", "{\"a\":1,\"a\":2}"),
+        encodeTool(&arena, &first, "fixture.tool", "{\"a\":1,\"a\":2}"),
     );
 }

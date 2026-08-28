@@ -48,6 +48,7 @@ const RequestSource = struct {
     context: *anyopaque,
     length_fn: *const fn (*anyopaque) u64,
     read_fn: *const fn (*anyopaque, u64, []u8) anyerror![]const u8,
+    validation: session_store.CanonicalJsonWorkspace,
 
     fn length(self: RequestSource) u64 {
         return self.length_fn(self.context);
@@ -212,7 +213,7 @@ pub const RequestCursor = struct {
                     else => unreachable,
                 };
             },
-            .tool_call => try decodeRequestToolCall(encoded, entry_id, parent_id),
+            .tool_call => try decodeRequestToolCall(self.source.validation, encoded, entry_id, parent_id),
             .tool_result => try decodeRequestToolResult(encoded, entry_id, parent_id),
         };
         self.cursor = encoded_start + encoded_length;
@@ -302,6 +303,7 @@ fn openRequest(source: RequestSource) !RequestCursor {
 }
 
 fn decodeRequestToolCall(
+    validation: session_store.CanonicalJsonWorkspace,
     encoded: ContentView,
     entry_id: u64,
     parent_id: u64,
@@ -323,9 +325,10 @@ fn decodeRequestToolCall(
     };
     try readContentExact(encoded, conversation.call_header_size, call.key_bytes[0..header.key_length]);
     model_contract.validateToolKey(call.key()) catch return error.MalformedModelRequest;
-    var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-    try readContentExact(call.arguments, 0, arguments[0..header.arguments_length]);
-    _ = model_contract.canonicalJsonValue(arguments[0..header.arguments_length]) catch
+    if (validation.input.len < header.arguments_length) return error.ModelRequestScratchTooSmall;
+    const arguments = validation.input[0..header.arguments_length];
+    try readContentExact(call.arguments, 0, arguments);
+    _ = model_contract.canonicalJsonValue(validation.scratch, arguments) catch
         return error.MalformedModelRequest;
     return .{ .tool_call = call };
 }
@@ -425,16 +428,18 @@ pub const ResponseWriter = struct {
 pub const ProviderIo = struct {
     request_blob: session_store.BlobReader,
     response: session_store.BlobWriter,
+    validation: session_store.CanonicalJsonWorkspace,
 
     pub fn open(
         session: *session_store.Session,
         request_ref: u64,
         response_ref: u64,
+        validation: session_store.CanonicalJsonWorkspace,
     ) !ProviderIo {
         var request_blob = try session.openBlob(request_ref);
         errdefer request_blob.close();
         const response = try session.beginBlob(response_ref);
-        return .{ .request_blob = request_blob, .response = response };
+        return .{ .request_blob = request_blob, .response = response, .validation = validation };
     }
 
     pub fn close(self: *ProviderIo) void {
@@ -443,7 +448,12 @@ pub const ProviderIo = struct {
     }
 
     pub fn request(self: *ProviderIo) !RequestCursor {
-        return openRequest(.{ .context = self, .length_fn = requestLength, .read_fn = requestRead });
+        return openRequest(.{
+            .context = self,
+            .length_fn = requestLength,
+            .read_fn = requestRead,
+            .validation = self.validation,
+        });
     }
 
     pub fn responseCapability(self: *ProviderIo) ResponseWriter {
@@ -609,8 +619,15 @@ test "semantic content views stitch bounded short reads" {
         }
     };
     var short: ShortSource = .{ .bytes = "prefixsemantic-suffix" };
+    var validation_input: [1]u8 = undefined;
+    var validation_scratch: model_contract.CanonicalJsonScratch = undefined;
     const view: ContentView = .{
-        .source = .{ .context = &short, .length_fn = ShortSource.length, .read_fn = ShortSource.readWindow },
+        .source = .{
+            .context = &short,
+            .length_fn = ShortSource.length,
+            .read_fn = ShortSource.readWindow,
+            .validation = .{ .input = &validation_input, .scratch = &validation_scratch },
+        },
         .start = "prefix".len,
         .length_value = "semantic".len,
     };

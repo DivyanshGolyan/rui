@@ -549,8 +549,9 @@ test "oversized truncated and malformed responses preserve accepted operation st
     try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
     const before = try core.operation();
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    var validation: model_protocol.ValidationScratch = undefined;
     const encoded = try model_protocol.encodeText(&response_buffer, "valid");
-    const valid_evidence = try model_protocol.validated(encoded);
+    const valid_evidence = try model_protocol.validate(&validation, encoded);
     var oversized: [model_protocol.max_response_size + 1]u8 = @splat(1);
     try std.testing.expectError(
         error.ResponseCapacityExceeded,
@@ -599,16 +600,23 @@ test "responses retain only validated metadata and durable content windows" {
     try core.acceptOperation(identity);
 
     var value: [model_protocol.max_resident_response_size]u8 = @splat('x');
+    var raw_arguments: [model_protocol.max_resident_response_size + 32]u8 = undefined;
     var arguments_buffer: [model_protocol.max_resident_response_size + 32]u8 = undefined;
+    var validation: model_protocol.ValidationScratch = undefined;
     const contract = @import("model_contract.zig");
-    const arguments = try contract.encodeJson(&arguments_buffer, .{ .value = &value });
+    const arguments = try contract.encodeJson(
+        &validation.json.arena,
+        &raw_arguments,
+        &arguments_buffer,
+        .{ .value = &value },
+    );
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const response = try model_protocol.encodeTool(&response_buffer, "fixture.large.v1", arguments);
+    const response = try model_protocol.encodeTool(&validation.json.arena, &response_buffer, "fixture.large.v1", arguments);
     try std.testing.expect(response.len > model_protocol.max_resident_response_size);
     const parsed = try core.applyModelResponse(
         identity,
         response,
-        try model_protocol.validated(response),
+        try model_protocol.validate(&validation, response),
         3,
     );
     try std.testing.expectEqual(@as(u32, @intCast(arguments.len)), parsed.arguments.length);
@@ -622,11 +630,12 @@ test "complete slot lifecycle is compiler checked to expose no allocator seam" {
     const operation_value = try core.beginModelOperation(2, 1);
     try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
     var response_bytes: [model_protocol.max_response_size]u8 = undefined;
+    var validation: model_protocol.ValidationScratch = undefined;
     const response = try model_protocol.encodeText(&response_bytes, "done");
     _ = try core.applyModelResponse(
         .{ .id = operation_value.id, .generation = operation_value.generation },
         response,
-        try model_protocol.validated(response),
+        try model_protocol.validate(&validation, response),
         3,
     );
     var encoded: [core_state.encoded_size]u8 = undefined;

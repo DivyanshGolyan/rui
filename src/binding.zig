@@ -13,6 +13,7 @@ fn Semantic(comptime domain_name: []const u8) type {
 pub const ModelDescriptor = Semantic("model-descriptor");
 pub const ToolCatalog = Semantic("tool-catalog");
 pub const ModelContract = Semantic("model-contract");
+pub const ModelResponseValidation = Semantic("model-response-validation");
 pub const CanonicalJson = Semantic("canonical-json");
 pub const BashDescriptor = Semantic("bash-descriptor");
 pub const PatchDescriptor = Semantic("patch-descriptor");
@@ -106,6 +107,7 @@ test "authoritative bindings use stable domain-separated SHA-256 vectors" {
         hash(ModelDescriptor, "echo onepage").bytes,
         hash(ToolCatalog, "echo onepage").bytes,
         hash(ModelContract, "echo onepage").bytes,
+        hash(ModelResponseValidation, "echo onepage").bytes,
         hash(CanonicalJson, "echo onepage").bytes,
         hash(BashDescriptor, "echo onepage").bytes,
         hash(PatchDescriptor, "echo onepage").bytes,
@@ -121,6 +123,7 @@ test "authoritative bindings use stable domain-separated SHA-256 vectors" {
         "536b9053ad1cf7c790af671c779521e2e89b2c69848e61c0a0a3ed00091e919e",
         "eb0bea81a7e35fc37a12c9812cf68cba8d245a068d22e0cf6bc54ddeea8d0403",
         "07c88c295e537b326385a51d521d6c90f0da423bdaf67d8e6088b1b9e96402f2",
+        "c97029b70915300e3e485f428bec6efd56469c0e42f161a35066203c0949fad7",
         "da2f701451ee696b35165f7d2845fc79bfd893f2b67d60aa4ac4c6835bf517aa",
         "7fe7f013c5aec0fc2ab55221722c2fce0fd81d63a83498c377ccf32578c40301",
         "cdf6070e6871f050d023a9ff0059edc7fae700671d3d719ff37885a1ba7decf6",
@@ -142,6 +145,7 @@ test "authoritative bindings use stable domain-separated SHA-256 vectors" {
     }
     comptime {
         std.debug.assert(ModelDescriptor != BashDescriptor);
+        std.debug.assert(ModelResponseValidation != Result);
         std.debug.assert(ModelContract != CanonicalJson);
         std.debug.assert(PatchDescriptor != PatchIntent);
         std.debug.assert(Preimage != Postimage);

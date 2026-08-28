@@ -60,6 +60,14 @@ pub const Lease = struct {
         );
     }
 
+    pub fn recoverSemanticWindow(
+        self: Lease,
+        session: *session_store.Session,
+        frame_budget: u8,
+    ) !session_store.RecoveryProgress {
+        return lifecycle.recoverSemanticWindow(self.execution, session, frame_budget);
+    }
+
     pub fn release(self: *Lease) void {
         if (!self.active) return;
         releaseHarness(self.runtime);

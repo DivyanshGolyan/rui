@@ -99,7 +99,7 @@ fn finishModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void
 fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
     var lease = try host_runtime.Lease.acquire(runtime);
     var restored = try lease.restoreSession(session_id);
-    while ((try restored.session.recoverSemanticWindow(32)).more) {}
+    while ((try lease.recoverSemanticWindow(&restored.session, 32)).more) {}
     var audit: ModelAttemptAudit = .{};
     const before = try restored.session.inspectSemantic(&audit, ModelAttemptAudit.apply);
     if (audit.count != 2) return error.ModelAttemptCountMismatch;
@@ -145,7 +145,7 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
         defer verification_lease.release();
         var verified = try verification_lease.restoreSession(session_id);
         defer verified.session.close();
-        while ((try verified.session.recoverSemanticWindow(32)).more) {}
+        while ((try verification_lease.recoverSemanticWindow(&verified.session, 32)).more) {}
         var after_audit: ModelAttemptAudit = .{};
         const after = try verified.session.inspectSemantic(&after_audit, ModelAttemptAudit.apply);
         if (after.last_sequence != before.last_sequence or after_audit.count != audit.count) {
@@ -261,7 +261,7 @@ fn expectModelAttempts(runtime: *harness.HostRuntime, session_id: u64, expected:
     defer lease.release();
     var restored = try lease.restoreSession(session_id);
     defer restored.session.close();
-    while ((try restored.session.recoverSemanticWindow(32)).more) {}
+    while ((try lease.recoverSemanticWindow(&restored.session, 32)).more) {}
     var audit: ModelAttemptAudit = .{};
     _ = try restored.session.inspectSemantic(&audit, ModelAttemptAudit.apply);
     if (audit.count != expected) return error.ModelAttemptCountMismatch;

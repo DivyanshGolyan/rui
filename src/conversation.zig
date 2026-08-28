@@ -31,10 +31,15 @@ pub const ToolResultHeader = struct {
     content_length: u32,
 };
 
-pub fn encodeToolCall(out: []u8, call: ToolCall) ![]const u8 {
+pub fn encodeToolCall(
+    arena: *contract.CanonicalJsonArena,
+    out: []u8,
+    call: ToolCall,
+) ![]const u8 {
     try contract.validateToolKey(call.key);
     if (out.len < call_header_size + call.key.len) return error.ToolCallTooLarge;
     const canonical = contract.canonicalizeJson(
+        arena,
         out[call_header_size + call.key.len ..],
         call.arguments,
     ) catch return error.InvalidToolArguments;
@@ -81,7 +86,7 @@ pub fn decodeToolCallHeader(bytes: []const u8, total_length: u64) !ToolCallHeade
     return header;
 }
 
-pub fn decodeToolCall(bytes: []const u8) !ToolCall {
+pub fn decodeToolCall(scratch: *contract.CanonicalJsonScratch, bytes: []const u8) !ToolCall {
     const header = try decodeToolCallHeader(bytes, bytes.len);
     const key_length: usize = header.key_length;
     const call: ToolCall = .{
@@ -89,7 +94,7 @@ pub fn decodeToolCall(bytes: []const u8) !ToolCall {
         .arguments = bytes[call_header_size + key_length ..],
     };
     try contract.validateToolKey(call.key);
-    if (!contract.canonicalJson(call.arguments)) return error.InvalidToolCall;
+    if (!contract.canonicalJson(scratch, call.arguments)) return error.InvalidToolCall;
     return call;
 }
 
@@ -187,29 +192,31 @@ fn read(comptime T: type, input: []const u8, offset: usize) T {
 
 test "arbitrary Tool Keys round trip without execution meaning" {
     var bytes: [128]u8 = undefined;
-    const encoded = try encodeToolCall(&bytes, .{ .key = "fixture.inspect.v1", .arguments = "{\"path\":\"README.md\"}" });
-    const decoded = try decodeToolCall(encoded);
+    var scratch: contract.CanonicalJsonScratch = undefined;
+    const encoded = try encodeToolCall(&scratch.arena, &bytes, .{ .key = "fixture.inspect.v1", .arguments = "{\"path\":\"README.md\"}" });
+    const decoded = try decodeToolCall(&scratch, encoded);
     try std.testing.expectEqualStrings("fixture.inspect.v1", decoded.key);
     try std.testing.expectEqualStrings("{\"path\":\"README.md\"}", decoded.arguments);
     std.mem.writeInt(u16, bytes[8..10], call_version - 1, .little);
-    try std.testing.expectError(error.InvalidToolCall, decodeToolCall(encoded));
+    try std.testing.expectError(error.InvalidToolCall, decodeToolCall(&scratch, encoded));
 }
 
 test "tool calls persist only normalized canonical arguments" {
     var first: [256]u8 = undefined;
     var second: [256]u8 = undefined;
-    const first_encoded = try encodeToolCall(&first, .{
+    var arena: contract.CanonicalJsonArena = undefined;
+    const first_encoded = try encodeToolCall(&arena, &first, .{
         .key = "fixture.inspect.v1",
         .arguments = "{\"z\":-0.0,\"a\":{\"text\":\"\\u0061\",\"number\":1e0}}",
     });
-    const second_encoded = try encodeToolCall(&second, .{
+    const second_encoded = try encodeToolCall(&arena, &second, .{
         .key = "fixture.inspect.v1",
         .arguments = "{\"a\":{\"number\":1,\"text\":\"a\"},\"z\":0}",
     });
     try std.testing.expectEqualSlices(u8, first_encoded, second_encoded);
     try std.testing.expectError(
         error.InvalidToolArguments,
-        encodeToolCall(&first, .{
+        encodeToolCall(&arena, &first, .{
             .key = "fixture.inspect.v1",
             .arguments = "{\"a\":1,\"a\":2}",
         }),

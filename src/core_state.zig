@@ -392,6 +392,34 @@ test "canonical Core State vector round trips deterministically" {
     try std.testing.expectEqualDeep(state, restored);
 }
 
+test "Core State keeps all-zero canonical digests distinct from absent evidence" {
+    var state: State = .{
+        .agent_id = 1,
+        .agent_generation = 1,
+        .accumulator = 1,
+        .operation_id = 2,
+        .operation_generation = 1,
+        .operation_phase = .completed,
+        .operation_result = 3,
+        .operation_sequence = 1,
+        .active_leaf_id = 1,
+        .response_ref = 3,
+        .task_phase = .awaiting_tool,
+        .response_disposition = .tool_call,
+        .context = .{ .offset = 1, .length = 1 },
+        .response_tool_key = .{ .offset = 24, .length = 4 },
+        .response_arguments = .{ .offset = 28, .length = 2 },
+        .response_arguments_evidence = .{ .digest = @splat(0), .length = 2 },
+    };
+    var encoded: [encoded_size]u8 = undefined;
+    try encode(&encoded, state);
+    const restored = try decode(&encoded);
+    try std.testing.expectEqualSlices(u8, &@as([32]u8, @splat(0)), &restored.response_arguments_evidence.digest);
+
+    state.response_arguments_evidence = .{};
+    try std.testing.expectError(error.InvalidResponseState, encode(&encoded, state));
+}
+
 test "Core State rejects unsupported schema enums truncation and checksum corruption" {
     var encoded: [encoded_size]u8 = undefined;
     try encode(&encoded, .{ .agent_id = 1, .agent_generation = 1, .accumulator = 1 });

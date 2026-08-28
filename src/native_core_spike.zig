@@ -239,8 +239,14 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
 
         const response_ref: u64 = 2000 + trace_index;
         var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+        var validation: model_protocol.ValidationScratch = undefined;
         if (trace_index % 2 == 0) {
-            const response = try model_protocol.encodeTool(&response_buffer, model_contract.bash_key, "{}");
+            const response = try model_protocol.encodeTool(
+                &validation.json.arena,
+                &response_buffer,
+                model_contract.bash_key,
+                "{}",
+            );
             before = try canonicalState(&core);
             try expectRejectedPreserves(
                 &core,
@@ -250,13 +256,13 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 discardResponse(core.applyModelResponse(.{
                     .id = operation.id,
                     .generation = operation.generation + 1,
-                }, response, try model_protocol.validated(response), response_ref + 1)),
+                }, response, try model_protocol.validate(&validation, response), response_ref + 1)),
                 poison,
             );
             const interpreted = try core.applyModelResponse(.{
                 .id = operation.id,
                 .generation = operation.generation,
-            }, response, try model_protocol.validated(response), response_ref);
+            }, response, try model_protocol.validate(&validation, response), response_ref);
             expected.operation_result = response_ref;
             expected.operation_phase = .completed;
             expected.response_ref = response_ref;
@@ -302,7 +308,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             const interpreted_final = try core.applyModelResponse(
                 .{ .id = second.id, .generation = second.generation },
                 final,
-                try model_protocol.validated(final),
+                try model_protocol.validate(&validation, final),
                 response_ref + 1000,
             );
             expected.operation_result = response_ref + 1000;
@@ -331,13 +337,13 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 discardResponse(core.applyModelResponse(.{
                     .id = operation.id,
                     .generation = operation.generation + 1,
-                }, final, try model_protocol.validated(final), response_ref + 1)),
+                }, final, try model_protocol.validate(&validation, final), response_ref + 1)),
                 poison,
             );
             const interpreted = try core.applyModelResponse(.{
                 .id = operation.id,
                 .generation = operation.generation,
-            }, final, try model_protocol.validated(final), response_ref);
+            }, final, try model_protocol.validate(&validation, final), response_ref);
             expected.operation_result = response_ref;
             expected.operation_phase = .completed;
             expected.response_ref = response_ref;

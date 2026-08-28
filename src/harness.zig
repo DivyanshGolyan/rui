@@ -245,7 +245,7 @@ const HarnessState = struct {
                 owner.recovery_pending = true;
                 const session = &owner.session.?;
                 if (try session.recoveryIsEmpty()) {
-                    _ = try session.recoverSemanticWindow(1);
+                    _ = try lease.recoverSemanticWindow(session, 1);
                     owner.recovery_pending = false;
                     owner.setState(.ready);
                 }
@@ -284,7 +284,10 @@ const HarnessState = struct {
         self.projection_generation += 1;
         if (self.recovery_pending) {
             const session = &self.session.?;
-            const recovery = session.recoverSemanticWindow(self.config.recovery_quantum) catch |err| {
+            const recovery = self.lease.recoverSemanticWindow(
+                session,
+                self.config.recovery_quantum,
+            ) catch |err| {
                 self.setState(.unavailable);
                 return err;
             };
@@ -972,7 +975,7 @@ test "restore withholds projections until the configured recovery quantum reache
             .agent_id = session.agent_id,
             .agent_generation = 1,
             .ownership_epoch = session.ownership_epoch,
-        }, index + 1, index + 1)}, null);
+        }, index + 1, index + 1)}, null, null);
     }
     created.close();
 
@@ -1109,7 +1112,7 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         descriptor.operation_submitted.descriptor_ref,
         "operation descriptor",
     );
-    _ = try session.commitSemantic(&.{descriptor}, null);
+    _ = try session.commitSemantic(&.{descriptor}, null, null);
     created.close();
     read_fault.armed = true;
 
@@ -1400,7 +1403,8 @@ test "input request fails terminally until the durable interaction layer exists"
         0,
         &response_buffer,
     );
-    const decoded_response = try model_protocol.decode(response_bytes);
+    var response_validation: model_protocol.ValidationScratch = undefined;
+    const decoded_response = try model_protocol.decode(&response_validation, response_bytes);
     try std.testing.expectEqual(model_protocol.Disposition.input_request, decoded_response.disposition);
     try std.testing.expectEqualStrings(
         "Which migration should I use?",
