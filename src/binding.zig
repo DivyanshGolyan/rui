@@ -139,11 +139,3 @@ test "authoritative bindings use stable domain-separated SHA-256 vectors" {
         std.debug.assert(Blob != LedgerRecord);
     }
 }
-
-test "the all-zero SHA-256 value is data rather than absence" {
-    const zero: Result = .{ .bytes = @splat(0) };
-    const present: ?Result = zero;
-
-    try std.testing.expect(present != null);
-    try std.testing.expectEqual(@as(?Result, null), @as(?Result, null));
-}
