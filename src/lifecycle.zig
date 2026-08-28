@@ -365,19 +365,32 @@ const ModelSlot = struct {
             selected_key orelse "",
             &self.scratch.tool_definition,
         );
-        const validated = model_protocol.admitWithDefinition(&self.scratch.validation, bytes, definition);
-        const parsed = try validated.verify(bytes);
+        var validated = model_protocol.admitWithDefinition(&self.scratch.validation, bytes, definition);
+        var parsed = try validated.verify(bytes);
         var prepared: Prepared = .{};
         if (parsed.disposition == .tool_call) {
             const admitted = (try validated.admittedToolArguments(bytes)) orelse
                 return error.MissingAdmittedToolArguments;
-            prepared = try prepareToolAdmission(
-                self.session,
-                self.workspace_path,
-                completion,
-                bytes[parsed.tool_key_offset..][0..parsed.tool_key_length],
-                admitted,
-            );
+            const key = bytes[parsed.tool_key_offset..][0..parsed.tool_key_length];
+            const executable = admitExecutableArguments(key, admitted.parsed) catch |err| switch (err) {
+                error.InvalidAdmittedBashArguments,
+                error.InvalidAdmittedPatchArguments,
+                => blk: {
+                    validated = try validated.rejectToolCall(bytes);
+                    parsed = try validated.verify(bytes);
+                    break :blk null;
+                },
+            };
+            if (parsed.disposition == .tool_call) {
+                prepared = try prepareToolAdmission(
+                    self.session,
+                    self.workspace_path,
+                    completion,
+                    key,
+                    admitted.json,
+                    executable,
+                );
+            }
         }
         _ = try self.core.reducer.applyModelResponse(.{
             .id = completion.operation_id,
@@ -392,7 +405,8 @@ fn prepareToolAdmission(
     workspace_path: []const u8,
     completion: ModelCompletion,
     key: []const u8,
-    admitted: model_contract.AdmittedToolArguments,
+    admitted_json: model_contract.StrictToolJson,
+    executable: ?ExecutableArguments,
 ) !ModelSlot.Prepared {
     const call_ref = (@as(u64, 1) << 59) | @as(u32, @truncate(completion.result));
     const call_entry = try session.appendConversation(.tool_call, call_ref, null);
@@ -403,14 +417,13 @@ fn prepareToolAdmission(
         .kind = call_entry.kind,
         .content_ref = call_ref,
     });
-    try storeToolCall(session, call_ref, key, admitted.json);
+    try storeToolCall(session, call_ref, key, admitted_json);
     var prepared: ModelSlot.Prepared = .{};
     prepared.facts[0] = conversation_fact;
     prepared.fact_count = 1;
-    const executable = executableToolFromKey(key) catch return prepared;
-    return switch (executable) {
-        .bash => blk: {
-            const arguments = try admittedBashArguments(admitted.parsed);
+    const arguments = executable orelse return prepared;
+    return switch (arguments) {
+        .bash => |bash| blk: {
             const tool_operation_id = (@as(u64, 1) << 63) | completion.operation_id;
             const descriptor_ref = (@as(u64, 1) << 62) | @as(u32, @truncate(completion.result));
             const descriptor: bash_tool.Descriptor = .{
@@ -418,7 +431,7 @@ fn prepareToolAdmission(
                 .operation_generation = 1,
                 .workspace_path = workspace_path,
                 .working_directory = workspace_path,
-                .call = .{ .command = arguments.command, .timeout_ms = arguments.timeout_ms },
+                .call = .{ .command = bash.command, .timeout_ms = bash.timeout_ms },
             };
             var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
             const descriptor_bytes = try bash_tool.encodeDescriptor(&descriptor_buffer, descriptor);
@@ -431,18 +444,17 @@ fn prepareToolAdmission(
                 conversation_fact,
             }, .fact_count = 3 };
         },
-        .apply_patch => blk: {
-            const arguments = try admittedPatchArguments(admitted.parsed);
+        .apply_patch => |patch| blk: {
             const tool_operation_id = (@as(u64, 3) << 62) | completion.operation_id;
             const response_ref: u32 = @truncate(completion.result);
             const patch_ref = (@as(u64, 1) << 60) | response_ref;
             const intent_ref = (@as(u64, 1) << 58) | response_ref;
-            const intent = try patch_tool.prepare(session.io, workspace_path, arguments, .{
+            const intent = try patch_tool.prepare(session.io, workspace_path, patch, .{
                 .operation_id = tool_operation_id,
                 .operation_generation = 1,
                 .patch_ref = patch_ref,
             });
-            try session.storeBlob(patch_ref, arguments);
+            try session.storeBlob(patch_ref, patch);
             try storePatchIntent(session, intent_ref, intent);
             const operation = operationContext(session, tool_operation_id, 1);
             break :blk .{ .facts = .{
@@ -458,6 +470,22 @@ const AdmittedBashArguments = struct {
     command: []const u8,
     timeout_ms: u32,
 };
+
+const ExecutableArguments = union(ExecutableTool) {
+    bash: AdmittedBashArguments,
+    apply_patch: []const u8,
+};
+
+fn admitExecutableArguments(
+    key: []const u8,
+    value: std.json.Value,
+) !?ExecutableArguments {
+    const executable = executableToolFromKey(key) catch return null;
+    return switch (executable) {
+        .bash => .{ .bash = try admittedBashArguments(value) },
+        .apply_patch => .{ .apply_patch = try admittedPatchArguments(value) },
+    };
+}
 
 fn admittedBashArguments(value: std.json.Value) !AdmittedBashArguments {
     const object = switch (value) {
@@ -3025,7 +3053,10 @@ fn expectBashArgumentBoundary(
             model_contract.default_catalog[0],
             encoded,
         );
-        _ = try admittedBashArguments(admitted.parsed);
+        try std.testing.expect((try admitExecutableArguments(
+            model_contract.bash_key,
+            admitted.parsed,
+        )) != null);
     } else {
         const admitted = model_contract.admitToolArguments(
             &scratch,
@@ -3037,7 +3068,7 @@ fn expectBashArgumentBoundary(
         };
         try std.testing.expectError(
             error.InvalidAdmittedBashArguments,
-            admittedBashArguments(admitted.parsed),
+            admitExecutableArguments(model_contract.bash_key, admitted.parsed),
         );
     }
 }
@@ -3055,7 +3086,10 @@ fn expectPatchArgumentBoundary(
             model_contract.default_catalog[1],
             encoded,
         );
-        _ = try admittedPatchArguments(admitted.parsed);
+        try std.testing.expect((try admitExecutableArguments(
+            model_contract.apply_patch_key,
+            admitted.parsed,
+        )) != null);
     } else {
         const admitted = model_contract.admitToolArguments(
             &scratch,
@@ -3067,7 +3101,7 @@ fn expectPatchArgumentBoundary(
         };
         try std.testing.expectError(
             error.InvalidAdmittedPatchArguments,
-            admittedPatchArguments(admitted.parsed),
+            admitExecutableArguments(model_contract.apply_patch_key, admitted.parsed),
         );
     }
 }

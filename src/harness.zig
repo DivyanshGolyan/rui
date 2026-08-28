@@ -1488,6 +1488,104 @@ test "malformed captured output becomes one durable terminal failure" {
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }
 
+test "built-in byte-limit rejection becomes one durable terminal failure" {
+    const ToolProvider = struct {
+        key: []const u8,
+        arguments: []const u8,
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var buffer: [model_protocol.max_response_size]u8 = undefined;
+            const encoded = try model_protocol.encodeTool(&buffer, self.key, self.arguments);
+            try response.append(encoded);
+            try response.finish();
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    const bash_command = try allocator.alloc(u8, model_contract.max_bash_command_bytes + 2);
+    defer allocator.free(bash_command);
+    for (0..bash_command.len / "é".len) |index| {
+        @memcpy(bash_command[index * "é".len ..][0.."é".len], "é");
+    }
+    const patch = try allocator.alloc(u8, model_contract.max_patch_input_bytes + 2);
+    defer allocator.free(patch);
+    for (0..patch.len / "é".len) |index| {
+        @memcpy(patch[index * "é".len ..][0.."é".len], "é");
+    }
+    const bash_buffer = try allocator.alloc(u8, model_contract.max_tool_arguments_envelope_size);
+    defer allocator.free(bash_buffer);
+    const patch_buffer = try allocator.alloc(u8, model_contract.max_tool_arguments_envelope_size);
+    defer allocator.free(patch_buffer);
+    const cases = [_]struct { key: []const u8, arguments: []const u8 }{
+        .{
+            .key = model_contract.bash_key,
+            .arguments = try model_contract.encodeJson(bash_buffer, .{
+                .command = bash_command,
+                .timeout_ms = bash_tool.max_timeout_ms,
+            }),
+        },
+        .{
+            .key = model_contract.apply_patch_key,
+            .arguments = try model_contract.encodeJson(patch_buffer, .{ .patch = patch }),
+        },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    for (cases, 0..) |case, index| {
+        var provider: ToolProvider = .{ .key = case.key, .arguments = case.arguments };
+        var owner = try Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .create = .{
+                .workspace_path = ".",
+                .model = "fixture:built-in-byte-rejection",
+                .task = if (index == 0) "reject oversized Bash bytes" else "reject oversized patch bytes",
+                .provider = provider.provider(),
+            } },
+        });
+        _ = try owner.drive();
+        const session_id = harnessState(owner).session.?.session_id;
+        try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+        _ = try owner.drive();
+        const failed = try owner.drive();
+        try std.testing.expectEqual(State.failed, failed.state);
+        var ignored: u8 = 0;
+        const ledger = try harnessState(owner).session.?.inspectSemantic(
+            &ignored,
+            struct {
+                fn apply(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
+            }.apply,
+        );
+        const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
+        try std.testing.expectEqual(model_protocol.Failure.malformed, state.response_failure);
+        try std.testing.expectEqual(@as(u64, 1), harnessState(owner).session.?.entryCount());
+        owner.close();
+
+        var restored = try Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .restore = .{ .session_id = session_id, .provider = provider.provider() } },
+        });
+        _ = try restored.drive();
+        const regenerated = try restored.drive();
+        try std.testing.expectEqual(State.failed, regenerated.state);
+        try std.testing.expectEqual(@as(u8, 1), provider.calls);
+        restored.close();
+    }
+}
+
 test "input request fails terminally until the durable interaction layer exists" {
     const IgnoreFacts = struct {
         fn apply(_: *anyopaque, _: session_transition.Fact) !void {}

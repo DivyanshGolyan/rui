@@ -77,6 +77,17 @@ pub const Validated = opaque {
         const record: *const ValidationRecord = @ptrCast(@alignCast(self));
         return record.tool_arguments;
     }
+
+    /// Replace a generically admitted tool call with the capture-bound terminal
+    /// failure used when the Host's closed executable mapping rejects it.
+    pub fn rejectToolCall(self: *const Validated, bytes: []const u8) !*const Validated {
+        const parsed = try self.verify(bytes);
+        if (parsed.disposition != .tool_call) return error.ExpectedAdmittedToolCall;
+        const record: *ValidationRecord = @ptrCast(@alignCast(@constCast(self)));
+        record.parsed = failed(.malformed);
+        record.tool_arguments = null;
+        return self;
+    }
 };
 
 pub const Choice = struct { id: []const u8, label: []const u8 };
@@ -478,6 +489,24 @@ test "semantic admission binds malformed and unknown captures as typed failures"
         error.InvalidModelResponseEvidence,
         unknown_proof.verify("substituted"),
     );
+}
+
+test "host rejection preserves exact capture identity as a typed failure" {
+    var response: [max_response_size]u8 = undefined;
+    const captured = try encodeTool(
+        &response,
+        contract.bash_key,
+        "{\"command\":\"true\",\"timeout_ms\":1000}",
+    );
+    var scratch: ValidationScratch = .{};
+    const admitted = admit(&scratch, captured);
+    try std.testing.expectEqual(Disposition.tool_call, (try admitted.verify(captured)).disposition);
+    const rejected = try admitted.rejectToolCall(captured);
+    const failure = try rejected.verify(captured);
+    try std.testing.expectEqual(Disposition.failure, failure.disposition);
+    try std.testing.expectEqual(Failure.malformed, failure.failure);
+    try std.testing.expectError(error.InvalidModelResponseEvidence, rejected.verify("substituted"));
+    try std.testing.expectError(error.ExpectedAdmittedToolCall, rejected.rejectToolCall(captured));
 }
 
 test "tool response identity preserves exact noncanonical arguments" {
