@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
             "semantic validation occupied high-water {d} ({d} B)\n" ++
             "semantic validation acquisitions={d} busy={d}\n" ++
             "semantic validation queue depth {d} (no V1 queue)\n" ++
-            "semantic validation wait time not retained in V1\n",
+            "semantic validation measured wait time {d} ns (fail-fast)\n",
         .{
             resources.semantic_validation.multiplier,
             resources.semantic_validation.response_bytes,
@@ -137,34 +137,36 @@ pub fn main(init: std.process.Init) !void {
             resources.semantic_validation.acquisition_count,
             resources.semantic_validation.busy_count,
             resources.semantic_validation.queue_depth,
+            resources.semantic_validation.wait_time_ns,
         },
     );
     std.debug.print(
-        "patch preparation multiplier Host {d}\n" ++
-            "patch preparation component patch={d} B\n" ++
-            "patch preparation workspace {d} B\n" ++
-            "patch preparation pool overhead {d} B\n" ++
-            "patch preparation reservation {d} B\n" ++
-            "patch preparation allocator allocations 0 (embedded Host reservation)\n" ++
-            "patch preparation allocator-observed bytes not applicable\n" ++
-            "patch preparation occupancy {d} ({d} B)\n" ++
-            "patch preparation occupied high-water {d} ({d} B)\n" ++
-            "patch preparation acquisitions={d} busy={d}\n" ++
-            "patch preparation queue depth {d} (no V1 queue)\n" ++
-            "patch preparation wait time not retained in V1\n",
+        "shared patch workspace multiplier Host {d}\n" ++
+            "shared patch workspace component patch={d} B\n" ++
+            "shared patch workspace bytes {d} B\n" ++
+            "shared patch workspace pool overhead {d} B\n" ++
+            "shared patch workspace reservation {d} B\n" ++
+            "shared patch workspace allocator allocations 0 (embedded Host reservation)\n" ++
+            "shared patch workspace allocator-observed bytes not applicable\n" ++
+            "shared patch workspace occupancy {d} ({d} B)\n" ++
+            "shared patch workspace occupied high-water {d} ({d} B)\n" ++
+            "shared patch workspace acquisitions={d} busy={d}\n" ++
+            "shared patch workspace queue depth {d} (no V1 queue)\n" ++
+            "shared patch workspace measured wait time {d} ns (fail-fast)\n",
         .{
-            resources.patch_preparation.multiplier,
-            resources.patch_preparation.patch_bytes,
-            resources.patch_preparation.workspace_bytes,
-            resources.patch_preparation.pool_overhead_bytes,
-            resources.patch_preparation.reservation_bytes,
-            resources.patch_preparation.occupied_count,
-            resources.patch_preparation.occupied_bytes,
-            resources.patch_preparation.occupied_high_water_count,
-            resources.patch_preparation.occupied_high_water_bytes,
-            resources.patch_preparation.acquisition_count,
-            resources.patch_preparation.busy_count,
-            resources.patch_preparation.queue_depth,
+            resources.patch_workspace.multiplier,
+            resources.patch_workspace.patch_bytes,
+            resources.patch_workspace.workspace_bytes,
+            resources.patch_workspace.pool_overhead_bytes,
+            resources.patch_workspace.reservation_bytes,
+            resources.patch_workspace.occupied_count,
+            resources.patch_workspace.occupied_bytes,
+            resources.patch_workspace.occupied_high_water_count,
+            resources.patch_workspace.occupied_high_water_bytes,
+            resources.patch_workspace.acquisition_count,
+            resources.patch_workspace.busy_count,
+            resources.patch_workspace.queue_depth,
+            resources.patch_workspace.wait_time_ns,
         },
     );
     std.debug.print(

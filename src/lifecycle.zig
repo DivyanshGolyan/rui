@@ -27,12 +27,12 @@ fn HostWithCapacity(comptime active_capacity: usize) type {
     return struct {
         slots: core_image.SlotPool(active_capacity) = .{},
         semantic_validation: SemanticValidationWorkspacePool = .{},
-        patch_preparation: PatchPreparationWorkspacePool = .{},
+        patch_workspace: PatchWorkspacePool = .{},
 
         pub fn resourceLedger(self: *const @This()) HostResourceLedger {
             return .{
                 .semantic_validation = self.semantic_validation.measurements(),
-                .patch_preparation = self.patch_preparation.measurements(),
+                .patch_workspace = self.patch_workspace.measurements(),
             };
         }
     };
@@ -55,10 +55,10 @@ pub const SemanticValidationResourceLedger = struct {
     acquisition_count: u64,
     busy_count: u64,
     queue_depth: usize,
-    wait_time_retained: bool,
+    wait_time_ns: u64,
 };
 
-pub const PatchPreparationResourceLedger = struct {
+pub const PatchWorkspaceResourceLedger = struct {
     multiplier: usize,
     patch_bytes: usize,
     workspace_bytes: usize,
@@ -71,12 +71,12 @@ pub const PatchPreparationResourceLedger = struct {
     acquisition_count: u64,
     busy_count: u64,
     queue_depth: usize,
-    wait_time_retained: bool,
+    wait_time_ns: u64,
 };
 
 pub const HostResourceLedger = struct {
     semantic_validation: SemanticValidationResourceLedger,
-    patch_preparation: PatchPreparationResourceLedger,
+    patch_workspace: PatchWorkspaceResourceLedger,
 };
 
 const SemanticValidationWorkspace = struct {
@@ -145,7 +145,7 @@ const SemanticValidationWorkspacePool = struct {
             .acquisition_count = self.generation,
             .busy_count = self.busy_count,
             .queue_depth = 0,
-            .wait_time_retained = false,
+            .wait_time_ns = 0,
         };
     }
 
@@ -163,29 +163,29 @@ const SemanticValidationWorkspacePool = struct {
     }
 };
 
-/// One decoded admitted patch retained only across patch intent preparation.
-/// This fixed Host stage does not scale with Active Capacity, and the semantic
-/// validator is released before this workspace can enter a subprocess wait.
-const PatchPreparationWorkspace = struct {
+/// One decoded admitted patch retained only while preparation or reconciliation
+/// needs it. This fixed Host stage does not scale with Active Capacity, and no
+/// activation keeps its own full patch across a subprocess wait.
+const PatchWorkspace = struct {
     patch: [patch_tool.max_patch_size]u8 = undefined,
 
-    fn scrub(self: *PatchPreparationWorkspace) void {
+    fn scrub(self: *PatchWorkspace) void {
         @memset(&self.patch, 0);
     }
 };
 
-const PatchPreparationWorkspaceLease = struct {
-    workspace: *PatchPreparationWorkspace,
-    owner: *PatchPreparationWorkspacePool,
+const PatchWorkspaceLease = struct {
+    workspace: *PatchWorkspace,
+    owner: *PatchWorkspacePool,
     generation: u64,
     borrowed: bool = true,
 
-    fn release(self: *PatchPreparationWorkspaceLease) !void {
+    fn release(self: *PatchWorkspaceLease) !void {
         if (!self.borrowed) return;
         if (!self.owner.occupied or self.owner.generation != self.generation or
             self.workspace != &self.owner.workspace)
         {
-            return error.StalePatchPreparationLease;
+            return error.StalePatchWorkspaceLease;
         }
         self.workspace.scrub();
         self.owner.occupied = false;
@@ -193,16 +193,16 @@ const PatchPreparationWorkspaceLease = struct {
     }
 };
 
-const PatchPreparationWorkspacePool = struct {
-    workspace: PatchPreparationWorkspace = .{},
+const PatchWorkspacePool = struct {
+    workspace: PatchWorkspace = .{},
     occupied: bool = false,
     generation: u64 = 0,
     busy_count: u64 = 0,
 
-    fn borrow(self: *PatchPreparationWorkspacePool) !PatchPreparationWorkspaceLease {
+    fn borrow(self: *PatchWorkspacePool) !PatchWorkspaceLease {
         if (self.occupied or self.generation == std.math.maxInt(u64)) {
             incrementBounded(&self.busy_count);
-            return error.PatchPreparationWorkspaceBusy;
+            return error.PatchWorkspaceBusy;
         }
         self.occupied = true;
         self.generation += 1;
@@ -214,23 +214,23 @@ const PatchPreparationWorkspacePool = struct {
         };
     }
 
-    fn measurements(self: *const PatchPreparationWorkspacePool) PatchPreparationResourceLedger {
+    fn measurements(self: *const PatchWorkspacePool) PatchWorkspaceResourceLedger {
         const occupied_count: usize = @intFromBool(self.occupied);
         const high_water_count: usize = @intFromBool(self.generation != 0);
         return .{
             .multiplier = 1,
             .patch_bytes = @sizeOf(@TypeOf(self.workspace.patch)),
-            .workspace_bytes = @sizeOf(PatchPreparationWorkspace),
-            .pool_overhead_bytes = @sizeOf(PatchPreparationWorkspacePool) - @sizeOf(PatchPreparationWorkspace),
-            .reservation_bytes = @sizeOf(PatchPreparationWorkspacePool),
+            .workspace_bytes = @sizeOf(PatchWorkspace),
+            .pool_overhead_bytes = @sizeOf(PatchWorkspacePool) - @sizeOf(PatchWorkspace),
+            .reservation_bytes = @sizeOf(PatchWorkspacePool),
             .occupied_count = occupied_count,
-            .occupied_bytes = occupied_count * @sizeOf(PatchPreparationWorkspace),
+            .occupied_bytes = occupied_count * @sizeOf(PatchWorkspace),
             .occupied_high_water_count = high_water_count,
-            .occupied_high_water_bytes = high_water_count * @sizeOf(PatchPreparationWorkspace),
+            .occupied_high_water_bytes = high_water_count * @sizeOf(PatchWorkspace),
             .acquisition_count = self.generation,
             .busy_count = self.busy_count,
             .queue_depth = 0,
-            .wait_time_retained = false,
+            .wait_time_ns = 0,
         };
     }
 };
@@ -632,7 +632,7 @@ fn prepareToolAdmission(
             prepared.fact_count = 2;
         },
         .apply_patch => |patch| {
-            var workspace = try host.patch_preparation.borrow();
+            var workspace = try host.patch_workspace.borrow();
             defer workspace.release() catch unreachable;
             const patch_bytes = try readAdmittedPatch(session, patch, &workspace.workspace.patch);
             std.debug.assert(!host.semantic_validation.occupied);
@@ -1286,6 +1286,7 @@ pub fn advanceRestored(
     }
     if (outcome == .awaiting_tool) {
         switch (try reconcileToolCall(
+            host,
             session,
             token,
             &core,
@@ -1333,6 +1334,7 @@ pub fn advanceRestored(
                             config.fault,
                         );
                         _ = try reconcilePatch(
+                            host,
                             session,
                             token,
                             &core,
@@ -1640,6 +1642,7 @@ pub fn acceptCompletion(
 const ToolRecovery = enum { none, ready, indeterminate, approval_required };
 
 fn reconcileToolCall(
+    host: *Host,
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
@@ -1650,6 +1653,7 @@ fn reconcileToolCall(
     return switch (try executableTool(session, &core.reducer)) {
         .bash => reconcileBash(session, token, core),
         .apply_patch => reconcilePatch(
+            host,
             session,
             token,
             core,
@@ -1824,6 +1828,7 @@ fn toolResultFromRecord(result: session_transition.ResultRecord) ToolResult {
 }
 
 fn reconcilePatch(
+    host: *Host,
     session: *session_store.Session,
     token: session_store.OwnerToken,
     core: *Core,
@@ -1878,18 +1883,21 @@ fn reconcilePatch(
     {
         return error.InvalidPatchHistory;
     }
-    var patch_buffer: [patch_tool.max_patch_size]u8 = undefined;
-    var patch: []const u8 = &.{};
     var attempt = history.attempt;
     var immediate_status: ?patch_tool.ResultStatus = if (authorization.allowed) null else .denied;
     if (!authorization.allowed and attempt != null) return error.InvalidPatchHistory;
-    if (authorization.allowed) {
-        patch = try readBoundedBlob(session, patch_ref, &patch_buffer);
-    }
     if (authorization.allowed and attempt == null) {
-        if (!try patch_tool.readyForAttempt(session.io, intent, patch)) {
+        const ready = blk: {
+            var workspace = try host.patch_workspace.borrow();
+            defer workspace.release() catch unreachable;
+            const patch = try readBoundedBlob(session, patch_ref, &workspace.workspace.patch);
+            break :blk try patch_tool.readyForAttempt(session.io, intent, patch);
+        };
+        if (!ready) {
             immediate_status = .stale;
         } else {
+            // The first lease ended before this durable transition. Reconciliation
+            // reopens the immutable patch under a new lease only if it needs bytes.
             var attempt_id: u64 = 0;
             while (attempt_id == 0) session.io.random(std.mem.asBytes(&attempt_id));
             const admitted = session_transition.consequentialAttemptAdmitted(
@@ -1952,7 +1960,12 @@ fn reconcilePatch(
                 patch_descriptor,
             );
         } else {
-            const reconciliation = try patch_tool.reconcile(session.io, intent, patch);
+            const reconciliation = blk: {
+                var workspace = try host.patch_workspace.borrow();
+                defer workspace.release() catch unreachable;
+                const patch = try readBoundedBlob(session, patch_ref, &workspace.workspace.patch);
+                break :blk try patch_tool.reconcile(session.io, intent, patch);
+            };
             result_status = reconciliation.status;
             if (reconciliation.mutated) try reach(fault, .after_patch_mutation);
             var result_bytes: [patch_tool.result_size]u8 = undefined;
@@ -3360,8 +3373,8 @@ test "Host owns one semantic validation workspace independent of Activation Slot
     const HostFour = HostWithCapacity(4);
     try std.testing.expectEqual(@as(usize, 256_424), semantic_validation_workspace_size);
     try std.testing.expectEqual(@as(usize, 256_448), @sizeOf(SemanticValidationWorkspacePool));
-    try std.testing.expectEqual(@as(usize, 16_384), @sizeOf(PatchPreparationWorkspace));
-    try std.testing.expectEqual(@as(usize, 16_408), @sizeOf(PatchPreparationWorkspacePool));
+    try std.testing.expectEqual(@as(usize, 16_384), @sizeOf(PatchWorkspace));
+    try std.testing.expectEqual(@as(usize, 16_408), @sizeOf(PatchWorkspacePool));
     try std.testing.expectEqual(@as(usize, 281_232), @sizeOf(Host));
     try std.testing.expectEqual(@as(usize, 306_336), @sizeOf(HostFour));
     try std.testing.expectEqual(@as(usize, 8_360), @sizeOf(core_image.ActivationSlot));
@@ -3374,8 +3387,8 @@ test "Host owns one semantic validation workspace independent of Activation Slot
         @sizeOf(@TypeOf(@as(HostFour, .{}).semantic_validation)),
     );
     try std.testing.expectEqual(
-        @sizeOf(PatchPreparationWorkspacePool),
-        @sizeOf(@TypeOf(host.patch_preparation)),
+        @sizeOf(PatchWorkspacePool),
+        @sizeOf(@TypeOf(host.patch_workspace)),
     );
     try std.testing.expectEqual(
         @sizeOf(ProductionSlotPool),
@@ -3405,14 +3418,14 @@ test "Host resource ledger measures each fixed scratch stage" {
     try std.testing.expectEqual(@as(u64, 0), initial.semantic_validation.acquisition_count);
     try std.testing.expectEqual(@as(u64, 0), initial.semantic_validation.busy_count);
     try std.testing.expectEqual(@as(usize, 0), initial.semantic_validation.queue_depth);
-    try std.testing.expect(!initial.semantic_validation.wait_time_retained);
-    try std.testing.expectEqual(@as(usize, 1), initial.patch_preparation.multiplier);
-    try std.testing.expectEqual(@as(usize, patch_tool.max_patch_size), initial.patch_preparation.patch_bytes);
-    try std.testing.expectEqual(@as(usize, 16_384), initial.patch_preparation.workspace_bytes);
-    try std.testing.expectEqual(@as(usize, 24), initial.patch_preparation.pool_overhead_bytes);
-    try std.testing.expectEqual(@as(usize, 16_408), initial.patch_preparation.reservation_bytes);
-    try std.testing.expectEqual(@as(usize, 0), initial.patch_preparation.queue_depth);
-    try std.testing.expect(!initial.patch_preparation.wait_time_retained);
+    try std.testing.expectEqual(@as(u64, 0), initial.semantic_validation.wait_time_ns);
+    try std.testing.expectEqual(@as(usize, 1), initial.patch_workspace.multiplier);
+    try std.testing.expectEqual(@as(usize, patch_tool.max_patch_size), initial.patch_workspace.patch_bytes);
+    try std.testing.expectEqual(@as(usize, 16_384), initial.patch_workspace.workspace_bytes);
+    try std.testing.expectEqual(@as(usize, 24), initial.patch_workspace.pool_overhead_bytes);
+    try std.testing.expectEqual(@as(usize, 16_408), initial.patch_workspace.reservation_bytes);
+    try std.testing.expectEqual(@as(usize, 0), initial.patch_workspace.queue_depth);
+    try std.testing.expectEqual(@as(u64, 0), initial.patch_workspace.wait_time_ns);
 
     var semantic = try host.semantic_validation.borrow();
     try std.testing.expectError(error.SemanticValidationWorkspaceBusy, host.semantic_validation.borrow());
@@ -3425,9 +3438,9 @@ test "Host resource ledger measures each fixed scratch stage" {
     try std.testing.expectEqual(@as(u64, 1), semantic_occupied.busy_count);
     try semantic.release();
 
-    var patch = try host.patch_preparation.borrow();
-    try std.testing.expectError(error.PatchPreparationWorkspaceBusy, host.patch_preparation.borrow());
-    const patch_occupied = host.resourceLedger().patch_preparation;
+    var patch = try host.patch_workspace.borrow();
+    try std.testing.expectError(error.PatchWorkspaceBusy, host.patch_workspace.borrow());
+    const patch_occupied = host.resourceLedger().patch_workspace;
     try std.testing.expectEqual(@as(usize, 1), patch_occupied.occupied_count);
     try std.testing.expectEqual(patch_occupied.workspace_bytes, patch_occupied.occupied_bytes);
     try std.testing.expectEqual(@as(usize, 1), patch_occupied.occupied_high_water_count);
@@ -3440,9 +3453,9 @@ test "Host resource ledger measures each fixed scratch stage" {
     try std.testing.expectEqual(@as(usize, 0), released.semantic_validation.occupied_count);
     try std.testing.expectEqual(@as(usize, 0), released.semantic_validation.occupied_bytes);
     try std.testing.expectEqual(@as(usize, 1), released.semantic_validation.occupied_high_water_count);
-    try std.testing.expectEqual(@as(usize, 0), released.patch_preparation.occupied_count);
-    try std.testing.expectEqual(@as(usize, 0), released.patch_preparation.occupied_bytes);
-    try std.testing.expectEqual(@as(usize, 1), released.patch_preparation.occupied_high_water_count);
+    try std.testing.expectEqual(@as(usize, 0), released.patch_workspace.occupied_count);
+    try std.testing.expectEqual(@as(usize, 0), released.patch_workspace.occupied_bytes);
+    try std.testing.expectEqual(@as(usize, 1), released.patch_workspace.occupied_high_water_count);
 
     host.semantic_validation.busy_count = std.math.maxInt(u64);
     var held = try host.semantic_validation.borrow();
@@ -3450,27 +3463,31 @@ test "Host resource ledger measures each fixed scratch stage" {
     try std.testing.expectError(error.SemanticValidationWorkspaceBusy, host.semantic_validation.borrow());
     try std.testing.expectEqual(std.math.maxInt(u64), host.resourceLedger().semantic_validation.busy_count);
 
-    host.patch_preparation.generation = std.math.maxInt(u64);
-    try std.testing.expectError(error.PatchPreparationWorkspaceBusy, host.patch_preparation.borrow());
-    const bounded = host.resourceLedger().patch_preparation;
+    host.patch_workspace.generation = std.math.maxInt(u64);
+    try std.testing.expectError(error.PatchWorkspaceBusy, host.patch_workspace.borrow());
+    const bounded = host.resourceLedger().patch_workspace;
     try std.testing.expectEqual(std.math.maxInt(u64), bounded.acquisition_count);
     try std.testing.expectEqual(@as(u64, 2), bounded.busy_count);
 }
 
-test "patch preparation capacity does not retain semantic validation capacity" {
+test "shared patch workspace contends fail-fast without retaining semantic validation" {
     var host: Host = .{};
-    var patch = try host.patch_preparation.borrow();
+    var patch = try host.patch_workspace.borrow();
     defer patch.release() catch unreachable;
     patch.workspace.patch[0] = 0xa5;
 
     var validation = try host.semantic_validation.borrow();
-    try std.testing.expect(host.patch_preparation.occupied);
+    try std.testing.expect(host.patch_workspace.occupied);
     try validation.release();
     try std.testing.expectEqual(@as(u8, 0xa5), patch.workspace.patch[0]);
     try std.testing.expectError(
-        error.PatchPreparationWorkspaceBusy,
-        host.patch_preparation.borrow(),
+        error.PatchWorkspaceBusy,
+        host.patch_workspace.borrow(),
     );
+    const contention = host.resourceLedger().patch_workspace;
+    try std.testing.expectEqual(@as(u64, 1), contention.busy_count);
+    try std.testing.expectEqual(@as(usize, 0), contention.queue_depth);
+    try std.testing.expectEqual(@as(u64, 0), contention.wait_time_ns);
 }
 
 test "stale copied semantic validation lease cannot scrub a new borrower" {
@@ -3486,16 +3503,16 @@ test "stale copied semantic validation lease cannot scrub a new borrower" {
     try std.testing.expectEqual(@as(u8, 0xa5), current.workspace.response[0]);
 }
 
-test "stale copied patch preparation lease cannot scrub a new borrower" {
+test "stale copied patch workspace lease cannot scrub a new borrower" {
     var host: Host = .{};
-    var original = try host.patch_preparation.borrow();
+    var original = try host.patch_workspace.borrow();
     var stale = original;
     try original.release();
 
-    var current = try host.patch_preparation.borrow();
+    var current = try host.patch_workspace.borrow();
     defer current.release() catch unreachable;
     current.workspace.patch[0] = 0xa5;
-    try std.testing.expectError(error.StalePatchPreparationLease, stale.release());
+    try std.testing.expectError(error.StalePatchWorkspaceLease, stale.release());
     try std.testing.expectEqual(@as(u8, 0xa5), current.workspace.patch[0]);
 }
 
