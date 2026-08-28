@@ -28,10 +28,56 @@ fn HostWithCapacity(comptime active_capacity: usize) type {
         slots: core_image.SlotPool(active_capacity) = .{},
         semantic_validation: SemanticValidationWorkspacePool = .{},
         patch_preparation: PatchPreparationWorkspacePool = .{},
+
+        pub fn resourceLedger(self: *const @This()) HostResourceLedger {
+            return .{
+                .semantic_validation = self.semantic_validation.measurements(),
+                .patch_preparation = self.patch_preparation.measurements(),
+            };
+        }
     };
 }
 
 pub const Host = HostWithCapacity(production_active_capacity);
+
+pub const SemanticValidationResourceLedger = struct {
+    multiplier: usize,
+    response_bytes: usize,
+    tool_definition_bytes: usize,
+    validation_scratch_bytes: usize,
+    workspace_bytes: usize,
+    pool_overhead_bytes: usize,
+    reservation_bytes: usize,
+    occupied_count: usize,
+    occupied_bytes: usize,
+    occupied_high_water_count: usize,
+    occupied_high_water_bytes: usize,
+    acquisition_count: u64,
+    busy_count: u64,
+    queue_depth: usize,
+    wait_time_retained: bool,
+};
+
+pub const PatchPreparationResourceLedger = struct {
+    multiplier: usize,
+    patch_bytes: usize,
+    workspace_bytes: usize,
+    pool_overhead_bytes: usize,
+    reservation_bytes: usize,
+    occupied_count: usize,
+    occupied_bytes: usize,
+    occupied_high_water_count: usize,
+    occupied_high_water_bytes: usize,
+    acquisition_count: u64,
+    busy_count: u64,
+    queue_depth: usize,
+    wait_time_retained: bool,
+};
+
+pub const HostResourceLedger = struct {
+    semantic_validation: SemanticValidationResourceLedger,
+    patch_preparation: PatchPreparationResourceLedger,
+};
 
 const SemanticValidationWorkspace = struct {
     response: [model_protocol.max_response_size]u8 = undefined,
@@ -63,9 +109,11 @@ const SemanticValidationWorkspacePool = struct {
     workspace: SemanticValidationWorkspace = .{},
     occupied: bool = false,
     generation: u64 = 0,
+    busy_count: u64 = 0,
 
     fn borrow(self: *SemanticValidationWorkspacePool) !SemanticValidationWorkspaceLease {
         if (self.occupied or self.generation == std.math.maxInt(u64)) {
+            incrementBounded(&self.busy_count);
             return error.SemanticValidationWorkspaceBusy;
         }
         self.occupied = true;
@@ -76,6 +124,28 @@ const SemanticValidationWorkspacePool = struct {
             .context = self,
             .generation = self.generation,
             .release_fn = releaseLease,
+        };
+    }
+
+    fn measurements(self: *const SemanticValidationWorkspacePool) SemanticValidationResourceLedger {
+        const occupied_count: usize = @intFromBool(self.occupied);
+        const high_water_count: usize = @intFromBool(self.generation != 0);
+        return .{
+            .multiplier = 1,
+            .response_bytes = @sizeOf(@TypeOf(self.workspace.response)),
+            .tool_definition_bytes = @sizeOf(@TypeOf(self.workspace.tool_definition)),
+            .validation_scratch_bytes = @sizeOf(@TypeOf(self.workspace.validation)),
+            .workspace_bytes = @sizeOf(SemanticValidationWorkspace),
+            .pool_overhead_bytes = @sizeOf(SemanticValidationWorkspacePool) - @sizeOf(SemanticValidationWorkspace),
+            .reservation_bytes = @sizeOf(SemanticValidationWorkspacePool),
+            .occupied_count = occupied_count,
+            .occupied_bytes = occupied_count * @sizeOf(SemanticValidationWorkspace),
+            .occupied_high_water_count = high_water_count,
+            .occupied_high_water_bytes = high_water_count * @sizeOf(SemanticValidationWorkspace),
+            .acquisition_count = self.generation,
+            .busy_count = self.busy_count,
+            .queue_depth = 0,
+            .wait_time_retained = false,
         };
     }
 
@@ -127,9 +197,11 @@ const PatchPreparationWorkspacePool = struct {
     workspace: PatchPreparationWorkspace = .{},
     occupied: bool = false,
     generation: u64 = 0,
+    busy_count: u64 = 0,
 
     fn borrow(self: *PatchPreparationWorkspacePool) !PatchPreparationWorkspaceLease {
         if (self.occupied or self.generation == std.math.maxInt(u64)) {
+            incrementBounded(&self.busy_count);
             return error.PatchPreparationWorkspaceBusy;
         }
         self.occupied = true;
@@ -141,7 +213,31 @@ const PatchPreparationWorkspacePool = struct {
             .generation = self.generation,
         };
     }
+
+    fn measurements(self: *const PatchPreparationWorkspacePool) PatchPreparationResourceLedger {
+        const occupied_count: usize = @intFromBool(self.occupied);
+        const high_water_count: usize = @intFromBool(self.generation != 0);
+        return .{
+            .multiplier = 1,
+            .patch_bytes = @sizeOf(@TypeOf(self.workspace.patch)),
+            .workspace_bytes = @sizeOf(PatchPreparationWorkspace),
+            .pool_overhead_bytes = @sizeOf(PatchPreparationWorkspacePool) - @sizeOf(PatchPreparationWorkspace),
+            .reservation_bytes = @sizeOf(PatchPreparationWorkspacePool),
+            .occupied_count = occupied_count,
+            .occupied_bytes = occupied_count * @sizeOf(PatchPreparationWorkspace),
+            .occupied_high_water_count = high_water_count,
+            .occupied_high_water_bytes = high_water_count * @sizeOf(PatchPreparationWorkspace),
+            .acquisition_count = self.generation,
+            .busy_count = self.busy_count,
+            .queue_depth = 0,
+            .wait_time_retained = false,
+        };
+    }
 };
+
+fn incrementBounded(value: *u64) void {
+    if (value.* != std.math.maxInt(u64)) value.* += 1;
+}
 
 comptime {
     std.debug.assert(semantic_validation_workspace_size >=
@@ -3263,11 +3359,11 @@ test "Host owns one semantic validation workspace independent of Activation Slot
     var host: Host = .{};
     const HostFour = HostWithCapacity(4);
     try std.testing.expectEqual(@as(usize, 256_424), semantic_validation_workspace_size);
-    try std.testing.expectEqual(@as(usize, 256_440), @sizeOf(SemanticValidationWorkspacePool));
+    try std.testing.expectEqual(@as(usize, 256_448), @sizeOf(SemanticValidationWorkspacePool));
     try std.testing.expectEqual(@as(usize, 16_384), @sizeOf(PatchPreparationWorkspace));
-    try std.testing.expectEqual(@as(usize, 16_400), @sizeOf(PatchPreparationWorkspacePool));
-    try std.testing.expectEqual(@as(usize, 281_216), @sizeOf(Host));
-    try std.testing.expectEqual(@as(usize, 306_320), @sizeOf(HostFour));
+    try std.testing.expectEqual(@as(usize, 16_408), @sizeOf(PatchPreparationWorkspacePool));
+    try std.testing.expectEqual(@as(usize, 281_232), @sizeOf(Host));
+    try std.testing.expectEqual(@as(usize, 306_336), @sizeOf(HostFour));
     try std.testing.expectEqual(@as(usize, 8_360), @sizeOf(core_image.ActivationSlot));
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
@@ -3292,6 +3388,73 @@ test "Host owns one semantic validation workspace independent of Activation Slot
     var reused = try host.semantic_validation.borrow();
     defer reused.release() catch unreachable;
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(reused.workspace), 0));
+}
+
+test "Host resource ledger measures each fixed scratch stage" {
+    var host: Host = .{};
+    const initial = host.resourceLedger();
+    try std.testing.expectEqual(@as(usize, 1), initial.semantic_validation.multiplier);
+    try std.testing.expectEqual(@as(usize, model_protocol.max_response_size), initial.semantic_validation.response_bytes);
+    try std.testing.expectEqual(@sizeOf(model_operation.ToolDefinitionBuffer), initial.semantic_validation.tool_definition_bytes);
+    try std.testing.expectEqual(@sizeOf(model_protocol.ValidationScratch), initial.semantic_validation.validation_scratch_bytes);
+    try std.testing.expectEqual(@as(usize, 256_424), initial.semantic_validation.workspace_bytes);
+    try std.testing.expectEqual(@as(usize, 24), initial.semantic_validation.pool_overhead_bytes);
+    try std.testing.expectEqual(@as(usize, 256_448), initial.semantic_validation.reservation_bytes);
+    try std.testing.expectEqual(@as(usize, 0), initial.semantic_validation.occupied_count);
+    try std.testing.expectEqual(@as(usize, 0), initial.semantic_validation.occupied_high_water_count);
+    try std.testing.expectEqual(@as(u64, 0), initial.semantic_validation.acquisition_count);
+    try std.testing.expectEqual(@as(u64, 0), initial.semantic_validation.busy_count);
+    try std.testing.expectEqual(@as(usize, 0), initial.semantic_validation.queue_depth);
+    try std.testing.expect(!initial.semantic_validation.wait_time_retained);
+    try std.testing.expectEqual(@as(usize, 1), initial.patch_preparation.multiplier);
+    try std.testing.expectEqual(@as(usize, patch_tool.max_patch_size), initial.patch_preparation.patch_bytes);
+    try std.testing.expectEqual(@as(usize, 16_384), initial.patch_preparation.workspace_bytes);
+    try std.testing.expectEqual(@as(usize, 24), initial.patch_preparation.pool_overhead_bytes);
+    try std.testing.expectEqual(@as(usize, 16_408), initial.patch_preparation.reservation_bytes);
+    try std.testing.expectEqual(@as(usize, 0), initial.patch_preparation.queue_depth);
+    try std.testing.expect(!initial.patch_preparation.wait_time_retained);
+
+    var semantic = try host.semantic_validation.borrow();
+    try std.testing.expectError(error.SemanticValidationWorkspaceBusy, host.semantic_validation.borrow());
+    const semantic_occupied = host.resourceLedger().semantic_validation;
+    try std.testing.expectEqual(@as(usize, 1), semantic_occupied.occupied_count);
+    try std.testing.expectEqual(semantic_occupied.workspace_bytes, semantic_occupied.occupied_bytes);
+    try std.testing.expectEqual(@as(usize, 1), semantic_occupied.occupied_high_water_count);
+    try std.testing.expectEqual(semantic_occupied.workspace_bytes, semantic_occupied.occupied_high_water_bytes);
+    try std.testing.expectEqual(@as(u64, 1), semantic_occupied.acquisition_count);
+    try std.testing.expectEqual(@as(u64, 1), semantic_occupied.busy_count);
+    try semantic.release();
+
+    var patch = try host.patch_preparation.borrow();
+    try std.testing.expectError(error.PatchPreparationWorkspaceBusy, host.patch_preparation.borrow());
+    const patch_occupied = host.resourceLedger().patch_preparation;
+    try std.testing.expectEqual(@as(usize, 1), patch_occupied.occupied_count);
+    try std.testing.expectEqual(patch_occupied.workspace_bytes, patch_occupied.occupied_bytes);
+    try std.testing.expectEqual(@as(usize, 1), patch_occupied.occupied_high_water_count);
+    try std.testing.expectEqual(patch_occupied.workspace_bytes, patch_occupied.occupied_high_water_bytes);
+    try std.testing.expectEqual(@as(u64, 1), patch_occupied.acquisition_count);
+    try std.testing.expectEqual(@as(u64, 1), patch_occupied.busy_count);
+    try patch.release();
+
+    const released = host.resourceLedger();
+    try std.testing.expectEqual(@as(usize, 0), released.semantic_validation.occupied_count);
+    try std.testing.expectEqual(@as(usize, 0), released.semantic_validation.occupied_bytes);
+    try std.testing.expectEqual(@as(usize, 1), released.semantic_validation.occupied_high_water_count);
+    try std.testing.expectEqual(@as(usize, 0), released.patch_preparation.occupied_count);
+    try std.testing.expectEqual(@as(usize, 0), released.patch_preparation.occupied_bytes);
+    try std.testing.expectEqual(@as(usize, 1), released.patch_preparation.occupied_high_water_count);
+
+    host.semantic_validation.busy_count = std.math.maxInt(u64);
+    var held = try host.semantic_validation.borrow();
+    defer held.release() catch unreachable;
+    try std.testing.expectError(error.SemanticValidationWorkspaceBusy, host.semantic_validation.borrow());
+    try std.testing.expectEqual(std.math.maxInt(u64), host.resourceLedger().semantic_validation.busy_count);
+
+    host.patch_preparation.generation = std.math.maxInt(u64);
+    try std.testing.expectError(error.PatchPreparationWorkspaceBusy, host.patch_preparation.borrow());
+    const bounded = host.resourceLedger().patch_preparation;
+    try std.testing.expectEqual(std.math.maxInt(u64), bounded.acquisition_count);
+    try std.testing.expectEqual(@as(u64, 2), bounded.busy_count);
 }
 
 test "patch preparation capacity does not retain semantic validation capacity" {

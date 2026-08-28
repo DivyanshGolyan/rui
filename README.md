@@ -183,8 +183,9 @@ zig build test -Doptimize=ReleaseSafe
 zig build native-core -Doptimize=ReleaseSafe
 ```
 
-`native-core` reports the current exact slot, compact Dormant Session state bytes, process RSS, and 32 randomized
-native invariant traces through canonical suspend and poisoned-slot restore.
+`native-core` reports the current exact slot, the two fixed Host scratch-stage resource ledgers, compact Dormant
+Session state bytes, process RSS, and 32 randomized native invariant traces through canonical suspend and
+poisoned-slot restore.
 
 See the spike notes for architecture, measurements, caveats, and next questions:
 

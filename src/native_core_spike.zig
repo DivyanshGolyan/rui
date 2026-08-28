@@ -2,6 +2,7 @@ const std = @import("std");
 const binding = @import("binding.zig");
 const core_image = @import("core_image.zig");
 const core_state = @import("core_state.zig");
+const lifecycle = @import("lifecycle.zig");
 const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 const c = @cImport({
@@ -26,7 +27,8 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 1) return error.InvalidArguments;
 
     const baseline_rss = try residentBytes();
-    var pool: core_image.SlotPool(1) = .{};
+    var host: lifecycle.Host = .{};
+    const pool = &host.slots;
     var random_name: [8]u8 = undefined;
     init.io.random(&random_name);
     var density_path_buffer: [96]u8 = undefined;
@@ -92,14 +94,81 @@ pub fn main(init: std.process.Init) !void {
     var invariant_lease = try pool.borrow();
     defer invariant_lease.release() catch unreachable;
     try randomizedStateMachineTraces(invariant_lease.slot);
+    const resources = host.resourceLedger();
 
     std.debug.print(
         "Activation Slot exact       {d} B\n" ++
             "resident slots            1\n" ++
             "configured slot bytes     {d} B\n" ++
             "occupied slot bytes       {d} B\n" ++
-            "slot-pool host overhead   {d} B\n" ++
-            "logical sleeping agents   {d}\n" ++
+            "slot-pool host overhead   {d} B\n",
+        .{
+            @sizeOf(core_image.ActivationSlot),
+            pool.residentBytes(),
+            pool.occupiedBytes(),
+            pool.hostOverheadBytes(),
+        },
+    );
+    std.debug.print(
+        "semantic validation multiplier Host {d}\n" ++
+            "semantic validation components response={d} B tool-definition={d} B validation-scratch={d} B\n" ++
+            "semantic validation workspace {d} B\n" ++
+            "semantic validation pool overhead {d} B\n" ++
+            "semantic validation reservation {d} B\n" ++
+            "semantic validation allocator allocations 0 (embedded Host reservation)\n" ++
+            "semantic validation allocator-observed bytes not applicable\n" ++
+            "semantic validation occupancy {d} ({d} B)\n" ++
+            "semantic validation occupied high-water {d} ({d} B)\n" ++
+            "semantic validation acquisitions={d} busy={d}\n" ++
+            "semantic validation queue depth {d} (no V1 queue)\n" ++
+            "semantic validation wait time not retained in V1\n",
+        .{
+            resources.semantic_validation.multiplier,
+            resources.semantic_validation.response_bytes,
+            resources.semantic_validation.tool_definition_bytes,
+            resources.semantic_validation.validation_scratch_bytes,
+            resources.semantic_validation.workspace_bytes,
+            resources.semantic_validation.pool_overhead_bytes,
+            resources.semantic_validation.reservation_bytes,
+            resources.semantic_validation.occupied_count,
+            resources.semantic_validation.occupied_bytes,
+            resources.semantic_validation.occupied_high_water_count,
+            resources.semantic_validation.occupied_high_water_bytes,
+            resources.semantic_validation.acquisition_count,
+            resources.semantic_validation.busy_count,
+            resources.semantic_validation.queue_depth,
+        },
+    );
+    std.debug.print(
+        "patch preparation multiplier Host {d}\n" ++
+            "patch preparation component patch={d} B\n" ++
+            "patch preparation workspace {d} B\n" ++
+            "patch preparation pool overhead {d} B\n" ++
+            "patch preparation reservation {d} B\n" ++
+            "patch preparation allocator allocations 0 (embedded Host reservation)\n" ++
+            "patch preparation allocator-observed bytes not applicable\n" ++
+            "patch preparation occupancy {d} ({d} B)\n" ++
+            "patch preparation occupied high-water {d} ({d} B)\n" ++
+            "patch preparation acquisitions={d} busy={d}\n" ++
+            "patch preparation queue depth {d} (no V1 queue)\n" ++
+            "patch preparation wait time not retained in V1\n",
+        .{
+            resources.patch_preparation.multiplier,
+            resources.patch_preparation.patch_bytes,
+            resources.patch_preparation.workspace_bytes,
+            resources.patch_preparation.pool_overhead_bytes,
+            resources.patch_preparation.reservation_bytes,
+            resources.patch_preparation.occupied_count,
+            resources.patch_preparation.occupied_bytes,
+            resources.patch_preparation.occupied_high_water_count,
+            resources.patch_preparation.occupied_high_water_bytes,
+            resources.patch_preparation.acquisition_count,
+            resources.patch_preparation.busy_count,
+            resources.patch_preparation.queue_depth,
+        },
+    );
+    std.debug.print(
+        "logical sleeping agents   {d}\n" ++
             "Core State per agent       {d} B\n" ++
             "durable Core State per agent {d} B\n" ++
             "sleeping Core State bytes  {d} B\n" ++
@@ -108,10 +177,6 @@ pub fn main(init: std.process.Init) !void {
             "RSS with first slot        {d} B\n" ++
             "RSS after density cycle    {d} B\n",
         .{
-            @sizeOf(core_image.ActivationSlot),
-            pool.residentBytes(),
-            pool.occupiedBytes(),
-            pool.hostOverheadBytes(),
             density_agents,
             core_state.encoded_size,
             core_state.encoded_size,
