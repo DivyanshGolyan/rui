@@ -1,8 +1,9 @@
 const std = @import("std");
+const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 
-pub const schema_version: u16 = 2;
-pub const encoded_size: usize = 144;
+pub const schema_version: u16 = 3;
+pub const encoded_size: usize = 180;
 
 const magic = "ONECORE\x00";
 const checksum_offset = encoded_size - @sizeOf(u32);
@@ -50,6 +51,7 @@ pub const State = extern struct {
     response_text: ContentWindow = .{},
     response_tool_key: ContentWindow = .{},
     response_arguments: ContentWindow = .{},
+    response_arguments_evidence: model_contract.CanonicalJsonEvidence = .{},
 };
 
 comptime {
@@ -94,6 +96,8 @@ pub fn encode(out: []u8, state: State) !void {
     writeWindow(out, 116, state.response_text);
     writeWindow(out, 124, state.response_arguments);
     writeWindow(out, 132, state.response_tool_key);
+    @memcpy(out[140..172], &state.response_arguments_evidence.digest);
+    write(u32, out, 172, state.response_arguments_evidence.length);
     rewriteChecksum(out);
 }
 
@@ -129,6 +133,10 @@ pub fn decode(input: []const u8) !State {
         .response_text = readWindow(input, 116),
         .response_arguments = readWindow(input, 124),
         .response_tool_key = readWindow(input, 132),
+        .response_arguments_evidence = .{
+            .digest = input[140..172].*,
+            .length = read(u32, input, 172),
+        },
     };
     try validate(state);
     return state;
@@ -217,7 +225,8 @@ fn validateResponse(state: State) !void {
     if (state.response_ref == 0) {
         if (state.response_disposition != .failure or
             state.response_failure != .none or state.response_text.length != 0 or
-            state.response_tool_key.length != 0 or state.response_arguments.length != 0)
+            state.response_tool_key.length != 0 or state.response_arguments.length != 0 or
+            !state.response_arguments_evidence.empty())
         {
             return error.InvalidResponseState;
         }
@@ -236,7 +245,8 @@ fn validateResponse(state: State) !void {
         .final_candidate, .finished => {
             if (state.response_disposition != .final_answer or
                 state.response_failure != .none or state.response_text.length == 0 or
-                state.response_tool_key.length != 0 or state.response_arguments.length != 0)
+                state.response_tool_key.length != 0 or state.response_arguments.length != 0 or
+                !state.response_arguments_evidence.empty())
             {
                 return error.InvalidResponseState;
             }
@@ -244,7 +254,8 @@ fn validateResponse(state: State) !void {
         .awaiting_tool, .ready => {
             if (state.response_disposition != .tool_call or
                 state.response_failure != .none or state.response_tool_key.length == 0 or
-                state.response_arguments.length == 0 or state.response_text.length != 0)
+                state.response_arguments.length == 0 or state.response_text.length != 0 or
+                !state.response_arguments_evidence.validForLength(state.response_arguments.length))
             {
                 return error.InvalidResponseState;
             }
@@ -253,13 +264,15 @@ fn validateResponse(state: State) !void {
             switch (state.response_disposition) {
                 .input_request => if (state.response_failure != .none or
                     state.response_tool_key.length != 0 or state.response_text.length != 0 or
-                    state.response_arguments.length != 0)
+                    state.response_arguments.length != 0 or
+                    !state.response_arguments_evidence.empty())
                 {
                     return error.InvalidResponseState;
                 },
                 .failure => if (state.response_failure == .none or
                     state.response_tool_key.length != 0 or state.response_text.length != 0 or
-                    state.response_arguments.length != 0)
+                    state.response_arguments.length != 0 or
+                    !state.response_arguments_evidence.empty())
                 {
                     return error.InvalidResponseState;
                 },
@@ -368,6 +381,7 @@ test "canonical Core State vector round trips deterministically" {
         .response_text = .{},
         .response_tool_key = .{ .offset = 24, .length = 7 },
         .response_arguments = .{ .offset = 31, .length = 32 },
+        .response_arguments_evidence = model_contract.canonicalJsonEvidence("00000000000000000000000000000000"),
     };
     var first: [encoded_size]u8 = undefined;
     var second: [encoded_size]u8 = undefined;

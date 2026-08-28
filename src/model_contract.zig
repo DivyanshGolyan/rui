@@ -148,18 +148,51 @@ fn hashField(hasher: *binding.Hasher(binding.ToolCatalog), bytes: []const u8) vo
 /// `canonicalizeJson` or `canonicalJsonValue`.
 pub const CanonicalJson = struct {
     value: []const u8,
+    proof: CanonicalJsonEvidence,
 
     pub fn bytes(self: CanonicalJson) []const u8 {
         return self.value;
     }
+
+    pub fn evidence(self: CanonicalJson) CanonicalJsonEvidence {
+        return self.proof;
+    }
+};
+
+pub const CanonicalJsonEvidence = extern struct {
+    digest: [32]u8 = @splat(0),
+    length: u32 = 0,
+
+    pub fn empty(self: CanonicalJsonEvidence) bool {
+        return self.length == 0 and std.mem.allEqual(u8, &self.digest, 0);
+    }
+
+    pub fn validForLength(self: CanonicalJsonEvidence, length: u32) bool {
+        return length != 0 and self.length == length and
+            !std.mem.allEqual(u8, &self.digest, 0);
+    }
+};
+
+pub const canonical_json_arena_size = max_tool_arguments_envelope_size + 48 * 1024;
+
+/// Host-owned workspace for canonical JSON validation. Production owner-loop
+/// callers reserve one instance per Activation Slot; convenience entry points
+/// use the same exact bounded shape on their caller's stack.
+pub const CanonicalJsonScratch = struct {
+    arena: [canonical_json_arena_size]u8 = undefined,
+    normalized: [max_tool_arguments_envelope_size]u8 = undefined,
 };
 
 pub fn canonicalizeJson(out: []u8, bytes: []const u8) !CanonicalJson {
+    var arena: [canonical_json_arena_size]u8 = undefined;
+    return canonicalizeJsonWithArena(out, bytes, &arena);
+}
+
+fn canonicalizeJsonWithArena(out: []u8, bytes: []const u8, arena: []u8) !CanonicalJson {
     if (bytes.len == 0 or bytes.len > max_tool_arguments_envelope_size or !utf8Valid(bytes)) {
         return error.InvalidCanonicalJson;
     }
-    var arena_bytes: [max_tool_arguments_envelope_size + 48 * 1024]u8 = undefined;
-    var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
+    var fixed = std.heap.FixedBufferAllocator.init(arena);
     var parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), bytes, .{
         .max_value_len = max_tool_arguments_envelope_size,
         .allocate = .alloc_always,
@@ -169,27 +202,52 @@ pub fn canonicalizeJson(out: []u8, bytes: []const u8) !CanonicalJson {
     normalizeJsonValue(&parsed.value, 0) catch return error.InvalidCanonicalJson;
     var writer = std.Io.Writer.fixed(out);
     std.json.Stringify.value(parsed.value, .{}, &writer) catch return error.JsonTooLarge;
-    return .{ .value = writer.buffered() };
+    const value = writer.buffered();
+    return .{ .value = value, .proof = canonicalJsonEvidence(value) };
 }
 
 pub fn canonicalJsonValue(bytes: []const u8) !CanonicalJson {
     if (!canonicalJson(bytes)) return error.InvalidCanonicalJson;
-    return .{ .value = bytes };
+    return .{ .value = bytes, .proof = canonicalJsonEvidence(bytes) };
 }
 
 pub fn canonicalJson(bytes: []const u8) bool {
+    var scratch: CanonicalJsonScratch = undefined;
+    return canonicalJsonWithScratch(&scratch, bytes);
+}
+
+pub fn canonicalJsonWithScratch(scratch: *CanonicalJsonScratch, bytes: []const u8) bool {
     if (bytes.len == 0 or bytes.len > max_tool_arguments_envelope_size or !utf8Valid(bytes)) return false;
-    var normalized_bytes: [max_tool_arguments_envelope_size]u8 = undefined;
-    const normalized = canonicalizeJson(&normalized_bytes, bytes) catch return false;
-    var hash_buffer: [4096]u8 = undefined;
-    var hashing = std.Io.Writer.Hashing(CountingSha256).initHasher(.{}, &hash_buffer);
-    hashing.writer.writeAll(normalized.bytes()) catch return false;
-    hashing.writer.flush() catch return false;
-    var expected: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &expected, .{});
-    var actual: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    hashing.hasher.hash.final(&actual);
-    return hashing.hasher.length == bytes.len and std.mem.eql(u8, &actual, &expected);
+    const normalized = canonicalizeJsonWithArena(
+        &scratch.normalized,
+        bytes,
+        &scratch.arena,
+    ) catch return false;
+    return std.mem.eql(u8, normalized.bytes(), bytes);
+}
+
+pub fn canonicalJsonEvidence(bytes: []const u8) CanonicalJsonEvidence {
+    return .{
+        .digest = binding.hash(binding.CanonicalJson, bytes).bytes,
+        .length = @intCast(bytes.len),
+    };
+}
+
+pub fn canonicalJsonFromEvidence(
+    bytes: []const u8,
+    evidence_value: CanonicalJsonEvidence,
+) !CanonicalJson {
+    if (bytes.len == 0 or bytes.len > max_tool_arguments_envelope_size or
+        bytes.len != evidence_value.length or
+        !binding.eql(
+            binding.CanonicalJson,
+            .{ .bytes = canonicalJsonEvidence(bytes).digest },
+            .{ .bytes = evidence_value.digest },
+        ))
+    {
+        return error.InvalidCanonicalJsonEvidence;
+    }
+    return .{ .value = bytes, .proof = evidence_value };
 }
 
 fn validJson(bytes: []const u8) bool {
@@ -244,16 +302,6 @@ fn normalizeJsonValue(value: *std.json.Value, depth: usize) !void {
         },
     }
 }
-
-const CountingSha256 = struct {
-    hash: std.crypto.hash.sha2.Sha256 = .init(.{}),
-    length: usize = 0,
-
-    pub fn update(self: *CountingSha256, bytes: []const u8) void {
-        self.hash.update(bytes);
-        self.length += bytes.len;
-    }
-};
 
 pub fn encodeJson(out: []u8, value: anytype) ![]const u8 {
     var raw: [max_tool_arguments_envelope_size]u8 = undefined;
@@ -331,6 +379,19 @@ test "canonical JSON rejects duplicate keys and normalizes strings and numbers" 
     try std.testing.expectError(
         error.InvalidCanonicalJson,
         canonicalizeJson(&out, "9007199254740992"),
+    );
+}
+
+test "canonical JSON evidence binds exact canonical bytes" {
+    var out: [64]u8 = undefined;
+    const canonical = try canonicalizeJson(&out, "{\"a\":1}");
+    try std.testing.expectEqualStrings(
+        canonical.bytes(),
+        (try canonicalJsonFromEvidence(canonical.bytes(), canonical.evidence())).bytes(),
+    );
+    try std.testing.expectError(
+        error.InvalidCanonicalJsonEvidence,
+        canonicalJsonFromEvidence("{\"a\":2}", canonical.evidence()),
     );
 }
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const core_state = @import("core_state.zig");
+const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 const session_transition = @import("session_transition.zig");
 
@@ -57,7 +58,17 @@ pub const Response = struct {
     failure: model_protocol.Failure,
     text: ContentWindow,
     tool_key: ContentWindow,
-    arguments: ContentWindow,
+    arguments: CanonicalJsonWindow,
+};
+
+pub const CanonicalJsonWindow = struct {
+    offset: u32,
+    length: u32,
+    evidence: model_contract.CanonicalJsonEvidence,
+
+    pub fn contentWindow(self: CanonicalJsonWindow) ContentWindow {
+        return .{ .offset = self.offset, .length = self.length };
+    }
 };
 
 pub const Task = struct {
@@ -224,7 +235,11 @@ pub const Core = struct {
             .failure = state.response_failure,
             .text = state.response_text,
             .tool_key = state.response_tool_key,
-            .arguments = state.response_arguments,
+            .arguments = .{
+                .offset = state.response_arguments.offset,
+                .length = state.response_arguments.length,
+                .evidence = state.response_arguments_evidence,
+            },
         };
     }
 
@@ -289,6 +304,7 @@ pub const Core = struct {
         self.state.response_text = .{};
         self.state.response_tool_key = .{};
         self.state.response_arguments = .{};
+        self.state.response_arguments_evidence = .{};
         self.state.task_phase = .awaiting_model;
         return prepared;
     }
@@ -302,6 +318,7 @@ pub const Core = struct {
         self: *Core,
         identity_value: OperationIdentity,
         response_bytes: []const u8,
+        validated: model_protocol.Validated,
         response_ref: u64,
     ) !Response {
         try self.requireOperation(identity_value, .accepted);
@@ -309,7 +326,7 @@ pub const Core = struct {
         if (response_bytes.len == 0) return error.EmptyModelResponse;
         if (response_bytes.len > model_protocol.max_response_size) return error.ResponseCapacityExceeded;
         if (self.state.task_phase != .awaiting_model) return error.IllegalModelResponseTransition;
-        const parsed = try model_protocol.decode(response_bytes);
+        const parsed = try validated.verify(response_bytes);
         self.state.operation_result = response_ref;
         self.state.operation_phase = .completed;
         self.state.response_ref = response_ref;
@@ -327,6 +344,7 @@ pub const Core = struct {
             .offset = parsed.arguments_offset,
             .length = parsed.arguments_length,
         };
+        self.state.response_arguments_evidence = parsed.arguments_evidence;
         self.state.task_phase = switch (parsed.disposition) {
             .final_answer => .final_candidate,
             .tool_call => .awaiting_tool,
@@ -530,24 +548,27 @@ test "oversized truncated and malformed responses preserve accepted operation st
     );
     try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
     const before = try core.operation();
+    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    const encoded = try model_protocol.encodeText(&response_buffer, "valid");
+    const valid_evidence = try model_protocol.validated(encoded);
     var oversized: [model_protocol.max_response_size + 1]u8 = @splat(1);
     try std.testing.expectError(
         error.ResponseCapacityExceeded,
         core.applyModelResponse(
             .{ .id = operation_value.id, .generation = operation_value.generation },
             &oversized,
+            valid_evidence,
             99,
         ),
     );
     try std.testing.expectEqualDeep(before, try core.operation());
 
-    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const encoded = try model_protocol.encodeText(&response_buffer, "valid");
     try std.testing.expectError(
-        error.MalformedModelResponse,
+        error.InvalidModelResponseEvidence,
         core.applyModelResponse(
             .{ .id = operation_value.id, .generation = operation_value.generation },
             encoded[0 .. encoded.len - 1],
+            valid_evidence,
             99,
         ),
     );
@@ -557,10 +578,11 @@ test "oversized truncated and malformed responses preserve accepted operation st
     @memcpy(malformed[0..encoded.len], encoded);
     malformed[0] = 'X';
     try std.testing.expectError(
-        error.MalformedModelResponse,
+        error.InvalidModelResponseEvidence,
         core.applyModelResponse(
             .{ .id = operation_value.id, .generation = operation_value.generation },
             malformed[0..encoded.len],
+            valid_evidence,
             99,
         ),
     );
@@ -583,7 +605,12 @@ test "responses retain only validated metadata and durable content windows" {
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     const response = try model_protocol.encodeTool(&response_buffer, "fixture.large.v1", arguments);
     try std.testing.expect(response.len > model_protocol.max_resident_response_size);
-    const parsed = try core.applyModelResponse(identity, response, 3);
+    const parsed = try core.applyModelResponse(
+        identity,
+        response,
+        try model_protocol.validated(response),
+        3,
+    );
     try std.testing.expectEqual(@as(u32, @intCast(arguments.len)), parsed.arguments.length);
     try std.testing.expectEqual(@as(u64, 3), parsed.content_ref);
 }
@@ -599,6 +626,7 @@ test "complete slot lifecycle is compiler checked to expose no allocator seam" {
     _ = try core.applyModelResponse(
         .{ .id = operation_value.id, .generation = operation_value.generation },
         response,
+        try model_protocol.validated(response),
         3,
     );
     var encoded: [core_state.encoded_size]u8 = undefined;

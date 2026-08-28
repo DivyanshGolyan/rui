@@ -21,7 +21,7 @@ const install_schema_version = std.fmt.comptimePrint(
 );
 
 comptime {
-    std.debug.assert(max_transition_payload == 980);
+    std.debug.assert(max_transition_payload == 1016);
 }
 
 const session_schema =
@@ -43,7 +43,7 @@ const transition_schema =
     \\CREATE TABLE session_transition (
     \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
     \\    sequence INTEGER NOT NULL CHECK (sequence > 0),
-    \\    payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 980),
+    \\    payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 1016),
     \\    record_digest BLOB NOT NULL CHECK (length(record_digest) = 32),
     \\    PRIMARY KEY (session_id, sequence),
     \\    FOREIGN KEY (session_id) REFERENCES session (session_id)
@@ -54,7 +54,7 @@ const conversation_schema =
     \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
     \\    entry_id BLOB NOT NULL CHECK (length(entry_id) = 8),
     \\    parent_id BLOB CHECK (parent_id IS NULL OR length(parent_id) = 8),
-    \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 1 AND 4),
+    \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 1 AND 5),
     \\    content_ref BLOB NOT NULL CHECK (length(content_ref) = 8),
     \\    committed_by_sequence INTEGER NOT NULL,
     \\    PRIMARY KEY (session_id, entry_id),
@@ -1020,7 +1020,7 @@ pub const StorageOwner = struct {
         else
             try readIdentityColumn(statement, 0);
         const kind = c.sqlite3_column_int64(statement, 1);
-        if (kind < 1 or kind > 4) return error.CorruptHostStore;
+        if (kind < 1 or kind > 5) return error.CorruptHostStore;
         if (c.sqlite3_column_type(statement, 3) != c.SQLITE_INTEGER) return error.CorruptHostStore;
         const committed_value = c.sqlite3_column_int64(statement, 3);
         if (committed_value <= 0) return error.CorruptHostStore;
@@ -1716,6 +1716,86 @@ test "installed schema retains the exact V1 keys constraints and completion inde
     try owner.expectSchemaSql("table", "conversation_entry", conversation_schema);
     try owner.expectSchemaSql("table", "completion_inbox", completion_schema);
     try owner.expectSchemaSql("index", "completion_inbox_by_session", completion_index_schema);
+}
+
+test "Host Store round trips context checkpoints and rejects hostile kinds" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+
+    const identity: SessionIdentity = .{
+        .session_id = 81,
+        .agent_id = 82,
+        .task_id = 83,
+        .branch_id = 84,
+    };
+    try owner.createSession(identity);
+    var checkpoint: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    checkpoint.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
+        .entry_id = 2,
+        .parent_id = 1,
+        .kind = .context_checkpoint,
+        .content_ref = 85,
+    });
+    _ = try owner.commit(.{ .session_id = identity.session_id, .epoch = 1 }, checkpoint);
+
+    const stored = try owner.readConversationEntry(identity.session_id, 2);
+    try std.testing.expectEqual(@intFromEnum(session_transition.ConversationKind.context_checkpoint), stored.kind);
+    try std.testing.expectEqual(@as(u64, 1), stored.parent_id);
+    try std.testing.expectEqual(@as(u64, 85), stored.content_ref);
+
+    try owner.execute("PRAGMA ignore_check_constraints=ON");
+    try owner.execute("UPDATE conversation_entry SET kind=6");
+    try std.testing.expectError(
+        error.CorruptHostStore,
+        owner.readConversationEntry(identity.session_id, 2),
+    );
+}
+
+test "pre-release Host Store rejects the preceding schema epoch without migration" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var terminated_path: [max_path_bytes:0]u8 = undefined;
+    @memcpy(terminated_path[0..path.len], path);
+    terminated_path[path.len] = 0;
+    var maybe_database: ?*c.sqlite3 = null;
+    try expectOk(c.sqlite3_open_v2(
+        &terminated_path,
+        &maybe_database,
+        c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
+        null,
+    ));
+    const database = maybe_database orelse return error.HostStoreOpenFailed;
+    try expectOk(c.sqlite3_exec(
+        database,
+        std.fmt.comptimePrint(
+            "CREATE TABLE legacy_schema (value INTEGER); PRAGMA application_id=1330532423; PRAGMA user_version={d}",
+            .{schema_version - 1},
+        ),
+        null,
+        null,
+        null,
+    ));
+    try expectOk(c.sqlite3_close_v2(database));
+
+    try std.testing.expectError(
+        error.UnsupportedHostStoreVersion,
+        StorageOwner.open(std.testing.io, path, .{}),
+    );
 }
 
 test "model identity is valid UTF-8 before write and after hostile persistence" {

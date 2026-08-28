@@ -207,7 +207,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 discardResponse(core.applyModelResponse(.{
                     .id = operation.id,
                     .generation = operation.generation,
-                }, "invalid", 9)),
+                }, "invalid", undefined, 9)),
                 poison,
             );
         }
@@ -233,7 +233,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             discardResponse(core.applyModelResponse(.{
                 .id = operation.id,
                 .generation = operation.generation,
-            }, "invalid", 0)),
+            }, "invalid", undefined, 0)),
             poison,
         );
 
@@ -250,13 +250,13 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 discardResponse(core.applyModelResponse(.{
                     .id = operation.id,
                     .generation = operation.generation + 1,
-                }, response, response_ref + 1)),
+                }, response, try model_protocol.validated(response), response_ref + 1)),
                 poison,
             );
             const interpreted = try core.applyModelResponse(.{
                 .id = operation.id,
                 .generation = operation.generation,
-            }, response, response_ref);
+            }, response, try model_protocol.validated(response), response_ref);
             expected.operation_result = response_ref;
             expected.operation_phase = .completed;
             expected.response_ref = response_ref;
@@ -269,6 +269,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 .offset = model_protocol.header_size + model_contract.bash_key.len,
                 .length = 2,
             };
+            expected.response_arguments_evidence = model_contract.canonicalJsonEvidence("{}");
             expected.task_phase = .awaiting_tool;
             try expectResponse(interpreted, expected);
             try expectStateAndRestore(&core, expected, poison);
@@ -290,6 +291,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             expected.response_text = .{};
             expected.response_tool_key = .{};
             expected.response_arguments = .{};
+            expected.response_arguments_evidence = .{};
             expected.task_phase = .awaiting_model;
             try expectOperation(second, expected);
             try expectStateAndRestore(&core, expected, poison);
@@ -300,6 +302,7 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             const interpreted_final = try core.applyModelResponse(
                 .{ .id = second.id, .generation = second.generation },
                 final,
+                try model_protocol.validated(final),
                 response_ref + 1000,
             );
             expected.operation_result = response_ref + 1000;
@@ -328,13 +331,13 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 discardResponse(core.applyModelResponse(.{
                     .id = operation.id,
                     .generation = operation.generation + 1,
-                }, final, response_ref + 1)),
+                }, final, try model_protocol.validated(final), response_ref + 1)),
                 poison,
             );
             const interpreted = try core.applyModelResponse(.{
                 .id = operation.id,
                 .generation = operation.generation,
-            }, final, response_ref);
+            }, final, try model_protocol.validated(final), response_ref);
             expected.operation_result = response_ref;
             expected.operation_phase = .completed;
             expected.response_ref = response_ref;
@@ -458,7 +461,11 @@ fn responseView(state: core_state.State) core_image.Response {
         .failure = state.response_failure,
         .text = state.response_text,
         .tool_key = state.response_tool_key,
-        .arguments = state.response_arguments,
+        .arguments = .{
+            .offset = state.response_arguments.offset,
+            .length = state.response_arguments.length,
+            .evidence = state.response_arguments_evidence,
+        },
     };
 }
 

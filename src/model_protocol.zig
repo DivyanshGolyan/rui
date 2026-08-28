@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const contract = @import("model_contract.zig");
 
 pub const header_size = 24;
@@ -31,10 +32,29 @@ pub const Parsed = struct {
     tool_key_length: u32 = 0,
     arguments_offset: u32 = 0,
     arguments_length: u32 = 0,
+    arguments_evidence: contract.CanonicalJsonEvidence = .{},
     input_shape: ?contract.InputShape = null,
     option_count: u8 = 0,
     options_offset: u32 = 0,
     options_length: u32 = 0,
+};
+
+/// Compact proof that response bytes passed the complete house-response
+/// validator before entering Core. Core rebinds the proof to the exact bytes
+/// with bounded hashing; it never parses JSON or allocates.
+pub const Validated = struct {
+    parsed: Parsed,
+    result_digest: binding.Result,
+    byte_length: u32,
+
+    pub fn verify(self: Validated, bytes: []const u8) !Parsed {
+        if (bytes.len != self.byte_length or
+            !binding.eql(binding.Result, binding.hash(binding.Result, bytes), self.result_digest))
+        {
+            return error.InvalidModelResponseEvidence;
+        }
+        return self.parsed;
+    }
 };
 
 pub const Choice = struct { id: []const u8, label: []const u8 };
@@ -136,6 +156,30 @@ pub fn parse(bytes: []const u8) Parsed {
 }
 
 pub fn decode(bytes: []const u8) !Parsed {
+    var scratch: contract.CanonicalJsonScratch = undefined;
+    return (try validate(&scratch, bytes)).parsed;
+}
+
+pub fn validate(
+    scratch: *contract.CanonicalJsonScratch,
+    bytes: []const u8,
+) !Validated {
+    return .{
+        .parsed = try decodeWithScratch(scratch, bytes),
+        .result_digest = binding.hash(binding.Result, bytes),
+        .byte_length = @intCast(bytes.len),
+    };
+}
+
+pub fn validated(bytes: []const u8) !Validated {
+    var scratch: contract.CanonicalJsonScratch = undefined;
+    return validate(&scratch, bytes);
+}
+
+fn decodeWithScratch(
+    scratch: *contract.CanonicalJsonScratch,
+    bytes: []const u8,
+) !Parsed {
     if (bytes.len < header_size or bytes.len > max_response_size or
         !std.mem.eql(u8, bytes[0..magic.len], magic) or read(u16, bytes, 8) != version or
         read(u16, bytes, 10) != header_size)
@@ -166,13 +210,16 @@ pub fn decode(bytes: []const u8) !Parsed {
                 return error.MalformedModelResponse;
             }
             contract.validateToolKey(first) catch return error.MalformedModelResponse;
-            if (!contract.canonicalJson(second)) return error.MalformedModelResponse;
+            if (!contract.canonicalJsonWithScratch(scratch, second)) {
+                return error.MalformedModelResponse;
+            }
             return .{
                 .disposition = .tool_call,
                 .tool_key_offset = header_size,
                 .tool_key_length = @intCast(first.len),
                 .arguments_offset = @intCast(header_size + first.len),
                 .arguments_length = @intCast(second.len),
+                .arguments_evidence = contract.canonicalJsonEvidence(second),
             };
         },
         .input_request => return try decodeInput(bytes, first, second, reason),
@@ -264,6 +311,17 @@ test "complete normalized responses cover every V1 disposition" {
     try std.testing.expectEqual(contract.InputShape.single_choice, input.input_shape.?);
     try std.testing.expectEqual(@as(u8, 2), input.option_count);
     try std.testing.expectEqual(Failure.provider_error, parse(try encodeFailure(&bytes, .provider_error)).failure);
+}
+
+test "validated response evidence is compact and byte exact" {
+    var first_buffer: [128]u8 = undefined;
+    var second_buffer: [128]u8 = undefined;
+    const first = try encodeTool(&first_buffer, "fixture.tool", "{\"value\":1}");
+    const second = try encodeTool(&second_buffer, "fixture.tool", "{\"value\":2}");
+    const proof = try validated(first);
+    try std.testing.expectEqual(Disposition.tool_call, (try proof.verify(first)).disposition);
+    try std.testing.expectError(error.InvalidModelResponseEvidence, proof.verify(second));
+    try std.testing.expect(@sizeOf(Validated) < 128);
 }
 
 test "hostile normalized responses fail before authorizing effects" {
