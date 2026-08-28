@@ -1,8 +1,10 @@
 const std = @import("std");
+const binding = @import("binding.zig");
+const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 
-pub const schema_version: u16 = 1;
-pub const encoded_size: usize = 160;
+pub const schema_version: u16 = 5;
+pub const encoded_size: usize = 176;
 
 const magic = "ONECORE\x00";
 const checksum_offset = encoded_size - @sizeOf(u32);
@@ -46,10 +48,11 @@ pub const State = extern struct {
     task_phase: TaskPhase = .idle,
     response_disposition: model_protocol.Disposition = .failure,
     response_failure: model_protocol.Failure = .none,
-    response_tool: model_protocol.Tool = .none,
     context: ContentWindow = .{},
     response_text: ContentWindow = .{},
+    response_tool_key: ContentWindow = .{},
     response_arguments: ContentWindow = .{},
+    response_arguments_digest: binding.StrictToolJsonV1 = .{ .bytes = @splat(0) },
 };
 
 comptime {
@@ -85,7 +88,6 @@ pub fn encode(out: []u8, state: State) !void {
     out[61] = @intFromEnum(state.task_phase);
     out[62] = @intFromEnum(state.response_disposition);
     out[63] = @intFromEnum(state.response_failure);
-    out[64] = @intFromEnum(state.response_tool);
     write(u64, out, 68, state.operation_result);
     write(u64, out, 76, state.operation_sequence);
     write(u64, out, 84, state.active_leaf_id);
@@ -94,6 +96,8 @@ pub fn encode(out: []u8, state: State) !void {
     writeWindow(out, 108, state.context);
     writeWindow(out, 116, state.response_text);
     writeWindow(out, 124, state.response_arguments);
+    writeWindow(out, 132, state.response_tool_key);
+    @memcpy(out[140..172], &state.response_arguments_digest.bytes);
     rewriteChecksum(out);
 }
 
@@ -103,10 +107,7 @@ pub fn decode(input: []const u8) !State {
     if (read(u16, input, 8) != schema_version) return error.UnsupportedSchema;
     if (read(u16, input, 10) != encoded_size) return error.InvalidCoreStateLength;
     if (read(u32, input, 12) != 0) return error.UnsupportedCoreStateFlags;
-    for (input[65..68]) |byte| if (byte != 0) return error.NonzeroCoreStateReservedByte;
-    for (input[132..checksum_offset]) |byte| {
-        if (byte != 0) return error.NonzeroCoreStateReservedByte;
-    }
+    for (input[64..68]) |byte| if (byte != 0) return error.NonzeroCoreStateReservedByte;
     if (read(u32, input, checksum_offset) != std.hash.Crc32.hash(input[0..checksum_offset])) {
         return error.CoreStateChecksumMismatch;
     }
@@ -123,7 +124,6 @@ pub fn decode(input: []const u8) !State {
         .task_phase = try taskPhase(input[61]),
         .response_disposition = try responseDisposition(input[62]),
         .response_failure = try responseFailure(input[63]),
-        .response_tool = try responseTool(input[64]),
         .operation_result = read(u64, input, 68),
         .operation_sequence = read(u64, input, 76),
         .active_leaf_id = read(u64, input, 84),
@@ -132,6 +132,8 @@ pub fn decode(input: []const u8) !State {
         .context = readWindow(input, 108),
         .response_text = readWindow(input, 116),
         .response_arguments = readWindow(input, 124),
+        .response_tool_key = readWindow(input, 132),
+        .response_arguments_digest = .{ .bytes = input[140..172].* },
     };
     try validate(state);
     return state;
@@ -143,6 +145,7 @@ fn validate(state: State) !void {
     try validateOperation(state);
     try validateWindow(state.context, null);
     try validateWindow(state.response_text, model_protocol.max_response_size);
+    try validateWindow(state.response_tool_key, model_protocol.max_response_size);
     try validateWindow(state.response_arguments, model_protocol.max_response_size);
     try validateTask(state);
     try validateResponse(state);
@@ -218,8 +221,8 @@ fn validateTask(state: State) !void {
 fn validateResponse(state: State) !void {
     if (state.response_ref == 0) {
         if (state.response_disposition != .failure or
-            state.response_failure != .none or state.response_tool != .none or
-            state.response_text.length != 0 or state.response_arguments.length != 0)
+            state.response_failure != .none or state.response_text.length != 0 or
+            state.response_tool_key.length != 0 or state.response_arguments.length != 0)
         {
             return error.InvalidResponseState;
         }
@@ -237,26 +240,35 @@ fn validateResponse(state: State) !void {
     switch (state.task_phase) {
         .final_candidate, .finished => {
             if (state.response_disposition != .final_answer or
-                state.response_failure != .none or state.response_tool != .none or
-                state.response_text.length == 0 or state.response_arguments.length != 0)
+                state.response_failure != .none or state.response_text.length == 0 or
+                state.response_tool_key.length != 0 or state.response_arguments.length != 0)
             {
                 return error.InvalidResponseState;
             }
         },
         .awaiting_tool, .ready => {
             if (state.response_disposition != .tool_call or
-                state.response_failure != .none or state.response_tool == .none or
-                state.response_arguments.length == 0)
+                state.response_failure != .none or state.response_tool_key.length == 0 or
+                state.response_arguments.length == 0 or state.response_text.length != 0)
             {
                 return error.InvalidResponseState;
             }
         },
         .failed => {
-            if (state.response_disposition != .failure or
-                state.response_failure == .none or state.response_tool != .none or
-                state.response_text.length != 0 or state.response_arguments.length != 0)
-            {
-                return error.InvalidResponseState;
+            switch (state.response_disposition) {
+                .input_request => if (state.response_failure != .none or
+                    state.response_tool_key.length != 0 or state.response_text.length != 0 or
+                    state.response_arguments.length != 0)
+                {
+                    return error.InvalidResponseState;
+                },
+                .failure => if (state.response_failure == .none or
+                    state.response_tool_key.length != 0 or state.response_text.length != 0 or
+                    state.response_arguments.length != 0)
+                {
+                    return error.InvalidResponseState;
+                },
+                else => return error.InvalidResponseState,
             }
         },
         .idle, .awaiting_model => return error.InvalidResponseState,
@@ -297,7 +309,8 @@ fn responseDisposition(value: u8) !model_protocol.Disposition {
     return switch (value) {
         1 => .final_answer,
         2 => .tool_call,
-        3 => .failure,
+        3 => .input_request,
+        4 => .failure,
         else => error.UnknownResponseDisposition,
     };
 }
@@ -310,17 +323,10 @@ fn responseFailure(value: u8) !model_protocol.Failure {
         3 => .provider_error,
         4 => .malformed,
         5 => .empty,
-        6 => .multiple_tools,
+        6 => .multiple_outputs,
+        7 => .oversized,
+        8 => .unknown_tool,
         else => error.UnknownResponseFailure,
-    };
-}
-
-fn responseTool(value: u8) !model_protocol.Tool {
-    return switch (value) {
-        0 => .none,
-        1 => .bash,
-        2 => .apply_patch,
-        else => error.UnknownResponseTool,
     };
 }
 
@@ -363,10 +369,11 @@ test "canonical Core State vector round trips deterministically" {
         .task_phase = .awaiting_tool,
         .response_disposition = .tool_call,
         .response_failure = .none,
-        .response_tool = .bash,
         .context = .{ .offset = 1, .length = 24 },
         .response_text = .{},
+        .response_tool_key = .{ .offset = 24, .length = 7 },
         .response_arguments = .{ .offset = 31, .length = 32 },
+        .response_arguments_digest = model_contract.strictToolJsonDigest("00000000000000000000000000000000"),
     };
     var first: [encoded_size]u8 = undefined;
     var second: [encoded_size]u8 = undefined;
@@ -375,6 +382,34 @@ test "canonical Core State vector round trips deterministically" {
     try encode(&second, restored);
     try std.testing.expectEqualSlices(u8, &first, &second);
     try std.testing.expectEqualDeep(state, restored);
+}
+
+test "Core State uses the arguments window for presence even with an all-zero digest" {
+    var state: State = .{
+        .agent_id = 1,
+        .agent_generation = 1,
+        .accumulator = 1,
+        .operation_id = 2,
+        .operation_generation = 1,
+        .operation_phase = .completed,
+        .operation_result = 3,
+        .operation_sequence = 1,
+        .active_leaf_id = 1,
+        .response_ref = 3,
+        .task_phase = .awaiting_tool,
+        .response_disposition = .tool_call,
+        .context = .{ .offset = 1, .length = 1 },
+        .response_tool_key = .{ .offset = 24, .length = 4 },
+        .response_arguments = .{ .offset = 28, .length = 2 },
+        .response_arguments_digest = .{ .bytes = @splat(0) },
+    };
+    var encoded: [encoded_size]u8 = undefined;
+    try encode(&encoded, state);
+    const restored = try decode(&encoded);
+    try std.testing.expectEqualSlices(u8, &@as([32]u8, @splat(0)), &restored.response_arguments_digest.bytes);
+
+    state.response_arguments = .{};
+    try std.testing.expectError(error.InvalidResponseState, encode(&encoded, state));
 }
 
 test "Core State rejects unsupported schema enums truncation and checksum corruption" {
@@ -399,16 +434,16 @@ test "Core State rejects unsupported schema enums truncation and checksum corrup
 test "Core State rejects every unknown enum and overflowing bounded window" {
     var encoded: [encoded_size]u8 = undefined;
     try encode(&encoded, .{ .agent_id = 1, .agent_generation = 1, .accumulator = 1 });
-    const cases = [_]struct { offset: usize, expected: anyerror }{
-        .{ .offset = 60, .expected = error.UnknownOperationPhase },
-        .{ .offset = 61, .expected = error.UnknownTaskPhase },
-        .{ .offset = 62, .expected = error.UnknownResponseDisposition },
-        .{ .offset = 63, .expected = error.UnknownResponseFailure },
-        .{ .offset = 64, .expected = error.UnknownResponseTool },
+    const cases = [_]struct { offset: usize, value: u8, expected: anyerror }{
+        .{ .offset = 60, .value = 0xff, .expected = error.UnknownOperationPhase },
+        .{ .offset = 61, .value = 7, .expected = error.UnknownTaskPhase },
+        .{ .offset = 62, .value = 0xff, .expected = error.UnknownResponseDisposition },
+        .{ .offset = 63, .value = 0xff, .expected = error.UnknownResponseFailure },
+        .{ .offset = 64, .value = 0xff, .expected = error.NonzeroCoreStateReservedByte },
     };
     for (cases) |case| {
         var changed = encoded;
-        changed[case.offset] = 0xff;
+        changed[case.offset] = case.value;
         rewriteChecksum(&changed);
         try std.testing.expectError(case.expected, decode(&changed));
     }
@@ -473,7 +508,7 @@ test "Core State rejects impossible task and response relationships" {
     try std.testing.expectError(error.InvalidTaskState, decode(&encoded));
 
     try encode(&encoded, valid);
-    encoded[64] = @intFromEnum(model_protocol.Tool.bash);
+    writeWindow(&encoded, 132, .{ .offset = 1, .length = 1 });
     rewriteChecksum(&encoded);
     try std.testing.expectError(error.InvalidResponseState, decode(&encoded));
 

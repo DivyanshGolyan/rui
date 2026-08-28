@@ -1,6 +1,6 @@
 const std = @import("std");
+const deterministic_provider = @import("deterministic_provider.zig");
 const harness = @import("harness.zig");
-const model_operation = @import("model_operation.zig");
 const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 
@@ -29,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn start(io: std.Io, runtime: *harness.HostRuntime, mode: []const u8, workspace: []const u8) !void {
-    var fixture: model_operation.ToolFixture = .{
+    var fixture: deterministic_provider.ToolFixture = .{
         .expected_task = task,
         .tool = .apply_patch,
         .tool_arguments = patch,
@@ -89,7 +89,7 @@ fn resumeSession(
         .indeterminate
     else
         return error.InvalidMode;
-    var fixture: model_operation.ToolFixture = .{
+    var fixture: deterministic_provider.ToolFixture = .{
         .expected_task = task,
         .tool = .apply_patch,
         .tool_arguments = patch,

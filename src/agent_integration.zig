@@ -1,8 +1,8 @@
 const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
 const binding = @import("binding.zig");
+const deterministic_provider = @import("deterministic_provider.zig");
 const harness = @import("harness.zig");
-const model_operation = @import("model_operation.zig");
 
 const task = "Explain the fixture repository.";
 const answer = "The fixture contains a durable one-page agent.";
@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     var layout = try Layout.init(init.io, allocator);
     defer layout.deinit(init.io);
 
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = task,
         .final_answer = answer,
     };
@@ -72,7 +72,7 @@ fn uncommittedTaskCanBeReadmitted(
     _: std.Io,
     _: std.mem.Allocator,
 ) !void {
-    var fixture: model_operation.Fixture = .{ .expected_task = task, .final_answer = answer };
+    var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
     var owner = try harness.Harness.open(.{
         .runtime = layout.runtime,
         .mode = .{ .create = .{
@@ -110,7 +110,7 @@ fn cancellationRegenerates(
     _: std.Io,
     _: std.mem.Allocator,
 ) !void {
-    var fixture: model_operation.Fixture = .{ .expected_task = task, .final_answer = answer };
+    var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
     var owner = try harness.Harness.open(.{
         .runtime = layout.runtime,
         .mode = .{ .create = .{
@@ -153,7 +153,7 @@ fn offeredPermissionDenialContinues(
         .command = "printf forbidden >> denied.txt",
         .timeout_ms = 5000,
     });
-    var fixture: model_operation.ToolFixture = .{
+    var fixture: deterministic_provider.ToolFixture = .{
         .expected_task = task,
         .tool_arguments = call,
         .final_answer = answer,
@@ -230,7 +230,7 @@ fn restoredBashApprovalDispatchesExactDescriptor(
         .command = "printf bound > approved.txt",
         .timeout_ms = 5000,
     });
-    var fixture: model_operation.ToolFixture = .{
+    var fixture: deterministic_provider.ToolFixture = .{
         .expected_task = task,
         .tool_arguments = call,
         .final_answer = answer,
@@ -345,7 +345,7 @@ fn restoredPatchApprovalUsesExactDescriptor(
         else => return error.GitAddFailed,
     }
 
-    var fixture: model_operation.ToolFixture = .{
+    var fixture: deterministic_provider.ToolFixture = .{
         .expected_task = task,
         .tool = .apply_patch,
         .tool_arguments = patch,
@@ -430,7 +430,7 @@ fn approvedPatchCompletesOnce(
         else => return error.GitAddFailed,
     }
 
-    var fixture: model_operation.ToolFixture = .{
+    var fixture: deterministic_provider.ToolFixture = .{
         .expected_task = task,
         .tool = .apply_patch,
         .tool_arguments = patch,
@@ -488,7 +488,7 @@ fn lostCompletionNotificationRecovers(
     _: std.Io,
     _: std.mem.Allocator,
 ) !void {
-    var fixture: model_operation.Fixture = .{ .expected_task = task, .final_answer = answer };
+    var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
     var capture: Crash = .{ .target = .after_completion_inbox };
     var owner = try harness.Harness.open(.{
         .runtime = layout.runtime,
@@ -522,7 +522,7 @@ fn uncertainModelRetryUsesNewAttempt(
     _: std.Io,
     _: std.mem.Allocator,
 ) !void {
-    var fixture: model_operation.Fixture = .{ .expected_task = task, .final_answer = answer };
+    var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
     var capture: Crash = .{ .target = .after_model_dispatch };
     var owner = try harness.Harness.open(.{
         .runtime = layout.runtime,
@@ -557,7 +557,7 @@ fn exhaustedModelRetriesBecomeFailure(
     _: std.Io,
     _: std.mem.Allocator,
 ) !void {
-    var fixture: model_operation.Fixture = .{ .expected_task = task, .final_answer = answer };
+    var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
     var capture: Crash = .{ .target = .after_model_dispatch };
     const session_id = initial: {
         var owner = try harness.Harness.open(.{
@@ -619,7 +619,7 @@ fn uncertainBashNeverReplays(
         .command = "printf x >> uncertain.txt",
         .timeout_ms = 5000,
     });
-    var fixture: model_operation.ToolFixture = .{
+    var fixture: deterministic_provider.ToolFixture = .{
         .expected_task = task,
         .tool_arguments = call,
         .final_answer = "must not be reached",

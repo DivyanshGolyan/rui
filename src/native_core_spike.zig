@@ -1,6 +1,9 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const core_image = @import("core_image.zig");
 const core_state = @import("core_state.zig");
+const lifecycle = @import("lifecycle.zig");
+const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 const c = @cImport({
     @cInclude("libproc.h");
@@ -24,7 +27,8 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 1) return error.InvalidArguments;
 
     const baseline_rss = try residentBytes();
-    var pool: core_image.SlotPool(1) = .{};
+    var host: lifecycle.Host = .{};
+    const pool = &host.slots;
     var random_name: [8]u8 = undefined;
     init.io.random(&random_name);
     var density_path_buffer: [96]u8 = undefined;
@@ -90,14 +94,83 @@ pub fn main(init: std.process.Init) !void {
     var invariant_lease = try pool.borrow();
     defer invariant_lease.release() catch unreachable;
     try randomizedStateMachineTraces(invariant_lease.slot);
+    const resources = host.resourceLedger();
 
     std.debug.print(
         "Activation Slot exact       {d} B\n" ++
             "resident slots            1\n" ++
             "configured slot bytes     {d} B\n" ++
             "occupied slot bytes       {d} B\n" ++
-            "slot-pool host overhead   {d} B\n" ++
-            "logical sleeping agents   {d}\n" ++
+            "slot-pool host overhead   {d} B\n",
+        .{
+            @sizeOf(core_image.ActivationSlot),
+            pool.residentBytes(),
+            pool.occupiedBytes(),
+            pool.hostOverheadBytes(),
+        },
+    );
+    std.debug.print(
+        "semantic validation multiplier Host {d}\n" ++
+            "semantic validation components response={d} B tool-definition={d} B validation-scratch={d} B\n" ++
+            "semantic validation workspace {d} B\n" ++
+            "semantic validation pool overhead {d} B\n" ++
+            "semantic validation reservation {d} B\n" ++
+            "semantic validation allocator allocations 0 (embedded Host reservation)\n" ++
+            "semantic validation allocator-observed bytes not applicable\n" ++
+            "semantic validation occupancy {d} ({d} B)\n" ++
+            "semantic validation occupied high-water {d} ({d} B)\n" ++
+            "semantic validation acquisitions={d} busy={d}\n" ++
+            "semantic validation queue depth {d} (no V1 queue)\n" ++
+            "semantic validation measured wait time {d} ns (fail-fast)\n",
+        .{
+            resources.semantic_validation.multiplier,
+            resources.semantic_validation.response_bytes,
+            resources.semantic_validation.tool_definition_bytes,
+            resources.semantic_validation.validation_scratch_bytes,
+            resources.semantic_validation.workspace_bytes,
+            resources.semantic_validation.pool_overhead_bytes,
+            resources.semantic_validation.reservation_bytes,
+            resources.semantic_validation.occupied_count,
+            resources.semantic_validation.occupied_bytes,
+            resources.semantic_validation.occupied_high_water_count,
+            resources.semantic_validation.occupied_high_water_bytes,
+            resources.semantic_validation.acquisition_count,
+            resources.semantic_validation.busy_count,
+            resources.semantic_validation.queue_depth,
+            resources.semantic_validation.wait_time_ns,
+        },
+    );
+    std.debug.print(
+        "shared patch workspace multiplier Host {d}\n" ++
+            "shared patch workspace component patch={d} B\n" ++
+            "shared patch workspace bytes {d} B\n" ++
+            "shared patch workspace pool overhead {d} B\n" ++
+            "shared patch workspace reservation {d} B\n" ++
+            "shared patch workspace allocator allocations 0 (embedded Host reservation)\n" ++
+            "shared patch workspace allocator-observed bytes not applicable\n" ++
+            "shared patch workspace occupancy {d} ({d} B)\n" ++
+            "shared patch workspace occupied high-water {d} ({d} B)\n" ++
+            "shared patch workspace acquisitions={d} busy={d}\n" ++
+            "shared patch workspace queue depth {d} (no V1 queue)\n" ++
+            "shared patch workspace measured wait time {d} ns (fail-fast)\n",
+        .{
+            resources.patch_workspace.multiplier,
+            resources.patch_workspace.patch_bytes,
+            resources.patch_workspace.workspace_bytes,
+            resources.patch_workspace.pool_overhead_bytes,
+            resources.patch_workspace.reservation_bytes,
+            resources.patch_workspace.occupied_count,
+            resources.patch_workspace.occupied_bytes,
+            resources.patch_workspace.occupied_high_water_count,
+            resources.patch_workspace.occupied_high_water_bytes,
+            resources.patch_workspace.acquisition_count,
+            resources.patch_workspace.busy_count,
+            resources.patch_workspace.queue_depth,
+            resources.patch_workspace.wait_time_ns,
+        },
+    );
+    std.debug.print(
+        "logical sleeping agents   {d}\n" ++
             "Core State per agent       {d} B\n" ++
             "durable Core State per agent {d} B\n" ++
             "sleeping Core State bytes  {d} B\n" ++
@@ -106,10 +179,6 @@ pub fn main(init: std.process.Init) !void {
             "RSS with first slot        {d} B\n" ++
             "RSS after density cycle    {d} B\n",
         .{
-            @sizeOf(core_image.ActivationSlot),
-            pool.residentBytes(),
-            pool.occupiedBytes(),
-            pool.hostOverheadBytes(),
             density_agents,
             core_state.encoded_size,
             core_state.encoded_size,
@@ -203,10 +272,10 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
                 before,
                 expected,
                 error.IllegalOperationTransition,
-                core.completeOperation(.{
+                discardResponse(core.applyModelResponse(.{
                     .id = operation.id,
                     .generation = operation.generation,
-                }, 9),
+                }, undefined, 9, undefined)),
                 poison,
             );
         }
@@ -229,42 +298,54 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             before,
             expected,
             error.InvalidResultReference,
-            core.completeOperation(.{
+            discardResponse(core.applyModelResponse(.{
                 .id = operation.id,
                 .generation = operation.generation,
-            }, 0),
+            }, undefined, 0, undefined)),
             poison,
         );
 
         const response_ref: u64 = 2000 + trace_index;
-        try core.completeOperation(.{
-            .id = operation.id,
-            .generation = operation.generation,
-        }, response_ref);
-        expected.operation_result = response_ref;
-        expected.operation_phase = .completed;
-        try expectStateAndRestore(&core, expected, poison);
-
         var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+        var validation: model_protocol.ValidationScratch = undefined;
         if (trace_index % 2 == 0) {
-            const response = try model_protocol.encodeTool(&response_buffer, .bash, "pwd");
+            const arguments = "{\"command\":\"true\",\"timeout_ms\":1000}";
+            const response = try model_protocol.encodeTool(
+                &response_buffer,
+                model_contract.bash_key,
+                arguments,
+            );
+            const response_digest = binding.hash(binding.Result, response);
+            const admission = model_protocol.admit(&validation, response).admission;
             before = try canonicalState(&core);
             try expectRejectedPreserves(
                 &core,
                 before,
                 expected,
-                error.IllegalModelResponseTransition,
-                discardResponse(core.interpretModelResponse(response, response_ref + 1)),
+                error.StaleOperation,
+                discardResponse(core.applyModelResponse(.{
+                    .id = operation.id,
+                    .generation = operation.generation + 1,
+                }, admission, response_ref + 1, response_digest)),
                 poison,
             );
-            const interpreted = try core.interpretModelResponse(response, response_ref);
+            const interpreted = try core.applyModelResponse(.{
+                .id = operation.id,
+                .generation = operation.generation,
+            }, admission, response_ref, response_digest);
+            expected.operation_result = response_ref;
+            expected.operation_phase = .completed;
             expected.response_ref = response_ref;
             expected.response_disposition = .tool_call;
-            expected.response_tool = .bash;
-            expected.response_arguments = .{
-                .offset = model_protocol.header_size + model_protocol.item_header_size,
-                .length = 3,
+            expected.response_tool_key = .{
+                .offset = model_protocol.header_size,
+                .length = model_contract.bash_key.len,
             };
+            expected.response_arguments = .{
+                .offset = model_protocol.header_size + model_contract.bash_key.len,
+                .length = arguments.len,
+            };
+            expected.response_arguments_digest = model_contract.strictToolJsonDigest(arguments);
             expected.task_phase = .awaiting_tool;
             try expectResponse(interpreted, expected);
             try expectStateAndRestore(&core, expected, poison);
@@ -283,28 +364,30 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             expected.response_ref = 0;
             expected.response_disposition = .failure;
             expected.response_failure = .none;
-            expected.response_tool = .none;
             expected.response_text = .{};
+            expected.response_tool_key = .{};
             expected.response_arguments = .{};
+            expected.response_arguments_digest = .{ .bytes = @splat(0) };
             expected.task_phase = .awaiting_model;
             try expectOperation(second, expected);
             try expectStateAndRestore(&core, expected, poison);
             try core.acceptOperation(.{ .id = second.id, .generation = second.generation });
             expected.operation_phase = .accepted;
             try expectStateAndRestore(&core, expected, poison);
-            try core.completeOperation(
+            const final = try model_protocol.encodeText(&response_buffer, "ok");
+            const final_digest = binding.hash(binding.Result, final);
+            const interpreted_final = try core.applyModelResponse(
                 .{ .id = second.id, .generation = second.generation },
+                model_protocol.admit(&validation, final).admission,
                 response_ref + 1000,
+                final_digest,
             );
             expected.operation_result = response_ref + 1000;
             expected.operation_phase = .completed;
-            try expectStateAndRestore(&core, expected, poison);
-            const final = try model_protocol.encodeText(&response_buffer, .complete, "ok");
-            const interpreted_final = try core.interpretModelResponse(final, response_ref + 1000);
             expected.response_ref = response_ref + 1000;
             expected.response_disposition = .final_answer;
             expected.response_text = .{
-                .offset = model_protocol.header_size + model_protocol.item_header_size,
+                .offset = model_protocol.header_size,
                 .length = 2,
             };
             expected.task_phase = .final_candidate;
@@ -315,21 +398,31 @@ fn randomizedStateMachineTraces(slot: *core_image.ActivationSlot) !void {
             expected.final_entry_id = active_leaf_id + 3;
             expected.task_phase = .finished;
         } else {
-            const final = try model_protocol.encodeText(&response_buffer, .complete, "ok");
+            const final = try model_protocol.encodeText(&response_buffer, "ok");
+            const final_digest = binding.hash(binding.Result, final);
+            const admission = model_protocol.admit(&validation, final).admission;
             before = try canonicalState(&core);
             try expectRejectedPreserves(
                 &core,
                 before,
                 expected,
-                error.IllegalModelResponseTransition,
-                discardResponse(core.interpretModelResponse(final, response_ref + 1)),
+                error.StaleOperation,
+                discardResponse(core.applyModelResponse(.{
+                    .id = operation.id,
+                    .generation = operation.generation + 1,
+                }, admission, response_ref + 1, final_digest)),
                 poison,
             );
-            const interpreted = try core.interpretModelResponse(final, response_ref);
+            const interpreted = try core.applyModelResponse(.{
+                .id = operation.id,
+                .generation = operation.generation,
+            }, admission, response_ref, final_digest);
+            expected.operation_result = response_ref;
+            expected.operation_phase = .completed;
             expected.response_ref = response_ref;
             expected.response_disposition = .final_answer;
             expected.response_text = .{
-                .offset = model_protocol.header_size + model_protocol.item_header_size,
+                .offset = model_protocol.header_size,
                 .length = 2,
             };
             expected.task_phase = .final_candidate;
@@ -445,9 +538,13 @@ fn responseView(state: core_state.State) core_image.Response {
         .content_ref = state.response_ref,
         .disposition = state.response_disposition,
         .failure = state.response_failure,
-        .tool = state.response_tool,
         .text = state.response_text,
-        .arguments = state.response_arguments,
+        .tool_key = state.response_tool_key,
+        .arguments = .{
+            .offset = state.response_arguments.offset,
+            .length = state.response_arguments.length,
+            .digest = state.response_arguments_digest,
+        },
     };
 }
 

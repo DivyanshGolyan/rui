@@ -1,12 +1,13 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const core_state = @import("core_state.zig");
+const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 const session_transition = @import("session_transition.zig");
 
 pub const slot_ceiling = 32 * 1024;
 pub const slot_alignment = 8;
 pub const parser_scratch_size = 4 * 1024;
-pub const response_scratch_size = model_protocol.max_response_size;
 pub const transition_scratch_size = 4 * 1024;
 
 pub const State = core_state.State;
@@ -18,7 +19,6 @@ pub const TaskPhase = core_state.TaskPhase;
 pub const ActivationSlot = extern struct {
     state: State,
     parser_scratch: [parser_scratch_size]u8,
-    response_scratch: [response_scratch_size]u8,
     transition_scratch: [transition_scratch_size]u8,
 };
 
@@ -57,9 +57,19 @@ pub const Response = struct {
     content_ref: u64,
     disposition: model_protocol.Disposition,
     failure: model_protocol.Failure,
-    tool: model_protocol.Tool,
     text: ContentWindow,
-    arguments: ContentWindow,
+    tool_key: ContentWindow,
+    arguments: StrictToolJsonWindow,
+};
+
+pub const StrictToolJsonWindow = struct {
+    offset: u32,
+    length: u32,
+    digest: binding.StrictToolJsonV1,
+
+    pub fn contentWindow(self: StrictToolJsonWindow) ContentWindow {
+        return .{ .offset = self.offset, .length = self.length };
+    }
 };
 
 pub const Task = struct {
@@ -147,9 +157,7 @@ pub fn SlotPool(comptime capacity: usize) type {
 pub const Core = struct {
     slot: *ActivationSlot,
     state: *State,
-    response_scratch: *[response_scratch_size]u8,
     active: bool = true,
-    staged_response_length: u32 = 0,
 
     pub fn initialize(slot: *ActivationSlot, identity_value: Identity) !Core {
         if (identity_value.agent_id == 0) return error.InvalidAgentIdentity;
@@ -163,7 +171,6 @@ pub const Core = struct {
         return .{
             .slot = slot,
             .state = &slot.state,
-            .response_scratch = &slot.response_scratch,
         };
     }
 
@@ -174,7 +181,6 @@ pub const Core = struct {
         return .{
             .slot = slot,
             .state = &slot.state,
-            .response_scratch = &slot.response_scratch,
         };
     }
 
@@ -183,14 +189,12 @@ pub const Core = struct {
         try core_state.encode(encoded, self.state.*);
         scrub(self.slot);
         self.active = false;
-        self.staged_response_length = 0;
     }
 
     pub fn abandon(self: *Core) void {
         if (!self.active) return;
         scrub(self.slot);
         self.active = false;
-        self.staged_response_length = 0;
     }
 
     pub fn identity(self: *const Core) !Identity {
@@ -230,9 +234,13 @@ pub const Core = struct {
             .content_ref = state.response_ref,
             .disposition = state.response_disposition,
             .failure = state.response_failure,
-            .tool = state.response_tool,
             .text = state.response_text,
-            .arguments = state.response_arguments,
+            .tool_key = state.response_tool_key,
+            .arguments = .{
+                .offset = state.response_arguments.offset,
+                .length = state.response_arguments.length,
+                .digest = state.response_arguments_digest,
+            },
         };
     }
 
@@ -294,11 +302,11 @@ pub const Core = struct {
         self.state.response_ref = 0;
         self.state.response_disposition = .failure;
         self.state.response_failure = .none;
-        self.state.response_tool = .none;
         self.state.response_text = .{};
+        self.state.response_tool_key = .{};
         self.state.response_arguments = .{};
+        self.state.response_arguments_digest = .{ .bytes = @splat(0) };
         self.state.task_phase = .awaiting_model;
-        self.staged_response_length = 0;
         return prepared;
     }
 
@@ -307,97 +315,50 @@ pub const Core = struct {
         self.state.operation_phase = .accepted;
     }
 
-    pub fn completeOperation(
+    pub fn applyModelResponse(
         self: *Core,
         identity_value: OperationIdentity,
-        result_ref: u64,
-    ) !void {
-        try self.requireOperation(identity_value, .accepted);
-        if (result_ref == 0) return error.InvalidResultReference;
-        self.state.operation_result = result_ref;
-        self.state.operation_phase = .completed;
-    }
-
-    pub fn interpretModelResponse(
-        self: *Core,
-        response_bytes: []const u8,
+        admission: model_protocol.Admission,
         response_ref: u64,
+        result_digest: binding.Result,
     ) !Response {
-        try self.requireActive();
-        if (response_bytes.len == 0) return error.EmptyModelResponse;
-        if (response_bytes.len > self.response_scratch.len) return error.ResponseCapacityExceeded;
-        const state = self.state.*;
-        if (state.task_phase != .awaiting_model or
-            state.operation_phase != .completed or
-            state.operation_result != response_ref or response_ref == 0)
+        try self.requireOperation(identity_value, .accepted);
+        if (response_ref == 0) return error.InvalidResultReference;
+        if (admission.byte_length > model_protocol.max_response_size) return error.ResponseCapacityExceeded;
+        if (self.state.task_phase != .awaiting_model) return error.IllegalModelResponseTransition;
+        const parsed = try admission.verify(result_digest);
+        if (admission.byte_length == 0 and
+            !(parsed.disposition == .failure and parsed.failure == .empty))
         {
-            return error.IllegalModelResponseTransition;
+            return error.EmptyModelResponse;
         }
-
-        @memcpy(self.response_scratch[0..response_bytes.len], response_bytes);
-        const parsed = model_protocol.parse(self.response_scratch[0..response_bytes.len]);
-        self.staged_response_length = @intCast(response_bytes.len);
+        self.state.operation_result = response_ref;
+        self.state.operation_phase = .completed;
         self.state.response_ref = response_ref;
         self.state.response_disposition = parsed.disposition;
         self.state.response_failure = parsed.failure;
-        self.state.response_tool = parsed.tool;
-        self.state.response_text = .{
+        self.state.response_text = if (parsed.disposition == .final_answer) .{
             .offset = parsed.text_offset,
             .length = parsed.text_length,
+        } else .{};
+        self.state.response_tool_key = .{
+            .offset = parsed.tool_key_offset,
+            .length = parsed.tool_key_length,
         };
         self.state.response_arguments = .{
             .offset = parsed.arguments_offset,
             .length = parsed.arguments_length,
         };
+        self.state.response_arguments_digest = parsed.arguments_digest;
         self.state.task_phase = switch (parsed.disposition) {
             .final_answer => .final_candidate,
             .tool_call => .awaiting_tool,
+            // Issue #38 replaces this terminal boundary with the atomic
+            // Conversation and durable Interaction Request transition.
+            .input_request => .failed,
             .failure => .failed,
         };
         return self.response();
-    }
-
-    /// Restages immutable response content after activation without changing Core State.
-    pub fn stageResponse(self: *Core, response_bytes: []const u8, response_ref: u64) !void {
-        try self.requireActive();
-        if (response_bytes.len == 0) return error.EmptyModelResponse;
-        if (response_bytes.len > self.response_scratch.len) return error.ResponseCapacityExceeded;
-        if (self.state.response_ref != response_ref or response_ref == 0) {
-            return error.ResponseIdentityMismatch;
-        }
-        const parsed = model_protocol.parse(response_bytes);
-        const expected = try self.response();
-        if (parsed.disposition != expected.disposition or
-            parsed.failure != expected.failure or
-            parsed.tool != expected.tool or
-            parsed.text_offset != expected.text.offset or
-            parsed.text_length != expected.text.length or
-            parsed.arguments_offset != expected.arguments.offset or
-            parsed.arguments_length != expected.arguments.length)
-        {
-            return error.ResponseContentMismatch;
-        }
-        @memcpy(self.response_scratch[0..response_bytes.len], response_bytes);
-        self.staged_response_length = @intCast(response_bytes.len);
-    }
-
-    pub fn copyResponseWindow(
-        self: *const Core,
-        window: ContentWindow,
-        out: []u8,
-    ) ![]const u8 {
-        try self.requireActive();
-        if (window.length == 0) return "";
-        const start: usize = window.offset;
-        const length: usize = window.length;
-        if (length > out.len) return error.ResponseWindowCapacityExceeded;
-        if (start > self.staged_response_length or
-            length > self.staged_response_length - start)
-        {
-            return error.ResponseWindowUnavailable;
-        }
-        @memcpy(out[0..length], self.response_scratch[start..][0..length]);
-        return out[0..length];
     }
 
     pub fn commitFinalAnswer(self: *Core, entry_id: u64) !void {
@@ -465,10 +426,8 @@ comptime {
     std.debug.assert(@sizeOf(ActivationSlot) == slot_size);
     std.debug.assert(@alignOf(ActivationSlot) == slot_alignment);
     std.debug.assert(@offsetOf(ActivationSlot, "parser_scratch") == @sizeOf(State));
-    std.debug.assert(@offsetOf(ActivationSlot, "response_scratch") ==
-        @sizeOf(State) + parser_scratch_size);
     std.debug.assert(@offsetOf(ActivationSlot, "transition_scratch") ==
-        @sizeOf(State) + parser_scratch_size + response_scratch_size);
+        @sizeOf(State) + parser_scratch_size);
     assertNoAllocatorParameter(Core.initialize);
     assertNoAllocatorParameter(Core.activate);
     assertNoAllocatorParameter(Core.deliver);
@@ -476,10 +435,7 @@ comptime {
     assertNoAllocatorParameter(Core.submitOperation);
     assertNoAllocatorParameter(Core.beginModelOperation);
     assertNoAllocatorParameter(Core.acceptOperation);
-    assertNoAllocatorParameter(Core.completeOperation);
-    assertNoAllocatorParameter(Core.interpretModelResponse);
-    assertNoAllocatorParameter(Core.stageResponse);
-    assertNoAllocatorParameter(Core.copyResponseWindow);
+    assertNoAllocatorParameter(Core.applyModelResponse);
     assertNoAllocatorParameter(Core.commitFinalAnswer);
     assertNoAllocatorParameter(Core.commitToolResult);
     assertNoAllocatorParameter(Core.suspendInto);
@@ -586,7 +542,7 @@ test "failed activation leaves no prior slot bytes reachable" {
     for (std.mem.asBytes(&slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
 
-test "capacity and stale generation rejections preserve prior Core State" {
+test "oversized admission preserves accepted operation state" {
     var slot: ActivationSlot = undefined;
     var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
     try core.startTask(1);
@@ -596,17 +552,60 @@ test "capacity and stale generation rejections preserve prior Core State" {
         core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation + 1 }),
     );
     try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
-    try core.completeOperation(
-        .{ .id = operation_value.id, .generation = operation_value.generation },
-        99,
-    );
     const before = try core.operation();
-    var oversized: [response_scratch_size + 1]u8 = @splat(1);
+    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    var validation: model_protocol.ValidationScratch = undefined;
+    const encoded = try model_protocol.encodeText(&response_buffer, "valid");
+    const admitted = model_protocol.admit(&validation, encoded);
+    var oversized = admitted.admission;
+    oversized.byte_length = model_protocol.max_response_size + 1;
     try std.testing.expectError(
         error.ResponseCapacityExceeded,
-        core.interpretModelResponse(&oversized, 99),
+        core.applyModelResponse(
+            .{ .id = operation_value.id, .generation = operation_value.generation },
+            oversized,
+            99,
+            binding.hash(binding.Result, encoded),
+        ),
     );
     try std.testing.expectEqualDeep(before, try core.operation());
+
+    try std.testing.expectError(
+        error.InvalidModelResponseEvidence,
+        core.applyModelResponse(
+            .{ .id = operation_value.id, .generation = operation_value.generation },
+            admitted.admission,
+            99,
+            binding.hash(binding.Result, "substituted"),
+        ),
+    );
+    try std.testing.expectEqualDeep(before, try core.operation());
+}
+
+test "responses retain only validated metadata and durable content windows" {
+    var slot: ActivationSlot = undefined;
+    var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
+    defer core.abandon();
+    try core.startTask(1);
+    const operation = try core.beginModelOperation(2, 1);
+    const identity: OperationIdentity = .{ .id = operation.id, .generation = operation.generation };
+    try core.acceptOperation(identity);
+
+    var value: [model_contract.max_patch_input_bytes]u8 = @splat(0x01);
+    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+    var validation: model_protocol.ValidationScratch = undefined;
+    const arguments = try model_contract.encodeJson(&arguments_buffer, .{ .patch = &value });
+    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    const response = try model_protocol.encodeTool(&response_buffer, model_contract.apply_patch_key, arguments);
+    try std.testing.expect(response.len > model_protocol.max_resident_response_size);
+    const parsed = try core.applyModelResponse(
+        identity,
+        model_protocol.admit(&validation, response).admission,
+        3,
+        binding.hash(binding.Result, response),
+    );
+    try std.testing.expectEqual(@as(u32, @intCast(arguments.len)), parsed.arguments.length);
+    try std.testing.expectEqual(@as(u64, 3), parsed.content_ref);
 }
 
 test "complete slot lifecycle is compiler checked to expose no allocator seam" {
@@ -615,20 +614,21 @@ test "complete slot lifecycle is compiler checked to expose no allocator seam" {
     try core.startTask(1);
     const operation_value = try core.beginModelOperation(2, 1);
     try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
-    try core.completeOperation(
-        .{ .id = operation_value.id, .generation = operation_value.generation },
-        3,
-    );
     var response_bytes: [model_protocol.max_response_size]u8 = undefined;
-    const response = try model_protocol.encodeText(&response_bytes, .complete, "done");
-    _ = try core.interpretModelResponse(response, 3);
+    var validation: model_protocol.ValidationScratch = undefined;
+    const response = try model_protocol.encodeText(&response_bytes, "done");
+    _ = try core.applyModelResponse(
+        .{ .id = operation_value.id, .generation = operation_value.generation },
+        model_protocol.admit(&validation, response).admission,
+        3,
+        binding.hash(binding.Result, response),
+    );
     var encoded: [core_state.encoded_size]u8 = undefined;
     try core.suspendInto(&encoded);
 
     var reused_slot: ActivationSlot = undefined;
     @memset(std.mem.asBytes(&reused_slot), 0xff);
     var restored = try Core.activate(&reused_slot, &encoded);
-    try restored.stageResponse(response, 3);
     try restored.commitFinalAnswer(2);
     try restored.suspendInto(&encoded);
 }
@@ -659,7 +659,7 @@ test "fixed slot pool returns closed capacity and scrubs before reuse" {
 
 test "the filler-free Activation Slot and widened transaction scratch stay bounded" {
     try std.testing.expectEqual(
-        @sizeOf(State) + parser_scratch_size + response_scratch_size + transition_scratch_size,
+        @sizeOf(State) + parser_scratch_size + transition_scratch_size,
         @sizeOf(ActivationSlot),
     );
     try std.testing.expect(@sizeOf(ActivationSlot) <= slot_ceiling);

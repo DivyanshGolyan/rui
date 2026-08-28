@@ -1,12 +1,15 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const blob_store = @import("blob_store.zig");
+const conversation = @import("conversation.zig");
+const model_contract = @import("model_contract.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const core_state = @import("core_state.zig");
 const host_store = @import("host_store.zig");
 const session_transition = @import("session_transition.zig");
 
 pub const workspace_path_capacity = 1024;
+pub const model_name_capacity = host_store.max_model_bytes;
 const lock_path = "owner.lock";
 const blobs_path = "blobs";
 
@@ -415,6 +418,7 @@ const ResidentState = struct {
     semantic: SemanticIndex = .{},
     inbox: InboxIndex = .{},
     conversation_head_id: u64 = 0,
+    conversation_head_kind: ?EntryKind = null,
 
     fn applyingLedger(
         self: ResidentState,
@@ -442,7 +446,19 @@ const ResidentState = struct {
                 {
                     return error.ConversationLedgerGap;
                 }
+                if (next.conversation_head_kind == null) {
+                    if (advanced.entry_id != 1 or advanced.parent_id != 0 or
+                        advanced.kind != .user_text) return error.InvalidConversationGrammar;
+                } else {
+                    const parent_kind = next.conversation_head_kind.?;
+                    if ((parent_kind == .tool_call) != (advanced.kind == .tool_result) or
+                        (advanced.kind == .tool_call and parent_kind == .tool_call))
+                    {
+                        return error.InvalidConversationGrammar;
+                    }
+                }
                 next.conversation_head_id = advanced.entry_id;
+                next.conversation_head_kind = advanced.kind;
             },
             .task_admitted,
             .operation_submitted,
@@ -548,6 +564,10 @@ pub const BlobReader = struct {
         return self.reader.meta.length;
     }
 
+    pub fn digest(self: *const BlobReader) binding.Blob {
+        return self.reader.meta.digest;
+    }
+
     pub fn readWindow(self: *BlobReader, offset: u64, out: []u8) ![]const u8 {
         if (!self.open) return error.BlobReaderClosed;
         try self.session.ensureUsable();
@@ -561,6 +581,45 @@ pub const BlobReader = struct {
         self.open = false;
     }
 };
+
+fn readExactConversationWindow(reader: *BlobReader, offset: u64, out: []u8) !void {
+    if ((try reader.readWindow(offset, out)).len != out.len) return error.InvalidConversationContent;
+}
+
+fn validateUtf8ConversationWindows(reader: *BlobReader, start: u64, length: u64) !void {
+    var window: [4096]u8 = undefined;
+    var sequence: [4]u8 = undefined;
+    var sequence_length: u3 = 0;
+    var sequence_size: u3 = 0;
+    var consumed: u64 = 0;
+    while (consumed < length) {
+        const wanted: usize = @intCast(@min(length - consumed, window.len));
+        const bytes = try reader.readWindow(start + consumed, window[0..wanted]);
+        if (bytes.len != wanted) return error.InvalidConversationContent;
+        for (bytes) |byte| {
+            if (sequence_length == 0) {
+                const size = std.unicode.utf8ByteSequenceLength(byte) catch
+                    return error.InvalidConversationContent;
+                if (size == 1) continue;
+                sequence[0] = byte;
+                sequence_length = 1;
+                sequence_size = @intCast(size);
+            } else {
+                sequence[sequence_length] = byte;
+                sequence_length += 1;
+                if (sequence_length == sequence_size) {
+                    if (!std.unicode.utf8ValidateSlice(sequence[0..sequence_size])) {
+                        return error.InvalidConversationContent;
+                    }
+                    sequence_length = 0;
+                    sequence_size = 0;
+                }
+            }
+        }
+        consumed += bytes.len;
+    }
+    if (sequence_length != 0) return error.InvalidConversationContent;
+}
 
 pub const Session = struct {
     io: std.Io,
@@ -577,6 +636,8 @@ pub const Session = struct {
     recovery: Recovery = .ready,
     workspace_path: [workspace_path_capacity]u8 = undefined,
     workspace_path_length: u16,
+    model_name: [model_name_capacity]u8 = undefined,
+    model_name_length: u8,
     open: bool = true,
     failed: bool = false,
 
@@ -611,7 +672,10 @@ pub const Session = struct {
     ) !Session {
         try config.identities.validate();
         if (config.workspace_path.len == 0 or config.workspace_path.len > workspace_path_capacity or
-            config.model.len == 0 or config.task.len == 0)
+            config.model.len == 0 or config.model.len > model_name_capacity or
+            !std.unicode.utf8ValidateSlice(config.model) or
+            config.task.len == 0 or config.task.len > conversation.max_result_content_size or
+            !std.unicode.utf8ValidateSlice(config.task))
         {
             return error.InvalidSessionMetadata;
         }
@@ -665,7 +729,7 @@ pub const Session = struct {
                 .agent = agent,
                 .entry_id = 1,
                 .parent_id = 0,
-                .kind = .user,
+                .kind = .user_text,
                 .content_ref = config.identities.task_id,
             },
         );
@@ -681,8 +745,10 @@ pub const Session = struct {
             .branch_id = config.identities.branch_id,
             .ownership_epoch = 1,
             .workspace_path_length = @intCast(canonical_workspace.len),
+            .model_name_length = @intCast(config.model.len),
         };
         @memcpy(created.workspace_path[0..canonical_workspace.len], canonical_workspace);
+        @memcpy(created.model_name[0..config.model.len], config.model);
         created.resident = try created.resident.applyingLedger(initial, created.agent_id, created.ownership_epoch);
 
         try storage.createSessionWithMetadata(.{
@@ -750,9 +816,11 @@ pub const Session = struct {
             .branch_id = stored.identities.branch_id,
             .ownership_epoch = stored.ownership_epoch,
             .workspace_path_length = stored.workspace_path_length,
+            .model_name_length = stored.model_length,
             .recovery = if (recovery_complete) .ready else .pending,
         };
         @memcpy(session.workspace_path[0..stored.workspace_path_length], stored.workspacePath());
+        @memcpy(session.model_name[0..stored.model_length], stored.modelName());
         return session;
     }
 
@@ -762,6 +830,10 @@ pub const Session = struct {
 
     pub fn workspacePath(self: *const Session) []const u8 {
         return self.workspace_path[0..self.workspace_path_length];
+    }
+
+    pub fn modelName(self: *const Session) []const u8 {
+        return self.model_name[0..self.model_name_length];
     }
 
     pub fn recoveryIsEmpty(self: *Session) !bool {
@@ -840,7 +912,10 @@ pub const Session = struct {
         return entry;
     }
 
-    fn validatePreparedConversationEntry(self: *Session, fact: session_transition.Fact) !void {
+    fn validatePreparedConversationEntry(
+        self: *Session,
+        fact: session_transition.Fact,
+    ) !void {
         const advanced = fact.conversation_advanced;
         const conversation_head = self.resident.conversation_head_id;
         if (advanced.entry_id != conversation_head + 1) return error.ConversationLedgerGap;
@@ -852,9 +927,13 @@ pub const Session = struct {
         {
             return error.ConversationLedgerMismatch;
         }
+        try self.validateConversationBlob(entry.kind, entry.content_ref, entry.parent_id);
     }
 
-    fn verifyConversationEntry(self: *Session, advanced: session_transition.ConversationRecord) !void {
+    fn verifyConversationEntry(
+        self: *Session,
+        advanced: session_transition.ConversationRecord,
+    ) !void {
         const entry = try self.loadEntry(advanced.entry_id);
         if (entry.entry_id != advanced.entry_id or entry.sequence != advanced.entry_id or
             entry.parent_id != advanced.parent_id or entry.kind != advanced.kind or
@@ -863,6 +942,70 @@ pub const Session = struct {
             entry.session_id != self.session_id or entry.task_id != self.task_id)
         {
             return error.ConversationLedgerMismatch;
+        }
+        try self.validateConversationBlob(entry.kind, entry.content_ref, entry.parent_id);
+    }
+
+    fn validateConversationBlob(
+        self: *Session,
+        kind: EntryKind,
+        content_ref: u64,
+        parent_id: u64,
+    ) !void {
+        var reader = try self.openBlob(content_ref);
+        defer reader.close();
+        const maximum: usize = switch (kind) {
+            .tool_call => conversation.call_header_size + model_contract.max_tool_key_size +
+                model_contract.max_tool_arguments_envelope_size,
+            .tool_result => conversation.result_header_size + conversation.max_result_content_size,
+            .user_text, .assistant_text, .context_checkpoint => conversation.max_result_content_size,
+        };
+        if (reader.length() == 0 or reader.length() > maximum) return error.InvalidConversationContent;
+        switch (kind) {
+            .tool_call => {
+                var header_bytes: [conversation.call_header_size]u8 = undefined;
+                try readExactConversationWindow(&reader, 0, &header_bytes);
+                const header = conversation.decodeToolCallHeader(&header_bytes, reader.length()) catch
+                    return error.InvalidConversationContent;
+                var key: [model_contract.max_tool_key_size]u8 = undefined;
+                try readExactConversationWindow(
+                    &reader,
+                    conversation.call_header_size,
+                    key[0..header.key_length],
+                );
+                model_contract.validateToolKey(key[0..header.key_length]) catch
+                    return error.InvalidConversationContent;
+                var hasher = binding.Hasher(binding.StrictToolJsonV1).init();
+                var arguments_offset: u64 = conversation.call_header_size + header.key_length;
+                var remaining: u64 = header.arguments_length;
+                var window: [4096]u8 = undefined;
+                while (remaining != 0) {
+                    const wanted: usize = @intCast(@min(remaining, window.len));
+                    const bytes = try reader.readWindow(arguments_offset, window[0..wanted]);
+                    if (bytes.len != wanted) return error.InvalidConversationContent;
+                    hasher.update(bytes);
+                    arguments_offset += bytes.len;
+                    remaining -= bytes.len;
+                }
+                if (!binding.eql(
+                    binding.StrictToolJsonV1,
+                    hasher.final(),
+                    header.arguments_digest,
+                )) return error.InvalidConversationContent;
+            },
+            .tool_result => {
+                var header_bytes: [conversation.result_header_size]u8 = undefined;
+                try readExactConversationWindow(&reader, 0, &header_bytes);
+                const result = conversation.decodeToolResultHeader(&header_bytes, reader.length()) catch
+                    return error.InvalidConversationContent;
+                if (result.parent_id != parent_id) return error.InvalidConversationParent;
+                try validateUtf8ConversationWindows(
+                    &reader,
+                    conversation.result_header_size,
+                    result.content_length,
+                );
+            },
+            .user_text, .assistant_text, .context_checkpoint => try validateUtf8ConversationWindows(&reader, 0, reader.length()),
         }
     }
 
@@ -956,7 +1099,9 @@ pub const Session = struct {
         var blobs = try self.dir.openDir(self.io, blobs_path, .{});
         defer blobs.close(self.io);
         for (facts) |fact| {
-            if (fact.kind() == .conversation_advanced) try self.validatePreparedConversationEntry(fact);
+            if (fact.kind() == .conversation_advanced) {
+                try self.validatePreparedConversationEntry(fact);
+            }
             try self.validatePreparedBlobReferences(blobs, fact);
         }
 
@@ -1008,7 +1153,9 @@ pub const Session = struct {
             .attempt_admitted => |value| try validateBlob(blobs, self.io, value.descriptor_ref),
             .authorization => |value| try validateBlob(blobs, self.io, value.permission_ref),
             .result => |value| try validateBlob(blobs, self.io, value.result_ref),
-            .conversation_advanced => |value| try validateBlob(blobs, self.io, value.content_ref),
+            // validatePreparedConversationEntry opens the Conversation blob,
+            // verifies its SHA-256 envelope, and validates its semantics.
+            .conversation_advanced => {},
             .outcome => |value| try validateBlob(blobs, self.io, value.content_ref),
             .result_applied => |value| try validateBlob(blobs, self.io, value.result_ref),
             .approval_required => |value| {
@@ -1441,6 +1588,59 @@ fn initTestGitWorktree(dir: std.Io.Dir, io: std.Io) !void {
     try head.writePositionalAll(io, "ref: refs/heads/main\n", 0);
 }
 
+test "Session creation rejects a non-UTF-8 model identity" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var config = testConfig(layout.workspacePath(), 15);
+    config.model = "fixture:\xff";
+    try std.testing.expectError(
+        error.InvalidSessionMetadata,
+        Session.createExact(layout.sessions, &layout.storage, io, config),
+    );
+}
+
+test "Session creation enforces recoverable root task content" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+
+    var exact_task: [conversation.max_result_content_size]u8 = @splat('x');
+    var exact = testConfig(layout.workspacePath(), 20);
+    exact.task = &exact_task;
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, exact);
+    created.close();
+    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 20);
+    defer restored.session.close();
+    const recovered = try restored.session.recoverSemanticWindow(8);
+    try std.testing.expect(!recovered.more);
+    try std.testing.expectEqual(@as(u64, 1), restored.session.entryCount());
+
+    var oversized_task: [conversation.max_result_content_size + 1]u8 = @splat('x');
+    var oversized = testConfig(layout.workspacePath(), 30);
+    oversized.task = &oversized_task;
+    try std.testing.expectError(
+        error.InvalidSessionMetadata,
+        Session.createExact(layout.sessions, &layout.storage, io, oversized),
+    );
+    var name_buffer: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.FileNotFound,
+        layout.sessions.access(io, sessionName(30, &name_buffer), .{}),
+    );
+
+    var invalid_utf8 = testConfig(layout.workspacePath(), 40);
+    invalid_utf8.task = "\xff";
+    try std.testing.expectError(
+        error.InvalidSessionMetadata,
+        Session.createExact(layout.sessions, &layout.storage, io, invalid_utf8),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        layout.sessions.access(io, sessionName(40, &name_buffer), .{}),
+    );
+}
+
 const TestLayout = struct {
     tmp: std.testing.TmpDir,
     storage: host_store.StorageOwner,
@@ -1612,7 +1812,7 @@ test "create and exact resume preserve distinct identities and one owner" {
     try std.testing.expectEqualDeep(live_resident, restored.session.resident);
 
     const root = try restored.session.readEntry(1);
-    try std.testing.expectEqual(EntryKind.user, root.kind);
+    try std.testing.expectEqual(EntryKind.user_text, root.kind);
     try std.testing.expectEqual(@as(u64, 0), root.parent_id);
     try std.testing.expectEqual(restored.session.task_id, root.content_ref);
     var task_buffer: [64]u8 = undefined;
@@ -2282,7 +2482,9 @@ test "late evidence for a prior Operation audits through durable history" {
             session_id,
         )).session;
         defer restored.close();
-        const ledger_recovery = try restored.recoverSemanticWindow(@intCast(sequence_before_late));
+        const ledger_recovery = try restored.recoverSemanticWindow(
+            @intCast(sequence_before_late),
+        );
         try std.testing.expectEqual(@as(u8, @intCast(sequence_before_late)), ledger_recovery.processed);
         try std.testing.expect(ledger_recovery.more);
         const first_history_window = try restored.recoverSemanticWindow(2);
@@ -2624,7 +2826,7 @@ test "conversation advances only after its Ledger fact commits" {
     var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 20));
     defer created.close();
     try created.storeBlob(900, "The test is fixed.");
-    const assistant = try created.appendConversation(.assistant, 900, null);
+    const assistant = try created.appendConversation(.assistant_text, 900, null);
 
     try std.testing.expectEqual(@as(u64, 2), assistant.entry_id);
     try std.testing.expectEqual(@as(u64, 1), assistant.parent_id);
@@ -2652,6 +2854,138 @@ test "conversation advances only after its Ledger fact commits" {
     );
 }
 
+test "prepared Conversation content is validated at commit" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 35));
+    defer created.close();
+    try created.storeBlob(900, &.{ 0xff, 0xfe });
+    const assistant = try created.appendConversation(.assistant_text, 900, null);
+
+    try std.testing.expectError(
+        error.InvalidConversationContent,
+        created.commitSemantic(&.{session_transition.conversationAdvanced(.{
+            .agent = .{
+                .agent_id = created.agent_id,
+                .agent_generation = 1,
+                .ownership_epoch = created.ownership_epoch,
+            },
+            .entry_id = assistant.entry_id,
+            .parent_id = assistant.parent_id,
+            .kind = assistant.kind,
+            .content_ref = assistant.content_ref,
+        })}, null),
+    );
+    try std.testing.expectEqual(@as(u64, 1), created.activeLeafId());
+}
+
+test "conversation grammar rejects orphaned and unpaired tool entries during recovery" {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 1,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    var root: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    root.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = agent,
+        .entry_id = 1,
+        .parent_id = 0,
+        .kind = .user_text,
+        .content_ref = 10,
+    });
+    const resident = try (ResidentState{}).applyingLedger(root, 1, 1);
+
+    var orphan: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    orphan.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = agent,
+        .entry_id = 2,
+        .parent_id = 1,
+        .kind = .tool_result,
+        .content_ref = 11,
+    });
+    try std.testing.expectError(error.InvalidConversationGrammar, resident.applyingLedger(orphan, 1, 1));
+
+    var call: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    call.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = agent,
+        .entry_id = 2,
+        .parent_id = 1,
+        .kind = .tool_call,
+        .content_ref = 12,
+    });
+    const awaiting_result = try resident.applyingLedger(call, 1, 1);
+    var non_result: session_transition.Transaction = .{ .sequence = 3, .fact_count = 1 };
+    non_result.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = agent,
+        .entry_id = 3,
+        .parent_id = 2,
+        .kind = .assistant_text,
+        .content_ref = 13,
+    });
+    try std.testing.expectError(
+        error.InvalidConversationGrammar,
+        awaiting_result.applyingLedger(non_result, 1, 1),
+    );
+}
+
+test "Conversation UTF-8 validation carries split sequences across bounded windows" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 25));
+    defer created.close();
+    var content: [4098]u8 = @splat('a');
+    @memcpy(content[4095..], "€");
+    try created.storeBlob(990, &content);
+    var valid = try created.openBlob(990);
+    defer valid.close();
+    try validateUtf8ConversationWindows(&valid, 0, valid.length());
+
+    content[4096] = 'x';
+    try created.storeBlob(991, &content);
+    var invalid = try created.openBlob(991);
+    defer invalid.close();
+    try std.testing.expectError(
+        error.InvalidConversationContent,
+        validateUtf8ConversationWindows(&invalid, 0, invalid.length()),
+    );
+}
+
+test "tool-call recovery trusts admitted exact-byte identity without reparsing JSON" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(
+        layout.sessions,
+        &layout.storage,
+        io,
+        testConfig(layout.workspacePath(), 21),
+    );
+    defer created.close();
+
+    const key = "fixture.inspect.v1";
+    const admitted_arguments = "{ \"command\" : \"echo exact bytes\", \"timeout_ms\" : 1000 }";
+    var call: [conversation.call_header_size + key.len + admitted_arguments.len]u8 = undefined;
+    _ = try conversation.encodeToolCallHeader(
+        &call,
+        key.len,
+        admitted_arguments.len,
+        model_contract.strictToolJsonDigest(admitted_arguments),
+    );
+    @memcpy(call[conversation.call_header_size..][0..key.len], key);
+    @memcpy(call[conversation.call_header_size + key.len ..], admitted_arguments);
+    try created.storeBlob(901, &call);
+    try created.validateConversationBlob(.tool_call, 901, 1);
+
+    call[0] = 0;
+    try created.storeBlob(902, &call);
+    try std.testing.expectError(
+        error.InvalidConversationContent,
+        created.validateConversationBlob(.tool_call, 902, 1),
+    );
+}
+
 const AppendCrash = struct {
     fn reached(_: *anyopaque, boundary: AppendBoundary) anyerror!void {
         if (boundary == .after_entry_sync) return error.InjectedCrash;
@@ -2664,9 +2998,10 @@ test "resume leaves an uncommitted conversation record invisible" {
     defer layout.deinit(io);
     var marker: u8 = 0;
     var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 30));
+    try created.storeBlob(901, "uncommitted assistant text");
     try std.testing.expectError(
         error.InjectedCrash,
-        created.appendConversation(.tool_result, 901, .{
+        created.appendConversation(.assistant_text, 901, .{
             .context = &marker,
             .reached = AppendCrash.reached,
         }),

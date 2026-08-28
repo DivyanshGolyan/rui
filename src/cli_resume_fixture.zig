@@ -1,6 +1,6 @@
 const std = @import("std");
+const deterministic_provider = @import("deterministic_provider.zig");
 const harness = @import("harness.zig");
-const model_operation = @import("model_operation.zig");
 const session_store = @import("session.zig");
 
 const task = "Resume this interrupted fixture Session.";
@@ -11,7 +11,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 2) return error.InvalidArguments;
     const runtime = try harness.HostRuntime.open(init.io, allocator, args[1], .{});
     defer runtime.close() catch unreachable;
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = task,
         .final_answer = "must be retried",
     };

@@ -3,10 +3,13 @@ const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
 const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
+const conversation = @import("conversation.zig");
+const deterministic_provider = @import("deterministic_provider.zig");
 const host_runtime = @import("host_runtime.zig");
 const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
 const model_operation = @import("model_operation.zig");
+const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
@@ -185,7 +188,6 @@ const HarnessState = struct {
     session: ?session_store.Session = null,
     session_projection_pending: bool = false,
     final_ref: u64 = 0,
-    core_state_buffer: [core_state.encoded_size]u8 = undefined,
     projection_generation: u64 = 0,
     awaiting_approval: ?lifecycle.ApprovalRequired = null,
     settling_control: ?lifecycle.Control = null,
@@ -244,7 +246,7 @@ const HarnessState = struct {
                 owner.recovery_pending = true;
                 const session = &owner.session.?;
                 if (try session.recoveryIsEmpty()) {
-                    _ = try session.recoverSemanticWindow(1);
+                    _ = try lease.recoverSemanticWindow(session, 1);
                     owner.recovery_pending = false;
                     owner.setState(.ready);
                 }
@@ -283,7 +285,10 @@ const HarnessState = struct {
         self.projection_generation += 1;
         if (self.recovery_pending) {
             const session = &self.session.?;
-            const recovery = session.recoverSemanticWindow(self.config.recovery_quantum) catch |err| {
+            const recovery = self.lease.recoverSemanticWindow(
+                session,
+                self.config.recovery_quantum,
+            ) catch |err| {
                 self.setState(.unavailable);
                 return err;
             };
@@ -347,7 +352,6 @@ const HarnessState = struct {
                     self.lease.execution,
                     self.lease.allocator,
                     session,
-                    &self.core_state_buffer,
                     expected,
                     decision.allow,
                     provider,
@@ -368,7 +372,6 @@ const HarnessState = struct {
                     self.lease.execution,
                     self.lease.allocator,
                     session,
-                    &self.core_state_buffer,
                     completion,
                     self.runtimeConfig(),
                     self.config.provider,
@@ -397,7 +400,6 @@ const HarnessState = struct {
             self.final_ref = lifecycle.advanceCreated(
                 self.lease.execution,
                 session,
-                &self.core_state_buffer,
                 self.runtimeConfig(),
                 self.config.provider orelse return error.SessionNeedsModel,
             ) catch |err| return self.classifyLifecycleError(err, progress);
@@ -413,7 +415,6 @@ const HarnessState = struct {
                     self.final_ref = lifecycle.advanceCreated(
                         self.lease.execution,
                         session,
-                        &self.core_state_buffer,
                         self.runtimeConfig(),
                         self.config.provider orelse return error.SessionNeedsModel,
                     ) catch |err| return self.classifyLifecycleError(err, progress);
@@ -428,7 +429,6 @@ const HarnessState = struct {
                 self.lease.execution,
                 self.lease.allocator,
                 session,
-                &self.core_state_buffer,
                 self.runtimeConfig(),
                 self.config.provider,
             ) catch |err| return self.classifyLifecycleError(err, progress);
@@ -556,7 +556,6 @@ const HarnessState = struct {
             self.lease.execution,
             self.lease.allocator,
             session,
-            &self.core_state_buffer,
             approval,
             false,
             null,
@@ -583,7 +582,6 @@ const HarnessState = struct {
             self.lease.execution,
             self.lease.allocator,
             session,
-            &self.core_state_buffer,
             self.runtimeConfig(),
             null,
         ) catch |err| switch (err) {
@@ -594,7 +592,7 @@ const HarnessState = struct {
             error.BashPossiblyExecuted,
             => {},
             else => {
-                if (!isModelFailure(err)) {
+                if (!isTerminalLifecycleFailure(err)) {
                     self.setState(.unavailable);
                     return err;
                 }
@@ -650,7 +648,7 @@ const HarnessState = struct {
             },
             else => {},
         }
-        if (isModelFailure(err)) {
+        if (isTerminalLifecycleFailure(err)) {
             self.setState(.failed);
             result.state = .failed;
             result.projections[0] = self.failureProjection();
@@ -696,18 +694,9 @@ const HarnessState = struct {
         return result;
     }
 
-    fn isModelFailure(err: anyerror) bool {
-        return switch (err) {
-            error.ModelResponseTruncated,
-            error.ModelResponseAborted,
-            error.ModelProviderFailed,
-            error.MalformedModelResponse,
-            error.EmptyModelResponse,
-            error.MultipleModelTools,
-            error.UnknownModelFailure,
-            => true,
-            else => false,
-        };
+    fn isTerminalLifecycleFailure(err: anyerror) bool {
+        return err == error.TerminalModelFailure or
+            err == error.InteractionRequestLayerRequired;
     }
 
     fn failureProjection(self: *HarnessState) Projection {
@@ -853,12 +842,16 @@ fn openTestRuntimeConfigured(
     );
 }
 
+test "Harness owner retains only live lifecycle state" {
+    try std.testing.expectEqual(@as(usize, 8_112), @sizeOf(HarnessState));
+}
+
 test "open retains no Activation Slot and offer transfers one bounded input" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
     defer runtime.close() catch unreachable;
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
@@ -895,7 +888,7 @@ test "Harness close is idempotent and releases one Runtime lease" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
@@ -917,8 +910,8 @@ test "Runtime close waits for every opaque Harness lease" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
-    var first_fixture: model_operation.Fixture = .{ .expected_task = "first", .final_answer = "done" };
-    var second_fixture: model_operation.Fixture = .{ .expected_task = "second", .final_answer = "done" };
+    var first_fixture: deterministic_provider.Fixture = .{ .expected_task = "first", .final_answer = "done" };
+    var second_fixture: deterministic_provider.Fixture = .{ .expected_task = "second", .final_answer = "done" };
     const first = try Harness.open(.{
         .runtime = runtime,
         .mode = .{ .create = .{
@@ -949,7 +942,7 @@ test "restore withholds projections until the configured recovery quantum reache
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
     defer runtime.close() catch unreachable;
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
@@ -1008,7 +1001,7 @@ test "restore publishes Session identity before reconciling Completion evidence"
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
     defer runtime.close() catch unreachable;
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
@@ -1079,7 +1072,7 @@ test "failed Host Store recovery makes the live Harness unavailable" {
     var read_fault: ReadFault = .{};
     const runtime = try openTestRuntimeConfigured(&tmp, .{ .fault = read_fault.hook() });
     defer runtime.close() catch unreachable;
-    var fixture: model_operation.Fixture = .{
+    var fixture: deterministic_provider.Fixture = .{
         .expected_task = "task",
         .final_answer = "done",
     };
@@ -1144,7 +1137,7 @@ test "shutdown denies Approval Required before closing" {
         .command = "printf forbidden",
         .timeout_ms = 5000,
     });
-    var fixture: model_operation.ToolFixture = .{
+    var fixture: deterministic_provider.ToolFixture = .{
         .expected_task = "task",
         .tool_arguments = call,
         .final_answer = "done",
@@ -1202,7 +1195,7 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
 
         fn dispatch(
             context: *anyopaque,
-            _: model_operation.RequestReader,
+            _: model_operation.RequestCursor,
             response: model_operation.ResponseWriter,
         ) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -1210,7 +1203,6 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
             var buffer: [64]u8 = undefined;
             const encoded = try model_protocol.encodeText(
                 &buffer,
-                .complete,
                 "done",
             );
             try response.append(encoded);
@@ -1257,7 +1249,7 @@ test "known provider failure is one durable terminal Result" {
 
         fn dispatch(
             context: *anyopaque,
-            _: model_operation.RequestReader,
+            _: model_operation.RequestCursor,
             response: model_operation.ResponseWriter,
         ) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -1265,7 +1257,6 @@ test "known provider failure is one durable terminal Result" {
             var buffer: [64]u8 = undefined;
             const encoded = try model_protocol.encodeText(
                 &buffer,
-                .complete,
                 "must not win",
             );
             try response.append(encoded);
@@ -1334,5 +1325,442 @@ test "known provider failure is one durable terminal Result" {
     _ = try restored.drive();
     const regenerated = try restored.drive();
     try std.testing.expectEqual(State.failed, regenerated.state);
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+}
+
+test "captured noncanonical tool call closes once after crash without redispatch" {
+    const exact_arguments = "{ \"timeout_ms\" : 1000, \"command\" : \"true\" }";
+    const ToolProvider = struct {
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var buffer: [model_protocol.max_response_size]u8 = undefined;
+            const encoded = try model_protocol.encodeTool(
+                &buffer,
+                "bash.v1",
+                exact_arguments,
+            );
+            try response.append(encoded);
+            try response.finish();
+        }
+    };
+    const CrashAfterCapture = struct {
+        armed: bool = true,
+
+        fn reached(context: *anyopaque, boundary: FaultBoundary) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.armed and boundary == .after_completion_inbox) {
+                self.armed = false;
+                return error.InjectedCrash;
+            }
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var provider: ToolProvider = .{};
+    var crash: CrashAfterCapture = .{};
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:captured-tool-replay",
+            .task = "task",
+            .provider = provider.provider(),
+            .fault = .{ .context = &crash, .reached = CrashAfterCapture.reached },
+        } },
+    });
+    _ = try owner.drive();
+    const session_id = harnessState(owner).session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    try std.testing.expectError(error.InjectedCrash, owner.drive());
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+    owner.close();
+
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .provider = provider.provider(),
+        } },
+    });
+    defer restored.close();
+    _ = try restored.drive();
+    const waiting = try restored.drive();
+    try std.testing.expectEqual(State.waiting, waiting.state);
+    try std.testing.expectEqual(ProjectionKind.approval_required, waiting.projections[0].kind);
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+
+    const session = &harnessState(restored).session.?;
+    const call_entry = try session.readEntry(session.activeLeafId());
+    try std.testing.expectEqual(session_store.EntryKind.tool_call, call_entry.kind);
+    var call_bytes: [
+        conversation.call_header_size + model_contract.max_tool_key_size +
+            model_contract.max_tool_arguments_envelope_size
+    ]u8 = undefined;
+    const encoded_call = try session.readBlob(call_entry.content_ref, 0, &call_bytes);
+    const call = try conversation.decodeToolCall(encoded_call);
+    try std.testing.expectEqualStrings("bash.v1", call.key);
+    try std.testing.expectEqualStrings(exact_arguments, call.arguments);
+}
+
+test "malformed captured output becomes one durable terminal failure" {
+    const MalformedProvider = struct {
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            try response.append("not a model response");
+            try response.finish();
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var provider: MalformedProvider = .{};
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:malformed-capture",
+            .task = "task",
+            .provider = provider.provider(),
+        } },
+    });
+    _ = try owner.drive();
+    const session_id = harnessState(owner).session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    _ = try owner.drive();
+    const failed = try owner.drive();
+    try std.testing.expectEqual(State.failed, failed.state);
+    var ignored: u8 = 0;
+    const ledger = try harnessState(owner).session.?.inspectSemantic(
+        &ignored,
+        struct {
+            fn ignore(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
+        }.ignore,
+    );
+    const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
+    try std.testing.expectEqual(model_protocol.Failure.malformed, state.response_failure);
+    owner.close();
+
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{ .session_id = session_id, .provider = provider.provider() } },
+    });
+    defer restored.close();
+    _ = try restored.drive();
+    const regenerated = try restored.drive();
+    try std.testing.expectEqual(State.failed, regenerated.state);
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+}
+
+test "typed durable model failures share one failed Harness projection" {
+    const Candidate = union(enum) {
+        failure: model_protocol.Failure,
+        unknown_tool,
+    };
+    const FailureProvider = struct {
+        candidate: Candidate,
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var buffer: [model_protocol.max_response_size]u8 = undefined;
+            const encoded = switch (self.candidate) {
+                .failure => |failure| try model_protocol.encodeFailure(&buffer, failure),
+                .unknown_tool => try model_protocol.encodeTool(
+                    &buffer,
+                    "fixture.unknown.v1",
+                    "{}",
+                ),
+            };
+            try response.append(encoded);
+            try response.finish();
+        }
+    };
+    const cases = [_]struct {
+        candidate: Candidate,
+        expected: model_protocol.Failure,
+    }{
+        .{ .candidate = .{ .failure = .truncated }, .expected = .truncated },
+        .{ .candidate = .{ .failure = .aborted }, .expected = .aborted },
+        .{ .candidate = .{ .failure = .provider_error }, .expected = .provider_error },
+        .{ .candidate = .{ .failure = .malformed }, .expected = .malformed },
+        .{ .candidate = .{ .failure = .empty }, .expected = .empty },
+        .{ .candidate = .{ .failure = .multiple_outputs }, .expected = .multiple_outputs },
+        .{ .candidate = .{ .failure = .oversized }, .expected = .oversized },
+        .{ .candidate = .unknown_tool, .expected = .unknown_tool },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    for (cases) |case| {
+        var provider: FailureProvider = .{ .candidate = case.candidate };
+        var owner = try Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .create = .{
+                .workspace_path = ".",
+                .model = "fixture:model-failure-classification",
+                .task = "task",
+                .provider = provider.provider(),
+            } },
+        });
+        _ = try owner.drive();
+        try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+        _ = try owner.drive();
+        const failed = try owner.drive();
+        try std.testing.expectEqual(State.failed, failed.state);
+        try std.testing.expectEqual(@as(u8, 1), failed.projection_count);
+        try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
+        try std.testing.expectEqual(@as(u8, 1), provider.calls);
+
+        var ignored: u8 = 0;
+        const ledger = try harnessState(owner).session.?.inspectSemantic(
+            &ignored,
+            struct {
+                fn ignore(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
+            }.ignore,
+        );
+        const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
+        try std.testing.expectEqual(case.expected, state.response_failure);
+        owner.close();
+    }
+}
+
+test "built-in argument rejection becomes one durable terminal failure" {
+    const ToolProvider = struct {
+        key: []const u8,
+        arguments: []const u8,
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var buffer: [model_protocol.max_response_size]u8 = undefined;
+            const encoded = try model_protocol.encodeTool(&buffer, self.key, self.arguments);
+            try response.append(encoded);
+            try response.finish();
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    const bash_command = try allocator.alloc(u8, model_contract.max_bash_command_bytes + 2);
+    defer allocator.free(bash_command);
+    for (0..bash_command.len / "é".len) |index| {
+        @memcpy(bash_command[index * "é".len ..][0.."é".len], "é");
+    }
+    const patch = try allocator.alloc(u8, model_contract.max_patch_input_bytes + 2);
+    defer allocator.free(patch);
+    for (0..patch.len / "é".len) |index| {
+        @memcpy(patch[index * "é".len ..][0.."é".len], "é");
+    }
+    const bash_buffer = try allocator.alloc(u8, model_contract.max_tool_arguments_envelope_size);
+    defer allocator.free(bash_buffer);
+    const patch_buffer = try allocator.alloc(u8, model_contract.max_tool_arguments_envelope_size);
+    defer allocator.free(patch_buffer);
+    const nul_buffer = try allocator.alloc(u8, model_contract.max_tool_arguments_envelope_size);
+    defer allocator.free(nul_buffer);
+    const nul_command = [_]u8{ 't', 'r', 'u', 'e', 0 };
+    const nul_arguments = try model_contract.encodeJson(nul_buffer, .{
+        .command = nul_command[0..],
+        .timeout_ms = bash_tool.max_timeout_ms,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, nul_arguments, "\\u0000") != null);
+    const cases = [_]struct { key: []const u8, arguments: []const u8 }{
+        .{
+            .key = model_contract.bash_key,
+            .arguments = try model_contract.encodeJson(bash_buffer, .{
+                .command = bash_command,
+                .timeout_ms = bash_tool.max_timeout_ms,
+            }),
+        },
+        .{
+            .key = model_contract.apply_patch_key,
+            .arguments = try model_contract.encodeJson(patch_buffer, .{ .patch = patch }),
+        },
+        .{
+            .key = model_contract.bash_key,
+            .arguments = nul_arguments,
+        },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    for (cases, 0..) |case, index| {
+        var provider: ToolProvider = .{ .key = case.key, .arguments = case.arguments };
+        var owner = try Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .create = .{
+                .workspace_path = ".",
+                .model = "fixture:built-in-byte-rejection",
+                .task = switch (index) {
+                    0 => "reject oversized Bash bytes",
+                    1 => "reject oversized patch bytes",
+                    else => "reject a Bash NUL byte",
+                },
+                .provider = provider.provider(),
+            } },
+        });
+        _ = try owner.drive();
+        const session_id = harnessState(owner).session.?.session_id;
+        try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+        _ = try owner.drive();
+        const failed = try owner.drive();
+        try std.testing.expectEqual(State.failed, failed.state);
+        var ignored: u8 = 0;
+        const ledger = try harnessState(owner).session.?.inspectSemantic(
+            &ignored,
+            struct {
+                fn apply(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
+            }.apply,
+        );
+        const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
+        try std.testing.expectEqual(model_protocol.Failure.malformed, state.response_failure);
+        try std.testing.expectEqual(@as(u64, 1), harnessState(owner).session.?.entryCount());
+        owner.close();
+
+        var restored = try Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .restore = .{ .session_id = session_id, .provider = provider.provider() } },
+        });
+        _ = try restored.drive();
+        const regenerated = try restored.drive();
+        try std.testing.expectEqual(State.failed, regenerated.state);
+        try std.testing.expectEqual(@as(u8, 1), provider.calls);
+        restored.close();
+    }
+}
+
+test "input request fails terminally until the durable interaction layer exists" {
+    const IgnoreFacts = struct {
+        fn apply(_: *anyopaque, _: session_transition.Fact) !void {}
+    };
+    const InputProvider = struct {
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.ResponseWriter,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var buffer: [model_protocol.max_response_size]u8 = undefined;
+            const encoded = try model_protocol.encodeInputText(&buffer, "Which migration should I use?");
+            try response.append(encoded);
+            try response.finish();
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var provider: InputProvider = .{};
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:input-request",
+            .task = "task",
+            .provider = provider.provider(),
+        } },
+    });
+    _ = try owner.drive();
+    const owner_state = harnessState(owner);
+    const session_id = owner_state.session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    const waiting = try owner.drive();
+    try std.testing.expectEqual(State.waiting, waiting.state);
+    const failed = try owner.drive();
+    try std.testing.expectEqual(State.failed, failed.state);
+    try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
+    var ignored: u8 = 0;
+    const ledger = try owner_state.session.?.inspectSemantic(&ignored, IgnoreFacts.apply);
+    const durable_core = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
+    try std.testing.expectEqual(core_state.TaskPhase.failed, durable_core.task_phase);
+    try std.testing.expectEqual(model_protocol.Disposition.input_request, durable_core.response_disposition);
+    try std.testing.expect(durable_core.response_ref != 0);
+    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_text);
+    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_tool_key);
+    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_arguments);
+    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    const response_bytes = try owner_state.session.?.readBlob(
+        durable_core.response_ref,
+        0,
+        &response_buffer,
+    );
+    var response_validation: model_protocol.ValidationScratch = undefined;
+    const decoded_response = try model_protocol.decode(&response_validation, response_bytes);
+    try std.testing.expectEqual(model_protocol.Disposition.input_request, decoded_response.disposition);
+    try std.testing.expectEqualStrings(
+        "Which migration should I use?",
+        response_bytes[decoded_response.text_offset..][0..decoded_response.text_length],
+    );
+    try std.testing.expectEqual(@as(u64, 1), owner_state.session.?.entryCount());
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+    owner.close();
+
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .provider = provider.provider(),
+        } },
+    });
+    defer restored.close();
+    _ = try restored.drive();
+    const regenerated = try restored.drive();
+    try std.testing.expectEqual(State.failed, regenerated.state);
+    try std.testing.expectEqual(@as(u64, 1), harnessState(restored).session.?.entryCount());
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }

@@ -27,7 +27,8 @@ decision, and no evaluator remains resident while a Workflow Run is Blocked on J
 Workflow code cannot observe physical Job completion order: V1 supports deterministic joins through
 `Promise.all` and `Promise.allSettled` and does not expose `Promise.race` or `Promise.any`.
 The target architecture separates compact, canonically encoded Core State from transient
-Activation Slot scratch. Core State is currently 160 bytes; authoritative semantic transactions
+Activation Slot scratch. Core State's encoded size is derived from `core_state.encoded_size` and is
+currently 176 bytes; authoritative semantic transactions
 carry it directly. Activation decodes that state into one Host-owned slot containing only named
 bounded scratch; V1 removes sizing filler and enforces a 32 KiB ceiling. Suspension scrubs the
 complete slot. A fixed Host-owned pool returns closed capacity instead of allocating a
@@ -56,6 +57,8 @@ evaluator instead of checkpointing JavaScript continuation state.
 [ADR-0015](docs/adr/0015-expose-a-protocol-independent-run-service.md) makes the durable Run Service
 the public semantic seam, separates User role from authority, and keeps the CLI and future industry
 protocols as adapters.
+[ADR-0016](docs/adr/0016-separate-captured-output-from-semantic-admission.md) keeps provider capture
+non-authoritative and shares bounded semantic-validation scratch independently of Active Capacity.
 
 The fixed-credit harness spike established a 1.5 KiB-bounded native owner with nonblocking task,
 completion, permission, cancellation, and shutdown admission; durable-before-apply ordering;
@@ -76,9 +79,10 @@ may intentionally use arbitrary workload memory; that usage is reported separate
 to preserve the harness budget. OnePage still bounds its own output capture and durable publication path.
 
 The first agent slice now performs one real durable model turn through the product CLI. A fixture
-provider validates the request reconstructed from the conversation, writes a complete response spool,
-and wakes a restored Core. Core alone classifies the response as a Final Answer, which is
-then committed as an immutable conversation entry and reproduced by exact Session resume.
+provider validates the request reconstructed from the conversation, writes complete Captured Model
+Output, and notifies a restored Harness owner. Harness-owned Semantic Admission classifies the output,
+and Core applies the admitted Final Answer. The answer is then committed as an immutable conversation
+entry and reproduced by exact Session resume.
 
 ```sh
 zig build fixture-answer -Doptimize=ReleaseSmall
@@ -121,7 +125,7 @@ Authority covers its exact operation and descriptor binding. An explicit invocat
 mode admits validated calls without creating the request; it does not bypass validation, durability,
 patch preimage checks, or recovery rules.
 
-The planned #32 model-facing representation is provider-neutral. Conversation records generic text,
+The model-facing representation is provider-neutral. Conversation records generic text,
 tool-call, tool-result, and checkpoint entries; each model Operation binds an immutable bounded Tool
 Catalog and stable Tool Keys. Provider adapters translate that house request at the edge. Harness then
 maps only the two admitted V1 keys to concrete Actions, so adding a provider does not change durable
@@ -180,8 +184,9 @@ zig build test -Doptimize=ReleaseSafe
 zig build native-core -Doptimize=ReleaseSafe
 ```
 
-`native-core` reports the current exact slot, compact Dormant Session state bytes, process RSS, and 32 randomized
-native invariant traces through canonical suspend and poisoned-slot restore.
+`native-core` reports the current exact slot, the two fixed Host scratch-stage resource ledgers, compact Dormant
+Session state bytes, process RSS, and 32 randomized native invariant traces through canonical suspend and
+poisoned-slot restore.
 
 See the spike notes for architecture, measurements, caveats, and next questions:
 
@@ -237,3 +242,4 @@ Architectural decisions:
 - [`docs/adr/0013-bound-orchestration-memory-not-workload-memory.md`](docs/adr/0013-bound-orchestration-memory-not-workload-memory.md)
 - [`docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md`](docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md)
 - [`docs/adr/0015-expose-a-protocol-independent-run-service.md`](docs/adr/0015-expose-a-protocol-independent-run-service.md)
+- [`docs/adr/0016-separate-captured-output-from-semantic-admission.md`](docs/adr/0016-separate-captured-output-from-semantic-admission.md)

@@ -1,36 +1,16 @@
 const std = @import("std");
+const binding = @import("binding.zig");
+const contract = @import("model_contract.zig");
 
-pub const max_response_size = 16 * 1024;
-pub const header_size = 8;
-pub const item_header_size = 8;
-pub const version: u8 = 1;
+pub const header_size = 24;
+pub const max_resident_response_size = 20 * 1024;
+pub const max_assistant_text_size = max_resident_response_size - header_size;
+pub const max_response_size = header_size + contract.max_tool_key_size +
+    contract.max_tool_arguments_envelope_size;
+pub const version: u16 = 3;
+const magic = "ONERSP3\x00";
 
-const magic: u32 = 0x5352504f;
-
-pub const Status = enum(u8) {
-    complete = 1,
-    length_truncated = 2,
-    aborted = 3,
-    provider_error = 4,
-};
-
-pub const ItemKind = enum(u8) {
-    text = 1,
-    tool_call = 2,
-};
-
-pub const Tool = enum(u8) {
-    none = 0,
-    bash = 1,
-    apply_patch = 2,
-};
-
-pub const Disposition = enum(u8) {
-    final_answer = 1,
-    tool_call = 2,
-    failure = 3,
-};
-
+pub const Disposition = enum(u8) { final_answer = 1, tool_call = 2, input_request = 3, failure = 4 };
 pub const Failure = enum(u8) {
     none = 0,
     truncated = 1,
@@ -38,7 +18,9 @@ pub const Failure = enum(u8) {
     provider_error = 3,
     malformed = 4,
     empty = 5,
-    multiple_tools = 6,
+    multiple_outputs = 6,
+    oversized = 7,
+    unknown_tool = 8,
 };
 
 pub const Parsed = struct {
@@ -46,188 +28,437 @@ pub const Parsed = struct {
     failure: Failure = .none,
     text_offset: u32 = 0,
     text_length: u32 = 0,
-    tool: Tool = .none,
+    tool_key_offset: u32 = 0,
+    tool_key_length: u32 = 0,
     arguments_offset: u32 = 0,
     arguments_length: u32 = 0,
+    arguments_digest: binding.StrictToolJsonV1 = .{ .bytes = @splat(0) },
+    input_shape: ?contract.InputShape = null,
+    option_count: u8 = 0,
+    options_offset: u32 = 0,
+    options_length: u32 = 0,
 };
 
-pub fn encodeText(out: []u8, status: Status, text: []const u8) ![]const u8 {
-    const total = if (text.len == 0) header_size else header_size + item_header_size + text.len;
-    if (total > out.len or total > max_response_size) return error.ResponseTooLarge;
-    @memset(out[0..total], 0);
-    write(u32, out, 0, magic);
-    out[4] = version;
-    out[5] = @intFromEnum(status);
-    out[6] = if (text.len == 0) 0 else 1;
-    if (text.len == 0) return out[0..total];
-    out[header_size] = @intFromEnum(ItemKind.text);
-    out[header_size + 1] = @intFromEnum(Tool.none);
-    write(u32, out, header_size + 4, @intCast(text.len));
-    @memcpy(out[header_size + item_header_size .. total], text);
-    return out[0..total];
-}
+/// Compact semantic authority copied out of reconstructible validation
+/// scratch before later preparation can wait. It contains no parsed JSON
+/// pointers or response bytes.
+pub const Admission = struct {
+    parsed_value: Parsed,
+    result_digest: binding.Result,
+    byte_length: u32,
 
-pub fn encodeTool(out: []u8, tool: Tool, arguments: []const u8) ![]const u8 {
-    if (tool == .none or arguments.len == 0) return error.InvalidToolCall;
-    const total = header_size + item_header_size + arguments.len;
-    if (total > out.len or total > max_response_size) return error.ResponseTooLarge;
-    @memset(out[0..total], 0);
-    write(u32, out, 0, magic);
-    out[4] = version;
-    out[5] = @intFromEnum(Status.complete);
-    out[6] = 1;
-    out[header_size] = @intFromEnum(ItemKind.tool_call);
-    out[header_size + 1] = @intFromEnum(tool);
-    write(u32, out, header_size + 4, @intCast(arguments.len));
-    @memcpy(out[header_size + item_header_size .. total], arguments);
-    return out[0..total];
-}
-
-pub fn parse(bytes: []const u8) Parsed {
-    if (bytes.len < header_size or bytes.len > max_response_size) return malformed();
-    if (read(u32, bytes, 0) != magic or bytes[4] != version or bytes[7] != 0) {
-        return malformed();
-    }
-    const status: Status = switch (bytes[5]) {
-        1 => .complete,
-        2 => .length_truncated,
-        3 => .aborted,
-        4 => .provider_error,
-        else => return malformed(),
-    };
-    switch (status) {
-        .length_truncated => return failure(.truncated),
-        .aborted => return failure(.aborted),
-        .provider_error => return failure(.provider_error),
-        .complete => {},
-    }
-
-    const item_count = bytes[6];
-    if (item_count == 0) return failure(.empty);
-    var cursor: usize = header_size;
-    var text_offset: u32 = 0;
-    var text_length: u32 = 0;
-    var text_count: u8 = 0;
-    var tool_count: u8 = 0;
-    var tool: Tool = .none;
-    var arguments_offset: u32 = 0;
-    var arguments_length: u32 = 0;
-    for (0..item_count) |_| {
-        if (cursor > bytes.len or item_header_size > bytes.len - cursor) return malformed();
-        const kind: ItemKind = switch (bytes[cursor]) {
-            1 => .text,
-            2 => .tool_call,
-            else => return malformed(),
-        };
-        const item_tool: Tool = switch (bytes[cursor + 1]) {
-            0 => .none,
-            1 => .bash,
-            2 => .apply_patch,
-            else => return malformed(),
-        };
-        if (read(u16, bytes, cursor + 2) != 0) return malformed();
-        const payload_length: usize = read(u32, bytes, cursor + 4);
-        cursor += item_header_size;
-        if (payload_length == 0 or payload_length > bytes.len - cursor) return malformed();
-        const payload = bytes[cursor .. cursor + payload_length];
-        switch (kind) {
-            .text => {
-                if (!utf8Valid(payload)) return malformed();
-                if (item_tool != .none or text_count != 0) return malformed();
-                text_count = 1;
-                text_offset = @intCast(cursor);
-                text_length = @intCast(payload_length);
-            },
-            .tool_call => {
-                if (item_tool == .none) return malformed();
-                tool_count += 1;
-                if (tool_count > 1) return failure(.multiple_tools);
-                tool = item_tool;
-                arguments_offset = @intCast(cursor);
-                arguments_length = @intCast(payload_length);
-            },
+    pub fn verify(self: Admission, expected_digest: binding.Result) !Parsed {
+        if (!binding.eql(binding.Result, self.result_digest, expected_digest)) {
+            return error.InvalidModelResponseEvidence;
         }
-        cursor += payload_length;
+        return self.parsed_value;
     }
-    if (cursor != bytes.len) return malformed();
-    if (tool_count == 1) return .{
-        .disposition = .tool_call,
-        .text_offset = text_offset,
-        .text_length = text_length,
-        .tool = tool,
-        .arguments_offset = arguments_offset,
-        .arguments_length = arguments_length,
+};
+
+pub const ValidationScratch = struct {
+    json: contract.StrictToolJsonScratch = .{},
+};
+
+/// Complete one-pass result. `tool_arguments` borrows the caller-owned
+/// validation scratch and is consumed before that scratch is released;
+/// `admission` is the compact durable authority that survives it.
+pub const CapturedAdmission = struct {
+    admission: Admission,
+    tool_arguments: ?contract.AdmittedToolArguments = null,
+
+    /// Replace a generically admitted tool call with the capture-bound terminal
+    /// failure used when the Host's closed executable mapping rejects it.
+    pub fn rejectToolCall(self: *CapturedAdmission) !void {
+        if (self.admission.parsed_value.disposition != .tool_call) {
+            return error.ExpectedAdmittedToolCall;
+        }
+        self.admission.parsed_value = failed(.malformed);
+        self.tool_arguments = null;
+    }
+};
+
+/// Resolves only the Tool Definition selected by the already-inspected capture.
+/// The decoder remains private; callers provide the Operation-bound catalog
+/// ownership seam without receiving a reusable parser object.
+pub const DefinitionResolver = struct {
+    context: *anyopaque,
+    resolve_fn: *const fn (*anyopaque, []const u8) anyerror!?contract.ToolDefinition,
+
+    fn resolve(self: DefinitionResolver, key: []const u8) !?contract.ToolDefinition {
+        return self.resolve_fn(self.context, key);
+    }
+};
+
+pub const Choice = struct { id: []const u8, label: []const u8 };
+
+pub fn encodeText(out: []u8, text: []const u8) ![]const u8 {
+    if (text.len == 0 or text.len > max_assistant_text_size or !contract.utf8Valid(text)) {
+        return error.InvalidAssistantText;
+    }
+    return encode(out, .final_answer, .none, 0, 0, text, "");
+}
+
+pub fn encodeTool(
+    out: []u8,
+    tool_key: []const u8,
+    arguments: []const u8,
+) ![]const u8 {
+    try contract.validateToolKey(tool_key);
+    if (arguments.len == 0 or arguments.len > contract.max_tool_arguments_envelope_size) {
+        return error.InvalidToolArguments;
+    }
+    return encode(out, .tool_call, .none, 0, 0, tool_key, arguments);
+}
+
+pub fn encodeInputText(out: []u8, prompt: []const u8) ![]const u8 {
+    try validatePrompt(prompt);
+    return encode(out, .input_request, .none, @intFromEnum(contract.InputShape.text), 0, prompt, "");
+}
+
+pub fn encodeInputChoice(out: []u8, prompt: []const u8, choices: []const Choice) ![]const u8 {
+    try validatePrompt(prompt);
+    if (choices.len == 0 or choices.len > contract.max_choice_count) return error.InvalidInputChoices;
+    var option_bytes: [
+        contract.max_choice_count *
+            (4 + contract.max_choice_id_size + contract.max_choice_label_size)
+    ]u8 = undefined;
+    var cursor: usize = 0;
+    for (choices, 0..) |choice, index| {
+        if (choice.id.len == 0 or choice.id.len > contract.max_choice_id_size or
+            choice.label.len == 0 or choice.label.len > contract.max_choice_label_size or
+            !contract.utf8Valid(choice.id) or !contract.utf8Valid(choice.label))
+        {
+            return error.InvalidInputChoices;
+        }
+        for (choices[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier.id, choice.id)) return error.DuplicateInputChoice;
+        }
+        write(u16, &option_bytes, cursor, @intCast(choice.id.len));
+        write(u16, &option_bytes, cursor + 2, @intCast(choice.label.len));
+        cursor += 4;
+        @memcpy(option_bytes[cursor..][0..choice.id.len], choice.id);
+        cursor += choice.id.len;
+        @memcpy(option_bytes[cursor..][0..choice.label.len], choice.label);
+        cursor += choice.label.len;
+    }
+    return encode(
+        out,
+        .input_request,
+        .none,
+        @intFromEnum(contract.InputShape.single_choice),
+        @intCast(choices.len),
+        prompt,
+        option_bytes[0..cursor],
+    );
+}
+
+pub fn encodeFailure(out: []u8, reason: Failure) ![]const u8 {
+    if (reason == .none) return error.InvalidProviderFailure;
+    return encode(out, .failure, reason, 0, 0, "", "");
+}
+
+fn encode(
+    out: []u8,
+    disposition: Disposition,
+    reason: Failure,
+    shape: u8,
+    option_count: u8,
+    first: []const u8,
+    second: []const u8,
+) ![]const u8 {
+    const total = header_size + first.len + second.len;
+    if (total > out.len or total > max_response_size) return error.ResponseTooLarge;
+    @memset(out[0..header_size], 0);
+    @memcpy(out[0..magic.len], magic);
+    write(u16, out, 8, version);
+    write(u16, out, 10, header_size);
+    out[12] = @intFromEnum(disposition);
+    out[13] = @intFromEnum(reason);
+    out[14] = shape;
+    out[15] = option_count;
+    write(u32, out, 16, @intCast(first.len));
+    write(u32, out, 20, @intCast(second.len));
+    @memcpy(out[header_size..][0..first.len], first);
+    if (second.ptr != out[header_size + first.len ..].ptr) {
+        @memcpy(out[header_size + first.len .. total], second);
+    }
+    return out[0..total];
+}
+
+pub fn parse(scratch: *ValidationScratch, bytes: []const u8) Parsed {
+    return decode(scratch, bytes) catch failed(.malformed);
+}
+
+pub fn decode(scratch: *ValidationScratch, bytes: []const u8) !Parsed {
+    return (try decodeWithCatalog(&scratch.json, bytes, &contract.default_catalog)).parsed;
+}
+
+/// Admit one bounded capture against the built-in catalog. The capture digest
+/// and envelope framing are each computed once.
+pub fn admit(
+    scratch: *ValidationScratch,
+    bytes: []const u8,
+) CapturedAdmission {
+    return admitWithCatalog(scratch, bytes, &contract.default_catalog);
+}
+
+pub fn admitWithCatalog(
+    scratch: *ValidationScratch,
+    bytes: []const u8,
+    catalog: []const contract.ToolDefinition,
+) CapturedAdmission {
+    const result_digest = binding.hash(binding.Result, bytes);
+    return admitWithCatalogDigest(scratch, bytes, catalog, result_digest);
+}
+
+/// Admit immutable captured evidence against the selected Operation-bound Tool
+/// Catalog. Exact capture identity is consumed once before any inspected field
+/// is authoritative; invalid provider output becomes a typed terminal failure.
+pub fn admitCaptured(
+    scratch: *ValidationScratch,
+    bytes: []const u8,
+    expected_digest: binding.Result,
+    resolver: DefinitionResolver,
+) !CapturedAdmission {
+    const actual_digest = binding.hash(binding.Result, bytes);
+    if (!binding.eql(binding.Result, actual_digest, expected_digest)) {
+        return error.InvalidModelResponseEvidence;
+    }
+    const inspected = inspect(bytes) catch |err| return typedFailure(bytes, expected_digest, err);
+    const decoded = finishWithResolver(&scratch.json, inspected, resolver) catch |err|
+        return switch (err) {
+            error.UnknownModelTool => typedFailure(bytes, expected_digest, err),
+            error.MalformedModelResponse => typedFailure(bytes, expected_digest, err),
+            else => err,
+        };
+    return completeAdmission(decoded, expected_digest, bytes.len);
+}
+
+const Decoded = struct {
+    parsed: Parsed,
+    tool_arguments: ?contract.AdmittedToolArguments = null,
+};
+
+const Inspected = struct {
+    disposition: Disposition,
+    reason: Failure,
+    shape: u8,
+    option_count: u8,
+    first: []const u8,
+    second: []const u8,
+};
+
+fn inspect(bytes: []const u8) !Inspected {
+    if (bytes.len < header_size or bytes.len > max_response_size or
+        !std.mem.eql(u8, bytes[0..magic.len], magic) or read(u16, bytes, 8) != version or
+        read(u16, bytes, 10) != header_size)
+    {
+        return error.MalformedModelResponse;
+    }
+    const disposition = std.enums.fromInt(Disposition, bytes[12]) orelse
+        return error.MalformedModelResponse;
+    const reason = std.enums.fromInt(Failure, bytes[13]) orelse
+        return error.MalformedModelResponse;
+    const first_length: usize = read(u32, bytes, 16);
+    const second_length: usize = read(u32, bytes, 20);
+    if (first_length > bytes.len - header_size or
+        second_length > bytes.len - header_size - first_length or
+        header_size + first_length + second_length != bytes.len)
+    {
+        return error.MalformedModelResponse;
+    }
+    return .{
+        .disposition = disposition,
+        .reason = reason,
+        .shape = bytes[14],
+        .option_count = bytes[15],
+        .first = bytes[header_size..][0..first_length],
+        .second = bytes[header_size + first_length ..],
     };
-    if (text_count == 1) return .{
-        .disposition = .final_answer,
-        .text_offset = text_offset,
-        .text_length = text_length,
+}
+
+fn decodeWithCatalog(
+    scratch: *contract.StrictToolJsonScratch,
+    bytes: []const u8,
+    catalog: []const contract.ToolDefinition,
+) !Decoded {
+    const inspected = try inspect(bytes);
+    return finishWithCatalog(scratch, inspected, catalog);
+}
+
+fn finishWithCatalog(
+    scratch: *contract.StrictToolJsonScratch,
+    inspected: Inspected,
+    catalog: []const contract.ToolDefinition,
+) !Decoded {
+    const definition = if (inspected.disposition == .tool_call)
+        contract.definitionForKey(catalog, inspected.first)
+    else
+        null;
+    return finish(scratch, inspected, definition);
+}
+
+fn finishWithResolver(
+    scratch: *contract.StrictToolJsonScratch,
+    inspected: Inspected,
+    resolver: DefinitionResolver,
+) !Decoded {
+    const definition = if (inspected.disposition == .tool_call)
+        try resolver.resolve(inspected.first)
+    else
+        null;
+    return finish(scratch, inspected, definition);
+}
+
+fn finish(
+    scratch: *contract.StrictToolJsonScratch,
+    inspected: Inspected,
+    definition: ?contract.ToolDefinition,
+) !Decoded {
+    const first = inspected.first;
+    const second = inspected.second;
+    switch (inspected.disposition) {
+        .final_answer => {
+            if (inspected.reason != .none or inspected.shape != 0 or inspected.option_count != 0 or first.len == 0 or
+                first.len > max_assistant_text_size or
+                second.len != 0 or !contract.utf8Valid(first)) return error.MalformedModelResponse;
+            return .{ .parsed = .{ .disposition = .final_answer, .text_offset = header_size, .text_length = @intCast(first.len) } };
+        },
+        .tool_call => {
+            if (inspected.reason != .none or inspected.shape != 0 or inspected.option_count != 0 or second.len == 0) {
+                return error.MalformedModelResponse;
+            }
+            contract.validateToolKey(first) catch return error.MalformedModelResponse;
+            const selected = definition orelse return error.UnknownModelTool;
+            if (!std.mem.eql(u8, selected.key, first)) return error.UnknownModelTool;
+            const admitted = contract.admitToolArguments(scratch, selected, second) catch
+                return error.MalformedModelResponse;
+            const evidence = admitted.json.evidence();
+            return .{ .parsed = .{
+                .disposition = .tool_call,
+                .tool_key_offset = header_size,
+                .tool_key_length = @intCast(first.len),
+                .arguments_offset = @intCast(header_size + first.len),
+                .arguments_length = @intCast(second.len),
+                .arguments_digest = evidence,
+            }, .tool_arguments = admitted };
+        },
+        .input_request => return .{ .parsed = try decodeInput(
+            first,
+            second,
+            inspected.reason,
+            inspected.shape,
+            inspected.option_count,
+        ) },
+        .failure => {
+            if (inspected.reason == .none or inspected.shape != 0 or inspected.option_count != 0 or first.len != 0 or second.len != 0) {
+                return error.MalformedModelResponse;
+            }
+            return .{ .parsed = failed(inspected.reason) };
+        },
+    }
+}
+
+fn admitWithCatalogDigest(
+    scratch: *ValidationScratch,
+    bytes: []const u8,
+    catalog: []const contract.ToolDefinition,
+    result_digest: binding.Result,
+) CapturedAdmission {
+    const decoded = decodeWithCatalog(&scratch.json, bytes, catalog) catch |err|
+        return typedFailure(bytes, result_digest, err);
+    return completeAdmission(decoded, result_digest, bytes.len);
+}
+
+fn completeAdmission(decoded: Decoded, result_digest: binding.Result, byte_length: usize) CapturedAdmission {
+    return .{
+        .admission = .{
+            .parsed_value = decoded.parsed,
+            .result_digest = result_digest,
+            .byte_length = @intCast(byte_length),
+        },
+        .tool_arguments = decoded.tool_arguments,
     };
-    return failure(.empty);
 }
 
-test "malformed payload length cannot overflow the parser" {
-    var bytes: [header_size + item_header_size]u8 = @splat(0);
-    write(u32, &bytes, 0, magic);
-    bytes[4] = version;
-    bytes[5] = @intFromEnum(Status.complete);
-    bytes[6] = 1;
-    bytes[header_size] = @intFromEnum(ItemKind.text);
-    write(u32, &bytes, header_size + 4, std.math.maxInt(u32));
-    try std.testing.expectEqual(Failure.malformed, parse(&bytes).failure);
+fn typedFailure(bytes: []const u8, result_digest: binding.Result, err: anyerror) CapturedAdmission {
+    return completeAdmission(.{ .parsed = failed(switch (err) {
+        error.UnknownModelTool => .unknown_tool,
+        else => if (bytes.len == 0) .empty else .malformed,
+    }) }, result_digest, bytes.len);
 }
 
-test "one binary tool call is accepted without becoming final text" {
-    var bytes: [128]u8 = undefined;
-    const encoded = try encodeTool(&bytes, .bash, "\x01\x00\xff");
-    const parsed = parse(encoded);
-    try std.testing.expectEqual(Disposition.tool_call, parsed.disposition);
-    try std.testing.expectEqual(Tool.bash, parsed.tool);
-    try std.testing.expectEqual(@as(u32, 3), parsed.arguments_length);
+const TestCatalogResolver = struct {
+    catalog: []const contract.ToolDefinition,
+    calls: u8 = 0,
+
+    fn resolve(context: *anyopaque, key: []const u8) anyerror!?contract.ToolDefinition {
+        const self: *TestCatalogResolver = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        return contract.definitionForKey(self.catalog, key);
+    }
+
+    fn capability(self: *TestCatalogResolver) DefinitionResolver {
+        return .{ .context = self, .resolve_fn = resolve };
+    }
+};
+
+fn decodeInput(
+    prompt: []const u8,
+    options: []const u8,
+    reason: Failure,
+    shape_byte: u8,
+    count: u8,
+) !Parsed {
+    if (reason != .none or prompt.len == 0 or prompt.len > contract.max_prompt_size or
+        !contract.utf8Valid(prompt)) return error.MalformedModelResponse;
+    const shape = std.enums.fromInt(contract.InputShape, shape_byte) orelse return error.MalformedModelResponse;
+    switch (shape) {
+        .text => if (count != 0 or options.len != 0) return error.MalformedModelResponse,
+        .single_choice => {
+            if (count == 0 or count > contract.max_choice_count) return error.MalformedModelResponse;
+            var cursor: usize = 0;
+            var ids: [contract.max_choice_count][]const u8 = undefined;
+            for (0..count) |index| {
+                if (cursor > options.len or options.len - cursor < 4) return error.MalformedModelResponse;
+                const id_length: usize = read(u16, options, cursor);
+                const label_length: usize = read(u16, options, cursor + 2);
+                cursor += 4;
+                if (id_length == 0 or id_length > contract.max_choice_id_size or
+                    label_length == 0 or label_length > contract.max_choice_label_size or
+                    id_length > options.len - cursor or label_length > options.len - cursor - id_length)
+                {
+                    return error.MalformedModelResponse;
+                }
+                const id = options[cursor..][0..id_length];
+                const label = options[cursor + id_length ..][0..label_length];
+                if (!contract.utf8Valid(id) or !contract.utf8Valid(label)) return error.MalformedModelResponse;
+                for (ids[0..index]) |earlier| if (std.mem.eql(u8, earlier, id)) return error.MalformedModelResponse;
+                ids[index] = id;
+                cursor += id_length + label_length;
+            }
+            if (cursor != options.len) return error.MalformedModelResponse;
+        },
+    }
+    return .{
+        .disposition = .input_request,
+        .text_offset = header_size,
+        .text_length = @intCast(prompt.len),
+        .input_shape = shape,
+        .option_count = count,
+        .options_offset = if (options.len == 0) 0 else @intCast(header_size + prompt.len),
+        .options_length = @intCast(options.len),
+    };
 }
 
-fn malformed() Parsed {
-    return failure(.malformed);
+fn validatePrompt(prompt: []const u8) !void {
+    if (prompt.len == 0 or prompt.len > contract.max_prompt_size or !contract.utf8Valid(prompt)) {
+        return error.InvalidInputPrompt;
+    }
 }
 
-fn failure(reason: Failure) Parsed {
+fn failed(reason: Failure) Parsed {
     return .{ .disposition = .failure, .failure = reason };
-}
-
-inline fn utf8Valid(bytes: []const u8) bool {
-    var index: usize = 0;
-    while (index < bytes.len) {
-        const first = bytes[index];
-        if (first < 0x80) {
-            index += 1;
-            continue;
-        }
-        const length: usize = if (first >= 0xc2 and first <= 0xdf)
-            2
-        else if (first >= 0xe0 and first <= 0xef)
-            3
-        else if (first >= 0xf0 and first <= 0xf4)
-            4
-        else
-            return false;
-        if (index + length > bytes.len) return false;
-        const second = bytes[index + 1];
-        if (second & 0xc0 != 0x80) return false;
-        if (length >= 3) {
-            const third = bytes[index + 2];
-            if (third & 0xc0 != 0x80) return false;
-            if (first == 0xe0 and second < 0xa0) return false;
-            if (first == 0xed and second >= 0xa0) return false;
-        }
-        if (length == 4) {
-            const fourth = bytes[index + 3];
-            if (fourth & 0xc0 != 0x80) return false;
-            if (first == 0xf0 and second < 0x90) return false;
-            if (first == 0xf4 and second >= 0x90) return false;
-        }
-        index += length;
-    }
-    return true;
 }
 
 fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
@@ -238,44 +469,145 @@ fn read(comptime T: type, input: []const u8, offset: usize) T {
     return std.mem.readInt(T, input[offset..][0..@sizeOf(T)], .little);
 }
 
-test "a complete text item is a Final Answer" {
-    var bytes: [128]u8 = undefined;
-    const encoded = try encodeText(&bytes, .complete, "The parser is fixed.");
-    const parsed = parse(encoded);
-    try std.testing.expectEqual(Disposition.final_answer, parsed.disposition);
-    try std.testing.expectEqualStrings(
-        "The parser is fixed.",
-        encoded[parsed.text_offset..][0..parsed.text_length],
+test "complete captured responses cover every V1 disposition" {
+    var bytes: [max_response_size]u8 = undefined;
+    var scratch: ValidationScratch = undefined;
+    try std.testing.expectEqual(Disposition.final_answer, parse(&scratch, try encodeText(&bytes, "done")).disposition);
+    const tool = parse(&scratch, try encodeTool(&bytes, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}"));
+    try std.testing.expectEqual(Disposition.tool_call, tool.disposition);
+    try std.testing.expectEqualStrings(contract.bash_key, bytes[tool.tool_key_offset..][0..tool.tool_key_length]);
+    const text_input = parse(&scratch, try encodeInputText(&bytes, "Which migration should I use?"));
+    try std.testing.expectEqual(Disposition.input_request, text_input.disposition);
+    try std.testing.expectEqual(@as(u32, 0), text_input.options_offset);
+    try std.testing.expectEqual(@as(u32, 0), text_input.options_length);
+    const choices = [_]Choice{
+        .{ .id = "existing", .label = "Use the existing migration" },
+        .{ .id = "new", .label = "Create a new migration" },
+    };
+    const input = parse(&scratch, try encodeInputChoice(&bytes, "Choose one", &choices));
+    try std.testing.expectEqual(contract.InputShape.single_choice, input.input_shape.?);
+    try std.testing.expectEqual(@as(u8, 2), input.option_count);
+    try std.testing.expectEqual(Failure.provider_error, parse(&scratch, try encodeFailure(&bytes, .provider_error)).failure);
+}
+
+test "captured admission consumes exact response identity once" {
+    var first_buffer: [128]u8 = undefined;
+    var second_buffer: [128]u8 = undefined;
+    var scratch: ValidationScratch = undefined;
+    const first = try encodeTool(&first_buffer, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}");
+    const second = try encodeTool(&second_buffer, contract.bash_key, "{\"command\":\"false\",\"timeout_ms\":1000}");
+    var resolver: TestCatalogResolver = .{ .catalog = &contract.default_catalog };
+    const expected = binding.hash(binding.Result, first);
+    const admitted = try admitCaptured(&scratch, first, expected, resolver.capability());
+    try std.testing.expectEqual(Disposition.tool_call, admitted.admission.parsed_value.disposition);
+    try std.testing.expectEqual(@as(u8, 1), resolver.calls);
+    try std.testing.expectError(
+        error.InvalidModelResponseEvidence,
+        admitCaptured(&scratch, second, expected, resolver.capability()),
     );
+    first_buffer[first.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.InvalidModelResponseEvidence,
+        admitCaptured(&scratch, first, expected, resolver.capability()),
+    );
+    try std.testing.expectEqual(@as(u8, 1), resolver.calls);
 }
 
-test "incomplete and empty responses are typed failures" {
-    var bytes: [128]u8 = undefined;
-    const truncated = try encodeText(&bytes, .length_truncated, "partial");
-    try std.testing.expectEqual(Failure.truncated, parse(truncated).failure);
-    const empty = try encodeText(&bytes, .complete, "");
-    try std.testing.expectEqual(Failure.empty, parse(empty).failure);
+test "hostile captured responses fail before authorizing effects" {
+    var bytes: [max_response_size]u8 = undefined;
+    var scratch: ValidationScratch = undefined;
+    const encoded = try encodeTool(&bytes, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}");
+    bytes[20] = 0xff;
+    try std.testing.expectEqual(Failure.malformed, parse(&scratch, encoded).failure);
+    try std.testing.expectError(error.MalformedModelResponse, decode(&scratch, encoded));
+    const current = try encodeTool(&bytes, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}");
+    std.mem.writeInt(u16, bytes[8..10], version - 1, .little);
+    try std.testing.expectEqual(Failure.malformed, parse(&scratch, current).failure);
+    try std.testing.expectEqual(Failure.truncated, parse(&scratch, try encodeFailure(&bytes, .truncated)).failure);
+    const choices = [_]Choice{
+        .{ .id = "same", .label = "First" },
+        .{ .id = "same", .label = "Second" },
+    };
+    try std.testing.expectError(error.DuplicateInputChoice, encodeInputChoice(&bytes, "Choose", &choices));
 }
 
-test "malformed and multiple tool responses cannot become Final Answers" {
-    var bytes: [128]u8 = undefined;
-    const encoded = try encodeText(&bytes, .complete, "answer");
-    bytes[4] = 9;
-    try std.testing.expectEqual(Failure.malformed, parse(encoded).failure);
+test "semantic admission binds malformed and unknown captures as typed failures" {
+    var scratch: ValidationScratch = .{};
+    const malformed = "not a response";
+    const malformed_result = admit(&scratch, malformed).admission.parsed_value;
+    try std.testing.expectEqual(Disposition.failure, malformed_result.disposition);
+    try std.testing.expectEqual(Failure.malformed, malformed_result.failure);
 
-    @memset(&bytes, 0);
-    write(u32, &bytes, 0, magic);
-    bytes[4] = version;
-    bytes[5] = @intFromEnum(Status.complete);
-    bytes[6] = 2;
-    var cursor: usize = header_size;
-    for (0..2) |_| {
-        bytes[cursor] = @intFromEnum(ItemKind.tool_call);
-        bytes[cursor + 1] = @intFromEnum(Tool.bash);
-        write(u32, &bytes, cursor + 4, 2);
-        cursor += item_header_size;
-        @memcpy(bytes[cursor..][0..2], "{}");
-        cursor += 2;
-    }
-    try std.testing.expectEqual(Failure.multiple_tools, parse(bytes[0..cursor]).failure);
+    var response: [max_response_size]u8 = undefined;
+    const unknown = try encodeTool(&response, "fixture.unknown.v1", "{}");
+    const unknown_proof = admit(&scratch, unknown);
+    const unknown_result = unknown_proof.admission.parsed_value;
+    try std.testing.expectEqual(Disposition.failure, unknown_result.disposition);
+    try std.testing.expectEqual(Failure.unknown_tool, unknown_result.failure);
+    try std.testing.expectError(error.InvalidModelResponseEvidence, unknown_proof.admission.verify(
+        binding.hash(binding.Result, "substituted"),
+    ));
+}
+
+test "host rejection preserves exact capture identity as a typed failure" {
+    var response: [max_response_size]u8 = undefined;
+    const capture = try encodeTool(
+        &response,
+        contract.bash_key,
+        "{\"command\":\"true\",\"timeout_ms\":1000}",
+    );
+    var scratch: ValidationScratch = .{};
+    var admitted = admit(&scratch, capture);
+    try std.testing.expectEqual(Disposition.tool_call, admitted.admission.parsed_value.disposition);
+    try admitted.rejectToolCall();
+    const failure = admitted.admission.parsed_value;
+    try std.testing.expectEqual(Disposition.failure, failure.disposition);
+    try std.testing.expectEqual(Failure.malformed, failure.failure);
+    try std.testing.expectError(error.InvalidModelResponseEvidence, admitted.admission.verify(
+        binding.hash(binding.Result, "substituted"),
+    ));
+    try std.testing.expectError(error.ExpectedAdmittedToolCall, admitted.rejectToolCall());
+}
+
+test "compact admission survives validation scratch reuse" {
+    var first_buffer: [max_response_size]u8 = undefined;
+    var second_buffer: [max_response_size]u8 = undefined;
+    const first = try encodeText(&first_buffer, "first");
+    const second = try encodeText(&second_buffer, "second");
+    var scratch: ValidationScratch = .{};
+    const admission_value = admit(&scratch, first).admission;
+    _ = admit(&scratch, second);
+
+    try std.testing.expectEqual(
+        Disposition.final_answer,
+        (try admission_value.verify(binding.hash(binding.Result, first))).disposition,
+    );
+    try std.testing.expectError(
+        error.InvalidModelResponseEvidence,
+        admission_value.verify(binding.hash(binding.Result, second)),
+    );
+    try std.testing.expect(@sizeOf(Admission) < @sizeOf(ValidationScratch));
+}
+
+test "tool response identity preserves exact noncanonical arguments" {
+    var first: [max_response_size]u8 = undefined;
+    var second: [max_response_size]u8 = undefined;
+    const first_encoded = try encodeTool(
+        &first,
+        contract.bash_key,
+        " { \"timeout_ms\" : 1000, \"command\" : \"true\" } ",
+    );
+    const second_encoded = try encodeTool(
+        &second,
+        contract.bash_key,
+        "{\"command\":\"true\",\"timeout_ms\":1000}",
+    );
+    try std.testing.expect(!std.mem.eql(u8, first_encoded, second_encoded));
+    var scratch: ValidationScratch = undefined;
+    const first_admitted = try decode(&scratch, first_encoded);
+    const first_digest = first_admitted.arguments_digest;
+    const second_admitted = try decode(&scratch, second_encoded);
+    try std.testing.expect(!binding.eql(binding.StrictToolJsonV1, first_digest, second_admitted.arguments_digest));
+    const malformed = try encodeTool(&first, contract.bash_key, "{\"command\":\"true\",\"command\":\"false\",\"timeout_ms\":1000}");
+    try std.testing.expectError(error.MalformedModelResponse, decode(&scratch, malformed));
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const deterministic_provider = @import("deterministic_provider.zig");
 const harness = @import("harness.zig");
 const bash_tool = @import("bash_tool.zig");
 const model_operation = @import("model_operation.zig");
@@ -35,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     const runtime = try harness.HostRuntime.open(init.io, allocator, state_path, .{});
     defer runtime.close() catch unreachable;
     if (arguments.resume_id) |session_id| {
-        var fixture: model_operation.Fixture = .{
+        var fixture: deterministic_provider.Fixture = .{
             .expected_task = null,
             .final_answer = arguments.fixture_response orelse "",
         };
@@ -75,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
                 .command = arguments.fixture_bash_command.?,
                 .timeout_ms = arguments.bash_timeout_ms,
             });
-            var fixture: model_operation.RepairFixture = .{
+            var fixture: deterministic_provider.RepairFixture = .{
                 .expected_task = task,
                 .bash_call = encoded_call,
                 .patch = patch,
@@ -97,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
                 .limited(patch_tool.max_patch_size),
             );
             defer allocator.free(patch);
-            var fixture: model_operation.ToolFixture = .{
+            var fixture: deterministic_provider.ToolFixture = .{
                 .expected_task = task,
                 .tool = .apply_patch,
                 .tool_arguments = patch,
@@ -118,7 +119,7 @@ pub fn main(init: std.process.Init) !void {
                 .command = command,
                 .timeout_ms = arguments.bash_timeout_ms,
             });
-            var fixture: model_operation.ToolFixture = .{
+            var fixture: deterministic_provider.ToolFixture = .{
                 .expected_task = task,
                 .tool_arguments = encoded_call,
                 .final_answer = response,
@@ -131,7 +132,7 @@ pub fn main(init: std.process.Init) !void {
             });
             return;
         }
-        var fixture: model_operation.Fixture = .{
+        var fixture: deterministic_provider.Fixture = .{
             .expected_task = task,
             .final_answer = response,
         };

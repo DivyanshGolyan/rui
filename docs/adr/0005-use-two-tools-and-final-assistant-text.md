@@ -11,7 +11,8 @@ classify apparently read-only Bash commands for automatic permission.
 
 The V1 product inventory is closed, but the provider-facing Conversation representation is generic:
 the exact model Operation binds a bounded Tool Catalog and a Tool Call selects a stable Tool Key with
-canonical JSON arguments. Harness alone maps an allowed key to one of these two Actions. This does not
+exact bounded JSON arguments admitted under the bound Validation Profile. Harness alone maps an allowed
+key to one of these two Actions. This does not
 create runtime discovery, a plugin system, or generic execution authority; see ADR-0012.
 
 A valid tool call, including one whose external effect is indeterminate, returns its Result to the

@@ -2,9 +2,9 @@ const std = @import("std");
 const bash_tool = @import("bash_tool.zig");
 const binding = @import("binding.zig");
 const completion_inbox = @import("completion_inbox.zig");
+const deterministic_provider = @import("deterministic_provider.zig");
 const harness = @import("harness.zig");
 const host_runtime = @import("host_runtime.zig");
-const model_operation = @import("model_operation.zig");
 const model_protocol = @import("model_protocol.zig");
 const session_store = @import("session.zig");
 const session_transition = @import("session_transition.zig");
@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn startModel(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !void {
-    var fixture: model_operation.Fixture = .{ .expected_task = task, .final_answer = answer };
+    var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
     var crash: Crash = .{ .target = .after_model_dispatch };
     var owner = try harness.Harness.open(.{
         .runtime = runtime,
@@ -61,7 +61,7 @@ fn startModel(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) 
 }
 
 fn retryModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
-    var fixture: model_operation.Fixture = .{ .expected_task = task, .final_answer = answer };
+    var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
     var crash: Crash = .{ .target = .after_model_dispatch };
     var owner = try harness.Harness.open(.{
         .runtime = runtime,
@@ -78,7 +78,7 @@ fn retryModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void 
 }
 
 fn finishModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
-    var fixture: model_operation.Fixture = .{ .expected_task = task, .final_answer = answer };
+    var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
     var owner = try harness.Harness.open(.{
         .runtime = runtime,
         .mode = .{ .restore = .{ .session_id = session_id, .provider = fixture.provider() } },
@@ -99,13 +99,13 @@ fn finishModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void
 fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
     var lease = try host_runtime.Lease.acquire(runtime);
     var restored = try lease.restoreSession(session_id);
-    while ((try restored.session.recoverSemanticWindow(32)).more) {}
+    while ((try lease.recoverSemanticWindow(&restored.session, 32)).more) {}
     var audit: ModelAttemptAudit = .{};
     const before = try restored.session.inspectSemantic(&audit, ModelAttemptAudit.apply);
     if (audit.count != 2) return error.ModelAttemptCountMismatch;
 
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const response = try model_protocol.encodeText(&response_buffer, .complete, "late original response");
+    const response = try model_protocol.encodeText(&response_buffer, "late original response");
     const result_ref = (@as(u64, 1) << 54) | (audit.ids[0] & ((@as(u64, 1) << 54) - 1));
     try restored.session.storeBlob(result_ref, response);
     const envelope = completion_inbox.bind(.{
@@ -145,7 +145,7 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
         defer verification_lease.release();
         var verified = try verification_lease.restoreSession(session_id);
         defer verified.session.close();
-        while ((try verified.session.recoverSemanticWindow(32)).more) {}
+        while ((try verification_lease.recoverSemanticWindow(&verified.session, 32)).more) {}
         var after_audit: ModelAttemptAudit = .{};
         const after = try verified.session.inspectSemantic(&after_audit, ModelAttemptAudit.apply);
         if (after.last_sequence != before.last_sequence or after_audit.count != audit.count) {
@@ -187,7 +187,7 @@ fn startBash(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !
         .command = "printf x >> uncertain.txt",
         .timeout_ms = 5000,
     });
-    var fixture: model_operation.ToolFixture = .{
+    var fixture: deterministic_provider.ToolFixture = .{
         .expected_task = task,
         .tool_arguments = call,
         .final_answer = "must not be reached",
@@ -261,7 +261,7 @@ fn expectModelAttempts(runtime: *harness.HostRuntime, session_id: u64, expected:
     defer lease.release();
     var restored = try lease.restoreSession(session_id);
     defer restored.session.close();
-    while ((try restored.session.recoverSemanticWindow(32)).more) {}
+    while ((try lease.recoverSemanticWindow(&restored.session, 32)).more) {}
     var audit: ModelAttemptAudit = .{};
     _ = try restored.session.inspectSemantic(&audit, ModelAttemptAudit.apply);
     if (audit.count != expected) return error.ModelAttemptCountMismatch;

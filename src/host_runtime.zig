@@ -1,6 +1,7 @@
 const std = @import("std");
 const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
+const model_contract = @import("model_contract.zig");
 const session_store = @import("session.zig");
 
 pub const Config = struct {
@@ -60,6 +61,14 @@ pub const Lease = struct {
         );
     }
 
+    pub fn recoverSemanticWindow(
+        self: Lease,
+        session: *session_store.Session,
+        frame_budget: u8,
+    ) !session_store.RecoveryProgress {
+        return lifecycle.recoverSemanticWindow(self.execution, session, frame_budget);
+    }
+
     pub fn release(self: *Lease) void {
         if (!self.active) return;
         releaseHarness(self.runtime);
@@ -85,6 +94,7 @@ pub const HostRuntime = opaque {
         config: Config,
     ) !*HostRuntime {
         if (state_path.len == 0) return error.InvalidStatePath;
+        try model_contract.validateBuiltinCatalog();
         if (runtime_open.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
             return error.HostRuntimeAlreadyOpen;
         }

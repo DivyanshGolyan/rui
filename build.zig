@@ -1,6 +1,10 @@
 const std = @import("std");
+const persisted_format = @import("src/persisted_format.zig");
 
-const fixture_state_namespace = ".zig-cache/onepage-fixture-v3-";
+const fixture_state_namespace = std.fmt.comptimePrint(
+    ".zig-cache/onepage-fixture-format-v{d}-",
+    .{persisted_format.epoch},
+);
 
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
@@ -153,6 +157,7 @@ fn addTestGraph(
         "src/binding.zig",
         "src/core_state.zig",
         "src/core_image.zig",
+        "src/deterministic_provider.zig",
         "src/harness.zig",
         "src/session.zig",
         "src/session_transition_test.zig",
@@ -313,6 +318,7 @@ fn usesHostStore(root: []const u8) bool {
         "src/agent_integration.zig",
         "src/cli.zig",
         "src/cli_resume_fixture.zig",
+        "src/deterministic_provider.zig",
         "src/effect_recovery_fixture.zig",
         "src/harness.zig",
         "src/host_runtime_lock_fixture.zig",

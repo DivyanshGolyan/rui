@@ -35,7 +35,7 @@ test "one semantic commit occupies one ledger sequence" {
             .agent = agent,
             .entry_id = 2,
             .parent_id = 1,
-            .kind = .assistant,
+            .kind = .assistant_text,
             .content_ref = 14,
         }),
     };
@@ -214,7 +214,7 @@ test "Conversation metadata and ledger publication are atomic" {
         },
         .entry_id = 2,
         .parent_id = 1,
-        .kind = .assistant,
+        .kind = .assistant_text,
         .content_ref = 39,
     })});
     _ = try owner.commit(.{ .session_id = 31, .epoch = 1 }, value);
