@@ -14,6 +14,22 @@ _Avoid_: Repair, job, prompt
 The identified decision-maker responsible for advancing tasks within a session through model responses.
 _Avoid_: Run, worker
 
+**User**:
+The conversation role that supplies tasks or requested input to an Agent. A User may be a person or another Agent; the role does not identify the invoking process, security principal, Run owner, or permission authority.
+_Avoid_: Human, operator, approver, Caller, Principal
+
+**Caller**:
+The entity invoking the Run Service for a Run. A Caller may present User-role content but is not thereby the permission authority.
+_Avoid_: User, Principal, Agent
+
+**Principal**:
+The identity against which Run access and delegated authority are checked.
+_Avoid_: User, Caller, permission decision
+
+**Authority**:
+A policy or delegated capability that permits a Principal to make one class of decisions, including a bound Permission Decision.
+_Avoid_: User role, Caller identity, Authorization
+
 **Session**:
 The durable container for one agent's related tasks, conversation, and outcomes.
 _Avoid_: Conversation, task, process
@@ -25,6 +41,10 @@ _Avoid_: In-flight Session, sleeping agent, closed Session, inactive process
 **In-flight Session**:
 A Session whose committed admitted external Attempt owns one transferable Active Credit while its Harness and Activation Slot are absent.
 _Avoid_: Dormant Session, open Harness, blocked workflow
+
+**Awaiting User**:
+A Session condition in which safe progress requires a supported input from its User. Approval Required is the V1 permission-specific form of this condition.
+_Avoid_: Blocked Workflow Run, In-flight Session, generic waiting
 
 **Orchestration Memory**:
 Resident memory owned by OnePage to coordinate work, including Activation Slots, live Harness state, Host Runtime metadata, SQLite, provider transport, and bounded adapter capture. It scales with explicit host capacities and current in-flight work.
@@ -43,16 +63,48 @@ The durable container for every Session Ledger and host-wide durable coordinatio
 _Avoid_: Session Ledger, blob store, Workspace
 
 **Host Runtime**:
-The sole live owner that coordinates agents and shared capacities for one Host Store.
+The sole live owner that coordinates Workflow Runs, Agents, and shared capacities for one Host Store.
 _Avoid_: Agent, Session, Storage Owner
 
+**Workflow Definition**:
+A bounded program that composes keyed Jobs and returns one Workflow Output. It expresses demand for agent work but does not own or execute the resulting Agents.
+_Avoid_: Workflow Run, evaluator, scheduler, agent runtime
+
 **Workflow Evaluator**:
-A disposable caller-side QuickJS subprocess that reconstructs one workflow evaluation from exact source, arguments, and a Visibility Snapshot, then submits or observes keyed Jobs. It is not an agent runtime.
-_Avoid_: Host Runtime, agent runtime, scheduler, durable VM
+A disposable, Host-managed mechanism that evaluates one Workflow Definition against one Evaluation Generation. It retains no durable workflow or Agent state.
+_Avoid_: Caller, Host Runtime, agent runtime, scheduler, durable workflow
+
+**Evaluation Generation**:
+One immutable evaluation input binding a Workflow Definition, arguments, semantics, resource profile, and Visibility Snapshot. Repeating the generation observes the same input even when later Job outcomes exist.
+_Avoid_: Workflow Run, replay history, live completion stream
 
 **Workflow Run**:
-The durable identity binding one workflow's exact source, arguments, canonical invocation Workspace, semantics, Workflow Resource Profile, keyed Jobs, and terminal outcome.
+The durable identity binding one caller Run Key, exact workflow source, arguments, canonical invocation Workspace, semantics, Workflow Resource Profile, keyed Jobs, interactions, and terminal outcome.
 _Avoid_: JavaScript process, Session, continuation, durable heap
+
+**Run Key**:
+A Caller-supplied stable idempotency key unique within one Host Store that creates or reattaches one Workflow Run when all bound inputs match.
+_Avoid_: Run identity, Job Key, display name
+
+**Run Service**:
+The protocol-independent semantic interface for creating, inspecting, advancing, responding to, cancelling, and reading immutable content from Workflow Runs.
+_Avoid_: CLI, Harness, wire protocol, daemon
+
+**Run Snapshot**:
+A committed, revisioned read model of one Workflow Run, including every open Interaction Request and bounded output, Job, failure, uncertainty, artifact, and pagination metadata. The durable Run and Session facts remain authoritative.
+_Avoid_: Harness Projection, event stream, durable authority
+
+**Blocked Workflow Run**:
+A non-terminal Workflow Run waiting for its complete requested set of Jobs to become terminal before a later Evaluation Generation. Being blocked does not imply that a Workflow Evaluator is live.
+_Avoid_: Awaiting User, In-flight Session, suspended JavaScript
+
+**Input Required**:
+A public Run condition in which at least one Interaction Request is open and no other work in the Run can currently progress without a response.
+_Avoid_: Awaiting User, Blocked Workflow Run, generic waiting
+
+**Suspended Workflow Run**:
+A non-terminal Run condition in which foreground advancement returns without requiring User input. V1 exposes it only if a concrete supported wait cannot remain attached to its wake source.
+_Avoid_: Input Required, Blocked Workflow Run, process detachment
 
 **Job**:
 One keyed request within a Workflow Run that creates or reattaches one ordinary agent Session. Its canonical immutable specification determines whether replay reattaches or conflicts.
@@ -63,8 +115,24 @@ The bounded workflow-visible projection of one Job Session's successful terminal
 _Avoid_: Result, Conversation, provider response, Completion
 
 **Workflow Output**:
-The explicit bounded strict-data value fulfilled by a workflow's default export, canonically committed with its completed Workflow Run before being rendered as one terminal-safe JSON line. An invalid or implicit `undefined` return fails as `WorkflowOutputInvalid`.
+The explicit bounded strict-data value fulfilled by a workflow's default export and canonically committed with its completed Workflow Run. An invalid or implicit `undefined` return fails as `WorkflowOutputInvalid`.
 _Avoid_: Job Output, Result, Final Answer, terminal Outcome
+
+**Interaction Request**:
+An immutable durable request for one typed response, issued by the runtime for permission or by an Agent for bounded conversational input. Its identity is never reused, and replacement requires withdrawal plus a new identity.
+_Avoid_: User Request, prompt, notification, Approval Required
+
+**Interaction Response**:
+A durable answer to one open Interaction Request. Every response is checked for kind, shape, freshness, and routing; a permission response additionally requires a Principal and matching Authority.
+_Avoid_: User message, signal, Permission Decision
+
+**Content Reference**:
+An opaque Run-scoped identity for immutable bounded content retained for at least as long as its containing Run remains inspectable.
+_Avoid_: Harness content reference, Workspace path, blob path
+
+**Artifact**:
+A named immutable Run output composed from inline content or Content References. A mutable Workspace path alone is not an Artifact.
+_Avoid_: message, tool Result, Workspace file
 
 **Workflow Data Value**:
 A bounded null, Boolean, string, array, string-keyed plain object, or finite IEEE-754 number shared by workflow arguments, inputs, schema-backed Job Outputs, and Workflow Output. Strings contain only Unicode scalar text: valid surrogate pairs encode as standard UTF-8 scalars, and lone UTF-16 surrogates are rejected without replacement. Integral numbers must be safe integers; negative zero canonicalizes to zero. `undefined`, non-finite numbers, unsafe integers, bigint, symbols, functions, accessors, proxies, cycles, host objects, lone surrogates, and unsupported prototypes are excluded.
@@ -79,7 +147,7 @@ A named immutable set of evaluator and Run limits, including source, argument, J
 _Avoid_: Agent Profile, Model Contract, Active Capacity
 
 **Visibility Snapshot**:
-The immutable run-local set of terminal Job Outputs and stable terminal Job failure codes visible to one workflow evaluation. Outcomes that become terminal during an evaluation are visible only after its complete blocked set settles and a later evaluation begins.
+The immutable run-local set of terminal Job Outputs and stable terminal Job failure codes visible to one workflow evaluation. It contains no physical completion order: outcomes that become terminal during an evaluation are visible only after its complete blocked set settles and a later evaluation begins.
 _Avoid_: live completion stream, Conversation, scheduler state
 
 **Storage Owner**:
@@ -155,7 +223,7 @@ The compact semantic state needed to continue one agent, independent of native l
 _Avoid_: Core image, Activation Slot, checkpoint bytes
 
 **Final Answer**:
-A non-empty assistant response with no tool call that completes the current task turn and is shown to the user.
+A non-empty assistant response with no tool call that completes the current task turn and is shown to the User.
 _Avoid_: Finish action, stop action, terminal tool
 
 ### Execution
@@ -196,6 +264,10 @@ _Avoid_: Operation, retry, request
 The durable, typed outcome of a completed operation that the agent can use in a later decision.
 _Avoid_: Completion, output, response
 
+**Indeterminate Result**:
+A Result stating that an Attempt may have affected external state but its terminal effect cannot be proved. It is evidence for the Agent's next decision, not an automatic retry, User escalation, or terminal Job outcome.
+_Avoid_: Failure, retry request, Approval Required, Job Outcome
+
 **Binding Digest**:
 A typed, domain-separated SHA-256 value that binds exact authoritative bytes for one semantic role. Different roles share a width but are not interchangeable.
 _Avoid_: Identifier, authentication tag, tamper proof, optional sentinel
@@ -213,25 +285,24 @@ The resolution of an uncertain operation by comparing durable intent with observ
 _Avoid_: Retry, replay, recovery
 
 **Authorization**:
-A durable admission decision bound to one exact validated Action. It comes from a user's decision in `ask` mode or automatic admission in bypass mode.
+A durable admission decision bound to one exact validated Action. It comes from an authorized Principal's Permission Decision in `ask` mode or automatic admission in bypass mode.
 _Avoid_: Confirmation, blanket permission, Permission Mode
 
 **Approval**:
-A user's allow decision for one exact Action in `ask` mode.
+A permitted Principal's allow decision for one exact Action in `ask` mode.
 _Avoid_: Authorization, bypass, blanket permission
 
 **Approval Required**:
-The durable waiting state that identifies the exact validated Action for which `ask` mode still
+The durable Awaiting User state that identifies the exact validated Action for which `ask` mode still
 needs a Permission Decision. It is not an Authorization.
 _Avoid_: Authorization, Approval, prompt
 
 **Permission Decision**:
-The user's exact allow or deny input for an Approval Required state. Harness validates it before
-committing the corresponding Authorization.
-_Avoid_: Authorization, Permission Mode, blanket permission
+A permitted Principal's exact allow or deny Interaction Response for an Approval Required state. Harness validates its Authority and exact operation binding before committing the corresponding Authorization.
+_Avoid_: Authorization, Permission Mode, User role, blanket permission
 
 **Permission Mode**:
-The invocation-scoped rule that obtains Authorization either by asking the user or by explicit bypass.
+The advancing-invocation rule that obtains Authorization either from an authorized Principal's response or by explicit bypass.
 _Avoid_: Session authority, tool, Approval
 
 **Verification**:
@@ -241,8 +312,8 @@ _Avoid_: Test, success check
 ### Observation
 
 **Projection**:
-A committed, observer-facing view of agent state or history that is not itself authoritative state.
-_Avoid_: Event, callback, log
+A small generation-scoped output emitted by a live Harness. Its content references require the originating Harness generation and are not public durable Run observations.
+_Avoid_: Run Snapshot, event, durable read model
 
 **Outcome**:
 The terminal resolution of a task: a Final Answer, cancellation, or failure when safe progress cannot continue.

@@ -1,29 +1,43 @@
 # OnePage
 
-A single-host coding-agent harness with a programmable workflow caller. One native Zig Host Runtime
-owns every agent Session; each active Core borrows one compile-time-bounded Activation Slot from a
-fixed resident pool.
+A resource-bounded, crash-resumable local Run service for programmable coding-agent workflows. A Caller—person or agent—
+supplies a Workflow Definition and stable Run Key through the local CLI, while one native Zig Host
+Runtime owns the durable Workflow Run, keyed Jobs, and every agent Session. `User` remains a
+Conversation role rather than the Caller or permission authority. Each active Core borrows one
+compile-time-bounded Activation Slot from a fixed resident pool.
 
 The current checkout implements the deterministic single-Session lifecycle, SQLite Host Store,
 permissioned Bash and patch execution, and repair fixtures described below. The provider-neutral,
-asynchronous Workflow Run architecture is the planned V1 destination tracked by issues #32–#36; it
+asynchronous Workflow Run architecture is the planned V1 destination tracked by issues #32–#39; it
 is not yet implemented.
 
-The V1 `onepage run workflow.js` path will evaluate a caller-supplied workflow in a fresh restricted QuickJS-ng
-subprocess. QuickJS is only the caller-side evaluator: it submits and observes keyed durable Jobs and
-is destroyed at each Job barrier. It never owns a Session, provider, tool, permission, or recovery
-decision, and no evaluator remains resident while the workflow waits.
+Codex is the required first live provider target. Issue #11 must prove that OnePage can use an existing
+ChatGPT subscription through the official authorization and model-transport path without embedding a
+second agent loop. Until that feasibility gate passes, this repository does not claim that the live
+subscription experience is available.
+
+The V1 CLI will expose `run`, `inspect`, `respond`, `advance`, `cancel`, and `read` over one
+protocol-independent Run Service. JSON `RunSnapshot` is the complete automation contract; Markdown is
+its deterministic bounded model-facing view. The CLI owns no lifecycle or permission policy. The Host
+owns Run creation, evaluation generations, Job observation, advancement, cancellation, and finalization.
+For each generation it launches a fresh restricted
+QuickJS-ng Workflow Evaluator. The evaluator returns `Completed`, `Blocked`, or a typed failure and
+exits. It never owns durable workflow state, a Session, provider, tool, permission, or recovery
+decision, and no evaluator remains resident while a Workflow Run is Blocked on Jobs.
+Workflow code cannot observe physical Job completion order: V1 supports deterministic joins through
+`Promise.all` and `Promise.allSettled` and does not expose `Promise.race` or `Promise.any`.
 The target architecture separates compact, canonically encoded Core State from transient
 Activation Slot scratch. Core State is currently 160 bytes; authoritative semantic transactions
-carry it directly. Activation decodes that state into one caller-owned slot containing only named
+carry it directly. Activation decodes that state into one Host-owned slot containing only named
 bounded scratch; V1 removes sizing filler and enforces a 32 KiB ceiling. Suspension scrubs the
-complete slot. A fixed caller-owned pool returns closed capacity instead of allocating a
+complete slot. A fixed Host-owned pool returns closed capacity instead of allocating a
 fallback slot. Native invariant traces check typed outcomes, rejection-state preservation, semantic
 observations, and canonical restoration rather than slot bytes. Complete Session semantics reconstruct
 from one ordered Session Ledger inside a bounded host-wide SQLite Host Store.
 
-[`PRODUCT.md`](PRODUCT.md), [`ARCHITECTURE.md`](ARCHITECTURE.md), and
-[`VERIFICATION.md`](VERIFICATION.md) are normative. Historical spikes and research remain evidence,
+[`PRODUCT.md`](PRODUCT.md), [`ARCHITECTURE.md`](ARCHITECTURE.md),
+[`VERIFICATION.md`](VERIFICATION.md), and the
+[`RunSnapshot` V1 schema](docs/spec/run-snapshot-v1.schema.json) are normative. Historical spikes and research remain evidence,
 but they do not override those documents or accepted ADRs.
 
 [`docs/style.md`](docs/style.md) defines the scoped engineering rules and canonical compiler-backed
@@ -38,6 +52,9 @@ workload memory.
 [ADR-0014](docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md) makes workflow control
 reconstructive: exact source and arguments replay against durable keyed Job Outputs in a disposable
 evaluator instead of checkpointing JavaScript continuation state.
+[ADR-0015](docs/adr/0015-expose-a-protocol-independent-run-service.md) makes the durable Run Service
+the public semantic seam, separates User role from authority, and keeps the CLI and future industry
+protocols as adapters.
 
 The fixed-credit harness spike established a 1.5 KiB-bounded native owner with nonblocking task,
 completion, permission, cancellation, and shutdown admission; durable-before-apply ordering;
@@ -70,7 +87,9 @@ The permissioned Bash slice validates one bounded call, records its typed collis
 and permission decision, syncs a consequential Attempt before execution, runs from the bound worktree
 with a sanitized environment, commits the typed Result to the conversation, and lets the core
 construct a second model turn. Ambiguous crash recovery records `possibly_executed` and never reruns
-Bash.
+Bash automatically. The current synchronous fixture stops with an indeterminate projection; the
+planned asynchronous V1 lifecycle will feed the already-committed Tool Result to the Agent's next
+model turn rather than automatically escalating to the User or terminating the Job.
 
 ```sh
 zig build fixture-bash -Doptimize=ReleaseSmall
@@ -94,10 +113,12 @@ substitution, missing or untracked files, special files, and wrong mode fail clo
 target remains quiescent from Authorization until Result commit; it does not provide atomic
 compare-and-swap protection against an uncooperative editor.
 
-V1 keeps only `bash` and `apply_patch`. The default `ask` permission mode prompts for every exact
-tool call. An explicit invocation-scoped bypass mode admits validated calls without prompting;
-it does not bypass validation, durability, patch preimage checks, or recovery rules, and resume must
-select it again.
+V1 keeps only `bash` and `apply_patch`. The default `ask` permission mode commits one immutable
+permission Interaction Request for every exact validated tool call. The Run Snapshot exposes that
+request without retaining a Harness or evaluator. A response is accepted only from a Principal whose
+Authority covers its exact operation and descriptor binding. An explicit invocation-scoped bypass
+mode admits validated calls without creating the request; it does not bypass validation, durability,
+patch preimage checks, or recovery rules.
 
 The planned #32 model-facing representation is provider-neutral. Conversation records generic text,
 tool-call, tool-result, and checkpoint entries; each model Operation binds an immutable bounded Tool
@@ -214,3 +235,4 @@ Architectural decisions:
 - [`docs/adr/0012-separate-model-tool-contracts-from-execution.md`](docs/adr/0012-separate-model-tool-contracts-from-execution.md)
 - [`docs/adr/0013-bound-orchestration-memory-not-workload-memory.md`](docs/adr/0013-bound-orchestration-memory-not-workload-memory.md)
 - [`docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md`](docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md)
+- [`docs/adr/0015-expose-a-protocol-independent-run-service.md`](docs/adr/0015-expose-a-protocol-independent-run-service.md)

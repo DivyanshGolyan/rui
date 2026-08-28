@@ -1,6 +1,6 @@
 # Compose agents through durable delegation
 
-> Post-V1 direction. V1 includes caller-directed keyed Jobs through the workflow evaluator, but
+> Post-V1 direction. V1 includes User-directed keyed Jobs through the Workflow Evaluator, but
 > model-directed recursive delegation is excluded and imposes no V1 implementation, schema,
 > capacity, or verification requirement. Reconsider this decision against measured product demand
 > before implementation.
