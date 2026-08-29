@@ -10,8 +10,9 @@ ordinary Harness, Bash, `apply_patch`, and durable follow-up turn. The implement
 provider registry, model catalog, response transaction API, or resumable provider stream.
 
 **No-go for a 100-active-call release claim until the concurrency slope is measured.** The capacity-one
-live tracer records compiled adapter bounds, whole-process RSS and physical footprint, virtual stack
-reservation, threads, and observable macOS TCP queue evidence. That single-call observation is not a
+live tracer records compiled adapter bounds, whole-process RSS and physical footprint, whole-process
+virtual stack reservation sampled while TCP is active, threads, and observable macOS TCP queue evidence.
+That single-call observation is not a
 substitute for issue #43's production-shaped 1, 10, 50, and 100 call matrix or complete kernel socket
 accounting. See [the transport memory budget](model-transport-memory-budget.md).
 

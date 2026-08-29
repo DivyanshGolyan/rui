@@ -90,7 +90,8 @@ can be inspected; a successful run removes the root. Every invocation first inva
 Only after the process exits and every repair assertion passes does it atomically write
 `.zig-cache/codex-live-capacity-one.json`. A successful report must include the exact compiled adapter
 structures and windows, whole-process RSS and physical footprint, virtual size, live thread count,
-active-transport stack reservation, observed TCP queues and configured queue high-water limits, and the
+whole-process stack reservation sampled while TCP is active, observed TCP queues and configured queue
+high-water limits, and the
 zero-capacity idle-pool policy. The report labels the process figures as a capacity-one whole-process
 observation and the macOS socket high-water values as limits rather than allocated kernel memory. It is
 not the concurrency slope owned by issue #43. Fake failures distinguish local refresh rejection,

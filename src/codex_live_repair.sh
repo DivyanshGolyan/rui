@@ -60,11 +60,11 @@ peak_tcp_receive_queue_bytes=0
 peak_tcp_send_queue_bytes=0
 peak_tcp_receive_high_water_bytes=0
 peak_tcp_send_high_water_bytes=0
-pre_transport_peak_rss_bytes=0
+no_active_tcp_peak_rss_bytes=0
 active_transport_peak_rss_bytes=0
 last_no_socket_rss_bytes=0
 transport_baseline_rss_bytes=0
-stack_virtual_bytes=0
+whole_process_stack_virtual_bytes_during_active_tcp=0
 stack_sampled=false
 
 maximum() {
@@ -111,7 +111,7 @@ sample_process() {
   peak_tcp_send_high_water_bytes=$(maximum "$peak_tcp_send_high_water_bytes" "$tcp_send_high_water_bytes")
 
   if test "$tcp_connection_count" -eq 0; then
-    pre_transport_peak_rss_bytes=$(maximum "$pre_transport_peak_rss_bytes" "$rss_bytes")
+    no_active_tcp_peak_rss_bytes=$(maximum "$no_active_tcp_peak_rss_bytes" "$rss_bytes")
     last_no_socket_rss_bytes=$rss_bytes
   else
     active_transport_peak_rss_bytes=$(maximum "$active_transport_peak_rss_bytes" "$rss_bytes")
@@ -122,7 +122,7 @@ sample_process() {
       page_size=$(getconf PAGESIZE)
       stack_pages=$(/usr/bin/vmmap -summary -pages "$onepage_pid" 2>/dev/null | awk '$1 == "Stack" { print $2; exit }')
       if test -n "$stack_pages"; then
-        stack_virtual_bytes=$((stack_pages * page_size))
+        whole_process_stack_virtual_bytes_during_active_tcp=$((stack_pages * page_size))
       fi
       stack_sampled=true
     fi
@@ -188,21 +188,19 @@ if test "$transport_baseline_rss_bytes" -gt 0; then
 fi
 
 adapter_contract=$("$memory_contract_binary")
-if test "$onepage_status" -eq 0; then
-  for required_measurement in \
-    "$peak_rss_bytes" \
-    "$peak_phys_footprint_bytes" \
-    "$active_transport_peak_rss_bytes" \
-    "$peak_thread_count" \
-    "$stack_virtual_bytes" \
-    "$peak_tcp_connection_count"
-  do
-    if test "$required_measurement" -eq 0; then
-      printf 'Successful live run produced an incomplete memory report.\n' >&2
-      exit 1
-    fi
-  done
-fi
+for required_measurement in \
+  "$peak_rss_bytes" \
+  "$peak_phys_footprint_bytes" \
+  "$active_transport_peak_rss_bytes" \
+  "$peak_thread_count" \
+  "$whole_process_stack_virtual_bytes_during_active_tcp" \
+  "$peak_tcp_connection_count"
+do
+  if test "$required_measurement" -eq 0; then
+    printf 'Successful live run produced an incomplete memory report.\n' >&2
+    exit 1
+  fi
+done
 report_directory=$(dirname "$memory_report_path")
 mkdir -p "$report_directory"
 report_temp="${memory_report_path}.tmp.$$"
@@ -226,12 +224,12 @@ source_commit=$(git -C "$script_directory/.." rev-parse HEAD)
     printf '    "peak_rss_bytes": %s,\n' "$peak_rss_bytes"
     printf '    "peak_physical_footprint_bytes": %s,\n' "$peak_phys_footprint_bytes"
     printf '    "peak_virtual_bytes": %s,\n' "$peak_virtual_bytes"
-    printf '    "pre_transport_peak_rss_bytes": %s,\n' "$pre_transport_peak_rss_bytes"
+    printf '    "no_active_tcp_peak_rss_bytes": %s,\n' "$no_active_tcp_peak_rss_bytes"
     printf '    "transport_baseline_rss_bytes": %s,\n' "$transport_baseline_report"
     printf '    "active_transport_peak_rss_bytes": %s,\n' "$active_transport_peak_rss_bytes"
     printf '    "observed_transport_rss_increase_upper_bound_bytes": %s,\n' "$observed_transport_rss_increase_bytes"
     printf '    "peak_thread_count": %s,\n' "$peak_thread_count"
-    printf '    "active_transport_stack_virtual_bytes": %s\n' "$stack_virtual_bytes"
+    printf '    "whole_process_stack_virtual_bytes_during_active_tcp": %s\n' "$whole_process_stack_virtual_bytes_during_active_tcp"
     printf '  },\n'
     printf '  "tcp": {\n'
     printf '    "measurement": "macOS netstat queues and configured high-water limits, not allocated kernel memory",\n'

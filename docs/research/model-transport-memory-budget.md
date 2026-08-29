@@ -25,8 +25,9 @@ The adapter compacts SSE `data:` lines in its one frame, decodes JSON strings in
 
 The opt-in `zig build codex-live-repair` command now writes the raw capacity-one observation to
 `.zig-cache/codex-live-capacity-one.json`. The report separates exact compiled structures and declared
-windows from whole-process RSS, macOS physical footprint, virtual size, thread count, active-transport
-stack reservation, observed TCP queues, and configured socket high-water limits. It also records that
+windows from whole-process RSS, macOS physical footprint, virtual size, thread count, whole-process
+stack reservation sampled while TCP is active, observed TCP queues, and configured socket high-water
+limits. It also records that
 the adapter has no idle connection pool. The report rejects a successful live repair when any required
 dynamic measurement was missed.
 
