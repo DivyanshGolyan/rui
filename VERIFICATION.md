@@ -84,8 +84,17 @@ Codex Provider, Harness, Bash and one-file patch implementation. It is excluded 
 ordinary release checks use fake authorization and transport and make no network or Keychain access.
 On failure it reports and preserves the disposable root so the bounded CLI diagnostic and durable state
 can be inspected; a successful run removes the root. Fake failures distinguish local refresh rejection,
-missing refresh authority, provider HTTP 401, and provider HTTP 403. The diagnostic admits only a
-closed source and a 64-byte provider `error.code` or `error.type` character class.
+missing refresh authority, provider HTTP 401/403, model rejection, rate or quota rejection, and backend
+failure. The diagnostic admits only a closed source and a 64-byte provider `error.code` or `error.type`
+character class.
+
+A single test-only loopback fixture drives the production native transport. It asserts the exact bounded
+request headers and JSON shape, a two-turn tool-result continuation, non-2xx classification without an
+invisible retry, and immediate return after the first terminal SSE event even if the response body remains
+open. Semantic capture fixtures separately prove that failed, cancelled, or incomplete terminal status
+overrides partial candidate output. The loopback fixture does not validate public backend acceptance of
+OnePage's truthful `originator`; that remains an opt-in live compatibility question rather than a hermetic
+CI assertion.
 
 Ingress tests distinguish three outcomes: `full` or `busy` leaves ownership with the producer; `accepted` transfers volatile custody to the live Harness; only a later committed semantic transition acknowledges durable acceptance. Interaction Responses are first validated and committed through the Run Service, then offered only after a fresh Harness acquires an Active Credit. Adapter tests destroy the admitting Harness, publish terminal Inbox evidence, drop every wake hint, and prove bounded durable readiness reconciliation opens a new Harness and applies the Completion. Tests fill ingress while every Active Credit is occupied and prove bounded retry without an unbounded fallback queue.
 

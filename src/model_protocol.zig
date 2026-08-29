@@ -36,6 +36,11 @@ pub const DiagnosticSource = enum(u8) {
     local_refresh_missing = 2,
     provider_http_401 = 3,
     provider_http_403 = 4,
+    provider_http_rejection = 5,
+    provider_model_not_found = 6,
+    provider_rate_limited = 7,
+    provider_quota_exceeded = 8,
+    provider_backend_failure = 9,
 };
 
 pub const FailureDiagnostic = struct {
@@ -506,23 +511,40 @@ fn validateFailureDiagnostic(reason: Failure, source: DiagnosticSource, code: []
         if (code.len != 0) return error.InvalidFailureDiagnosticCode;
         return;
     }
-    if (reason != .authentication_expired) return error.InvalidFailureDiagnosticSource;
     switch (source) {
-        .local_refresh_rejected, .local_refresh_missing => if (code.len != 0) {
-            return error.InvalidFailureDiagnosticCode;
+        .local_refresh_rejected, .local_refresh_missing => {
+            if (reason != .authentication_expired) return error.InvalidFailureDiagnosticSource;
+            if (code.len != 0) return error.InvalidFailureDiagnosticCode;
         },
         .provider_http_401, .provider_http_403 => {
-            if (code.len > max_failure_diagnostic_code_size) {
-                return error.InvalidFailureDiagnosticCode;
-            }
-            for (code) |byte| if (!std.ascii.isAlphanumeric(byte) and
-                byte != '_' and byte != '-' and byte != '.')
-            {
-                return error.InvalidFailureDiagnosticCode;
-            };
+            if (reason != .authentication_expired) return error.InvalidFailureDiagnosticSource;
+            try validateFailureDiagnosticCode(code);
+        },
+        .provider_http_rejection,
+        .provider_rate_limited,
+        .provider_quota_exceeded,
+        .provider_backend_failure,
+        => {
+            if (reason != .provider_error) return error.InvalidFailureDiagnosticSource;
+            try validateFailureDiagnosticCode(code);
+        },
+        .provider_model_not_found => {
+            if (reason != .model_unavailable) return error.InvalidFailureDiagnosticSource;
+            try validateFailureDiagnosticCode(code);
         },
         .none => unreachable,
     }
+}
+
+fn validateFailureDiagnosticCode(code: []const u8) !void {
+    if (code.len > max_failure_diagnostic_code_size) {
+        return error.InvalidFailureDiagnosticCode;
+    }
+    for (code) |byte| if (!std.ascii.isAlphanumeric(byte) and
+        byte != '_' and byte != '-' and byte != '.')
+    {
+        return error.InvalidFailureDiagnosticCode;
+    };
 }
 
 fn failed(reason: Failure) Parsed {

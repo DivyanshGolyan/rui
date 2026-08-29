@@ -63,7 +63,11 @@ pub const TransportDisposition = enum {
     complete,
     http_unauthorized,
     http_forbidden,
-    model_unavailable,
+    provider_rejected,
+    model_not_found,
+    rate_limited,
+    quota_exceeded,
+    backend_failed,
     timed_out,
     cancelled,
     not_started,
@@ -143,7 +147,36 @@ pub const CodexProvider = struct {
                 .provider_http_403,
                 capture.failureDiagnosticCode(),
             ),
-            .model_unavailable => try publishFailure(response, .model_unavailable),
+            .provider_rejected => try publishFailureDiagnostic(
+                response,
+                .provider_error,
+                .provider_http_rejection,
+                capture.failureDiagnosticCode(),
+            ),
+            .model_not_found => try publishFailureDiagnostic(
+                response,
+                .model_unavailable,
+                .provider_model_not_found,
+                capture.failureDiagnosticCode(),
+            ),
+            .rate_limited => try publishFailureDiagnostic(
+                response,
+                .provider_error,
+                .provider_rate_limited,
+                capture.failureDiagnosticCode(),
+            ),
+            .quota_exceeded => try publishFailureDiagnostic(
+                response,
+                .provider_error,
+                .provider_quota_exceeded,
+                capture.failureDiagnosticCode(),
+            ),
+            .backend_failed => try publishFailureDiagnostic(
+                response,
+                .provider_error,
+                .provider_backend_failure,
+                capture.failureDiagnosticCode(),
+            ),
             .timed_out => try publishFailure(response, .timeout),
             .cancelled => try publishFailure(response, .aborted),
             .not_started => try publishFailure(response, .transport_not_started),
@@ -211,7 +244,9 @@ pub const Capture = struct {
     result: [model_protocol.max_response_size]u8 = undefined,
     result_length: usize = 0,
     mapping: ToolMapping = .{},
+    candidate_count: u8 = 0,
     terminal_count: u8 = 0,
+    terminal_status: TerminalStatus = .none,
     completed: bool = false,
     malformed: bool = false,
     failure_diagnostic_code: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
@@ -240,6 +275,10 @@ pub const Capture = struct {
     fn discardRequestBytes(_: *anyopaque, _: []const u8) anyerror!void {}
 
     pub fn appendSse(self: *Capture, bytes: []const u8) !void {
+        if (self.completed) {
+            self.malformed = true;
+            return;
+        }
         var remaining = bytes;
         while (remaining.len != 0) {
             const available = self.frame.len - self.frame_length;
@@ -255,12 +294,22 @@ pub const Capture = struct {
                 const consumed = boundary.end + boundary.length;
                 std.mem.copyForwards(u8, self.frame[0 .. self.frame_length - consumed], self.frame[consumed..self.frame_length]);
                 self.frame_length -= consumed;
+                if (self.completed) {
+                    self.frame_length = 0;
+                    return;
+                }
             }
         }
     }
 
+    pub fn terminalObserved(self: *const Capture) bool {
+        return self.completed;
+    }
+
     pub fn finishSse(self: *Capture) void {
-        if (self.frame_length != 0 or !self.completed or self.terminal_count != 1) {
+        if (self.frame_length != 0 or !self.completed or self.terminal_count != 1 or
+            (self.terminal_status == .completed and self.candidate_count != 1))
+        {
             self.malformed = true;
         }
     }
@@ -308,27 +357,7 @@ pub const Capture = struct {
             self.malformed = true;
             return;
         };
-        if (std.mem.eql(u8, event_type, "response.completed") or
-            std.mem.eql(u8, event_type, "response.done"))
-        {
-            if (self.completed) self.malformed = true;
-            self.completed = true;
-            return;
-        }
-        if (std.mem.eql(u8, event_type, "response.failed") or std.mem.eql(u8, event_type, "error")) {
-            if (self.completed) self.malformed = true;
-            self.completed = true;
-            self.terminal_count +|= 1;
-            self.result_length = (try model_protocol.encodeFailure(&self.result, .provider_error)).len;
-            return;
-        }
-        if (std.mem.eql(u8, event_type, "response.incomplete")) {
-            if (self.completed) self.malformed = true;
-            self.completed = true;
-            self.terminal_count +|= 1;
-            self.result_length = (try model_protocol.encodeFailure(&self.result, .truncated)).len;
-            return;
-        }
+        if (try terminalStatus(event_type, object)) |status| return self.captureTerminal(status);
         if (!std.mem.eql(u8, event_type, "response.output_item.done")) return;
         const item = jsonObject(object.get("item")) orelse {
             self.malformed = true;
@@ -341,11 +370,8 @@ pub const Capture = struct {
         if (!std.mem.eql(u8, item_type, "message") and !std.mem.eql(u8, item_type, "function_call")) {
             return;
         }
-        self.terminal_count +|= 1;
-        if (self.terminal_count != 1) {
-            self.malformed = true;
-            return;
-        }
+        self.candidate_count +|= 1;
+        if (self.candidate_count != 1) return;
         if (std.mem.eql(u8, item_type, "message")) {
             try self.captureMessage(item);
         } else if (std.mem.eql(u8, item_type, "function_call")) {
@@ -353,6 +379,23 @@ pub const Capture = struct {
         } else {
             self.malformed = true;
         }
+    }
+
+    fn captureTerminal(self: *Capture, status: TerminalStatus) !void {
+        if (self.completed) {
+            self.malformed = true;
+            return;
+        }
+        self.completed = true;
+        self.terminal_count +|= 1;
+        self.terminal_status = status;
+        self.result_length = switch (status) {
+            .none => unreachable,
+            .completed => self.result_length,
+            .incomplete => (try model_protocol.encodeFailure(&self.result, .truncated)).len,
+            .failed => (try model_protocol.encodeFailure(&self.result, .provider_error)).len,
+            .cancelled => (try model_protocol.encodeFailure(&self.result, .aborted)).len,
+        };
     }
 
     fn captureMessage(self: *Capture, item: std.json.ObjectMap) !void {
@@ -427,6 +470,32 @@ pub const Capture = struct {
         try response.finish();
     }
 };
+
+const TerminalStatus = enum { none, completed, incomplete, failed, cancelled };
+
+fn terminalStatus(event_type: []const u8, object: std.json.ObjectMap) !?TerminalStatus {
+    const fallback: TerminalStatus = if (std.mem.eql(u8, event_type, "response.completed") or
+        std.mem.eql(u8, event_type, "response.done"))
+        .completed
+    else if (std.mem.eql(u8, event_type, "response.incomplete"))
+        .incomplete
+    else if (std.mem.eql(u8, event_type, "response.failed") or std.mem.eql(u8, event_type, "error"))
+        .failed
+    else if (std.mem.eql(u8, event_type, "response.cancelled") or
+        std.mem.eql(u8, event_type, "response.canceled"))
+        .cancelled
+    else
+        return null;
+    const response = jsonObject(object.get("response")) orelse return fallback;
+    const status_text = jsonString(response.get("status")) orelse return fallback;
+    if (std.mem.eql(u8, status_text, "completed")) return .completed;
+    if (std.mem.eql(u8, status_text, "incomplete")) return .incomplete;
+    if (std.mem.eql(u8, status_text, "failed")) return .failed;
+    if (std.mem.eql(u8, status_text, "cancelled") or std.mem.eql(u8, status_text, "canceled")) {
+        return .cancelled;
+    }
+    return error.MalformedTerminalStatus;
+}
 
 const FrameBoundary = struct { end: usize, length: usize };
 
@@ -642,4 +711,37 @@ test "SSE capture accepts fragmented CRLF and multi-line data" {
         model_protocol.Disposition.final_answer,
         (try model_protocol.decode(&scratch, capture.result[0..capture.result_length])).disposition,
     );
+}
+
+test "terminal response status overrides a partial candidate" {
+    const candidate = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]}}\n\n";
+    const cases = [_]struct {
+        terminal: []const u8,
+        expected: model_protocol.Failure,
+    }{
+        .{
+            .terminal = "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n",
+            .expected = .truncated,
+        },
+        .{
+            .terminal = "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n",
+            .expected = .provider_error,
+        },
+        .{
+            .terminal = "data: {\"type\":\"response.done\",\"response\":{\"status\":\"cancelled\"}}\n\n",
+            .expected = .aborted,
+        },
+    };
+    for (cases) |case| {
+        var capture: Capture = .{};
+        try capture.appendSse(candidate);
+        try capture.appendSse(case.terminal);
+        capture.finishSse();
+        try std.testing.expect(!capture.malformed);
+        var scratch: model_protocol.ValidationScratch = .{};
+        try std.testing.expectEqual(
+            case.expected,
+            (try model_protocol.decode(&scratch, capture.result[0..capture.result_length])).failure,
+        );
+    }
 }

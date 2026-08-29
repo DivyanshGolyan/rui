@@ -338,6 +338,7 @@ fn usesHostStore(root: []const u8) bool {
         "src/agent_integration.zig",
         "src/cli.zig",
         "src/cli_resume_fixture.zig",
+        "src/codex_native.zig",
         "src/deterministic_provider.zig",
         "src/effect_recovery_fixture.zig",
         "src/harness.zig",

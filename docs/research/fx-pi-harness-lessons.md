@@ -92,6 +92,12 @@ OnePage therefore sends `originator: onepage`. Compatibility diagnostics retain 
 local/HTTP source and a validated provider `error.code` or `error.type`; they never retain a response
 message, bearer token, account identifier, or raw response body.
 
+Neither the public Codex SDK nor app-server documentation publishes the private ChatGPT backend endpoint
+or an allow-list contract for arbitrary `originator` values. The pinned implementations above are therefore
+compatibility evidence, not authority that the backend accepts `onepage`. Until an opt-in live run accepts
+that truthful identity, a bounded `provider_http_403/originator_not_allowed` result is a feasibility blocker;
+OnePage must not impersonate `pi` or `codex_cli_rs` to bypass it.
+
 ## Pi
 
 ### Adopt the irreducible loop
