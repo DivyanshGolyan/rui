@@ -12,7 +12,7 @@ const keychain_service = "OnePage Codex";
 const keychain_account = "chatgpt-subscription";
 const err_sec_success: i32 = 0;
 const err_sec_item_not_found: i32 = -25300;
-const transport_timeout_seconds: u32 = 300;
+const transport_timeout = std.Io.Duration.fromSeconds(300);
 
 const SecKeychainItemRef = *anyopaque;
 extern "Security" fn SecKeychainFindGenericPassword(
@@ -200,7 +200,7 @@ pub const NativeTransport = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     endpoint: []const u8 = codex_provider.endpoint,
-    timeout_seconds: u32 = transport_timeout_seconds,
+    timeout: std.Io.Duration = transport_timeout,
 
     pub fn capability(self: *NativeTransport) codex_provider.Transport {
         return .{ .context = self, .perform_fn = perform };
@@ -217,12 +217,26 @@ pub const NativeTransport = struct {
             request: anyerror!codex_provider.TransportDisposition,
             timeout,
         };
+        var request_control: RequestControl = .{};
         var results: [2]SelectResult = undefined;
         var select = std.Io.Select(SelectResult).init(self.io, &results);
-        defer select.cancelDiscard();
-        select.async(.request, performRequest, .{ self, credential, request_value, capture });
-        select.async(.timeout, waitForTimeout, .{ self.io, self.timeout_seconds });
-        return switch (try select.await()) {
+        select.async(.request, performRequest, .{
+            self,
+            credential,
+            request_value,
+            capture,
+            &request_control,
+        });
+        select.async(.timeout, waitForTimeout, .{ self.io, self.timeout, &request_control });
+        const selected = try select.await();
+        select.cancelDiscard();
+        if (request_control.didTimeOut(self.io)) {
+            return if (capture.failureHttpStatus()) |status|
+                classifyHttpFailure(status, capture.failureDiagnosticCode())
+            else
+                .timed_out;
+        }
+        return switch (selected) {
             .request => |result| result,
             .timeout => if (capture.failureHttpStatus()) |status|
                 classifyHttpFailure(status, capture.failureDiagnosticCode())
@@ -236,6 +250,7 @@ pub const NativeTransport = struct {
         credential: *const codex_provider.Credential,
         request_value: model_operation.RequestCursor,
         capture: *codex_provider.Capture,
+        request_control: *RequestControl,
     ) anyerror!codex_provider.TransportDisposition {
         var counter: CountingSink = .{};
         var count_mapping: codex_provider.ToolMapping = .{};
@@ -262,6 +277,8 @@ pub const NativeTransport = struct {
             .extra_headers = &headers,
         }) catch return .not_started;
         defer request.deinit();
+        request_control.publish(self.io, request.connection.?.stream_reader.stream);
+        defer request_control.clear(self.io);
         request.transfer_encoding = .{ .content_length = counter.count };
         var body = request.sendBodyUnflushed(&.{}) catch return .not_started;
         var body_sink: WriterSink = .{ .writer = &body.writer };
@@ -295,10 +312,50 @@ pub const NativeTransport = struct {
         return .complete;
     }
 
-    fn waitForTimeout(io: std.Io, seconds: u32) void {
-        std.Io.sleep(io, std.Io.Duration.fromSeconds(seconds), .awake) catch {};
+    fn waitForTimeout(io: std.Io, duration: std.Io.Duration, request_control: *RequestControl) void {
+        std.Io.sleep(io, duration, .awake) catch return;
+        request_control.interrupt(io);
     }
 };
+
+const RequestControl = struct {
+    mutex: std.Io.Mutex = .init,
+    stream: ?std.Io.net.Stream = null,
+    timed_out: bool = false,
+
+    fn publish(self: *RequestControl, io: std.Io, stream: std.Io.net.Stream) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.stream = stream;
+        if (self.timed_out) interruptStream(io, stream);
+    }
+
+    fn clear(self: *RequestControl, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.stream = null;
+    }
+
+    fn interrupt(self: *RequestControl, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.timed_out = true;
+        if (self.stream) |stream| interruptStream(io, stream);
+    }
+
+    fn didTimeOut(self: *RequestControl, io: std.Io) bool {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.timed_out;
+    }
+};
+
+fn interruptStream(io: std.Io, stream: std.Io.net.Stream) void {
+    // The request still owns and closes the socket. A shutdown error means the
+    // socket is already terminal, so cleanup can join the request without a
+    // competing close or a detached task.
+    stream.shutdown(io, .both) catch {};
+}
 
 fn readProviderFailureCode(
     response: *std.http.Client.Response,
@@ -306,9 +363,11 @@ fn readProviderFailureCode(
 ) void {
     var body: [4097]u8 = undefined;
     var transfer_buffer: [1024]u8 = undefined;
+    const expected_length = response.head.content_length;
     const reader = response.reader(&transfer_buffer);
     const length = reader.readSliceShort(&body) catch return;
     if (length == 0 or length > 4096) return;
+    if (expected_length) |expected| if (length != expected) return;
     setProviderFailureCode(body[0..length], capture);
 }
 
@@ -446,7 +505,7 @@ test "NativeTransport sends the production request and stops at terminal SSE" {
         .io = io,
         .allocator = std.testing.allocator,
         .endpoint = local_endpoint,
-        .timeout_seconds = 1,
+        .timeout = std.Io.Duration.fromSeconds(1),
     };
     var credential = fakeCredential();
     defer credential.scrub();
@@ -464,6 +523,68 @@ test "NativeTransport sends the production request and stops at terminal SSE" {
     try std.testing.expectEqual(codex_provider.TransportDisposition.complete, try disposition);
     try std.testing.expect(capture.terminalObserved());
     try fixture.expectProductionRequest(false);
+}
+
+test "NativeTransport timeout bounds the entire call and closes an open response body" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wire = try WireSession.init(io, &tmp);
+    defer wire.deinit(io);
+    _ = try model_operation.buildRequest(&wire.session, 1050, 1, 1);
+    const cases = [_]struct {
+        status: std.http.Status,
+        body: []const u8,
+        expected: codex_provider.TransportDisposition,
+        expected_status: ?u16,
+    }{
+        .{
+            .status = .ok,
+            .body = "data: {\"type\":\"response.created\"}\n\n",
+            .expected = .timed_out,
+            .expected_status = null,
+        },
+        .{
+            .status = .bad_request,
+            .body = "{\"error\":{\"code\":\"incomplete",
+            .expected = .provider_rejected,
+            .expected_status = 400,
+        },
+    };
+    for (cases, 0..) |case, index| {
+        var provider_io = try model_operation.ProviderIo.open(&wire.session, 1050, 1051 + index);
+        defer provider_io.close();
+        var fixture = try WireFixture.init(io, case.status, case.body, .stall);
+        defer fixture.deinit(io);
+        var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+        var endpoint_buffer: [128]u8 = undefined;
+        var transport: NativeTransport = .{
+            .io = io,
+            .allocator = std.testing.allocator,
+            .endpoint = try fixture.endpoint(&endpoint_buffer),
+            .timeout = std.Io.Duration.fromMilliseconds(50),
+        };
+        var credential = fakeCredential();
+        defer credential.scrub();
+        var capture: codex_provider.Capture = .{};
+
+        const started = std.Io.Clock.awake.now(io);
+        const capability = transport.capability();
+        const disposition = try capability.perform_fn(
+            capability.context,
+            &credential,
+            try provider_io.request(),
+            &capture,
+        );
+        const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+        try server_future.await(io);
+
+        try std.testing.expectEqual(case.expected, disposition);
+        try std.testing.expectEqual(case.expected_status, capture.failureHttpStatus());
+        try std.testing.expectEqualStrings("", capture.failureDiagnosticCode());
+        try std.testing.expect(elapsed.nanoseconds < std.Io.Duration.fromMilliseconds(500).nanoseconds);
+        try std.testing.expect(fixture.peer_closed);
+    }
 }
 
 test "NativeTransport lowers a two-turn tool result on the production wire" {
@@ -505,7 +626,7 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
         .io = io,
         .allocator = std.testing.allocator,
         .endpoint = try fixture.endpoint(&endpoint_buffer),
-        .timeout_seconds = 1,
+        .timeout = std.Io.Duration.fromSeconds(1),
     };
     var credential = fakeCredential();
     defer credential.scrub();
@@ -557,7 +678,7 @@ test "NativeTransport classifies every received HTTP rejection without retry" {
             .io = io,
             .allocator = std.testing.allocator,
             .endpoint = try fixture.endpoint(&endpoint_buffer),
-            .timeout_seconds = 1,
+            .timeout = std.Io.Duration.fromSeconds(1),
         };
         var credential = fakeCredential();
         defer credential.scrub();
@@ -601,7 +722,7 @@ test "NativeTransport reads a chunked provider diagnostic after the response hea
         .io = io,
         .allocator = std.testing.allocator,
         .endpoint = try fixture.endpoint(&endpoint_buffer),
-        .timeout_seconds = 1,
+        .timeout = std.Io.Duration.fromSeconds(1),
     };
     var credential = fakeCredential();
     defer credential.scrub();
@@ -645,7 +766,7 @@ test "NativeTransport keeps status without retaining oversized or malformed prov
             .io = io,
             .allocator = std.testing.allocator,
             .endpoint = try fixture.endpoint(&endpoint_buffer),
-            .timeout_seconds = 1,
+            .timeout = std.Io.Duration.fromSeconds(1),
         };
         var credential = fakeCredential();
         defer credential.scrub();
@@ -755,7 +876,7 @@ fn commitConversation(session: *session_store.Session, entry: session_store.Conv
 }
 
 const WireFixture = struct {
-    const ResponseMode = enum { complete, keep_open, chunked };
+    const ResponseMode = enum { complete, keep_open, stall, chunked };
 
     listener: std.Io.net.Server,
     status: std.http.Status,
@@ -772,6 +893,7 @@ const WireFixture = struct {
     beta: bool = false,
     body: [96 * 1024]u8 = undefined,
     body_length: usize = 0,
+    peer_closed: bool = false,
 
     fn init(io: std.Io, status: std.http.Status, response: []const u8, response_mode: ResponseMode) !WireFixture {
         const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
@@ -838,7 +960,10 @@ const WireFixture = struct {
         }
         var response_buffer: [4096]u8 = undefined;
         var response_writer = try request.respondStreaming(&response_buffer, .{
-            .content_length = if (self.response_mode == .keep_open) self.response.len + 1 else null,
+            .content_length = if (self.response_mode == .keep_open or self.response_mode == .stall)
+                self.response.len + 1
+            else
+                null,
             .respond_options = .{
                 .status = self.status,
                 .extra_headers = &.{.{ .name = "content-type", .value = "text/event-stream" }},
@@ -851,7 +976,31 @@ const WireFixture = struct {
             try response_writer.end();
             return;
         }
+        if (self.response_mode == .stall) {
+            const PeerResult = union(enum) { closed: bool, guard };
+            var results: [2]PeerResult = undefined;
+            var select = std.Io.Select(PeerResult).init(io, &results);
+            select.async(.closed, waitForPeerClose, .{&stream_reader.interface});
+            select.async(.guard, interruptPeerAfterGuard, .{ io, &stream });
+            const selected = try select.await();
+            select.cancelDiscard();
+            self.peer_closed = switch (selected) {
+                .closed => |closed| closed,
+                .guard => false,
+            };
+            return;
+        }
         try std.Io.sleep(io, std.Io.Duration.fromSeconds(5), .awake);
+    }
+
+    fn waitForPeerClose(reader: *std.Io.Reader) bool {
+        _ = reader.peekGreedy(1) catch |err| return err == error.EndOfStream;
+        return false;
+    }
+
+    fn interruptPeerAfterGuard(io: std.Io, stream: *const std.Io.net.Stream) void {
+        std.Io.sleep(io, std.Io.Duration.fromSeconds(2), .awake) catch return;
+        stream.shutdown(io, .both) catch {};
     }
 
     fn expectProductionRequest(self: *const WireFixture, two_turn: bool) !void {
