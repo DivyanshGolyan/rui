@@ -125,7 +125,6 @@ pub const Projection = struct {
     generation: u64 = 0,
     failure: model_protocol.Failure = .none,
     diagnostic_source: model_protocol.DiagnosticSource = .none,
-    diagnostic_http_status: u16 = 0,
     diagnostic_code: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
     diagnostic_code_length: u8 = 0,
 
@@ -138,10 +137,6 @@ pub const Projection = struct {
 
     pub fn diagnosticCode(self: *const Projection) []const u8 {
         return self.diagnostic_code[0..self.diagnostic_code_length];
-    }
-
-    pub fn diagnosticHttpStatus(self: *const Projection) ?u16 {
-        return if (self.diagnostic_http_status == 0) null else self.diagnostic_http_status;
     }
 };
 
@@ -756,13 +751,12 @@ const HarnessState = struct {
         if (response_ref == 0) return;
         var reader = session.openBlob(response_ref) catch return;
         defer reader.close();
-        var bytes: [model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size + 2]u8 = undefined;
+        var bytes: [model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size]u8 = undefined;
         if (reader.length() > bytes.len) return;
         const captured = reader.readWindow(0, &bytes) catch return;
         if (captured.len != reader.length()) return;
         const diagnostic = model_protocol.inspectFailureDiagnostic(captured) catch return;
         projection.diagnostic_source = diagnostic.source;
-        projection.diagnostic_http_status = diagnostic.http_status orelse 0;
         projection.setDiagnosticCode(diagnostic.code);
     }
 
@@ -1805,6 +1799,140 @@ test "input request fails terminally until the durable interaction layer exists"
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }
 
+test "fresh Harness resumes after admitted Tool Result without replaying the tool" {
+    const HistoryProvider = struct {
+        calls: u8 = 0,
+        command: []const u8,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            request_value: model_operation.RequestCursor,
+            candidate: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var request = request_value;
+            var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
+            const encoded = switch (request.entryCount()) {
+                1 => blk: {
+                    const task = (try request.next()) orelse return error.MissingTask;
+                    if (task != .user_text or task.user_text.content.length() != "run once".len) {
+                        return error.UnexpectedTask;
+                    }
+                    var task_bytes: ["run once".len]u8 = undefined;
+                    _ = try task.user_text.content.readWindow(0, &task_bytes);
+                    if (!std.mem.eql(u8, &task_bytes, "run once")) return error.UnexpectedTask;
+                    if (try request.next() != null) return error.UnexpectedHistory;
+                    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+                    const arguments = try model_contract.encodeJson(&arguments_buffer, .{
+                        .command = self.command,
+                        .timeout_ms = 5000,
+                    });
+                    break :blk try model_protocol.encodeTool(
+                        &encoded_buffer,
+                        model_contract.bash_key,
+                        arguments,
+                    );
+                },
+                3 => blk: {
+                    _ = (try request.next()) orelse return error.MissingTask;
+                    const call = (try request.next()) orelse return error.MissingToolCall;
+                    if (call != .tool_call or !std.mem.eql(u8, call.tool_call.key(), model_contract.bash_key)) {
+                        return error.UnexpectedToolCall;
+                    }
+                    const result_entry = (try request.next()) orelse return error.MissingToolResult;
+                    if (result_entry != .tool_result or result_entry.tool_result.is_error) {
+                        return error.UnexpectedToolResult;
+                    }
+                    const expected_result = "status=success\nexit_code=0\n" ++
+                        "stdout_base64=cmVwbGF5LXByb29m\nstderr_base64=";
+                    if (result_entry.tool_result.content.length() != expected_result.len) {
+                        return error.UnexpectedToolResult;
+                    }
+                    var result_bytes: [expected_result.len]u8 = undefined;
+                    _ = try result_entry.tool_result.content.readWindow(0, &result_bytes);
+                    if (!std.mem.eql(u8, &result_bytes, expected_result)) return error.UnexpectedToolResult;
+                    if (try request.next() != null) return error.UnexpectedHistory;
+                    break :blk try model_protocol.encodeText(&encoded_buffer, "durable final");
+                },
+                else => return error.UnexpectedHistory,
+            };
+            try candidate.append(encoded);
+            return .candidate;
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var command_buffer: [256]u8 = undefined;
+    const command = try std.fmt.bufPrint(
+        &command_buffer,
+        "printf x >> '.zig-cache/tmp/{s}/execution-count'; printf replay-proof",
+        .{tmp.sub_path},
+    );
+    var first_provider: HistoryProvider = .{ .command = command };
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .permission_mode = .bypass,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:history-restart",
+            .task = "run once",
+            .provider = first_provider.provider(),
+        } },
+    });
+    _ = try owner.drive();
+    const session_id = harnessState(owner).session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    for (0..12) |_| {
+        _ = try owner.drive();
+        if (harnessState(owner).session.?.entryCount() == 3) break;
+    }
+    try std.testing.expectEqual(@as(u64, 3), harnessState(owner).session.?.entryCount());
+    try std.testing.expectEqual(@as(u8, 1), first_provider.calls);
+    var execution_count: [2]u8 = undefined;
+    var count_file = try tmp.dir.openFile(std.testing.io, "execution-count", .{});
+    defer count_file.close(std.testing.io);
+    const count_length = try count_file.readPositionalAll(std.testing.io, &execution_count, 0);
+    try std.testing.expectEqualStrings("x", execution_count[0..count_length]);
+    owner.close();
+
+    var fresh_provider: HistoryProvider = .{ .command = command };
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .permission_mode = .bypass,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .provider = fresh_provider.provider(),
+        } },
+    });
+    var finished: Progress = undefined;
+    for (0..12) |_| {
+        finished = try restored.drive();
+        if (finished.state == .finished) break;
+    }
+    try std.testing.expectEqual(State.finished, finished.state);
+    try std.testing.expectEqual(@as(u8, 1), fresh_provider.calls);
+    const unchanged_length = try count_file.readPositionalAll(std.testing.io, &execution_count, 0);
+    try std.testing.expectEqualStrings("x", execution_count[0..unchanged_length]);
+    restored.close();
+
+    var final_restore = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{ .session_id = session_id } },
+    });
+    defer final_restore.close();
+    _ = try final_restore.drive();
+    const durable = try final_restore.drive();
+    try std.testing.expectEqual(State.finished, durable.state);
+}
+
 test "Codex fake authorization and transport complete through the existing Harness" {
     const FakeAuthorization = struct {
         fn load(
@@ -1889,7 +2017,7 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
     };
     const FakeTransport = struct {
         disposition: codex_provider.TransportDisposition,
-        http_status: ?u16 = null,
+        private_http_status: ?u16 = null,
         diagnostic_code: []const u8 = "",
         calls: u8 = 0,
 
@@ -1901,7 +2029,7 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         ) anyerror!codex_provider.TransportDisposition {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
-            if (self.http_status) |status| try capture.setFailureHttpStatus(status);
+            if (self.private_http_status) |status| try capture.setFailureHttpStatus(status);
             try capture.setFailureDiagnosticCode(self.diagnostic_code);
             return self.disposition;
         }
@@ -1911,7 +2039,7 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         transport: codex_provider.TransportDisposition = .not_started,
         expected: model_protocol.Failure,
         expected_source: model_protocol.DiagnosticSource = .none,
-        http_status: ?u16 = null,
+        private_http_status: ?u16 = null,
         diagnostic_code: []const u8 = "",
     };
     const cases = [_]Case{
@@ -1919,61 +2047,61 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         .{
             .authorization = .refresh_rejected,
             .expected = .authentication_expired,
-            .expected_source = .local_refresh_rejected,
+            .expected_source = .local_credentials,
         },
         .{
             .authorization = .refresh_missing,
             .expected = .authentication_expired,
-            .expected_source = .local_refresh_missing,
+            .expected_source = .local_credentials,
         },
         .{ .authorization = .timed_out, .expected = .timeout },
         .{
             .transport = .http_unauthorized,
             .expected = .authentication_expired,
-            .expected_source = .provider_http_401,
-            .http_status = 401,
+            .expected_source = .provider,
+            .private_http_status = 401,
             .diagnostic_code = "invalid_token",
         },
         .{
             .transport = .http_forbidden,
             .expected = .authentication_expired,
-            .expected_source = .provider_http_403,
-            .http_status = 403,
+            .expected_source = .provider,
+            .private_http_status = 403,
             .diagnostic_code = "originator_not_allowed",
         },
         .{
             .transport = .provider_rejected,
             .expected = .provider_error,
-            .expected_source = .provider_http_rejection,
-            .http_status = 400,
+            .expected_source = .provider,
+            .private_http_status = 400,
             .diagnostic_code = "invalid_request_error",
         },
         .{
             .transport = .model_not_found,
             .expected = .model_unavailable,
-            .expected_source = .provider_model_not_found,
-            .http_status = 404,
+            .expected_source = .provider,
+            .private_http_status = 404,
             .diagnostic_code = "model_not_found",
         },
         .{
             .transport = .rate_limited,
             .expected = .provider_error,
-            .expected_source = .provider_rate_limited,
-            .http_status = 429,
+            .expected_source = .provider,
+            .private_http_status = 429,
             .diagnostic_code = "rate_limit_exceeded",
         },
         .{
             .transport = .quota_exceeded,
             .expected = .provider_error,
-            .expected_source = .provider_quota_exceeded,
-            .http_status = 429,
+            .expected_source = .provider,
+            .private_http_status = 429,
             .diagnostic_code = "insufficient_quota",
         },
         .{
             .transport = .backend_failed,
             .expected = .provider_error,
-            .expected_source = .provider_backend_failure,
-            .http_status = 503,
+            .expected_source = .provider,
+            .private_http_status = 503,
             .diagnostic_code = "backend_error",
         },
         .{ .transport = .timed_out, .expected = .timeout },
@@ -1990,7 +2118,7 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         var authorization: FakeAuthorization = .{ .disposition = case.authorization };
         var transport: FakeTransport = .{
             .disposition = case.transport,
-            .http_status = case.http_status,
+            .private_http_status = case.private_http_status,
             .diagnostic_code = case.diagnostic_code,
         };
         var codex: codex_provider.CodexProvider = .{
@@ -2018,7 +2146,6 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
         try std.testing.expectEqual(case.expected, failed.projections[0].failure);
         try std.testing.expectEqual(case.expected_source, failed.projections[0].diagnostic_source);
-        try std.testing.expectEqual(case.http_status, failed.projections[0].diagnosticHttpStatus());
         try std.testing.expectEqualStrings(case.diagnostic_code, failed.projections[0].diagnosticCode());
         var ignored: u8 = 0;
         const ledger = try harnessState(owner).session.?.inspectSemantic(
@@ -2043,7 +2170,6 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         try std.testing.expectEqual(ProjectionKind.failure, reopened.projections[0].kind);
         try std.testing.expectEqual(case.expected, reopened.projections[0].failure);
         try std.testing.expectEqual(case.expected_source, reopened.projections[0].diagnostic_source);
-        try std.testing.expectEqual(case.http_status, reopened.projections[0].diagnosticHttpStatus());
         try std.testing.expectEqualStrings(case.diagnostic_code, reopened.projections[0].diagnosticCode());
         try std.testing.expectEqual(dispatches, transport.calls);
         restored.close();

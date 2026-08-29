@@ -289,26 +289,11 @@ fn failureLine(out: []u8, failure: model_protocol.Failure) ![]const u8 {
 fn failureProjectionLine(out: []u8, projection: *const harness.Projection) ![]const u8 {
     if (projection.diagnostic_source == .none) return failureLine(out, projection.failure);
     const code = projection.diagnosticCode();
-    const status = projection.diagnosticHttpStatus();
-    if (status == null and code.len == 0) {
+    if (code.len == 0) {
         return std.fmt.bufPrint(
             out,
             "Session failed: {s} ({s}).\n",
             .{ @tagName(projection.failure), @tagName(projection.diagnostic_source) },
-        );
-    }
-    if (status) |value| {
-        if (code.len == 0) {
-            return std.fmt.bufPrint(
-                out,
-                "Session failed: {s} ({s}, status={d}).\n",
-                .{ @tagName(projection.failure), @tagName(projection.diagnostic_source), value },
-            );
-        }
-        return std.fmt.bufPrint(
-            out,
-            "Session failed: {s} ({s}, status={d}, code={s}).\n",
-            .{ @tagName(projection.failure), @tagName(projection.diagnostic_source), value, code },
         );
     }
     return std.fmt.bufPrint(
@@ -663,29 +648,26 @@ test "CLI failure rendering preserves the bounded typed cause" {
         .kind = .failure,
         .session_id = 1,
         .failure = .authentication_expired,
-        .diagnostic_source = .provider_http_403,
-        .diagnostic_http_status = 403,
+        .diagnostic_source = .provider,
     };
     projection.setDiagnosticCode("originator_not_allowed");
     try std.testing.expectEqualStrings(
-        "Session failed: authentication_expired (provider_http_403, status=403, code=originator_not_allowed).\n",
+        "Session failed: authentication_expired (provider, code=originator_not_allowed).\n",
         try failureProjectionLine(&buffer, &projection),
     );
     projection.failure = .provider_error;
-    projection.diagnostic_source = .provider_http_rejection;
-    projection.diagnostic_http_status = 422;
+    projection.diagnostic_source = .provider;
     projection.setDiagnosticCode("");
     try std.testing.expectEqualStrings(
-        "Session failed: provider_error (provider_http_rejection, status=422).\n",
+        "Session failed: provider_error (provider).\n",
         try failureProjectionLine(&buffer, &projection),
     );
     projection.failure = .model_unavailable;
-    projection.diagnostic_source = .provider_model_not_found;
-    projection.diagnostic_http_status = 400;
+    projection.diagnostic_source = .provider;
     projection.setDiagnosticCode("model_not_supported");
     const model_line = try failureProjectionLine(&buffer, &projection);
     try std.testing.expectEqualStrings(
-        "Session failed: model_unavailable (provider_model_not_found, status=400, code=model_not_supported).\n",
+        "Session failed: model_unavailable (provider, code=model_not_supported).\n",
         model_line,
     );
     try std.testing.expect(std.mem.indexOf(u8, model_line, "using Codex with a ChatGPT account") == null);

@@ -51,6 +51,7 @@ pub const AuthorizationDisposition = enum {
     missing,
     refresh_rejected,
     refresh_missing,
+    failed,
     timed_out,
 };
 
@@ -113,72 +114,62 @@ pub const CodexProvider = struct {
         const self: *CodexProvider = @ptrCast(@alignCast(context));
         var credential: Credential = .{};
         defer credential.scrub();
-        const authorization = self.authorization.load(&credential) catch
-            return failureOutcome(.provider_error);
+        const authorization = try self.authorization.load(&credential);
         switch (authorization) {
             .missing => return failureOutcome(.missing_authentication),
             .refresh_rejected => return failureDiagnosticOutcome(
                 .authentication_expired,
-                .local_refresh_rejected,
-                null,
+                .local_credentials,
                 "",
             ),
             .refresh_missing => return failureDiagnosticOutcome(
                 .authentication_expired,
-                .local_refresh_missing,
-                null,
+                .local_credentials,
                 "",
             ),
+            .failed => return failureOutcome(.provider_error),
             .timed_out => return failureOutcome(.timeout),
             .ready => {},
         }
         if (credential.token().len == 0) return failureOutcome(.provider_error);
 
         var capture: Capture = .{ .candidate = candidate };
-        const disposition = self.transport.perform(&credential, request, &capture) catch
-            return failureOutcome(.transport_may_have_started);
+        const disposition = try self.transport.perform(&credential, request, &capture);
         return switch (disposition) {
             .complete => capture.publish(candidate),
             .http_unauthorized => failureDiagnosticOutcome(
                 .authentication_expired,
-                .provider_http_401,
-                capture.failureHttpStatus(),
+                .provider,
                 capture.failureDiagnosticCode(),
             ),
             .http_forbidden => failureDiagnosticOutcome(
                 .authentication_expired,
-                .provider_http_403,
-                capture.failureHttpStatus(),
+                .provider,
                 capture.failureDiagnosticCode(),
             ),
             .provider_rejected => failureDiagnosticOutcome(
                 .provider_error,
-                .provider_http_rejection,
-                capture.failureHttpStatus(),
+                .provider,
                 capture.failureDiagnosticCode(),
             ),
             .model_not_found => failureDiagnosticOutcome(
                 .model_unavailable,
-                .provider_model_not_found,
-                capture.failureHttpStatus(),
+                .provider,
                 capture.failureDiagnosticCode(),
             ),
             .rate_limited => failureDiagnosticOutcome(
                 .provider_error,
-                .provider_rate_limited,
-                capture.failureHttpStatus(),
+                .provider,
                 capture.failureDiagnosticCode(),
             ),
             .quota_exceeded => failureDiagnosticOutcome(
                 .provider_error,
-                .provider_quota_exceeded,
-                capture.failureHttpStatus(),
+                .provider,
                 capture.failureDiagnosticCode(),
             ),
             .backend_failed => failureDiagnosticOutcome(
                 .provider_error,
-                .provider_backend_failure,
-                capture.failureHttpStatus(),
+                .provider,
                 capture.failureDiagnosticCode(),
             ),
             .timed_out => failureOutcome(.timeout),
@@ -196,13 +187,11 @@ fn failureOutcome(failure: model_protocol.Failure) model_operation.DispatchOutco
 fn failureDiagnosticOutcome(
     failure: model_protocol.Failure,
     source: model_protocol.DiagnosticSource,
-    http_status: ?u16,
     code: []const u8,
 ) model_operation.DispatchOutcome {
     var capture: model_operation.FailureCapture = .{
         .failure = failure,
         .diagnostic_source = source,
-        .http_status = http_status,
     };
     std.debug.assert(code.len <= capture.diagnostic_code_bytes.len);
     @memcpy(capture.diagnostic_code_bytes[0..code.len], code);
@@ -297,14 +286,22 @@ pub const Capture = struct {
 
     pub fn appendSse(self: *Capture, bytes: []const u8) !void {
         if (self.completed) return;
-        self.total_sse_bytes = std.math.add(usize, self.total_sse_bytes, bytes.len) catch
-            return self.exceeded(error.SseStreamTooLarge);
-        if (self.total_sse_bytes > max_total_sse_bytes) return self.exceeded(error.SseStreamTooLarge);
         var remaining = bytes;
         while (remaining.len != 0) {
             const available = self.frame.len - self.frame_length;
             if (available == 0) return self.exceeded(error.SseFrameTooLarge);
-            const count = @min(available, remaining.len);
+            // Stop each copy at the next line ending so a terminal boundary is
+            // observed before any coalesced trailing bytes are charged.
+            const through_next_lf = if (std.mem.indexOfScalar(u8, remaining, '\n')) |index|
+                index + 1
+            else
+                remaining.len;
+            const count = @min(available, through_next_lf);
+            self.total_sse_bytes = std.math.add(usize, self.total_sse_bytes, count) catch
+                return self.exceeded(error.SseStreamTooLarge);
+            if (self.total_sse_bytes > max_total_sse_bytes) {
+                return self.exceeded(error.SseStreamTooLarge);
+            }
             @memcpy(self.frame[self.frame_length..][0..count], remaining[0..count]);
             self.frame_length += count;
             remaining = remaining[count..];
@@ -1248,6 +1245,56 @@ const TestCandidate = struct {
     }
 };
 
+test "Codex dispatch preserves Host errors and captures declared external failures" {
+    const AuthorizationFixture = struct {
+        disposition: ?AuthorizationDisposition = null,
+
+        fn load(
+            context: *anyopaque,
+            credential: *Credential,
+        ) anyerror!AuthorizationDisposition {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const disposition = self.disposition orelse return error.InjectedHostAuthorizationFailure;
+            if (disposition == .ready) {
+                @memcpy(credential.access_token[0..5], "token");
+                credential.access_token_length = 5;
+            }
+            return disposition;
+        }
+    };
+    const TransportFixture = struct {
+        fn perform(
+            _: *anyopaque,
+            _: *const Credential,
+            _: model_operation.RequestCursor,
+            _: *Capture,
+        ) anyerror!TransportDisposition {
+            return error.InjectedHostCandidateFailure;
+        }
+    };
+    var output: TestCandidate = .{};
+    var authorization: AuthorizationFixture = .{};
+    var transport: u8 = 0;
+    var provider: CodexProvider = .{
+        .authorization = .{ .context = &authorization, .load_fn = AuthorizationFixture.load },
+        .transport = .{ .context = &transport, .perform_fn = TransportFixture.perform },
+    };
+    try std.testing.expectError(
+        error.InjectedHostAuthorizationFailure,
+        CodexProvider.dispatch(&provider, undefined, output.capture().candidate.?),
+    );
+
+    authorization.disposition = .ready;
+    try std.testing.expectError(
+        error.InjectedHostCandidateFailure,
+        CodexProvider.dispatch(&provider, undefined, output.capture().candidate.?),
+    );
+
+    authorization.disposition = .failed;
+    const captured = try CodexProvider.dispatch(&provider, undefined, output.capture().candidate.?);
+    try std.testing.expectEqual(model_protocol.Failure.provider_error, captured.failure.failure);
+}
+
 test "SSE capture maps final text, tools, input, and repeated terminals" {
     var output: TestCandidate = .{};
     var capture = output.capture();
@@ -1364,6 +1411,21 @@ test "terminal status agreement and first-terminal-wins are chunk independent" {
     );
     contradictory.finishSse();
     try std.testing.expect(contradictory.malformed);
+
+    var coalesced_output: TestCandidate = .{};
+    var coalesced = coalesced_output.capture();
+    coalesced.total_sse_bytes = max_total_sse_bytes - terminal.len;
+    try coalesced.appendSse(terminal ++ "trailing bytes beyond the stream budget");
+    try std.testing.expect(coalesced.completed);
+    try std.testing.expectEqual(max_total_sse_bytes, coalesced.total_sse_bytes);
+
+    var partitioned_output: TestCandidate = .{};
+    var partitioned = partitioned_output.capture();
+    partitioned.total_sse_bytes = max_total_sse_bytes - terminal.len;
+    try partitioned.appendSse(terminal);
+    try partitioned.appendSse("trailing bytes beyond the stream budget");
+    try std.testing.expect(partitioned.completed);
+    try std.testing.expectEqual(coalesced.total_sse_bytes, partitioned.total_sse_bytes);
 }
 
 test "every two-chunk partition produces byte-identical captured evidence" {

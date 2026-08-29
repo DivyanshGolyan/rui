@@ -47,7 +47,6 @@ pub const Provider = struct {
 pub const FailureCapture = struct {
     failure: model_protocol.Failure,
     diagnostic_source: model_protocol.DiagnosticSource = .none,
-    http_status: ?u16 = null,
     diagnostic_code_bytes: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
     diagnostic_code_length: u8 = 0,
 
@@ -652,19 +651,17 @@ pub const ProviderIo = struct {
                 self.response.abort();
                 self.response = try self.session.beginBlob(self.response_ref);
                 var bytes: [
-                    model_protocol.header_size +
-                        model_protocol.max_failure_diagnostic_code_size + 2
+                    model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size
                 ]u8 = undefined;
                 const diagnostic_code = failure.diagnosticCode();
                 const encoded = if (failure.diagnostic_source == .none and
-                    failure.http_status == null and diagnostic_code.len == 0)
+                    diagnostic_code.len == 0)
                     try model_protocol.encodeFailure(&bytes, failure.failure)
                 else
                     try model_protocol.encodeFailureDiagnostic(
                         &bytes,
                         failure.failure,
                         failure.diagnostic_source,
-                        failure.http_status,
                         diagnostic_code,
                     );
                 try self.response.append(encoded);

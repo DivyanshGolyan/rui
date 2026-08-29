@@ -172,7 +172,12 @@ pub const NativeHttp = struct {
         select.cancelDiscard();
         if (request_control.winnerValue(self.io) == .timed_out) return error.HttpRequestTimedOut;
         return switch (selected) {
-            .request => |result| result,
+            .request => |result| result catch |err| switch (err) {
+                error.OutOfMemory,
+                error.UnexpectedAuthorizationOrigin,
+                => return err,
+                else => error.AuthorizationTransportFailed,
+            },
             .timeout => if (request_control.winnerValue(self.io) == .terminal)
                 completed_response orelse error.IncompleteHttpResponse
             else
@@ -261,6 +266,7 @@ pub const NativeAuthorization = struct {
                 error.RefreshRejected => return .refresh_rejected,
                 error.MissingRefreshToken => return .refresh_missing,
                 error.HttpRequestTimedOut => return .timed_out,
+                error.AuthorizationTransportFailed => return .failed,
                 else => return err,
             };
             defer renewed.scrub();
@@ -340,8 +346,7 @@ pub const NativeTransport = struct {
     ) anyerror!codex_provider.TransportDisposition {
         var counter: CountingSink = .{};
         var count_mapping: codex_provider.ToolMapping = .{};
-        codex_provider.encodeRequest(request_value, counter.sink(), &count_mapping) catch
-            return .not_started;
+        try codex_provider.encodeRequest(request_value, counter.sink(), &count_mapping);
 
         var authorization: [codex_auth.max_token_size + 8]u8 = undefined;
         defer std.crypto.secureZero(u8, &authorization);
@@ -361,7 +366,10 @@ pub const NativeTransport = struct {
             .redirect_behavior = .unhandled,
             .keep_alive = false,
             .extra_headers = &headers,
-        }) catch return .not_started;
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return .not_started,
+        };
         defer request.deinit();
         request_control.publish(self.io, request.connection.?.stream_reader.stream);
         defer request_control.clear(self.io);
@@ -369,15 +377,18 @@ pub const NativeTransport = struct {
         var body = request.sendBodyUnflushed(&.{}) catch return .not_started;
         var body_sink: WriterSink = .{ .writer = &body.writer };
         capture.mapping = .{};
-        codex_provider.encodeRequest(request_value, body_sink.sink(), &capture.mapping) catch
-            return .may_have_started;
+        codex_provider.encodeRequest(request_value, body_sink.sink(), &capture.mapping) catch |err|
+            switch (err) {
+                error.ProviderRequestWriteFailed => return .may_have_started,
+                else => return err,
+            };
         body.end() catch return .may_have_started;
         request.connection.?.flush() catch return .may_have_started;
         var redirect_buffer: [1024]u8 = undefined;
         var response = request.receiveHead(&redirect_buffer) catch return .may_have_started;
         const status: u16 = @intFromEnum(response.head.status);
         if (status < 200 or status >= 300) {
-            capture.setFailureHttpStatus(status) catch return .provider_rejected;
+            try capture.setFailureHttpStatus(status);
             readProviderFailureCode(&response, capture);
             return classifyHttpFailure(status, capture.failureDiagnosticCode());
         }
@@ -561,7 +572,7 @@ const WriterSink = struct {
     }
     fn write(context: *anyopaque, bytes: []const u8) anyerror!void {
         const self: *WriterSink = @ptrCast(@alignCast(context));
-        try self.writer.writeAll(bytes);
+        self.writer.writeAll(bytes) catch return error.ProviderRequestWriteFailed;
     }
 };
 
