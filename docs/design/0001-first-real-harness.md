@@ -439,6 +439,8 @@ The adapter consumes one already-accepted typed request. It receives an append-o
 
 Codex-specific SSE framing, first-terminal policy, status agreement, OAuth diagnostics, and the one-frame allocation-free JSON cursor remain inside the Codex adapter. They do not appear in the model port. A future adapter may combine many wire events or use its own bounded Host-owned scratch while returning through the same synchronous candidate-or-failure settlement seam. Authorization and model transports use the same deadline-owned native HTTP pattern: timeout interrupts the owned socket and the request task is joined before return.
 
+The consolidated protocol, credential, retry, bounds, history, and go/no-go decision is recorded in the [Codex subscription feasibility result](../research/codex-subscription-feasibility.md).
+
 ### Durable store port
 
 Dependency category: local-substitutable.
