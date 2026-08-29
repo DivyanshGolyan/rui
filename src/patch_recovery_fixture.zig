@@ -59,7 +59,7 @@ fn start(io: std.Io, runtime: *harness.HostRuntime, mode: []const u8, workspace:
     const identity = try owner.drive();
     const session_id = identity.projections[0].session_id;
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
-    for (0..8) |_| {
+    for (0..16) |_| {
         if (owner.drive()) |_| {} else |err| {
             if (err != error.InjectedCrash) return err;
             var id_buffer: [16]u8 = undefined;

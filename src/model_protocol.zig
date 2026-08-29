@@ -117,6 +117,98 @@ pub const DefinitionResolver = struct {
 
 pub const Choice = struct { id: []const u8, label: []const u8 };
 
+pub fn writeText(writer: anytype, text: []const u8) !void {
+    if (text.len == 0 or text.len > max_assistant_text_size or !contract.utf8Valid(text)) {
+        return error.InvalidAssistantText;
+    }
+    try writeEnvelopeHeader(writer, .final_answer, .none, 0, 0, text.len, 0);
+    try writer.append(text);
+}
+
+pub fn writeTool(writer: anytype, tool_key: []const u8, arguments: []const u8) !void {
+    try contract.validateToolKey(tool_key);
+    if (arguments.len == 0 or arguments.len > contract.max_tool_arguments_envelope_size) {
+        return error.InvalidToolArguments;
+    }
+    try writeEnvelopeHeader(writer, .tool_call, .none, 0, 0, tool_key.len, arguments.len);
+    try writer.append(tool_key);
+    try writer.append(arguments);
+}
+
+pub fn writeInputText(writer: anytype, prompt: []const u8) !void {
+    try validatePrompt(prompt);
+    try writeEnvelopeHeader(
+        writer,
+        .input_request,
+        .none,
+        @intFromEnum(contract.InputShape.text),
+        0,
+        prompt.len,
+        0,
+    );
+    try writer.append(prompt);
+}
+
+pub fn writeInputChoice(writer: anytype, prompt: []const u8, choices: []const Choice) !void {
+    try validatePrompt(prompt);
+    if (choices.len == 0 or choices.len > contract.max_choice_count) return error.InvalidInputChoices;
+    var option_length: usize = 0;
+    for (choices, 0..) |choice, index| {
+        if (choice.id.len == 0 or choice.id.len > contract.max_choice_id_size or
+            choice.label.len == 0 or choice.label.len > contract.max_choice_label_size or
+            !contract.utf8Valid(choice.id) or !contract.utf8Valid(choice.label))
+        {
+            return error.InvalidInputChoices;
+        }
+        for (choices[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier.id, choice.id)) return error.DuplicateInputChoice;
+        }
+        option_length += 4 + choice.id.len + choice.label.len;
+    }
+    try writeEnvelopeHeader(
+        writer,
+        .input_request,
+        .none,
+        @intFromEnum(contract.InputShape.single_choice),
+        @intCast(choices.len),
+        prompt.len,
+        option_length,
+    );
+    try writer.append(prompt);
+    for (choices) |choice| {
+        var option_header: [4]u8 = undefined;
+        write(u16, &option_header, 0, @intCast(choice.id.len));
+        write(u16, &option_header, 2, @intCast(choice.label.len));
+        try writer.append(&option_header);
+        try writer.append(choice.id);
+        try writer.append(choice.label);
+    }
+}
+
+fn writeEnvelopeHeader(
+    writer: anytype,
+    disposition: Disposition,
+    reason: Failure,
+    shape: u8,
+    option_count: u8,
+    first_length: usize,
+    second_length: usize,
+) !void {
+    const total = header_size + first_length + second_length;
+    if (total > max_response_size) return error.ResponseTooLarge;
+    var header: [header_size]u8 = @splat(0);
+    @memcpy(header[0..magic.len], magic);
+    write(u16, &header, 8, version);
+    write(u16, &header, 10, header_size);
+    header[12] = @intFromEnum(disposition);
+    header[13] = @intFromEnum(reason);
+    header[14] = shape;
+    header[15] = option_count;
+    write(u32, &header, 16, @intCast(first_length));
+    write(u32, &header, 20, @intCast(second_length));
+    try writer.append(&header);
+}
+
 pub fn encodeText(out: []u8, text: []const u8) ![]const u8 {
     if (text.len == 0 or text.len > max_assistant_text_size or !contract.utf8Valid(text)) {
         return error.InvalidAssistantText;
@@ -327,6 +419,26 @@ fn inspect(bytes: []const u8) !Inspected {
         .first = bytes[header_size..][0..first_length],
         .second = bytes[header_size + first_length ..],
     };
+}
+
+/// Settlement-time framing check for an append-only candidate. Full semantic
+/// validation remains the later Session-ledger admission step.
+pub fn validateCandidateEnvelopePrefix(prefix: []const u8, total_length: u32) !void {
+    if (prefix.len != header_size or total_length < header_size or
+        total_length > max_response_size or
+        !std.mem.eql(u8, prefix[0..magic.len], magic) or
+        read(u16, prefix, 8) != version or read(u16, prefix, 10) != header_size)
+    {
+        return error.InvalidProviderCandidate;
+    }
+    const disposition = std.enums.fromInt(Disposition, prefix[12]) orelse
+        return error.InvalidProviderCandidate;
+    if (disposition == .failure) return error.ProviderFailureAsCandidate;
+    const first_length: u32 = read(u32, prefix, 16);
+    const second_length: u32 = read(u32, prefix, 20);
+    if (@as(u64, header_size) + first_length + second_length != total_length) {
+        return error.InvalidProviderCandidate;
+    }
 }
 
 fn decodeWithCatalog(
@@ -612,6 +724,43 @@ test "complete captured responses cover every V1 disposition" {
         if (failure != .none) {
             try std.testing.expectEqual(failure, parse(&scratch, try encodeFailure(&bytes, failure)).failure);
         }
+    }
+}
+
+test "writer encoders are byte-identical to complete-buffer encoders" {
+    const BufferWriter = struct {
+        bytes: *[max_response_size]u8,
+        length: usize = 0,
+
+        fn append(self: *@This(), chunk: []const u8) !void {
+            if (chunk.len > self.bytes.len - self.length) return error.NoSpaceLeft;
+            @memcpy(self.bytes[self.length..][0..chunk.len], chunk);
+            self.length += chunk.len;
+        }
+    };
+    const choices = [_]Choice{
+        .{ .id = "existing", .label = "Use existing" },
+        .{ .id = "new", .label = "Create new" },
+    };
+    const Case = enum { text, tool, input_text, input_choice };
+    inline for (std.meta.fields(Case)) |field| {
+        const case: Case = @enumFromInt(field.value);
+        var expected_buffer: [max_response_size]u8 = undefined;
+        const expected = switch (case) {
+            .text => try encodeText(&expected_buffer, "done"),
+            .tool => try encodeTool(&expected_buffer, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}"),
+            .input_text => try encodeInputText(&expected_buffer, "What next?"),
+            .input_choice => try encodeInputChoice(&expected_buffer, "Choose", &choices),
+        };
+        var actual_buffer: [max_response_size]u8 = undefined;
+        var writer: BufferWriter = .{ .bytes = &actual_buffer };
+        switch (case) {
+            .text => try writeText(&writer, "done"),
+            .tool => try writeTool(&writer, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}"),
+            .input_text => try writeInputText(&writer, "What next?"),
+            .input_choice => try writeInputChoice(&writer, "Choose", &choices),
+        }
+        try std.testing.expectEqualSlices(u8, expected, actual_buffer[0..writer.length]);
     }
 }
 

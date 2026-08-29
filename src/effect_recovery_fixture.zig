@@ -84,7 +84,7 @@ fn finishModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void
         .mode = .{ .restore = .{ .session_id = session_id, .provider = fixture.provider() } },
     });
     defer owner.close();
-    for (0..24) |_| {
+    for (0..48) |_| {
         const progress = try owner.drive();
         if (progress.state != .finished) continue;
         if (fixture.calls != 1) return error.ModelAttemptNotDispatched;
@@ -230,7 +230,7 @@ fn resumeBash(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void 
 }
 
 fn driveUntilCrash(owner: *harness.Harness) !void {
-    for (0..24) |_| {
+    for (0..48) |_| {
         if (owner.drive()) |_| continue else |err| {
             if (err != error.InjectedCrash) return err;
             return;

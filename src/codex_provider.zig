@@ -10,6 +10,8 @@ pub const endpoint = "https://chatgpt.com/backend-api/codex/responses";
 pub const max_access_token_size: usize = 16 * 1024;
 pub const max_account_id_size: usize = 128;
 pub const max_sse_frame_size: usize = model_protocol.max_response_size + 8192;
+pub const max_total_sse_bytes: usize = 4 * max_sse_frame_size;
+pub const max_sse_event_count: usize = 128;
 pub const request_window_size: usize = model_operation.request_window_size;
 
 pub const Credential = struct {
@@ -104,25 +106,22 @@ pub const CodexProvider = struct {
     fn dispatch(
         context: *anyopaque,
         request: model_operation.RequestCursor,
-        response: model_operation.ResponseWriter,
-    ) anyerror!void {
+        candidate: model_operation.CandidateWriter,
+    ) anyerror!model_operation.DispatchOutcome {
         const self: *CodexProvider = @ptrCast(@alignCast(context));
         var credential: Credential = .{};
         defer credential.scrub();
-        const authorization = self.authorization.load(&credential) catch {
-            return publishFailure(response, .provider_error);
-        };
+        const authorization = self.authorization.load(&credential) catch
+            return failureOutcome(.provider_error);
         switch (authorization) {
-            .missing => return publishFailure(response, .missing_authentication),
-            .refresh_rejected => return publishFailureDiagnostic(
-                response,
+            .missing => return failureOutcome(.missing_authentication),
+            .refresh_rejected => return failureDiagnosticOutcome(
                 .authentication_expired,
                 .local_refresh_rejected,
                 null,
                 "",
             ),
-            .refresh_missing => return publishFailureDiagnostic(
-                response,
+            .refresh_missing => return failureDiagnosticOutcome(
                 .authentication_expired,
                 .local_refresh_missing,
                 null,
@@ -130,92 +129,82 @@ pub const CodexProvider = struct {
             ),
             .ready => {},
         }
-        if (credential.token().len == 0) return publishFailure(response, .provider_error);
+        if (credential.token().len == 0) return failureOutcome(.provider_error);
 
         var capture: Capture = .{};
         const disposition = self.transport.perform(&credential, request, &capture) catch
-            return publishFailure(response, .transport_may_have_started);
-        switch (disposition) {
-            .complete => try capture.publish(response),
-            .http_unauthorized => try publishFailureDiagnostic(
-                response,
+            return failureOutcome(.transport_may_have_started);
+        return switch (disposition) {
+            .complete => capture.publish(candidate),
+            .http_unauthorized => failureDiagnosticOutcome(
                 .authentication_expired,
                 .provider_http_401,
                 capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
-            .http_forbidden => try publishFailureDiagnostic(
-                response,
+            .http_forbidden => failureDiagnosticOutcome(
                 .authentication_expired,
                 .provider_http_403,
                 capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
-            .provider_rejected => try publishFailureDiagnostic(
-                response,
+            .provider_rejected => failureDiagnosticOutcome(
                 .provider_error,
                 .provider_http_rejection,
                 capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
-            .model_not_found => try publishFailureDiagnostic(
-                response,
+            .model_not_found => failureDiagnosticOutcome(
                 .model_unavailable,
                 .provider_model_not_found,
                 capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
-            .rate_limited => try publishFailureDiagnostic(
-                response,
+            .rate_limited => failureDiagnosticOutcome(
                 .provider_error,
                 .provider_rate_limited,
                 capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
-            .quota_exceeded => try publishFailureDiagnostic(
-                response,
+            .quota_exceeded => failureDiagnosticOutcome(
                 .provider_error,
                 .provider_quota_exceeded,
                 capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
-            .backend_failed => try publishFailureDiagnostic(
-                response,
+            .backend_failed => failureDiagnosticOutcome(
                 .provider_error,
                 .provider_backend_failure,
                 capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
-            .timed_out => try publishFailure(response, .timeout),
-            .cancelled => try publishFailure(response, .aborted),
-            .not_started => try publishFailure(response, .transport_not_started),
-            .may_have_started => try publishFailure(response, .transport_may_have_started),
-        }
+            .timed_out => failureOutcome(.timeout),
+            .cancelled => failureOutcome(.aborted),
+            .not_started => failureOutcome(.transport_not_started),
+            .may_have_started => failureOutcome(.transport_may_have_started),
+        };
     }
 };
 
-fn publishFailure(response: model_operation.ResponseWriter, failure: model_protocol.Failure) !void {
-    var bytes: [model_protocol.header_size]u8 = undefined;
-    try response.append(try model_protocol.encodeFailure(&bytes, failure));
-    try response.finish();
+fn failureOutcome(failure: model_protocol.Failure) model_operation.DispatchOutcome {
+    return .{ .failure = .{ .failure = failure } };
 }
 
-fn publishFailureDiagnostic(
-    response: model_operation.ResponseWriter,
+fn failureDiagnosticOutcome(
     failure: model_protocol.Failure,
     source: model_protocol.DiagnosticSource,
     http_status: ?u16,
     code: []const u8,
-) !void {
-    var bytes: [model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size + 2]u8 = undefined;
-    try response.append(try model_protocol.encodeFailureDiagnostic(
-        &bytes,
-        failure,
-        source,
-        http_status,
-        code,
-    ));
-    try response.finish();
+) model_operation.DispatchOutcome {
+    var capture: model_operation.FailureCapture = .{
+        .failure = failure,
+        .diagnostic_source = source,
+        .http_status = http_status,
+    };
+    std.debug.assert(code.len <= capture.diagnostic_code_bytes.len);
+    @memcpy(capture.diagnostic_code_bytes[0..code.len], code);
+    capture.diagnostic_code_length = @intCast(code.len);
+    return .{ .failure = capture };
 }
 
 pub const ToolMapping = struct {
@@ -268,6 +257,8 @@ pub const Capture = struct {
     failure_diagnostic_code: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
     failure_diagnostic_code_length: u8 = 0,
     failure_http_status: u16 = 0,
+    total_sse_bytes: usize = 0,
+    event_count: u16 = 0,
 
     pub fn setFailureHttpStatus(self: *Capture, status: u16) !void {
         if (status < 100 or status > 599) return error.InvalidHttpStatus;
@@ -301,10 +292,10 @@ pub const Capture = struct {
     fn discardRequestBytes(_: *anyopaque, _: []const u8) anyerror!void {}
 
     pub fn appendSse(self: *Capture, bytes: []const u8) !void {
-        if (self.completed) {
-            self.malformed = true;
-            return;
-        }
+        if (self.completed) return;
+        self.total_sse_bytes = std.math.add(usize, self.total_sse_bytes, bytes.len) catch
+            return error.SseStreamTooLarge;
+        if (self.total_sse_bytes > max_total_sse_bytes) return error.SseStreamTooLarge;
         var remaining = bytes;
         while (remaining.len != 0) {
             const available = self.frame.len - self.frame_length;
@@ -314,6 +305,8 @@ pub const Capture = struct {
             self.frame_length += count;
             remaining = remaining[count..];
             while (frameBoundary(self.frame[0..self.frame_length])) |boundary| {
+                if (self.event_count == max_sse_event_count) return error.TooManySseEvents;
+                self.event_count += 1;
                 self.consumeFrame(self.frame[0..boundary.end]) catch {
                     self.malformed = true;
                 };
@@ -456,44 +449,57 @@ pub const Capture = struct {
     fn captureInputRequest(self: *Capture, arguments: []const u8) !void {
         var arena_bytes: [16 * 1024]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
-        var parsed = try std.json.parseFromSlice(std.json.Value, fixed.allocator(), arguments, .{
+        var parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), arguments, .{
             .max_value_len = 16 * 1024,
             .allocate = .alloc_always,
             .duplicate_field_behavior = .@"error",
-        });
+        }) catch return error.MalformedInputRequest;
         defer parsed.deinit();
         const object = jsonObject(parsed.value) orelse return error.MalformedInputRequest;
+        if (object.count() != 3) return error.MalformedInputRequest;
         const prompt = jsonString(object.get("prompt")) orelse return error.MalformedInputRequest;
         const shape = jsonString(object.get("response_type")) orelse return error.MalformedInputRequest;
+        const choices = jsonArray(object.get("choices")) orelse return error.MalformedInputRequest;
         if (std.mem.eql(u8, shape, "text")) {
-            self.result_length = (try model_protocol.encodeInputText(&self.result, prompt)).len;
+            if (choices.items.len != 0) return error.MalformedInputRequest;
+            self.result_length = (model_protocol.encodeInputText(&self.result, prompt) catch
+                return error.MalformedInputRequest).len;
             return;
         }
         if (!std.mem.eql(u8, shape, "single_choice")) return error.MalformedInputRequest;
-        const choices = jsonArray(object.get("choices")) orelse return error.MalformedInputRequest;
-        if (choices.items.len > model_contract.max_choice_count) return error.MalformedInputRequest;
+        if (choices.items.len == 0 or choices.items.len > model_contract.max_choice_count) {
+            return error.MalformedInputRequest;
+        }
         var decoded: [model_contract.max_choice_count]model_protocol.Choice = undefined;
         for (choices.items, 0..) |choice_value, index| {
             const choice = jsonObject(choice_value) orelse return error.MalformedInputRequest;
+            if (choice.count() != 2) return error.MalformedInputRequest;
             decoded[index] = .{
                 .id = jsonString(choice.get("id")) orelse return error.MalformedInputRequest,
                 .label = jsonString(choice.get("label")) orelse return error.MalformedInputRequest,
             };
         }
-        self.result_length = (try model_protocol.encodeInputChoice(
+        self.result_length = (model_protocol.encodeInputChoice(
             &self.result,
             prompt,
             decoded[0..choices.items.len],
-        )).len;
+        ) catch return error.MalformedInputRequest).len;
     }
 
-    fn publish(self: *Capture, response: model_operation.ResponseWriter) !void {
+    fn publish(
+        self: *Capture,
+        candidate: model_operation.CandidateWriter,
+    ) !model_operation.DispatchOutcome {
         self.finishSse();
         if (self.malformed or self.result_length == 0) {
-            return publishFailure(response, if (!self.completed) .truncated else .malformed);
+            return failureOutcome(if (!self.completed) .truncated else .malformed);
         }
-        try response.append(self.result[0..self.result_length]);
-        try response.finish();
+        var scratch: model_protocol.ValidationScratch = .{};
+        const parsed = model_protocol.decode(&scratch, self.result[0..self.result_length]) catch
+            return failureOutcome(.malformed);
+        if (parsed.disposition == .failure) return failureOutcome(parsed.failure);
+        try candidate.append(self.result[0..self.result_length]);
+        return .candidate;
     }
 };
 
@@ -514,13 +520,18 @@ fn terminalStatus(event_type: []const u8, object: std.json.ObjectMap) !?Terminal
         return null;
     const response = jsonObject(object.get("response")) orelse return fallback;
     const status_text = jsonString(response.get("status")) orelse return fallback;
-    if (std.mem.eql(u8, status_text, "completed")) return .completed;
-    if (std.mem.eql(u8, status_text, "incomplete")) return .incomplete;
-    if (std.mem.eql(u8, status_text, "failed")) return .failed;
-    if (std.mem.eql(u8, status_text, "cancelled") or std.mem.eql(u8, status_text, "canceled")) {
-        return .cancelled;
-    }
-    return error.MalformedTerminalStatus;
+    const nested: TerminalStatus = if (std.mem.eql(u8, status_text, "completed"))
+        .completed
+    else if (std.mem.eql(u8, status_text, "incomplete"))
+        .incomplete
+    else if (std.mem.eql(u8, status_text, "failed"))
+        .failed
+    else if (std.mem.eql(u8, status_text, "cancelled") or std.mem.eql(u8, status_text, "canceled"))
+        .cancelled
+    else
+        return error.MalformedTerminalStatus;
+    if (nested != fallback) return error.ContradictoryTerminalStatus;
+    return nested;
 }
 
 const FrameBoundary = struct { end: usize, length: usize };
@@ -660,6 +671,7 @@ fn writeJsonContent(sink: ByteSink, content: model_operation.ContentView) !void 
 }
 
 fn writeJsonString(sink: ByteSink, bytes: []const u8) !void {
+    if (!model_contract.utf8Valid(bytes)) return error.InvalidJsonString;
     try sink.write("\"");
     try writeJsonEscaped(sink, bytes);
     try sink.write("\"");
@@ -739,7 +751,7 @@ test "SSE capture accepts fragmented CRLF and multi-line data" {
     );
 }
 
-test "terminal response status overrides a partial candidate" {
+test "authoritative non-success terminals replace a partial candidate" {
     const candidate = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]}}\n\n";
     const cases = [_]struct {
         terminal: []const u8,
@@ -754,7 +766,7 @@ test "terminal response status overrides a partial candidate" {
             .expected = .provider_error,
         },
         .{
-            .terminal = "data: {\"type\":\"response.done\",\"response\":{\"status\":\"cancelled\"}}\n\n",
+            .terminal = "data: {\"type\":\"response.cancelled\",\"response\":{\"status\":\"cancelled\"}}\n\n",
             .expected = .aborted,
         },
     };
@@ -770,4 +782,85 @@ test "terminal response status overrides a partial candidate" {
             (try model_protocol.decode(&scratch, capture.result[0..capture.result_length])).failure,
         );
     }
+}
+
+test "terminal status agreement and first-terminal-wins are chunk independent" {
+    const candidate = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n\n";
+    const terminal = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
+    var capture: Capture = .{};
+    try capture.appendSse(candidate ++ terminal ++
+        "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n");
+    capture.finishSse();
+    try std.testing.expect(!capture.malformed);
+
+    var split: Capture = .{};
+    try split.appendSse(candidate);
+    try split.appendSse(terminal);
+    try split.appendSse("data: malformed trailing bytes\n\n");
+    split.finishSse();
+    try std.testing.expect(!split.malformed);
+    try std.testing.expectEqualSlices(
+        u8,
+        capture.result[0..capture.result_length],
+        split.result[0..split.result_length],
+    );
+
+    var contradictory: Capture = .{};
+    try contradictory.appendSse(candidate);
+    try contradictory.appendSse(
+        "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"completed\"}}\n\n",
+    );
+    contradictory.finishSse();
+    try std.testing.expect(contradictory.malformed);
+}
+
+test "input request arguments require the exact closed shape" {
+    const valid = [_][]const u8{
+        "{\"prompt\":\"Explain\",\"response_type\":\"text\",\"choices\":[]}",
+        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"Alpha\"}]}",
+    };
+    for (valid) |arguments| {
+        var capture: Capture = .{};
+        try capture.captureInputRequest(arguments);
+        try std.testing.expect(capture.result_length != 0);
+    }
+    const invalid = [_][]const u8{
+        "{\"prompt\":\"Explain\",\"response_type\":\"text\"}",
+        "{\"prompt\":\"Explain\",\"response_type\":\"text\",\"choices\":[],\"extra\":true}",
+        "{\"prompt\":\"Explain\",\"prompt\":\"Again\",\"response_type\":\"text\",\"choices\":[]}",
+        "{\"prompt\":42,\"response_type\":\"text\",\"choices\":[]}",
+        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[]}",
+        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"Alpha\",\"extra\":true}]}",
+        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"Alpha\"},{\"id\":\"a\",\"label\":\"Again\"}]}",
+        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"\\uD800\"}]}",
+        "{\"prompt\":\"Explain\",\"response_type\":\"text\",\"choices\":[]} trailing",
+    };
+    for (invalid) |arguments| {
+        var capture: Capture = .{};
+        try std.testing.expectError(error.MalformedInputRequest, capture.captureInputRequest(arguments));
+    }
+}
+
+test "JSON strings escape every control and reject malformed UTF-8" {
+    const Sink = struct {
+        bytes: [128]u8 = undefined,
+        length: usize = 0,
+        fn sink(self: *@This()) ByteSink {
+            return .{ .context = self, .write_fn = write };
+        }
+        fn write(context: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (bytes.len > self.bytes.len - self.length) return error.NoSpaceLeft;
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    var sink: Sink = .{};
+    try writeJsonString(sink.sink(), "quote\" slash\\\x00\x01\x08\x09\x0a\x0b\x0c\x0d\x1f é");
+    try std.testing.expectEqualStrings(
+        "\"quote\\\" slash\\\\\\u0000\\u0001\\b\\t\\n\\u000b\\f\\r\\u001f é\"",
+        sink.bytes[0..sink.length],
+    );
+    const malformed = [_]u8{ 0xc3, 0x28 };
+    try std.testing.expectError(error.InvalidJsonString, writeJsonString(sink.sink(), &malformed));
 }

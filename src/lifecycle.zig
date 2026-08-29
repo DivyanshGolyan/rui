@@ -1013,23 +1013,13 @@ fn dispatchModelAttempt(
         dispatch.response_ref,
     );
     defer provider_io.close();
-    var result_ref = dispatch.response_ref;
-    var provider_failed = false;
-    provider.dispatch(
+    const outcome = try provider.dispatch(
         provider.context,
         try provider_io.request(),
-        provider_io.responseCapability(),
-    ) catch {
-        result_ref = try provider_io.publishProviderFailure(
-            session,
-            dispatch.response_ref,
-        );
-        provider_failed = true;
-    };
-    if (!provider_failed) {
-        try provider_io.ensureResponsePublished();
-        try reach(fault, .after_model_dispatch);
-    }
+        provider_io.candidateCapability(),
+    );
+    try provider_io.settle(outcome);
+    try reach(fault, .after_model_dispatch);
     const evidence = completion_inbox.bind(.{
         .kind = .model,
         .session_id = session.session_id,
@@ -1039,8 +1029,8 @@ fn dispatchModelAttempt(
         .operation_id = dispatch.operation_id,
         .operation_generation = dispatch.operation_generation,
         .attempt_id = dispatch.attempt_id,
-        .result_ref = result_ref,
-        .result_digest = try blobDigest(session, result_ref),
+        .result_ref = dispatch.response_ref,
+        .result_digest = try blobDigest(session, dispatch.response_ref),
     });
     try session.publishCompletionEvidence(evidence);
     try reach(fault, .after_completion_inbox);
@@ -1643,6 +1633,8 @@ pub fn acceptCompletion(
     config: RuntimeConfig,
     provider: ?model_operation.Provider,
 ) !u64 {
+    var admission_config = config;
+    admission_config.settle_only = true;
     const token = session.ownerToken();
     try completion_inbox.validate(offered);
     if (offered.session_id != session.session_id or offered.agent_id != session.agent_id or
@@ -1669,14 +1661,14 @@ pub fn acceptCompletion(
     if (offered.kind != std.meta.activeTag(attempt.descriptor_digest)) return error.StaleCompletion;
     if (history.result) |result| {
         if (resultAttemptId(result) != offered.attempt_id) {
-            return advanceRestored(host, allocator, session, config, provider);
+            return advanceRestored(host, allocator, session, admission_config, provider);
         }
         if (result.result_ref != offered.result_ref or
             !binding.eql(binding.Result, result.result_digest, offered.result_digest))
         {
             return error.ConflictingCompletionEvidence;
         }
-        return advanceRestored(host, allocator, session, config, provider);
+        return advanceRestored(host, allocator, session, admission_config, provider);
     }
     var inbox: InboxSearch = .{
         .session_id = offered.session_id,
@@ -1696,7 +1688,7 @@ pub fn acceptCompletion(
     {
         return error.ConflictingCompletionEvidence;
     }
-    return advanceRestored(host, allocator, session, config, provider);
+    return advanceRestored(host, allocator, session, admission_config, provider);
 }
 
 const ToolRecovery = enum { none, ready, indeterminate, approval_required };
@@ -3296,15 +3288,15 @@ test "model dispatch releases Core and rejects substituted request bytes" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             var lease = try self.host.slots.borrow();
             defer lease.release() catch unreachable;
             self.observed_released_slot = true;
             var bytes: [model_protocol.header_size + "done".len]u8 = undefined;
             try response.append(try model_protocol.encodeText(&bytes, "done"));
-            try response.finish();
+            return .candidate;
         }
     };
     var probe: SlotProbeProvider = .{ .host = &host };
@@ -3341,10 +3333,11 @@ test "model dispatch releases Core and rejects substituted request bytes" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            _: model_operation.ResponseWriter,
-        ) anyerror!void {
+            _: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
+            return error.UnexpectedProviderDispatch;
         }
     };
     var fixture: CountingProvider = .{};

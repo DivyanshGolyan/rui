@@ -23,8 +23,8 @@ pub const Fixture = struct {
     fn dispatch(
         context: *anyopaque,
         request_value: model_operation.RequestCursor,
-        response: model_operation.ResponseWriter,
-    ) anyerror!void {
+        response: model_operation.CandidateWriter,
+    ) anyerror!model_operation.DispatchOutcome {
         const self: *Fixture = @ptrCast(@alignCast(context));
         self.calls += 1;
         var request = request_value;
@@ -35,7 +35,8 @@ pub const Fixture = struct {
         var response_buffer: [model_protocol.max_response_size]u8 = undefined;
         const encoded = try model_protocol.encodeText(&response_buffer, self.final_answer);
         try response.append(encoded);
-        if (self.finish_response) try response.finish();
+        if (!self.finish_response) return error.IncompleteFixtureResponse;
+        return .candidate;
     }
 };
 
@@ -57,8 +58,8 @@ pub const ToolFixture = struct {
     fn dispatch(
         context: *anyopaque,
         request_value: model_operation.RequestCursor,
-        response: model_operation.ResponseWriter,
-    ) anyerror!void {
+        response: model_operation.CandidateWriter,
+    ) anyerror!model_operation.DispatchOutcome {
         const self: *ToolFixture = @ptrCast(@alignCast(context));
         var request = request_value;
         var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
@@ -97,7 +98,7 @@ pub const ToolFixture = struct {
         };
         self.calls += 1;
         try response.append(encoded);
-        try response.finish();
+        return .candidate;
     }
 };
 
@@ -116,8 +117,8 @@ pub const RepairFixture = struct {
     fn dispatch(
         context: *anyopaque,
         request_value: model_operation.RequestCursor,
-        response: model_operation.ResponseWriter,
-    ) anyerror!void {
+        response: model_operation.CandidateWriter,
+    ) anyerror!model_operation.DispatchOutcome {
         const self: *RepairFixture = @ptrCast(@alignCast(context));
         var request = request_value;
 
@@ -164,7 +165,7 @@ pub const RepairFixture = struct {
             else => return error.UnexpectedRepairHistory,
         };
         try response.append(encoded);
-        try response.finish();
+        return .candidate;
     }
 
     fn expectPrefix(
@@ -373,7 +374,11 @@ test "deterministic Provider decodes the exact immutable request" {
     var provider_io = try model_operation.ProviderIo.open(&session, 1001, 1002);
     defer provider_io.close();
     const provider = fixture.provider();
-    try provider.dispatch(provider.context, try provider_io.request(), provider_io.responseCapability());
+    try provider_io.settle(try provider.dispatch(
+        provider.context,
+        try provider_io.request(),
+        provider_io.candidateCapability(),
+    ));
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     const response = try session.readBlob(1002, 0, &response_buffer);
     var response_validation: model_protocol.ValidationScratch = undefined;

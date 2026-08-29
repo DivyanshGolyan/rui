@@ -213,6 +213,7 @@ const HarnessState = struct {
     awaiting_approval: ?lifecycle.ApprovalRequired = null,
     settling_control: ?lifecycle.Control = null,
     recovery_pending: bool = false,
+    task_started: bool = false,
     closing: bool = false,
     ingress_lock: std.Io.Mutex = .init,
     drive_lock: std.Io.Mutex = .init,
@@ -412,10 +413,11 @@ const HarnessState = struct {
             else => {},
         };
         if (self.final_ref != 0) return self.finish(progress);
-        if (self.config.created) {
+        if (self.config.created and !self.task_started) {
             const input = current_input orelse return .{ .state = .ready };
             progress.consumed = 1;
             if (input != .task) return self.consumeControl(input, progress);
+            self.task_started = true;
             self.setState(.running);
             const session = if (self.session) |*value| value else return error.SessionUnavailable;
             self.final_ref = lifecycle.advanceCreated(
@@ -1208,8 +1210,10 @@ test "shutdown denies Approval Required before closing" {
             .provider = fixture.provider(),
         } },
     });
+    defer owner.close();
     _ = try owner.drive();
     try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    _ = try owner.drive();
     _ = try owner.drive();
     const waiting = try owner.drive();
     try std.testing.expectEqual(State.waiting, waiting.state);
@@ -1252,8 +1256,8 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [64]u8 = undefined;
@@ -1262,9 +1266,9 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
                 "done",
             );
             try response.append(encoded);
-            try response.finish();
             const owner = self.owner orelse return error.MissingHarness;
             if (owner.offer(.cancel) != .accepted) return error.CancellationOfferRejected;
+            return .candidate;
         }
     };
 
@@ -1306,8 +1310,8 @@ test "known provider failure is one durable terminal Result" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [64]u8 = undefined;
@@ -1316,8 +1320,7 @@ test "known provider failure is one durable terminal Result" {
                 "must not win",
             );
             try response.append(encoded);
-            try response.finish();
-            return error.TestProviderUnavailable;
+            return .{ .failure = .{ .failure = .provider_error } };
         }
     };
     const ResultFacts = struct {
@@ -1396,8 +1399,8 @@ test "captured noncanonical tool call closes once after crash without redispatch
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [model_protocol.max_response_size]u8 = undefined;
@@ -1407,7 +1410,7 @@ test "captured noncanonical tool call closes once after crash without redispatch
                 exact_arguments,
             );
             try response.append(encoded);
-            try response.finish();
+            return .candidate;
         }
     };
     const CrashAfterCapture = struct {
@@ -1472,7 +1475,7 @@ test "captured noncanonical tool call closes once after crash without redispatch
     try std.testing.expectEqualStrings(exact_arguments, call.arguments);
 }
 
-test "malformed captured output becomes one durable terminal failure" {
+test "provider candidate settlement rejects malformed framing without publishing" {
     const MalformedProvider = struct {
         calls: u8 = 0,
 
@@ -1483,12 +1486,12 @@ test "malformed captured output becomes one durable terminal failure" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             try response.append("not a model response");
-            try response.finish();
+            return .candidate;
         }
     };
 
@@ -1506,31 +1509,11 @@ test "malformed captured output becomes one durable terminal failure" {
             .provider = provider.provider(),
         } },
     });
+    defer owner.close();
     _ = try owner.drive();
-    const session_id = harnessState(owner).session.?.session_id;
     try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
-    _ = try owner.drive();
-    const failed = try owner.drive();
-    try std.testing.expectEqual(State.failed, failed.state);
-    var ignored: u8 = 0;
-    const ledger = try harnessState(owner).session.?.inspectSemantic(
-        &ignored,
-        struct {
-            fn ignore(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
-        }.ignore,
-    );
-    const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
-    try std.testing.expectEqual(model_protocol.Failure.malformed, state.response_failure);
-    owner.close();
-
-    var restored = try Harness.open(.{
-        .runtime = runtime,
-        .mode = .{ .restore = .{ .session_id = session_id, .provider = provider.provider() } },
-    });
-    defer restored.close();
-    _ = try restored.drive();
-    const regenerated = try restored.drive();
-    try std.testing.expectEqual(State.failed, regenerated.state);
+    const rejected = try owner.drive();
+    try std.testing.expectEqual(State.unavailable, rejected.state);
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }
 
@@ -1550,13 +1533,13 @@ test "typed durable model failures share one failed Harness projection" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [model_protocol.max_response_size]u8 = undefined;
             const encoded = switch (self.candidate) {
-                .failure => |failure| try model_protocol.encodeFailure(&buffer, failure),
+                .failure => |failure| return .{ .failure = .{ .failure = failure } },
                 .unknown_tool => try model_protocol.encodeTool(
                     &buffer,
                     "fixture.unknown.v1",
@@ -1564,7 +1547,7 @@ test "typed durable model failures share one failed Harness projection" {
                 ),
             };
             try response.append(encoded);
-            try response.finish();
+            return .candidate;
         }
     };
     const cases = [_]struct {
@@ -1632,14 +1615,14 @@ test "built-in argument rejection becomes one durable terminal failure" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [model_protocol.max_response_size]u8 = undefined;
             const encoded = try model_protocol.encodeTool(&buffer, self.key, self.arguments);
             try response.append(encoded);
-            try response.finish();
+            return .candidate;
         }
     };
 
@@ -1747,14 +1730,14 @@ test "input request fails terminally until the durable interaction layer exists"
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [model_protocol.max_response_size]u8 = undefined;
             const encoded = try model_protocol.encodeInputText(&buffer, "Which migration should I use?");
             try response.append(encoded);
-            try response.finish();
+            return .candidate;
         }
     };
 

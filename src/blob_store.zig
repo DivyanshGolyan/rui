@@ -69,6 +69,11 @@ pub const Writer = struct {
         if (!self.open) return;
         self.file.close(io);
         self.open = false;
+        var final_name_buffer: [21]u8 = undefined;
+        const final_name = blobName(self.reference, &final_name_buffer) catch return;
+        var temp_name_buffer: [25]u8 = undefined;
+        const temp_name = std.fmt.bufPrint(&temp_name_buffer, "{s}.tmp", .{final_name}) catch return;
+        self.dir.deleteFile(io, temp_name) catch {};
     }
 };
 

@@ -172,6 +172,7 @@ fn offeredPermissionDenialContinues(
     const session_id = try sessionProjection(&identified);
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
     _ = try owner.drive();
+    _ = try owner.drive();
     const waiting = try owner.drive();
     const original_approval = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
     const original_digest = original_approval.descriptor_digest orelse
@@ -247,6 +248,7 @@ fn restoredBashApprovalDispatchesExactDescriptor(
     const identified = try owner.drive();
     const session_id = try sessionProjection(&identified);
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+    _ = try owner.drive();
     _ = try owner.drive();
     const waiting = try owner.drive();
     const initial = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
@@ -364,6 +366,7 @@ fn restoredPatchApprovalUsesExactDescriptor(
     const session_id = try sessionProjection(&identified);
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
     _ = try owner.drive();
+    _ = try owner.drive();
     const waiting = try owner.drive();
     _ = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
     owner.close();
@@ -449,6 +452,7 @@ fn approvedPatchCompletesOnce(
     defer owner.close();
     _ = try owner.drive();
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+    _ = try owner.drive();
     _ = try owner.drive();
     const waiting = try owner.drive();
     const approval = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
@@ -698,11 +702,13 @@ fn finalProjection(progress: *const harness.Progress) ?harness.Projection {
 }
 
 fn expectInjectedCrash(owner: *harness.Harness) !void {
-    if (owner.drive()) |_| {
-        return error.CrashBoundaryNotReached;
-    } else |err| if (err != error.InjectedCrash) {
-        return err;
+    for (0..8) |_| {
+        if (owner.drive()) |_| continue else |err| {
+            if (err != error.InjectedCrash) return err;
+            return;
+        }
     }
+    return error.CrashBoundaryNotReached;
 }
 
 const Crash = struct {
