@@ -2018,7 +2018,7 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
     const FakeTransport = struct {
         disposition: codex_provider.TransportDisposition,
         private_http_status: ?u16 = null,
-        diagnostic_code: []const u8 = "",
+        provider_code: []const u8 = "",
         calls: u8 = 0,
 
         fn perform(
@@ -2030,7 +2030,7 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             if (self.private_http_status) |status| try capture.setFailureHttpStatus(status);
-            try capture.setFailureDiagnosticCode(self.diagnostic_code);
+            try capture.setFailureDiagnosticCode(self.provider_code);
             return self.disposition;
         }
     };
@@ -2040,7 +2040,8 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         expected: model_protocol.Failure,
         expected_source: model_protocol.DiagnosticSource = .none,
         private_http_status: ?u16 = null,
-        diagnostic_code: []const u8 = "",
+        provider_code: []const u8 = "",
+        expected_code: []const u8 = "",
     };
     const cases = [_]Case{
         .{ .authorization = .missing, .expected = .missing_authentication },
@@ -2048,11 +2049,13 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
             .authorization = .refresh_rejected,
             .expected = .authentication_expired,
             .expected_source = .local_credentials,
+            .expected_code = "codex.refresh.rejected",
         },
         .{
             .authorization = .refresh_missing,
             .expected = .authentication_expired,
             .expected_source = .local_credentials,
+            .expected_code = "codex.refresh.missing",
         },
         .{ .authorization = .timed_out, .expected = .timeout },
         .{
@@ -2060,49 +2063,56 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
             .expected = .authentication_expired,
             .expected_source = .provider,
             .private_http_status = 401,
-            .diagnostic_code = "invalid_token",
+            .provider_code = "invalid_token",
+            .expected_code = "codex.http.unauthorized.401",
         },
         .{
             .transport = .http_forbidden,
             .expected = .authentication_expired,
             .expected_source = .provider,
             .private_http_status = 403,
-            .diagnostic_code = "originator_not_allowed",
+            .provider_code = "originator_not_allowed",
+            .expected_code = "codex.http.forbidden.403",
         },
         .{
             .transport = .provider_rejected,
             .expected = .provider_error,
             .expected_source = .provider,
             .private_http_status = 400,
-            .diagnostic_code = "invalid_request_error",
+            .provider_code = "invalid_request_error",
+            .expected_code = "codex.http.rejected.400",
         },
         .{
             .transport = .model_not_found,
             .expected = .model_unavailable,
             .expected_source = .provider,
             .private_http_status = 404,
-            .diagnostic_code = "model_not_found",
+            .provider_code = "model_not_found",
+            .expected_code = "codex.http.model.404",
         },
         .{
             .transport = .rate_limited,
             .expected = .provider_error,
             .expected_source = .provider,
             .private_http_status = 429,
-            .diagnostic_code = "rate_limit_exceeded",
+            .provider_code = "rate_limit_exceeded",
+            .expected_code = "codex.http.rate.429",
         },
         .{
             .transport = .quota_exceeded,
             .expected = .provider_error,
             .expected_source = .provider,
             .private_http_status = 429,
-            .diagnostic_code = "insufficient_quota",
+            .provider_code = "insufficient_quota",
+            .expected_code = "codex.http.quota.429",
         },
         .{
             .transport = .backend_failed,
             .expected = .provider_error,
             .expected_source = .provider,
-            .private_http_status = 503,
-            .diagnostic_code = "backend_error",
+            .private_http_status = 502,
+            .provider_code = "backend_error",
+            .expected_code = "codex.http.backend.502",
         },
         .{ .transport = .timed_out, .expected = .timeout },
         .{ .transport = .cancelled, .expected = .aborted },
@@ -2119,7 +2129,7 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         var transport: FakeTransport = .{
             .disposition = case.transport,
             .private_http_status = case.private_http_status,
-            .diagnostic_code = case.diagnostic_code,
+            .provider_code = case.provider_code,
         };
         var codex: codex_provider.CodexProvider = .{
             .authorization = .{ .context = &authorization, .load_fn = FakeAuthorization.load },
@@ -2146,7 +2156,7 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
         try std.testing.expectEqual(case.expected, failed.projections[0].failure);
         try std.testing.expectEqual(case.expected_source, failed.projections[0].diagnostic_source);
-        try std.testing.expectEqualStrings(case.diagnostic_code, failed.projections[0].diagnosticCode());
+        try std.testing.expectEqualStrings(case.expected_code, failed.projections[0].diagnosticCode());
         var ignored: u8 = 0;
         const ledger = try harnessState(owner).session.?.inspectSemantic(
             &ignored,
@@ -2170,7 +2180,7 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         try std.testing.expectEqual(ProjectionKind.failure, reopened.projections[0].kind);
         try std.testing.expectEqual(case.expected, reopened.projections[0].failure);
         try std.testing.expectEqual(case.expected_source, reopened.projections[0].diagnostic_source);
-        try std.testing.expectEqualStrings(case.diagnostic_code, reopened.projections[0].diagnosticCode());
+        try std.testing.expectEqualStrings(case.expected_code, reopened.projections[0].diagnosticCode());
         try std.testing.expectEqual(dispatches, transport.calls);
         restored.close();
     }

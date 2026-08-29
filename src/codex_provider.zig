@@ -120,12 +120,12 @@ pub const CodexProvider = struct {
             .refresh_rejected => return failureDiagnosticOutcome(
                 .authentication_expired,
                 .local_credentials,
-                "",
+                "codex.refresh.rejected",
             ),
             .refresh_missing => return failureDiagnosticOutcome(
                 .authentication_expired,
                 .local_credentials,
-                "",
+                "codex.refresh.missing",
             ),
             .failed => return failureOutcome(.provider_error),
             .timed_out => return failureOutcome(.timeout),
@@ -137,40 +137,40 @@ pub const CodexProvider = struct {
         const disposition = try self.transport.perform(&credential, request, &capture);
         return switch (disposition) {
             .complete => capture.publish(candidate),
-            .http_unauthorized => failureDiagnosticOutcome(
+            .http_unauthorized => transportFailureOutcome(
                 .authentication_expired,
-                .provider,
-                capture.failureDiagnosticCode(),
+                "unauthorized",
+                &capture,
             ),
-            .http_forbidden => failureDiagnosticOutcome(
+            .http_forbidden => transportFailureOutcome(
                 .authentication_expired,
-                .provider,
-                capture.failureDiagnosticCode(),
+                "forbidden",
+                &capture,
             ),
-            .provider_rejected => failureDiagnosticOutcome(
+            .provider_rejected => transportFailureOutcome(
                 .provider_error,
-                .provider,
-                capture.failureDiagnosticCode(),
+                "rejected",
+                &capture,
             ),
-            .model_not_found => failureDiagnosticOutcome(
+            .model_not_found => transportFailureOutcome(
                 .model_unavailable,
-                .provider,
-                capture.failureDiagnosticCode(),
+                "model",
+                &capture,
             ),
-            .rate_limited => failureDiagnosticOutcome(
+            .rate_limited => transportFailureOutcome(
                 .provider_error,
-                .provider,
-                capture.failureDiagnosticCode(),
+                "rate",
+                &capture,
             ),
-            .quota_exceeded => failureDiagnosticOutcome(
+            .quota_exceeded => transportFailureOutcome(
                 .provider_error,
-                .provider,
-                capture.failureDiagnosticCode(),
+                "quota",
+                &capture,
             ),
-            .backend_failed => failureDiagnosticOutcome(
+            .backend_failed => transportFailureOutcome(
                 .provider_error,
-                .provider,
-                capture.failureDiagnosticCode(),
+                "backend",
+                &capture,
             ),
             .timed_out => failureOutcome(.timeout),
             .cancelled => failureOutcome(.aborted),
@@ -197,6 +197,21 @@ fn failureDiagnosticOutcome(
     @memcpy(capture.diagnostic_code_bytes[0..code.len], code);
     capture.diagnostic_code_length = @intCast(code.len);
     return .{ .failure = capture };
+}
+
+/// Codex owns this opaque code grammar. Shared protocol code only validates
+/// its generic bounded ASCII representation and never interprets its parts.
+fn transportFailureOutcome(
+    failure: model_protocol.Failure,
+    class: []const u8,
+    capture: *const Capture,
+) model_operation.DispatchOutcome {
+    var code_buffer: [model_protocol.max_failure_diagnostic_code_size]u8 = undefined;
+    const code = if (capture.failureHttpStatus()) |status|
+        std.fmt.bufPrint(&code_buffer, "codex.http.{s}.{d}", .{ class, status }) catch unreachable
+    else
+        std.fmt.bufPrint(&code_buffer, "codex.http.{s}", .{class}) catch unreachable;
+    return failureDiagnosticOutcome(failure, .provider, code);
 }
 
 pub const ToolMapping = struct {

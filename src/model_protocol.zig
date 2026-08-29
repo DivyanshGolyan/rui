@@ -629,7 +629,7 @@ fn validateFailureDiagnostic(
     switch (source) {
         .local_credentials => {
             if (reason != .authentication_expired) return error.InvalidFailureDiagnosticSource;
-            if (code.len != 0) return error.InvalidFailureDiagnosticCode;
+            try validateFailureDiagnosticCode(code);
         },
         .provider => {
             if (reason != .authentication_expired and reason != .provider_error and
@@ -745,6 +745,15 @@ test "provider-neutral failure diagnostics retain bounded source and code" {
     const diagnostic = try inspectFailureDiagnostic(encoded);
     try std.testing.expectEqual(DiagnosticSource.provider, diagnostic.source);
     try std.testing.expectEqualStrings("originator_not_allowed", diagnostic.code);
+    const local = try encodeFailureDiagnostic(
+        &bytes,
+        .authentication_expired,
+        .local_credentials,
+        "adapter.local.code",
+    );
+    const local_diagnostic = try inspectFailureDiagnostic(local);
+    try std.testing.expectEqual(DiagnosticSource.local_credentials, local_diagnostic.source);
+    try std.testing.expectEqualStrings("adapter.local.code", local_diagnostic.code);
     try std.testing.expectError(
         error.InvalidFailureDiagnosticCode,
         encodeFailureDiagnostic(
