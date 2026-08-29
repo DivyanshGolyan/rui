@@ -362,7 +362,7 @@ pub const Capture = struct {
         if (std.mem.eql(u8, payload, "[DONE]")) return;
         const parsed = parseEvent(payload) catch |err| {
             switch (err) {
-                error.JsonNestingTooDeep, error.TooManyJsonMembers => self.resource_exceeded = true,
+                error.JsonNestingTooDeep => self.resource_exceeded = true,
                 else => self.malformed = true,
             }
             return;
@@ -452,7 +452,7 @@ pub const Capture = struct {
     fn captureInputRequest(self: *Capture, arguments: []u8) !void {
         const parsed = parseInputRequest(arguments) catch |err| {
             switch (err) {
-                error.JsonNestingTooDeep, error.TooManyJsonMembers, error.TooManyInputChoices => self.resource_exceeded = true,
+                error.JsonNestingTooDeep, error.TooManyInputChoices => self.resource_exceeded = true,
                 else => self.malformed = true,
             }
             return;
@@ -624,20 +624,6 @@ const ParsedInputRequest = struct {
     shape: []const u8,
     choices: [model_contract.max_choice_count]model_protocol.Choice,
     choice_count: usize,
-};
-
-const JsonObjectKeys = struct {
-    keys: [model_contract.max_json_members][]const u8 = undefined,
-    count: usize = 0,
-
-    fn claim(self: *JsonObjectKeys, key: []const u8) !void {
-        for (self.keys[0..self.count]) |seen| {
-            if (std.mem.eql(u8, seen, key)) return error.DuplicateJsonField;
-        }
-        if (self.count == self.keys.len) return error.TooManyJsonMembers;
-        self.keys[self.count] = key;
-        self.count += 1;
-    }
 };
 
 /// A Codex-private, allocation-free cursor over one compacted SSE JSON payload.
@@ -868,11 +854,9 @@ fn parseEvent(payload: []u8) !ParsedEvent {
     var response_status: ?[]const u8 = null;
     var response_seen = false;
     var item: ?ParsedItem = null;
-    var keys: JsonObjectKeys = .{};
     if (!cursor.maybeTake('}')) {
         while (true) {
             const key = try cursor.string();
-            try keys.claim(key);
             try cursor.take(':');
             if (std.mem.eql(u8, key, "type")) {
                 if (event_type != null) return error.DuplicateJsonField;
@@ -903,11 +887,9 @@ fn parseEvent(payload: []u8) !ParsedEvent {
 fn parseResponse(cursor: *JsonCursor) !?[]const u8 {
     try cursor.enter('{');
     var status: ?[]const u8 = null;
-    var keys: JsonObjectKeys = .{};
     if (!cursor.maybeTake('}')) {
         while (true) {
             const key = try cursor.string();
-            try keys.claim(key);
             try cursor.take(':');
             if (std.mem.eql(u8, key, "status")) {
                 if (status != null) return error.DuplicateJsonField;
@@ -930,11 +912,9 @@ fn parseItem(cursor: *JsonCursor) !ParsedItem {
     var seen_role = false;
     var seen_name = false;
     var seen_arguments = false;
-    var keys: JsonObjectKeys = .{};
     if (!cursor.maybeTake('}')) {
         while (true) {
             const key = try cursor.string();
-            try keys.claim(key);
             try cursor.take(':');
             if (std.mem.eql(u8, key, "type")) {
                 if (seen_type) return error.DuplicateJsonField;
@@ -974,11 +954,9 @@ fn parseContent(cursor: *JsonCursor, item: *ParsedItem) !void {
             try cursor.enter('{');
             var part_type: ?[]const u8 = null;
             var text: ?[]const u8 = null;
-            var keys: JsonObjectKeys = .{};
             if (!cursor.maybeTake('}')) {
                 while (true) {
                     const key = try cursor.string();
-                    try keys.claim(key);
                     try cursor.take(':');
                     if (std.mem.eql(u8, key, "type")) {
                         if (part_type != null) return error.DuplicateJsonField;
@@ -1014,11 +992,9 @@ fn parseInputRequest(arguments: []u8) !ParsedInputRequest {
     var choices_seen = false;
     var choices: [model_contract.max_choice_count]model_protocol.Choice = undefined;
     var choice_count: usize = 0;
-    var keys: JsonObjectKeys = .{};
     if (!cursor.maybeTake('}')) {
         while (true) {
             const key = try cursor.string();
-            try keys.claim(key);
             try cursor.take(':');
             if (std.mem.eql(u8, key, "prompt")) {
                 if (prompt != null) return error.DuplicateJsonField;
@@ -1060,11 +1036,9 @@ fn parseChoices(
             try cursor.enter('{');
             var id: ?[]const u8 = null;
             var label: ?[]const u8 = null;
-            var keys: JsonObjectKeys = .{};
             if (!cursor.maybeTake('}')) {
                 while (true) {
                     const key = try cursor.string();
-                    try keys.claim(key);
                     try cursor.take(':');
                     if (std.mem.eql(u8, key, "id")) {
                         if (id != null) return error.DuplicateJsonField;
@@ -1543,6 +1517,23 @@ test "capture rejects malformed escapes surrogates and excessive nesting" {
     var utf8_capture = utf8_output.capture();
     try utf8_capture.appendSse(&invalid_utf8);
     try std.testing.expect(utf8_capture.malformed);
+}
+
+test "capture ignores bounded provider metadata without a schema-member cap" {
+    var event: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&event);
+    try writer.writeAll("data: {\"type\":\"response.created\"");
+    for (0..model_contract.max_json_members + 32) |index| {
+        try writer.print(",\"metadata_{d}\":null", .{index});
+    }
+    try writer.writeAll("}\n\n");
+
+    var output: TestCandidate = .{};
+    var capture = output.capture();
+    try capture.appendSse(writer.buffered());
+    try std.testing.expect(!capture.malformed);
+    try std.testing.expect(!capture.resource_exceeded);
+    try std.testing.expect(!capture.terminalObserved());
 }
 
 test "wire and stream bounds are exact" {

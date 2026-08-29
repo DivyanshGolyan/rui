@@ -87,11 +87,12 @@ terminal ends the logical response, and later bytes are ignored independently of
 Each retained limit owns a distinct resource. The canonical response bounds decoded semantic content
 and provisional storage. The frame bounds resident parser memory and worst-case JSON escape expansion.
 Total SSE bytes bound cumulative parser and transport work, while the whole-call deadline independently
-bounds elapsed time. JSON depth and object-member limits bound the cursor's fixed stack and duplicate-key
-storage. Tool, choice, field, and argument counts or sizes bound semantic cardinality in the model
-contract. The dedicated draft-entry count bounds startup cleanup work independently of the one live
-writer. There is no event-count limit: every event consumes the total byte budget, so a separate count
-would reject valid fine-grained streams without bounding another resource.
+bounds elapsed time. JSON depth bounds the cursor's fixed stack. Duplicate checks cover only the fields
+whose semantics the adapter consumes; unknown provider metadata is skipped and remains bounded by the
+frame and total byte budgets. Tool, choice, field, and argument counts or sizes bound semantic
+cardinality in the model contract. The dedicated draft-entry count bounds startup cleanup work
+independently of the one live writer. There is no event-count limit: every event consumes the total byte
+budget, so a separate count would reject valid fine-grained streams without bounding another resource.
 
 OAuth and model HTTP requests explicitly require identity content encoding. Compressed provider bytes
 therefore never enter the bounded JSON or SSE readers, and no decompression window or hidden allocator
