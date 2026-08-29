@@ -8,13 +8,15 @@ compile-time-bounded Activation Slot from a fixed resident pool.
 
 The current checkout implements the deterministic single-Session lifecycle, SQLite Host Store,
 permissioned Bash and patch execution, and repair fixtures described below. The provider-neutral,
-asynchronous Workflow Run architecture is the planned V1 destination tracked by issues #32–#39; it
-is not yet implemented.
+asynchronous Workflow Run architecture is the planned V1 destination tracked by issues #33–#39 and
+#43; it is not yet implemented.
 
-Codex is the required first live provider target. Issue #11 must prove that OnePage can use an existing
-ChatGPT subscription through the official authorization and model-transport path without embedding a
-second agent loop. Until that feasibility gate passes, this repository does not claim that the live
-subscription experience is available.
+Codex is the required first live provider target. Before workflow orchestration, issue #11 must prove
+that OnePage can use an existing ChatGPT subscription through the official authorization and
+model-transport path, then let a real Codex model complete one controlled coding repair through the
+existing capacity-one Harness. Issue #43 later carries that same adapter into durable Workflow Runs
+and measured concurrency. Neither step embeds a second agent loop. Until #11 passes, this repository
+does not claim that the live subscription experience is available.
 
 The V1 CLI will expose `run`, `inspect`, `respond`, `advance`, `cancel`, and `read` over one
 protocol-independent Run Service. JSON `RunSnapshot` is the complete automation contract; Markdown is

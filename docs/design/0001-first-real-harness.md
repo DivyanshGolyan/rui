@@ -560,13 +560,15 @@ internal module test once the harness-seam tests cover it.
 
 ## Implementation order
 
-The foundation through the Host Store cutover is complete. Remaining V1 work is organized as vertical workstreams with small review units:
+The foundation through the deterministic repair, Host Store, and provider-neutral model contract is complete. Remaining V1 work is organized as risk gates followed by vertical production slices with small review units:
 
-1. Reset authoritative bindings to typed, domain-separated SHA-256 and persist one immutable Patch Intent.
-2. Apply and reconcile that intent, then compose Bash inspection, patch, Bash verification, and Final Answer into one deterministic repair.
-3. Prove or reject a safe transport-only Codex dependency before implementing one narrow live Provider adapter.
-4. Replace the compile-time one-slot production pool with one startup-fixed `active_capacity` and produce the two-axis density evidence.
-5. Add conservative line output, documentation, the residual semantic recovery audit, and compiler declaration coverage as release gates.
+1. Prove the official Codex subscription transport, implement one narrow Provider adapter, and let a real model complete a controlled repair through the existing capacity-one Harness. This happens before QuickJS so the current agent runtime and provider seam receive real-world feedback early.
+2. Prove the disposable QuickJS kernel independently, including complete blocked-demand capture and deterministic Promise joins.
+3. Build one durable one-Job Run through the bounded foreground advancement engine, keyed Job identity, disposable evaluation, cold-open resume, and committed observation.
+4. Extend that path first with Active Credits, fan-out, and deterministic whole-blocked-set barriers, then with Workspace effect fencing.
+5. Add durable interactions and stabilize the complete Run Service and CLI contract.
+6. Carry the already-proven Codex adapter into the durable Workflow Run path, measure supported transport concurrency, and run the opt-in live repair through that final architecture.
+7. Produce density evidence, package the deterministic demonstration, and run the residual recovery and declaration-coverage gates.
 
 Host Store maintenance, generalized scheduling, provider and OAuth frameworks, custom SQLite VFS testing, and terminal infrastructure are post-V1 or rejected until a concrete consumer exists.
 
