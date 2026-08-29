@@ -124,6 +124,20 @@ pub const Projection = struct {
     content_ref: u64 = 0,
     generation: u64 = 0,
     failure: model_protocol.Failure = .none,
+    diagnostic_source: model_protocol.DiagnosticSource = .none,
+    diagnostic_code: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
+    diagnostic_code_length: u8 = 0,
+
+    pub fn setDiagnosticCode(self: *Projection, code: []const u8) void {
+        std.debug.assert(code.len <= self.diagnostic_code.len);
+        @memset(&self.diagnostic_code, 0);
+        @memcpy(self.diagnostic_code[0..code.len], code);
+        self.diagnostic_code_length = @intCast(code.len);
+    }
+
+    pub fn diagnosticCode(self: *const Projection) []const u8 {
+        return self.diagnostic_code[0..self.diagnostic_code_length];
+    }
 };
 
 pub const Progress = struct {
@@ -704,6 +718,7 @@ const HarnessState = struct {
     fn failureProjection(self: *HarnessState) Projection {
         const session = &self.session.?;
         var ignored: u8 = 0;
+        var response_ref: u64 = 0;
         const failure = failure: {
             const ledger = session.inspectSemantic(
                 &ignored,
@@ -713,14 +728,34 @@ const HarnessState = struct {
             ) catch break :failure .none;
             const encoded = ledger.last_core orelse break :failure .none;
             const state = core_state.decode(&encoded) catch break :failure .none;
+            response_ref = state.response_ref;
             break :failure state.response_failure;
         };
-        return .{
+        var projection: Projection = .{
             .kind = .failure,
             .session_id = session.session_id,
             .task_id = session.task_id,
             .failure = failure,
         };
+        populateFailureDiagnostic(session, response_ref, &projection);
+        return projection;
+    }
+
+    fn populateFailureDiagnostic(
+        session: *session_store.Session,
+        response_ref: u64,
+        projection: *Projection,
+    ) void {
+        if (response_ref == 0) return;
+        var reader = session.openBlob(response_ref) catch return;
+        defer reader.close();
+        var bytes: [model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size]u8 = undefined;
+        if (reader.length() > bytes.len) return;
+        const captured = reader.readWindow(0, &bytes) catch return;
+        if (captured.len != reader.length()) return;
+        const diagnostic = model_protocol.inspectFailureDiagnostic(captured) catch return;
+        projection.diagnostic_source = diagnostic.source;
+        projection.setDiagnosticCode(diagnostic.code);
     }
 
     fn approvalRequired(context: *anyopaque, approval: lifecycle.ApprovalRequired) anyerror!void {
@@ -1865,16 +1900,18 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
     };
     const FakeTransport = struct {
         disposition: codex_provider.TransportDisposition,
+        diagnostic_code: []const u8 = "",
         calls: u8 = 0,
 
         fn perform(
             context: *anyopaque,
             _: *const codex_provider.Credential,
             _: model_operation.RequestCursor,
-            _: *codex_provider.Capture,
+            capture: *codex_provider.Capture,
         ) anyerror!codex_provider.TransportDisposition {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
+            try capture.setFailureDiagnosticCode(self.diagnostic_code);
             return self.disposition;
         }
     };
@@ -1882,11 +1919,33 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         authorization: codex_provider.AuthorizationDisposition = .ready,
         transport: codex_provider.TransportDisposition = .not_started,
         expected: model_protocol.Failure,
+        expected_source: model_protocol.DiagnosticSource = .none,
+        diagnostic_code: []const u8 = "",
     };
     const cases = [_]Case{
         .{ .authorization = .missing, .expected = .missing_authentication },
-        .{ .authorization = .expired, .expected = .authentication_expired },
-        .{ .transport = .authentication_failed, .expected = .authentication_expired },
+        .{
+            .authorization = .refresh_rejected,
+            .expected = .authentication_expired,
+            .expected_source = .local_refresh_rejected,
+        },
+        .{
+            .authorization = .refresh_missing,
+            .expected = .authentication_expired,
+            .expected_source = .local_refresh_missing,
+        },
+        .{
+            .transport = .http_unauthorized,
+            .expected = .authentication_expired,
+            .expected_source = .provider_http_401,
+            .diagnostic_code = "invalid_token",
+        },
+        .{
+            .transport = .http_forbidden,
+            .expected = .authentication_expired,
+            .expected_source = .provider_http_403,
+            .diagnostic_code = "originator_not_allowed",
+        },
         .{ .transport = .model_unavailable, .expected = .model_unavailable },
         .{ .transport = .timed_out, .expected = .timeout },
         .{ .transport = .cancelled, .expected = .aborted },
@@ -1900,7 +1959,10 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
     defer runtime.close() catch unreachable;
     for (cases, 0..) |case, index| {
         var authorization: FakeAuthorization = .{ .disposition = case.authorization };
-        var transport: FakeTransport = .{ .disposition = case.transport };
+        var transport: FakeTransport = .{
+            .disposition = case.transport,
+            .diagnostic_code = case.diagnostic_code,
+        };
         var codex: codex_provider.CodexProvider = .{
             .authorization = .{ .context = &authorization, .load_fn = FakeAuthorization.load },
             .transport = .{ .context = &transport, .perform_fn = FakeTransport.perform },
@@ -1925,6 +1987,8 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         try std.testing.expectEqual(@as(u8, 1), failed.projection_count);
         try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
         try std.testing.expectEqual(case.expected, failed.projections[0].failure);
+        try std.testing.expectEqual(case.expected_source, failed.projections[0].diagnostic_source);
+        try std.testing.expectEqualStrings(case.diagnostic_code, failed.projections[0].diagnosticCode());
         var ignored: u8 = 0;
         const ledger = try harnessState(owner).session.?.inspectSemantic(
             &ignored,
@@ -1947,6 +2011,8 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         try std.testing.expectEqual(@as(u8, 1), reopened.projection_count);
         try std.testing.expectEqual(ProjectionKind.failure, reopened.projections[0].kind);
         try std.testing.expectEqual(case.expected, reopened.projections[0].failure);
+        try std.testing.expectEqual(case.expected_source, reopened.projections[0].diagnostic_source);
+        try std.testing.expectEqualStrings(case.diagnostic_code, reopened.projections[0].diagnosticCode());
         try std.testing.expectEqual(dispatches, transport.calls);
         restored.close();
     }

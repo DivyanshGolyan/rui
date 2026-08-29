@@ -273,8 +273,8 @@ fn renderProgress(io: std.Io, owner: *harness.Harness, progress: *const harness.
         ),
         .cancelled => try std.Io.File.stdout().writeStreamingAll(io, "Cancelled.\n"),
         .failure => {
-            var line_buffer: [96]u8 = undefined;
-            const line = try failureLine(&line_buffer, projection.failure);
+            var line_buffer: [192]u8 = undefined;
+            const line = try failureProjectionLine(&line_buffer, &projection);
             try std.Io.File.stdout().writeStreamingAll(io, line);
         },
         .task_admitted, .outcome, .closed => {},
@@ -284,6 +284,23 @@ fn renderProgress(io: std.Io, owner: *harness.Harness, progress: *const harness.
 fn failureLine(out: []u8, failure: model_protocol.Failure) ![]const u8 {
     const diagnostic = if (failure == .none) "unclassified" else @tagName(failure);
     return std.fmt.bufPrint(out, "Session failed: {s}.\n", .{diagnostic});
+}
+
+fn failureProjectionLine(out: []u8, projection: *const harness.Projection) ![]const u8 {
+    if (projection.diagnostic_source == .none) return failureLine(out, projection.failure);
+    const code = projection.diagnosticCode();
+    if (code.len == 0) {
+        return std.fmt.bufPrint(
+            out,
+            "Session failed: {s} ({s}).\n",
+            .{ @tagName(projection.failure), @tagName(projection.diagnostic_source) },
+        );
+    }
+    return std.fmt.bufPrint(
+        out,
+        "Session failed: {s} ({s}, code={s}).\n",
+        .{ @tagName(projection.failure), @tagName(projection.diagnostic_source), code },
+    );
 }
 
 fn resolveStatePath(
@@ -626,6 +643,17 @@ test "CLI failure rendering preserves the bounded typed cause" {
     try std.testing.expectEqualStrings(
         "Session failed: transport_may_have_started.\n",
         try failureLine(&buffer, .transport_may_have_started),
+    );
+    var projection: harness.Projection = .{
+        .kind = .failure,
+        .session_id = 1,
+        .failure = .authentication_expired,
+        .diagnostic_source = .provider_http_403,
+    };
+    projection.setDiagnosticCode("originator_not_allowed");
+    try std.testing.expectEqualStrings(
+        "Session failed: authentication_expired (provider_http_403, code=originator_not_allowed).\n",
+        try failureProjectionLine(&buffer, &projection),
     );
 }
 

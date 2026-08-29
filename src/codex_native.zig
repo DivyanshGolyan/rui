@@ -170,7 +170,8 @@ pub const NativeAuthorization = struct {
         defer tokens.scrub();
         if (try tokenExpiresSoon(tokens.accessToken(), self.io)) {
             var renewed = codex_auth.refresh(self.http, &tokens) catch |err| switch (err) {
-                error.RefreshRejected, error.MissingRefreshToken => return .expired,
+                error.RefreshRejected => return .refresh_rejected,
+                error.MissingRefreshToken => return .refresh_missing,
                 else => return err,
             };
             defer renewed.scrub();
@@ -262,11 +263,14 @@ pub const NativeTransport = struct {
         var redirect_buffer: [1024]u8 = undefined;
         var response = request.receiveHead(&redirect_buffer) catch return .may_have_started;
         const status: u16 = @intFromEnum(response.head.status);
-        if (status == 401 or status == 403) return .authentication_failed;
-        if (status == 404 or status == 429 or status >= 500) return .model_unavailable;
-        if (status < 200 or status >= 300) return .may_have_started;
         var transfer_buffer: [64]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
+        if (status == 401 or status == 403) {
+            captureProviderFailureCode(reader, capture);
+            return if (status == 401) .http_unauthorized else .http_forbidden;
+        }
+        if (status == 404 or status == 429 or status >= 500) return .model_unavailable;
+        if (status < 200 or status >= 300) return .may_have_started;
         var chunk: [8192]u8 = undefined;
         while (true) {
             const read = reader.readSliceShort(&chunk) catch return .may_have_started;
@@ -283,6 +287,43 @@ pub const NativeTransport = struct {
         std.Io.sleep(io, std.Io.Duration.fromSeconds(transport_timeout_seconds), .awake) catch {};
     }
 };
+
+fn captureProviderFailureCode(reader: *std.Io.Reader, capture: *codex_provider.Capture) void {
+    var body: [4096]u8 = undefined;
+    var length: usize = 0;
+    while (length < body.len) {
+        const read = reader.readSliceShort(body[length..]) catch return;
+        if (read == 0) break;
+        length += read;
+    }
+    if (length == body.len) return;
+    setProviderFailureCode(body[0..length], capture);
+}
+
+fn setProviderFailureCode(body: []const u8, capture: *codex_provider.Capture) void {
+    var arena_bytes: [8192]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
+    var parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), body, .{
+        .max_value_len = 4096,
+        .duplicate_field_behavior = .@"error",
+    }) catch return;
+    defer parsed.deinit();
+    const outer = switch (parsed.value) {
+        .object => |value| value,
+        else => return,
+    };
+    const error_value = outer.get("error") orelse return;
+    const error_object = switch (error_value) {
+        .object => |value| value,
+        else => return,
+    };
+    const code_value = error_object.get("code") orelse error_object.get("type") orelse return;
+    const code = switch (code_value) {
+        .string => |value| value,
+        else => return,
+    };
+    capture.setFailureDiagnosticCode(code) catch {};
+}
 
 const CountingSink = struct {
     count: u64 = 0,
@@ -327,4 +368,24 @@ fn tokenExpiresSoon(token: []const u8, io: std.Io) !bool {
     };
     const now = std.Io.Clock.real.now(io).toSeconds();
     return expiry <= now + 300;
+}
+
+test "live-shaped integer expiry does not force premature refresh" {
+    const token = "e30.eyJleHAiOjQxMDI0NDQ4MDAsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2NvdW50In19.sig";
+    try std.testing.expect(!try tokenExpiresSoon(token, std.testing.io));
+}
+
+test "HTTP diagnostics retain only bounded provider error code or type" {
+    var capture: codex_provider.Capture = .{};
+    setProviderFailureCode(
+        "{\"error\":{\"code\":\"originator_not_allowed\",\"message\":\"unbounded secret-adjacent text\"}}",
+        &capture,
+    );
+    try std.testing.expectEqualStrings("originator_not_allowed", capture.failureDiagnosticCode());
+
+    setProviderFailureCode("{\"error\":{\"type\":\"invalid_request_error\"}}", &capture);
+    try std.testing.expectEqualStrings("invalid_request_error", capture.failureDiagnosticCode());
+
+    setProviderFailureCode("{\"error\":{\"code\":\"not a bounded code\"}}", &capture);
+    try std.testing.expectEqualStrings("invalid_request_error", capture.failureDiagnosticCode());
 }

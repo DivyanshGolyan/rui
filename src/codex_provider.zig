@@ -43,7 +43,12 @@ pub const Authorization = struct {
     }
 };
 
-pub const AuthorizationDisposition = enum { ready, missing, expired };
+pub const AuthorizationDisposition = enum {
+    ready,
+    missing,
+    refresh_rejected,
+    refresh_missing,
+};
 
 pub const ByteSink = struct {
     context: *anyopaque,
@@ -56,7 +61,8 @@ pub const ByteSink = struct {
 
 pub const TransportDisposition = enum {
     complete,
-    authentication_failed,
+    http_unauthorized,
+    http_forbidden,
     model_unavailable,
     timed_out,
     cancelled,
@@ -104,7 +110,18 @@ pub const CodexProvider = struct {
         };
         switch (authorization) {
             .missing => return publishFailure(response, .missing_authentication),
-            .expired => return publishFailure(response, .authentication_expired),
+            .refresh_rejected => return publishFailureDiagnostic(
+                response,
+                .authentication_expired,
+                .local_refresh_rejected,
+                "",
+            ),
+            .refresh_missing => return publishFailureDiagnostic(
+                response,
+                .authentication_expired,
+                .local_refresh_missing,
+                "",
+            ),
             .ready => {},
         }
         if (credential.token().len == 0) return publishFailure(response, .provider_error);
@@ -114,7 +131,18 @@ pub const CodexProvider = struct {
             return publishFailure(response, .transport_may_have_started);
         switch (disposition) {
             .complete => try capture.publish(response),
-            .authentication_failed => try publishFailure(response, .authentication_expired),
+            .http_unauthorized => try publishFailureDiagnostic(
+                response,
+                .authentication_expired,
+                .provider_http_401,
+                capture.failureDiagnosticCode(),
+            ),
+            .http_forbidden => try publishFailureDiagnostic(
+                response,
+                .authentication_expired,
+                .provider_http_403,
+                capture.failureDiagnosticCode(),
+            ),
             .model_unavailable => try publishFailure(response, .model_unavailable),
             .timed_out => try publishFailure(response, .timeout),
             .cancelled => try publishFailure(response, .aborted),
@@ -127,6 +155,17 @@ pub const CodexProvider = struct {
 fn publishFailure(response: model_operation.ResponseWriter, failure: model_protocol.Failure) !void {
     var bytes: [model_protocol.header_size]u8 = undefined;
     try response.append(try model_protocol.encodeFailure(&bytes, failure));
+    try response.finish();
+}
+
+fn publishFailureDiagnostic(
+    response: model_operation.ResponseWriter,
+    failure: model_protocol.Failure,
+    source: model_protocol.DiagnosticSource,
+    code: []const u8,
+) !void {
+    var bytes: [model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size]u8 = undefined;
+    try response.append(try model_protocol.encodeFailureDiagnostic(&bytes, failure, source, code));
     try response.finish();
 }
 
@@ -175,6 +214,24 @@ pub const Capture = struct {
     terminal_count: u8 = 0,
     completed: bool = false,
     malformed: bool = false,
+    failure_diagnostic_code: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
+    failure_diagnostic_code_length: u8 = 0,
+
+    pub fn setFailureDiagnosticCode(self: *Capture, code: []const u8) !void {
+        if (code.len > self.failure_diagnostic_code.len) return error.FailureDiagnosticCodeTooLong;
+        for (code) |byte| if (!std.ascii.isAlphanumeric(byte) and
+            byte != '_' and byte != '-' and byte != '.')
+        {
+            return error.InvalidFailureDiagnosticCode;
+        };
+        @memset(&self.failure_diagnostic_code, 0);
+        @memcpy(self.failure_diagnostic_code[0..code.len], code);
+        self.failure_diagnostic_code_length = @intCast(code.len);
+    }
+
+    pub fn failureDiagnosticCode(self: *const Capture) []const u8 {
+        return self.failure_diagnostic_code[0..self.failure_diagnostic_code_length];
+    }
 
     pub fn requestSink(self: *Capture) ByteSink {
         return .{ .context = self, .write_fn = discardRequestBytes };

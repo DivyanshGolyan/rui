@@ -5,6 +5,7 @@ const contract = @import("model_contract.zig");
 pub const header_size = 24;
 pub const max_resident_response_size = 20 * 1024;
 pub const max_assistant_text_size = max_resident_response_size - header_size;
+pub const max_failure_diagnostic_code_size: usize = 64;
 pub const max_response_size = header_size + contract.max_tool_key_size +
     contract.max_tool_arguments_envelope_size;
 pub const version: u16 = 3;
@@ -27,6 +28,19 @@ pub const Failure = enum(u8) {
     timeout = 12,
     transport_not_started = 13,
     transport_may_have_started = 14,
+};
+
+pub const DiagnosticSource = enum(u8) {
+    none = 0,
+    local_refresh_rejected = 1,
+    local_refresh_missing = 2,
+    provider_http_401 = 3,
+    provider_http_403 = 4,
+};
+
+pub const FailureDiagnostic = struct {
+    source: DiagnosticSource = .none,
+    code: []const u8 = "",
 };
 
 pub const Parsed = struct {
@@ -161,6 +175,25 @@ pub fn encodeInputChoice(out: []u8, prompt: []const u8, choices: []const Choice)
 pub fn encodeFailure(out: []u8, reason: Failure) ![]const u8 {
     if (reason == .none) return error.InvalidProviderFailure;
     return encode(out, .failure, reason, 0, 0, "", "");
+}
+
+pub fn encodeFailureDiagnostic(
+    out: []u8,
+    reason: Failure,
+    source: DiagnosticSource,
+    code: []const u8,
+) ![]const u8 {
+    try validateFailureDiagnostic(reason, source, code);
+    return encode(out, .failure, reason, @intFromEnum(source), 0, code, "");
+}
+
+pub fn inspectFailureDiagnostic(bytes: []const u8) !FailureDiagnostic {
+    const inspected = try inspect(bytes);
+    if (inspected.disposition != .failure) return error.ExpectedFailureResponse;
+    const source = std.enums.fromInt(DiagnosticSource, inspected.shape) orelse
+        return error.MalformedModelResponse;
+    try validateFailureDiagnostic(inspected.reason, source, inspected.first);
+    return .{ .source = source, .code = inspected.first };
 }
 
 fn encode(
@@ -357,7 +390,11 @@ fn finish(
             inspected.option_count,
         ) },
         .failure => {
-            if (inspected.reason == .none or inspected.shape != 0 or inspected.option_count != 0 or first.len != 0 or second.len != 0) {
+            const source = std.enums.fromInt(DiagnosticSource, inspected.shape) orelse
+                return error.MalformedModelResponse;
+            validateFailureDiagnostic(inspected.reason, source, first) catch
+                return error.MalformedModelResponse;
+            if (inspected.option_count != 0 or second.len != 0) {
                 return error.MalformedModelResponse;
             }
             return .{ .parsed = failed(inspected.reason) };
@@ -463,6 +500,31 @@ fn validatePrompt(prompt: []const u8) !void {
     }
 }
 
+fn validateFailureDiagnostic(reason: Failure, source: DiagnosticSource, code: []const u8) !void {
+    if (reason == .none) return error.InvalidProviderFailure;
+    if (source == .none) {
+        if (code.len != 0) return error.InvalidFailureDiagnosticCode;
+        return;
+    }
+    if (reason != .authentication_expired) return error.InvalidFailureDiagnosticSource;
+    switch (source) {
+        .local_refresh_rejected, .local_refresh_missing => if (code.len != 0) {
+            return error.InvalidFailureDiagnosticCode;
+        },
+        .provider_http_401, .provider_http_403 => {
+            if (code.len > max_failure_diagnostic_code_size) {
+                return error.InvalidFailureDiagnosticCode;
+            }
+            for (code) |byte| if (!std.ascii.isAlphanumeric(byte) and
+                byte != '_' and byte != '-' and byte != '.')
+            {
+                return error.InvalidFailureDiagnosticCode;
+            };
+        },
+        .none => unreachable,
+    }
+}
+
 fn failed(reason: Failure) Parsed {
     return .{ .disposition = .failure, .failure = reason };
 }
@@ -499,6 +561,33 @@ test "complete captured responses cover every V1 disposition" {
             try std.testing.expectEqual(failure, parse(&scratch, try encodeFailure(&bytes, failure)).failure);
         }
     }
+}
+
+test "authentication failure diagnostics retain only a bounded source and code" {
+    var bytes: [max_response_size]u8 = undefined;
+    var scratch: ValidationScratch = undefined;
+    const encoded = try encodeFailureDiagnostic(
+        &bytes,
+        .authentication_expired,
+        .provider_http_403,
+        "originator_not_allowed",
+    );
+    try std.testing.expectEqual(
+        Failure.authentication_expired,
+        parse(&scratch, encoded).failure,
+    );
+    const diagnostic = try inspectFailureDiagnostic(encoded);
+    try std.testing.expectEqual(DiagnosticSource.provider_http_403, diagnostic.source);
+    try std.testing.expectEqualStrings("originator_not_allowed", diagnostic.code);
+    try std.testing.expectError(
+        error.InvalidFailureDiagnosticCode,
+        encodeFailureDiagnostic(
+            &bytes,
+            .authentication_expired,
+            .provider_http_403,
+            "unbounded provider message with spaces",
+        ),
+    );
 }
 
 test "captured admission consumes exact response identity once" {
