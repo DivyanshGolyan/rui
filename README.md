@@ -110,7 +110,8 @@ zig build
 ```
 
 After completing the browser prompt, run the controlled live repair through the same capacity-one
-Harness used by deterministic fixtures:
+Harness used by deterministic fixtures. The V1 tracer selects the supported `gpt-5.6-sol` default;
+ordinary callers may still select another raw Codex model with `--model codex:MODEL`:
 
 ```sh
 zig build codex-live-repair

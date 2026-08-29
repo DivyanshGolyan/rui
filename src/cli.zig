@@ -622,18 +622,18 @@ test "CLI arguments distinguish create from exact resume" {
     const codex_create = try parseArguments(&.{
         "onepage",
         "--model",
-        "codex:gpt-5.3-codex",
+        "codex:gpt-5.6-sol",
         "task",
     });
-    try std.testing.expectEqualStrings("codex:gpt-5.3-codex", codex_create.model.?);
+    try std.testing.expectEqualStrings("codex:gpt-5.6-sol", codex_create.model.?);
     const codex_resume = try parseArguments(&.{
         "onepage",
         "--resume",
         "000000000000000a",
         "--model",
-        "codex:gpt-5.3-codex",
+        "codex:caller-selected-model",
     });
-    try std.testing.expectEqualStrings("codex:gpt-5.3-codex", codex_resume.model.?);
+    try std.testing.expectEqualStrings("codex:caller-selected-model", codex_resume.model.?);
 
     try std.testing.expect((try parseArguments(&.{ "onepage", "--codex-login" })).codex_login);
     try std.testing.expect((try parseArguments(&.{ "onepage", "--codex-logout" })).codex_logout);
@@ -679,6 +679,16 @@ test "CLI failure rendering preserves the bounded typed cause" {
         "Session failed: provider_error (provider_http_rejection, status=422).\n",
         try failureProjectionLine(&buffer, &projection),
     );
+    projection.failure = .model_unavailable;
+    projection.diagnostic_source = .provider_model_not_found;
+    projection.diagnostic_http_status = 400;
+    projection.setDiagnosticCode("model_not_supported");
+    const model_line = try failureProjectionLine(&buffer, &projection);
+    try std.testing.expectEqualStrings(
+        "Session failed: model_unavailable (provider_model_not_found, status=400, code=model_not_supported).\n",
+        model_line,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, model_line, "using Codex with a ChatGPT account") == null);
 }
 
 test "patch display escapes terminal controls and backslashes losslessly" {

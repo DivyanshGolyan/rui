@@ -31,7 +31,7 @@ set +e
 "$onepage_binary" \
   --state "$live_root/state" \
   --repo "$repo_dir" \
-  --model codex:gpt-5.3-codex \
+  --model codex:gpt-5.6-sol \
   --dangerously-bypass-permissions \
   "Run ./test.sh, diagnose the failure, change only status.txt so the test passes, run ./test.sh again, and finish with a concise summary." \
   > "$live_root/output.txt" 2>&1

@@ -86,9 +86,16 @@ On failure it reports and preserves the disposable root so the bounded CLI diagn
 can be inspected; a successful run removes the root. Fake failures distinguish local refresh rejection,
 missing refresh authority, provider HTTP 401/403, model rejection, rate or quota rejection, and backend
 failure. The diagnostic admits only a closed source and a 64-byte provider `error.code` or `error.type`
-character class. Every received non-2xx response also retains its exact numeric HTTP status. The native
-transport reads ordinary content-length or chunked diagnostic bodies through the response reader under
+character class, plus the synthetic `model_not_supported` code derived from the exact bounded ChatGPT
+unsupported-model detail shape. It never retains the detail prose. Every received non-2xx response also
+retains its exact numeric HTTP status. The native transport reads ordinary content-length or chunked
+diagnostic bodies through the response reader under
 the existing request timeout, retaining no body when it is malformed or exceeds 4,096 bytes.
+
+The live tracer selects `gpt-5.6-sol` as the supported V1 default without adding a model registry or
+catalog lookup. Callers may still provide another raw model. If that model receives the bounded ChatGPT
+unsupported-model response, one durable Attempt fails without an invisible retry as
+`model_unavailable (provider_model_not_found, status=400, code=model_not_supported)`.
 
 A single test-only loopback fixture drives the production native transport. It asserts the exact bounded
 request headers and JSON shape, a two-turn tool-result continuation, non-2xx classification without an

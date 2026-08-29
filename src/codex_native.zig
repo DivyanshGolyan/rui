@@ -381,6 +381,9 @@ fn classifyHttpFailure(status: u16, code: []const u8) codex_provider.TransportDi
         }
         return .rate_limited;
     }
+    if (status == 400 and std.mem.eql(u8, code, "model_not_supported")) {
+        return .model_not_found;
+    }
     if (status == 404 and codeIsOneOf(code, &.{ "model_not_found", "model_not_available" })) {
         return .model_not_found;
     }
@@ -404,7 +407,10 @@ fn setProviderFailureCode(body: []const u8, capture: *codex_provider.Capture) vo
         .object => |value| value,
         else => return,
     };
-    const error_value = outer.get("error") orelse return;
+    const error_value = outer.get("error") orelse {
+        setUnsupportedModelDetail(&outer, capture);
+        return;
+    };
     const error_object = switch (error_value) {
         .object => |value| value,
         else => return,
@@ -415,6 +421,29 @@ fn setProviderFailureCode(body: []const u8, capture: *codex_provider.Capture) vo
         else => return,
     };
     capture.setFailureDiagnosticCode(code) catch {};
+}
+
+fn setUnsupportedModelDetail(
+    outer: *const std.json.ObjectMap,
+    capture: *codex_provider.Capture,
+) void {
+    if (outer.count() != 1) return;
+    const detail_value = outer.get("detail") orelse return;
+    const detail = switch (detail_value) {
+        .string => |value| value,
+        else => return,
+    };
+    const prefix = "The '";
+    const suffix = "' model is not supported when using Codex with a ChatGPT account.";
+    if (!std.mem.startsWith(u8, detail, prefix) or !std.mem.endsWith(u8, detail, suffix)) return;
+    const model = detail[prefix.len .. detail.len - suffix.len];
+    if (model.len == 0 or model.len > session_store.model_name_capacity) return;
+    for (model) |byte| if (!std.ascii.isAlphanumeric(byte) and
+        byte != '-' and byte != '_' and byte != '.' and byte != ':' and byte != '/')
+    {
+        return;
+    };
+    capture.setFailureDiagnosticCode("model_not_supported") catch {};
 }
 
 const CountingSink = struct {
@@ -738,6 +767,94 @@ test "NativeTransport reads a chunked provider diagnostic after the response hea
     try std.testing.expectEqual(codex_provider.TransportDisposition.provider_rejected, disposition);
     try std.testing.expectEqual(@as(?u16, 400), capture.failureHttpStatus());
     try std.testing.expectEqualStrings("unsupported_parameter", capture.failureDiagnosticCode());
+}
+
+test "NativeTransport classifies the bounded ChatGPT unsupported-model detail" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wire = try WireSession.init(io, &tmp);
+    defer wire.deinit(io);
+    _ = try model_operation.buildRequest(&wire.session, 1350, 1, 1);
+    try expectUnsupportedModelWireCase(
+        io,
+        &wire.session,
+        1350,
+        1351,
+        "{\"detail\":\"The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.\"}",
+        .model_not_found,
+        "model_not_supported",
+    );
+
+    const rejected = [_][]const u8{
+        "{\"detail\":\"This model is unavailable.\"}",
+        "{\"detail\":42}",
+        "{\"detail\":\"The 'gpt-5.3\\ncodex' model is not supported when using Codex with a ChatGPT account.\"}",
+        "{\"detail\":\"The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.\",\"extra\":true}",
+    };
+    for (rejected, 0..) |body, index| try expectUnsupportedModelWireCase(
+        io,
+        &wire.session,
+        1350,
+        1352 + index,
+        body,
+        .provider_rejected,
+        "",
+    );
+
+    const oversized_model: [session_store.model_name_capacity + 1]u8 = @splat('m');
+    var body_buffer: [512]u8 = undefined;
+    const oversized_body = try std.fmt.bufPrint(
+        &body_buffer,
+        "{{\"detail\":\"The '{s}' model is not supported when using Codex with a ChatGPT account.\"}}",
+        .{&oversized_model},
+    );
+    try expectUnsupportedModelWireCase(
+        io,
+        &wire.session,
+        1350,
+        1356,
+        oversized_body,
+        .provider_rejected,
+        "",
+    );
+}
+
+fn expectUnsupportedModelWireCase(
+    io: std.Io,
+    session: *session_store.Session,
+    operation_id: u64,
+    response_id: u64,
+    body: []const u8,
+    expected: codex_provider.TransportDisposition,
+    expected_code: []const u8,
+) !void {
+    var provider_io = try model_operation.ProviderIo.open(session, operation_id, response_id);
+    defer provider_io.close();
+    var fixture = try WireFixture.init(io, .bad_request, body, .complete);
+    defer fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    var endpoint_buffer: [128]u8 = undefined;
+    var transport: NativeTransport = .{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .endpoint = try fixture.endpoint(&endpoint_buffer),
+        .timeout = std.Io.Duration.fromSeconds(1),
+    };
+    var credential = fakeCredential();
+    defer credential.scrub();
+    var capture: codex_provider.Capture = .{};
+    const capability = transport.capability();
+    const disposition = try capability.perform_fn(
+        capability.context,
+        &credential,
+        try provider_io.request(),
+        &capture,
+    );
+    try server_future.await(io);
+    try std.testing.expectEqual(expected, disposition);
+    try std.testing.expectEqual(@as(?u16, 400), capture.failureHttpStatus());
+    try std.testing.expectEqualStrings(expected_code, capture.failureDiagnosticCode());
 }
 
 test "NativeTransport keeps status without retaining oversized or malformed provider bodies" {
