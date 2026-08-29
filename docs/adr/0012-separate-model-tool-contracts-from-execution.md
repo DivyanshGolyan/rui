@@ -9,6 +9,15 @@ request at the edge and durably capture one bounded candidate assistant text, ge
 input request, or typed failure. Captured bytes remain non-authoritative until the Host validates them
 once and commits their provider-neutral Result meaning through the Session Ledger.
 
+Provider conversion uses open envelopes and closed semantic conversion. The configured provider is a
+non-adversarial dependency in V1. Adapters bound the framing, bytes, nesting, deadline, and canonical
+output they own, but ignore unknown provider events, fields, item types, and content-part types after
+valid syntactic traversal. They first resolve the relevant discriminator, then strictly validate only
+the fields consumed to produce a house disposition. Unknown metadata receives no schema-member bound.
+Malformed framing, exhausted resources, duplicates or type errors in consumed fields, and contradictory
+terminal meaning fail deterministically. OnePage-owned canonical records, tool-input shapes,
+`input_request`, durable facts, and authority-bearing objects remain closed and exact.
+
 The exact catalog, model contract, instructions, Model Context, and semantic request digest are bound
 to a model Operation. Replacement Attempts under that Operation dispatch identical semantic request
 bytes. Changing the catalog creates a new Operation rather than changing a retry.

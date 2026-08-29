@@ -1064,18 +1064,16 @@ fn parseContent(cursor: *JsonCursor, item: *ParsedItem) !void {
     if (!cursor.maybeTake(']')) {
         while (true) {
             try cursor.enter('{');
-            var part_type: ?[]const u8 = null;
-            var text: ?[]const u8 = null;
+            var type_field: RawJsonField = .{};
+            var text_field: RawJsonField = .{};
             if (!cursor.maybeTake('}')) {
                 while (true) {
                     const key = try cursor.string();
                     try cursor.take(':');
                     if (std.mem.eql(u8, key, "type")) {
-                        if (part_type != null) return error.DuplicateJsonField;
-                        part_type = try cursor.string();
+                        try type_field.capture(cursor);
                     } else if (std.mem.eql(u8, key, "text")) {
-                        if (text != null) return error.DuplicateJsonField;
-                        text = try cursor.string();
+                        try text_field.capture(cursor);
                     } else {
                         try cursor.skipValue();
                     }
@@ -1084,10 +1082,14 @@ fn parseContent(cursor: *JsonCursor, item: *ParsedItem) !void {
                 }
             }
             cursor.depth -= 1;
-            const kind = part_type orelse return error.MalformedCodexMessage;
+            const kind = try parseStringValue(
+                (try type_field.single()) orelse return error.MalformedCodexMessage,
+            );
             if (std.mem.eql(u8, kind, "output_text")) {
                 item.output_text_count +|= 1;
-                item.text = text orelse return error.MalformedCodexMessage;
+                item.text = try parseStringValue(
+                    (try text_field.single()) orelse return error.MalformedCodexMessage,
+                );
             }
             if (cursor.maybeTake(']')) break;
             try cursor.take(',');
@@ -1527,8 +1529,8 @@ test "terminal status agreement and first-terminal-wins are chunk independent" {
 }
 
 test "every two-chunk partition produces byte-identical captured evidence" {
-    const stream = "data: {\"type\":\"response.output_item.done\",\"item\":{\"content\":[{\"text\":\"quote\\\" slash\\\\ emoji \\uD83D\\uDE00\",\"type\":\"output_text\"}],\"role\":\"assistant\",\"type\":\"message\"}}\n\n" ++
-        "data: {\"response\":{\"status\":\"completed\"},\"type\":\"response.completed\"}\n\n";
+    const stream = "data: {\"future_event\":{\"nested\":[1,true,null]},\"type\":\"response.output_item.done\",\"item\":{\"future_item\":42,\"content\":[{\"text\":{\"future\":true},\"type\":\"future_annotation\"},{\"future_part\":[\"ignored\"],\"text\":\"quote\\\" slash\\\\ emoji \\uD83D\\uDE00\",\"type\":\"output_text\"}],\"role\":\"assistant\",\"type\":\"message\"}}\n\n" ++
+        "data: {\"future_terminal\":false,\"response\":{\"future_response\":{},\"status\":\"completed\"},\"type\":\"response.completed\"}\n\n";
     var expected_output: TestCandidate = .{};
     var expected = expected_output.capture();
     try expected.appendSse(stream);
@@ -1631,7 +1633,7 @@ test "capture rejects malformed escapes surrogates and excessive nesting" {
     try std.testing.expect(utf8_capture.malformed);
 }
 
-test "capture ignores bounded provider metadata without a schema-member cap" {
+test "open provider envelopes ignore bounded unknown metadata without a schema-member cap" {
     var event: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&event);
     try writer.writeAll("data: {\"type\":\"response.created\"");
@@ -1648,7 +1650,7 @@ test "capture ignores bounded provider metadata without a schema-member cap" {
     try std.testing.expect(!capture.terminalObserved());
 }
 
-test "capture ignores colliding fields on unknown events and unsupported items" {
+test "open provider envelopes ignore colliding fields on unknown events and unsupported items" {
     var output: TestCandidate = .{};
     var capture = output.capture();
     try capture.appendSse(
@@ -1660,6 +1662,41 @@ test "capture ignores colliding fields on unknown events and unsupported items" 
     try std.testing.expect(!capture.malformed);
     try std.testing.expect(!capture.resource_exceeded);
     try std.testing.expectEqual(@as(u8, 0), capture.candidate_count);
+}
+
+test "recognized provider conversions reject ambiguous consumed fields" {
+    const malformed = [_][]const u8{
+        "data: {}\n\n",
+        "data: {\"type\":\"response.created\",\"type\":\"response.created\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{},\"item\":{}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"type\":\"message\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[]}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":42,\"content\":[]}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":{}}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"content\":[]}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\"}]}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"type\":\"output_text\",\"text\":\"x\"}]}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"x\",\"text\":\"y\"}]}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":{}}]}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"arguments\":\"{}\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":42,\"arguments\":\"{}\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"bash\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":{}}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"bash\",\"name\":\"bash\",\"arguments\":\"{}\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":\"{}\",\"arguments\":\"{}\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":42}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"status\":\"completed\"}}\n\n",
+    };
+    for (malformed) |event| {
+        var output: TestCandidate = .{};
+        var capture = output.capture();
+        try capture.appendSse(event);
+        try std.testing.expect(capture.malformed);
+        try std.testing.expectEqual(@as(usize, 0), output.length);
+    }
 }
 
 test "wire and stream bounds are exact" {

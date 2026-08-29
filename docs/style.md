@@ -27,7 +27,7 @@ deferred explicitly.
 | Harness | After `open`, use Host-owned bounded storage for owner-loop state. Only `drive` advances Core; `offer` remains nonblocking and allocation-free. |
 | Host Store | Route all access through the Storage Owner. Treat every durable value as hostile input; use bounded canonical payloads, indexed SQL, fixed-width identities, and prepare-commit-publish ordering. |
 | Run Service | Keep queries pure, updates acknowledged and safely retriable under their operation-specific contracts, advancement fenced, content immutable, and Run Snapshots derived from committed facts. Implement both checked-in JSON schemas exactly, keep caller-defined Unicode Job Keys separate from shell-safe system IDs, and represent truncation only through a Content Reference preview. Never expose Harness generations or storage mechanics. |
-| Adapters | Allocation is permitted only when bounded and fallible. External effects begin only after durable Attempt admission. |
+| Adapters | Allocation is permitted only when bounded and fallible. External effects begin only after durable Attempt admission. Treat provider-owned envelopes as open and OnePage semantic conversions as closed. |
 | CLI | Allocation is permitted only when bounded and fallible. Compose Run Service operations, derive Markdown only from normative JSON, sanitize hostile output, and own no Run or Session policy. |
 | Tests and tooling | May allocate freely within host limits, but must exercise production bounds and failure behavior rather than replacing them. |
 
@@ -155,7 +155,25 @@ deferred explicitly.
   memory as overlapping diagnostics within that total, and request envelopes and results as separate
   host reservations.
 
-### Treat boundaries as hostile
+### Validate according to ownership and consequence
+
+- Do not equate external with adversarial. State the trust assumption at each seam and validate only
+  what is needed for framing, an owned resource, unambiguous semantic conversion, durable authority, or
+  a consequential effect.
+- Treat provider wire formats as open envelopes. Within framing, byte, depth, and deadline bounds,
+  determine the event or variant discriminator before interpreting dependent fields; ignore unknown
+  events, fields, item types, and content-part types. Do not assign a schema-cardinality limit to
+  provider metadata unless it bounds an independently named resource.
+- Make conversion into OnePage semantic state closed. Reject missing, duplicated, wrongly typed,
+  inconsistent, or oversized fields that OnePage consumes to create a canonical fact. Never guess,
+  coerce, or default ambiguous provider meaning.
+- Keep OnePage-owned canonical, durable, authority-bearing, tool-input, interaction, and cross-process
+  formats closed and exact. Trusting a provider does not grant provider metadata authority inside those
+  formats.
+- Add GREASE-like compatibility fixtures at open provider seams: inject bounded unknown events, fields,
+  variant types, and valid arbitrary values in different orders and chunk partitions, and prove the
+  recognized canonical result is unchanged. Pair them with strict negative fixtures for every consumed
+  field.
 
 - Use fixed-width integers, explicit byte order, versioning, lengths, and checksums in durable,
   cross-process, and network formats. Do not persist `usize`, native enums, pointers, or struct
