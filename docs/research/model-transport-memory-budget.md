@@ -2,6 +2,29 @@
 
 Date: 2026-08-27
 
+## Capacity-one implementation evidence (2026-08-29)
+
+The issue #11 adapter now has the following capacity-one bounds. These are classified by evidence source so compile-time limits are not presented as measured resident memory.
+
+| Component | Evidence | Capacity-one value or bound |
+| --- | --- | ---: |
+| Provider-neutral request window | compile-time source bound | 4,096 bytes |
+| Canonical decoded candidate | compile-time source bound | 98,372 bytes |
+| SSE wire frame | compile-time source bound | 106,564 bytes |
+| Total SSE response | compile-time source bound | 426,256 bytes |
+| SSE event count | compile-time source bound | 128 events |
+| HTTP response transfer window | compile-time source bound | 64 bytes on the Codex success path |
+| HTTP rejection diagnostic body | compile-time source bound | 4,097 bytes read, at most 4,096 accepted |
+| HTTPS connection byte buffers | Zig 0.16 source-derived | 59,151 bytes before structs and allocator rounding |
+| TCP send and receive defaults | measured with `sysctl` on the development host, 2026-08-29 | 131,072 bytes each |
+| TCP autotuning maxima | measured with `sysctl` on the development host, 2026-08-29 | 4,194,304 bytes each |
+| Async task stack reservation | Zig 0.16 source-derived | 4 MiB virtual minimum per Kqueue task; resident pages unmeasured |
+| Retained connection state | implementation observation | zero idle Codex connections; each request uses `keep_alive = false` and deinitializes its client |
+
+The adapter compacts SSE `data:` lines in its one frame and writes the provider-neutral candidate directly to Host-owned provisional storage. It no longer retains a complete canonical result buffer or a second payload-sized SSE copy. The current JSON object parser still uses a fixed DOM arena for the outer frame and a smaller fixed arena for nested `input_request` arguments. Therefore, this report does not claim the issue's final non-DOM parser target yet.
+
+No live provider call was made for this update, and no real credential was read. Process RSS, physical footprint, touched async-stack pages, TLS handshake peak, allocator live bytes, and actual per-socket queued memory remain unmeasured for the capacity-one live path. The source and OS figures above are bounds or configuration evidence, not a measured whole-process slope. A later opt-in run must report those observations before this document can replace the existing planning estimate with a measured capacity-one result.
+
 ## Decision
 
 For a V1 lane of 100 concurrent HTTPS model calls, use **256 KiB per active call as the planning

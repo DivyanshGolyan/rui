@@ -435,7 +435,7 @@ Adapters:
 - Codex subscription access for live inference.
 - Fixture model that validates the exact model-visible history before returning each response.
 
-The adapter consumes one already-accepted typed request and finishes by publishing one durable result. It cannot call the core.
+The adapter consumes one already-accepted typed request. It receives an append-only candidate writer and synchronously returns one typed candidate-or-failure outcome. The Host alone seals or replaces the unpublished draft and later publishes Completion evidence. The adapter cannot call the core or publish Session authority.
 
 ### Durable store port
 

@@ -50,6 +50,7 @@ pub const AuthorizationDisposition = enum {
     missing,
     refresh_rejected,
     refresh_missing,
+    timed_out,
 };
 
 pub const ByteSink = struct {
@@ -127,11 +128,12 @@ pub const CodexProvider = struct {
                 null,
                 "",
             ),
+            .timed_out => return failureOutcome(.timeout),
             .ready => {},
         }
         if (credential.token().len == 0) return failureOutcome(.provider_error);
 
-        var capture: Capture = .{};
+        var capture: Capture = .{ .candidate = candidate };
         const disposition = self.transport.perform(&credential, request, &capture) catch
             return failureOutcome(.transport_may_have_started);
         return switch (disposition) {
@@ -246,8 +248,8 @@ pub const ToolMapping = struct {
 pub const Capture = struct {
     frame: [max_sse_frame_size]u8 = undefined,
     frame_length: usize = 0,
-    result: [model_protocol.max_response_size]u8 = undefined,
-    result_length: usize = 0,
+    candidate: ?model_operation.CandidateWriter = null,
+    candidate_failure: model_protocol.Failure = .none,
     mapping: ToolMapping = .{},
     candidate_count: u8 = 0,
     terminal_count: u8 = 0,
@@ -333,26 +335,9 @@ pub const Capture = struct {
         }
     }
 
-    fn consumeFrame(self: *Capture, frame: []const u8) !void {
-        var payload_bytes: [max_sse_frame_size]u8 = undefined;
-        var payload_length: usize = 0;
-        var lines = std.mem.splitScalar(u8, frame, '\n');
-        while (lines.next()) |raw_line| {
-            const line = std.mem.trimEnd(u8, raw_line, "\r");
-            if (std.mem.startsWith(u8, line, "data:")) {
-                const data = if (line.len > 5 and line[5] == ' ') line[6..] else line[5..];
-                if (payload_length != 0) {
-                    if (payload_length == payload_bytes.len) return error.SseFrameTooLarge;
-                    payload_bytes[payload_length] = '\n';
-                    payload_length += 1;
-                }
-                if (data.len > payload_bytes.len - payload_length) return error.SseFrameTooLarge;
-                @memcpy(payload_bytes[payload_length..][0..data.len], data);
-                payload_length += data.len;
-            }
-        }
-        if (payload_length == 0) return;
-        const payload = payload_bytes[0..payload_length];
+    fn consumeFrame(self: *Capture, frame: []u8) !void {
+        const payload = try compactSseData(frame);
+        if (payload.len == 0) return;
         if (std.mem.eql(u8, payload, "[DONE]")) return;
         var arena_bytes: [max_sse_frame_size * 2]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
@@ -408,13 +393,6 @@ pub const Capture = struct {
         self.completed = true;
         self.terminal_count +|= 1;
         self.terminal_status = status;
-        self.result_length = switch (status) {
-            .none => unreachable,
-            .completed => self.result_length,
-            .incomplete => (try model_protocol.encodeFailure(&self.result, .truncated)).len,
-            .failed => (try model_protocol.encodeFailure(&self.result, .provider_error)).len,
-            .cancelled => (try model_protocol.encodeFailure(&self.result, .aborted)).len,
-        };
     }
 
     fn captureMessage(self: *Capture, item: std.json.ObjectMap) !void {
@@ -429,7 +407,10 @@ pub const Capture = struct {
             if (text != null) return error.MultipleCodexTextOutputs;
             text = jsonString(part.get("text")) orelse return error.MalformedCodexMessage;
         }
-        self.result_length = (try model_protocol.encodeText(&self.result, text orelse "")).len;
+        try model_protocol.writeText(
+            self.candidate orelse return error.CandidateWriterMissing,
+            text orelse "",
+        );
     }
 
     fn captureFunction(self: *Capture, item: std.json.ObjectMap) !void {
@@ -440,10 +421,14 @@ pub const Capture = struct {
             return;
         }
         const key = self.mapping.keyForName(name) orelse {
-            self.result_length = (try model_protocol.encodeFailure(&self.result, .unknown_tool)).len;
+            self.candidate_failure = .unknown_tool;
             return;
         };
-        self.result_length = (try model_protocol.encodeTool(&self.result, key, arguments)).len;
+        try model_protocol.writeTool(
+            self.candidate orelse return error.CandidateWriterMissing,
+            key,
+            arguments,
+        );
     }
 
     fn captureInputRequest(self: *Capture, arguments: []const u8) !void {
@@ -462,8 +447,10 @@ pub const Capture = struct {
         const choices = jsonArray(object.get("choices")) orelse return error.MalformedInputRequest;
         if (std.mem.eql(u8, shape, "text")) {
             if (choices.items.len != 0) return error.MalformedInputRequest;
-            self.result_length = (model_protocol.encodeInputText(&self.result, prompt) catch
-                return error.MalformedInputRequest).len;
+            model_protocol.writeInputText(
+                self.candidate orelse return error.CandidateWriterMissing,
+                prompt,
+            ) catch return error.MalformedInputRequest;
             return;
         }
         if (!std.mem.eql(u8, shape, "single_choice")) return error.MalformedInputRequest;
@@ -479,29 +466,67 @@ pub const Capture = struct {
                 .label = jsonString(choice.get("label")) orelse return error.MalformedInputRequest,
             };
         }
-        self.result_length = (model_protocol.encodeInputChoice(
-            &self.result,
+        model_protocol.writeInputChoice(
+            self.candidate orelse return error.CandidateWriterMissing,
             prompt,
             decoded[0..choices.items.len],
-        ) catch return error.MalformedInputRequest).len;
+        ) catch return error.MalformedInputRequest;
     }
 
     fn publish(
         self: *Capture,
         candidate: model_operation.CandidateWriter,
     ) !model_operation.DispatchOutcome {
+        _ = candidate;
         self.finishSse();
-        if (self.malformed or self.result_length == 0) {
+        if (self.malformed) {
             return failureOutcome(if (!self.completed) .truncated else .malformed);
         }
-        var scratch: model_protocol.ValidationScratch = .{};
-        const parsed = model_protocol.decode(&scratch, self.result[0..self.result_length]) catch
-            return failureOutcome(.malformed);
-        if (parsed.disposition == .failure) return failureOutcome(parsed.failure);
-        try candidate.append(self.result[0..self.result_length]);
+        switch (self.terminal_status) {
+            .none => return failureOutcome(.truncated),
+            .incomplete => return failureOutcome(.truncated),
+            .failed => return failureOutcome(.provider_error),
+            .cancelled => return failureOutcome(.aborted),
+            .completed => {},
+        }
+        if (self.candidate_failure != .none) return failureOutcome(self.candidate_failure);
+        if (self.candidate_count != 1) return failureOutcome(.malformed);
         return .candidate;
     }
 };
+
+fn compactSseData(frame: []u8) ![]u8 {
+    var read_cursor: usize = 0;
+    var write_cursor: usize = 0;
+    var found_data = false;
+    while (read_cursor <= frame.len) {
+        const relative_end = std.mem.indexOfScalar(u8, frame[read_cursor..], '\n');
+        const raw_end = if (relative_end) |offset| read_cursor + offset else frame.len;
+        var line_end = raw_end;
+        if (line_end > read_cursor and frame[line_end - 1] == '\r') line_end -= 1;
+        const line = frame[read_cursor..line_end];
+        if (std.mem.startsWith(u8, line, "data:")) {
+            const prefix_length: usize = if (line.len > 5 and line[5] == ' ') 6 else 5;
+            const data_start = read_cursor + prefix_length;
+            if (found_data) {
+                if (write_cursor == frame.len) return error.SseFrameTooLarge;
+                frame[write_cursor] = '\n';
+                write_cursor += 1;
+            }
+            const data_length = line_end - data_start;
+            std.mem.copyForwards(
+                u8,
+                frame[write_cursor .. write_cursor + data_length],
+                frame[data_start..line_end],
+            );
+            write_cursor += data_length;
+            found_data = true;
+        }
+        if (raw_end == frame.len) break;
+        read_cursor = raw_end + 1;
+    }
+    return frame[0..write_cursor];
+}
 
 const TerminalStatus = enum { none, completed, incomplete, failed, cancelled };
 
@@ -700,18 +725,36 @@ fn writeJsonEscaped(sink: ByteSink, bytes: []const u8) !void {
     try sink.write(encoded[0..cursor]);
 }
 
+const TestCandidate = struct {
+    bytes: [model_protocol.max_response_size]u8 = undefined,
+    length: usize = 0,
+
+    fn capture(self: *TestCandidate) Capture {
+        return .{ .candidate = .{ .context = self, .append_fn = append } };
+    }
+
+    fn append(context: *anyopaque, bytes: []const u8) !void {
+        const self: *TestCandidate = @ptrCast(@alignCast(context));
+        if (bytes.len > self.bytes.len - self.length) return error.NoSpaceLeft;
+        @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+        self.length += bytes.len;
+    }
+};
+
 test "SSE capture maps final text, tools, input, and repeated terminals" {
-    var capture: Capture = .{};
+    var output: TestCandidate = .{};
+    var capture = output.capture();
     for (model_contract.default_catalog) |definition| try capture.mapping.add(definition);
     try capture.appendSse("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"true\\\",\\\"timeout_ms\\\":1000}\",\"call_id\":\"call_1\"}}\n\n");
     try capture.appendSse("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n");
     capture.finishSse();
     try std.testing.expect(!capture.malformed);
     var scratch: model_protocol.ValidationScratch = .{};
-    const parsed = try model_protocol.decode(&scratch, capture.result[0..capture.result_length]);
+    const parsed = try model_protocol.decode(&scratch, output.bytes[0..output.length]);
     try std.testing.expectEqual(model_protocol.Disposition.tool_call, parsed.disposition);
 
-    var repeated: Capture = .{};
+    var repeated_output: TestCandidate = .{};
+    var repeated = repeated_output.capture();
     const final_frame = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n\n";
     try repeated.appendSse(final_frame);
     try repeated.appendSse(final_frame);
@@ -721,24 +764,26 @@ test "SSE capture maps final text, tools, input, and repeated terminals" {
 }
 
 test "SSE capture distinguishes truncated and malformed terminal streams" {
-    var truncated: Capture = .{};
+    var truncated_output: TestCandidate = .{};
+    var truncated = truncated_output.capture();
     try truncated.appendSse("data: {\"type\":\"response.output_item.done\"");
     truncated.finishSse();
     try std.testing.expect(truncated.malformed);
 
-    var unknown: Capture = .{};
+    var unknown_output: TestCandidate = .{};
+    var unknown = unknown_output.capture();
     try unknown.appendSse("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"not_offered\",\"arguments\":\"{}\",\"call_id\":\"x\"}}\n\n");
     try unknown.appendSse("data: {\"type\":\"response.completed\"}\n\n");
     unknown.finishSse();
-    var scratch: model_protocol.ValidationScratch = .{};
     try std.testing.expectEqual(
         model_protocol.Failure.unknown_tool,
-        (try model_protocol.decode(&scratch, unknown.result[0..unknown.result_length])).failure,
+        (try unknown.publish(unknown.candidate.?)).failure.failure,
     );
 }
 
 test "SSE capture accepts fragmented CRLF and multi-line data" {
-    var capture: Capture = .{};
+    var output: TestCandidate = .{};
+    var capture = output.capture();
     try capture.appendSse("data: {\"type\":\"response.output_item.done\",\r\n");
     try capture.appendSse("data: \"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\r\n\r");
     try capture.appendSse("\ndata: {\"type\":\"response.done\"}\r\n\r\n");
@@ -747,7 +792,7 @@ test "SSE capture accepts fragmented CRLF and multi-line data" {
     var scratch: model_protocol.ValidationScratch = .{};
     try std.testing.expectEqual(
         model_protocol.Disposition.final_answer,
-        (try model_protocol.decode(&scratch, capture.result[0..capture.result_length])).disposition,
+        (try model_protocol.decode(&scratch, output.bytes[0..output.length])).disposition,
     );
 }
 
@@ -771,29 +816,28 @@ test "authoritative non-success terminals replace a partial candidate" {
         },
     };
     for (cases) |case| {
-        var capture: Capture = .{};
+        var output: TestCandidate = .{};
+        var capture = output.capture();
         try capture.appendSse(candidate);
         try capture.appendSse(case.terminal);
         capture.finishSse();
         try std.testing.expect(!capture.malformed);
-        var scratch: model_protocol.ValidationScratch = .{};
-        try std.testing.expectEqual(
-            case.expected,
-            (try model_protocol.decode(&scratch, capture.result[0..capture.result_length])).failure,
-        );
+        try std.testing.expectEqual(case.expected, (try capture.publish(capture.candidate.?)).failure.failure);
     }
 }
 
 test "terminal status agreement and first-terminal-wins are chunk independent" {
     const candidate = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n\n";
     const terminal = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
-    var capture: Capture = .{};
+    var output: TestCandidate = .{};
+    var capture = output.capture();
     try capture.appendSse(candidate ++ terminal ++
         "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n");
     capture.finishSse();
     try std.testing.expect(!capture.malformed);
 
-    var split: Capture = .{};
+    var split_output: TestCandidate = .{};
+    var split = split_output.capture();
     try split.appendSse(candidate);
     try split.appendSse(terminal);
     try split.appendSse("data: malformed trailing bytes\n\n");
@@ -801,11 +845,12 @@ test "terminal status agreement and first-terminal-wins are chunk independent" {
     try std.testing.expect(!split.malformed);
     try std.testing.expectEqualSlices(
         u8,
-        capture.result[0..capture.result_length],
-        split.result[0..split.result_length],
+        output.bytes[0..output.length],
+        split_output.bytes[0..split_output.length],
     );
 
-    var contradictory: Capture = .{};
+    var contradictory_output: TestCandidate = .{};
+    var contradictory = contradictory_output.capture();
     try contradictory.appendSse(candidate);
     try contradictory.appendSse(
         "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"completed\"}}\n\n",
@@ -820,9 +865,10 @@ test "input request arguments require the exact closed shape" {
         "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"Alpha\"}]}",
     };
     for (valid) |arguments| {
-        var capture: Capture = .{};
+        var output: TestCandidate = .{};
+        var capture = output.capture();
         try capture.captureInputRequest(arguments);
-        try std.testing.expect(capture.result_length != 0);
+        try std.testing.expect(output.length != 0);
     }
     const invalid = [_][]const u8{
         "{\"prompt\":\"Explain\",\"response_type\":\"text\"}",
@@ -836,7 +882,8 @@ test "input request arguments require the exact closed shape" {
         "{\"prompt\":\"Explain\",\"response_type\":\"text\",\"choices\":[]} trailing",
     };
     for (invalid) |arguments| {
-        var capture: Capture = .{};
+        var output: TestCandidate = .{};
+        var capture = output.capture();
         try std.testing.expectError(error.MalformedInputRequest, capture.captureInputRequest(arguments));
     }
 }

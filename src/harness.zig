@@ -1926,6 +1926,7 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
             .expected = .authentication_expired,
             .expected_source = .local_refresh_missing,
         },
+        .{ .authorization = .timed_out, .expected = .timeout },
         .{
             .transport = .http_unauthorized,
             .expected = .authentication_expired,

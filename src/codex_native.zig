@@ -126,6 +126,7 @@ pub const KeychainStore = struct {
 pub const NativeHttp = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
+    timeout: std.Io.Duration = transport_timeout,
 
     pub fn capability(self: *NativeHttp) codex_auth.Http {
         return .{ .context = self, .post_fn = post };
@@ -139,6 +140,29 @@ pub const NativeHttp = struct {
         out: []u8,
     ) anyerror!codex_auth.HttpResponse {
         const self: *NativeHttp = @ptrCast(@alignCast(context));
+        const Result = union(enum) {
+            request: anyerror!codex_auth.HttpResponse,
+            timeout,
+        };
+        var results: [2]Result = undefined;
+        var select = std.Io.Select(Result).init(self.io, &results);
+        select.async(.request, postRequest, .{ self, url, content_type, body, out });
+        select.async(.timeout, waitHttpTimeout, .{ self.io, self.timeout });
+        const selected = try select.await();
+        select.cancelDiscard();
+        return switch (selected) {
+            .request => |result| result,
+            .timeout => error.HttpRequestTimedOut,
+        };
+    }
+
+    fn postRequest(
+        self: *NativeHttp,
+        url: []const u8,
+        content_type: []const u8,
+        body: []const u8,
+        out: []u8,
+    ) !codex_auth.HttpResponse {
         var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
         defer client.deinit();
         var writer = std.Io.Writer.fixed(out);
@@ -150,6 +174,10 @@ pub const NativeHttp = struct {
             .headers = .{ .content_type = .{ .override = content_type } },
         });
         return .{ .status = @intFromEnum(result.status), .body = writer.buffered() };
+    }
+
+    fn waitHttpTimeout(io: std.Io, duration: std.Io.Duration) void {
+        std.Io.sleep(io, duration, .awake) catch {};
     }
 };
 
@@ -177,6 +205,7 @@ pub const NativeAuthorization = struct {
             var renewed = codex_auth.refresh(self.http, &tokens) catch |err| switch (err) {
                 error.RefreshRejected => return .refresh_rejected,
                 error.MissingRefreshToken => return .refresh_missing,
+                error.HttpRequestTimedOut => return .timed_out,
                 else => return err,
             };
             defer renewed.scrub();
@@ -230,7 +259,7 @@ pub const NativeTransport = struct {
         select.async(.timeout, waitForTimeout, .{ self.io, self.timeout, &request_control });
         const selected = try select.await();
         select.cancelDiscard();
-        if (request_control.didTimeOut(self.io)) {
+        if (request_control.winnerValue(self.io) == .timed_out) {
             return if (capture.failureHttpStatus()) |status|
                 classifyHttpFailure(status, capture.failureDiagnosticCode())
             else
@@ -238,7 +267,9 @@ pub const NativeTransport = struct {
         }
         return switch (selected) {
             .request => |result| result,
-            .timeout => if (capture.failureHttpStatus()) |status|
+            .timeout => if (request_control.winnerValue(self.io) == .terminal)
+                .complete
+            else if (capture.failureHttpStatus()) |status|
                 classifyHttpFailure(status, capture.failureDiagnosticCode())
             else
                 .timed_out,
@@ -307,7 +338,10 @@ pub const NativeTransport = struct {
                 return .complete;
             };
             reader.toss(chunk.len);
-            if (capture.terminalObserved()) return .complete;
+            if (capture.terminalObserved()) {
+                request_control.observeTerminal(self.io);
+                return .complete;
+            }
         }
         return .complete;
     }
@@ -319,15 +353,16 @@ pub const NativeTransport = struct {
 };
 
 const RequestControl = struct {
+    const Winner = enum { running, terminal, timed_out };
     mutex: std.Io.Mutex = .init,
     stream: ?std.Io.net.Stream = null,
-    timed_out: bool = false,
+    winner: Winner = .running,
 
     fn publish(self: *RequestControl, io: std.Io, stream: std.Io.net.Stream) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         self.stream = stream;
-        if (self.timed_out) interruptStream(io, stream);
+        if (self.winner == .timed_out) interruptStream(io, stream);
     }
 
     fn clear(self: *RequestControl, io: std.Io) void {
@@ -339,14 +374,21 @@ const RequestControl = struct {
     fn interrupt(self: *RequestControl, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        self.timed_out = true;
+        if (self.winner != .running) return;
+        self.winner = .timed_out;
         if (self.stream) |stream| interruptStream(io, stream);
     }
 
-    fn didTimeOut(self: *RequestControl, io: std.Io) bool {
+    fn observeTerminal(self: *RequestControl, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        return self.timed_out;
+        if (self.winner == .running) self.winner = .terminal;
+    }
+
+    fn winnerValue(self: *RequestControl, io: std.Io) Winner {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.winner;
     }
 };
 
@@ -538,7 +580,7 @@ test "NativeTransport sends the production request and stops at terminal SSE" {
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{};
+    var capture: codex_provider.Capture = .{ .candidate = provider_io.candidateCapability() };
     const capability = transport.capability();
     const disposition = capability.perform_fn(
         capability.context,
@@ -659,7 +701,7 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{};
+    var capture: codex_provider.Capture = .{ .candidate = provider_io.candidateCapability() };
     const capability = transport.capability();
     const disposition = try capability.perform_fn(
         capability.context,
