@@ -98,6 +98,29 @@ Bash automatically. The current synchronous fixture stops with an indeterminate 
 planned asynchronous V1 lifecycle will feed the already-committed Tool Result to the Agent's next
 model turn rather than automatically escalating to the User or terminating the Job.
 
+### Opt-in Codex subscription run
+
+OnePage is its own Codex client. It does not invoke the Codex CLI or load an OpenAI SDK. The first
+authorization uses OpenAI's device flow and stores the access, refresh, and account binding only in
+macOS Keychain:
+
+```sh
+zig build
+./zig-out/bin/onepage --codex-login
+```
+
+After completing the browser prompt, run the controlled live repair through the same capacity-one
+Harness used by deterministic fixtures:
+
+```sh
+zig build codex-live-repair
+```
+
+The live step is deliberately opt-in and is not part of `zig build check`. Credentials are never
+written to the Host Store, repository, Conversation, transcripts, child-tool environments, or test
+fixtures. `./zig-out/bin/onepage --codex-logout` revokes the credential when possible and deletes the
+Keychain item.
+
 ```sh
 zig build fixture-bash -Doptimize=ReleaseSmall
 ```
