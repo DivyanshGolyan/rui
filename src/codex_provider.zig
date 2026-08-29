@@ -9,7 +9,8 @@ pub const implementation_version = "onepage-codex-responses-v1@6478a751";
 pub const endpoint = "https://chatgpt.com/backend-api/codex/responses";
 pub const max_access_token_size: usize = 16 * 1024;
 pub const max_account_id_size: usize = 128;
-pub const max_sse_frame_size: usize = model_protocol.max_response_size + 8192;
+/// JSON string escaping can expand one decoded byte to six wire bytes.
+pub const max_sse_frame_size: usize = 6 * model_protocol.max_response_size + 8192;
 pub const max_total_sse_bytes: usize = 4 * max_sse_frame_size;
 pub const max_sse_event_count: usize = 128;
 pub const request_window_size: usize = model_operation.request_window_size;
@@ -256,6 +257,7 @@ pub const Capture = struct {
     terminal_status: TerminalStatus = .none,
     completed: bool = false,
     malformed: bool = false,
+    resource_exceeded: bool = false,
     failure_diagnostic_code: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
     failure_diagnostic_code_length: u8 = 0,
     failure_http_status: u16 = 0,
@@ -296,22 +298,22 @@ pub const Capture = struct {
     pub fn appendSse(self: *Capture, bytes: []const u8) !void {
         if (self.completed) return;
         self.total_sse_bytes = std.math.add(usize, self.total_sse_bytes, bytes.len) catch
-            return error.SseStreamTooLarge;
-        if (self.total_sse_bytes > max_total_sse_bytes) return error.SseStreamTooLarge;
+            return self.exceeded(error.SseStreamTooLarge);
+        if (self.total_sse_bytes > max_total_sse_bytes) return self.exceeded(error.SseStreamTooLarge);
         var remaining = bytes;
         while (remaining.len != 0) {
             const available = self.frame.len - self.frame_length;
-            if (available == 0) return error.SseFrameTooLarge;
+            if (available == 0) return self.exceeded(error.SseFrameTooLarge);
             const count = @min(available, remaining.len);
             @memcpy(self.frame[self.frame_length..][0..count], remaining[0..count]);
             self.frame_length += count;
             remaining = remaining[count..];
             while (frameBoundary(self.frame[0..self.frame_length])) |boundary| {
-                if (self.event_count == max_sse_event_count) return error.TooManySseEvents;
+                if (self.event_count == max_sse_event_count) {
+                    return self.exceeded(error.TooManySseEvents);
+                }
                 self.event_count += 1;
-                self.consumeFrame(self.frame[0..boundary.end]) catch {
-                    self.malformed = true;
-                };
+                try self.consumeFrame(self.frame[0..boundary.end]);
                 const consumed = boundary.end + boundary.length;
                 std.mem.copyForwards(u8, self.frame[0 .. self.frame_length - consumed], self.frame[consumed..self.frame_length]);
                 self.frame_length -= consumed;
@@ -321,6 +323,11 @@ pub const Capture = struct {
                 }
             }
         }
+    }
+
+    fn exceeded(self: *Capture, err: anyerror) anyerror {
+        self.resource_exceeded = true;
+        return err;
     }
 
     pub fn terminalObserved(self: *const Capture) bool {
@@ -336,38 +343,28 @@ pub const Capture = struct {
     }
 
     fn consumeFrame(self: *Capture, frame: []u8) !void {
-        const payload = try compactSseData(frame);
+        const payload = compactSseData(frame) catch |err| return self.exceeded(err);
         if (payload.len == 0) return;
         if (std.mem.eql(u8, payload, "[DONE]")) return;
-        var arena_bytes: [max_sse_frame_size * 2]u8 = undefined;
-        var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
-        var parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), payload, .{
-            .max_value_len = max_sse_frame_size,
-            .allocate = .alloc_always,
-            .duplicate_field_behavior = .@"error",
-        }) catch {
+        const parsed = parseEvent(payload) catch |err| {
+            switch (err) {
+                error.JsonNestingTooDeep, error.TooManyJsonMembers => self.resource_exceeded = true,
+                else => self.malformed = true,
+            }
+            return;
+        };
+        if (terminalStatus(parsed.event_type, parsed.response_status) catch {
+            self.malformed = true;
+            return;
+        }) |status| {
+            return self.captureTerminal(status);
+        }
+        if (!std.mem.eql(u8, parsed.event_type, "response.output_item.done")) return;
+        const item = parsed.item orelse {
             self.malformed = true;
             return;
         };
-        defer parsed.deinit();
-        const object = switch (parsed.value) {
-            .object => |object| object,
-            else => {
-                self.malformed = true;
-                return;
-            },
-        };
-        const event_type = jsonString(object.get("type")) orelse {
-            self.malformed = true;
-            return;
-        };
-        if (try terminalStatus(event_type, object)) |status| return self.captureTerminal(status);
-        if (!std.mem.eql(u8, event_type, "response.output_item.done")) return;
-        const item = jsonObject(object.get("item")) orelse {
-            self.malformed = true;
-            return;
-        };
-        const item_type = jsonString(item.get("type")) orelse {
+        const item_type = item.item_type orelse {
             self.malformed = true;
             return;
         };
@@ -377,7 +374,18 @@ pub const Capture = struct {
         self.candidate_count +|= 1;
         if (self.candidate_count != 1) return;
         if (std.mem.eql(u8, item_type, "message")) {
-            try self.captureMessage(item);
+            const text = validateMessage(item) catch {
+                self.malformed = true;
+                return;
+            };
+            if (text.len > model_protocol.max_assistant_text_size) {
+                self.candidate_failure = .oversized;
+                return;
+            }
+            try model_protocol.writeText(
+                self.candidate orelse return error.CandidateWriterMissing,
+                text,
+            );
         } else if (std.mem.eql(u8, item_type, "function_call")) {
             try self.captureFunction(item);
         } else {
@@ -395,27 +403,23 @@ pub const Capture = struct {
         self.terminal_status = status;
     }
 
-    fn captureMessage(self: *Capture, item: std.json.ObjectMap) !void {
-        const role = jsonString(item.get("role")) orelse return error.MalformedCodexMessage;
-        if (!std.mem.eql(u8, role, "assistant")) return error.MalformedCodexMessage;
-        const content = jsonArray(item.get("content")) orelse return error.MalformedCodexMessage;
-        var text: ?[]const u8 = null;
-        for (content.items) |part_value| {
-            const part = jsonObject(part_value) orelse return error.MalformedCodexMessage;
-            const part_type = jsonString(part.get("type")) orelse return error.MalformedCodexMessage;
-            if (!std.mem.eql(u8, part_type, "output_text")) continue;
-            if (text != null) return error.MultipleCodexTextOutputs;
-            text = jsonString(part.get("text")) orelse return error.MalformedCodexMessage;
+    fn captureFunction(self: *Capture, item: ParsedItem) !void {
+        const name = item.name orelse {
+            self.malformed = true;
+            return;
+        };
+        const arguments = item.arguments orelse {
+            self.malformed = true;
+            return;
+        };
+        if (arguments.len == 0) {
+            self.malformed = true;
+            return;
         }
-        try model_protocol.writeText(
-            self.candidate orelse return error.CandidateWriterMissing,
-            text orelse "",
-        );
-    }
-
-    fn captureFunction(self: *Capture, item: std.json.ObjectMap) !void {
-        const name = jsonString(item.get("name")) orelse return error.MalformedCodexFunction;
-        const arguments = jsonString(item.get("arguments")) orelse return error.MalformedCodexFunction;
+        if (arguments.len > model_contract.max_tool_arguments_envelope_size) {
+            self.candidate_failure = .oversized;
+            return;
+        }
         if (std.mem.eql(u8, name, "onepage_input_request")) {
             try self.captureInputRequest(arguments);
             return;
@@ -431,46 +435,62 @@ pub const Capture = struct {
         );
     }
 
-    fn captureInputRequest(self: *Capture, arguments: []const u8) !void {
-        var arena_bytes: [16 * 1024]u8 = undefined;
-        var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
-        var parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), arguments, .{
-            .max_value_len = 16 * 1024,
-            .allocate = .alloc_always,
-            .duplicate_field_behavior = .@"error",
-        }) catch return error.MalformedInputRequest;
-        defer parsed.deinit();
-        const object = jsonObject(parsed.value) orelse return error.MalformedInputRequest;
-        if (object.count() != 3) return error.MalformedInputRequest;
-        const prompt = jsonString(object.get("prompt")) orelse return error.MalformedInputRequest;
-        const shape = jsonString(object.get("response_type")) orelse return error.MalformedInputRequest;
-        const choices = jsonArray(object.get("choices")) orelse return error.MalformedInputRequest;
-        if (std.mem.eql(u8, shape, "text")) {
-            if (choices.items.len != 0) return error.MalformedInputRequest;
-            model_protocol.writeInputText(
+    fn captureInputRequest(self: *Capture, arguments: []u8) !void {
+        const parsed = parseInputRequest(arguments) catch |err| {
+            switch (err) {
+                error.JsonNestingTooDeep, error.TooManyJsonMembers, error.TooManyInputChoices => self.resource_exceeded = true,
+                else => self.malformed = true,
+            }
+            return;
+        };
+        if (std.mem.eql(u8, parsed.shape, "text")) {
+            if (parsed.choice_count != 0 or parsed.prompt.len == 0) {
+                self.malformed = true;
+                return;
+            }
+            if (parsed.prompt.len > model_contract.max_prompt_size) {
+                self.candidate_failure = .oversized;
+                return;
+            }
+            try model_protocol.writeInputText(
                 self.candidate orelse return error.CandidateWriterMissing,
-                prompt,
-            ) catch return error.MalformedInputRequest;
+                parsed.prompt,
+            );
             return;
         }
-        if (!std.mem.eql(u8, shape, "single_choice")) return error.MalformedInputRequest;
-        if (choices.items.len == 0 or choices.items.len > model_contract.max_choice_count) {
-            return error.MalformedInputRequest;
+        if (!std.mem.eql(u8, parsed.shape, "single_choice")) {
+            self.malformed = true;
+            return;
         }
-        var decoded: [model_contract.max_choice_count]model_protocol.Choice = undefined;
-        for (choices.items, 0..) |choice_value, index| {
-            const choice = jsonObject(choice_value) orelse return error.MalformedInputRequest;
-            if (choice.count() != 2) return error.MalformedInputRequest;
-            decoded[index] = .{
-                .id = jsonString(choice.get("id")) orelse return error.MalformedInputRequest,
-                .label = jsonString(choice.get("label")) orelse return error.MalformedInputRequest,
-            };
+        if (parsed.choice_count == 0) {
+            self.malformed = true;
+            return;
         }
-        model_protocol.writeInputChoice(
+        if (parsed.prompt.len == 0) {
+            self.malformed = true;
+            return;
+        }
+        if (parsed.prompt.len > model_contract.max_prompt_size) {
+            self.candidate_failure = .oversized;
+            return;
+        }
+        for (parsed.choices[0..parsed.choice_count]) |choice| {
+            if (choice.id.len == 0 or choice.label.len == 0) {
+                self.malformed = true;
+                return;
+            }
+            if (choice.id.len > model_contract.max_choice_id_size or
+                choice.label.len > model_contract.max_choice_label_size)
+            {
+                self.candidate_failure = .oversized;
+                return;
+            }
+        }
+        try model_protocol.writeInputChoice(
             self.candidate orelse return error.CandidateWriterMissing,
-            prompt,
-            decoded[0..choices.items.len],
-        ) catch return error.MalformedInputRequest;
+            parsed.prompt,
+            parsed.choices[0..parsed.choice_count],
+        );
     }
 
     fn publish(
@@ -479,6 +499,7 @@ pub const Capture = struct {
     ) !model_operation.DispatchOutcome {
         _ = candidate;
         self.finishSse();
+        if (self.resource_exceeded) return failureOutcome(.oversized);
         if (self.malformed) {
             return failureOutcome(if (!self.completed) .truncated else .malformed);
         }
@@ -530,7 +551,7 @@ fn compactSseData(frame: []u8) ![]u8 {
 
 const TerminalStatus = enum { none, completed, incomplete, failed, cancelled };
 
-fn terminalStatus(event_type: []const u8, object: std.json.ObjectMap) !?TerminalStatus {
+fn terminalStatus(event_type: []const u8, response_status: ?[]const u8) !?TerminalStatus {
     const fallback: TerminalStatus = if (std.mem.eql(u8, event_type, "response.completed") or
         std.mem.eql(u8, event_type, "response.done"))
         .completed
@@ -543,8 +564,7 @@ fn terminalStatus(event_type: []const u8, object: std.json.ObjectMap) !?Terminal
         .cancelled
     else
         return null;
-    const response = jsonObject(object.get("response")) orelse return fallback;
-    const status_text = jsonString(response.get("status")) orelse return fallback;
+    const status_text = response_status orelse return fallback;
     const nested: TerminalStatus = if (std.mem.eql(u8, status_text, "completed"))
         .completed
     else if (std.mem.eql(u8, status_text, "incomplete"))
@@ -559,6 +579,514 @@ fn terminalStatus(event_type: []const u8, object: std.json.ObjectMap) !?Terminal
     return nested;
 }
 
+const max_json_nesting_depth: usize = 32;
+
+const ParsedEvent = struct {
+    event_type: []const u8,
+    response_status: ?[]const u8 = null,
+    item: ?ParsedItem = null,
+};
+
+const ParsedItem = struct {
+    item_type: ?[]const u8 = null,
+    role: ?[]const u8 = null,
+    content_seen: bool = false,
+    output_text_count: u8 = 0,
+    text: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    arguments: ?[]u8 = null,
+};
+
+fn validateMessage(item: ParsedItem) ![]const u8 {
+    const role = item.role orelse return error.MalformedCodexMessage;
+    if (!std.mem.eql(u8, role, "assistant") or !item.content_seen or
+        item.output_text_count != 1)
+    {
+        return error.MalformedCodexMessage;
+    }
+    const text = item.text orelse return error.MalformedCodexMessage;
+    if (text.len == 0) return error.MalformedCodexMessage;
+    return text;
+}
+
+const ParsedInputRequest = struct {
+    prompt: []const u8,
+    shape: []const u8,
+    choices: [model_contract.max_choice_count]model_protocol.Choice,
+    choice_count: usize,
+};
+
+const JsonObjectKeys = struct {
+    keys: [model_contract.max_json_members][]const u8 = undefined,
+    count: usize = 0,
+
+    fn claim(self: *JsonObjectKeys, key: []const u8) !void {
+        for (self.keys[0..self.count]) |seen| {
+            if (std.mem.eql(u8, seen, key)) return error.DuplicateJsonField;
+        }
+        if (self.count == self.keys.len) return error.TooManyJsonMembers;
+        self.keys[self.count] = key;
+        self.count += 1;
+    }
+};
+
+/// A Codex-private, allocation-free cursor over one compacted SSE JSON payload.
+/// Strings are decoded in place; decoding cannot expand JSON source bytes.
+const JsonCursor = struct {
+    bytes: []u8,
+    cursor: usize = 0,
+    depth: usize = 0,
+
+    fn document(bytes: []u8) JsonCursor {
+        return .{ .bytes = bytes };
+    }
+
+    fn finish(self: *JsonCursor) !void {
+        self.skipWhitespace();
+        if (self.cursor != self.bytes.len) return error.TrailingJsonValue;
+    }
+
+    fn skipWhitespace(self: *JsonCursor) void {
+        while (self.cursor < self.bytes.len and switch (self.bytes[self.cursor]) {
+            ' ', '\t', '\r', '\n' => true,
+            else => false,
+        }) self.cursor += 1;
+    }
+
+    fn take(self: *JsonCursor, expected: u8) !void {
+        self.skipWhitespace();
+        if (self.cursor == self.bytes.len or self.bytes[self.cursor] != expected) {
+            return error.InvalidJsonShape;
+        }
+        self.cursor += 1;
+    }
+
+    fn enter(self: *JsonCursor, delimiter: u8) !void {
+        if (self.depth == max_json_nesting_depth) return error.JsonNestingTooDeep;
+        try self.take(delimiter);
+        self.depth += 1;
+    }
+
+    fn maybeTake(self: *JsonCursor, expected: u8) bool {
+        self.skipWhitespace();
+        if (self.cursor == self.bytes.len or self.bytes[self.cursor] != expected) return false;
+        self.cursor += 1;
+        return true;
+    }
+
+    fn string(self: *JsonCursor) ![]u8 {
+        self.skipWhitespace();
+        if (self.cursor == self.bytes.len or self.bytes[self.cursor] != '"') {
+            return error.ExpectedJsonString;
+        }
+        const start = self.cursor + 1;
+        var read = start;
+        var write = start;
+        while (read < self.bytes.len) {
+            const byte = self.bytes[read];
+            if (byte == '"') {
+                self.cursor = read + 1;
+                const decoded = self.bytes[start..write];
+                if (!model_contract.utf8Valid(decoded)) return error.InvalidJsonUtf8;
+                return decoded;
+            }
+            if (byte < 0x20) return error.InvalidJsonControl;
+            if (byte != '\\') {
+                self.bytes[write] = byte;
+                write += 1;
+                read += 1;
+                continue;
+            }
+            read += 1;
+            if (read == self.bytes.len) return error.IncompleteJsonEscape;
+            switch (self.bytes[read]) {
+                '"', '\\', '/' => |escaped| {
+                    self.bytes[write] = escaped;
+                    write += 1;
+                    read += 1;
+                },
+                'b' => {
+                    self.bytes[write] = 0x08;
+                    write += 1;
+                    read += 1;
+                },
+                'f' => {
+                    self.bytes[write] = 0x0c;
+                    write += 1;
+                    read += 1;
+                },
+                'n' => {
+                    self.bytes[write] = '\n';
+                    write += 1;
+                    read += 1;
+                },
+                'r' => {
+                    self.bytes[write] = '\r';
+                    write += 1;
+                    read += 1;
+                },
+                't' => {
+                    self.bytes[write] = '\t';
+                    write += 1;
+                    read += 1;
+                },
+                'u' => {
+                    const first = try hexCodeUnit(self.bytes, read + 1);
+                    read += 5;
+                    var code_point: u21 = first;
+                    if (first >= 0xd800 and first <= 0xdbff) {
+                        if (read + 6 > self.bytes.len or self.bytes[read] != '\\' or
+                            self.bytes[read + 1] != 'u') return error.UnpairedJsonSurrogate;
+                        const second = try hexCodeUnit(self.bytes, read + 2);
+                        if (second < 0xdc00 or second > 0xdfff) return error.UnpairedJsonSurrogate;
+                        code_point = @intCast(0x10000 +
+                            ((@as(u32, first) - 0xd800) << 10) +
+                            (@as(u32, second) - 0xdc00));
+                        read += 6;
+                    } else if (first >= 0xdc00 and first <= 0xdfff) {
+                        return error.UnpairedJsonSurrogate;
+                    }
+                    write += try std.unicode.utf8Encode(code_point, self.bytes[write..]);
+                },
+                else => return error.InvalidJsonEscape,
+            }
+        }
+        return error.UnterminatedJsonString;
+    }
+
+    fn skipValue(self: *JsonCursor) !void {
+        self.skipWhitespace();
+        if (self.cursor == self.bytes.len) return error.MissingJsonValue;
+        switch (self.bytes[self.cursor]) {
+            '"' => _ = try self.string(),
+            '{' => {
+                try self.enter('{');
+                if (!self.maybeTake('}')) {
+                    while (true) {
+                        _ = try self.string();
+                        try self.take(':');
+                        try self.skipValue();
+                        if (self.maybeTake('}')) break;
+                        try self.take(',');
+                    }
+                }
+                self.depth -= 1;
+            },
+            '[' => {
+                try self.enter('[');
+                if (!self.maybeTake(']')) {
+                    while (true) {
+                        try self.skipValue();
+                        if (self.maybeTake(']')) break;
+                        try self.take(',');
+                    }
+                }
+                self.depth -= 1;
+            },
+            't' => try self.literal("true"),
+            'f' => try self.literal("false"),
+            'n' => try self.literal("null"),
+            '-', '0'...'9' => try self.number(),
+            else => return error.InvalidJsonValue,
+        }
+    }
+
+    fn literal(self: *JsonCursor, value: []const u8) !void {
+        if (!std.mem.startsWith(u8, self.bytes[self.cursor..], value)) return error.InvalidJsonLiteral;
+        self.cursor += value.len;
+    }
+
+    fn number(self: *JsonCursor) !void {
+        if (self.maybeRaw('-') and self.cursor == self.bytes.len) return error.InvalidJsonNumber;
+        if (self.maybeRaw('0')) {
+            if (self.cursor < self.bytes.len and std.ascii.isDigit(self.bytes[self.cursor])) {
+                return error.InvalidJsonNumber;
+            }
+        } else {
+            if (self.cursor == self.bytes.len or self.bytes[self.cursor] < '1' or
+                self.bytes[self.cursor] > '9') return error.InvalidJsonNumber;
+            while (self.cursor < self.bytes.len and std.ascii.isDigit(self.bytes[self.cursor])) {
+                self.cursor += 1;
+            }
+        }
+        if (self.maybeRaw('.')) {
+            if (self.cursor == self.bytes.len or !std.ascii.isDigit(self.bytes[self.cursor])) {
+                return error.InvalidJsonNumber;
+            }
+            while (self.cursor < self.bytes.len and std.ascii.isDigit(self.bytes[self.cursor])) {
+                self.cursor += 1;
+            }
+        }
+        if (self.cursor < self.bytes.len and (self.bytes[self.cursor] == 'e' or self.bytes[self.cursor] == 'E')) {
+            self.cursor += 1;
+            _ = self.maybeRaw('+') or self.maybeRaw('-');
+            if (self.cursor == self.bytes.len or !std.ascii.isDigit(self.bytes[self.cursor])) {
+                return error.InvalidJsonNumber;
+            }
+            while (self.cursor < self.bytes.len and std.ascii.isDigit(self.bytes[self.cursor])) {
+                self.cursor += 1;
+            }
+        }
+    }
+
+    fn maybeRaw(self: *JsonCursor, byte: u8) bool {
+        if (self.cursor == self.bytes.len or self.bytes[self.cursor] != byte) return false;
+        self.cursor += 1;
+        return true;
+    }
+};
+
+fn hexCodeUnit(bytes: []const u8, start: usize) !u16 {
+    if (start + 4 > bytes.len) return error.IncompleteJsonEscape;
+    var value: u16 = 0;
+    for (bytes[start .. start + 4]) |byte| {
+        value = std.math.mul(u16, value, 16) catch unreachable;
+        value += switch (byte) {
+            '0'...'9' => byte - '0',
+            'a'...'f' => byte - 'a' + 10,
+            'A'...'F' => byte - 'A' + 10,
+            else => return error.InvalidJsonEscape,
+        };
+    }
+    return value;
+}
+
+fn parseEvent(payload: []u8) !ParsedEvent {
+    var cursor = JsonCursor.document(payload);
+    try cursor.enter('{');
+    var event_type: ?[]const u8 = null;
+    var response_status: ?[]const u8 = null;
+    var response_seen = false;
+    var item: ?ParsedItem = null;
+    var keys: JsonObjectKeys = .{};
+    if (!cursor.maybeTake('}')) {
+        while (true) {
+            const key = try cursor.string();
+            try keys.claim(key);
+            try cursor.take(':');
+            if (std.mem.eql(u8, key, "type")) {
+                if (event_type != null) return error.DuplicateJsonField;
+                event_type = try cursor.string();
+            } else if (std.mem.eql(u8, key, "response")) {
+                if (response_seen) return error.DuplicateJsonField;
+                response_seen = true;
+                response_status = try parseResponse(&cursor);
+            } else if (std.mem.eql(u8, key, "item")) {
+                if (item != null) return error.DuplicateJsonField;
+                item = try parseItem(&cursor);
+            } else {
+                try cursor.skipValue();
+            }
+            if (cursor.maybeTake('}')) break;
+            try cursor.take(',');
+        }
+    }
+    cursor.depth -= 1;
+    try cursor.finish();
+    return .{
+        .event_type = event_type orelse return error.MissingEventType,
+        .response_status = response_status,
+        .item = item,
+    };
+}
+
+fn parseResponse(cursor: *JsonCursor) !?[]const u8 {
+    try cursor.enter('{');
+    var status: ?[]const u8 = null;
+    var keys: JsonObjectKeys = .{};
+    if (!cursor.maybeTake('}')) {
+        while (true) {
+            const key = try cursor.string();
+            try keys.claim(key);
+            try cursor.take(':');
+            if (std.mem.eql(u8, key, "status")) {
+                if (status != null) return error.DuplicateJsonField;
+                status = try cursor.string();
+            } else {
+                try cursor.skipValue();
+            }
+            if (cursor.maybeTake('}')) break;
+            try cursor.take(',');
+        }
+    }
+    cursor.depth -= 1;
+    return status;
+}
+
+fn parseItem(cursor: *JsonCursor) !ParsedItem {
+    try cursor.enter('{');
+    var item: ParsedItem = .{};
+    var seen_type = false;
+    var seen_role = false;
+    var seen_name = false;
+    var seen_arguments = false;
+    var keys: JsonObjectKeys = .{};
+    if (!cursor.maybeTake('}')) {
+        while (true) {
+            const key = try cursor.string();
+            try keys.claim(key);
+            try cursor.take(':');
+            if (std.mem.eql(u8, key, "type")) {
+                if (seen_type) return error.DuplicateJsonField;
+                seen_type = true;
+                item.item_type = try cursor.string();
+            } else if (std.mem.eql(u8, key, "role")) {
+                if (seen_role) return error.DuplicateJsonField;
+                seen_role = true;
+                item.role = try cursor.string();
+            } else if (std.mem.eql(u8, key, "content")) {
+                if (item.content_seen) return error.DuplicateJsonField;
+                item.content_seen = true;
+                try parseContent(cursor, &item);
+            } else if (std.mem.eql(u8, key, "name")) {
+                if (seen_name) return error.DuplicateJsonField;
+                seen_name = true;
+                item.name = try cursor.string();
+            } else if (std.mem.eql(u8, key, "arguments")) {
+                if (seen_arguments) return error.DuplicateJsonField;
+                seen_arguments = true;
+                item.arguments = try cursor.string();
+            } else {
+                try cursor.skipValue();
+            }
+            if (cursor.maybeTake('}')) break;
+            try cursor.take(',');
+        }
+    }
+    cursor.depth -= 1;
+    return item;
+}
+
+fn parseContent(cursor: *JsonCursor, item: *ParsedItem) !void {
+    try cursor.enter('[');
+    if (!cursor.maybeTake(']')) {
+        while (true) {
+            try cursor.enter('{');
+            var part_type: ?[]const u8 = null;
+            var text: ?[]const u8 = null;
+            var keys: JsonObjectKeys = .{};
+            if (!cursor.maybeTake('}')) {
+                while (true) {
+                    const key = try cursor.string();
+                    try keys.claim(key);
+                    try cursor.take(':');
+                    if (std.mem.eql(u8, key, "type")) {
+                        if (part_type != null) return error.DuplicateJsonField;
+                        part_type = try cursor.string();
+                    } else if (std.mem.eql(u8, key, "text")) {
+                        if (text != null) return error.DuplicateJsonField;
+                        text = try cursor.string();
+                    } else {
+                        try cursor.skipValue();
+                    }
+                    if (cursor.maybeTake('}')) break;
+                    try cursor.take(',');
+                }
+            }
+            cursor.depth -= 1;
+            const kind = part_type orelse return error.MalformedCodexMessage;
+            if (std.mem.eql(u8, kind, "output_text")) {
+                item.output_text_count +|= 1;
+                item.text = text orelse return error.MalformedCodexMessage;
+            }
+            if (cursor.maybeTake(']')) break;
+            try cursor.take(',');
+        }
+    }
+    cursor.depth -= 1;
+}
+
+fn parseInputRequest(arguments: []u8) !ParsedInputRequest {
+    var cursor = JsonCursor.document(arguments);
+    try cursor.enter('{');
+    var prompt: ?[]const u8 = null;
+    var shape: ?[]const u8 = null;
+    var choices_seen = false;
+    var choices: [model_contract.max_choice_count]model_protocol.Choice = undefined;
+    var choice_count: usize = 0;
+    var keys: JsonObjectKeys = .{};
+    if (!cursor.maybeTake('}')) {
+        while (true) {
+            const key = try cursor.string();
+            try keys.claim(key);
+            try cursor.take(':');
+            if (std.mem.eql(u8, key, "prompt")) {
+                if (prompt != null) return error.DuplicateJsonField;
+                prompt = try cursor.string();
+            } else if (std.mem.eql(u8, key, "response_type")) {
+                if (shape != null) return error.DuplicateJsonField;
+                shape = try cursor.string();
+            } else if (std.mem.eql(u8, key, "choices")) {
+                if (choices_seen) return error.DuplicateJsonField;
+                choices_seen = true;
+                choice_count = try parseChoices(&cursor, &choices);
+            } else {
+                return error.UnknownInputRequestField;
+            }
+            if (cursor.maybeTake('}')) break;
+            try cursor.take(',');
+        }
+    }
+    cursor.depth -= 1;
+    try cursor.finish();
+    if (!choices_seen) return error.MissingInputRequestField;
+    return .{
+        .prompt = prompt orelse return error.MissingInputRequestField,
+        .shape = shape orelse return error.MissingInputRequestField,
+        .choices = choices,
+        .choice_count = choice_count,
+    };
+}
+
+fn parseChoices(
+    cursor: *JsonCursor,
+    choices: *[model_contract.max_choice_count]model_protocol.Choice,
+) !usize {
+    try cursor.enter('[');
+    var count: usize = 0;
+    if (!cursor.maybeTake(']')) {
+        while (true) {
+            if (count == choices.len) return error.TooManyInputChoices;
+            try cursor.enter('{');
+            var id: ?[]const u8 = null;
+            var label: ?[]const u8 = null;
+            var keys: JsonObjectKeys = .{};
+            if (!cursor.maybeTake('}')) {
+                while (true) {
+                    const key = try cursor.string();
+                    try keys.claim(key);
+                    try cursor.take(':');
+                    if (std.mem.eql(u8, key, "id")) {
+                        if (id != null) return error.DuplicateJsonField;
+                        id = try cursor.string();
+                    } else if (std.mem.eql(u8, key, "label")) {
+                        if (label != null) return error.DuplicateJsonField;
+                        label = try cursor.string();
+                    } else {
+                        return error.UnknownInputChoiceField;
+                    }
+                    if (cursor.maybeTake('}')) break;
+                    try cursor.take(',');
+                }
+            }
+            cursor.depth -= 1;
+            const choice_id = id orelse return error.MissingInputChoiceField;
+            for (choices[0..count]) |earlier| {
+                if (std.mem.eql(u8, earlier.id, choice_id)) return error.DuplicateInputChoice;
+            }
+            choices[count] = .{
+                .id = choice_id,
+                .label = label orelse return error.MissingInputChoiceField,
+            };
+            count += 1;
+            if (cursor.maybeTake(']')) break;
+            try cursor.take(',');
+        }
+    }
+    cursor.depth -= 1;
+    return count;
+}
+
 const FrameBoundary = struct { end: usize, length: usize };
 
 fn frameBoundary(bytes: []const u8) ?FrameBoundary {
@@ -569,27 +1097,6 @@ fn frameBoundary(bytes: []const u8) ?FrameBoundary {
         if (lf == null or index <= lf.?) return .{ .end = index, .length = 4 };
     }
     return .{ .end = lf.?, .length = 2 };
-}
-
-fn jsonString(value: ?std.json.Value) ?[]const u8 {
-    return switch (value orelse return null) {
-        .string => |string| string,
-        else => null,
-    };
-}
-
-fn jsonObject(value: ?std.json.Value) ?std.json.ObjectMap {
-    return switch (value orelse return null) {
-        .object => |object| object,
-        else => null,
-    };
-}
-
-fn jsonArray(value: ?std.json.Value) ?std.json.Array {
-    return switch (value orelse return null) {
-        .array => |array| array,
-        else => null,
-    };
 }
 
 /// Streams the provider-neutral request into Responses JSON. The caller chooses
@@ -859,15 +1366,178 @@ test "terminal status agreement and first-terminal-wins are chunk independent" {
     try std.testing.expect(contradictory.malformed);
 }
 
+test "every two-chunk partition produces byte-identical captured evidence" {
+    const stream = "data: {\"type\":\"response.output_item.done\",\"item\":{\"content\":[{\"text\":\"quote\\\" slash\\\\ emoji \\uD83D\\uDE00\",\"type\":\"output_text\"}],\"role\":\"assistant\",\"type\":\"message\"}}\n\n" ++
+        "data: {\"response\":{\"status\":\"completed\"},\"type\":\"response.completed\"}\n\n";
+    var expected_output: TestCandidate = .{};
+    var expected = expected_output.capture();
+    try expected.appendSse(stream);
+    expected.finishSse();
+    try std.testing.expect(!expected.malformed);
+    for (0..stream.len + 1) |split_at| {
+        var actual_output: TestCandidate = .{};
+        var actual = actual_output.capture();
+        try actual.appendSse(stream[0..split_at]);
+        try actual.appendSse(stream[split_at..]);
+        actual.finishSse();
+        try std.testing.expect(!actual.malformed);
+        try std.testing.expectEqualSlices(
+            u8,
+            expected_output.bytes[0..expected_output.length],
+            actual_output.bytes[0..actual_output.length],
+        );
+    }
+    var canonical: [model_protocol.max_response_size]u8 = undefined;
+    const encoded = try model_protocol.encodeText(&canonical, "quote\" slash\\ emoji 😀");
+    try std.testing.expectEqualSlices(
+        u8,
+        encoded,
+        expected_output.bytes[0..expected_output.length],
+    );
+}
+
+test "capture accepts the exact decoded text bound and types one byte over as oversized" {
+    const prefix = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"";
+    const suffix = "\"}]}}\n\ndata: {\"type\":\"response.completed\"}\n\n";
+    var wire: [max_sse_frame_size + 256]u8 = undefined;
+    for ([_]usize{ model_protocol.max_assistant_text_size, model_protocol.max_assistant_text_size + 1 }) |length| {
+        var writer = std.Io.Writer.fixed(&wire);
+        try writer.writeAll(prefix);
+        for (0..length) |_| try writer.writeByte('a');
+        try writer.writeAll(suffix);
+        var output: TestCandidate = .{};
+        var capture = output.capture();
+        try capture.appendSse(writer.buffered());
+        capture.finishSse();
+        const outcome = try capture.publish(capture.candidate.?);
+        if (length == model_protocol.max_assistant_text_size) {
+            try std.testing.expectEqual(model_operation.DispatchOutcome.candidate, outcome);
+        } else {
+            try std.testing.expectEqual(model_protocol.Failure.oversized, outcome.failure.failure);
+        }
+    }
+}
+
+test "escape amplification is bounded by wire frame rather than decoded result size" {
+    const prefix = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"";
+    const suffix = "\"}]}}\n\ndata: {\"type\":\"response.completed\"}\n\n";
+    var wire: [max_sse_frame_size]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&wire);
+    try writer.writeAll(prefix);
+    for (0..model_protocol.max_assistant_text_size) |_| try writer.writeAll("\\u0061");
+    try writer.writeAll(suffix);
+    var output: TestCandidate = .{};
+    var capture = output.capture();
+    try capture.appendSse(writer.buffered());
+    capture.finishSse();
+    try std.testing.expect(!capture.malformed);
+    var scratch: model_protocol.ValidationScratch = .{};
+    const parsed = try model_protocol.decode(&scratch, output.bytes[0..output.length]);
+    try std.testing.expectEqual(model_protocol.max_assistant_text_size, parsed.text_length);
+}
+
+test "capture rejects malformed escapes surrogates and excessive nesting" {
+    const malformed = [_][]const u8{
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"bad\\x\"}]}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"bad\\uD800\"}]}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"bad\\u12\"}]}}\n\n",
+    };
+    for (malformed) |stream| {
+        var output: TestCandidate = .{};
+        var capture = output.capture();
+        try capture.appendSse(stream);
+        try std.testing.expect(capture.malformed);
+    }
+    var deep: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&deep);
+    try writer.writeAll("data: {\"type\":\"ignored\",\"extra\":");
+    for (0..max_json_nesting_depth) |_| try writer.writeByte('[');
+    try writer.writeAll("0");
+    for (0..max_json_nesting_depth) |_| try writer.writeByte(']');
+    try writer.writeAll("}\n\n");
+    var output: TestCandidate = .{};
+    var capture = output.capture();
+    try capture.appendSse(writer.buffered());
+    try std.testing.expect(capture.resource_exceeded);
+
+    var invalid_utf8 = [_]u8{
+        'd',  'a', 't', 'a',  ':',  ' ', '{', '"', 't', 'y', 'p', 'e', '"', ':', '"',
+        'i',  'g', 'n', 'o',  'r',  'e', 'd', '"', ',', '"', 'x', '"', ':', '"', 0xc3,
+        0x28, '"', '}', '\n', '\n',
+    };
+    var utf8_output: TestCandidate = .{};
+    var utf8_capture = utf8_output.capture();
+    try utf8_capture.appendSse(&invalid_utf8);
+    try std.testing.expect(utf8_capture.malformed);
+}
+
+test "wire and stream bounds are exact" {
+    var exact: [max_sse_frame_size]u8 = @splat('x');
+    var output: TestCandidate = .{};
+    var capture = output.capture();
+    try capture.appendSse(&exact);
+    try std.testing.expectEqual(max_sse_frame_size, capture.frame_length);
+    try std.testing.expectError(error.SseFrameTooLarge, capture.appendSse("x"));
+
+    var total_output: TestCandidate = .{};
+    var total = total_output.capture();
+    var ignored: [max_sse_frame_size]u8 = @splat('x');
+    const base = max_total_sse_bytes / max_sse_event_count;
+    const extra = max_total_sse_bytes % max_sse_event_count;
+    for (0..max_sse_event_count) |index| {
+        const length = base + @intFromBool(index < extra);
+        ignored[length - 2] = '\n';
+        ignored[length - 1] = '\n';
+        try total.appendSse(ignored[0..length]);
+        ignored[length - 2] = 'x';
+        ignored[length - 1] = 'x';
+    }
+    try std.testing.expectEqual(max_total_sse_bytes, total.total_sse_bytes);
+    try std.testing.expectError(error.SseStreamTooLarge, total.appendSse("x"));
+}
+
+test "duplicate response objects are malformed even without nested status" {
+    var output: TestCandidate = .{};
+    var capture = output.capture();
+    try capture.appendSse(
+        "data: {\"type\":\"response.completed\",\"response\":{},\"response\":{}}\n\n",
+    );
+    try std.testing.expect(capture.malformed);
+}
+
+test "candidate writer failures escape capture as Host errors" {
+    const FailingCandidate = struct {
+        fn append(_: *anyopaque, _: []const u8) anyerror!void {
+            return error.InjectedHostStorageFailure;
+        }
+    };
+    var context: u8 = 0;
+    var capture: Capture = .{ .candidate = .{
+        .context = &context,
+        .append_fn = FailingCandidate.append,
+    } };
+    try std.testing.expectError(
+        error.InjectedHostStorageFailure,
+        capture.appendSse(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n\n",
+        ),
+    );
+    try std.testing.expect(!capture.malformed);
+    try std.testing.expect(!capture.resource_exceeded);
+}
+
 test "input request arguments require the exact closed shape" {
     const valid = [_][]const u8{
         "{\"prompt\":\"Explain\",\"response_type\":\"text\",\"choices\":[]}",
         "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"Alpha\"}]}",
+        "{\"choices\":[{\"label\":\"Caf\\u00e9 \\uD83D\\uDE00\",\"id\":\"a\\\"b\"}],\"response_type\":\"single_choice\",\"prompt\":\"Say \\\"hi\\\"\"}",
     };
     for (valid) |arguments| {
         var output: TestCandidate = .{};
         var capture = output.capture();
-        try capture.captureInputRequest(arguments);
+        var mutable: [16 * 1024]u8 = undefined;
+        @memcpy(mutable[0..arguments.len], arguments);
+        try capture.captureInputRequest(mutable[0..arguments.len]);
         try std.testing.expect(output.length != 0);
     }
     const invalid = [_][]const u8{
@@ -884,7 +1554,11 @@ test "input request arguments require the exact closed shape" {
     for (invalid) |arguments| {
         var output: TestCandidate = .{};
         var capture = output.capture();
-        try std.testing.expectError(error.MalformedInputRequest, capture.captureInputRequest(arguments));
+        var mutable: [16 * 1024]u8 = undefined;
+        @memcpy(mutable[0..arguments.len], arguments);
+        try capture.captureInputRequest(mutable[0..arguments.len]);
+        try std.testing.expect(capture.malformed or capture.resource_exceeded);
+        try std.testing.expectEqual(@as(usize, 0), output.length);
     }
 }
 
