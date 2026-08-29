@@ -102,7 +102,7 @@ onepage [--repo PATH] --model PROVIDER:MODEL TASK
 onepage --resume SESSION_ID
 ```
 
-Creating a session prints its stable identity before the first external effect. Resume restores the recorded repository binding, model selection, session, agent, task, and active branch; credentials remain external and must still be available to the relevant adapter. If the session lock is held, the command fails without opening a second owner. Repeating task text creates a new session and never implies resume.
+Creating a session prints its stable identity before the first external effect. Resume restores the recorded repository binding, model selection, session, agent, task, and active branch; credentials remain external and must still be available to the relevant adapter. When a caller supplies a provider for continued execution, its expected model identity must exactly match the immutable recorded model before any provider dispatch or new durable Result. The caller cannot replace that model during resume. If the session lock is held, the command fails without opening a second owner. Repeating task text creates a new session and never implies resume.
 
 ## Workspace continuity
 
