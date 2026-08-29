@@ -224,7 +224,10 @@ pub const NativeTransport = struct {
         select.async(.timeout, waitForTimeout, .{ self.io, self.timeout_seconds });
         return switch (try select.await()) {
             .request => |result| result,
-            .timeout => .timed_out,
+            .timeout => if (capture.failureHttpStatus()) |status|
+                classifyHttpFailure(status, capture.failureDiagnosticCode())
+            else
+                .timed_out,
         };
     }
 
@@ -271,7 +274,8 @@ pub const NativeTransport = struct {
         var response = request.receiveHead(&redirect_buffer) catch return .may_have_started;
         const status: u16 = @intFromEnum(response.head.status);
         if (status < 200 or status >= 300) {
-            captureBufferedProviderFailureCode(&response, capture);
+            capture.setFailureHttpStatus(status) catch return .provider_rejected;
+            readProviderFailureCode(&response, capture);
             return classifyHttpFailure(status, capture.failureDiagnosticCode());
         }
         var transfer_buffer: [64]u8 = undefined;
@@ -296,19 +300,16 @@ pub const NativeTransport = struct {
     }
 };
 
-fn captureBufferedProviderFailureCode(
+fn readProviderFailureCode(
     response: *std.http.Client.Response,
     capture: *codex_provider.Capture,
 ) void {
-    const length = response.head.content_length orelse return;
-    if (length == 0 or length > 4096 or response.head.transfer_encoding != .none or
-        response.head.content_encoding != .identity)
-    {
-        return;
-    }
-    const buffered = response.request.connection.?.reader().buffered();
-    if (buffered.len < length) return;
-    setProviderFailureCode(buffered[0..@intCast(length)], capture);
+    var body: [4097]u8 = undefined;
+    var transfer_buffer: [1024]u8 = undefined;
+    const reader = response.reader(&transfer_buffer);
+    const length = reader.readSliceShort(&body) catch return;
+    if (length == 0 or length > 4096) return;
+    setProviderFailureCode(body[0..length], capture);
 }
 
 fn classifyHttpFailure(status: u16, code: []const u8) codex_provider.TransportDisposition {
@@ -435,7 +436,7 @@ test "NativeTransport sends the production request and stops at terminal SSE" {
     const response =
         "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n\n" ++
         "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
-    var fixture = try WireFixture.init(io, .ok, response, true);
+    var fixture = try WireFixture.init(io, .ok, response, .keep_open);
     defer fixture.deinit(io);
     var server_future = io.async(WireFixture.serve, .{ &fixture, io });
 
@@ -496,7 +497,7 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
     const response =
         "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"verified\"}]}}\n\n" ++
         "data: {\"type\":\"response.done\",\"response\":{\"status\":\"completed\"}}\n\n";
-    var fixture = try WireFixture.init(io, .ok, response, false);
+    var fixture = try WireFixture.init(io, .ok, response, .complete);
     defer fixture.deinit(io);
     var server_future = io.async(WireFixture.serve, .{ &fixture, io });
     var endpoint_buffer: [128]u8 = undefined;
@@ -548,7 +549,7 @@ test "NativeTransport classifies every received HTTP rejection without retry" {
             "{{\"error\":{{\"code\":\"{s}\",\"message\":\"discard this message\"}}}}",
             .{case.code},
         );
-        var fixture = try WireFixture.init(io, case.status, body, false);
+        var fixture = try WireFixture.init(io, case.status, body, .complete);
         defer fixture.deinit(io);
         var server_future = io.async(WireFixture.serve, .{ &fixture, io });
         var endpoint_buffer: [128]u8 = undefined;
@@ -576,7 +577,97 @@ test "NativeTransport classifies every received HTTP rejection without retry" {
         );
         try server_future.await(io);
         try std.testing.expectEqual(case.expected, disposition);
+        try std.testing.expectEqual(@as(?u16, @intFromEnum(case.status)), capture.failureHttpStatus());
         try std.testing.expectEqualStrings(case.code, capture.failureDiagnosticCode());
+    }
+}
+
+test "NativeTransport reads a chunked provider diagnostic after the response head" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wire = try WireSession.init(io, &tmp);
+    defer wire.deinit(io);
+    _ = try model_operation.buildRequest(&wire.session, 1300, 1, 1);
+    var provider_io = try model_operation.ProviderIo.open(&wire.session, 1300, 1301);
+    defer provider_io.close();
+
+    const body = "{\"error\":{\"code\":\"unsupported_parameter\",\"message\":\"discard this message\"}}";
+    var fixture = try WireFixture.init(io, .bad_request, body, .chunked);
+    defer fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    var endpoint_buffer: [128]u8 = undefined;
+    var transport: NativeTransport = .{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .endpoint = try fixture.endpoint(&endpoint_buffer),
+        .timeout_seconds = 1,
+    };
+    var credential = fakeCredential();
+    defer credential.scrub();
+    var capture: codex_provider.Capture = .{};
+    const capability = transport.capability();
+    const disposition = try capability.perform_fn(
+        capability.context,
+        &credential,
+        try provider_io.request(),
+        &capture,
+    );
+    try server_future.await(io);
+    try std.testing.expectEqual(codex_provider.TransportDisposition.provider_rejected, disposition);
+    try std.testing.expectEqual(@as(?u16, 400), capture.failureHttpStatus());
+    try std.testing.expectEqualStrings("unsupported_parameter", capture.failureDiagnosticCode());
+}
+
+test "NativeTransport keeps status without retaining oversized or malformed provider bodies" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wire = try WireSession.init(io, &tmp);
+    defer wire.deinit(io);
+    _ = try model_operation.buildRequest(&wire.session, 1400, 1, 1);
+
+    var oversized: [4097]u8 = @splat('x');
+    const cases = [_]struct {
+        body: []const u8,
+        mode: WireFixture.ResponseMode,
+    }{
+        .{ .body = &oversized, .mode = .chunked },
+        .{ .body = "{not-json}", .mode = .chunked },
+        .{ .body = "{\"error\":{\"code\":\"incomplete\"}}", .mode = .keep_open },
+    };
+    for (cases, 0..) |case, index| {
+        var fixture = try WireFixture.init(io, .bad_request, case.body, case.mode);
+        defer fixture.deinit(io);
+        var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+        var endpoint_buffer: [128]u8 = undefined;
+        var transport: NativeTransport = .{
+            .io = io,
+            .allocator = std.testing.allocator,
+            .endpoint = try fixture.endpoint(&endpoint_buffer),
+            .timeout_seconds = 1,
+        };
+        var credential = fakeCredential();
+        defer credential.scrub();
+        var capture: codex_provider.Capture = .{};
+        var provider_io = try model_operation.ProviderIo.open(
+            &wire.session,
+            1400,
+            1401 + index,
+        );
+        defer provider_io.close();
+        const capability = transport.capability();
+        const disposition = try capability.perform_fn(
+            capability.context,
+            &credential,
+            try provider_io.request(),
+            &capture,
+        );
+        const server_result = server_future.cancel(io);
+        server_result catch |err| if (err != error.Canceled) return err;
+        try std.testing.expectEqual(codex_provider.TransportDisposition.provider_rejected, disposition);
+        try std.testing.expectEqual(@as(?u16, 400), capture.failureHttpStatus());
+        try std.testing.expectEqualStrings("", capture.failureDiagnosticCode());
     }
 }
 
@@ -664,10 +755,12 @@ fn commitConversation(session: *session_store.Session, entry: session_store.Conv
 }
 
 const WireFixture = struct {
+    const ResponseMode = enum { complete, keep_open, chunked };
+
     listener: std.Io.net.Server,
     status: std.http.Status,
     response: []const u8,
-    keep_open: bool,
+    response_mode: ResponseMode,
     method: std.http.Method = .GET,
     target: [128]u8 = @splat(0),
     target_length: usize = 0,
@@ -680,13 +773,13 @@ const WireFixture = struct {
     body: [96 * 1024]u8 = undefined,
     body_length: usize = 0,
 
-    fn init(io: std.Io, status: std.http.Status, response: []const u8, keep_open: bool) !WireFixture {
+    fn init(io: std.Io, status: std.http.Status, response: []const u8, response_mode: ResponseMode) !WireFixture {
         const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
         return .{
             .listener = try address.listen(io, .{}),
             .status = status,
             .response = response,
-            .keep_open = keep_open,
+            .response_mode = response_mode,
         };
     }
 
@@ -736,7 +829,7 @@ const WireFixture = struct {
         const body_reader = try request.readerExpectContinue(&.{});
         try body_reader.readSliceAll(self.body[0..@intCast(body_length)]);
         self.body_length = @intCast(body_length);
-        if (!self.keep_open) {
+        if (self.response_mode == .complete) {
             try request.respond(self.response, .{
                 .status = self.status,
                 .extra_headers = &.{.{ .name = "content-type", .value = "text/event-stream" }},
@@ -745,7 +838,7 @@ const WireFixture = struct {
         }
         var response_buffer: [4096]u8 = undefined;
         var response_writer = try request.respondStreaming(&response_buffer, .{
-            .content_length = self.response.len + 1,
+            .content_length = if (self.response_mode == .keep_open) self.response.len + 1 else null,
             .respond_options = .{
                 .status = self.status,
                 .extra_headers = &.{.{ .name = "content-type", .value = "text/event-stream" }},
@@ -754,6 +847,10 @@ const WireFixture = struct {
         try response_writer.writer.writeAll(self.response);
         try response_writer.writer.flush();
         try response_writer.flush();
+        if (self.response_mode == .chunked) {
+            try response_writer.end();
+            return;
+        }
         try std.Io.sleep(io, std.Io.Duration.fromSeconds(5), .awake);
     }
 

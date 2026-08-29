@@ -86,12 +86,16 @@ On failure it reports and preserves the disposable root so the bounded CLI diagn
 can be inspected; a successful run removes the root. Fake failures distinguish local refresh rejection,
 missing refresh authority, provider HTTP 401/403, model rejection, rate or quota rejection, and backend
 failure. The diagnostic admits only a closed source and a 64-byte provider `error.code` or `error.type`
-character class.
+character class. Every received non-2xx response also retains its exact numeric HTTP status. The native
+transport reads ordinary content-length or chunked diagnostic bodies through the response reader under
+the existing request timeout, retaining no body when it is malformed or exceeds 4,096 bytes.
 
 A single test-only loopback fixture drives the production native transport. It asserts the exact bounded
 request headers and JSON shape, a two-turn tool-result continuation, non-2xx classification without an
 invisible retry, and immediate return after the first terminal SSE event even if the response body remains
-open. Semantic capture fixtures separately prove that failed, cancelled, or incomplete terminal status
+open. Its rejection cases cover a diagnostic delivered after the response head in chunked encoding and
+oversized, malformed, or stalled bodies that preserve status without retaining content. Semantic capture
+fixtures separately prove that failed, cancelled, or incomplete terminal status
 overrides partial candidate output. The loopback fixture does not validate public backend acceptance of
 OnePage's truthful `originator`; that remains an opt-in live compatibility question rather than a hermetic
 CI assertion.

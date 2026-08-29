@@ -289,11 +289,26 @@ fn failureLine(out: []u8, failure: model_protocol.Failure) ![]const u8 {
 fn failureProjectionLine(out: []u8, projection: *const harness.Projection) ![]const u8 {
     if (projection.diagnostic_source == .none) return failureLine(out, projection.failure);
     const code = projection.diagnosticCode();
-    if (code.len == 0) {
+    const status = projection.diagnosticHttpStatus();
+    if (status == null and code.len == 0) {
         return std.fmt.bufPrint(
             out,
             "Session failed: {s} ({s}).\n",
             .{ @tagName(projection.failure), @tagName(projection.diagnostic_source) },
+        );
+    }
+    if (status) |value| {
+        if (code.len == 0) {
+            return std.fmt.bufPrint(
+                out,
+                "Session failed: {s} ({s}, status={d}).\n",
+                .{ @tagName(projection.failure), @tagName(projection.diagnostic_source), value },
+            );
+        }
+        return std.fmt.bufPrint(
+            out,
+            "Session failed: {s} ({s}, status={d}, code={s}).\n",
+            .{ @tagName(projection.failure), @tagName(projection.diagnostic_source), value, code },
         );
     }
     return std.fmt.bufPrint(
@@ -639,7 +654,7 @@ test "CLI arguments distinguish create from exact resume" {
 }
 
 test "CLI failure rendering preserves the bounded typed cause" {
-    var buffer: [96]u8 = undefined;
+    var buffer: [192]u8 = undefined;
     try std.testing.expectEqualStrings(
         "Session failed: transport_may_have_started.\n",
         try failureLine(&buffer, .transport_may_have_started),
@@ -649,10 +664,19 @@ test "CLI failure rendering preserves the bounded typed cause" {
         .session_id = 1,
         .failure = .authentication_expired,
         .diagnostic_source = .provider_http_403,
+        .diagnostic_http_status = 403,
     };
     projection.setDiagnosticCode("originator_not_allowed");
     try std.testing.expectEqualStrings(
-        "Session failed: authentication_expired (provider_http_403, code=originator_not_allowed).\n",
+        "Session failed: authentication_expired (provider_http_403, status=403, code=originator_not_allowed).\n",
+        try failureProjectionLine(&buffer, &projection),
+    );
+    projection.failure = .provider_error;
+    projection.diagnostic_source = .provider_http_rejection;
+    projection.diagnostic_http_status = 422;
+    projection.setDiagnosticCode("");
+    try std.testing.expectEqualStrings(
+        "Session failed: provider_error (provider_http_rejection, status=422).\n",
         try failureProjectionLine(&buffer, &projection),
     );
 }

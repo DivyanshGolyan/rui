@@ -45,6 +45,7 @@ pub const DiagnosticSource = enum(u8) {
 
 pub const FailureDiagnostic = struct {
     source: DiagnosticSource = .none,
+    http_status: ?u16 = null,
     code: []const u8 = "",
 };
 
@@ -186,10 +187,16 @@ pub fn encodeFailureDiagnostic(
     out: []u8,
     reason: Failure,
     source: DiagnosticSource,
+    http_status: ?u16,
     code: []const u8,
 ) ![]const u8 {
-    try validateFailureDiagnostic(reason, source, code);
-    return encode(out, .failure, reason, @intFromEnum(source), 0, code, "");
+    try validateFailureDiagnostic(reason, source, http_status, code);
+    var status_bytes: [2]u8 = undefined;
+    const encoded_status = if (http_status) |status| blk: {
+        write(u16, &status_bytes, 0, status);
+        break :blk status_bytes[0..];
+    } else "";
+    return encode(out, .failure, reason, @intFromEnum(source), 0, code, encoded_status);
 }
 
 pub fn inspectFailureDiagnostic(bytes: []const u8) !FailureDiagnostic {
@@ -197,8 +204,9 @@ pub fn inspectFailureDiagnostic(bytes: []const u8) !FailureDiagnostic {
     if (inspected.disposition != .failure) return error.ExpectedFailureResponse;
     const source = std.enums.fromInt(DiagnosticSource, inspected.shape) orelse
         return error.MalformedModelResponse;
-    try validateFailureDiagnostic(inspected.reason, source, inspected.first);
-    return .{ .source = source, .code = inspected.first };
+    const http_status = try decodeFailureDiagnosticStatus(inspected.second);
+    try validateFailureDiagnostic(inspected.reason, source, http_status, inspected.first);
+    return .{ .source = source, .http_status = http_status, .code = inspected.first };
 }
 
 fn encode(
@@ -397,9 +405,11 @@ fn finish(
         .failure => {
             const source = std.enums.fromInt(DiagnosticSource, inspected.shape) orelse
                 return error.MalformedModelResponse;
-            validateFailureDiagnostic(inspected.reason, source, first) catch
+            const http_status = decodeFailureDiagnosticStatus(second) catch
                 return error.MalformedModelResponse;
-            if (inspected.option_count != 0 or second.len != 0) {
+            validateFailureDiagnostic(inspected.reason, source, http_status, first) catch
+                return error.MalformedModelResponse;
+            if (inspected.option_count != 0) {
                 return error.MalformedModelResponse;
             }
             return .{ .parsed = failed(inspected.reason) };
@@ -505,19 +515,39 @@ fn validatePrompt(prompt: []const u8) !void {
     }
 }
 
-fn validateFailureDiagnostic(reason: Failure, source: DiagnosticSource, code: []const u8) !void {
+fn decodeFailureDiagnosticStatus(bytes: []const u8) !?u16 {
+    if (bytes.len == 0) return null;
+    if (bytes.len != 2) return error.InvalidFailureDiagnosticStatus;
+    return read(u16, bytes, 0);
+}
+
+fn validateFailureDiagnostic(
+    reason: Failure,
+    source: DiagnosticSource,
+    http_status: ?u16,
+    code: []const u8,
+) !void {
     if (reason == .none) return error.InvalidProviderFailure;
     if (source == .none) {
+        if (http_status != null) return error.InvalidFailureDiagnosticStatus;
         if (code.len != 0) return error.InvalidFailureDiagnosticCode;
         return;
+    }
+    if (http_status) |status| {
+        if (status < 100 or status > 599) return error.InvalidFailureDiagnosticStatus;
     }
     switch (source) {
         .local_refresh_rejected, .local_refresh_missing => {
             if (reason != .authentication_expired) return error.InvalidFailureDiagnosticSource;
+            if (http_status != null) return error.InvalidFailureDiagnosticStatus;
             if (code.len != 0) return error.InvalidFailureDiagnosticCode;
         },
         .provider_http_401, .provider_http_403 => {
             if (reason != .authentication_expired) return error.InvalidFailureDiagnosticSource;
+            if (http_status) |status| {
+                const expected: u16 = if (source == .provider_http_401) 401 else 403;
+                if (status != expected) return error.InvalidFailureDiagnosticStatus;
+            }
             try validateFailureDiagnosticCode(code);
         },
         .provider_http_rejection,
@@ -585,13 +615,14 @@ test "complete captured responses cover every V1 disposition" {
     }
 }
 
-test "authentication failure diagnostics retain only a bounded source and code" {
+test "provider failure diagnostics retain bounded status and code" {
     var bytes: [max_response_size]u8 = undefined;
     var scratch: ValidationScratch = undefined;
     const encoded = try encodeFailureDiagnostic(
         &bytes,
         .authentication_expired,
         .provider_http_403,
+        403,
         "originator_not_allowed",
     );
     try std.testing.expectEqual(
@@ -600,13 +631,23 @@ test "authentication failure diagnostics retain only a bounded source and code" 
     );
     const diagnostic = try inspectFailureDiagnostic(encoded);
     try std.testing.expectEqual(DiagnosticSource.provider_http_403, diagnostic.source);
+    try std.testing.expectEqual(@as(?u16, 403), diagnostic.http_status);
     try std.testing.expectEqualStrings("originator_not_allowed", diagnostic.code);
+    const legacy = try encodeFailureDiagnostic(
+        &bytes,
+        .authentication_expired,
+        .provider_http_403,
+        null,
+        "originator_not_allowed",
+    );
+    try std.testing.expectEqual(@as(?u16, null), (try inspectFailureDiagnostic(legacy)).http_status);
     try std.testing.expectError(
         error.InvalidFailureDiagnosticCode,
         encodeFailureDiagnostic(
             &bytes,
             .authentication_expired,
             .provider_http_403,
+            403,
             "unbounded provider message with spaces",
         ),
     );

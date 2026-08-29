@@ -118,12 +118,14 @@ pub const CodexProvider = struct {
                 response,
                 .authentication_expired,
                 .local_refresh_rejected,
+                null,
                 "",
             ),
             .refresh_missing => return publishFailureDiagnostic(
                 response,
                 .authentication_expired,
                 .local_refresh_missing,
+                null,
                 "",
             ),
             .ready => {},
@@ -139,42 +141,49 @@ pub const CodexProvider = struct {
                 response,
                 .authentication_expired,
                 .provider_http_401,
+                capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
             .http_forbidden => try publishFailureDiagnostic(
                 response,
                 .authentication_expired,
                 .provider_http_403,
+                capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
             .provider_rejected => try publishFailureDiagnostic(
                 response,
                 .provider_error,
                 .provider_http_rejection,
+                capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
             .model_not_found => try publishFailureDiagnostic(
                 response,
                 .model_unavailable,
                 .provider_model_not_found,
+                capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
             .rate_limited => try publishFailureDiagnostic(
                 response,
                 .provider_error,
                 .provider_rate_limited,
+                capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
             .quota_exceeded => try publishFailureDiagnostic(
                 response,
                 .provider_error,
                 .provider_quota_exceeded,
+                capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
             .backend_failed => try publishFailureDiagnostic(
                 response,
                 .provider_error,
                 .provider_backend_failure,
+                capture.failureHttpStatus(),
                 capture.failureDiagnosticCode(),
             ),
             .timed_out => try publishFailure(response, .timeout),
@@ -195,10 +204,17 @@ fn publishFailureDiagnostic(
     response: model_operation.ResponseWriter,
     failure: model_protocol.Failure,
     source: model_protocol.DiagnosticSource,
+    http_status: ?u16,
     code: []const u8,
 ) !void {
-    var bytes: [model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size]u8 = undefined;
-    try response.append(try model_protocol.encodeFailureDiagnostic(&bytes, failure, source, code));
+    var bytes: [model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size + 2]u8 = undefined;
+    try response.append(try model_protocol.encodeFailureDiagnostic(
+        &bytes,
+        failure,
+        source,
+        http_status,
+        code,
+    ));
     try response.finish();
 }
 
@@ -251,6 +267,16 @@ pub const Capture = struct {
     malformed: bool = false,
     failure_diagnostic_code: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
     failure_diagnostic_code_length: u8 = 0,
+    failure_http_status: u16 = 0,
+
+    pub fn setFailureHttpStatus(self: *Capture, status: u16) !void {
+        if (status < 100 or status > 599) return error.InvalidHttpStatus;
+        self.failure_http_status = status;
+    }
+
+    pub fn failureHttpStatus(self: *const Capture) ?u16 {
+        return if (self.failure_http_status == 0) null else self.failure_http_status;
+    }
 
     pub fn setFailureDiagnosticCode(self: *Capture, code: []const u8) !void {
         if (code.len > self.failure_diagnostic_code.len) return error.FailureDiagnosticCodeTooLong;
