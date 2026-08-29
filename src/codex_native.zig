@@ -221,6 +221,7 @@ pub const NativeHttp = struct {
         try request.connection.?.flush();
         var redirect_buffer: [response_head_window_size]u8 = undefined;
         var response = try request.receiveHead(&redirect_buffer);
+        if (response.head.content_encoding != .identity) return error.UnexpectedContentEncoding;
         var transfer_buffer: [diagnostic_transfer_window_size]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
         var length: usize = 0;
@@ -393,6 +394,9 @@ pub const NativeTransport = struct {
         request.connection.?.flush() catch return .{ .disposition = .may_have_started };
         var redirect_buffer: [response_head_window_size]u8 = undefined;
         var response = request.receiveHead(&redirect_buffer) catch return .{ .disposition = .may_have_started };
+        if (response.head.content_encoding != .identity) {
+            return .{ .disposition = .invalid_encoding };
+        }
         const status: u16 = @intFromEnum(response.head.status);
         if (status < 200 or status >= 300) {
             var result: codex_provider.TransportResult = .{ .disposition = .provider_rejected };
@@ -726,6 +730,28 @@ test "authorization HTTP primitive deadlines and joins every OAuth call class" {
     }
 }
 
+test "authorization rejects compressed response bytes before JSON decoding" {
+    const io = std.testing.io;
+    var fixture = try WireFixture.init(io, .ok, "not actually compressed", .complete);
+    fixture.response_encoding = "gzip";
+    defer fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    var endpoint_buffer: [128]u8 = undefined;
+    const endpoint = try fixture.endpoint(&endpoint_buffer);
+    const path_start = std.mem.indexOf(u8, endpoint, "/backend-api/") orelse unreachable;
+    var http: NativeHttp = .{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .authorization_origin_override = endpoint[0..path_start],
+    };
+    try std.testing.expectError(
+        error.AuthorizationTransportFailed,
+        codex_auth.requestDeviceCode(http.capability()),
+    );
+    try server_future.await(io);
+    try std.testing.expect(fixture.accept_encoding_identity);
+}
+
 test "NativeTransport sends the production request and stops at terminal SSE" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -767,6 +793,42 @@ test "NativeTransport sends the production request and stops at terminal SSE" {
     try std.testing.expectEqual(codex_provider.TransportDisposition.complete, (try disposition).disposition);
     try std.testing.expect(capture.terminalObserved());
     try fixture.expectProductionRequest(false);
+}
+
+test "NativeTransport rejects compressed response bytes before SSE capture" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wire = try WireSession.init(io, &tmp);
+    defer wire.deinit(io);
+    _ = try model_operation.buildRequest(&wire.session, 1025, 1, 1);
+    var provider_io = try model_operation.ProviderIo.open(&wire.session, 1025, 1026);
+    defer provider_io.close();
+
+    var fixture = try WireFixture.init(io, .ok, "not actually compressed", .complete);
+    fixture.response_encoding = "gzip";
+    defer fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    var endpoint_buffer: [128]u8 = undefined;
+    var transport: NativeTransport = .{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .endpoint = try fixture.endpoint(&endpoint_buffer),
+    };
+    var credential = fakeCredential();
+    defer credential.scrub();
+    var capture: codex_provider.Capture = .{ .candidate = provider_io.candidateCapability() };
+    const capability = transport.capability();
+    const result = try capability.perform_fn(
+        capability.context,
+        &credential,
+        try provider_io.request(),
+        &capture,
+    );
+    try server_future.await(io);
+    try std.testing.expectEqual(codex_provider.TransportDisposition.invalid_encoding, result.disposition);
+    try std.testing.expect(!capture.terminalObserved());
+    try std.testing.expect(fixture.accept_encoding_identity);
 }
 
 test "NativeTransport timeout bounds the entire call and closes an open response body" {
@@ -1214,6 +1276,7 @@ const WireFixture = struct {
     status: std.http.Status,
     response: []const u8,
     response_mode: ResponseMode,
+    response_encoding: []const u8 = "identity",
     method: std.http.Method = .GET,
     target: [128]u8 = @splat(0),
     target_length: usize = 0,
@@ -1286,10 +1349,14 @@ const WireFixture = struct {
         const body_reader = try request.readerExpectContinue(&.{});
         try body_reader.readSliceAll(self.body[0..@intCast(body_length)]);
         self.body_length = @intCast(body_length);
+        const response_headers = [_]std.http.Header{
+            .{ .name = "content-type", .value = "text/event-stream" },
+            .{ .name = "content-encoding", .value = self.response_encoding },
+        };
         if (self.response_mode == .complete) {
             try request.respond(self.response, .{
                 .status = self.status,
-                .extra_headers = &.{.{ .name = "content-type", .value = "text/event-stream" }},
+                .extra_headers = &response_headers,
             });
             return;
         }
@@ -1301,7 +1368,7 @@ const WireFixture = struct {
                 null,
             .respond_options = .{
                 .status = self.status,
-                .extra_headers = &.{.{ .name = "content-type", .value = "text/event-stream" }},
+                .extra_headers = &response_headers,
             },
         });
         try response_writer.writer.writeAll(self.response);
