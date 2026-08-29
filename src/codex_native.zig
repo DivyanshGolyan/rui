@@ -221,7 +221,14 @@ pub const NativeHttp = struct {
         try request.connection.?.flush();
         var redirect_buffer: [response_head_window_size]u8 = undefined;
         var response = try request.receiveHead(&redirect_buffer);
-        if (response.head.content_encoding != .identity) return error.UnexpectedContentEncoding;
+        if (response.head.content_encoding != .identity) {
+            const status: u16 = @intFromEnum(response.head.status);
+            if (status >= 200 and status < 300) return error.UnexpectedContentEncoding;
+            const result: codex_auth.HttpResponse = .{ .status = status, .body = "" };
+            completed_response.* = result;
+            request_control.observeComplete(self.io);
+            return result;
+        }
         var transfer_buffer: [diagnostic_transfer_window_size]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
         var length: usize = 0;
@@ -394,19 +401,20 @@ pub const NativeTransport = struct {
         request.connection.?.flush() catch return .{ .disposition = .may_have_started };
         var redirect_buffer: [response_head_window_size]u8 = undefined;
         var response = request.receiveHead(&redirect_buffer) catch return .{ .disposition = .may_have_started };
-        if (response.head.content_encoding != .identity) {
-            return .{ .disposition = .invalid_encoding };
-        }
         const status: u16 = @intFromEnum(response.head.status);
         if (status < 200 or status >= 300) {
             var result: codex_provider.TransportResult = .{ .disposition = .provider_rejected };
             try result.setHttpStatus(status);
             result.disposition = classifyHttpFailure(status, "");
             request_control.observeTerminal(self.io, result, completed_result);
+            if (response.head.content_encoding != .identity) return result;
             readProviderFailureCode(&response, &result);
             result.disposition = classifyHttpFailure(status, result.diagnosticCode());
             request_control.observeTerminal(self.io, result, completed_result);
             return result;
+        }
+        if (response.head.content_encoding != .identity) {
+            return .{ .disposition = .invalid_encoding };
         }
         var transfer_buffer: [stream_transfer_window_size]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
@@ -752,6 +760,28 @@ test "authorization rejects compressed response bytes before JSON decoding" {
     try std.testing.expect(fixture.accept_encoding_identity);
 }
 
+test "authorization classifies compressed refresh rejection from status" {
+    const io = std.testing.io;
+    var fixture = try WireFixture.init(io, .unauthorized, "not actually compressed", .complete);
+    fixture.response_encoding = "gzip";
+    defer fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    var endpoint_buffer: [128]u8 = undefined;
+    const endpoint = try fixture.endpoint(&endpoint_buffer);
+    const path_start = std.mem.indexOf(u8, endpoint, "/backend-api/") orelse unreachable;
+    var http: NativeHttp = .{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .authorization_origin_override = endpoint[0..path_start],
+    };
+    var tokens: codex_auth.Tokens = .{ .refresh_length = "refresh".len };
+    defer tokens.scrub();
+    @memcpy(tokens.refresh[0.."refresh".len], "refresh");
+    try std.testing.expectError(error.RefreshRejected, codex_auth.refresh(http.capability(), &tokens));
+    try server_future.await(io);
+    try std.testing.expect(fixture.accept_encoding_identity);
+}
+
 test "NativeTransport sends the production request and stops at terminal SSE" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -827,6 +857,44 @@ test "NativeTransport rejects compressed response bytes before SSE capture" {
     );
     try server_future.await(io);
     try std.testing.expectEqual(codex_provider.TransportDisposition.invalid_encoding, result.disposition);
+    try std.testing.expect(!capture.terminalObserved());
+    try std.testing.expect(fixture.accept_encoding_identity);
+}
+
+test "NativeTransport classifies compressed HTTP rejection from status" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wire = try WireSession.init(io, &tmp);
+    defer wire.deinit(io);
+    _ = try model_operation.buildRequest(&wire.session, 1030, 1, 1);
+    var provider_io = try model_operation.ProviderIo.open(&wire.session, 1030, 1031);
+    defer provider_io.close();
+
+    var fixture = try WireFixture.init(io, .unauthorized, "not actually compressed", .complete);
+    fixture.response_encoding = "gzip";
+    defer fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    var endpoint_buffer: [128]u8 = undefined;
+    var transport: NativeTransport = .{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .endpoint = try fixture.endpoint(&endpoint_buffer),
+    };
+    var credential = fakeCredential();
+    defer credential.scrub();
+    var capture: codex_provider.Capture = .{ .candidate = provider_io.candidateCapability() };
+    const capability = transport.capability();
+    const result = try capability.perform_fn(
+        capability.context,
+        &credential,
+        try provider_io.request(),
+        &capture,
+    );
+    try server_future.await(io);
+    try std.testing.expectEqual(codex_provider.TransportDisposition.http_unauthorized, result.disposition);
+    try std.testing.expectEqual(@as(?u16, 401), result.httpStatus());
+    try std.testing.expectEqualStrings("", result.diagnosticCode());
     try std.testing.expect(!capture.terminalObserved());
     try std.testing.expect(fixture.accept_encoding_identity);
 }
