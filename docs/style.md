@@ -175,9 +175,9 @@ deferred explicitly.
   recognized canonical result is unchanged. Pair them with strict negative fixtures for every consumed
   field.
 
-- Use fixed-width integers, explicit byte order, versioning, lengths, and checksums in durable,
-  cross-process, and network formats. Do not persist `usize`, native enums, pointers, or struct
-  layout.
+- Use fixed-width integers, explicit byte order, versioning, lengths, and checksums in OnePage-owned
+  binary durable, cross-process, and network formats. Do not persist `usize`, native enums, pointers,
+  or struct layout.
 - Represent semantic facts as typed variants whose payload exposes only fields valid for that kind.
   Keep flat tagged records private to the canonical wire codec, and validate them before constructing
   a typed fact.
