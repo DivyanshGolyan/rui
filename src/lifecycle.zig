@@ -1250,6 +1250,8 @@ pub fn advanceRestored(
 ) !u64 {
     switch (try reconcileRestored(host, session, config)) {
         .finished => |final_ref| return final_ref,
+        .settled_needs_model => return error.SessionNeedsModel,
+        .settled_needs_tool => return error.ToolCallDeferred,
         .retry_model => {
             const io = session.io;
             const token = session.ownerToken();
@@ -1351,6 +1353,8 @@ pub fn advanceRestored(
 
 const LocalRestored = union(enum) {
     finished: u64,
+    settled_needs_model,
+    settled_needs_tool,
     retry_model,
     dispatch_model,
     dispatch_tool,
@@ -1368,6 +1372,7 @@ fn reconcileRestored(
     const token = session.ownerToken();
     try restoreCoreFromLedger(session, &core);
     var outcome = (try core.reducer.task()).phase;
+    var admitted_completion = false;
     if (outcome == .awaiting_model) {
         if (durableCompletion(session, token, &core)) |completion| {
             const admission = blk: {
@@ -1421,6 +1426,7 @@ fn reconcileRestored(
                 admission_facts[0 .. 2 + prepared.fact_count],
                 true,
             );
+            admitted_completion = true;
         } else |err| switch (err) {
             error.SessionOperationPending => return .retry_model,
             else => return err,
@@ -1445,9 +1451,13 @@ fn reconcileRestored(
             config.fault,
         )) {
             .indeterminate => return error.BashPossiblyExecuted,
-            .ready => outcome = .ready,
+            .ready_completion => {
+                outcome = .ready;
+                admitted_completion = true;
+            },
+            .ready_local => outcome = .ready,
             .approval_required => return error.PatchApprovalRequired,
-            .none => return .dispatch_tool,
+            .none => return if (admitted_completion) .settled_needs_tool else .dispatch_tool,
         }
     }
     if (outcome == .failed) {
@@ -1463,7 +1473,7 @@ fn reconcileRestored(
         return .{ .finished = entry.content_ref };
     }
     if (outcome != .ready) return error.SessionNotReadyForModel;
-    return .dispatch_model;
+    return if (admitted_completion) .settled_needs_model else .dispatch_model;
 }
 
 /// Performs only local reconstruction and durable evidence admission. It
@@ -1732,12 +1742,20 @@ pub fn acceptCompletion(
 fn localCompletionResult(result: LocalRestored) !u64 {
     return switch (result) {
         .finished => |final_ref| final_ref,
+        .settled_needs_model => error.SessionNeedsModel,
+        .settled_needs_tool => error.ToolCallDeferred,
         .retry_model, .dispatch_model => error.SessionNeedsModel,
         .dispatch_tool => error.ToolCallDeferred,
     };
 }
 
-const ToolRecovery = enum { none, ready, indeterminate, approval_required };
+const ToolRecovery = enum {
+    none,
+    ready_local,
+    ready_completion,
+    indeterminate,
+    approval_required,
+};
 
 fn reconcileToolCall(
     host: *Host,
@@ -1784,10 +1802,11 @@ fn reconcileBash(
             core,
             toolResultFromRecord(result),
         );
-        return if (result.class == .indeterminate)
-            .indeterminate
-        else
-            .ready;
+        if (result.class == .indeterminate) return .indeterminate;
+        return switch (result.evidence) {
+            .immediate => .ready_local,
+            .durable => .ready_completion,
+        };
     }
     const attempt = history.attempt orelse {
         if (history.authorization == null and history.approval_required != null) {
@@ -1820,7 +1839,7 @@ fn reconcileBash(
             core,
             toolResultFromRecord(denied.result),
         );
-        return .ready;
+        return .ready_local;
     };
     var inbox: InboxSearch = .{
         .session_id = session.session_id,
@@ -1890,10 +1909,7 @@ fn reconcileBash(
         core,
         toolResultFromRecord(result.result),
     );
-    return if (result.result.class == .indeterminate)
-        .indeterminate
-    else
-        .ready;
+    return if (result.result.class == .indeterminate) .indeterminate else .ready_completion;
 }
 
 fn readBashStatus(
@@ -1972,7 +1988,10 @@ fn reconcilePatch(
             .apply_patch,
             toolResultFromRecord(settled),
         );
-        return .ready;
+        return switch (settled.evidence) {
+            .immediate => .ready_local,
+            .durable => .ready_completion,
+        };
     }
     if (history.authorization == null and history.approval_required != null) {
         return .approval_required;
@@ -2110,7 +2129,10 @@ fn reconcilePatch(
         .apply_patch,
         toolResultFromRecord(terminal.result),
     );
-    return .ready;
+    return switch (result_evidence) {
+        .immediate => .ready_local,
+        .durable => .ready_completion,
+    };
 }
 
 const ToolResult = struct {

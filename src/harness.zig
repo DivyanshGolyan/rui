@@ -1445,6 +1445,11 @@ test "captured noncanonical tool call closes once after crash without redispatch
     });
     defer restored.close();
     _ = try restored.drive();
+    const reconciled = try restored.drive();
+    try std.testing.expectEqual(State.waiting, reconciled.state);
+    try std.testing.expectEqual(ProjectionKind.outcome, reconciled.projections[0].kind);
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+
     const waiting = try restored.drive();
     try std.testing.expectEqual(State.waiting, waiting.state);
     try std.testing.expectEqual(ProjectionKind.approval_required, waiting.projections[0].kind);
@@ -1793,73 +1798,73 @@ test "input request fails terminally until the durable interaction layer exists"
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }
 
+const HistoryProvider = struct {
+    calls: u8 = 0,
+    command: []const u8,
+
+    fn provider(self: *@This()) model_operation.Provider {
+        return .{ .context = self, .dispatch = dispatch };
+    }
+
+    fn dispatch(
+        context: *anyopaque,
+        request_value: model_operation.RequestCursor,
+        candidate: model_operation.CandidateWriter,
+    ) anyerror!model_operation.DispatchOutcome {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        var request = request_value;
+        var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
+        const encoded = switch (request.entryCount()) {
+            1 => blk: {
+                const task = (try request.next()) orelse return error.MissingTask;
+                if (task != .user_text or task.user_text.content.length() != "run once".len) {
+                    return error.UnexpectedTask;
+                }
+                var task_bytes: ["run once".len]u8 = undefined;
+                _ = try task.user_text.content.readWindow(0, &task_bytes);
+                if (!std.mem.eql(u8, &task_bytes, "run once")) return error.UnexpectedTask;
+                if (try request.next() != null) return error.UnexpectedHistory;
+                var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+                const arguments = try model_contract.encodeJson(&arguments_buffer, .{
+                    .command = self.command,
+                    .timeout_ms = 5000,
+                });
+                break :blk try model_protocol.encodeTool(
+                    &encoded_buffer,
+                    model_contract.bash_key,
+                    arguments,
+                );
+            },
+            3 => blk: {
+                _ = (try request.next()) orelse return error.MissingTask;
+                const call = (try request.next()) orelse return error.MissingToolCall;
+                if (call != .tool_call or !std.mem.eql(u8, call.tool_call.key(), model_contract.bash_key)) {
+                    return error.UnexpectedToolCall;
+                }
+                const result_entry = (try request.next()) orelse return error.MissingToolResult;
+                if (result_entry != .tool_result or result_entry.tool_result.is_error) {
+                    return error.UnexpectedToolResult;
+                }
+                const expected_result = "status=success\nexit_code=0\n" ++
+                    "stdout_base64=cmVwbGF5LXByb29m\nstderr_base64=";
+                if (result_entry.tool_result.content.length() != expected_result.len) {
+                    return error.UnexpectedToolResult;
+                }
+                var result_bytes: [expected_result.len]u8 = undefined;
+                _ = try result_entry.tool_result.content.readWindow(0, &result_bytes);
+                if (!std.mem.eql(u8, &result_bytes, expected_result)) return error.UnexpectedToolResult;
+                if (try request.next() != null) return error.UnexpectedHistory;
+                break :blk try model_protocol.encodeText(&encoded_buffer, "durable final");
+            },
+            else => return error.UnexpectedHistory,
+        };
+        try candidate.append(encoded);
+        return .candidate;
+    }
+};
+
 test "fresh Harness resumes after admitted Tool Result without replaying the tool" {
-    const HistoryProvider = struct {
-        calls: u8 = 0,
-        command: []const u8,
-
-        fn provider(self: *@This()) model_operation.Provider {
-            return .{ .context = self, .dispatch = dispatch };
-        }
-
-        fn dispatch(
-            context: *anyopaque,
-            request_value: model_operation.RequestCursor,
-            candidate: model_operation.CandidateWriter,
-        ) anyerror!model_operation.DispatchOutcome {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.calls += 1;
-            var request = request_value;
-            var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
-            const encoded = switch (request.entryCount()) {
-                1 => blk: {
-                    const task = (try request.next()) orelse return error.MissingTask;
-                    if (task != .user_text or task.user_text.content.length() != "run once".len) {
-                        return error.UnexpectedTask;
-                    }
-                    var task_bytes: ["run once".len]u8 = undefined;
-                    _ = try task.user_text.content.readWindow(0, &task_bytes);
-                    if (!std.mem.eql(u8, &task_bytes, "run once")) return error.UnexpectedTask;
-                    if (try request.next() != null) return error.UnexpectedHistory;
-                    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-                    const arguments = try model_contract.encodeJson(&arguments_buffer, .{
-                        .command = self.command,
-                        .timeout_ms = 5000,
-                    });
-                    break :blk try model_protocol.encodeTool(
-                        &encoded_buffer,
-                        model_contract.bash_key,
-                        arguments,
-                    );
-                },
-                3 => blk: {
-                    _ = (try request.next()) orelse return error.MissingTask;
-                    const call = (try request.next()) orelse return error.MissingToolCall;
-                    if (call != .tool_call or !std.mem.eql(u8, call.tool_call.key(), model_contract.bash_key)) {
-                        return error.UnexpectedToolCall;
-                    }
-                    const result_entry = (try request.next()) orelse return error.MissingToolResult;
-                    if (result_entry != .tool_result or result_entry.tool_result.is_error) {
-                        return error.UnexpectedToolResult;
-                    }
-                    const expected_result = "status=success\nexit_code=0\n" ++
-                        "stdout_base64=cmVwbGF5LXByb29m\nstderr_base64=";
-                    if (result_entry.tool_result.content.length() != expected_result.len) {
-                        return error.UnexpectedToolResult;
-                    }
-                    var result_bytes: [expected_result.len]u8 = undefined;
-                    _ = try result_entry.tool_result.content.readWindow(0, &result_bytes);
-                    if (!std.mem.eql(u8, &result_bytes, expected_result)) return error.UnexpectedToolResult;
-                    if (try request.next() != null) return error.UnexpectedHistory;
-                    break :blk try model_protocol.encodeText(&encoded_buffer, "durable final");
-                },
-                else => return error.UnexpectedHistory,
-            };
-            try candidate.append(encoded);
-            return .candidate;
-        }
-    };
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
@@ -1925,4 +1930,68 @@ test "fresh Harness resumes after admitted Tool Result without replaying the too
     _ = try final_restore.drive();
     const durable = try final_restore.drive();
     try std.testing.expectEqual(State.finished, durable.state);
+}
+
+test "recovered Tool Result returns before the next Provider dispatch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var command_buffer: [256]u8 = undefined;
+    const command = try std.fmt.bufPrint(
+        &command_buffer,
+        "printf x >> '.zig-cache/tmp/{s}/recovery-execution-count'; printf replay-proof",
+        .{tmp.sub_path},
+    );
+    var first_provider: HistoryProvider = .{ .command = command };
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .permission_mode = .bypass,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "fixture:tool-result-recovery",
+            .task = "run once",
+            .provider = first_provider.provider(),
+        } },
+    });
+    _ = try owner.drive();
+    const session_id = harnessState(owner).session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    _ = try owner.drive(); // Capture the model response.
+    _ = try owner.drive(); // Admit it without executing the Tool.
+    _ = try owner.drive(); // Capture the Tool Result, then lose its live notification.
+    try std.testing.expectEqual(@as(u8, 1), first_provider.calls);
+    owner.close();
+
+    var execution_count: [2]u8 = undefined;
+    var count_file = try tmp.dir.openFile(std.testing.io, "recovery-execution-count", .{});
+    defer count_file.close(std.testing.io);
+    const before_restore = try count_file.readPositionalAll(std.testing.io, &execution_count, 0);
+    try std.testing.expectEqualStrings("x", execution_count[0..before_restore]);
+
+    var fresh_provider: HistoryProvider = .{ .command = command };
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .permission_mode = .bypass,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .provider = fresh_provider.provider(),
+        } },
+    });
+    defer restored.close();
+    _ = try restored.drive();
+
+    const reconciled = try restored.drive();
+    try std.testing.expectEqual(State.waiting, reconciled.state);
+    try std.testing.expectEqual(@as(u8, 0), fresh_provider.calls);
+    try std.testing.expectEqual(@as(u64, 3), harnessState(restored).session.?.entryCount());
+
+    const dispatched = try restored.drive();
+    try std.testing.expectEqual(State.waiting, dispatched.state);
+    try std.testing.expectEqual(@as(u8, 1), fresh_provider.calls);
+    const unchanged = try count_file.readPositionalAll(std.testing.io, &execution_count, 0);
+    try std.testing.expectEqualStrings("x", execution_count[0..unchanged]);
+
+    const finished = try restored.drive();
+    try std.testing.expectEqual(State.finished, finished.state);
 }
