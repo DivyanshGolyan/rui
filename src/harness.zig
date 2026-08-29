@@ -25,19 +25,22 @@ pub const max_recovery_records: usize = session_transition.max_transitions +
 
 pub const PermissionMode = lifecycle.PermissionMode;
 
+pub const ModelBinding = struct {
+    model: []const u8,
+    provider: model_operation.Provider,
+};
+
 pub const Create = struct {
     workspace_path: []const u8,
-    model: []const u8,
+    model_binding: ModelBinding,
     task: []const u8,
-    provider: model_operation.Provider,
     bash_cancelled: ?*const std.atomic.Value(bool) = null,
     fault: ?FaultHook = null,
 };
 
 pub const Restore = struct {
     session_id: u64,
-    provider: ?model_operation.Provider = null,
-    expected_model: ?[]const u8 = null,
+    model_binding: ?ModelBinding = null,
     fault: ?FaultHook = null,
 };
 
@@ -217,7 +220,7 @@ const HarnessState = struct {
         if (config.recovery_quantum == 0) return error.InvalidRecoveryQuantum;
         switch (config.mode) {
             .create => |create| {
-                if (create.workspace_path.len == 0 or create.model.len == 0 or
+                if (create.workspace_path.len == 0 or create.model_binding.model.len == 0 or
                     create.task.len == 0)
                 {
                     return error.InvalidCreateRequest;
@@ -225,7 +228,8 @@ const HarnessState = struct {
             },
             .restore => |restore| {
                 if (restore.session_id == 0) return error.InvalidSessionIdentity;
-                if (restore.expected_model) |model| {
+                if (restore.model_binding) |binding_value| {
+                    const model = binding_value.model;
                     if (model.len == 0 or model.len > session_store.model_name_capacity or
                         !std.unicode.utf8ValidateSlice(model))
                     {
@@ -237,7 +241,7 @@ const HarnessState = struct {
         var owner: HarnessState = .{
             .config = switch (config.mode) {
                 .create => |create| .{
-                    .provider = create.provider,
+                    .provider = create.model_binding.provider,
                     .fault = create.fault,
                     .bash_cancelled = create.bash_cancelled,
                     .permission_mode = config.permission_mode,
@@ -245,7 +249,7 @@ const HarnessState = struct {
                     .created = true,
                 },
                 .restore => |restore| .{
-                    .provider = restore.provider,
+                    .provider = if (restore.model_binding) |binding_value| binding_value.provider else null,
                     .fault = restore.fault,
                     .bash_cancelled = null,
                     .permission_mode = config.permission_mode,
@@ -263,13 +267,13 @@ const HarnessState = struct {
         switch (config.mode) {
             .create => |create| owner.session = try lease.createSession(.{
                 .workspace_path = create.workspace_path,
-                .model = create.model,
+                .model = create.model_binding.model,
                 .task = create.task,
             }),
             .restore => |restore| {
                 var restored = try lease.restoreSession(restore.session_id);
-                if (restore.expected_model) |expected| {
-                    if (!std.mem.eql(u8, restored.session.modelName(), expected)) {
+                if (restore.model_binding) |binding_value| {
+                    if (!std.mem.eql(u8, restored.session.modelName(), binding_value.model)) {
                         restored.session.close();
                         return error.RestoreModelMismatch;
                     }
@@ -921,9 +925,8 @@ test "open retains no Activation Slot and offer transfers one bounded input" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:answer",
+            .model_binding = .{ .model = "fixture:answer", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
     defer owner.close();
@@ -958,9 +961,8 @@ test "Harness close is idempotent and releases one Runtime lease" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:answer",
+            .model_binding = .{ .model = "fixture:answer", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
     owner.close();
@@ -978,18 +980,16 @@ test "Runtime close waits for every opaque Harness lease" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:first",
+            .model_binding = .{ .model = "fixture:first", .provider = first_fixture.provider() },
             .task = "first",
-            .provider = first_fixture.provider(),
         } },
     });
     const second = try Harness.open(.{
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:second",
+            .model_binding = .{ .model = "fixture:second", .provider = second_fixture.provider() },
             .task = "second",
-            .provider = second_fixture.provider(),
         } },
     });
     try std.testing.expectError(error.HostRuntimeBusy, runtime.close());
@@ -1012,9 +1012,8 @@ test "restore withholds projections until the configured recovery quantum reache
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:answer",
+            .model_binding = .{ .model = "fixture:answer", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
     const session = &harnessState(created).session.?;
@@ -1071,9 +1070,8 @@ test "restore publishes Session identity before reconciling Completion evidence"
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:answer",
+            .model_binding = .{ .model = "fixture:answer", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
     _ = try created.drive();
@@ -1142,9 +1140,8 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:answer",
+            .model_binding = .{ .model = "fixture:answer", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
     const session = &harnessState(created).session.?;
@@ -1209,9 +1206,8 @@ test "shutdown denies Approval Required before closing" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:shutdown-approval",
+            .model_binding = .{ .model = "fixture:shutdown-approval", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
     defer owner.close();
@@ -1285,9 +1281,8 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:cancellation-race",
+            .model_binding = .{ .model = "fixture:cancellation-race", .provider = provider.provider() },
             .task = "task",
-            .provider = provider.provider(),
         } },
     });
     defer owner.close();
@@ -1355,9 +1350,8 @@ test "known provider failure is one durable terminal Result" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:provider-failure",
+            .model_binding = .{ .model = "fixture:provider-failure", .provider = provider.provider() },
             .task = "task",
-            .provider = provider.provider(),
         } },
     });
     _ = try owner.drive();
@@ -1381,7 +1375,7 @@ test "known provider failure is one durable terminal Result" {
         .runtime = runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = provider.provider(),
+            .model_binding = .{ .model = "fixture:provider-failure", .provider = provider.provider() },
         } },
     });
     defer restored.close();
@@ -1439,9 +1433,8 @@ test "captured noncanonical tool call closes once after crash without redispatch
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:captured-tool-replay",
+            .model_binding = .{ .model = "fixture:captured-tool-replay", .provider = provider.provider() },
             .task = "task",
-            .provider = provider.provider(),
             .fault = .{ .context = &crash, .reached = CrashAfterCapture.reached },
         } },
     });
@@ -1456,7 +1449,7 @@ test "captured noncanonical tool call closes once after crash without redispatch
         .runtime = runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = provider.provider(),
+            .model_binding = .{ .model = "fixture:captured-tool-replay", .provider = provider.provider() },
         } },
     });
     defer restored.close();
@@ -1513,9 +1506,8 @@ test "provider candidate settlement rejects malformed framing without publishing
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:malformed-capture",
+            .model_binding = .{ .model = "fixture:malformed-capture", .provider = provider.provider() },
             .task = "task",
-            .provider = provider.provider(),
         } },
     });
     defer owner.close();
@@ -1583,9 +1575,8 @@ test "typed durable model failures share one failed Harness projection" {
             .runtime = runtime,
             .mode = .{ .create = .{
                 .workspace_path = ".",
-                .model = "fixture:model-failure-classification",
+                .model_binding = .{ .model = "fixture:model-failure-classification", .provider = provider.provider() },
                 .task = "task",
-                .provider = provider.provider(),
             } },
         });
         _ = try owner.drive();
@@ -1686,13 +1677,12 @@ test "built-in argument rejection becomes one durable terminal failure" {
             .runtime = runtime,
             .mode = .{ .create = .{
                 .workspace_path = ".",
-                .model = "fixture:built-in-byte-rejection",
+                .model_binding = .{ .model = "fixture:built-in-byte-rejection", .provider = provider.provider() },
                 .task = switch (index) {
                     0 => "reject oversized Bash bytes",
                     1 => "reject oversized patch bytes",
                     else => "reject a Bash NUL byte",
                 },
-                .provider = provider.provider(),
             } },
         });
         _ = try owner.drive();
@@ -1715,7 +1705,10 @@ test "built-in argument rejection becomes one durable terminal failure" {
 
         var restored = try Harness.open(.{
             .runtime = runtime,
-            .mode = .{ .restore = .{ .session_id = session_id, .provider = provider.provider() } },
+            .mode = .{ .restore = .{ .session_id = session_id, .model_binding = .{
+                .model = "fixture:built-in-byte-rejection",
+                .provider = provider.provider(),
+            } } },
         });
         _ = try restored.drive();
         const regenerated = try restored.drive();
@@ -1759,9 +1752,8 @@ test "input request fails terminally until the durable interaction layer exists"
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:input-request",
+            .model_binding = .{ .model = "fixture:input-request", .provider = provider.provider() },
             .task = "task",
-            .provider = provider.provider(),
         } },
     });
     _ = try owner.drive();
@@ -1803,7 +1795,7 @@ test "input request fails terminally until the durable interaction layer exists"
         .runtime = runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = provider.provider(),
+            .model_binding = .{ .model = "fixture:input-request", .provider = provider.provider() },
         } },
     });
     defer restored.close();
@@ -1897,9 +1889,8 @@ test "fresh Harness resumes after admitted Tool Result without replaying the too
         .permission_mode = .bypass,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:history-restart",
+            .model_binding = .{ .model = "fixture:history-restart", .provider = first_provider.provider() },
             .task = "run once",
-            .provider = first_provider.provider(),
         } },
     });
     _ = try owner.drive();
@@ -1924,7 +1915,7 @@ test "fresh Harness resumes after admitted Tool Result without replaying the too
         .permission_mode = .bypass,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = fresh_provider.provider(),
+            .model_binding = .{ .model = "fixture:history-restart", .provider = fresh_provider.provider() },
         } },
     });
     var finished: Progress = undefined;
@@ -1965,9 +1956,8 @@ test "recovered Tool Result returns before the next Provider dispatch" {
         .permission_mode = .bypass,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:tool-result-recovery",
+            .model_binding = .{ .model = "fixture:tool-result-recovery", .provider = first_provider.provider() },
             .task = "run once",
-            .provider = first_provider.provider(),
         } },
     });
     _ = try owner.drive();
@@ -1991,7 +1981,7 @@ test "recovered Tool Result returns before the next Provider dispatch" {
         .permission_mode = .bypass,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = fresh_provider.provider(),
+            .model_binding = .{ .model = "fixture:tool-result-recovery", .provider = fresh_provider.provider() },
         } },
     });
     defer restored.close();

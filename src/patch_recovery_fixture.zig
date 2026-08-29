@@ -49,9 +49,8 @@ fn start(io: std.Io, runtime: *harness.HostRuntime, mode: []const u8, workspace:
         .permission_mode = .bypass,
         .mode = .{ .create = .{
             .workspace_path = workspace,
-            .model = "fixture:patch-crash",
+            .model_binding = .{ .model = "fixture:patch-crash", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
             .fault = crash.hook(),
         } },
     });
@@ -99,7 +98,10 @@ fn resumeSession(
     };
     var owner = try harness.Harness.open(.{
         .runtime = runtime,
-        .mode = .{ .restore = .{ .session_id = session_id, .provider = fixture.provider() } },
+        .mode = .{ .restore = .{ .session_id = session_id, .model_binding = .{
+            .model = "fixture:patch-crash",
+            .provider = fixture.provider(),
+        } } },
     });
     defer owner.close();
     for (0..24) |_| {

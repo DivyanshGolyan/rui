@@ -21,9 +21,8 @@ pub fn main(init: std.process.Init) !void {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = model,
+            .model_binding = .{ .model = model, .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
             .fault = crash.hook(),
         } },
     });

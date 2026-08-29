@@ -102,7 +102,7 @@ onepage [--repo PATH] --model PROVIDER:MODEL TASK
 onepage --resume SESSION_ID
 ```
 
-Creating a session prints its stable identity before the first external effect. Resume restores the recorded repository binding, model selection, session, agent, task, and active branch; credentials remain external and must still be available to the relevant adapter. When a caller supplies a provider for continued execution, its expected model identity must exactly match the immutable recorded model before any provider dispatch or new durable Result. The caller cannot replace that model during resume. If the session lock is held, the command fails without opening a second owner. Repeating task text creates a new session and never implies resume.
+Creating a session prints its stable identity before the first external effect. Resume restores the recorded repository binding, model selection, session, agent, task, and active branch; credentials remain external and must still be available to the relevant adapter. Harness accepts a Provider only as part of a provider-neutral `ModelBinding` that also carries the exact immutable model identity. Create always requires that binding. Resume may omit it for read-only/local reconstruction, but any resumed external model work requires the binding and validates its identity before provider dispatch or a new durable Result. The caller cannot replace the recorded model. If the session lock is held, the command fails without opening a second owner. Repeating task text creates a new session and never implies resume.
 
 ## Workspace continuity
 

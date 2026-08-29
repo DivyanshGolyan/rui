@@ -68,9 +68,8 @@ test "Codex fake authorization and transport complete through the existing Harne
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "codex:test-model",
+            .model_binding = .{ .model = "codex:test-model", .provider = codex.provider() },
             .task = "task",
-            .provider = codex.provider(),
         } },
     });
     defer owner.close();
@@ -229,9 +228,8 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
             .runtime = runtime,
             .mode = .{ .create = .{
                 .workspace_path = ".",
-                .model = "codex:test-model",
+                .model_binding = .{ .model = "codex:test-model", .provider = codex.provider() },
                 .task = task,
-                .provider = codex.provider(),
             } },
         });
         const identified = try owner.drive();
@@ -250,7 +248,10 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
 
         var restored = try Harness.open(.{
             .runtime = runtime,
-            .mode = .{ .restore = .{ .session_id = session_id, .provider = codex.provider() } },
+            .mode = .{ .restore = .{ .session_id = session_id, .model_binding = .{
+                .model = "codex:test-model",
+                .provider = codex.provider(),
+            } } },
         });
         _ = try restored.drive();
         const reopened = try restored.drive();

@@ -138,8 +138,10 @@ pub fn main(init: std.process.Init) !void {
             .permission_mode = if (arguments.dangerously_bypass_permissions) .bypass else .ask,
             .mode = .{ .restore = .{
                 .session_id = session_id,
-                .provider = provider,
-                .expected_model = arguments.model,
+                .model_binding = if (provider) |value| .{
+                    .model = arguments.model.?,
+                    .provider = value,
+                } else null,
             } },
         });
         defer owner.close();
@@ -172,9 +174,8 @@ pub fn main(init: std.process.Init) !void {
             };
             try runCreate(init.io, runtime, arguments.dangerously_bypass_permissions, .{
                 .workspace_path = workspace_path,
-                .model = model,
+                .model_binding = .{ .model = model, .provider = codex.provider() },
                 .task = task,
-                .provider = codex.provider(),
             });
             return;
         }
@@ -201,9 +202,8 @@ pub fn main(init: std.process.Init) !void {
             };
             try runCreate(init.io, runtime, arguments.dangerously_bypass_permissions, .{
                 .workspace_path = workspace_path,
-                .model = model,
+                .model_binding = .{ .model = model, .provider = fixture.provider() },
                 .task = task,
-                .provider = fixture.provider(),
             });
             return;
         }
@@ -224,9 +224,8 @@ pub fn main(init: std.process.Init) !void {
             };
             try runCreate(init.io, runtime, arguments.dangerously_bypass_permissions, .{
                 .workspace_path = workspace_path,
-                .model = model,
+                .model_binding = .{ .model = model, .provider = fixture.provider() },
                 .task = task,
-                .provider = fixture.provider(),
             });
             return;
         }
@@ -243,9 +242,8 @@ pub fn main(init: std.process.Init) !void {
             };
             try runCreate(init.io, runtime, arguments.dangerously_bypass_permissions, .{
                 .workspace_path = workspace_path,
-                .model = model,
+                .model_binding = .{ .model = model, .provider = fixture.provider() },
                 .task = task,
-                .provider = fixture.provider(),
             });
             return;
         }
@@ -255,9 +253,8 @@ pub fn main(init: std.process.Init) !void {
         };
         try runCreate(init.io, runtime, arguments.dangerously_bypass_permissions, .{
             .workspace_path = workspace_path,
-            .model = model,
+            .model_binding = .{ .model = model, .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
         });
     }
 }
