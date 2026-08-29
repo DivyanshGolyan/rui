@@ -85,17 +85,21 @@ ordinary release checks use fake authorization and transport and make no network
 On failure it reports and preserves the disposable root so the bounded CLI diagnostic and durable state
 can be inspected; a successful run removes the root. Fake failures distinguish local refresh rejection,
 missing refresh authority, provider HTTP 401/403, model rejection, rate or quota rejection, and backend
-failure. The diagnostic admits only a closed source and a 64-byte provider `error.code` or `error.type`
-character class, plus the synthetic `model_not_supported` code derived from the exact bounded ChatGPT
-unsupported-model detail shape. It never retains the detail prose. Every received non-2xx response also
-retains its exact numeric HTTP status. The native transport reads ordinary content-length or chunked
+failure. The shared diagnostic admits only a generic source (`none`, `local_credentials`, or
+`provider`) and one bounded 64-byte opaque ASCII code. Shared protocol, Harness, and CLI code validate
+and preserve those bytes but never interpret adapter semantics. The Codex adapter privately defines stable
+`codex.refresh.<class>` and `codex.http.<class>.<decimal-status>` codes. The latter encodes the exact
+received non-2xx status while distinguishing authentication, authorization, model, rate, quota, backend,
+and general rejection classes. Provider `error.code`, `error.type`, and the exact bounded ChatGPT
+unsupported-model detail shape may inform that classification but are not retained. Detail prose is never
+retained. The native transport reads ordinary content-length or chunked
 diagnostic bodies through the response reader under
 the existing request timeout, retaining no body when it is malformed or exceeds 4,096 bytes.
 
 The live tracer selects `gpt-5.6-sol` as the supported V1 default without adding a model registry or
 catalog lookup. Callers may still provide another raw model. If that model receives the bounded ChatGPT
 unsupported-model response, one durable Attempt fails without an invisible retry as
-`model_unavailable (provider_model_not_found, status=400, code=model_not_supported)`.
+`model_unavailable (provider, code=codex.http.model.400)`.
 
 A single test-only loopback fixture drives the production native transport. It asserts the exact bounded
 request headers and JSON shape, a two-turn tool-result continuation, non-2xx classification without an
