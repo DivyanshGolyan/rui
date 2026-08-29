@@ -53,9 +53,12 @@ revocation failure cannot retain local authority.
 
 ## Retry and timeout behavior
 
-Every device, token, refresh, revoke, and model HTTP call has one 300-second whole-request deadline.
-The deadline interrupts the owned socket and joins the request task before return; it leaves no
-detached work.
+Every device, token, refresh, revoke, and model HTTP call has a whole-request deadline of at most 300
+seconds. During attended login, the device request, every poll, each interval sleep, and the token
+exchange also consume one monotonic 15-minute budget. Each HTTP call and sleep is capped to the
+smaller remaining limit. Reaching that overall deadline wins over a simultaneous authorization or
+token response. The HTTP deadline interrupts the owned socket and joins the request task before
+return; it leaves no detached work.
 
 OnePage does not retry a model request. Failures before request start and failures after the request
 may have started remain distinct. Device authorization polling is the only repeated protocol action:

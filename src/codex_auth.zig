@@ -8,6 +8,7 @@ pub const max_token_size = codex_provider.max_access_token_size;
 pub const max_response_size: usize = 64 * 1024;
 pub const max_device_id_size: usize = 512;
 pub const max_user_code_size: usize = 64;
+pub const request_timeout = std.Io.Duration.fromSeconds(300);
 
 pub const HttpResponse = struct {
     status: u16,
@@ -16,7 +17,14 @@ pub const HttpResponse = struct {
 
 pub const Http = struct {
     context: *anyopaque,
-    post_fn: *const fn (*anyopaque, []const u8, []const u8, []const u8, []u8) anyerror!HttpResponse,
+    post_fn: *const fn (*anyopaque, []const u8, []const u8, []const u8, []u8, std.Io.Duration) anyerror!HttpResponse,
+    timeout: std.Io.Duration = request_timeout,
+
+    pub fn withTimeout(self: Http, timeout: std.Io.Duration) Http {
+        var bounded = self;
+        bounded.timeout = if (timeout.nanoseconds < self.timeout.nanoseconds) timeout else self.timeout;
+        return bounded;
+    }
 
     pub fn post(
         self: Http,
@@ -25,7 +33,8 @@ pub const Http = struct {
         body: []const u8,
         out: []u8,
     ) !HttpResponse {
-        return self.post_fn(self.context, url, content_type, body, out);
+        if (self.timeout.nanoseconds <= 0) return error.HttpRequestTimedOut;
+        return self.post_fn(self.context, url, content_type, body, out, self.timeout);
     }
 };
 
@@ -435,7 +444,7 @@ test "refresh rejects a new access token without a trustworthy account claim" {
 }
 
 const ChangedAccountHttp = struct {
-    fn post(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8, out: []u8) anyerror!HttpResponse {
+    fn post(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8, out: []u8, _: std.Io.Duration) anyerror!HttpResponse {
         const body = "{\"access_token\":\"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0yIn19.sig\",\"refresh_token\":\"refresh\"}";
         @memcpy(out[0..body.len], body);
         return .{ .status = 200, .body = out[0..body.len] };
@@ -443,7 +452,7 @@ const ChangedAccountHttp = struct {
 };
 
 const MissingAccountHttp = struct {
-    fn post(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8, out: []u8) anyerror!HttpResponse {
+    fn post(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8, out: []u8, _: std.Io.Duration) anyerror!HttpResponse {
         const body = "{\"access_token\":\"e30.e30.sig\"}";
         @memcpy(out[0..body.len], body);
         return .{ .status = 200, .body = out[0..body.len] };
@@ -453,7 +462,7 @@ const MissingAccountHttp = struct {
 const FakeHttp = struct {
     calls: u8 = 0,
 
-    fn post(context: *anyopaque, url: []const u8, _: []const u8, _: []const u8, out: []u8) anyerror!HttpResponse {
+    fn post(context: *anyopaque, url: []const u8, _: []const u8, _: []const u8, out: []u8, _: std.Io.Duration) anyerror!HttpResponse {
         const self: *FakeHttp = @ptrCast(@alignCast(context));
         self.calls += 1;
         const body = if (std.mem.endsWith(u8, url, "/deviceauth/usercode"))

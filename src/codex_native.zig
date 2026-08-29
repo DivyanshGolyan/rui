@@ -12,7 +12,7 @@ const keychain_service = "OnePage Codex";
 const keychain_account = "chatgpt-subscription";
 const err_sec_success: i32 = 0;
 const err_sec_item_not_found: i32 = -25300;
-const transport_timeout = std.Io.Duration.fromSeconds(300);
+const transport_timeout = codex_auth.request_timeout;
 
 const SecKeychainItemRef = *anyopaque;
 extern "Security" fn SecKeychainFindGenericPassword(
@@ -130,7 +130,7 @@ pub const NativeHttp = struct {
     authorization_origin_override: ?[]const u8 = null,
 
     pub fn capability(self: *NativeHttp) codex_auth.Http {
-        return .{ .context = self, .post_fn = post };
+        return .{ .context = self, .post_fn = post, .timeout = self.timeout };
     }
 
     fn post(
@@ -139,6 +139,7 @@ pub const NativeHttp = struct {
         content_type: []const u8,
         body: []const u8,
         out: []u8,
+        timeout: std.Io.Duration,
     ) anyerror!codex_auth.HttpResponse {
         const self: *NativeHttp = @ptrCast(@alignCast(context));
         var rewritten_url: [512]u8 = undefined;
@@ -167,7 +168,7 @@ pub const NativeHttp = struct {
             &request_control,
             &completed_response,
         });
-        select.async(.timeout, waitHttpTimeout, .{ self.io, self.timeout, &request_control });
+        select.async(.timeout, waitHttpTimeout, .{ self.io, timeout, &request_control });
         const selected = try select.await();
         select.cancelDiscard();
         if (request_control.winnerValue(self.io) == .timed_out) return error.HttpRequestTimedOut;

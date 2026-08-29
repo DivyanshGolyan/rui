@@ -12,6 +12,65 @@ const session_store = @import("session.zig");
 
 const output_window_size = 4096;
 const max_permission_decision_line_size: usize = 64;
+const codex_login_timeout = std.Io.Duration.fromSeconds(15 * 60);
+
+const LoginClock = struct {
+    context: *anyopaque,
+    now_fn: *const fn (*anyopaque) std.Io.Timestamp,
+    sleep_fn: *const fn (*anyopaque, std.Io.Duration) anyerror!void,
+
+    fn now(self: LoginClock) std.Io.Timestamp {
+        return self.now_fn(self.context);
+    }
+
+    fn sleep(self: LoginClock, duration: std.Io.Duration) !void {
+        try self.sleep_fn(self.context, duration);
+    }
+};
+
+const NativeLoginClock = struct {
+    io: std.Io,
+
+    fn capability(self: *NativeLoginClock) LoginClock {
+        return .{ .context = self, .now_fn = now, .sleep_fn = sleep };
+    }
+
+    fn now(context: *anyopaque) std.Io.Timestamp {
+        const self: *NativeLoginClock = @ptrCast(@alignCast(context));
+        return std.Io.Timestamp.now(self.io, .awake);
+    }
+
+    fn sleep(context: *anyopaque, duration: std.Io.Duration) anyerror!void {
+        const self: *NativeLoginClock = @ptrCast(@alignCast(context));
+        try std.Io.sleep(self.io, duration, .awake);
+    }
+};
+
+const LoginDeadline = struct {
+    at: std.Io.Timestamp,
+
+    fn start(clock: LoginClock, budget: std.Io.Duration) LoginDeadline {
+        return .{ .at = clock.now().addDuration(budget) };
+    }
+
+    fn remaining(self: LoginDeadline, clock: LoginClock) !std.Io.Duration {
+        const now = clock.now();
+        if (now.nanoseconds >= self.at.nanoseconds) return error.DeviceAuthorizationTimedOut;
+        return now.durationTo(self.at);
+    }
+
+    fn sleep(self: LoginDeadline, clock: LoginClock, requested: std.Io.Duration) !void {
+        const available = try self.remaining(clock);
+        const bounded = if (requested.nanoseconds < available.nanoseconds) requested else available;
+        try clock.sleep(bounded);
+        _ = try self.remaining(clock);
+    }
+
+    fn callError(self: LoginDeadline, clock: LoginClock, err: anyerror) anyerror {
+        if (clock.now().nanoseconds >= self.at.nanoseconds) return error.DeviceAuthorizationTimedOut;
+        return err;
+    }
+};
 
 const Arguments = struct {
     state_path: ?[]const u8 = null,
@@ -403,7 +462,10 @@ fn loginCodex(
     http: codex_auth.Http,
     store: codex_auth.Store,
 ) !void {
-    const device = try codex_auth.requestDeviceCode(http);
+    var native_clock: NativeLoginClock = .{ .io = io };
+    const clock = native_clock.capability();
+    const deadline = LoginDeadline.start(clock, codex_login_timeout);
+    const device = try requestLoginDevice(clock, deadline, http);
     var prompt: [512]u8 = undefined;
     const message = try std.fmt.bufPrint(
         &prompt,
@@ -420,33 +482,52 @@ fn loginCodex(
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
-    const deadline = std.Io.Clock.Timestamp.now(io, .awake).addDuration(.{
-        .raw = std.Io.Duration.fromSeconds(15 * 60),
-        .clock = .awake,
-    });
+    try completeCodexLogin(clock, deadline, http, store, &device);
+    try std.Io.File.stdout().writeStreamingAll(io, "Codex authorization saved in macOS Keychain.\n");
+}
+
+fn requestLoginDevice(clock: LoginClock, deadline: LoginDeadline, http: codex_auth.Http) !codex_auth.DeviceCode {
+    const budget = try deadline.remaining(clock);
+    const device = codex_auth.requestDeviceCode(http.withTimeout(budget)) catch |err|
+        return deadline.callError(clock, err);
+    _ = try deadline.remaining(clock);
+    return device;
+}
+
+fn completeCodexLogin(
+    clock: LoginClock,
+    deadline: LoginDeadline,
+    http: codex_auth.Http,
+    store: codex_auth.Store,
+    device: *const codex_auth.DeviceCode,
+) !void {
     var poll_seconds = device.interval_seconds;
-    while (std.Io.Clock.Timestamp.now(io, .awake).compare(.lt, deadline)) {
-        switch (try codex_auth.pollDeviceCode(http, &device)) {
-            .pending => try std.Io.sleep(io, std.Io.Duration.fromSeconds(poll_seconds), .awake),
+    while (true) {
+        const poll_budget = try deadline.remaining(clock);
+        const poll = codex_auth.pollDeviceCode(http.withTimeout(poll_budget), device) catch |err|
+            return deadline.callError(clock, err);
+        switch (poll) {
+            .pending => try deadline.sleep(clock, std.Io.Duration.fromSeconds(poll_seconds)),
             .slow_down => {
                 poll_seconds = @min(@as(u16, 60), poll_seconds + 5);
-                try std.Io.sleep(io, std.Io.Duration.fromSeconds(poll_seconds), .awake);
+                try deadline.sleep(clock, std.Io.Duration.fromSeconds(poll_seconds));
             },
             .authorization => |authorization| {
                 var authorization_value = authorization;
                 defer authorization_value.scrub();
-                var tokens = try codex_auth.exchangeCode(http, &authorization_value);
+                const exchange_budget = try deadline.remaining(clock);
+                var tokens = codex_auth.exchangeCode(http.withTimeout(exchange_budget), &authorization_value) catch |err|
+                    return deadline.callError(clock, err);
                 defer tokens.scrub();
+                _ = try deadline.remaining(clock);
                 var stored: [3 * codex_auth.max_token_size + 1024]u8 = undefined;
                 defer std.crypto.secureZero(u8, &stored);
                 const record = try codex_auth.encodeStored(&tokens, &stored);
                 try store.save(record);
-                try std.Io.File.stdout().writeStreamingAll(io, "Codex authorization saved in macOS Keychain.\n");
                 return;
             },
         }
     }
-    return error.DeviceAuthorizationTimedOut;
 }
 
 fn logoutCodex(http: codex_auth.Http, store: codex_auth.Store) !void {
@@ -676,6 +757,213 @@ test "CLI failure rendering preserves the bounded typed cause" {
     try std.testing.expect(std.mem.indexOf(u8, model_line, "using Codex with a ChatGPT account") == null);
 }
 
+test "Codex login caps a pending poll interval to the overall deadline" {
+    var clock_fixture: FakeLoginClock = .{};
+    const clock = clock_fixture.capability();
+    const deadline = LoginDeadline.start(clock, std.Io.Duration.fromSeconds(10));
+    clock_fixture.now = std.Io.Timestamp.fromNanoseconds(9 * std.time.ns_per_s);
+    var http_fixture: LoginHttp = .{ .clock = &clock_fixture, .poll = .pending };
+    var store_fixture: LoginStore = .{};
+    var device = loginDevice(5);
+
+    try std.testing.expectError(
+        error.DeviceAuthorizationTimedOut,
+        completeCodexLogin(clock, deadline, http_fixture.capability(), store_fixture.capability(), &device),
+    );
+
+    try std.testing.expectEqual(@as(u8, 1), http_fixture.poll_calls);
+    try std.testing.expectEqual(std.time.ns_per_s, http_fixture.poll_budget.nanoseconds);
+    try std.testing.expectEqual(std.time.ns_per_s, clock_fixture.slept.nanoseconds);
+    try std.testing.expectEqual(@as(u8, 0), http_fixture.exchange_calls);
+    try std.testing.expectEqual(@as(u8, 0), store_fixture.save_calls);
+}
+
+test "Codex login rejects authorization observed at the overall deadline" {
+    var clock_fixture: FakeLoginClock = .{};
+    const clock = clock_fixture.capability();
+    const deadline = LoginDeadline.start(clock, std.Io.Duration.fromSeconds(10));
+    clock_fixture.now = std.Io.Timestamp.fromNanoseconds(9 * std.time.ns_per_s);
+    var http_fixture: LoginHttp = .{
+        .clock = &clock_fixture,
+        .poll = .authorization,
+        .poll_advance = std.Io.Duration.fromSeconds(1),
+    };
+    var store_fixture: LoginStore = .{};
+    var device = loginDevice(5);
+
+    try std.testing.expectError(
+        error.DeviceAuthorizationTimedOut,
+        completeCodexLogin(clock, deadline, http_fixture.capability(), store_fixture.capability(), &device),
+    );
+
+    try std.testing.expectEqual(std.time.ns_per_s, http_fixture.poll_budget.nanoseconds);
+    try std.testing.expectEqual(@as(u8, 0), http_fixture.exchange_calls);
+    try std.testing.expectEqual(@as(u8, 0), store_fixture.save_calls);
+}
+
+test "Codex login caps token exchange to its remaining overall budget" {
+    var clock_fixture: FakeLoginClock = .{};
+    const clock = clock_fixture.capability();
+    const deadline = LoginDeadline.start(clock, std.Io.Duration.fromSeconds(10));
+    clock_fixture.now = std.Io.Timestamp.fromNanoseconds(7 * std.time.ns_per_s);
+    var http_fixture: LoginHttp = .{
+        .clock = &clock_fixture,
+        .poll = .authorization,
+        .poll_advance = std.Io.Duration.fromSeconds(1),
+        .exchange_advance = std.Io.Duration.fromSeconds(2),
+    };
+    var store_fixture: LoginStore = .{};
+    var device = loginDevice(5);
+
+    try std.testing.expectError(
+        error.DeviceAuthorizationTimedOut,
+        completeCodexLogin(clock, deadline, http_fixture.capability(), store_fixture.capability(), &device),
+    );
+
+    try std.testing.expectEqual(@as(u8, 1), http_fixture.exchange_calls);
+    try std.testing.expectEqual(2 * std.time.ns_per_s, http_fixture.exchange_budget.nanoseconds);
+    try std.testing.expectEqual(@as(u8, 0), store_fixture.save_calls);
+}
+
+test "Codex login caps the initial device request to the overall deadline" {
+    var clock_fixture: FakeLoginClock = .{};
+    const clock = clock_fixture.capability();
+    const deadline = LoginDeadline.start(clock, std.Io.Duration.fromSeconds(10));
+    clock_fixture.now = std.Io.Timestamp.fromNanoseconds(9 * std.time.ns_per_s);
+    var http_fixture: LoginHttp = .{
+        .clock = &clock_fixture,
+        .device_advance = std.Io.Duration.fromSeconds(1),
+    };
+
+    try std.testing.expectError(
+        error.DeviceAuthorizationTimedOut,
+        requestLoginDevice(clock, deadline, http_fixture.capability()),
+    );
+
+    try std.testing.expectEqual(@as(u8, 1), http_fixture.device_calls);
+    try std.testing.expectEqual(std.time.ns_per_s, http_fixture.device_budget.nanoseconds);
+    try std.testing.expectEqual(@as(u8, 0), http_fixture.poll_calls);
+
+    var long_clock_fixture: FakeLoginClock = .{};
+    const long_clock = long_clock_fixture.capability();
+    const long_deadline = LoginDeadline.start(long_clock, codex_login_timeout);
+    var long_http_fixture: LoginHttp = .{ .clock = &long_clock_fixture };
+    _ = try requestLoginDevice(long_clock, long_deadline, long_http_fixture.capability());
+    try std.testing.expectEqual(
+        codex_auth.request_timeout.nanoseconds,
+        long_http_fixture.device_budget.nanoseconds,
+    );
+}
+
+const FakeLoginClock = struct {
+    now: std.Io.Timestamp = .zero,
+    slept: std.Io.Duration = .zero,
+
+    fn capability(self: *FakeLoginClock) LoginClock {
+        return .{ .context = self, .now_fn = read, .sleep_fn = sleep };
+    }
+
+    fn read(context: *anyopaque) std.Io.Timestamp {
+        const self: *FakeLoginClock = @ptrCast(@alignCast(context));
+        return self.now;
+    }
+
+    fn sleep(context: *anyopaque, duration: std.Io.Duration) anyerror!void {
+        const self: *FakeLoginClock = @ptrCast(@alignCast(context));
+        self.slept.nanoseconds += duration.nanoseconds;
+        self.now = self.now.addDuration(duration);
+    }
+};
+
+const LoginHttp = struct {
+    const Poll = enum { pending, authorization };
+
+    clock: *FakeLoginClock,
+    poll: Poll = .pending,
+    device_advance: std.Io.Duration = .zero,
+    poll_advance: std.Io.Duration = .zero,
+    exchange_advance: std.Io.Duration = .zero,
+    device_budget: std.Io.Duration = .zero,
+    poll_budget: std.Io.Duration = .zero,
+    exchange_budget: std.Io.Duration = .zero,
+    device_calls: u8 = 0,
+    poll_calls: u8 = 0,
+    exchange_calls: u8 = 0,
+
+    fn capability(self: *LoginHttp) codex_auth.Http {
+        return .{ .context = self, .post_fn = post };
+    }
+
+    fn post(
+        context: *anyopaque,
+        url: []const u8,
+        _: []const u8,
+        _: []const u8,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) anyerror!codex_auth.HttpResponse {
+        const self: *LoginHttp = @ptrCast(@alignCast(context));
+        const body = if (std.mem.endsWith(u8, url, "/deviceauth/usercode")) body: {
+            self.device_calls += 1;
+            self.device_budget = timeout;
+            self.clock.now = self.clock.now.addDuration(self.device_advance);
+            break :body "{\"device_auth_id\":\"device\",\"user_code\":\"CODE\",\"interval\":5}";
+        } else if (std.mem.endsWith(u8, url, "/deviceauth/token")) body: {
+            self.poll_calls += 1;
+            self.poll_budget = timeout;
+            self.clock.now = self.clock.now.addDuration(self.poll_advance);
+            break :body switch (self.poll) {
+                .pending => "{\"error\":\"deviceauth_authorization_pending\"}",
+                .authorization => "{\"authorization_code\":\"code\",\"code_verifier\":\"verifier\"}",
+            };
+        } else if (std.mem.endsWith(u8, url, "/oauth/token")) body: {
+            self.exchange_calls += 1;
+            self.exchange_budget = timeout;
+            self.clock.now = self.clock.now.addDuration(self.exchange_advance);
+            break :body "{\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"id_token\":\"id\",\"account_id\":\"account\"}";
+        } else return error.UnexpectedLoginUrl;
+        @memcpy(out[0..body.len], body);
+        return .{ .status = 200, .body = out[0..body.len] };
+    }
+};
+
+const LoginStore = struct {
+    save_calls: u8 = 0,
+
+    fn capability(self: *LoginStore) codex_auth.Store {
+        return .{
+            .context = self,
+            .load_fn = load,
+            .save_fn = save,
+            .delete_fn = delete,
+        };
+    }
+
+    fn load(_: *anyopaque, _: []u8) anyerror!?[]const u8 {
+        return error.UnexpectedLoad;
+    }
+
+    fn save(context: *anyopaque, _: []const u8) anyerror!void {
+        const self: *LoginStore = @ptrCast(@alignCast(context));
+        self.save_calls += 1;
+    }
+
+    fn delete(_: *anyopaque) anyerror!void {
+        return error.UnexpectedDelete;
+    }
+};
+
+fn loginDevice(interval_seconds: u16) codex_auth.DeviceCode {
+    var device: codex_auth.DeviceCode = .{
+        .device_id_length = "device".len,
+        .user_code_length = "CODE".len,
+        .interval_seconds = interval_seconds,
+    };
+    @memcpy(device.device_id[0.."device".len], "device");
+    @memcpy(device.user_code[0.."CODE".len], "CODE");
+    return device;
+}
+
 test "Codex logout deletes a malformed stored credential without remote revocation" {
     var store_fixture: LogoutStore = .{ .record = "{truncated" };
     var http_fixture: LogoutHttp = .{};
@@ -752,6 +1040,7 @@ const LogoutHttp = struct {
         _: []const u8,
         _: []const u8,
         _: []u8,
+        _: std.Io.Duration,
     ) anyerror!codex_auth.HttpResponse {
         const self: *LogoutHttp = @ptrCast(@alignCast(context));
         self.calls += 1;
