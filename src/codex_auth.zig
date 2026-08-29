@@ -299,13 +299,12 @@ fn parseTokensWithFallback(bytes: []const u8, fallback: ?*const Tokens) !Tokens 
         if (fallback) |tokens| tokens.idToken() else return error.MalformedTokenResponse;
     const stored_account = string(object.get("account_id")) orelse "";
     var decoded_account: [codex_provider.max_account_id_size]u8 = undefined;
-    const account = if (stored_account.len != 0)
+    const account = if (fallback != null)
+        try accountIdFromAccessToken(access, &decoded_account)
+    else if (stored_account.len != 0)
         stored_account
     else
-        accountIdFromAccessToken(access, &decoded_account) catch if (fallback) |tokens|
-            tokens.accountId()
-        else
-            return error.MalformedAccessToken;
+        try accountIdFromAccessToken(access, &decoded_account);
     if (access.len == 0 or access.len > max_token_size or refresh_token.len > max_token_size or
         id_token.len == 0 or id_token.len > max_token_size or account.len == 0 or
         account.len > codex_provider.max_account_id_size)
@@ -399,7 +398,10 @@ test "device authorization and refresh use the official subscription protocol" {
     try std.testing.expectEqualStrings("acct-1", tokens.accountId());
     var renewed = try refresh(http, &tokens);
     defer renewed.scrub();
-    try std.testing.expectEqualStrings("new-access", renewed.accessToken());
+    try std.testing.expectEqualStrings(
+        "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0xIn19.sig",
+        renewed.accessToken(),
+    );
     try std.testing.expectEqualStrings("refresh", renewed.refreshToken());
     var stored: [3 * max_token_size + 1024]u8 = undefined;
     var reopened = try decodeStored(try encodeStored(&renewed, &stored));
@@ -421,9 +423,28 @@ test "account binding comes from the nested access-token auth claim" {
     try std.testing.expectEqualStrings("acct-live", tokens.accountId());
 }
 
+test "refresh rejects a new access token without a trustworthy account claim" {
+    var existing = try parseTokens(
+        "{\"access_token\":\"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0xIn19.sig\"," ++
+            "\"refresh_token\":\"refresh\",\"id_token\":\"e30.e30.sig\"}",
+    );
+    defer existing.scrub();
+    var missing = MissingAccountHttp{};
+    const http: Http = .{ .context = &missing, .post_fn = MissingAccountHttp.post };
+    try std.testing.expectError(error.MalformedAccessToken, refresh(http, &existing));
+}
+
 const ChangedAccountHttp = struct {
     fn post(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8, out: []u8) anyerror!HttpResponse {
         const body = "{\"access_token\":\"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0yIn19.sig\",\"refresh_token\":\"refresh\"}";
+        @memcpy(out[0..body.len], body);
+        return .{ .status = 200, .body = out[0..body.len] };
+    }
+};
+
+const MissingAccountHttp = struct {
+    fn post(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8, out: []u8) anyerror!HttpResponse {
+        const body = "{\"access_token\":\"e30.e30.sig\"}";
         @memcpy(out[0..body.len], body);
         return .{ .status = 200, .body = out[0..body.len] };
     }
@@ -444,7 +465,7 @@ const FakeHttp = struct {
         else if (std.mem.endsWith(u8, url, "/oauth/token") and self.calls == 4)
             "{\"access_token\":\"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0xIn19.sig\",\"refresh_token\":\"refresh\",\"id_token\":\"e30.e30.sig\"}"
         else
-            "{\"access_token\":\"new-access\"}";
+            "{\"access_token\":\"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0xIn19.sig\"}";
         if (body.len > out.len) return error.ResponseTooLarge;
         @memcpy(out[0..body.len], body);
         return .{ .status = if (self.calls == 2) 403 else 200, .body = out[0..body.len] };
