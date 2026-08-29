@@ -61,6 +61,9 @@ deferred explicitly.
 
 - Give every queue, payload, read, record, retry count, output tail, recovery scan, and `drive` quantum
   an explicit bound.
+- For every limit, name the distinct memory, storage, work, time, or semantic-cardinality resource it
+  bounds. If another enforced limit strictly dominates it and it adds no independent guarantee, remove
+  the redundant limit instead of choosing a larger threshold.
 - Bound workflow source, arguments, Job count, blocked set, visible Results, JavaScript heap and stack,
   native bridge arena, protocol bytes, microtasks, diagnostics, evaluation time, and cumulative replay.
   Destroy the evaluator at every Job barrier; never retain a Promise resolver across durable waits.

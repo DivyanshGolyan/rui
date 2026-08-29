@@ -12,7 +12,6 @@ pub const max_account_id_size: usize = 128;
 /// JSON string escaping can expand one decoded byte to six wire bytes.
 pub const max_sse_frame_size: usize = 6 * model_protocol.max_response_size + 8192;
 pub const max_total_sse_bytes: usize = 4 * max_sse_frame_size;
-pub const max_sse_event_count: usize = 128;
 pub const request_window_size: usize = model_operation.request_window_size;
 
 pub const Credential = struct {
@@ -295,7 +294,6 @@ pub const Capture = struct {
     malformed: bool = false,
     resource_exceeded: bool = false,
     total_sse_bytes: usize = 0,
-    event_count: u16 = 0,
 
     pub fn requestSink(self: *Capture) ByteSink {
         return .{ .context = self, .write_fn = discardRequestBytes };
@@ -325,10 +323,6 @@ pub const Capture = struct {
             self.frame_length += count;
             remaining = remaining[count..];
             while (frameBoundary(self.frame[0..self.frame_length])) |boundary| {
-                if (self.event_count == max_sse_event_count) {
-                    return self.exceeded(error.TooManySseEvents);
-                }
-                self.event_count += 1;
                 try self.consumeFrame(self.frame[0..boundary.end]);
                 const consumed = boundary.end + boundary.length;
                 std.mem.copyForwards(u8, self.frame[0 .. self.frame_length - consumed], self.frame[consumed..self.frame_length]);
@@ -1560,18 +1554,38 @@ test "wire and stream bounds are exact" {
     var total_output: TestCandidate = .{};
     var total = total_output.capture();
     var ignored: [max_sse_frame_size]u8 = @splat('x');
-    const base = max_total_sse_bytes / max_sse_event_count;
-    const extra = max_total_sse_bytes % max_sse_event_count;
-    for (0..max_sse_event_count) |index| {
-        const length = base + @intFromBool(index < extra);
-        ignored[length - 2] = '\n';
-        ignored[length - 1] = '\n';
-        try total.appendSse(ignored[0..length]);
-        ignored[length - 2] = 'x';
-        ignored[length - 1] = 'x';
+    ignored[ignored.len - 2] = '\n';
+    ignored[ignored.len - 1] = '\n';
+    for (0..max_total_sse_bytes / max_sse_frame_size) |_| {
+        try total.appendSse(&ignored);
     }
     try std.testing.expectEqual(max_total_sse_bytes, total.total_sse_bytes);
     try std.testing.expectError(error.SseStreamTooLarge, total.appendSse("x"));
+}
+
+test "many small reasoning and lifecycle events remain bounded by total wire bytes" {
+    const reasoning =
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"x\"}\n\n";
+    const lifecycle =
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\"}}\n\n";
+    var output: TestCandidate = .{};
+    var capture = output.capture();
+    for (0..256) |index| {
+        try capture.appendSse(if (index % 2 == 0) reasoning else lifecycle);
+    }
+    try capture.appendSse(
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n\n" ++
+            "data: {\"type\":\"response.completed\"}\n\n",
+    );
+    capture.finishSse();
+    try std.testing.expect(capture.total_sse_bytes < max_total_sse_bytes);
+    try std.testing.expectEqual(model_operation.DispatchOutcome.candidate, try capture.publish());
+    var scratch: model_protocol.ValidationScratch = .{};
+    const parsed = try model_protocol.decode(&scratch, output.bytes[0..output.length]);
+    try std.testing.expectEqualStrings(
+        "done",
+        output.bytes[parsed.text_offset..][0..parsed.text_length],
+    );
 }
 
 test "duplicate response objects are malformed even without nested status" {

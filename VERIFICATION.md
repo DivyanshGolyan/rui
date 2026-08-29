@@ -107,7 +107,8 @@ tools and omits `input_request` until issue #38 supplies durable admission, a tw
 invisible retry, and immediate return after the first terminal SSE event even if the response body remains
 open. Its rejection cases cover a diagnostic delivered after the response head in chunked encoding and
 oversized, malformed, or stalled bodies that preserve status without retaining content. Semantic capture
-fixtures separately prove that failed, cancelled, or incomplete terminal status
+fixtures separately prove that more than 128 ordinary reasoning and lifecycle events remain valid below
+the total-byte bound, that the total-byte bound is exact, and that failed, cancelled, or incomplete terminal status
 overrides partial candidate output. The loopback fixture does not validate public backend acceptance of
 OnePage's truthful `originator`; that remains an opt-in live compatibility question rather than a hermetic
 CI assertion.

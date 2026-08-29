@@ -12,7 +12,6 @@ The issue #11 adapter now has the following capacity-one bounds. These are class
 | Canonical decoded candidate | compile-time source bound | 98,372 bytes |
 | SSE wire frame | compile-time source bound | 598,424 bytes |
 | Total SSE response | compile-time source bound | 2,393,696 bytes cumulatively; not retained |
-| SSE event count | compile-time source bound | 128 events |
 | JSON parser | compile-time source bound | one in-place cursor, depth 32; no payload-sized arena |
 | HTTP response transfer window | compile-time source bound | 64 bytes on the Codex success path |
 | HTTP rejection diagnostic body | compile-time source bound | 4,097 bytes read, at most 4,096 accepted |
@@ -22,7 +21,7 @@ The issue #11 adapter now has the following capacity-one bounds. These are class
 | Async task stack reservation | Zig 0.16 source-derived | 4 MiB virtual minimum per Kqueue task; resident pages unmeasured |
 | Retained connection state | implementation observation | zero idle Codex connections; each request uses `keep_alive = false` and deinitializes its client |
 
-The adapter compacts SSE `data:` lines in its one frame, decodes JSON strings in place with a bounded non-allocating cursor, and writes the provider-neutral candidate directly to Host-owned provisional storage after structural validation. It retains neither a JSON DOM, a nested `input_request` arena, a complete canonical result buffer, nor a second payload-sized SSE copy. The wire-frame bound deliberately covers six-byte JSON escape amplification at the maximum decoded candidate size; total-stream and event-count bounds separately limit cumulative work.
+The adapter compacts SSE `data:` lines in its one frame, decodes JSON strings in place with a bounded non-allocating cursor, and writes the provider-neutral candidate directly to Host-owned provisional storage after structural validation. It retains neither a JSON DOM, a nested `input_request` arena, a complete canonical result buffer, nor a second payload-sized SSE copy. The wire-frame bound deliberately covers six-byte JSON escape amplification at the maximum decoded candidate size. The total-stream bound limits cumulative parser and transport work, and the whole-call deadline limits elapsed time. A separate event count would add no independent resource guarantee because each event already consumes the byte budget.
 
 No live provider call was made for this update, and no real credential was read. Process RSS, physical footprint, touched async-stack pages, TLS handshake peak, allocator live bytes, and actual per-socket queued memory remain unmeasured for the capacity-one live path. The source and OS figures above are bounds or configuration evidence, not a measured whole-process slope. A later opt-in run must report those observations before this document can replace the existing planning estimate with a measured capacity-one result.
 

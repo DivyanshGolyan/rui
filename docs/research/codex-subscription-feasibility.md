@@ -75,7 +75,6 @@ and stays within the 15-minute attended deadline.
 | Canonical response | 98,372 bytes |
 | One SSE wire frame | 598,424 bytes |
 | Total SSE bytes per dispatch | 2,393,696 bytes |
-| SSE events per dispatch | 128 |
 | JSON nesting | 32 levels |
 | Rejection body accepted for diagnostics | 4,096 bytes |
 | Durable opaque diagnostic code | 64 bytes |
@@ -83,6 +82,15 @@ and stays within the 15-minute attended deadline.
 The adapter compacts one SSE frame in place and uses a bounded non-allocating two-pass cursor. It does
 not retain a payload copy, JSON DOM arena, or complete canonical result buffer. The first valid
 terminal ends the logical response, and later bytes are ignored independently of HTTP chunking.
+
+Each retained limit owns a distinct resource. The canonical response bounds decoded semantic content
+and provisional storage. The frame bounds resident parser memory and worst-case JSON escape expansion.
+Total SSE bytes bound cumulative parser and transport work, while the whole-call deadline independently
+bounds elapsed time. JSON depth and object-member limits bound the cursor's fixed stack and duplicate-key
+storage. Tool, choice, field, and argument counts or sizes bound semantic cardinality in the model
+contract. The dedicated draft-entry count bounds startup cleanup work independently of the one live
+writer. There is no event-count limit: every event consumes the total byte budget, so a separate count
+would reject valid fine-grained streams without bounding another resource.
 
 Durable failure diagnostics keep the shared source generic (`local_credentials` or `provider`). The
 opaque code is Codex-owned. Stable codes distinguish refresh rejection, missing refresh authority,
