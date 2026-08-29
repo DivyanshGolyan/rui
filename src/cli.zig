@@ -118,7 +118,6 @@ pub fn main(init: std.process.Init) !void {
         };
         var authorization: codex_native.NativeAuthorization = .{
             .io = init.io,
-            .allocator = allocator,
             .store = keychain.capability(),
             .http = native_http.capability(),
         };
@@ -163,7 +162,6 @@ pub fn main(init: std.process.Init) !void {
             }
             var authorization: codex_native.NativeAuthorization = .{
                 .io = init.io,
-                .allocator = allocator,
                 .store = keychain.capability(),
                 .http = native_http.capability(),
             };

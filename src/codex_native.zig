@@ -244,7 +244,6 @@ pub const NativeHttp = struct {
 
 pub const NativeAuthorization = struct {
     io: std.Io,
-    allocator: std.mem.Allocator,
     store: codex_auth.Store,
     http: codex_auth.Http,
 
