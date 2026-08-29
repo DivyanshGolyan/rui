@@ -74,6 +74,9 @@ pub const Writer = struct {
         const final_name = blobName(self.reference, &final_name_buffer) catch return;
         var temp_name_buffer: [25]u8 = undefined;
         const temp_name = std.fmt.bufPrint(&temp_name_buffer, "{s}.tmp", .{final_name}) catch return;
+        // A draft is never readable as evidence: only the final rename publishes it.
+        // Cleanup is therefore best-effort here; the bounded startup sweep removes
+        // crash-left or deletion-failed `.tmp` files before the store is served.
         self.dir.deleteFile(io, temp_name) catch {};
     }
 };
