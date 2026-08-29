@@ -127,6 +127,7 @@ pub const NativeHttp = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     timeout: std.Io.Duration = transport_timeout,
+    authorization_origin_override: ?[]const u8 = null,
 
     pub fn capability(self: *NativeHttp) codex_auth.Http {
         return .{ .context = self, .post_fn = post };
@@ -140,19 +141,42 @@ pub const NativeHttp = struct {
         out: []u8,
     ) anyerror!codex_auth.HttpResponse {
         const self: *NativeHttp = @ptrCast(@alignCast(context));
+        var rewritten_url: [512]u8 = undefined;
+        const request_url = if (self.authorization_origin_override) |origin| blk: {
+            if (!std.mem.startsWith(u8, url, codex_auth.issuer)) return error.UnexpectedAuthorizationOrigin;
+            break :blk try std.fmt.bufPrint(
+                &rewritten_url,
+                "{s}{s}",
+                .{ origin, url[codex_auth.issuer.len..] },
+            );
+        } else url;
         const Result = union(enum) {
             request: anyerror!codex_auth.HttpResponse,
             timeout,
         };
+        var request_control: RequestControl = .{};
+        var completed_response: ?codex_auth.HttpResponse = null;
         var results: [2]Result = undefined;
         var select = std.Io.Select(Result).init(self.io, &results);
-        select.async(.request, postRequest, .{ self, url, content_type, body, out });
-        select.async(.timeout, waitHttpTimeout, .{ self.io, self.timeout });
+        select.async(.request, postRequest, .{
+            self,
+            request_url,
+            content_type,
+            body,
+            out,
+            &request_control,
+            &completed_response,
+        });
+        select.async(.timeout, waitHttpTimeout, .{ self.io, self.timeout, &request_control });
         const selected = try select.await();
         select.cancelDiscard();
+        if (request_control.winnerValue(self.io) == .timed_out) return error.HttpRequestTimedOut;
         return switch (selected) {
             .request => |result| result,
-            .timeout => error.HttpRequestTimedOut,
+            .timeout => if (request_control.winnerValue(self.io) == .terminal)
+                completed_response orelse error.IncompleteHttpResponse
+            else
+                error.HttpRequestTimedOut,
         };
     }
 
@@ -162,22 +186,53 @@ pub const NativeHttp = struct {
         content_type: []const u8,
         body: []const u8,
         out: []u8,
+        request_control: *RequestControl,
+        completed_response: *?codex_auth.HttpResponse,
     ) !codex_auth.HttpResponse {
         var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
         defer client.deinit();
-        var writer = std.Io.Writer.fixed(out);
-        const result = try client.fetch(.{
-            .location = .{ .url = url },
-            .method = .POST,
-            .payload = body,
-            .response_writer = &writer,
-            .headers = .{ .content_type = .{ .override = content_type } },
+        const uri = try std.Uri.parse(url);
+        const headers = [_]std.http.Header{.{ .name = "content-type", .value = content_type }};
+        var request = try client.request(.POST, uri, .{
+            .redirect_behavior = .unhandled,
+            .keep_alive = false,
+            .extra_headers = &headers,
         });
-        return .{ .status = @intFromEnum(result.status), .body = writer.buffered() };
+        defer request.deinit();
+        request_control.publish(self.io, request.connection.?.stream_reader.stream);
+        defer request_control.clear(self.io);
+        request.transfer_encoding = .{ .content_length = body.len };
+        var request_body = try request.sendBodyUnflushed(&.{});
+        try request_body.writer.writeAll(body);
+        try request_body.end();
+        try request.connection.?.flush();
+        var redirect_buffer: [1024]u8 = undefined;
+        var response = try request.receiveHead(&redirect_buffer);
+        var transfer_buffer: [1024]u8 = undefined;
+        const reader = response.reader(&transfer_buffer);
+        var length: usize = 0;
+        while (true) {
+            const chunk = reader.peekGreedy(1) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            if (chunk.len > out.len - length) return error.HttpResponseTooLarge;
+            @memcpy(out[length..][0..chunk.len], chunk);
+            length += chunk.len;
+            reader.toss(chunk.len);
+        }
+        const result: codex_auth.HttpResponse = .{
+            .status = @intFromEnum(response.head.status),
+            .body = out[0..length],
+        };
+        completed_response.* = result;
+        request_control.observeTerminal(self.io);
+        return result;
     }
 
-    fn waitHttpTimeout(io: std.Io, duration: std.Io.Duration) void {
-        std.Io.sleep(io, duration, .awake) catch {};
+    fn waitHttpTimeout(io: std.Io, duration: std.Io.Duration, request_control: *RequestControl) void {
+        std.Io.sleep(io, duration, .awake) catch return;
+        request_control.interrupt(io);
     }
 };
 
@@ -333,9 +388,9 @@ pub const NativeTransport = struct {
                 error.EndOfStream => break,
                 else => return .may_have_started,
             };
-            capture.appendSse(chunk) catch {
-                capture.malformed = true;
-                return .complete;
+            capture.appendSse(chunk) catch |err| {
+                if (capture.resource_exceeded) return .complete;
+                return err;
             };
             reader.toss(chunk.len);
             if (capture.terminalObserved()) {
@@ -551,6 +606,76 @@ test "HTTP diagnostics retain only bounded provider error code or type" {
 
     setProviderFailureCode("{\"error\":{\"code\":\"not a bounded code\"}}", &capture);
     try std.testing.expectEqualStrings("invalid_request_error", capture.failureDiagnosticCode());
+}
+
+test "authorization HTTP primitive deadlines and joins every OAuth call class" {
+    const io = std.testing.io;
+    const Call = enum { request_device, poll_device, exchange, refresh, revoke };
+    const calls = [_]Call{ .request_device, .poll_device, .exchange, .refresh, .revoke };
+    for (calls) |call| {
+        var fixture = try WireFixture.init(io, .ok, "{}", .stall);
+        defer fixture.deinit(io);
+        var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+        var endpoint_buffer: [128]u8 = undefined;
+        const endpoint = try fixture.endpoint(&endpoint_buffer);
+        const path_start = std.mem.indexOf(u8, endpoint, "/backend-api/") orelse unreachable;
+        var http: NativeHttp = .{
+            .io = io,
+            .allocator = std.testing.allocator,
+            .timeout = std.Io.Duration.fromMilliseconds(50),
+            .authorization_origin_override = endpoint[0..path_start],
+        };
+        var device: codex_auth.DeviceCode = .{
+            .device_id_length = 6,
+            .user_code_length = 4,
+            .interval_seconds = 1,
+        };
+        @memcpy(device.device_id[0..6], "device");
+        @memcpy(device.user_code[0..4], "code");
+        var authorization: codex_auth.AuthorizationCode = .{
+            .code_length = 4,
+            .verifier_length = 8,
+        };
+        @memcpy(authorization.code[0..4], "code");
+        @memcpy(authorization.verifier[0..8], "verifier");
+        var tokens: codex_auth.Tokens = .{
+            .access_length = 6,
+            .refresh_length = 7,
+            .account_length = 7,
+        };
+        defer tokens.scrub();
+        @memcpy(tokens.access[0..6], "access");
+        @memcpy(tokens.refresh[0..7], "refresh");
+        @memcpy(tokens.account[0..7], "account");
+        const started = std.Io.Clock.awake.now(io);
+        switch (call) {
+            .request_device => try std.testing.expectError(
+                error.HttpRequestTimedOut,
+                codex_auth.requestDeviceCode(http.capability()),
+            ),
+            .poll_device => try std.testing.expectError(
+                error.HttpRequestTimedOut,
+                codex_auth.pollDeviceCode(http.capability(), &device),
+            ),
+            .exchange => try std.testing.expectError(
+                error.HttpRequestTimedOut,
+                codex_auth.exchangeCode(http.capability(), &authorization),
+            ),
+            .refresh => try std.testing.expectError(
+                error.HttpRequestTimedOut,
+                codex_auth.refresh(http.capability(), &tokens),
+            ),
+            .revoke => try std.testing.expectError(
+                error.HttpRequestTimedOut,
+                codex_auth.revoke(http.capability(), &tokens),
+            ),
+        }
+        const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+        try server_future.await(io);
+        try std.testing.expect(elapsed.nanoseconds < std.Io.Duration.fromMilliseconds(500).nanoseconds);
+        try std.testing.expect(fixture.peer_closed);
+        try std.testing.expectEqual(std.http.Method.POST, fixture.method);
+    }
 }
 
 test "NativeTransport sends the production request and stops at terminal SSE" {

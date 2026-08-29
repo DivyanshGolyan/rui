@@ -437,6 +437,8 @@ Adapters:
 
 The adapter consumes one already-accepted typed request. It receives an append-only candidate writer and synchronously returns one typed candidate-or-failure outcome. The Host alone seals or replaces the unpublished draft and later publishes Completion evidence. The adapter cannot call the core or publish Session authority.
 
+Codex-specific SSE framing, first-terminal policy, status agreement, OAuth diagnostics, and the one-frame allocation-free JSON cursor remain inside the Codex adapter. They do not appear in the model port. A future adapter may combine many wire events or use its own bounded Host-owned scratch while returning through the same synchronous candidate-or-failure settlement seam. Authorization and model transports use the same deadline-owned native HTTP pattern: timeout interrupts the owned socket and the request task is joined before return.
+
 ### Durable store port
 
 Dependency category: local-substitutable.
@@ -447,6 +449,7 @@ Adapters:
 - Temporary fault-injecting store for deterministic durability tests.
 
 The store interface exposes semantic publications, not raw file calls to the harness caller.
+Crash-left provisional `.blob.tmp` writers are not semantic publications. After the Session lock establishes a new ownership epoch, a bounded startup sweep removes those exact scratch names; complete sealed blobs remain recoverable for later admission.
 
 ### Tool execution port
 
