@@ -1248,17 +1248,17 @@ pub fn advanceRestored(
     config: RuntimeConfig,
     provider: ?model_operation.Provider,
 ) !u64 {
-    switch (try reconcileRestored(host, session, config)) {
+    const io = session.io;
+    const token = session.ownerToken();
+    var core = try Core.open(&host.slots);
+    var core_open = true;
+    defer if (core_open) core.close();
+    try restoreCoreFromLedger(session, &core);
+    switch (try reconcileRestored(host, session, config, &core)) {
         .finished => |final_ref| return final_ref,
         .settled_needs_model => return error.SessionNeedsModel,
         .settled_needs_tool => return error.ToolCallDeferred,
         .retry_model => {
-            const io = session.io;
-            const token = session.ownerToken();
-            var core = try Core.open(&host.slots);
-            var core_open = true;
-            defer if (core_open) core.close();
-            try restoreCoreFromLedger(session, &core);
             try retryModelAttempt(
                 io,
                 session,
@@ -1272,12 +1272,6 @@ pub fn advanceRestored(
             return error.CompletionExpected;
         },
         .dispatch_tool => {
-            const io = session.io;
-            const token = session.ownerToken();
-            var core = try Core.open(&host.slots);
-            var core_open = true;
-            defer if (core_open) core.close();
-            try restoreCoreFromLedger(session, &core);
             const observation = try core.reducer.operation();
             const ids: OperationIds = .{
                 .operation_id = @intCast(observation.id),
@@ -1328,12 +1322,6 @@ pub fn advanceRestored(
             return error.CompletionExpected;
         },
         .dispatch_model => {
-            const io = session.io;
-            const token = session.ownerToken();
-            var core = try Core.open(&host.slots);
-            var core_open = true;
-            defer if (core_open) core.close();
-            try restoreCoreFromLedger(session, &core);
             if (try hasIndeterminateBash(session)) return error.BashPossiblyExecuted;
             _ = try performModelTurn(
                 io,
@@ -1366,15 +1354,13 @@ fn reconcileRestored(
     host: *Host,
     session: *session_store.Session,
     config: RuntimeConfig,
+    core: *Core,
 ) !LocalRestored {
-    var core = try Core.open(&host.slots);
-    defer core.close();
     const token = session.ownerToken();
-    try restoreCoreFromLedger(session, &core);
     var outcome = (try core.reducer.task()).phase;
     var admitted_completion = false;
     if (outcome == .awaiting_model) {
-        if (durableCompletion(session, token, &core)) |completion| {
+        if (durableCompletion(session, token, core)) |completion| {
             const admission = blk: {
                 var scratch = try host.semantic_validation.borrow();
                 defer scratch.release() catch unreachable;
@@ -1422,7 +1408,7 @@ fn reconcileRestored(
             @memcpy(admission_facts[2..][0..prepared.fact_count], prepared.facts[0..prepared.fact_count]);
             try commitCoreFacts(
                 session,
-                &core,
+                core,
                 admission_facts[0 .. 2 + prepared.fact_count],
                 true,
             );
@@ -1436,7 +1422,7 @@ fn reconcileRestored(
     if (outcome == .final_candidate) {
         return .{ .finished = try finalizeCandidate(
             session,
-            &core,
+            core,
             null,
         ) };
     }
@@ -1445,7 +1431,7 @@ fn reconcileRestored(
             host,
             session,
             token,
-            &core,
+            core,
             session.workspacePath(),
             config.completion_hook,
             config.fault,
@@ -1483,7 +1469,10 @@ pub fn settleRestored(
     session: *session_store.Session,
     config: RuntimeConfig,
 ) !u64 {
-    return localCompletionResult(try reconcileRestored(host, session, config));
+    var core = try Core.open(&host.slots);
+    defer core.close();
+    try restoreCoreFromLedger(session, &core);
+    return localCompletionResult(try reconcileRestored(host, session, config, &core));
 }
 
 pub fn resolvePermission(
