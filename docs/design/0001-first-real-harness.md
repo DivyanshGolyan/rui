@@ -451,7 +451,7 @@ Adapters:
 - Temporary fault-injecting store for deterministic durability tests.
 
 The store interface exposes semantic publications, not raw file calls to the harness caller.
-Crash-left provisional `.blob.tmp` writers are not semantic publications. They live in a dedicated scratch namespace, so sealed history never consumes the bounded cleanup budget. After the Session lock establishes a new ownership epoch, startup removes those exact scratch names; complete sealed blobs remain recoverable for later admission.
+Crash-left provisional `.blob.tmp` writers are not semantic publications. They live in a wholly owned scratch namespace, separate from sealed history. After the Session lock establishes a new ownership epoch, startup removes that complete namespace and writers recreate it lazily; complete sealed blobs remain recoverable for later admission.
 
 ### Tool execution port
 

@@ -796,10 +796,10 @@ pub const Session = struct {
         // holds the Session lock, no live writer from an earlier process can
         // exist, so crash-left drafts in the dedicated scratch namespace are
         // safe to discard. Sealed blobs remain available for the normal
-        // recovery/admission path and never consume the draft sweep budget.
-        var blobs = try dir.openDir(io, blobs_path, .{ .iterate = true });
+        // recovery/admission path outside that namespace.
+        var blobs = try dir.openDir(io, blobs_path, .{});
         defer blobs.close(io);
-        _ = try blob_store.sweepIncomplete(blobs, io);
+        try blob_store.resetDrafts(blobs, io);
         return .{
             .session = fromStored(io, storage, dir, lock_file, stored, false),
         };
@@ -1650,7 +1650,7 @@ test "Session creation enforces recoverable root task content" {
     );
 }
 
-test "Session startup sweeps provisional drafts but preserves sealed unadmitted evidence" {
+test "Session startup resets provisional drafts but preserves sealed unadmitted evidence" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
