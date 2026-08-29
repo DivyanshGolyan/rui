@@ -19,6 +19,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     cli.root_module.link_libc = true;
+    cli.root_module.linkFramework("Security", .{});
+    cli.root_module.linkFramework("CoreFoundation", .{});
     configureSqlite(b, cli);
     b.installArtifact(cli);
 
@@ -144,6 +146,15 @@ pub fn build(b: *std.Build) void {
         .ReleaseSafe,
     );
     check_step.dependOn(&b.addRunArtifact(release_safe_native_core).step);
+
+    const codex_live_step = b.step(
+        "codex-live-repair",
+        "Run the opt-in controlled repair through the live Codex subscription Provider",
+    );
+    const run_codex_live = b.addSystemCommand(&.{"sh"});
+    run_codex_live.addFileArg(b.path("src/codex_live_repair.sh"));
+    run_codex_live.addArtifactArg(cli);
+    codex_live_step.dependOn(&run_codex_live.step);
 }
 
 fn addTestGraph(
@@ -157,6 +168,7 @@ fn addTestGraph(
         "src/binding.zig",
         "src/core_state.zig",
         "src/core_image.zig",
+        "src/codex_provider.zig",
         "src/deterministic_provider.zig",
         "src/harness.zig",
         "src/session.zig",
@@ -169,6 +181,8 @@ fn addTestGraph(
 
     const libc_test_roots = [_][]const u8{
         "src/bash_tool.zig",
+        "src/codex_auth.zig",
+        "src/codex_native.zig",
         "src/host_store_test.zig",
         "src/patch_tool.zig",
         "src/cli.zig",
@@ -265,6 +279,12 @@ fn addTestRun(
         }),
     });
     tests.root_module.link_libc = link_libc;
+    if (std.mem.eql(u8, root, "src/codex_native.zig") or
+        std.mem.eql(u8, root, "src/cli.zig"))
+    {
+        tests.root_module.linkFramework("Security", .{});
+        tests.root_module.linkFramework("CoreFoundation", .{});
+    }
     if (usesHostStore(root)) configureSqlite(b, tests);
     parent.dependOn(&b.addRunArtifact(tests).step);
 }

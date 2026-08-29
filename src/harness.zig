@@ -5,6 +5,7 @@ const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const conversation = @import("conversation.zig");
 const deterministic_provider = @import("deterministic_provider.zig");
+const codex_provider = @import("codex_provider.zig");
 const host_runtime = @import("host_runtime.zig");
 const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
@@ -1763,4 +1764,169 @@ test "input request fails terminally until the durable interaction layer exists"
     try std.testing.expectEqual(State.failed, regenerated.state);
     try std.testing.expectEqual(@as(u64, 1), harnessState(restored).session.?.entryCount());
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
+}
+
+test "Codex fake authorization and transport complete through the existing Harness" {
+    const FakeAuthorization = struct {
+        fn load(
+            _: *anyopaque,
+            credential: *codex_provider.Credential,
+        ) anyerror!codex_provider.AuthorizationDisposition {
+            @memcpy(credential.access_token[0..5], "token");
+            credential.access_token_length = 5;
+            @memcpy(credential.account_id[0..7], "account");
+            credential.account_id_length = 7;
+            return .ready;
+        }
+    };
+    const FakeTransport = struct {
+        requests: u8 = 0,
+
+        fn perform(
+            context: *anyopaque,
+            _: *const codex_provider.Credential,
+            request: model_operation.RequestCursor,
+            capture: *codex_provider.Capture,
+        ) anyerror!codex_provider.TransportDisposition {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.requests += 1;
+            try codex_provider.encodeRequest(request, capture.requestSink(), &capture.mapping);
+            try capture.appendSse(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"completed by Codex\"}]}}\n\n" ++
+                    "data: {\"type\":\"response.completed\"}\n\n",
+            );
+            return .complete;
+        }
+    };
+
+    var fake_authorization: u8 = 0;
+    var fake_transport: FakeTransport = .{};
+    var codex: codex_provider.CodexProvider = .{
+        .authorization = .{ .context = &fake_authorization, .load_fn = FakeAuthorization.load },
+        .transport = .{ .context = &fake_transport, .perform_fn = FakeTransport.perform },
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model = "codex:test-model",
+            .task = "task",
+            .provider = codex.provider(),
+        } },
+    });
+    defer owner.close();
+    _ = try owner.drive();
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    _ = try owner.drive();
+    const finished = try owner.drive();
+    try std.testing.expectEqual(State.finished, finished.state);
+    try std.testing.expectEqual(@as(u8, 1), fake_transport.requests);
+    var saw_final = false;
+    for (finished.projectionSlice()) |projection| {
+        if (projection.kind == .final_answer) saw_final = true;
+    }
+    try std.testing.expect(saw_final);
+}
+
+test "Codex auth and transport failures remain typed after Harness reopen" {
+    const FakeAuthorization = struct {
+        disposition: codex_provider.AuthorizationDisposition,
+
+        fn load(
+            context: *anyopaque,
+            credential: *codex_provider.Credential,
+        ) anyerror!codex_provider.AuthorizationDisposition {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.disposition == .ready) {
+                @memcpy(credential.access_token[0..5], "token");
+                credential.access_token_length = 5;
+            }
+            return self.disposition;
+        }
+    };
+    const FakeTransport = struct {
+        disposition: codex_provider.TransportDisposition,
+        calls: u8 = 0,
+
+        fn perform(
+            context: *anyopaque,
+            _: *const codex_provider.Credential,
+            _: model_operation.RequestCursor,
+            _: *codex_provider.Capture,
+        ) anyerror!codex_provider.TransportDisposition {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return self.disposition;
+        }
+    };
+    const Case = struct {
+        authorization: codex_provider.AuthorizationDisposition = .ready,
+        transport: codex_provider.TransportDisposition = .not_started,
+        expected: model_protocol.Failure,
+    };
+    const cases = [_]Case{
+        .{ .authorization = .missing, .expected = .missing_authentication },
+        .{ .authorization = .expired, .expected = .authentication_expired },
+        .{ .transport = .authentication_failed, .expected = .authentication_expired },
+        .{ .transport = .model_unavailable, .expected = .model_unavailable },
+        .{ .transport = .timed_out, .expected = .timeout },
+        .{ .transport = .cancelled, .expected = .aborted },
+        .{ .transport = .not_started, .expected = .transport_not_started },
+        .{ .transport = .may_have_started, .expected = .transport_may_have_started },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    for (cases, 0..) |case, index| {
+        var authorization: FakeAuthorization = .{ .disposition = case.authorization };
+        var transport: FakeTransport = .{ .disposition = case.transport };
+        var codex: codex_provider.CodexProvider = .{
+            .authorization = .{ .context = &authorization, .load_fn = FakeAuthorization.load },
+            .transport = .{ .context = &transport, .perform_fn = FakeTransport.perform },
+        };
+        var task_buffer: [32]u8 = undefined;
+        const task = try std.fmt.bufPrint(&task_buffer, "failure case {d}", .{index});
+        var owner = try Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .create = .{
+                .workspace_path = ".",
+                .model = "codex:test-model",
+                .task = task,
+                .provider = codex.provider(),
+            } },
+        });
+        _ = try owner.drive();
+        const session_id = harnessState(owner).session.?.session_id;
+        try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+        _ = try owner.drive();
+        const failed = try owner.drive();
+        try std.testing.expectEqual(State.failed, failed.state);
+        var ignored: u8 = 0;
+        const ledger = try harnessState(owner).session.?.inspectSemantic(
+            &ignored,
+            struct {
+                fn apply(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
+            }.apply,
+        );
+        const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
+        try std.testing.expectEqual(case.expected, state.response_failure);
+        const dispatches = transport.calls;
+        owner.close();
+
+        var restored = try Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .restore = .{ .session_id = session_id, .provider = codex.provider() } },
+        });
+        _ = try restored.drive();
+        const reopened = try restored.drive();
+        try std.testing.expectEqual(State.failed, reopened.state);
+        try std.testing.expectEqual(dispatches, transport.calls);
+        restored.close();
+    }
 }

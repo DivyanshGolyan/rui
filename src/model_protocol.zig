@@ -21,6 +21,12 @@ pub const Failure = enum(u8) {
     multiple_outputs = 6,
     oversized = 7,
     unknown_tool = 8,
+    missing_authentication = 9,
+    authentication_expired = 10,
+    model_unavailable = 11,
+    timeout = 12,
+    transport_not_started = 13,
+    transport_may_have_started = 14,
 };
 
 pub const Parsed = struct {
@@ -487,7 +493,12 @@ test "complete captured responses cover every V1 disposition" {
     const input = parse(&scratch, try encodeInputChoice(&bytes, "Choose one", &choices));
     try std.testing.expectEqual(contract.InputShape.single_choice, input.input_shape.?);
     try std.testing.expectEqual(@as(u8, 2), input.option_count);
-    try std.testing.expectEqual(Failure.provider_error, parse(&scratch, try encodeFailure(&bytes, .provider_error)).failure);
+    inline for (std.meta.fields(Failure)) |field| {
+        const failure = @field(Failure, field.name);
+        if (failure != .none) {
+            try std.testing.expectEqual(failure, parse(&scratch, try encodeFailure(&bytes, failure)).failure);
+        }
+    }
 }
 
 test "captured admission consumes exact response identity once" {

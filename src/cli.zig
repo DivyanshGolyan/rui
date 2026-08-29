@@ -1,5 +1,8 @@
 const std = @import("std");
 const deterministic_provider = @import("deterministic_provider.zig");
+const codex_auth = @import("codex_auth.zig");
+const codex_native = @import("codex_native.zig");
+const codex_provider = @import("codex_provider.zig");
 const harness = @import("harness.zig");
 const bash_tool = @import("bash_tool.zig");
 const model_operation = @import("model_operation.zig");
@@ -20,12 +23,25 @@ const Arguments = struct {
     dangerously_bypass_permissions: bool = false,
     task: ?[]const u8 = null,
     resume_id: ?u64 = null,
+    codex_login: bool = false,
+    codex_logout: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const raw_args = try init.minimal.args.toSlice(allocator);
     const arguments = try parseArguments(raw_args);
+
+    var native_http: codex_native.NativeHttp = .{ .io = init.io, .allocator = allocator };
+    var keychain: codex_native.KeychainStore = .{};
+    if (arguments.codex_login) {
+        try loginCodex(init.io, allocator, native_http.capability(), keychain.capability());
+        return;
+    }
+    if (arguments.codex_logout) {
+        try logoutCodex(native_http.capability(), keychain.capability());
+        return;
+    }
 
     const state_path = try resolveStatePath(
         init.minimal.environ,
@@ -40,7 +56,19 @@ pub fn main(init: std.process.Init) !void {
             .expected_task = null,
             .final_answer = arguments.fixture_response orelse "",
         };
+        var authorization: codex_native.NativeAuthorization = .{
+            .io = init.io,
+            .allocator = allocator,
+            .store = keychain.capability(),
+            .http = native_http.capability(),
+        };
+        var transport: codex_native.NativeTransport = .{ .io = init.io, .allocator = allocator };
+        var codex: codex_provider.CodexProvider = .{
+            .authorization = authorization.capability(),
+            .transport = transport.capability(),
+        };
         const provider: ?model_operation.Provider = if (arguments.model) |model| provider: {
+            if (std.mem.startsWith(u8, model, "codex:")) break :provider codex.provider();
             if (!std.mem.startsWith(u8, model, "fixture:")) return error.UnsupportedModel;
             if (arguments.fixture_response == null) return error.MissingFixtureResponse;
             break :provider fixture.provider();
@@ -58,11 +86,36 @@ pub fn main(init: std.process.Init) !void {
     }
     {
         const model = arguments.model orelse return error.MissingModel;
-        if (!std.mem.startsWith(u8, model, "fixture:")) return error.UnsupportedModel;
-        const response = arguments.fixture_response orelse return error.MissingFixtureResponse;
         const task = arguments.task orelse return error.MissingTask;
         const workspace_path = try resolveWorkspacePath(init.io, allocator, arguments.repo_path);
         defer allocator.free(workspace_path);
+        if (std.mem.startsWith(u8, model, "codex:")) {
+            if (arguments.fixture_response != null or arguments.fixture_bash_command != null or
+                arguments.fixture_patch_path != null)
+            {
+                return error.CodexFixtureArgumentsConflict;
+            }
+            var authorization: codex_native.NativeAuthorization = .{
+                .io = init.io,
+                .allocator = allocator,
+                .store = keychain.capability(),
+                .http = native_http.capability(),
+            };
+            var transport: codex_native.NativeTransport = .{ .io = init.io, .allocator = allocator };
+            var codex: codex_provider.CodexProvider = .{
+                .authorization = authorization.capability(),
+                .transport = transport.capability(),
+            };
+            try runCreate(init.io, runtime, arguments.dangerously_bypass_permissions, .{
+                .workspace_path = workspace_path,
+                .model = model,
+                .task = task,
+                .provider = codex.provider(),
+            });
+            return;
+        }
+        if (!std.mem.startsWith(u8, model, "fixture:")) return error.UnsupportedModel;
+        const response = arguments.fixture_response orelse return error.MissingFixtureResponse;
         if (arguments.fixture_bash_command != null and arguments.fixture_patch_path != null) {
             const patch = try std.Io.Dir.cwd().readFileAlloc(
                 init.io,
@@ -271,6 +324,10 @@ fn parseArguments(args: []const []const u8) !Arguments {
             parsed.bash_timeout_ms = try std.fmt.parseInt(u32, args[index], 10);
         } else if (std.mem.eql(u8, argument, "--dangerously-bypass-permissions")) {
             parsed.dangerously_bypass_permissions = true;
+        } else if (std.mem.eql(u8, argument, "--codex-login")) {
+            parsed.codex_login = true;
+        } else if (std.mem.eql(u8, argument, "--codex-logout")) {
+            parsed.codex_logout = true;
         } else if (std.mem.eql(u8, argument, "--resume")) {
             index += 1;
             if (index == args.len) return error.InvalidArguments;
@@ -283,17 +340,98 @@ fn parseArguments(args: []const []const u8) !Arguments {
         }
         index += 1;
     }
+    if (parsed.codex_login or parsed.codex_logout) {
+        if (parsed.codex_login == parsed.codex_logout or parsed.task != null or parsed.model != null or
+            parsed.resume_id != null or parsed.repo_path != null or parsed.state_path != null or
+            parsed.fixture_response != null or parsed.fixture_bash_command != null or
+            parsed.fixture_patch_path != null or parsed.dangerously_bypass_permissions)
+        {
+            return error.AuthorizationArgumentsConflict;
+        }
+        return parsed;
+    }
     if (parsed.resume_id != null) {
         if (parsed.task != null or parsed.repo_path != null or
             parsed.fixture_bash_command != null or parsed.fixture_patch_path != null)
         {
             return error.ResumeArgumentsConflict;
         }
-        if ((parsed.model == null) != (parsed.fixture_response == null)) {
+        if (parsed.model) |model| {
+            if (std.mem.startsWith(u8, model, "fixture:") and parsed.fixture_response == null) {
+                return error.ResumeProviderArgumentsIncomplete;
+            }
+            if (std.mem.startsWith(u8, model, "codex:") and parsed.fixture_response != null) {
+                return error.ResumeProviderArgumentsIncomplete;
+            }
+        } else if (parsed.fixture_response != null) {
             return error.ResumeProviderArgumentsIncomplete;
         }
     }
     return parsed;
+}
+
+fn loginCodex(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    http: codex_auth.Http,
+    store: codex_auth.Store,
+) !void {
+    const device = try codex_auth.requestDeviceCode(http);
+    var prompt: [512]u8 = undefined;
+    const message = try std.fmt.bufPrint(
+        &prompt,
+        "Open {s} and enter code {s}. Waiting for authorization (up to 15 minutes).\n",
+        .{ codex_auth.verification_url, device.userCode() },
+    );
+    try std.Io.File.stdout().writeStreamingAll(io, message);
+    const opened = std.process.run(allocator, io, .{
+        .argv = &.{ "/usr/bin/open", codex_auth.verification_url },
+        .stdout_limit = .limited(0),
+        .stderr_limit = .limited(1024),
+    }) catch null;
+    if (opened) |result| {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    const deadline = std.Io.Clock.Timestamp.now(io, .awake).addDuration(.{
+        .raw = std.Io.Duration.fromSeconds(15 * 60),
+        .clock = .awake,
+    });
+    var poll_seconds = device.interval_seconds;
+    while (std.Io.Clock.Timestamp.now(io, .awake).compare(.lt, deadline)) {
+        switch (try codex_auth.pollDeviceCode(http, &device)) {
+            .pending => try std.Io.sleep(io, std.Io.Duration.fromSeconds(poll_seconds), .awake),
+            .slow_down => {
+                poll_seconds = @min(@as(u16, 60), poll_seconds + 5);
+                try std.Io.sleep(io, std.Io.Duration.fromSeconds(poll_seconds), .awake);
+            },
+            .authorization => |authorization| {
+                var authorization_value = authorization;
+                defer authorization_value.scrub();
+                var tokens = try codex_auth.exchangeCode(http, &authorization_value);
+                defer tokens.scrub();
+                var stored: [3 * codex_auth.max_token_size + 1024]u8 = undefined;
+                defer std.crypto.secureZero(u8, &stored);
+                const record = try codex_auth.encodeStored(&tokens, &stored);
+                try store.save(record);
+                try std.Io.File.stdout().writeStreamingAll(io, "Codex authorization saved in macOS Keychain.\n");
+                return;
+            },
+        }
+    }
+    return error.DeviceAuthorizationTimedOut;
+}
+
+fn logoutCodex(http: codex_auth.Http, store: codex_auth.Store) !void {
+    var stored: [3 * codex_auth.max_token_size + 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &stored);
+    if (try store.load(&stored)) |bytes| {
+        var tokens = try codex_auth.decodeStored(bytes);
+        defer tokens.scrub();
+        // Local logout must still remove the credential when remote revocation is unavailable.
+        codex_auth.revoke(http, &tokens) catch {};
+    }
+    try store.delete();
 }
 
 fn approvalProjection(progress: *const harness.Progress) ?harness.Projection {
@@ -438,6 +576,29 @@ test "CLI arguments distinguish create from exact resume" {
     });
     try std.testing.expectEqualStrings("fixture:answer", resumed_with_provider.model.?);
     try std.testing.expectEqualStrings("done", resumed_with_provider.fixture_response.?);
+
+    const codex_create = try parseArguments(&.{
+        "onepage",
+        "--model",
+        "codex:gpt-5.3-codex",
+        "task",
+    });
+    try std.testing.expectEqualStrings("codex:gpt-5.3-codex", codex_create.model.?);
+    const codex_resume = try parseArguments(&.{
+        "onepage",
+        "--resume",
+        "000000000000000a",
+        "--model",
+        "codex:gpt-5.3-codex",
+    });
+    try std.testing.expectEqualStrings("codex:gpt-5.3-codex", codex_resume.model.?);
+
+    try std.testing.expect((try parseArguments(&.{ "onepage", "--codex-login" })).codex_login);
+    try std.testing.expect((try parseArguments(&.{ "onepage", "--codex-logout" })).codex_logout);
+    try std.testing.expectError(
+        error.AuthorizationArgumentsConflict,
+        parseArguments(&.{ "onepage", "--codex-login", "--fixture-response", "ignored" }),
+    );
 
     const patch = try parseArguments(&.{
         "onepage",
