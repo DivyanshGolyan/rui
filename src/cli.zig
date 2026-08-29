@@ -6,6 +6,7 @@ const codex_provider = @import("codex_provider.zig");
 const harness = @import("harness.zig");
 const bash_tool = @import("bash_tool.zig");
 const model_operation = @import("model_operation.zig");
+const model_protocol = @import("model_protocol.zig");
 const patch_tool = @import("patch_tool.zig");
 const session_store = @import("session.zig");
 
@@ -271,9 +272,18 @@ fn renderProgress(io: std.Io, owner: *harness.Harness, progress: *const harness.
             "The Bash Attempt may have executed and will not be replayed.\n",
         ),
         .cancelled => try std.Io.File.stdout().writeStreamingAll(io, "Cancelled.\n"),
-        .failure => try std.Io.File.stdout().writeStreamingAll(io, "Session failed.\n"),
+        .failure => {
+            var line_buffer: [96]u8 = undefined;
+            const line = try failureLine(&line_buffer, projection.failure);
+            try std.Io.File.stdout().writeStreamingAll(io, line);
+        },
         .task_admitted, .outcome, .closed => {},
     };
+}
+
+fn failureLine(out: []u8, failure: model_protocol.Failure) ![]const u8 {
+    const diagnostic = if (failure == .none) "unclassified" else @tagName(failure);
+    return std.fmt.bufPrint(out, "Session failed: {s}.\n", .{diagnostic});
 }
 
 fn resolveStatePath(
@@ -609,6 +619,14 @@ test "CLI arguments distinguish create from exact resume" {
     });
     try std.testing.expectEqualStrings("change.patch", patch.fixture_patch_path.?);
     try std.testing.expect(patch.dangerously_bypass_permissions);
+}
+
+test "CLI failure rendering preserves the bounded typed cause" {
+    var buffer: [96]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Session failed: transport_may_have_started.\n",
+        try failureLine(&buffer, .transport_may_have_started),
+    );
 }
 
 test "patch display escapes terminal controls and backslashes losslessly" {

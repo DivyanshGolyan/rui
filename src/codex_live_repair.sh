@@ -3,7 +3,18 @@ set -eu
 
 onepage_binary=$1
 live_root=$(mktemp -d "${TMPDIR:-/tmp}/onepage-codex-live.XXXXXX")
-trap 'rm -rf "$live_root"' EXIT HUP INT TERM
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if test "$status" -eq 0; then
+    rm -rf "$live_root"
+  else
+    printf 'Failed live fixture preserved at: %s\n' "$live_root" >&2
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 repo_dir="$live_root/repo"
 mkdir "$repo_dir"
 
@@ -16,15 +27,21 @@ chmod +x "$repo_dir/test.sh"
 git -C "$repo_dir" add status.txt test.sh
 git -C "$repo_dir" commit -qm fixture
 
+set +e
 "$onepage_binary" \
   --state "$live_root/state" \
   --repo "$repo_dir" \
   --model codex:gpt-5.3-codex \
   --dangerously-bypass-permissions \
   "Run ./test.sh, diagnose the failure, change only status.txt so the test passes, run ./test.sh again, and finish with a concise summary." \
-  > "$live_root/output.txt"
+  > "$live_root/output.txt" 2>&1
+onepage_status=$?
+set -e
 
 cat "$live_root/output.txt"
+if test "$onepage_status" -ne 0; then
+  exit "$onepage_status"
+fi
 grep -q '^Final Answer:$' "$live_root/output.txt"
 test "$(cat "$repo_dir/status.txt")" = fixed
 (cd "$repo_dir" && ./test.sh)

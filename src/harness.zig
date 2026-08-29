@@ -123,6 +123,7 @@ pub const Projection = struct {
     descriptor_digest: ?binding.Descriptor = null,
     content_ref: u64 = 0,
     generation: u64 = 0,
+    failure: model_protocol.Failure = .none,
 };
 
 pub const Progress = struct {
@@ -702,10 +703,23 @@ const HarnessState = struct {
 
     fn failureProjection(self: *HarnessState) Projection {
         const session = &self.session.?;
+        var ignored: u8 = 0;
+        const failure = failure: {
+            const ledger = session.inspectSemantic(
+                &ignored,
+                struct {
+                    fn ignore(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
+                }.ignore,
+            ) catch break :failure .none;
+            const encoded = ledger.last_core orelse break :failure .none;
+            const state = core_state.decode(&encoded) catch break :failure .none;
+            break :failure state.response_failure;
+        };
         return .{
             .kind = .failure,
             .session_id = session.session_id,
             .task_id = session.task_id,
+            .failure = failure,
         };
     }
 
@@ -1548,6 +1562,7 @@ test "typed durable model failures share one failed Harness projection" {
         try std.testing.expectEqual(State.failed, failed.state);
         try std.testing.expectEqual(@as(u8, 1), failed.projection_count);
         try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
+        try std.testing.expectEqual(case.expected, failed.projections[0].failure);
         try std.testing.expectEqual(@as(u8, 1), provider.calls);
 
         var ignored: u8 = 0;
@@ -1907,6 +1922,9 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         _ = try owner.drive();
         const failed = try owner.drive();
         try std.testing.expectEqual(State.failed, failed.state);
+        try std.testing.expectEqual(@as(u8, 1), failed.projection_count);
+        try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
+        try std.testing.expectEqual(case.expected, failed.projections[0].failure);
         var ignored: u8 = 0;
         const ledger = try harnessState(owner).session.?.inspectSemantic(
             &ignored,
@@ -1926,6 +1944,9 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
         _ = try restored.drive();
         const reopened = try restored.drive();
         try std.testing.expectEqual(State.failed, reopened.state);
+        try std.testing.expectEqual(@as(u8, 1), reopened.projection_count);
+        try std.testing.expectEqual(ProjectionKind.failure, reopened.projections[0].kind);
+        try std.testing.expectEqual(case.expected, reopened.projections[0].failure);
         try std.testing.expectEqual(dispatches, transport.calls);
         restored.close();
     }

@@ -82,6 +82,8 @@ Before QuickJS or Workflow Run integration becomes the main workstream, one opt-
 authorization, creates a disposable Git repository outside the worktree, and runs with the production
 Codex Provider, Harness, Bash and one-file patch implementation. It is excluded from `zig build check`;
 ordinary release checks use fake authorization and transport and make no network or Keychain access.
+On failure it reports and preserves the disposable root so the bounded CLI diagnostic and durable state
+can be inspected; a successful run removes the root.
 
 Ingress tests distinguish three outcomes: `full` or `busy` leaves ownership with the producer; `accepted` transfers volatile custody to the live Harness; only a later committed semantic transition acknowledges durable acceptance. Interaction Responses are first validated and committed through the Run Service, then offered only after a fresh Harness acquires an Active Credit. Adapter tests destroy the admitting Harness, publish terminal Inbox evidence, drop every wake hint, and prove bounded durable readiness reconciliation opens a new Harness and applies the Completion. Tests fill ingress while every Active Credit is occupied and prove bounded retry without an unbounded fallback queue.
 
