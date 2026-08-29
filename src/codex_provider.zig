@@ -136,7 +136,7 @@ pub const CodexProvider = struct {
         var capture: Capture = .{ .candidate = candidate };
         const disposition = try self.transport.perform(&credential, request, &capture);
         return switch (disposition) {
-            .complete => capture.publish(candidate),
+            .complete => capture.publish(),
             .http_unauthorized => transportFailureOutcome(
                 .authentication_expired,
                 "unauthorized",
@@ -505,11 +505,7 @@ pub const Capture = struct {
         );
     }
 
-    fn publish(
-        self: *Capture,
-        candidate: model_operation.CandidateWriter,
-    ) !model_operation.DispatchOutcome {
-        _ = candidate;
+    fn publish(self: *Capture) !model_operation.DispatchOutcome {
         self.finishSse();
         if (self.resource_exceeded) return failureOutcome(.oversized);
         if (self.malformed) {
@@ -1346,7 +1342,7 @@ test "SSE capture distinguishes truncated and malformed terminal streams" {
     unknown.finishSse();
     try std.testing.expectEqual(
         model_protocol.Failure.unknown_tool,
-        (try unknown.publish(unknown.candidate.?)).failure.failure,
+        (try unknown.publish()).failure.failure,
     );
 }
 
@@ -1391,7 +1387,7 @@ test "authoritative non-success terminals replace a partial candidate" {
         try capture.appendSse(case.terminal);
         capture.finishSse();
         try std.testing.expect(!capture.malformed);
-        try std.testing.expectEqual(case.expected, (try capture.publish(capture.candidate.?)).failure.failure);
+        try std.testing.expectEqual(case.expected, (try capture.publish()).failure.failure);
     }
 }
 
@@ -1486,7 +1482,7 @@ test "capture accepts the exact decoded text bound and types one byte over as ov
         var capture = output.capture();
         try capture.appendSse(writer.buffered());
         capture.finishSse();
-        const outcome = try capture.publish(capture.candidate.?);
+        const outcome = try capture.publish();
         if (length == model_protocol.max_assistant_text_size) {
             try std.testing.expectEqual(model_operation.DispatchOutcome.candidate, outcome);
         } else {
