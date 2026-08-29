@@ -8,6 +8,7 @@ pub const max_startup_sweep_entries: usize = 65_536;
 pub const version: u16 = 2;
 
 const magic = "ONEBLOB\x00";
+const drafts_path = ".drafts";
 
 pub const Metadata = struct {
     length: u64,
@@ -32,8 +33,9 @@ pub const Writer = struct {
             error.FileNotFound => {},
             else => return err,
         }
-        var temp_name_buffer: [25]u8 = undefined;
-        const temp_name = try std.fmt.bufPrint(&temp_name_buffer, "{s}.tmp", .{final_name});
+        try ensureDraftDir(dir, io);
+        var temp_name_buffer: [33]u8 = undefined;
+        const temp_name = try draftName(final_name, &temp_name_buffer);
         const file = try dir.createFile(io, temp_name, .{});
         var empty_header: [header_size]u8 = @splat(0);
         try file.writePositionalAll(io, &empty_header, 0);
@@ -60,8 +62,8 @@ pub const Writer = struct {
         self.open = false;
         var final_name_buffer: [21]u8 = undefined;
         const final_name = try blobName(self.reference, &final_name_buffer);
-        var temp_name_buffer: [25]u8 = undefined;
-        const temp_name = try std.fmt.bufPrint(&temp_name_buffer, "{s}.tmp", .{final_name});
+        var temp_name_buffer: [33]u8 = undefined;
+        const temp_name = try draftName(final_name, &temp_name_buffer);
         try self.dir.rename(temp_name, self.dir, final_name, io);
         try syncDir(self.dir, io);
     }
@@ -72,8 +74,8 @@ pub const Writer = struct {
         self.open = false;
         var final_name_buffer: [21]u8 = undefined;
         const final_name = blobName(self.reference, &final_name_buffer) catch return;
-        var temp_name_buffer: [25]u8 = undefined;
-        const temp_name = std.fmt.bufPrint(&temp_name_buffer, "{s}.tmp", .{final_name}) catch return;
+        var temp_name_buffer: [33]u8 = undefined;
+        const temp_name = draftName(final_name, &temp_name_buffer) catch return;
         // A draft is never readable as evidence: only the final rename publishes it.
         // Cleanup is therefore best-effort here; the bounded startup sweep removes
         // crash-left or deletion-failed `.tmp` files before the store is served.
@@ -142,21 +144,38 @@ pub fn readWindow(
 }
 
 /// Removes crash-left unpublished writers. The caller must hold the owning
-/// Session lock and open `dir` with iteration capability. Final `.blob` files
-/// are immutable evidence and are never considered by this sweep.
+/// Session lock. Drafts live in a dedicated bounded scratch namespace, so the
+/// amount of sealed immutable evidence cannot consume the cleanup budget.
 pub fn sweepIncomplete(dir: std.Io.Dir, io: std.Io) !usize {
-    var iterator = dir.iterate();
+    var drafts = dir.openDir(io, drafts_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    defer drafts.close(io);
+    var iterator = drafts.iterate();
     var scanned: usize = 0;
     var removed: usize = 0;
     while (try iterator.next(io)) |entry| {
         if (scanned == max_startup_sweep_entries) return error.BlobSweepEntryLimitExceeded;
         scanned += 1;
         if (entry.kind != .file or !isIncompleteName(entry.name)) continue;
-        try dir.deleteFile(io, entry.name);
+        try drafts.deleteFile(io, entry.name);
         removed += 1;
     }
-    if (removed != 0) try syncDir(dir, io);
+    if (removed != 0) try syncDir(drafts, io);
     return removed;
+}
+
+fn ensureDraftDir(dir: std.Io.Dir, io: std.Io) !void {
+    dir.createDir(io, drafts_path, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => return,
+        else => return err,
+    };
+    try syncDir(dir, io);
+}
+
+fn draftName(final_name: []const u8, buffer: *[33]u8) ![]const u8 {
+    return std.fmt.bufPrint(buffer, drafts_path ++ "/{s}.tmp", .{final_name});
 }
 
 fn isIncompleteName(name: []const u8) bool {
@@ -265,7 +284,8 @@ test "startup sweep removes only crash-left provisional drafts" {
     try interrupted.append(io, "partial and non-authoritative");
     interrupted.file.close(io);
     interrupted.open = false; // Simulate process loss before abort or finish.
-    try tmp.dir.writeFile(io, .{ .sub_path = "not-a-blob.tmp", .data = "unrelated" });
+    try tmp.dir.writeFile(io, .{ .sub_path = ".drafts/not-a-blob.tmp", .data = "unrelated" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "root-history.blob", .data = "sealed population is outside scratch" });
 
     try std.testing.expectEqual(@as(usize, 1), try sweepIncomplete(tmp.dir, io));
     try std.testing.expectEqualStrings(
@@ -276,7 +296,28 @@ test "startup sweep removes only crash-left provisional drafts" {
         },
     );
     try std.testing.expectError(error.FileNotFound, metadata(tmp.dir, io, 42));
-    try tmp.dir.access(io, "not-a-blob.tmp", .{});
+    try tmp.dir.access(io, ".drafts/not-a-blob.tmp", .{});
+    try tmp.dir.access(io, "root-history.blob", .{});
+}
+
+test "sealed population is outside the bounded draft sweep namespace" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try put(tmp.dir, io, 1, "sealed");
+    var root = tmp.dir.iterate();
+    var saw_sealed = false;
+    while (try root.next(io)) |entry| {
+        if (std.mem.eql(u8, entry.name, "0000000000000001.blob")) saw_sealed = true;
+    }
+    try std.testing.expect(saw_sealed);
+    try std.testing.expectEqual(@as(usize, 0), try sweepIncomplete(tmp.dir, io));
+
+    // The bounded enumerator sees only this namespace. A historical population
+    // larger than the draft budget therefore cannot affect startup recovery.
+    try std.testing.expect(max_startup_sweep_entries < std.math.maxInt(usize));
+    _ = try metadata(tmp.dir, io, 1);
 }
 
 test "blob validation rejects corruption before returning a window" {

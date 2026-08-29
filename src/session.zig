@@ -794,8 +794,9 @@ pub const Session = struct {
 
         // Provisional response drafts are scratch. Once this ownership epoch
         // holds the Session lock, no live writer from an earlier process can
-        // exist, so crash-left `.tmp` files are safe to discard. Sealed blobs
-        // remain available for the normal recovery/admission path.
+        // exist, so crash-left drafts in the dedicated scratch namespace are
+        // safe to discard. Sealed blobs remain available for the normal
+        // recovery/admission path and never consume the draft sweep budget.
         var blobs = try dir.openDir(io, blobs_path, .{ .iterate = true });
         defer blobs.close(io);
         _ = try blob_store.sweepIncomplete(blobs, io);
