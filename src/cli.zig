@@ -450,15 +450,18 @@ fn loginCodex(
 }
 
 fn logoutCodex(http: codex_auth.Http, store: codex_auth.Store) !void {
+    revokeStoredCodexCredential(http, store) catch {};
+    try store.delete();
+}
+
+fn revokeStoredCodexCredential(http: codex_auth.Http, store: codex_auth.Store) !void {
     var stored: [3 * codex_auth.max_token_size + 1024]u8 = undefined;
     defer std.crypto.secureZero(u8, &stored);
     if (try store.load(&stored)) |bytes| {
         var tokens = try codex_auth.decodeStored(bytes);
         defer tokens.scrub();
-        // Local logout must still remove the credential when remote revocation is unavailable.
-        codex_auth.revoke(http, &tokens) catch {};
+        try codex_auth.revoke(http, &tokens);
     }
-    try store.delete();
 }
 
 fn approvalProjection(progress: *const harness.Progress) ?harness.Projection {
@@ -672,6 +675,89 @@ test "CLI failure rendering preserves the bounded typed cause" {
     );
     try std.testing.expect(std.mem.indexOf(u8, model_line, "using Codex with a ChatGPT account") == null);
 }
+
+test "Codex logout deletes a malformed stored credential without remote revocation" {
+    var store_fixture: LogoutStore = .{ .record = "{truncated" };
+    var http_fixture: LogoutHttp = .{};
+
+    try logoutCodex(http_fixture.capability(), store_fixture.capability());
+
+    try std.testing.expect(store_fixture.delete_called);
+    try std.testing.expect(!store_fixture.present);
+    try std.testing.expectEqual(@as(u8, 0), http_fixture.calls);
+}
+
+test "Codex logout surfaces local deletion failure after malformed stored credential" {
+    var store_fixture: LogoutStore = .{
+        .record = "{truncated",
+        .delete_error = error.TestDeleteFailed,
+    };
+    var http_fixture: LogoutHttp = .{};
+
+    try std.testing.expectError(
+        error.TestDeleteFailed,
+        logoutCodex(http_fixture.capability(), store_fixture.capability()),
+    );
+
+    try std.testing.expect(store_fixture.delete_called);
+    try std.testing.expect(store_fixture.present);
+    try std.testing.expectEqual(@as(u8, 0), http_fixture.calls);
+}
+
+const LogoutStore = struct {
+    record: []const u8,
+    present: bool = true,
+    delete_called: bool = false,
+    delete_error: ?anyerror = null,
+
+    fn capability(self: *LogoutStore) codex_auth.Store {
+        return .{
+            .context = self,
+            .load_fn = load,
+            .save_fn = save,
+            .delete_fn = delete,
+        };
+    }
+
+    fn load(context: *anyopaque, out: []u8) anyerror!?[]const u8 {
+        const self: *LogoutStore = @ptrCast(@alignCast(context));
+        if (!self.present) return null;
+        if (self.record.len > out.len) return error.TestRecordTooLarge;
+        @memcpy(out[0..self.record.len], self.record);
+        return out[0..self.record.len];
+    }
+
+    fn save(_: *anyopaque, _: []const u8) anyerror!void {
+        return error.UnexpectedSave;
+    }
+
+    fn delete(context: *anyopaque) anyerror!void {
+        const self: *LogoutStore = @ptrCast(@alignCast(context));
+        self.delete_called = true;
+        if (self.delete_error) |err| return err;
+        self.present = false;
+    }
+};
+
+const LogoutHttp = struct {
+    calls: u8 = 0,
+
+    fn capability(self: *LogoutHttp) codex_auth.Http {
+        return .{ .context = self, .post_fn = post };
+    }
+
+    fn post(
+        context: *anyopaque,
+        _: []const u8,
+        _: []const u8,
+        _: []const u8,
+        _: []u8,
+    ) anyerror!codex_auth.HttpResponse {
+        const self: *LogoutHttp = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        return error.UnexpectedRevoke;
+    }
+};
 
 test "patch display escapes terminal controls and backslashes losslessly" {
     const escaped = try escapePatch(std.testing.allocator, "safe\n\x1b[2J\\x1b\t\xff");
