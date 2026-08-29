@@ -164,13 +164,27 @@ terminate_child "$footprint_pid"
 footprint_pid=
 set -e
 
+cat "$live_root/output.txt"
+if test "$onepage_status" -ne 0; then
+  exit "$onepage_status"
+fi
+grep -q '^Final Answer:$' "$live_root/output.txt"
+test "$(cat "$repo_dir/status.txt")" = fixed
+(cd "$repo_dir" && ./test.sh)
+test "$(git -C "$repo_dir" diff --name-only)" = status.txt
+
 peak_phys_footprint_bytes=$(awk '
   /phys_footprint_peak:/ && $2 > peak { peak = $2 }
   END { print peak + 0 }
 ' "$footprint_output")
-observed_transport_rss_increase_bytes=0
-if test "$active_transport_peak_rss_bytes" -gt "$transport_baseline_rss_bytes"; then
-  observed_transport_rss_increase_bytes=$((active_transport_peak_rss_bytes - transport_baseline_rss_bytes))
+transport_baseline_report=null
+observed_transport_rss_increase_bytes=null
+if test "$transport_baseline_rss_bytes" -gt 0; then
+  transport_baseline_report=$transport_baseline_rss_bytes
+  observed_transport_rss_increase_bytes=0
+  if test "$active_transport_peak_rss_bytes" -gt "$transport_baseline_rss_bytes"; then
+    observed_transport_rss_increase_bytes=$((active_transport_peak_rss_bytes - transport_baseline_rss_bytes))
+  fi
 fi
 
 adapter_contract=$("$memory_contract_binary")
@@ -213,7 +227,7 @@ source_commit=$(git -C "$script_directory/.." rev-parse HEAD)
     printf '    "peak_physical_footprint_bytes": %s,\n' "$peak_phys_footprint_bytes"
     printf '    "peak_virtual_bytes": %s,\n' "$peak_virtual_bytes"
     printf '    "pre_transport_peak_rss_bytes": %s,\n' "$pre_transport_peak_rss_bytes"
-    printf '    "transport_baseline_rss_bytes": %s,\n' "$transport_baseline_rss_bytes"
+    printf '    "transport_baseline_rss_bytes": %s,\n' "$transport_baseline_report"
     printf '    "active_transport_peak_rss_bytes": %s,\n' "$active_transport_peak_rss_bytes"
     printf '    "observed_transport_rss_increase_upper_bound_bytes": %s,\n' "$observed_transport_rss_increase_bytes"
     printf '    "peak_thread_count": %s,\n' "$peak_thread_count"
@@ -226,21 +240,11 @@ source_commit=$(git -C "$script_directory/.." rev-parse HEAD)
     printf '    "peak_send_queue_bytes": %s,\n' "$peak_tcp_send_queue_bytes"
     printf '    "peak_receive_high_water_bytes": %s,\n' "$peak_tcp_receive_high_water_bytes"
     printf '    "peak_send_high_water_bytes": %s,\n' "$peak_tcp_send_high_water_bytes"
-    printf '    "idle_pool_capacity": 0,\n'
-    printf '    "retained_connections_after_call": 0\n'
-    printf '  },\n'
-    printf '  "run_exit_status": %s\n' "$onepage_status"
+    printf '    "http_keep_alive": false,\n'
+    printf '    "idle_pool_capacity": 0\n'
+    printf '  }\n'
     printf '}\n'
 } > "$report_temp"
 mv "$report_temp" "$memory_report_path"
 report_temp=
 printf 'Capacity-one memory report: %s\n' "$memory_report_path"
-
-cat "$live_root/output.txt"
-if test "$onepage_status" -ne 0; then
-  exit "$onepage_status"
-fi
-grep -q '^Final Answer:$' "$live_root/output.txt"
-test "$(cat "$repo_dir/status.txt")" = fixed
-(cd "$repo_dir" && ./test.sh)
-test "$(git -C "$repo_dir" diff --name-only)" = status.txt

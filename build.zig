@@ -157,7 +157,7 @@ pub fn build(b: *std.Build) void {
         "onepage-codex-memory-contract",
         "src/codex_memory_contract.zig",
         native_target,
-        .ReleaseSmall,
+        optimize,
     );
     const run_codex_live = b.addSystemCommand(&.{"sh"});
     run_codex_live.addFileArg(b.path("src/codex_live_repair.sh"));

@@ -86,9 +86,9 @@ cache paths as the documented login target. A rebuilt ad-hoc-signed binary may s
 Keychain approval. The tracer is excluded from `zig build check`;
 ordinary release checks use fake authorization and transport and make no network or Keychain access.
 On failure it reports and preserves the disposable root so the bounded CLI diagnostic and durable state
-can be inspected; a successful run removes the root. Every invocation first invalidates any older report,
-then atomically writes `.zig-cache/codex-live-capacity-one.json` after the measured process exits. A
-successful report must include the exact compiled adapter
+can be inspected; a successful run removes the root. Every invocation first invalidates any older report.
+Only after the process exits and every repair assertion passes does it atomically write
+`.zig-cache/codex-live-capacity-one.json`. A successful report must include the exact compiled adapter
 structures and windows, whole-process RSS and physical footprint, virtual size, live thread count,
 active-transport stack reservation, observed TCP queues and configured queue high-water limits, and the
 zero-capacity idle-pool policy. The report labels the process figures as a capacity-one whole-process
