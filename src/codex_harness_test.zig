@@ -42,7 +42,7 @@ test "Codex fake authorization and transport complete through the existing Harne
             _: *const codex_provider.Credential,
             request: model_operation.RequestCursor,
             capture: *codex_provider.Capture,
-        ) anyerror!codex_provider.TransportDisposition {
+        ) anyerror!codex_provider.TransportResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.requests += 1;
             try codex_provider.encodeRequest(request, capture.requestSink(), &capture.mapping);
@@ -50,7 +50,7 @@ test "Codex fake authorization and transport complete through the existing Harne
                 "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"completed by Codex\"}]}}\n\n" ++
                     "data: {\"type\":\"response.completed\"}\n\n",
             );
-            return .complete;
+            return .{ .disposition = .complete };
         }
     };
 
@@ -112,13 +112,14 @@ test "Codex auth and transport failures remain typed after Harness reopen" {
             context: *anyopaque,
             _: *const codex_provider.Credential,
             _: model_operation.RequestCursor,
-            capture: *codex_provider.Capture,
-        ) anyerror!codex_provider.TransportDisposition {
+            _: *codex_provider.Capture,
+        ) anyerror!codex_provider.TransportResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
-            if (self.private_http_status) |status| try capture.setFailureHttpStatus(status);
-            try capture.setFailureDiagnosticCode(self.provider_code);
-            return self.disposition;
+            var result: codex_provider.TransportResult = .{ .disposition = self.disposition };
+            if (self.private_http_status) |status| try result.setHttpStatus(status);
+            try result.setDiagnosticCode(self.provider_code);
+            return result;
         }
     };
     const Case = struct {

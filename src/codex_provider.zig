@@ -79,6 +79,38 @@ pub const TransportDisposition = enum {
     may_have_started,
 };
 
+pub const TransportResult = struct {
+    disposition: TransportDisposition,
+    http_status: u16 = 0,
+    diagnostic_code_bytes: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
+    diagnostic_code_length: u8 = 0,
+
+    pub fn setHttpStatus(self: *TransportResult, status: u16) !void {
+        if (status < 100 or status > 599) return error.InvalidHttpStatus;
+        self.http_status = status;
+    }
+
+    pub fn httpStatus(self: *const TransportResult) ?u16 {
+        return if (self.http_status == 0) null else self.http_status;
+    }
+
+    pub fn setDiagnosticCode(self: *TransportResult, code: []const u8) !void {
+        if (code.len > self.diagnostic_code_bytes.len) return error.FailureDiagnosticCodeTooLong;
+        for (code) |byte| if (!std.ascii.isAlphanumeric(byte) and
+            byte != '_' and byte != '-' and byte != '.')
+        {
+            return error.InvalidFailureDiagnosticCode;
+        };
+        @memset(&self.diagnostic_code_bytes, 0);
+        @memcpy(self.diagnostic_code_bytes[0..code.len], code);
+        self.diagnostic_code_length = @intCast(code.len);
+    }
+
+    pub fn diagnosticCode(self: *const TransportResult) []const u8 {
+        return self.diagnostic_code_bytes[0..self.diagnostic_code_length];
+    }
+};
+
 pub const Transport = struct {
     context: *anyopaque,
     perform_fn: *const fn (
@@ -86,14 +118,14 @@ pub const Transport = struct {
         *const Credential,
         model_operation.RequestCursor,
         *Capture,
-    ) anyerror!TransportDisposition,
+    ) anyerror!TransportResult,
 
     fn perform(
         self: Transport,
         credential: *const Credential,
         request: model_operation.RequestCursor,
         capture: *Capture,
-    ) !TransportDisposition {
+    ) !TransportResult {
         return self.perform_fn(self.context, credential, request, capture);
     }
 };
@@ -134,43 +166,43 @@ pub const CodexProvider = struct {
         if (credential.token().len == 0) return failureOutcome(.provider_error);
 
         var capture: Capture = .{ .candidate = candidate };
-        const disposition = try self.transport.perform(&credential, request, &capture);
-        return switch (disposition) {
+        const transport_result = try self.transport.perform(&credential, request, &capture);
+        return switch (transport_result.disposition) {
             .complete => capture.publish(),
             .http_unauthorized => transportFailureOutcome(
                 .authentication_expired,
                 "unauthorized",
-                &capture,
+                &transport_result,
             ),
             .http_forbidden => transportFailureOutcome(
                 .authentication_expired,
                 "forbidden",
-                &capture,
+                &transport_result,
             ),
             .provider_rejected => transportFailureOutcome(
                 .provider_error,
                 "rejected",
-                &capture,
+                &transport_result,
             ),
             .model_not_found => transportFailureOutcome(
                 .model_unavailable,
                 "model",
-                &capture,
+                &transport_result,
             ),
             .rate_limited => transportFailureOutcome(
                 .provider_error,
                 "rate",
-                &capture,
+                &transport_result,
             ),
             .quota_exceeded => transportFailureOutcome(
                 .provider_error,
                 "quota",
-                &capture,
+                &transport_result,
             ),
             .backend_failed => transportFailureOutcome(
                 .provider_error,
                 "backend",
-                &capture,
+                &transport_result,
             ),
             .timed_out => failureOutcome(.timeout),
             .cancelled => failureOutcome(.aborted),
@@ -204,10 +236,10 @@ fn failureDiagnosticOutcome(
 fn transportFailureOutcome(
     failure: model_protocol.Failure,
     class: []const u8,
-    capture: *const Capture,
+    transport_result: *const TransportResult,
 ) model_operation.DispatchOutcome {
     var code_buffer: [model_protocol.max_failure_diagnostic_code_size]u8 = undefined;
-    const code = if (capture.failureHttpStatus()) |status|
+    const code = if (transport_result.httpStatus()) |status|
         std.fmt.bufPrint(&code_buffer, "codex.http.{s}.{d}", .{ class, status }) catch unreachable
     else
         std.fmt.bufPrint(&code_buffer, "codex.http.{s}", .{class}) catch unreachable;
@@ -262,36 +294,8 @@ pub const Capture = struct {
     completed: bool = false,
     malformed: bool = false,
     resource_exceeded: bool = false,
-    failure_diagnostic_code: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
-    failure_diagnostic_code_length: u8 = 0,
-    failure_http_status: u16 = 0,
     total_sse_bytes: usize = 0,
     event_count: u16 = 0,
-
-    pub fn setFailureHttpStatus(self: *Capture, status: u16) !void {
-        if (status < 100 or status > 599) return error.InvalidHttpStatus;
-        self.failure_http_status = status;
-    }
-
-    pub fn failureHttpStatus(self: *const Capture) ?u16 {
-        return if (self.failure_http_status == 0) null else self.failure_http_status;
-    }
-
-    pub fn setFailureDiagnosticCode(self: *Capture, code: []const u8) !void {
-        if (code.len > self.failure_diagnostic_code.len) return error.FailureDiagnosticCodeTooLong;
-        for (code) |byte| if (!std.ascii.isAlphanumeric(byte) and
-            byte != '_' and byte != '-' and byte != '.')
-        {
-            return error.InvalidFailureDiagnosticCode;
-        };
-        @memset(&self.failure_diagnostic_code, 0);
-        @memcpy(self.failure_diagnostic_code[0..code.len], code);
-        self.failure_diagnostic_code_length = @intCast(code.len);
-    }
-
-    pub fn failureDiagnosticCode(self: *const Capture) []const u8 {
-        return self.failure_diagnostic_code[0..self.failure_diagnostic_code_length];
-    }
 
     pub fn requestSink(self: *Capture) ByteSink {
         return .{ .context = self, .write_fn = discardRequestBytes };
@@ -1281,7 +1285,7 @@ test "Codex dispatch preserves Host errors and captures declared external failur
             _: *const Credential,
             _: model_operation.RequestCursor,
             _: *Capture,
-        ) anyerror!TransportDisposition {
+        ) anyerror!TransportResult {
             return error.InjectedHostCandidateFailure;
         }
     };

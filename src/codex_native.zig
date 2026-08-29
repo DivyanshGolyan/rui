@@ -232,7 +232,7 @@ pub const NativeHttp = struct {
             .body = out[0..length],
         };
         completed_response.* = result;
-        request_control.observeTerminal(self.io);
+        request_control.observeComplete(self.io);
         return result;
     }
 
@@ -302,13 +302,14 @@ pub const NativeTransport = struct {
         credential: *const codex_provider.Credential,
         request_value: model_operation.RequestCursor,
         capture: *codex_provider.Capture,
-    ) anyerror!codex_provider.TransportDisposition {
+    ) anyerror!codex_provider.TransportResult {
         const self: *NativeTransport = @ptrCast(@alignCast(context));
         const SelectResult = union(enum) {
-            request: anyerror!codex_provider.TransportDisposition,
+            request: anyerror!codex_provider.TransportResult,
             timeout,
         };
         var request_control: RequestControl = .{};
+        var completed_result: ?codex_provider.TransportResult = null;
         var results: [2]SelectResult = undefined;
         var select = std.Io.Select(SelectResult).init(self.io, &results);
         select.async(.request, performRequest, .{
@@ -317,24 +318,21 @@ pub const NativeTransport = struct {
             request_value,
             capture,
             &request_control,
+            &completed_result,
         });
         select.async(.timeout, waitForTimeout, .{ self.io, self.timeout, &request_control });
         const selected = try select.await();
         select.cancelDiscard();
         if (request_control.winnerValue(self.io) == .timed_out) {
-            return if (capture.failureHttpStatus()) |status|
-                classifyHttpFailure(status, capture.failureDiagnosticCode())
-            else
-                .timed_out;
+            return .{ .disposition = .timed_out };
         }
         return switch (selected) {
             .request => |result| result,
             .timeout => if (request_control.winnerValue(self.io) == .terminal)
-                .complete
-            else if (capture.failureHttpStatus()) |status|
-                classifyHttpFailure(status, capture.failureDiagnosticCode())
+                request_control.terminalResult(self.io, &completed_result) orelse
+                    error.IncompleteTransportResult
             else
-                .timed_out,
+                .{ .disposition = .timed_out },
         };
     }
 
@@ -344,7 +342,8 @@ pub const NativeTransport = struct {
         request_value: model_operation.RequestCursor,
         capture: *codex_provider.Capture,
         request_control: *RequestControl,
-    ) anyerror!codex_provider.TransportDisposition {
+        completed_result: *?codex_provider.TransportResult,
+    ) anyerror!codex_provider.TransportResult {
         var counter: CountingSink = .{};
         var count_mapping: codex_provider.ToolMapping = .{};
         try codex_provider.encodeRequest(request_value, counter.sink(), &count_mapping);
@@ -369,48 +368,54 @@ pub const NativeTransport = struct {
             .extra_headers = &headers,
         }) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            else => return .not_started,
+            else => return .{ .disposition = .not_started },
         };
         defer request.deinit();
         request_control.publish(self.io, request.connection.?.stream_reader.stream);
         defer request_control.clear(self.io);
         request.transfer_encoding = .{ .content_length = counter.count };
-        var body = request.sendBodyUnflushed(&.{}) catch return .not_started;
+        var body = request.sendBodyUnflushed(&.{}) catch return .{ .disposition = .not_started };
         var body_sink: WriterSink = .{ .writer = &body.writer };
         capture.mapping = .{};
         codex_provider.encodeRequest(request_value, body_sink.sink(), &capture.mapping) catch |err|
             switch (err) {
-                error.ProviderRequestWriteFailed => return .may_have_started,
+                error.ProviderRequestWriteFailed => return .{ .disposition = .may_have_started },
                 else => return err,
             };
-        body.end() catch return .may_have_started;
-        request.connection.?.flush() catch return .may_have_started;
+        body.end() catch return .{ .disposition = .may_have_started };
+        request.connection.?.flush() catch return .{ .disposition = .may_have_started };
         var redirect_buffer: [1024]u8 = undefined;
-        var response = request.receiveHead(&redirect_buffer) catch return .may_have_started;
+        var response = request.receiveHead(&redirect_buffer) catch return .{ .disposition = .may_have_started };
         const status: u16 = @intFromEnum(response.head.status);
         if (status < 200 or status >= 300) {
-            try capture.setFailureHttpStatus(status);
-            readProviderFailureCode(&response, capture);
-            return classifyHttpFailure(status, capture.failureDiagnosticCode());
+            var result: codex_provider.TransportResult = .{ .disposition = .provider_rejected };
+            try result.setHttpStatus(status);
+            result.disposition = classifyHttpFailure(status, "");
+            request_control.observeTerminal(self.io, result, completed_result);
+            readProviderFailureCode(&response, &result);
+            result.disposition = classifyHttpFailure(status, result.diagnosticCode());
+            request_control.observeTerminal(self.io, result, completed_result);
+            return result;
         }
         var transfer_buffer: [64]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
         while (true) {
             const chunk = reader.peekGreedy(1) catch |err| switch (err) {
                 error.EndOfStream => break,
-                else => return .may_have_started,
+                else => return .{ .disposition = .may_have_started },
             };
             capture.appendSse(chunk) catch |err| {
-                if (capture.resource_exceeded) return .complete;
+                if (capture.resource_exceeded) return .{ .disposition = .complete };
                 return err;
             };
             reader.toss(chunk.len);
             if (capture.terminalObserved()) {
-                request_control.observeTerminal(self.io);
-                return .complete;
+                const result: codex_provider.TransportResult = .{ .disposition = .complete };
+                request_control.observeTerminal(self.io, result, completed_result);
+                return result;
             }
         }
-        return .complete;
+        return .{ .disposition = .complete };
     }
 
     fn waitForTimeout(io: std.Io, duration: std.Io.Duration, request_control: *RequestControl) void {
@@ -446,7 +451,20 @@ const RequestControl = struct {
         if (self.stream) |stream| interruptStream(io, stream);
     }
 
-    fn observeTerminal(self: *RequestControl, io: std.Io) void {
+    fn observeTerminal(
+        self: *RequestControl,
+        io: std.Io,
+        result: codex_provider.TransportResult,
+        completed_result: *?codex_provider.TransportResult,
+    ) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.winner == .timed_out) return;
+        self.winner = .terminal;
+        completed_result.* = result;
+    }
+
+    fn observeComplete(self: *RequestControl, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (self.winner == .running) self.winner = .terminal;
@@ -456,6 +474,16 @@ const RequestControl = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         return self.winner;
+    }
+
+    fn terminalResult(
+        self: *RequestControl,
+        io: std.Io,
+        completed_result: *const ?codex_provider.TransportResult,
+    ) ?codex_provider.TransportResult {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return completed_result.*;
     }
 };
 
@@ -468,7 +496,7 @@ fn interruptStream(io: std.Io, stream: std.Io.net.Stream) void {
 
 fn readProviderFailureCode(
     response: *std.http.Client.Response,
-    capture: *codex_provider.Capture,
+    result: *codex_provider.TransportResult,
 ) void {
     var body: [4097]u8 = undefined;
     var transfer_buffer: [1024]u8 = undefined;
@@ -477,7 +505,7 @@ fn readProviderFailureCode(
     const length = reader.readSliceShort(&body) catch return;
     if (length == 0 or length > 4096) return;
     if (expected_length) |expected| if (length != expected) return;
-    setProviderFailureCode(body[0..length], capture);
+    setProviderFailureCode(body[0..length], result);
 }
 
 fn classifyHttpFailure(status: u16, code: []const u8) codex_provider.TransportDisposition {
@@ -504,7 +532,7 @@ fn codeIsOneOf(code: []const u8, expected: []const []const u8) bool {
     return false;
 }
 
-fn setProviderFailureCode(body: []const u8, capture: *codex_provider.Capture) void {
+fn setProviderFailureCode(body: []const u8, result: *codex_provider.TransportResult) void {
     var arena_bytes: [8192]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&arena_bytes);
     var parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), body, .{
@@ -517,7 +545,7 @@ fn setProviderFailureCode(body: []const u8, capture: *codex_provider.Capture) vo
         else => return,
     };
     const error_value = outer.get("error") orelse {
-        setUnsupportedModelDetail(&outer, capture);
+        setUnsupportedModelDetail(&outer, result);
         return;
     };
     const error_object = switch (error_value) {
@@ -529,12 +557,12 @@ fn setProviderFailureCode(body: []const u8, capture: *codex_provider.Capture) vo
         .string => |value| value,
         else => return,
     };
-    capture.setFailureDiagnosticCode(code) catch {};
+    result.setDiagnosticCode(code) catch {};
 }
 
 fn setUnsupportedModelDetail(
     outer: *const std.json.ObjectMap,
-    capture: *codex_provider.Capture,
+    result: *codex_provider.TransportResult,
 ) void {
     if (outer.count() != 1) return;
     const detail_value = outer.get("detail") orelse return;
@@ -552,7 +580,7 @@ fn setUnsupportedModelDetail(
     {
         return;
     };
-    capture.setFailureDiagnosticCode("model_not_supported") catch {};
+    result.setDiagnosticCode("model_not_supported") catch {};
 }
 
 const CountingSink = struct {
@@ -606,18 +634,18 @@ test "live-shaped integer expiry does not force premature refresh" {
 }
 
 test "HTTP diagnostics retain only bounded provider error code or type" {
-    var capture: codex_provider.Capture = .{};
+    var result: codex_provider.TransportResult = .{ .disposition = .provider_rejected };
     setProviderFailureCode(
         "{\"error\":{\"code\":\"originator_not_allowed\",\"message\":\"unbounded secret-adjacent text\"}}",
-        &capture,
+        &result,
     );
-    try std.testing.expectEqualStrings("originator_not_allowed", capture.failureDiagnosticCode());
+    try std.testing.expectEqualStrings("originator_not_allowed", result.diagnosticCode());
 
-    setProviderFailureCode("{\"error\":{\"type\":\"invalid_request_error\"}}", &capture);
-    try std.testing.expectEqualStrings("invalid_request_error", capture.failureDiagnosticCode());
+    setProviderFailureCode("{\"error\":{\"type\":\"invalid_request_error\"}}", &result);
+    try std.testing.expectEqualStrings("invalid_request_error", result.diagnosticCode());
 
-    setProviderFailureCode("{\"error\":{\"code\":\"not a bounded code\"}}", &capture);
-    try std.testing.expectEqualStrings("invalid_request_error", capture.failureDiagnosticCode());
+    setProviderFailureCode("{\"error\":{\"code\":\"not a bounded code\"}}", &result);
+    try std.testing.expectEqualStrings("invalid_request_error", result.diagnosticCode());
 }
 
 test "authorization HTTP primitive deadlines and joins every OAuth call class" {
@@ -728,7 +756,7 @@ test "NativeTransport sends the production request and stops at terminal SSE" {
     const server_result = server_future.cancel(io);
     server_result catch |err| if (err != error.Canceled) return err;
 
-    try std.testing.expectEqual(codex_provider.TransportDisposition.complete, try disposition);
+    try std.testing.expectEqual(codex_provider.TransportDisposition.complete, (try disposition).disposition);
     try std.testing.expect(capture.terminalObserved());
     try fixture.expectProductionRequest(false);
 }
@@ -787,9 +815,9 @@ test "NativeTransport timeout bounds the entire call and closes an open response
         const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
         try server_future.await(io);
 
-        try std.testing.expectEqual(case.expected, disposition);
-        try std.testing.expectEqual(case.expected_status, capture.failureHttpStatus());
-        try std.testing.expectEqualStrings("", capture.failureDiagnosticCode());
+        try std.testing.expectEqual(case.expected, disposition.disposition);
+        try std.testing.expectEqual(case.expected_status, disposition.httpStatus());
+        try std.testing.expectEqualStrings("", disposition.diagnosticCode());
         try std.testing.expect(elapsed.nanoseconds < std.Io.Duration.fromMilliseconds(500).nanoseconds);
         try std.testing.expect(fixture.peer_closed);
     }
@@ -847,7 +875,7 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
         &capture,
     );
     try server_future.await(io);
-    try std.testing.expectEqual(codex_provider.TransportDisposition.complete, disposition);
+    try std.testing.expectEqual(codex_provider.TransportDisposition.complete, disposition.disposition);
     try fixture.expectProductionRequest(true);
 }
 
@@ -905,9 +933,9 @@ test "NativeTransport classifies every received HTTP rejection without retry" {
             &capture,
         );
         try server_future.await(io);
-        try std.testing.expectEqual(case.expected, disposition);
-        try std.testing.expectEqual(@as(?u16, @intFromEnum(case.status)), capture.failureHttpStatus());
-        try std.testing.expectEqualStrings(case.code, capture.failureDiagnosticCode());
+        try std.testing.expectEqual(case.expected, disposition.disposition);
+        try std.testing.expectEqual(@as(?u16, @intFromEnum(case.status)), disposition.httpStatus());
+        try std.testing.expectEqualStrings(case.code, disposition.diagnosticCode());
     }
 }
 
@@ -943,9 +971,9 @@ test "NativeTransport reads a chunked provider diagnostic after the response hea
         &capture,
     );
     try server_future.await(io);
-    try std.testing.expectEqual(codex_provider.TransportDisposition.provider_rejected, disposition);
-    try std.testing.expectEqual(@as(?u16, 400), capture.failureHttpStatus());
-    try std.testing.expectEqualStrings("unsupported_parameter", capture.failureDiagnosticCode());
+    try std.testing.expectEqual(codex_provider.TransportDisposition.provider_rejected, disposition.disposition);
+    try std.testing.expectEqual(@as(?u16, 400), disposition.httpStatus());
+    try std.testing.expectEqualStrings("unsupported_parameter", disposition.diagnosticCode());
 }
 
 test "NativeTransport classifies the bounded ChatGPT unsupported-model detail" {
@@ -1031,9 +1059,9 @@ fn expectUnsupportedModelWireCase(
         &capture,
     );
     try server_future.await(io);
-    try std.testing.expectEqual(expected, disposition);
-    try std.testing.expectEqual(@as(?u16, 400), capture.failureHttpStatus());
-    try std.testing.expectEqualStrings(expected_code, capture.failureDiagnosticCode());
+    try std.testing.expectEqual(expected, disposition.disposition);
+    try std.testing.expectEqual(@as(?u16, 400), disposition.httpStatus());
+    try std.testing.expectEqualStrings(expected_code, disposition.diagnosticCode());
 }
 
 test "NativeTransport keeps status without retaining oversized or malformed provider bodies" {
@@ -1082,9 +1110,9 @@ test "NativeTransport keeps status without retaining oversized or malformed prov
         );
         const server_result = server_future.cancel(io);
         server_result catch |err| if (err != error.Canceled) return err;
-        try std.testing.expectEqual(codex_provider.TransportDisposition.provider_rejected, disposition);
-        try std.testing.expectEqual(@as(?u16, 400), capture.failureHttpStatus());
-        try std.testing.expectEqualStrings("", capture.failureDiagnosticCode());
+        try std.testing.expectEqual(codex_provider.TransportDisposition.provider_rejected, disposition.disposition);
+        try std.testing.expectEqual(@as(?u16, 400), disposition.httpStatus());
+        try std.testing.expectEqualStrings("", disposition.diagnosticCode());
     }
 }
 
