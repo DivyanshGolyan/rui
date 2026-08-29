@@ -94,7 +94,7 @@ run_permission_input_case() {
     resumed=$(printf 'y\n' | $onepage \
         --state "$state" \
         --resume "$session_id" \
-        --model fixture:resume \
+        --model fixture:bash \
         --fixture-response "Approval remained durable and resumable.")
     printf '%s\n' "$resumed" | grep -F "Final Answer:" >/dev/null
     printf '%s\n' "$resumed" | grep -F "Approval remained durable and resumable." >/dev/null

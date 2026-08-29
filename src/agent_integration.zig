@@ -22,9 +22,8 @@ pub fn main(init: std.process.Init) !void {
         .runtime = layout.runtime,
         .mode = .{ .create = .{
             .workspace_path = layout.workspace_path,
-            .model = "fixture:answer",
+            .model_binding = .{ .model = "fixture:answer", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
         } },
     });
     const identity = try owner.drive();
@@ -77,9 +76,8 @@ fn uncommittedTaskCanBeReadmitted(
         .runtime = layout.runtime,
         .mode = .{ .create = .{
             .workspace_path = layout.workspace_path,
-            .model = "fixture:task-readmission",
+            .model_binding = .{ .model = "fixture:task-readmission", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
         } },
     });
     const identified = try owner.drive();
@@ -91,7 +89,7 @@ fn uncommittedTaskCanBeReadmitted(
         .runtime = layout.runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = fixture.provider(),
+            .model_binding = .{ .model = "fixture:task-readmission", .provider = fixture.provider() },
         } },
     });
     defer restored.close();
@@ -115,9 +113,8 @@ fn cancellationRegenerates(
         .runtime = layout.runtime,
         .mode = .{ .create = .{
             .workspace_path = layout.workspace_path,
-            .model = "fixture:cancelled",
+            .model_binding = .{ .model = "fixture:cancelled", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
         } },
     });
     const identified = try owner.drive();
@@ -163,14 +160,14 @@ fn offeredPermissionDenialContinues(
         .runtime = layout.runtime,
         .mode = .{ .create = .{
             .workspace_path = layout.workspace_path,
-            .model = "fixture:permission-denied",
+            .model_binding = .{ .model = "fixture:permission-denied", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
         } },
     });
     const identified = try owner.drive();
     const session_id = try sessionProjection(&identified);
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+    _ = try owner.drive();
     _ = try owner.drive();
     const waiting = try owner.drive();
     const original_approval = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
@@ -182,7 +179,7 @@ fn offeredPermissionDenialContinues(
         .runtime = layout.runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = fixture.provider(),
+            .model_binding = .{ .model = "fixture:permission-denied", .provider = fixture.provider() },
         } },
     });
     defer restored.close();
@@ -239,14 +236,14 @@ fn restoredBashApprovalDispatchesExactDescriptor(
         .runtime = layout.runtime,
         .mode = .{ .create = .{
             .workspace_path = layout.workspace_path,
-            .model = "fixture:restored-bash-authority",
+            .model_binding = .{ .model = "fixture:restored-bash-authority", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
         } },
     });
     const identified = try owner.drive();
     const session_id = try sessionProjection(&identified);
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+    _ = try owner.drive();
     _ = try owner.drive();
     const waiting = try owner.drive();
     const initial = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
@@ -256,7 +253,7 @@ fn restoredBashApprovalDispatchesExactDescriptor(
         .runtime = layout.runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = fixture.provider(),
+            .model_binding = .{ .model = "fixture:restored-bash-authority", .provider = fixture.provider() },
         } },
     });
     defer restored.close();
@@ -355,14 +352,14 @@ fn restoredPatchApprovalUsesExactDescriptor(
         .runtime = layout.runtime,
         .mode = .{ .create = .{
             .workspace_path = layout.workspace_path,
-            .model = "fixture:restored-patch-approval",
+            .model_binding = .{ .model = "fixture:restored-patch-approval", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
         } },
     });
     const identified = try owner.drive();
     const session_id = try sessionProjection(&identified);
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+    _ = try owner.drive();
     _ = try owner.drive();
     const waiting = try owner.drive();
     _ = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
@@ -372,7 +369,7 @@ fn restoredPatchApprovalUsesExactDescriptor(
         .runtime = layout.runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = fixture.provider(),
+            .model_binding = .{ .model = "fixture:restored-patch-approval", .provider = fixture.provider() },
         } },
     });
     defer restored.close();
@@ -441,14 +438,14 @@ fn approvedPatchCompletesOnce(
         .runtime = layout.runtime,
         .mode = .{ .create = .{
             .workspace_path = layout.workspace_path,
-            .model = "fixture:approved-patch",
+            .model_binding = .{ .model = "fixture:approved-patch", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
         } },
     });
     defer owner.close();
     _ = try owner.drive();
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+    _ = try owner.drive();
     _ = try owner.drive();
     const waiting = try owner.drive();
     const approval = approvalProjection(&waiting) orelse return error.ApprovalProjectionMissing;
@@ -494,9 +491,8 @@ fn lostCompletionNotificationRecovers(
         .runtime = layout.runtime,
         .mode = .{ .create = .{
             .workspace_path = layout.workspace_path,
-            .model = "fixture:lost-notification",
+            .model_binding = .{ .model = "fixture:lost-notification", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
             .fault = capture.hook(),
         } },
     });
@@ -528,9 +524,8 @@ fn uncertainModelRetryUsesNewAttempt(
         .runtime = layout.runtime,
         .mode = .{ .create = .{
             .workspace_path = layout.workspace_path,
-            .model = "fixture:model-retry",
+            .model_binding = .{ .model = "fixture:model-retry", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
             .fault = capture.hook(),
         } },
     });
@@ -542,7 +537,10 @@ fn uncertainModelRetryUsesNewAttempt(
 
     var restored = try harness.Harness.open(.{
         .runtime = layout.runtime,
-        .mode = .{ .restore = .{ .session_id = session_id, .provider = fixture.provider() } },
+        .mode = .{ .restore = .{ .session_id = session_id, .model_binding = .{
+            .model = "fixture:model-retry",
+            .provider = fixture.provider(),
+        } } },
     });
     defer restored.close();
     _ = try restored.drive();
@@ -564,9 +562,8 @@ fn exhaustedModelRetriesBecomeFailure(
             .runtime = layout.runtime,
             .mode = .{ .create = .{
                 .workspace_path = layout.workspace_path,
-                .model = "fixture:model-retry-exhaustion",
+                .model_binding = .{ .model = "fixture:model-retry-exhaustion", .provider = fixture.provider() },
                 .task = task,
-                .provider = fixture.provider(),
                 .fault = capture.hook(),
             } },
         });
@@ -583,7 +580,7 @@ fn exhaustedModelRetriesBecomeFailure(
             .runtime = layout.runtime,
             .mode = .{ .restore = .{
                 .session_id = session_id,
-                .provider = fixture.provider(),
+                .model_binding = .{ .model = "fixture:model-retry-exhaustion", .provider = fixture.provider() },
                 .fault = capture.hook(),
             } },
         });
@@ -630,9 +627,8 @@ fn uncertainBashNeverReplays(
         .permission_mode = .bypass,
         .mode = .{ .create = .{
             .workspace_path = layout.workspace_path,
-            .model = "fixture:uncertain-bash",
+            .model_binding = .{ .model = "fixture:uncertain-bash", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
             .fault = capture.hook(),
         } },
     });
@@ -698,11 +694,13 @@ fn finalProjection(progress: *const harness.Progress) ?harness.Projection {
 }
 
 fn expectInjectedCrash(owner: *harness.Harness) !void {
-    if (owner.drive()) |_| {
-        return error.CrashBoundaryNotReached;
-    } else |err| if (err != error.InjectedCrash) {
-        return err;
+    for (0..8) |_| {
+        if (owner.drive()) |_| continue else |err| {
+            if (err != error.InjectedCrash) return err;
+            return;
+        }
     }
+    return error.CrashBoundaryNotReached;
 }
 
 const Crash = struct {

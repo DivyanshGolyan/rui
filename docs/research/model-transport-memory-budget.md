@@ -2,20 +2,46 @@
 
 Date: 2026-08-27
 
+## Capacity-one implementation evidence (2026-08-29)
+
+The issue #11 adapter now has the following capacity-one bounds. These are classified by evidence source so compile-time limits are not presented as measured resident memory.
+
+| Component | Evidence | Capacity-one value or bound |
+| --- | --- | ---: |
+| Provider-neutral request window | compile-time source bound | 4,096 bytes |
+| Canonical decoded candidate | compile-time source bound | 98,372 bytes |
+| SSE wire frame | compile-time source bound | 598,424 bytes |
+| Total SSE response | compile-time source bound | 2,393,696 bytes cumulatively; not retained |
+| JSON parser | compile-time source bound | one in-place cursor, depth 32; no payload-sized arena |
+| HTTP response transfer window | compile-time source bound | 64 bytes on the Codex success path |
+| HTTP rejection diagnostic body | compile-time source bound | 4,097 bytes read, at most 4,096 accepted |
+| HTTPS connection byte buffers | Zig 0.16 source-derived | 59,151 bytes before structs and allocator rounding |
+| TCP send and receive defaults | measured with `sysctl` on the development host, 2026-08-29 | 131,072 bytes each |
+| TCP autotuning maxima | measured with `sysctl` on the development host, 2026-08-29 | 4,194,304 bytes each |
+| Async task stack reservation | Zig 0.16 source-derived | 4 MiB virtual minimum per Kqueue task; resident pages unmeasured |
+| Retained connection state | implementation observation | zero idle Codex connections; each request uses `keep_alive = false` and deinitializes its client |
+
+The adapter compacts SSE `data:` lines in its one frame, decodes JSON strings in place with a bounded non-allocating cursor, and writes the provider-neutral candidate directly to Host-owned provisional storage after structural validation. It retains neither a JSON DOM, a nested `input_request` arena, a complete canonical result buffer, nor a second payload-sized SSE copy. The wire-frame bound deliberately covers six-byte JSON escape amplification at the maximum decoded candidate size. The total-stream bound limits cumulative parser and transport work, and the whole-call deadline limits elapsed time. A separate event count would add no independent resource guarantee because each event already consumes the byte budget.
+
+No live provider call was made for this update, and no real credential was read. Process RSS, physical footprint, touched async-stack pages, TLS handshake peak, allocator live bytes, and actual per-socket queued memory remain unmeasured for the capacity-one live path. The source and OS figures above are bounds or configuration evidence, not a measured whole-process slope. A later opt-in run must report those observations before this document can replace the existing planning estimate with a measured capacity-one result.
+
 ## Decision
 
-For a V1 lane of 100 concurrent HTTPS model calls, use **256 KiB per active call as the planning
-estimate** and **512 KiB per active call as provisional guarded headroom**:
+For a V1 lane of 100 concurrent HTTPS model calls, use **768 KiB of process-resident memory per active
+call as the planning estimate** and **1 MiB per active call as provisional whole-machine guarded
+headroom**. This revision reflects the compile-time worst-case escaped SSE frame rather than the
+smaller ordinary-response frame:
 
 | Transport-only budget | Per active call | 100 active calls |
 | --- | ---: | ---: |
-| Low, measured target | 128 KiB | 12.5 MiB |
-| Planning estimate | 256 KiB | 25 MiB |
-| Provisional guarded headroom | 512 KiB | 50 MiB |
+| Ordinary-frame measured target, not a hard bound | 128 KiB | 12.5 MiB |
+| Worst-case process-resident planning estimate | 768 KiB | 75 MiB |
+| Provisional whole-machine guarded headroom | 1 MiB | 100 MiB |
 
-These figures include process-resident transport state and an allowance for kernel socket memory.
-They exclude the Activation Slot, QuickJS, SQLite, durable prompt and result storage, subprocesses,
-and shared host baseline. The 512 KiB figure is not yet a proved hard ceiling. It becomes defensible
+The 768 KiB figure covers process-resident transport state. The 1 MiB figure additionally leaves
+provisional room for measured kernel socket memory. Both exclude the Activation Slot, QuickJS,
+SQLite, durable prompt and result storage, subprocesses, and shared host baseline. The 1 MiB figure
+is not yet a proved hard ceiling. It becomes defensible
 only if OnePage incrementally parses streaming events, bounds transient frames, controls socket
 autotuning, and does not create one native thread per call.
 
@@ -128,7 +154,7 @@ send, forward-allocation, and queued-memory counters separately from configured 
 For a streamed model response that OnePage drains immediately, the send queue should be nearly empty
 after the prompt is uploaded and the receive queue should normally contain only a small number of
 records. Charging the full platform high-water marks is useful as guarded headroom, not as a
-steady-state prediction. Conversely, leaving autotuning unbounded means neither 256 nor 512 KiB is a
+steady-state prediction. Conversely, leaving autotuning unbounded means neither 768 KiB nor 1 MiB is a
 hard per-call ceiling: a slow consumer or high-bandwidth/high-latency path can grow the queues into
 MiBs per socket.
 
@@ -166,25 +192,23 @@ resident or physical-footprint measurements.
 
 ## Assumptions behind the three estimates
 
-| Component per live call | 128 KiB low | 256 KiB planning | 512 KiB guarded |
+| Component per live call | 672 KiB low | 768 KiB planning | 1 MiB guarded |
 | --- | ---: | ---: | ---: |
 | Zig fixed HTTPS allocation | 64 KiB | 64 KiB | 64 KiB |
-| Transfer/SSE/request metadata and allocator slack | 16-32 KiB | 32-64 KiB | 96-128 KiB |
+| Transfer/SSE/request metadata and allocator slack | 576-592 KiB | 576-608 KiB | 608-672 KiB |
 | Resident stack/fiber pages | small/shared | 16-32 KiB | 32-64 KiB |
-| Actual kernel socket memory allowance | 32-48 KiB | 96-144 KiB | about 256 KiB |
 | Interpretation | stretch target | expected planning slope | provisional headroom |
 
 The rows are intentionally rounded and are not independent maxima. The low figure assumes the prompt
 has been sent, the response is slow and immediately drained, parsing is incremental, and the event
-loop has no per-call native thread. The planning figure permits realistic allocator and queue
-occupancy. The guarded figure approximately charges the current macOS 128 KiB send plus 128 KiB
-receive high-water marks and leaves about another 256 KiB for all user-space state.
+loop has no per-call native thread. The planning figure permits realistic allocator occupancy above
+the worst-case frame and fixed TLS buffers. Kernel socket memory remains a separately reported
+whole-machine slope because platform autotuning can exceed every user-space estimate in this table.
 
 Handshake bursts, DNS resolver behavior, the shared certificate bundle, connection-pool metadata,
 and allocator fragmentation remain unmeasured. The certificate bundle and event-loop workers should
-primarily be a shared baseline rather than a per-call slope. Zig's connection pool also retains up to
-32 idle connections by default, so V1 should set an intentional idle-pool limit or include those
-roughly 64 KiB user-space allocations in the post-burst baseline.
+primarily be a shared baseline rather than a per-call slope. This implementation disables keep-alive
+and deinitializes its client after each call, so it retains no idle Codex connections.
 
 ## Best way to turn the estimate into a contract
 
@@ -205,8 +229,8 @@ intercept. Record steady p50, steady p95, and peak-handshake slopes over repeate
 
 Acceptance gates for a 100-call V1 lane should be:
 
-- process-RSS slope no greater than 256 KiB per active transport in normal streaming;
-- process plus measured kernel/socket slope no greater than 512 KiB per active transport during the
+- process-RSS slope no greater than 768 KiB per active transport in worst-case-frame streaming;
+- process plus measured kernel/socket slope no greater than 1 MiB per active transport during the
   slow-consumer and simultaneous-handshake tests;
 - no whole-request JSON copy and no whole-response/SSE-event accumulation;
 - fixed request, transfer, parser, canonical response, and maximum-frame bounds;

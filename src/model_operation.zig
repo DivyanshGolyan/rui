@@ -40,8 +40,24 @@ pub const Provider = struct {
     dispatch: *const fn (
         *anyopaque,
         RequestCursor,
-        ResponseWriter,
-    ) anyerror!void,
+        CandidateWriter,
+    ) anyerror!DispatchOutcome,
+};
+
+pub const FailureCapture = struct {
+    failure: model_protocol.Failure,
+    diagnostic_source: model_protocol.DiagnosticSource = .none,
+    diagnostic_code_bytes: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
+    diagnostic_code_length: u8 = 0,
+
+    pub fn diagnosticCode(self: *const FailureCapture) []const u8 {
+        return self.diagnostic_code_bytes[0..self.diagnostic_code_length];
+    }
+};
+
+pub const DispatchOutcome = union(enum) {
+    candidate,
+    failure: FailureCapture,
 };
 
 const RequestSource = struct {
@@ -564,17 +580,12 @@ fn allZero(bytes: []const u8) bool {
     return true;
 }
 
-pub const ResponseWriter = struct {
+pub const CandidateWriter = struct {
     context: *anyopaque,
     append_fn: *const fn (*anyopaque, []const u8) anyerror!void,
-    finish_fn: *const fn (*anyopaque) anyerror!void,
 
-    pub fn append(self: ResponseWriter, bytes: []const u8) !void {
+    pub fn append(self: CandidateWriter, bytes: []const u8) !void {
         try self.append_fn(self.context, bytes);
-    }
-
-    pub fn finish(self: ResponseWriter) !void {
-        try self.finish_fn(self.context);
     }
 };
 
@@ -584,7 +595,11 @@ pub const ResponseWriter = struct {
 pub const ProviderIo = struct {
     request_blob: session_store.BlobReader,
     response: session_store.BlobWriter,
+    session: *session_store.Session,
+    response_ref: u64,
     response_length: u32 = 0,
+    response_prefix: [model_protocol.header_size]u8 = @splat(0),
+    response_prefix_length: u8 = 0,
 
     pub fn open(
         session: *session_store.Session,
@@ -594,7 +609,12 @@ pub const ProviderIo = struct {
         var request_blob = try session.openBlob(request_ref);
         errdefer request_blob.close();
         const response = try session.beginBlob(response_ref);
-        return .{ .request_blob = request_blob, .response = response };
+        return .{
+            .request_blob = request_blob,
+            .response = response,
+            .session = session,
+            .response_ref = response_ref,
+        };
     }
 
     pub fn close(self: *ProviderIo) void {
@@ -610,21 +630,44 @@ pub const ProviderIo = struct {
         }, null);
     }
 
-    pub fn responseCapability(self: *ProviderIo) ResponseWriter {
-        return .{ .context = self, .append_fn = responseAppend, .finish_fn = responseFinish };
+    pub fn candidateCapability(self: *ProviderIo) CandidateWriter {
+        return .{ .context = self, .append_fn = responseAppend };
     }
 
-    pub fn ensureResponsePublished(self: *const ProviderIo) !void {
-        if (self.response.open) return error.ProviderResponseIncomplete;
-    }
-
-    pub fn publishProviderFailure(
-        self: *ProviderIo,
-        session: *session_store.Session,
-        response_ref: u64,
-    ) !u64 {
-        self.response.abort();
-        return publishFailureResult(session, response_ref);
+    /// The synchronous provider return is the only settlement point. Providers
+    /// can append candidate bytes, but cannot seal or replace Host-owned
+    /// captured evidence.
+    pub fn settle(self: *ProviderIo, outcome: DispatchOutcome) !void {
+        switch (outcome) {
+            .candidate => {
+                if (self.response_length == 0) return error.EmptyProviderCandidate;
+                try model_protocol.validateCandidateEnvelopePrefix(
+                    self.response_prefix[0..self.response_prefix_length],
+                    self.response_length,
+                );
+                try self.response.finish();
+            },
+            .failure => |failure| {
+                self.response.abort();
+                self.response = try self.session.beginBlob(self.response_ref);
+                var bytes: [
+                    model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size
+                ]u8 = undefined;
+                const diagnostic_code = failure.diagnosticCode();
+                const encoded = if (failure.diagnostic_source == .none and
+                    diagnostic_code.len == 0)
+                    try model_protocol.encodeFailure(&bytes, failure.failure)
+                else
+                    try model_protocol.encodeFailureDiagnostic(
+                        &bytes,
+                        failure.failure,
+                        failure.diagnostic_source,
+                        diagnostic_code,
+                    );
+                try self.response.append(encoded);
+                try self.response.finish();
+            },
+        }
     }
 
     fn requestLength(context: *anyopaque) u64 {
@@ -641,12 +684,16 @@ pub const ProviderIo = struct {
         const self: *ProviderIo = @ptrCast(@alignCast(context));
         const next_length = try capturedResponseLength(self.response_length, bytes.len);
         try self.response.append(bytes);
+        const remaining_prefix = model_protocol.header_size - self.response_prefix_length;
+        const copy_length = @min(remaining_prefix, bytes.len);
+        if (copy_length != 0) {
+            @memcpy(
+                self.response_prefix[self.response_prefix_length..][0..copy_length],
+                bytes[0..copy_length],
+            );
+            self.response_prefix_length += @intCast(copy_length);
+        }
         self.response_length = next_length;
-    }
-
-    fn responseFinish(context: *anyopaque) anyerror!void {
-        const self: *ProviderIo = @ptrCast(@alignCast(context));
-        try self.response.finish();
     }
 };
 

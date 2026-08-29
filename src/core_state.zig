@@ -326,6 +326,12 @@ fn responseFailure(value: u8) !model_protocol.Failure {
         6 => .multiple_outputs,
         7 => .oversized,
         8 => .unknown_tool,
+        9 => .missing_authentication,
+        10 => .authentication_expired,
+        11 => .model_unavailable,
+        12 => .timeout,
+        13 => .transport_not_started,
+        14 => .transport_may_have_started,
         else => error.UnknownResponseFailure,
     };
 }
@@ -382,6 +388,15 @@ test "canonical Core State vector round trips deterministically" {
     try encode(&second, restored);
     try std.testing.expectEqualSlices(u8, &first, &second);
     try std.testing.expectEqualDeep(state, restored);
+}
+
+test "Core State decodes every durable model failure" {
+    inline for (std.meta.fields(model_protocol.Failure)) |field| {
+        try std.testing.expectEqual(
+            @field(model_protocol.Failure, field.name),
+            try responseFailure(field.value),
+        );
+    }
 }
 
 test "Core State uses the arguments window for presence even with an all-zero digest" {

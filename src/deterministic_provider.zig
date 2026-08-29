@@ -13,7 +13,6 @@ const session_transition = @import("session_transition.zig");
 pub const Fixture = struct {
     expected_task: ?[]const u8,
     final_answer: []const u8,
-    finish_response: bool = true,
     calls: u32 = 0,
 
     pub fn provider(self: *Fixture) model_operation.Provider {
@@ -23,8 +22,8 @@ pub const Fixture = struct {
     fn dispatch(
         context: *anyopaque,
         request_value: model_operation.RequestCursor,
-        response: model_operation.ResponseWriter,
-    ) anyerror!void {
+        response: model_operation.CandidateWriter,
+    ) anyerror!model_operation.DispatchOutcome {
         const self: *Fixture = @ptrCast(@alignCast(context));
         self.calls += 1;
         var request = request_value;
@@ -32,10 +31,8 @@ pub const Fixture = struct {
         if (self.expected_task) |expected_task| try expectText(first, .user_text, expected_task);
         while (try request.next()) |_| {}
 
-        var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-        const encoded = try model_protocol.encodeText(&response_buffer, self.final_answer);
-        try response.append(encoded);
-        if (self.finish_response) try response.finish();
+        try model_protocol.writeText(response, self.final_answer);
+        return .candidate;
     }
 };
 
@@ -57,24 +54,23 @@ pub const ToolFixture = struct {
     fn dispatch(
         context: *anyopaque,
         request_value: model_operation.RequestCursor,
-        response: model_operation.ResponseWriter,
-    ) anyerror!void {
+        response: model_operation.CandidateWriter,
+    ) anyerror!model_operation.DispatchOutcome {
         const self: *ToolFixture = @ptrCast(@alignCast(context));
         var request = request_value;
-        var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
-        const encoded = switch (self.calls) {
-            0 => blk: {
+        switch (self.calls) {
+            0 => {
                 if (request.entryCount() != 1) return error.UnexpectedFixtureRequest;
                 try expectText((try request.next()).?, .user_text, self.expected_task);
                 try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-                break :blk try model_protocol.encodeTool(
-                    &encoded_buffer,
+                try model_protocol.writeTool(
+                    response,
                     fixtureToolKey(self.tool),
                     try fixtureArguments(self.tool, self.tool_arguments, &arguments),
                 );
             },
-            1 => blk: {
+            1 => {
                 if (request.entryCount() != 3) return error.ToolResultMissingFromContext;
                 try expectText((try request.next()).?, .user_text, self.expected_task);
                 try expectToolCall((try request.next()).?, self.tool, self.tool_arguments);
@@ -91,13 +87,12 @@ pub const ToolFixture = struct {
                         return error.UnexpectedFixtureToolStatus;
                     },
                 }
-                break :blk try model_protocol.encodeText(&encoded_buffer, self.final_answer);
+                try model_protocol.writeText(response, self.final_answer);
             },
             else => return error.UnexpectedFixtureCall,
-        };
+        }
         self.calls += 1;
-        try response.append(encoded);
-        try response.finish();
+        return .candidate;
     }
 };
 
@@ -116,55 +111,53 @@ pub const RepairFixture = struct {
     fn dispatch(
         context: *anyopaque,
         request_value: model_operation.RequestCursor,
-        response: model_operation.ResponseWriter,
-    ) anyerror!void {
+        response: model_operation.CandidateWriter,
+    ) anyerror!model_operation.DispatchOutcome {
         const self: *RepairFixture = @ptrCast(@alignCast(context));
         var request = request_value;
 
-        var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
-        const encoded = switch (request.entryCount()) {
-            1 => blk: {
+        switch (request.entryCount()) {
+            1 => {
                 try expectText((try request.next()).?, .user_text, self.expected_task);
                 try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-                break :blk try model_protocol.encodeTool(
-                    &encoded_buffer,
+                try model_protocol.writeTool(
+                    response,
                     model_contract.bash_key,
                     try fixtureArguments(.bash, self.bash_call, &arguments),
                 );
             },
-            3 => blk: {
+            3 => {
                 try self.expectPrefix(&request, 3);
                 try expectBashResult((try request.next()).?, .nonzero_exit, 1);
                 try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-                break :blk try model_protocol.encodeTool(
-                    &encoded_buffer,
+                try model_protocol.writeTool(
+                    response,
                     model_contract.apply_patch_key,
                     try fixtureArguments(.apply_patch, self.patch, &arguments),
                 );
             },
-            5 => blk: {
+            5 => {
                 try self.expectPrefix(&request, 5);
                 try expectPatchResult((try request.next()).?, .applied);
                 try expectEnd(&request);
                 var arguments: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-                break :blk try model_protocol.encodeTool(
-                    &encoded_buffer,
+                try model_protocol.writeTool(
+                    response,
                     model_contract.bash_key,
                     try fixtureArguments(.bash, self.bash_call, &arguments),
                 );
             },
-            7 => blk: {
+            7 => {
                 try self.expectPrefix(&request, 7);
                 try expectBashResult((try request.next()).?, .success, 0);
                 try expectEnd(&request);
-                break :blk try model_protocol.encodeText(&encoded_buffer, self.final_answer);
+                try model_protocol.writeText(response, self.final_answer);
             },
             else => return error.UnexpectedRepairHistory,
-        };
-        try response.append(encoded);
-        try response.finish();
+        }
+        return .candidate;
     }
 
     fn expectPrefix(
@@ -373,7 +366,11 @@ test "deterministic Provider decodes the exact immutable request" {
     var provider_io = try model_operation.ProviderIo.open(&session, 1001, 1002);
     defer provider_io.close();
     const provider = fixture.provider();
-    try provider.dispatch(provider.context, try provider_io.request(), provider_io.responseCapability());
+    try provider_io.settle(try provider.dispatch(
+        provider.context,
+        try provider_io.request(),
+        provider_io.candidateCapability(),
+    ));
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     const response = try session.readBlob(1002, 0, &response_buffer);
     var response_validation: model_protocol.ValidationScratch = undefined;

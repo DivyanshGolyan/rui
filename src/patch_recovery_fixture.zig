@@ -49,9 +49,8 @@ fn start(io: std.Io, runtime: *harness.HostRuntime, mode: []const u8, workspace:
         .permission_mode = .bypass,
         .mode = .{ .create = .{
             .workspace_path = workspace,
-            .model = "fixture:patch-crash",
+            .model_binding = .{ .model = "fixture:patch-crash", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
             .fault = crash.hook(),
         } },
     });
@@ -59,7 +58,7 @@ fn start(io: std.Io, runtime: *harness.HostRuntime, mode: []const u8, workspace:
     const identity = try owner.drive();
     const session_id = identity.projections[0].session_id;
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
-    for (0..8) |_| {
+    for (0..16) |_| {
         if (owner.drive()) |_| {} else |err| {
             if (err != error.InjectedCrash) return err;
             var id_buffer: [16]u8 = undefined;
@@ -99,7 +98,10 @@ fn resumeSession(
     };
     var owner = try harness.Harness.open(.{
         .runtime = runtime,
-        .mode = .{ .restore = .{ .session_id = session_id, .provider = fixture.provider() } },
+        .mode = .{ .restore = .{ .session_id = session_id, .model_binding = .{
+            .model = "fixture:patch-crash",
+            .provider = fixture.provider(),
+        } } },
     });
     defer owner.close();
     for (0..24) |_| {

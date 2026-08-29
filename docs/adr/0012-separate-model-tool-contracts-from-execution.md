@@ -31,8 +31,11 @@ Issue #38 owns that atomic Conversation and Interaction Request transition. Befo
 available, the lifecycle validates and isolates a complete `input_request`, creates no Action or
 Conversation entry, and commits a terminal Core phase reported as `InteractionRequestLayerRequired`.
 It preserves the admitted response metadata but must not expose an awaiting-input state that has no
-durable request or response path.
+durable request or response path. An adapter advertises only dispositions that the lifecycle can
+durably admit. The live Codex request therefore omits `input_request` until issue #38 lands, while its
+strict capture decoder continues to reject malformed provider-returned input dispositions safely.
 
-The split is necessary now because both the deterministic fixture and Codex Provider must
-consume the same request without understanding tool-specific durable encodings. It preserves a small
-provider seam while retaining ADR-0005's closed V1 product surface and ADR-0010's simplicity rule.
+The split is necessary now because deterministic fixtures and provider adapters must use the same
+semantic response format without understanding tool-specific durable encodings. Format membership does
+not imply that every adapter advertises a capability before the lifecycle supports it. This preserves a
+small provider seam while retaining ADR-0005's closed V1 product surface and ADR-0010's simplicity rule.

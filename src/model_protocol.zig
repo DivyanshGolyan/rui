@@ -5,6 +5,7 @@ const contract = @import("model_contract.zig");
 pub const header_size = 24;
 pub const max_resident_response_size = 20 * 1024;
 pub const max_assistant_text_size = max_resident_response_size - header_size;
+pub const max_failure_diagnostic_code_size: usize = 64;
 pub const max_response_size = header_size + contract.max_tool_key_size +
     contract.max_tool_arguments_envelope_size;
 pub const version: u16 = 3;
@@ -21,6 +22,23 @@ pub const Failure = enum(u8) {
     multiple_outputs = 6,
     oversized = 7,
     unknown_tool = 8,
+    missing_authentication = 9,
+    authentication_expired = 10,
+    model_unavailable = 11,
+    timeout = 12,
+    transport_not_started = 13,
+    transport_may_have_started = 14,
+};
+
+pub const DiagnosticSource = enum(u8) {
+    none = 0,
+    local_credentials = 1,
+    provider = 2,
+};
+
+pub const FailureDiagnostic = struct {
+    source: DiagnosticSource = .none,
+    code: []const u8 = "",
 };
 
 pub const Parsed = struct {
@@ -91,10 +109,72 @@ pub const DefinitionResolver = struct {
 
 pub const Choice = struct { id: []const u8, label: []const u8 };
 
-pub fn encodeText(out: []u8, text: []const u8) ![]const u8 {
-    if (text.len == 0 or text.len > max_assistant_text_size or !contract.utf8Valid(text)) {
-        return error.InvalidAssistantText;
+pub fn writeText(writer: anytype, text: []const u8) !void {
+    try validateText(text);
+    try writeEnvelopeHeader(writer, .final_answer, .none, 0, 0, text.len, 0);
+    try writer.append(text);
+}
+
+pub fn writeTool(writer: anytype, tool_key: []const u8, arguments: []const u8) !void {
+    try validateTool(tool_key, arguments);
+    try writeEnvelopeHeader(writer, .tool_call, .none, 0, 0, tool_key.len, arguments.len);
+    try writer.append(tool_key);
+    try writer.append(arguments);
+}
+
+pub fn writeInputText(writer: anytype, prompt: []const u8) !void {
+    try validatePrompt(prompt);
+    try writeEnvelopeHeader(
+        writer,
+        .input_request,
+        .none,
+        @intFromEnum(contract.InputShape.text),
+        0,
+        prompt.len,
+        0,
+    );
+    try writer.append(prompt);
+}
+
+pub fn writeInputChoice(writer: anytype, prompt: []const u8, choices: []const Choice) !void {
+    try validatePrompt(prompt);
+    const option_length = try validateChoices(choices);
+    try writeEnvelopeHeader(
+        writer,
+        .input_request,
+        .none,
+        @intFromEnum(contract.InputShape.single_choice),
+        @intCast(choices.len),
+        prompt.len,
+        option_length,
+    );
+    try writer.append(prompt);
+    for (choices) |choice| {
+        var option_header: [4]u8 = undefined;
+        write(u16, &option_header, 0, @intCast(choice.id.len));
+        write(u16, &option_header, 2, @intCast(choice.label.len));
+        try writer.append(&option_header);
+        try writer.append(choice.id);
+        try writer.append(choice.label);
     }
+}
+
+fn writeEnvelopeHeader(
+    writer: anytype,
+    disposition: Disposition,
+    reason: Failure,
+    shape: u8,
+    option_count: u8,
+    first_length: usize,
+    second_length: usize,
+) !void {
+    var header: [header_size]u8 = undefined;
+    try buildEnvelopeHeader(&header, disposition, reason, shape, option_count, first_length, second_length);
+    try writer.append(&header);
+}
+
+pub fn encodeText(out: []u8, text: []const u8) ![]const u8 {
+    try validateText(text);
     return encode(out, .final_answer, .none, 0, 0, text, "");
 }
 
@@ -103,10 +183,7 @@ pub fn encodeTool(
     tool_key: []const u8,
     arguments: []const u8,
 ) ![]const u8 {
-    try contract.validateToolKey(tool_key);
-    if (arguments.len == 0 or arguments.len > contract.max_tool_arguments_envelope_size) {
-        return error.InvalidToolArguments;
-    }
+    try validateTool(tool_key, arguments);
     return encode(out, .tool_call, .none, 0, 0, tool_key, arguments);
 }
 
@@ -117,22 +194,13 @@ pub fn encodeInputText(out: []u8, prompt: []const u8) ![]const u8 {
 
 pub fn encodeInputChoice(out: []u8, prompt: []const u8, choices: []const Choice) ![]const u8 {
     try validatePrompt(prompt);
-    if (choices.len == 0 or choices.len > contract.max_choice_count) return error.InvalidInputChoices;
+    _ = try validateChoices(choices);
     var option_bytes: [
         contract.max_choice_count *
             (4 + contract.max_choice_id_size + contract.max_choice_label_size)
     ]u8 = undefined;
     var cursor: usize = 0;
-    for (choices, 0..) |choice, index| {
-        if (choice.id.len == 0 or choice.id.len > contract.max_choice_id_size or
-            choice.label.len == 0 or choice.label.len > contract.max_choice_label_size or
-            !contract.utf8Valid(choice.id) or !contract.utf8Valid(choice.label))
-        {
-            return error.InvalidInputChoices;
-        }
-        for (choices[0..index]) |earlier| {
-            if (std.mem.eql(u8, earlier.id, choice.id)) return error.DuplicateInputChoice;
-        }
+    for (choices) |choice| {
         write(u16, &option_bytes, cursor, @intCast(choice.id.len));
         write(u16, &option_bytes, cursor + 2, @intCast(choice.label.len));
         cursor += 4;
@@ -157,6 +225,26 @@ pub fn encodeFailure(out: []u8, reason: Failure) ![]const u8 {
     return encode(out, .failure, reason, 0, 0, "", "");
 }
 
+pub fn encodeFailureDiagnostic(
+    out: []u8,
+    reason: Failure,
+    source: DiagnosticSource,
+    code: []const u8,
+) ![]const u8 {
+    try validateFailureDiagnostic(reason, source, code);
+    return encode(out, .failure, reason, @intFromEnum(source), 0, code, "");
+}
+
+pub fn inspectFailureDiagnostic(bytes: []const u8) !FailureDiagnostic {
+    const inspected = try inspect(bytes);
+    if (inspected.disposition != .failure) return error.ExpectedFailureResponse;
+    const source = std.enums.fromInt(DiagnosticSource, inspected.shape) orelse
+        return error.MalformedModelResponse;
+    if (inspected.second.len != 0) return error.MalformedModelResponse;
+    try validateFailureDiagnostic(inspected.reason, source, inspected.first);
+    return .{ .source = source, .code = inspected.first };
+}
+
 fn encode(
     out: []u8,
     disposition: Disposition,
@@ -168,16 +256,7 @@ fn encode(
 ) ![]const u8 {
     const total = header_size + first.len + second.len;
     if (total > out.len or total > max_response_size) return error.ResponseTooLarge;
-    @memset(out[0..header_size], 0);
-    @memcpy(out[0..magic.len], magic);
-    write(u16, out, 8, version);
-    write(u16, out, 10, header_size);
-    out[12] = @intFromEnum(disposition);
-    out[13] = @intFromEnum(reason);
-    out[14] = shape;
-    out[15] = option_count;
-    write(u32, out, 16, @intCast(first.len));
-    write(u32, out, 20, @intCast(second.len));
+    try buildEnvelopeHeader(out[0..header_size], disposition, reason, shape, option_count, first.len, second.len);
     @memcpy(out[header_size..][0..first.len], first);
     if (second.ptr != out[header_size + first.len ..].ptr) {
         @memcpy(out[header_size + first.len .. total], second);
@@ -277,6 +356,26 @@ fn inspect(bytes: []const u8) !Inspected {
     };
 }
 
+/// Settlement-time framing check for an append-only candidate. Full semantic
+/// validation remains the later Session-ledger admission step.
+pub fn validateCandidateEnvelopePrefix(prefix: []const u8, total_length: u32) !void {
+    if (prefix.len != header_size or total_length < header_size or
+        total_length > max_response_size or
+        !std.mem.eql(u8, prefix[0..magic.len], magic) or
+        read(u16, prefix, 8) != version or read(u16, prefix, 10) != header_size)
+    {
+        return error.InvalidProviderCandidate;
+    }
+    const disposition = std.enums.fromInt(Disposition, prefix[12]) orelse
+        return error.InvalidProviderCandidate;
+    if (disposition == .failure) return error.ProviderFailureAsCandidate;
+    const first_length: u32 = read(u32, prefix, 16);
+    const second_length: u32 = read(u32, prefix, 20);
+    if (@as(u64, header_size) + first_length + second_length != total_length) {
+        return error.InvalidProviderCandidate;
+    }
+}
+
 fn decodeWithCatalog(
     scratch: *contract.StrictToolJsonScratch,
     bytes: []const u8,
@@ -351,7 +450,12 @@ fn finish(
             inspected.option_count,
         ) },
         .failure => {
-            if (inspected.reason == .none or inspected.shape != 0 or inspected.option_count != 0 or first.len != 0 or second.len != 0) {
+            const source = std.enums.fromInt(DiagnosticSource, inspected.shape) orelse
+                return error.MalformedModelResponse;
+            if (second.len != 0) return error.MalformedModelResponse;
+            validateFailureDiagnostic(inspected.reason, source, first) catch
+                return error.MalformedModelResponse;
+            if (inspected.option_count != 0) {
                 return error.MalformedModelResponse;
             }
             return .{ .parsed = failed(inspected.reason) };
@@ -457,6 +561,99 @@ fn validatePrompt(prompt: []const u8) !void {
     }
 }
 
+fn validateText(text: []const u8) !void {
+    if (text.len == 0 or text.len > max_assistant_text_size or !contract.utf8Valid(text)) {
+        return error.InvalidAssistantText;
+    }
+}
+
+fn validateTool(tool_key: []const u8, arguments: []const u8) !void {
+    try contract.validateToolKey(tool_key);
+    if (arguments.len == 0 or arguments.len > contract.max_tool_arguments_envelope_size) {
+        return error.InvalidToolArguments;
+    }
+}
+
+fn validateChoices(choices: []const Choice) !usize {
+    if (choices.len == 0 or choices.len > contract.max_choice_count) return error.InvalidInputChoices;
+    var option_length: usize = 0;
+    for (choices, 0..) |choice, index| {
+        if (choice.id.len == 0 or choice.id.len > contract.max_choice_id_size or
+            choice.label.len == 0 or choice.label.len > contract.max_choice_label_size or
+            !contract.utf8Valid(choice.id) or !contract.utf8Valid(choice.label))
+        {
+            return error.InvalidInputChoices;
+        }
+        for (choices[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier.id, choice.id)) return error.DuplicateInputChoice;
+        }
+        option_length += 4 + choice.id.len + choice.label.len;
+    }
+    return option_length;
+}
+
+fn buildEnvelopeHeader(
+    out: []u8,
+    disposition: Disposition,
+    reason: Failure,
+    shape: u8,
+    option_count: u8,
+    first_length: usize,
+    second_length: usize,
+) !void {
+    if (out.len < header_size or header_size + first_length + second_length > max_response_size) {
+        return error.ResponseTooLarge;
+    }
+    @memset(out[0..header_size], 0);
+    @memcpy(out[0..magic.len], magic);
+    write(u16, out, 8, version);
+    write(u16, out, 10, header_size);
+    out[12] = @intFromEnum(disposition);
+    out[13] = @intFromEnum(reason);
+    out[14] = shape;
+    out[15] = option_count;
+    write(u32, out, 16, @intCast(first_length));
+    write(u32, out, 20, @intCast(second_length));
+}
+
+fn validateFailureDiagnostic(
+    reason: Failure,
+    source: DiagnosticSource,
+    code: []const u8,
+) !void {
+    if (reason == .none) return error.InvalidProviderFailure;
+    if (source == .none) {
+        if (code.len != 0) return error.InvalidFailureDiagnosticCode;
+        return;
+    }
+    switch (source) {
+        .local_credentials => {
+            if (reason != .authentication_expired) return error.InvalidFailureDiagnosticSource;
+            try validateFailureDiagnosticCode(code);
+        },
+        .provider => {
+            if (reason != .authentication_expired and reason != .provider_error and
+                reason != .model_unavailable)
+            {
+                return error.InvalidFailureDiagnosticSource;
+            }
+            try validateFailureDiagnosticCode(code);
+        },
+        .none => unreachable,
+    }
+}
+
+fn validateFailureDiagnosticCode(code: []const u8) !void {
+    if (code.len > max_failure_diagnostic_code_size) {
+        return error.InvalidFailureDiagnosticCode;
+    }
+    for (code) |byte| if (!std.ascii.isAlphanumeric(byte) and
+        byte != '_' and byte != '-' and byte != '.')
+    {
+        return error.InvalidFailureDiagnosticCode;
+    };
+}
+
 fn failed(reason: Failure) Parsed {
     return .{ .disposition = .failure, .failure = reason };
 }
@@ -487,7 +684,85 @@ test "complete captured responses cover every V1 disposition" {
     const input = parse(&scratch, try encodeInputChoice(&bytes, "Choose one", &choices));
     try std.testing.expectEqual(contract.InputShape.single_choice, input.input_shape.?);
     try std.testing.expectEqual(@as(u8, 2), input.option_count);
-    try std.testing.expectEqual(Failure.provider_error, parse(&scratch, try encodeFailure(&bytes, .provider_error)).failure);
+    inline for (std.meta.fields(Failure)) |field| {
+        const failure = @field(Failure, field.name);
+        if (failure != .none) {
+            try std.testing.expectEqual(failure, parse(&scratch, try encodeFailure(&bytes, failure)).failure);
+        }
+    }
+}
+
+test "writer encoders are byte-identical to complete-buffer encoders" {
+    const BufferWriter = struct {
+        bytes: *[max_response_size]u8,
+        length: usize = 0,
+
+        fn append(self: *@This(), chunk: []const u8) !void {
+            if (chunk.len > self.bytes.len - self.length) return error.NoSpaceLeft;
+            @memcpy(self.bytes[self.length..][0..chunk.len], chunk);
+            self.length += chunk.len;
+        }
+    };
+    const choices = [_]Choice{
+        .{ .id = "existing", .label = "Use existing" },
+        .{ .id = "new", .label = "Create new" },
+    };
+    const Case = enum { text, tool, input_text, input_choice };
+    inline for (std.meta.fields(Case)) |field| {
+        const case: Case = @enumFromInt(field.value);
+        var expected_buffer: [max_response_size]u8 = undefined;
+        const expected = switch (case) {
+            .text => try encodeText(&expected_buffer, "done"),
+            .tool => try encodeTool(&expected_buffer, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}"),
+            .input_text => try encodeInputText(&expected_buffer, "What next?"),
+            .input_choice => try encodeInputChoice(&expected_buffer, "Choose", &choices),
+        };
+        var actual_buffer: [max_response_size]u8 = undefined;
+        var writer: BufferWriter = .{ .bytes = &actual_buffer };
+        switch (case) {
+            .text => try writeText(&writer, "done"),
+            .tool => try writeTool(&writer, contract.bash_key, "{\"command\":\"true\",\"timeout_ms\":1000}"),
+            .input_text => try writeInputText(&writer, "What next?"),
+            .input_choice => try writeInputChoice(&writer, "Choose", &choices),
+        }
+        try std.testing.expectEqualSlices(u8, expected, actual_buffer[0..writer.length]);
+    }
+}
+
+test "provider-neutral failure diagnostics retain bounded source and code" {
+    var bytes: [max_response_size]u8 = undefined;
+    var scratch: ValidationScratch = undefined;
+    const encoded = try encodeFailureDiagnostic(
+        &bytes,
+        .authentication_expired,
+        .provider,
+        "originator_not_allowed",
+    );
+    try std.testing.expectEqual(
+        Failure.authentication_expired,
+        parse(&scratch, encoded).failure,
+    );
+    const diagnostic = try inspectFailureDiagnostic(encoded);
+    try std.testing.expectEqual(DiagnosticSource.provider, diagnostic.source);
+    try std.testing.expectEqualStrings("originator_not_allowed", diagnostic.code);
+    const local = try encodeFailureDiagnostic(
+        &bytes,
+        .authentication_expired,
+        .local_credentials,
+        "adapter.local.code",
+    );
+    const local_diagnostic = try inspectFailureDiagnostic(local);
+    try std.testing.expectEqual(DiagnosticSource.local_credentials, local_diagnostic.source);
+    try std.testing.expectEqualStrings("adapter.local.code", local_diagnostic.code);
+    try std.testing.expectError(
+        error.InvalidFailureDiagnosticCode,
+        encodeFailureDiagnostic(
+            &bytes,
+            .authentication_expired,
+            .provider,
+            "unbounded provider message with spaces",
+        ),
+    );
 }
 
 test "captured admission consumes exact response identity once" {

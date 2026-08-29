@@ -44,9 +44,8 @@ fn startModel(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) 
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = workspace,
-            .model = "fixture:model-recovery",
+            .model_binding = .{ .model = "fixture:model-recovery", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
             .fault = crash.hook(),
         } },
     });
@@ -67,7 +66,7 @@ fn retryModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void 
         .runtime = runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = fixture.provider(),
+            .model_binding = .{ .model = "fixture:model-recovery", .provider = fixture.provider() },
             .fault = crash.hook(),
         } },
     });
@@ -81,10 +80,13 @@ fn finishModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void
     var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
     var owner = try harness.Harness.open(.{
         .runtime = runtime,
-        .mode = .{ .restore = .{ .session_id = session_id, .provider = fixture.provider() } },
+        .mode = .{ .restore = .{ .session_id = session_id, .model_binding = .{
+            .model = "fixture:model-recovery",
+            .provider = fixture.provider(),
+        } } },
     });
     defer owner.close();
-    for (0..24) |_| {
+    for (0..48) |_| {
         const progress = try owner.drive();
         if (progress.state != .finished) continue;
         if (fixture.calls != 1) return error.ModelAttemptNotDispatched;
@@ -198,9 +200,8 @@ fn startBash(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !
         .permission_mode = .bypass,
         .mode = .{ .create = .{
             .workspace_path = workspace,
-            .model = "fixture:bash-recovery",
+            .model_binding = .{ .model = "fixture:bash-recovery", .provider = fixture.provider() },
             .task = task,
-            .provider = fixture.provider(),
             .fault = crash.hook(),
         } },
     });
@@ -230,7 +231,7 @@ fn resumeBash(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void 
 }
 
 fn driveUntilCrash(owner: *harness.Harness) !void {
-    for (0..24) |_| {
+    for (0..48) |_| {
         if (owner.drive()) |_| continue else |err| {
             if (err != error.InjectedCrash) return err;
             return;

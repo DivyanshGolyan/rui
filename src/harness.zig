@@ -25,18 +25,22 @@ pub const max_recovery_records: usize = session_transition.max_transitions +
 
 pub const PermissionMode = lifecycle.PermissionMode;
 
+pub const ModelBinding = struct {
+    model: []const u8,
+    provider: model_operation.Provider,
+};
+
 pub const Create = struct {
     workspace_path: []const u8,
-    model: []const u8,
+    model_binding: ModelBinding,
     task: []const u8,
-    provider: model_operation.Provider,
     bash_cancelled: ?*const std.atomic.Value(bool) = null,
     fault: ?FaultHook = null,
 };
 
 pub const Restore = struct {
     session_id: u64,
-    provider: ?model_operation.Provider = null,
+    model_binding: ?ModelBinding = null,
     fault: ?FaultHook = null,
 };
 
@@ -122,6 +126,21 @@ pub const Projection = struct {
     descriptor_digest: ?binding.Descriptor = null,
     content_ref: u64 = 0,
     generation: u64 = 0,
+    failure: model_protocol.Failure = .none,
+    diagnostic_source: model_protocol.DiagnosticSource = .none,
+    diagnostic_code: [model_protocol.max_failure_diagnostic_code_size]u8 = @splat(0),
+    diagnostic_code_length: u8 = 0,
+
+    pub fn setDiagnosticCode(self: *Projection, code: []const u8) void {
+        std.debug.assert(code.len <= self.diagnostic_code.len);
+        @memset(&self.diagnostic_code, 0);
+        @memcpy(self.diagnostic_code[0..code.len], code);
+        self.diagnostic_code_length = @intCast(code.len);
+    }
+
+    pub fn diagnosticCode(self: *const Projection) []const u8 {
+        return self.diagnostic_code[0..self.diagnostic_code_length];
+    }
 };
 
 pub const Progress = struct {
@@ -192,6 +211,7 @@ const HarnessState = struct {
     awaiting_approval: ?lifecycle.ApprovalRequired = null,
     settling_control: ?lifecycle.Control = null,
     recovery_pending: bool = false,
+    task_started: bool = false,
     closing: bool = false,
     ingress_lock: std.Io.Mutex = .init,
     drive_lock: std.Io.Mutex = .init,
@@ -200,18 +220,28 @@ const HarnessState = struct {
         if (config.recovery_quantum == 0) return error.InvalidRecoveryQuantum;
         switch (config.mode) {
             .create => |create| {
-                if (create.workspace_path.len == 0 or create.model.len == 0 or
+                if (create.workspace_path.len == 0 or create.model_binding.model.len == 0 or
                     create.task.len == 0)
                 {
                     return error.InvalidCreateRequest;
                 }
             },
-            .restore => |restore| if (restore.session_id == 0) return error.InvalidSessionIdentity,
+            .restore => |restore| {
+                if (restore.session_id == 0) return error.InvalidSessionIdentity;
+                if (restore.model_binding) |binding_value| {
+                    const model = binding_value.model;
+                    if (model.len == 0 or model.len > session_store.model_name_capacity or
+                        !std.unicode.utf8ValidateSlice(model))
+                    {
+                        return error.InvalidRestoreModel;
+                    }
+                }
+            },
         }
         var owner: HarnessState = .{
             .config = switch (config.mode) {
                 .create => |create| .{
-                    .provider = create.provider,
+                    .provider = create.model_binding.provider,
                     .fault = create.fault,
                     .bash_cancelled = create.bash_cancelled,
                     .permission_mode = config.permission_mode,
@@ -219,7 +249,7 @@ const HarnessState = struct {
                     .created = true,
                 },
                 .restore => |restore| .{
-                    .provider = restore.provider,
+                    .provider = if (restore.model_binding) |binding_value| binding_value.provider else null,
                     .fault = restore.fault,
                     .bash_cancelled = null,
                     .permission_mode = config.permission_mode,
@@ -237,11 +267,17 @@ const HarnessState = struct {
         switch (config.mode) {
             .create => |create| owner.session = try lease.createSession(.{
                 .workspace_path = create.workspace_path,
-                .model = create.model,
+                .model = create.model_binding.model,
                 .task = create.task,
             }),
             .restore => |restore| {
-                const restored = try lease.restoreSession(restore.session_id);
+                var restored = try lease.restoreSession(restore.session_id);
+                if (restore.model_binding) |binding_value| {
+                    if (!std.mem.eql(u8, restored.session.modelName(), binding_value.model)) {
+                        restored.session.close();
+                        return error.RestoreModelMismatch;
+                    }
+                }
                 owner.session = restored.session;
                 owner.recovery_pending = true;
                 const session = &owner.session.?;
@@ -370,11 +406,9 @@ const HarnessState = struct {
                 self.setState(.running);
                 self.final_ref = lifecycle.acceptCompletion(
                     self.lease.execution,
-                    self.lease.allocator,
                     session,
                     completion,
                     self.runtimeConfig(),
-                    self.config.provider,
                 ) catch |err| if (self.settlingControl() != null and switch (err) {
                     error.ToolCallDeferred,
                     error.SessionNeedsModel,
@@ -391,10 +425,11 @@ const HarnessState = struct {
             else => {},
         };
         if (self.final_ref != 0) return self.finish(progress);
-        if (self.config.created) {
+        if (self.config.created and !self.task_started) {
             const input = current_input orelse return .{ .state = .ready };
             progress.consumed = 1;
             if (input != .task) return self.consumeControl(input, progress);
+            self.task_started = true;
             self.setState(.running);
             const session = if (self.session) |*value| value else return error.SessionUnavailable;
             self.final_ref = lifecycle.advanceCreated(
@@ -578,12 +613,10 @@ const HarnessState = struct {
     fn continueSettlingControl(self: *HarnessState) !Progress {
         if (self.settlingControl() == null) return error.MissingSettlingControl;
         const session = if (self.session) |*value| value else return error.SessionUnavailable;
-        _ = lifecycle.advanceRestored(
+        _ = lifecycle.settleRestored(
             self.lease.execution,
-            self.lease.allocator,
             session,
             self.runtimeConfig(),
-            null,
         ) catch |err| switch (err) {
             error.SessionOperationPending => return .{ .state = .cancelling, .more = true },
             error.SessionNeedsModel,
@@ -701,11 +734,45 @@ const HarnessState = struct {
 
     fn failureProjection(self: *HarnessState) Projection {
         const session = &self.session.?;
-        return .{
+        var ignored: u8 = 0;
+        var response_ref: u64 = 0;
+        const failure = failure: {
+            const ledger = session.inspectSemantic(
+                &ignored,
+                struct {
+                    fn ignore(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
+                }.ignore,
+            ) catch break :failure .none;
+            const encoded = ledger.last_core orelse break :failure .none;
+            const state = core_state.decode(&encoded) catch break :failure .none;
+            response_ref = state.response_ref;
+            break :failure state.response_failure;
+        };
+        var projection: Projection = .{
             .kind = .failure,
             .session_id = session.session_id,
             .task_id = session.task_id,
+            .failure = failure,
         };
+        populateFailureDiagnostic(session, response_ref, &projection);
+        return projection;
+    }
+
+    fn populateFailureDiagnostic(
+        session: *session_store.Session,
+        response_ref: u64,
+        projection: *Projection,
+    ) void {
+        if (response_ref == 0) return;
+        var reader = session.openBlob(response_ref) catch return;
+        defer reader.close();
+        var bytes: [model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size]u8 = undefined;
+        if (reader.length() > bytes.len) return;
+        const captured = reader.readWindow(0, &bytes) catch return;
+        if (captured.len != reader.length()) return;
+        const diagnostic = model_protocol.inspectFailureDiagnostic(captured) catch return;
+        projection.diagnostic_source = diagnostic.source;
+        projection.setDiagnosticCode(diagnostic.code);
     }
 
     fn approvalRequired(context: *anyopaque, approval: lifecycle.ApprovalRequired) anyerror!void {
@@ -735,7 +802,6 @@ const HarnessState = struct {
             .bash_cancelled = self.config.bash_cancelled,
             .approval_required_hook = self.approvalRequiredHook(),
             .completion_hook = self.completionHook(),
-            .settle_only = self.settlingControl() != null,
         };
     }
 
@@ -859,9 +925,8 @@ test "open retains no Activation Slot and offer transfers one bounded input" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:answer",
+            .model_binding = .{ .model = "fixture:answer", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
     defer owner.close();
@@ -896,9 +961,8 @@ test "Harness close is idempotent and releases one Runtime lease" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:answer",
+            .model_binding = .{ .model = "fixture:answer", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
     owner.close();
@@ -916,18 +980,16 @@ test "Runtime close waits for every opaque Harness lease" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:first",
+            .model_binding = .{ .model = "fixture:first", .provider = first_fixture.provider() },
             .task = "first",
-            .provider = first_fixture.provider(),
         } },
     });
     const second = try Harness.open(.{
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:second",
+            .model_binding = .{ .model = "fixture:second", .provider = second_fixture.provider() },
             .task = "second",
-            .provider = second_fixture.provider(),
         } },
     });
     try std.testing.expectError(error.HostRuntimeBusy, runtime.close());
@@ -950,9 +1012,8 @@ test "restore withholds projections until the configured recovery quantum reache
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:answer",
+            .model_binding = .{ .model = "fixture:answer", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
     const session = &harnessState(created).session.?;
@@ -1009,9 +1070,8 @@ test "restore publishes Session identity before reconciling Completion evidence"
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:answer",
+            .model_binding = .{ .model = "fixture:answer", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
     _ = try created.drive();
@@ -1080,9 +1140,8 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:answer",
+            .model_binding = .{ .model = "fixture:answer", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
     const session = &harnessState(created).session.?;
@@ -1147,13 +1206,14 @@ test "shutdown denies Approval Required before closing" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:shutdown-approval",
+            .model_binding = .{ .model = "fixture:shutdown-approval", .provider = fixture.provider() },
             .task = "task",
-            .provider = fixture.provider(),
         } },
     });
+    defer owner.close();
     _ = try owner.drive();
     try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    _ = try owner.drive();
     _ = try owner.drive();
     const waiting = try owner.drive();
     try std.testing.expectEqual(State.waiting, waiting.state);
@@ -1196,8 +1256,8 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [64]u8 = undefined;
@@ -1206,9 +1266,9 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
                 "done",
             );
             try response.append(encoded);
-            try response.finish();
             const owner = self.owner orelse return error.MissingHarness;
             if (owner.offer(.cancel) != .accepted) return error.CancellationOfferRejected;
+            return .candidate;
         }
     };
 
@@ -1221,9 +1281,8 @@ test "cancellation reconciles Completion evidence that lost live ingress custody
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:cancellation-race",
+            .model_binding = .{ .model = "fixture:cancellation-race", .provider = provider.provider() },
             .task = "task",
-            .provider = provider.provider(),
         } },
     });
     defer owner.close();
@@ -1250,8 +1309,8 @@ test "known provider failure is one durable terminal Result" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [64]u8 = undefined;
@@ -1260,8 +1319,7 @@ test "known provider failure is one durable terminal Result" {
                 "must not win",
             );
             try response.append(encoded);
-            try response.finish();
-            return error.TestProviderUnavailable;
+            return .{ .failure = .{ .failure = .provider_error } };
         }
     };
     const ResultFacts = struct {
@@ -1292,9 +1350,8 @@ test "known provider failure is one durable terminal Result" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:provider-failure",
+            .model_binding = .{ .model = "fixture:provider-failure", .provider = provider.provider() },
             .task = "task",
-            .provider = provider.provider(),
         } },
     });
     _ = try owner.drive();
@@ -1318,7 +1375,7 @@ test "known provider failure is one durable terminal Result" {
         .runtime = runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = provider.provider(),
+            .model_binding = .{ .model = "fixture:provider-failure", .provider = provider.provider() },
         } },
     });
     defer restored.close();
@@ -1340,8 +1397,8 @@ test "captured noncanonical tool call closes once after crash without redispatch
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [model_protocol.max_response_size]u8 = undefined;
@@ -1351,7 +1408,7 @@ test "captured noncanonical tool call closes once after crash without redispatch
                 exact_arguments,
             );
             try response.append(encoded);
-            try response.finish();
+            return .candidate;
         }
     };
     const CrashAfterCapture = struct {
@@ -1376,9 +1433,8 @@ test "captured noncanonical tool call closes once after crash without redispatch
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:captured-tool-replay",
+            .model_binding = .{ .model = "fixture:captured-tool-replay", .provider = provider.provider() },
             .task = "task",
-            .provider = provider.provider(),
             .fault = .{ .context = &crash, .reached = CrashAfterCapture.reached },
         } },
     });
@@ -1393,11 +1449,16 @@ test "captured noncanonical tool call closes once after crash without redispatch
         .runtime = runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = provider.provider(),
+            .model_binding = .{ .model = "fixture:captured-tool-replay", .provider = provider.provider() },
         } },
     });
     defer restored.close();
     _ = try restored.drive();
+    const reconciled = try restored.drive();
+    try std.testing.expectEqual(State.waiting, reconciled.state);
+    try std.testing.expectEqual(ProjectionKind.outcome, reconciled.projections[0].kind);
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+
     const waiting = try restored.drive();
     try std.testing.expectEqual(State.waiting, waiting.state);
     try std.testing.expectEqual(ProjectionKind.approval_required, waiting.projections[0].kind);
@@ -1416,7 +1477,7 @@ test "captured noncanonical tool call closes once after crash without redispatch
     try std.testing.expectEqualStrings(exact_arguments, call.arguments);
 }
 
-test "malformed captured output becomes one durable terminal failure" {
+test "provider candidate settlement rejects malformed framing without publishing" {
     const MalformedProvider = struct {
         calls: u8 = 0,
 
@@ -1427,12 +1488,12 @@ test "malformed captured output becomes one durable terminal failure" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             try response.append("not a model response");
-            try response.finish();
+            return .candidate;
         }
     };
 
@@ -1445,36 +1506,15 @@ test "malformed captured output becomes one durable terminal failure" {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:malformed-capture",
+            .model_binding = .{ .model = "fixture:malformed-capture", .provider = provider.provider() },
             .task = "task",
-            .provider = provider.provider(),
         } },
     });
+    defer owner.close();
     _ = try owner.drive();
-    const session_id = harnessState(owner).session.?.session_id;
     try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
-    _ = try owner.drive();
-    const failed = try owner.drive();
-    try std.testing.expectEqual(State.failed, failed.state);
-    var ignored: u8 = 0;
-    const ledger = try harnessState(owner).session.?.inspectSemantic(
-        &ignored,
-        struct {
-            fn ignore(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
-        }.ignore,
-    );
-    const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
-    try std.testing.expectEqual(model_protocol.Failure.malformed, state.response_failure);
-    owner.close();
-
-    var restored = try Harness.open(.{
-        .runtime = runtime,
-        .mode = .{ .restore = .{ .session_id = session_id, .provider = provider.provider() } },
-    });
-    defer restored.close();
-    _ = try restored.drive();
-    const regenerated = try restored.drive();
-    try std.testing.expectEqual(State.failed, regenerated.state);
+    const rejected = try owner.drive();
+    try std.testing.expectEqual(State.unavailable, rejected.state);
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }
 
@@ -1494,13 +1534,13 @@ test "typed durable model failures share one failed Harness projection" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [model_protocol.max_response_size]u8 = undefined;
             const encoded = switch (self.candidate) {
-                .failure => |failure| try model_protocol.encodeFailure(&buffer, failure),
+                .failure => |failure| return .{ .failure = .{ .failure = failure } },
                 .unknown_tool => try model_protocol.encodeTool(
                     &buffer,
                     "fixture.unknown.v1",
@@ -1508,7 +1548,7 @@ test "typed durable model failures share one failed Harness projection" {
                 ),
             };
             try response.append(encoded);
-            try response.finish();
+            return .candidate;
         }
     };
     const cases = [_]struct {
@@ -1535,9 +1575,8 @@ test "typed durable model failures share one failed Harness projection" {
             .runtime = runtime,
             .mode = .{ .create = .{
                 .workspace_path = ".",
-                .model = "fixture:model-failure-classification",
+                .model_binding = .{ .model = "fixture:model-failure-classification", .provider = provider.provider() },
                 .task = "task",
-                .provider = provider.provider(),
             } },
         });
         _ = try owner.drive();
@@ -1547,6 +1586,7 @@ test "typed durable model failures share one failed Harness projection" {
         try std.testing.expectEqual(State.failed, failed.state);
         try std.testing.expectEqual(@as(u8, 1), failed.projection_count);
         try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
+        try std.testing.expectEqual(case.expected, failed.projections[0].failure);
         try std.testing.expectEqual(@as(u8, 1), provider.calls);
 
         var ignored: u8 = 0;
@@ -1575,14 +1615,14 @@ test "built-in argument rejection becomes one durable terminal failure" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [model_protocol.max_response_size]u8 = undefined;
             const encoded = try model_protocol.encodeTool(&buffer, self.key, self.arguments);
             try response.append(encoded);
-            try response.finish();
+            return .candidate;
         }
     };
 
@@ -1637,13 +1677,12 @@ test "built-in argument rejection becomes one durable terminal failure" {
             .runtime = runtime,
             .mode = .{ .create = .{
                 .workspace_path = ".",
-                .model = "fixture:built-in-byte-rejection",
+                .model_binding = .{ .model = "fixture:built-in-byte-rejection", .provider = provider.provider() },
                 .task = switch (index) {
                     0 => "reject oversized Bash bytes",
                     1 => "reject oversized patch bytes",
                     else => "reject a Bash NUL byte",
                 },
-                .provider = provider.provider(),
             } },
         });
         _ = try owner.drive();
@@ -1666,7 +1705,10 @@ test "built-in argument rejection becomes one durable terminal failure" {
 
         var restored = try Harness.open(.{
             .runtime = runtime,
-            .mode = .{ .restore = .{ .session_id = session_id, .provider = provider.provider() } },
+            .mode = .{ .restore = .{ .session_id = session_id, .model_binding = .{
+                .model = "fixture:built-in-byte-rejection",
+                .provider = provider.provider(),
+            } } },
         });
         _ = try restored.drive();
         const regenerated = try restored.drive();
@@ -1690,14 +1732,14 @@ test "input request fails terminally until the durable interaction layer exists"
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             var buffer: [model_protocol.max_response_size]u8 = undefined;
             const encoded = try model_protocol.encodeInputText(&buffer, "Which migration should I use?");
             try response.append(encoded);
-            try response.finish();
+            return .candidate;
         }
     };
 
@@ -1710,9 +1752,8 @@ test "input request fails terminally until the durable interaction layer exists"
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:input-request",
+            .model_binding = .{ .model = "fixture:input-request", .provider = provider.provider() },
             .task = "task",
-            .provider = provider.provider(),
         } },
     });
     _ = try owner.drive();
@@ -1754,7 +1795,7 @@ test "input request fails terminally until the durable interaction layer exists"
         .runtime = runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .provider = provider.provider(),
+            .model_binding = .{ .model = "fixture:input-request", .provider = provider.provider() },
         } },
     });
     defer restored.close();
@@ -1763,4 +1804,200 @@ test "input request fails terminally until the durable interaction layer exists"
     try std.testing.expectEqual(State.failed, regenerated.state);
     try std.testing.expectEqual(@as(u64, 1), harnessState(restored).session.?.entryCount());
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
+}
+
+const HistoryProvider = struct {
+    calls: u8 = 0,
+    command: []const u8,
+
+    fn provider(self: *@This()) model_operation.Provider {
+        return .{ .context = self, .dispatch = dispatch };
+    }
+
+    fn dispatch(
+        context: *anyopaque,
+        request_value: model_operation.RequestCursor,
+        candidate: model_operation.CandidateWriter,
+    ) anyerror!model_operation.DispatchOutcome {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        var request = request_value;
+        var encoded_buffer: [model_protocol.max_response_size]u8 = undefined;
+        const encoded = switch (request.entryCount()) {
+            1 => blk: {
+                const task = (try request.next()) orelse return error.MissingTask;
+                if (task != .user_text or task.user_text.content.length() != "run once".len) {
+                    return error.UnexpectedTask;
+                }
+                var task_bytes: ["run once".len]u8 = undefined;
+                _ = try task.user_text.content.readWindow(0, &task_bytes);
+                if (!std.mem.eql(u8, &task_bytes, "run once")) return error.UnexpectedTask;
+                if (try request.next() != null) return error.UnexpectedHistory;
+                var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+                const arguments = try model_contract.encodeJson(&arguments_buffer, .{
+                    .command = self.command,
+                    .timeout_ms = 5000,
+                });
+                break :blk try model_protocol.encodeTool(
+                    &encoded_buffer,
+                    model_contract.bash_key,
+                    arguments,
+                );
+            },
+            3 => blk: {
+                _ = (try request.next()) orelse return error.MissingTask;
+                const call = (try request.next()) orelse return error.MissingToolCall;
+                if (call != .tool_call or !std.mem.eql(u8, call.tool_call.key(), model_contract.bash_key)) {
+                    return error.UnexpectedToolCall;
+                }
+                const result_entry = (try request.next()) orelse return error.MissingToolResult;
+                if (result_entry != .tool_result or result_entry.tool_result.is_error) {
+                    return error.UnexpectedToolResult;
+                }
+                const expected_result = "status=success\nexit_code=0\n" ++
+                    "stdout_base64=cmVwbGF5LXByb29m\nstderr_base64=";
+                if (result_entry.tool_result.content.length() != expected_result.len) {
+                    return error.UnexpectedToolResult;
+                }
+                var result_bytes: [expected_result.len]u8 = undefined;
+                _ = try result_entry.tool_result.content.readWindow(0, &result_bytes);
+                if (!std.mem.eql(u8, &result_bytes, expected_result)) return error.UnexpectedToolResult;
+                if (try request.next() != null) return error.UnexpectedHistory;
+                break :blk try model_protocol.encodeText(&encoded_buffer, "durable final");
+            },
+            else => return error.UnexpectedHistory,
+        };
+        try candidate.append(encoded);
+        return .candidate;
+    }
+};
+
+test "fresh Harness resumes after admitted Tool Result without replaying the tool" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var command_buffer: [256]u8 = undefined;
+    const command = try std.fmt.bufPrint(
+        &command_buffer,
+        "printf x >> '.zig-cache/tmp/{s}/execution-count'; printf replay-proof",
+        .{tmp.sub_path},
+    );
+    var first_provider: HistoryProvider = .{ .command = command };
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .permission_mode = .bypass,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model_binding = .{ .model = "fixture:history-restart", .provider = first_provider.provider() },
+            .task = "run once",
+        } },
+    });
+    _ = try owner.drive();
+    const session_id = harnessState(owner).session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    for (0..12) |_| {
+        _ = try owner.drive();
+        if (harnessState(owner).session.?.entryCount() == 3) break;
+    }
+    try std.testing.expectEqual(@as(u64, 3), harnessState(owner).session.?.entryCount());
+    try std.testing.expectEqual(@as(u8, 1), first_provider.calls);
+    var execution_count: [2]u8 = undefined;
+    var count_file = try tmp.dir.openFile(std.testing.io, "execution-count", .{});
+    defer count_file.close(std.testing.io);
+    const count_length = try count_file.readPositionalAll(std.testing.io, &execution_count, 0);
+    try std.testing.expectEqualStrings("x", execution_count[0..count_length]);
+    owner.close();
+
+    var fresh_provider: HistoryProvider = .{ .command = command };
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .permission_mode = .bypass,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .model_binding = .{ .model = "fixture:history-restart", .provider = fresh_provider.provider() },
+        } },
+    });
+    var finished: Progress = undefined;
+    for (0..12) |_| {
+        finished = try restored.drive();
+        if (finished.state == .finished) break;
+    }
+    try std.testing.expectEqual(State.finished, finished.state);
+    try std.testing.expectEqual(@as(u8, 1), fresh_provider.calls);
+    const unchanged_length = try count_file.readPositionalAll(std.testing.io, &execution_count, 0);
+    try std.testing.expectEqualStrings("x", execution_count[0..unchanged_length]);
+    restored.close();
+
+    var final_restore = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{ .session_id = session_id } },
+    });
+    defer final_restore.close();
+    _ = try final_restore.drive();
+    const durable = try final_restore.drive();
+    try std.testing.expectEqual(State.finished, durable.state);
+}
+
+test "recovered Tool Result returns before the next Provider dispatch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var command_buffer: [256]u8 = undefined;
+    const command = try std.fmt.bufPrint(
+        &command_buffer,
+        "printf x >> '.zig-cache/tmp/{s}/recovery-execution-count'; printf replay-proof",
+        .{tmp.sub_path},
+    );
+    var first_provider: HistoryProvider = .{ .command = command };
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .permission_mode = .bypass,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model_binding = .{ .model = "fixture:tool-result-recovery", .provider = first_provider.provider() },
+            .task = "run once",
+        } },
+    });
+    _ = try owner.drive();
+    const session_id = harnessState(owner).session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    _ = try owner.drive(); // Capture the model response.
+    _ = try owner.drive(); // Admit it without executing the Tool.
+    _ = try owner.drive(); // Capture the Tool Result, then lose its live notification.
+    try std.testing.expectEqual(@as(u8, 1), first_provider.calls);
+    owner.close();
+
+    var execution_count: [2]u8 = undefined;
+    var count_file = try tmp.dir.openFile(std.testing.io, "recovery-execution-count", .{});
+    defer count_file.close(std.testing.io);
+    const before_restore = try count_file.readPositionalAll(std.testing.io, &execution_count, 0);
+    try std.testing.expectEqualStrings("x", execution_count[0..before_restore]);
+
+    var fresh_provider: HistoryProvider = .{ .command = command };
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .permission_mode = .bypass,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .model_binding = .{ .model = "fixture:tool-result-recovery", .provider = fresh_provider.provider() },
+        } },
+    });
+    defer restored.close();
+    _ = try restored.drive();
+
+    const reconciled = try restored.drive();
+    try std.testing.expectEqual(State.waiting, reconciled.state);
+    try std.testing.expectEqual(@as(u8, 0), fresh_provider.calls);
+    try std.testing.expectEqual(@as(u64, 3), harnessState(restored).session.?.entryCount());
+
+    const dispatched = try restored.drive();
+    try std.testing.expectEqual(State.waiting, dispatched.state);
+    try std.testing.expectEqual(@as(u8, 1), fresh_provider.calls);
+    const unchanged = try count_file.readPositionalAll(std.testing.io, &execution_count, 0);
+    try std.testing.expectEqualStrings("x", execution_count[0..unchanged]);
+
+    const finished = try restored.drive();
+    try std.testing.expectEqual(State.finished, finished.state);
 }

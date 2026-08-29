@@ -102,7 +102,7 @@ onepage [--repo PATH] --model PROVIDER:MODEL TASK
 onepage --resume SESSION_ID
 ```
 
-Creating a session prints its stable identity before the first external effect. Resume restores the recorded repository binding, model selection, session, agent, task, and active branch; credentials remain external and must still be available to the relevant adapter. If the session lock is held, the command fails without opening a second owner. Repeating task text creates a new session and never implies resume.
+Creating a session prints its stable identity before the first external effect. Resume restores the recorded repository binding, model selection, session, agent, task, and active branch; credentials remain external and must still be available to the relevant adapter. Harness accepts a Provider only as part of a provider-neutral `ModelBinding` that also carries the exact immutable model identity. Create always requires that binding. Resume may omit it for read-only/local reconstruction, but any resumed external model work requires the binding and validates its identity before provider dispatch or a new durable Result. The caller cannot replace the recorded model. If the session lock is held, the command fails without opening a second owner. Repeating task text creates a new session and never implies resume.
 
 ## Workspace continuity
 
@@ -435,7 +435,11 @@ Adapters:
 - Codex subscription access for live inference.
 - Fixture model that validates the exact model-visible history before returning each response.
 
-The adapter consumes one already-accepted typed request and finishes by publishing one durable result. It cannot call the core.
+The adapter consumes one already-accepted typed request. It receives an append-only candidate writer and synchronously returns one typed candidate-or-failure outcome. The Host alone seals or replaces the unpublished draft and later publishes Completion evidence. The adapter cannot call the core or publish Session authority.
+
+Codex-specific SSE framing, first-terminal policy, status agreement, OAuth diagnostics, and the one-frame allocation-free JSON cursor remain inside the Codex adapter. They do not appear in the model port. A future adapter may combine many wire events or use its own bounded Host-owned scratch while returning through the same synchronous candidate-or-failure settlement seam. Authorization and model transports use the same deadline-owned native HTTP pattern: timeout interrupts the owned socket and the request task is joined before return.
+
+The consolidated protocol, credential, retry, bounds, history, and go/no-go decision is recorded in the [Codex subscription feasibility result](../research/codex-subscription-feasibility.md).
 
 ### Durable store port
 
@@ -447,6 +451,7 @@ Adapters:
 - Temporary fault-injecting store for deterministic durability tests.
 
 The store interface exposes semantic publications, not raw file calls to the harness caller.
+Crash-left provisional `.blob.tmp` writers are not semantic publications. They live in a wholly owned flat scratch namespace, separate from sealed history. After the Session lock establishes a new ownership epoch, startup validates and removes at most 16 exact draft files—sixteen times V1's single live writer capacity—and fails before deletion on excess or unexpected entries. Complete sealed blobs remain recoverable for later admission.
 
 ### Tool execution port
 

@@ -82,6 +82,25 @@ At [`fff3f63e348dec846bb235332974226bd2feae26`](https://github.com/vercel-labs/f
 
 OnePage should adopt those boundaries, not fx's full provider system. OAuth login, credential refresh, model-catalog fetching, and wire transport remain host concerns outside Core State, the Activation Slot, Session WAL, Model Context, tool environments, and durable result content. The selected raw Codex model ID is fixed in the Session before the first model Attempt. Ordinary tests use deterministic fake authorization, token, catalog, and Responses endpoints; only an explicitly selected compatibility test uses a real ChatGPT subscription.
 
+Official Codex source treats `originator` as a client-owned identity: `codex_cli_rs` is its default,
+but a caller can set another valid value and the request builder forwards the session value
+([default client](https://github.com/openai/codex/blob/6478a751fde8884b2fdc76486fe23175a8e795d4/codex-rs/login/src/auth/default_client.rs#L36-L87),
+[Responses request](https://github.com/openai/codex/blob/6478a751fde8884b2fdc76486fe23175a8e795d4/codex-rs/core/src/client.rs#L648-L661)).
+Pinned Pi similarly sends its truthful `pi` identity and user agent rather than impersonating an
+official surface ([Pi transport](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/ai/src/api/openai-codex-responses.ts#L1493-L1527)).
+OnePage therefore sends `originator: onepage`. Compatibility diagnostics retain only a generic
+provider source and one bounded Codex-owned code; they never retain a response message, bearer token,
+account identifier, or raw response body.
+
+Neither the public Codex SDK nor app-server documentation publishes the private ChatGPT backend endpoint
+or an allow-list contract for arbitrary `originator` values. The pinned implementations above are therefore
+compatibility evidence, not authority that the backend accepts `onepage`. An attended live run with that
+truthful identity first reached provider dispatch and returned a non-403 HTTP rejection, disproving the
+narrower expectation that `onepage` necessarily produces `originator_not_allowed`. Subsequent issue #11
+work produced successful streamed model responses and a complete controlled repair without impersonating
+`pi` or `codex_cli_rs`. The authoritative protocol, ownership, bounds, and release verdict now live in the
+[Codex subscription feasibility result](codex-subscription-feasibility.md).
+
 ## Pi
 
 ### Adopt the irreducible loop

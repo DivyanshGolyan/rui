@@ -256,7 +256,6 @@ pub const RuntimeConfig = struct {
     bash_cancelled: ?*const std.atomic.Value(bool) = null,
     approval_required_hook: ?ApprovalRequiredHook = null,
     completion_hook: ?CompletionHook = null,
-    settle_only: bool = false,
 };
 
 pub const ApprovalRequiredKind = enum { bash, apply_patch };
@@ -1013,23 +1012,13 @@ fn dispatchModelAttempt(
         dispatch.response_ref,
     );
     defer provider_io.close();
-    var result_ref = dispatch.response_ref;
-    var provider_failed = false;
-    provider.dispatch(
+    const outcome = try provider.dispatch(
         provider.context,
         try provider_io.request(),
-        provider_io.responseCapability(),
-    ) catch {
-        result_ref = try provider_io.publishProviderFailure(
-            session,
-            dispatch.response_ref,
-        );
-        provider_failed = true;
-    };
-    if (!provider_failed) {
-        try provider_io.ensureResponsePublished();
-        try reach(fault, .after_model_dispatch);
-    }
+        provider_io.candidateCapability(),
+    );
+    try provider_io.settle(outcome);
+    try reach(fault, .after_model_dispatch);
     const evidence = completion_inbox.bind(.{
         .kind = .model,
         .session_id = session.session_id,
@@ -1039,8 +1028,8 @@ fn dispatchModelAttempt(
         .operation_id = dispatch.operation_id,
         .operation_generation = dispatch.operation_generation,
         .attempt_id = dispatch.attempt_id,
-        .result_ref = result_ref,
-        .result_digest = try blobDigest(session, result_ref),
+        .result_ref = dispatch.response_ref,
+        .result_digest = try blobDigest(session, dispatch.response_ref),
     });
     try session.publishCompletionEvidence(evidence);
     try reach(fault, .after_completion_inbox);
@@ -1260,14 +1249,118 @@ pub fn advanceRestored(
     provider: ?model_operation.Provider,
 ) !u64 {
     const io = session.io;
+    const token = session.ownerToken();
     var core = try Core.open(&host.slots);
     var core_open = true;
     defer if (core_open) core.close();
-    const token = session.ownerToken();
     try restoreCoreFromLedger(session, &core);
+    switch (try reconcileRestored(host, session, config, &core)) {
+        .finished => |final_ref| return final_ref,
+        .settled_needs_model => return error.SessionNeedsModel,
+        .settled_needs_tool => return error.ToolCallDeferred,
+        .retry_model => {
+            try retryModelAttempt(
+                io,
+                session,
+                token,
+                &core,
+                &core_open,
+                provider,
+                config.completion_hook,
+                config.fault,
+            );
+            return error.CompletionExpected;
+        },
+        .dispatch_tool => {
+            const observation = try core.reducer.operation();
+            const ids: OperationIds = .{
+                .operation_id = @intCast(observation.id),
+                .attempt_id = 0,
+                .request_ref = 0,
+                .response_ref = @truncate(observation.result_ref),
+                .final_ref = finalReference(observation.result_ref),
+            };
+            const tool = try admittedExecutableTool(session, &core.reducer) orelse
+                return error.UnboundToolKey;
+            switch (tool) {
+                .bash => try executeBashCall(
+                    io,
+                    allocator,
+                    session,
+                    token,
+                    &core,
+                    host,
+                    ids,
+                    &core_open,
+                    config.workspace_path,
+                    config.permission_mode,
+                    config.bash_cancelled,
+                    config.approval_required_hook,
+                    config.completion_hook,
+                    config.fault,
+                ),
+                .apply_patch => {
+                    try requestPatchPermission(
+                        session,
+                        &core,
+                        ids,
+                        config.permission_mode,
+                        config.approval_required_hook,
+                        config.fault,
+                    );
+                    _ = try reconcilePatch(
+                        host,
+                        session,
+                        token,
+                        &core,
+                        config.workspace_path,
+                        config.completion_hook,
+                        config.fault,
+                    );
+                },
+            }
+            return error.CompletionExpected;
+        },
+        .dispatch_model => {
+            if (try hasIndeterminateBash(session)) return error.BashPossiblyExecuted;
+            _ = try performModelTurn(
+                io,
+                session,
+                token,
+                &core,
+                &core_open,
+                provider orelse return error.SessionNeedsModel,
+                2,
+                config.completion_hook,
+                null,
+            );
+            return error.CompletionExpected;
+        },
+    }
+}
+
+const LocalRestored = union(enum) {
+    finished: u64,
+    settled_needs_model,
+    settled_needs_tool,
+    retry_model,
+    dispatch_model,
+    dispatch_tool,
+};
+
+/// Reconstructs and admits durable evidence without beginning a subsequent
+/// external effect. Completion acceptance always ends at this structural seam.
+fn reconcileRestored(
+    host: *Host,
+    session: *session_store.Session,
+    config: RuntimeConfig,
+    core: *Core,
+) !LocalRestored {
+    const token = session.ownerToken();
     var outcome = (try core.reducer.task()).phase;
+    var admitted_completion = false;
     if (outcome == .awaiting_model) {
-        if (durableCompletion(session, token, &core)) |completion| {
+        if (durableCompletion(session, token, core)) |completion| {
             const admission = blk: {
                 var scratch = try host.semantic_validation.borrow();
                 defer scratch.release() catch unreachable;
@@ -1315,96 +1408,42 @@ pub fn advanceRestored(
             @memcpy(admission_facts[2..][0..prepared.fact_count], prepared.facts[0..prepared.fact_count]);
             try commitCoreFacts(
                 session,
-                &core,
+                core,
                 admission_facts[0 .. 2 + prepared.fact_count],
                 true,
             );
+            admitted_completion = true;
         } else |err| switch (err) {
-            error.SessionOperationPending => try retryModelAttempt(
-                io,
-                session,
-                token,
-                &core,
-                &core_open,
-                provider,
-                config.completion_hook,
-                config.fault,
-            ),
+            error.SessionOperationPending => return .retry_model,
             else => return err,
         }
         outcome = (try core.reducer.task()).phase;
     }
     if (outcome == .final_candidate) {
-        return finalizeCandidate(
+        return .{ .finished = try finalizeCandidate(
             session,
-            &core,
+            core,
             null,
-        );
+        ) };
     }
     if (outcome == .awaiting_tool) {
         switch (try reconcileToolCall(
             host,
             session,
             token,
-            &core,
+            core,
             session.workspacePath(),
             config.completion_hook,
             config.fault,
         )) {
             .indeterminate => return error.BashPossiblyExecuted,
-            .ready => outcome = .ready,
-            .approval_required => return error.PatchApprovalRequired,
-            .none => {
-                if (config.settle_only) return error.ToolCallDeferred;
-                const observation = try core.reducer.operation();
-                const ids: OperationIds = .{
-                    .operation_id = @intCast(observation.id),
-                    .attempt_id = 0,
-                    .request_ref = 0,
-                    .response_ref = @truncate(observation.result_ref),
-                    .final_ref = finalReference(observation.result_ref),
-                };
-                const tool = try admittedExecutableTool(session, &core.reducer) orelse
-                    return error.UnboundToolKey;
-                switch (tool) {
-                    .bash => try executeBashCall(
-                        io,
-                        allocator,
-                        session,
-                        token,
-                        &core,
-                        host,
-                        ids,
-                        &core_open,
-                        config.workspace_path,
-                        config.permission_mode,
-                        config.bash_cancelled,
-                        config.approval_required_hook,
-                        config.completion_hook,
-                        config.fault,
-                    ),
-                    .apply_patch => {
-                        try requestPatchPermission(
-                            session,
-                            &core,
-                            ids,
-                            config.permission_mode,
-                            config.approval_required_hook,
-                            config.fault,
-                        );
-                        _ = try reconcilePatch(
-                            host,
-                            session,
-                            token,
-                            &core,
-                            config.workspace_path,
-                            config.completion_hook,
-                            config.fault,
-                        );
-                    },
-                }
-                outcome = (try core.reducer.task()).phase;
+            .ready_completion => {
+                outcome = .ready;
+                admitted_completion = true;
             },
+            .ready_local => outcome = .ready,
+            .approval_required => return error.PatchApprovalRequired,
+            .none => return if (admitted_completion) .settled_needs_tool else .dispatch_tool,
         }
     }
     if (outcome == .failed) {
@@ -1417,31 +1456,23 @@ pub fn advanceRestored(
         if (entry_id != session.activeLeafId()) return error.FinalEntryMismatch;
         const entry = try session.readEntry(entry_id);
         if (entry.kind != .assistant_text) return error.InvalidFinalEntry;
-        return entry.content_ref;
+        return .{ .finished = entry.content_ref };
     }
     if (outcome != .ready) return error.SessionNotReadyForModel;
-    if (try hasIndeterminateBash(session)) return error.BashPossiblyExecuted;
-    if (config.settle_only) return error.SessionNeedsModel;
-    _ = try performModelTurn(
-        io,
-        session,
-        token,
-        &core,
-        &core_open,
-        provider orelse return error.SessionNeedsModel,
-        2,
-        config.completion_hook,
-        null,
-    );
-    if ((try core.reducer.response()).disposition != .final_answer) {
-        return error.ResumedModelDidNotFinish;
-    }
-    const final_ref = try finalizeCandidate(
-        session,
-        &core,
-        null,
-    );
-    return final_ref;
+    return if (admitted_completion) .settled_needs_model else .dispatch_model;
+}
+
+/// Performs only local reconstruction and durable evidence admission. It
+/// returns before any causally subsequent Provider or Tool dispatch.
+pub fn settleRestored(
+    host: *Host,
+    session: *session_store.Session,
+    config: RuntimeConfig,
+) !u64 {
+    var core = try Core.open(&host.slots);
+    defer core.close();
+    try restoreCoreFromLedger(session, &core);
+    return localCompletionResult(try reconcileRestored(host, session, config, &core));
 }
 
 pub fn resolvePermission(
@@ -1637,11 +1668,9 @@ pub fn resolvePermission(
 
 pub fn acceptCompletion(
     host: *Host,
-    allocator: std.mem.Allocator,
     session: *session_store.Session,
     offered: completion_inbox.Envelope,
     config: RuntimeConfig,
-    provider: ?model_operation.Provider,
 ) !u64 {
     const token = session.ownerToken();
     try completion_inbox.validate(offered);
@@ -1669,14 +1698,14 @@ pub fn acceptCompletion(
     if (offered.kind != std.meta.activeTag(attempt.descriptor_digest)) return error.StaleCompletion;
     if (history.result) |result| {
         if (resultAttemptId(result) != offered.attempt_id) {
-            return advanceRestored(host, allocator, session, config, provider);
+            return settleRestored(host, session, config);
         }
         if (result.result_ref != offered.result_ref or
             !binding.eql(binding.Result, result.result_digest, offered.result_digest))
         {
             return error.ConflictingCompletionEvidence;
         }
-        return advanceRestored(host, allocator, session, config, provider);
+        return settleRestored(host, session, config);
     }
     var inbox: InboxSearch = .{
         .session_id = offered.session_id,
@@ -1696,10 +1725,26 @@ pub fn acceptCompletion(
     {
         return error.ConflictingCompletionEvidence;
     }
-    return advanceRestored(host, allocator, session, config, provider);
+    return settleRestored(host, session, config);
 }
 
-const ToolRecovery = enum { none, ready, indeterminate, approval_required };
+fn localCompletionResult(result: LocalRestored) !u64 {
+    return switch (result) {
+        .finished => |final_ref| final_ref,
+        .settled_needs_model => error.SessionNeedsModel,
+        .settled_needs_tool => error.ToolCallDeferred,
+        .retry_model, .dispatch_model => error.SessionNeedsModel,
+        .dispatch_tool => error.ToolCallDeferred,
+    };
+}
+
+const ToolRecovery = enum {
+    none,
+    ready_local,
+    ready_completion,
+    indeterminate,
+    approval_required,
+};
 
 fn reconcileToolCall(
     host: *Host,
@@ -1746,10 +1791,11 @@ fn reconcileBash(
             core,
             toolResultFromRecord(result),
         );
-        return if (result.class == .indeterminate)
-            .indeterminate
-        else
-            .ready;
+        if (result.class == .indeterminate) return .indeterminate;
+        return switch (result.evidence) {
+            .immediate => .ready_local,
+            .durable => .ready_completion,
+        };
     }
     const attempt = history.attempt orelse {
         if (history.authorization == null and history.approval_required != null) {
@@ -1782,7 +1828,7 @@ fn reconcileBash(
             core,
             toolResultFromRecord(denied.result),
         );
-        return .ready;
+        return .ready_local;
     };
     var inbox: InboxSearch = .{
         .session_id = session.session_id,
@@ -1852,10 +1898,7 @@ fn reconcileBash(
         core,
         toolResultFromRecord(result.result),
     );
-    return if (result.result.class == .indeterminate)
-        .indeterminate
-    else
-        .ready;
+    return if (result.result.class == .indeterminate) .indeterminate else .ready_completion;
 }
 
 fn readBashStatus(
@@ -1934,7 +1977,10 @@ fn reconcilePatch(
             .apply_patch,
             toolResultFromRecord(settled),
         );
-        return .ready;
+        return switch (settled.evidence) {
+            .immediate => .ready_local,
+            .durable => .ready_completion,
+        };
     }
     if (history.authorization == null and history.approval_required != null) {
         return .approval_required;
@@ -2072,7 +2118,10 @@ fn reconcilePatch(
         .apply_patch,
         toolResultFromRecord(terminal.result),
     );
-    return .ready;
+    return switch (result_evidence) {
+        .immediate => .ready_local,
+        .durable => .ready_completion,
+    };
 }
 
 const ToolResult = struct {
@@ -3296,15 +3345,15 @@ test "model dispatch releases Core and rejects substituted request bytes" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            response: model_operation.ResponseWriter,
-        ) anyerror!void {
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             var lease = try self.host.slots.borrow();
             defer lease.release() catch unreachable;
             self.observed_released_slot = true;
             var bytes: [model_protocol.header_size + "done".len]u8 = undefined;
             try response.append(try model_protocol.encodeText(&bytes, "done"));
-            try response.finish();
+            return .candidate;
         }
     };
     var probe: SlotProbeProvider = .{ .host = &host };
@@ -3341,10 +3390,11 @@ test "model dispatch releases Core and rejects substituted request bytes" {
         fn dispatch(
             context: *anyopaque,
             _: model_operation.RequestCursor,
-            _: model_operation.ResponseWriter,
-        ) anyerror!void {
+            _: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
+            return error.UnexpectedProviderDispatch;
         }
     };
     var fixture: CountingProvider = .{};

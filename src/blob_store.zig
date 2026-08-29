@@ -4,9 +4,12 @@ const binding = @import("binding.zig");
 pub const header_size = 64;
 pub const max_blob_size = 1024 * 1024;
 pub const validation_window_size = 4096;
+pub const max_live_writers_per_session: usize = 1;
+pub const max_draft_entries: usize = max_live_writers_per_session * 16;
 pub const version: u16 = 2;
 
 const magic = "ONEBLOB\x00";
+const drafts_path = ".drafts";
 
 pub const Metadata = struct {
     length: u64,
@@ -31,8 +34,9 @@ pub const Writer = struct {
             error.FileNotFound => {},
             else => return err,
         }
-        var temp_name_buffer: [25]u8 = undefined;
-        const temp_name = try std.fmt.bufPrint(&temp_name_buffer, "{s}.tmp", .{final_name});
+        try ensureDraftDir(dir, io);
+        var temp_name_buffer: [33]u8 = undefined;
+        const temp_name = try draftName(final_name, &temp_name_buffer);
         const file = try dir.createFile(io, temp_name, .{});
         var empty_header: [header_size]u8 = @splat(0);
         try file.writePositionalAll(io, &empty_header, 0);
@@ -59,8 +63,8 @@ pub const Writer = struct {
         self.open = false;
         var final_name_buffer: [21]u8 = undefined;
         const final_name = try blobName(self.reference, &final_name_buffer);
-        var temp_name_buffer: [25]u8 = undefined;
-        const temp_name = try std.fmt.bufPrint(&temp_name_buffer, "{s}.tmp", .{final_name});
+        var temp_name_buffer: [33]u8 = undefined;
+        const temp_name = try draftName(final_name, &temp_name_buffer);
         try self.dir.rename(temp_name, self.dir, final_name, io);
         try syncDir(self.dir, io);
     }
@@ -69,6 +73,14 @@ pub const Writer = struct {
         if (!self.open) return;
         self.file.close(io);
         self.open = false;
+        var final_name_buffer: [21]u8 = undefined;
+        const final_name = blobName(self.reference, &final_name_buffer) catch return;
+        var temp_name_buffer: [33]u8 = undefined;
+        const temp_name = draftName(final_name, &temp_name_buffer) catch return;
+        // A draft is never readable as evidence: only the final rename publishes it.
+        // Cleanup is therefore best-effort here; startup resets the complete
+        // internal scratch namespace before the store is served.
+        self.dir.deleteFile(io, temp_name) catch {};
     }
 };
 
@@ -130,6 +142,58 @@ pub fn readWindow(
     var reader = try Reader.openIn(dir, io, reference);
     defer reader.close(io);
     return reader.readWindow(io, offset, out);
+}
+
+/// Resets the flat internal draft namespace. The caller must hold the owning
+/// Session lock, which proves that no live writer can still use it. The bound
+/// is sixteen times V1's single live writer to cover failed best-effort aborts.
+pub fn resetDrafts(dir: std.Io.Dir, io: std.Io) !usize {
+    var drafts = dir.openDir(io, drafts_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    var drafts_open = true;
+    defer if (drafts_open) drafts.close(io);
+
+    var names: [max_draft_entries][25]u8 = undefined;
+    var count: usize = 0;
+    var iterator = drafts.iterate();
+    while (try iterator.next(io)) |entry| {
+        if (entry.kind != .file or !isDraftName(entry.name)) {
+            return error.UnexpectedDraftEntry;
+        }
+        if (count == names.len) return error.DraftEntryLimitExceeded;
+        names[count] = entry.name[0..25].*;
+        count += 1;
+    }
+    for (names[0..count]) |name| try drafts.deleteFile(io, &name);
+    if (count != 0) try syncDir(drafts, io);
+    drafts.close(io);
+    drafts_open = false;
+    try dir.deleteDir(io, drafts_path);
+    try syncDir(dir, io);
+    return count;
+}
+
+fn ensureDraftDir(dir: std.Io.Dir, io: std.Io) !void {
+    dir.createDir(io, drafts_path, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => return,
+        else => return err,
+    };
+    try syncDir(dir, io);
+}
+
+fn draftName(final_name: []const u8, buffer: *[33]u8) ![]const u8 {
+    return std.fmt.bufPrint(buffer, drafts_path ++ "/{s}.tmp", .{final_name});
+}
+
+fn isDraftName(name: []const u8) bool {
+    if (name.len != 25 or !std.mem.eql(u8, name[16..], ".blob.tmp")) return false;
+    for (name[0..16]) |byte| switch (byte) {
+        '0'...'9', 'a'...'f' => {},
+        else => return false,
+    };
+    return true;
 }
 
 fn validateFile(file: std.Io.File, io: std.Io) !Metadata {
@@ -217,6 +281,102 @@ test "blob publication and bounded reads are canonical" {
     var window: [7]u8 = undefined;
     try std.testing.expectEqualStrings("bounded", try readWindow(tmp.dir, io, 42, 2, &window));
     try std.testing.expectError(error.BlobAlreadyExists, put(tmp.dir, io, 42, payload));
+}
+
+test "startup reset removes expected flat drafts only" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try put(tmp.dir, io, 41, "sealed before semantic admission");
+    var interrupted = try Writer.begin(tmp.dir, io, 42);
+    try interrupted.append(io, "partial and non-authoritative");
+    interrupted.file.close(io);
+    interrupted.open = false; // Simulate process loss before abort or finish.
+    try tmp.dir.writeFile(io, .{ .sub_path = "root-history.blob", .data = "sealed population is outside scratch" });
+
+    try std.testing.expectEqual(@as(usize, 1), try resetDrafts(tmp.dir, io));
+    try std.testing.expectEqualStrings(
+        "sealed before semantic admission",
+        blk: {
+            var bytes: [64]u8 = undefined;
+            break :blk try readWindow(tmp.dir, io, 41, 0, &bytes);
+        },
+    );
+    try std.testing.expectError(error.FileNotFound, metadata(tmp.dir, io, 42));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, ".drafts", .{}));
+    try tmp.dir.access(io, "root-history.blob", .{});
+}
+
+test "writer lazily recreates the reset draft namespace" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try put(tmp.dir, io, 1, "sealed");
+    _ = try resetDrafts(tmp.dir, io);
+    var writer = try Writer.begin(tmp.dir, io, 2);
+    writer.abort(io);
+    _ = try metadata(tmp.dir, io, 1);
+}
+
+test "startup reset accepts the exact flat draft bound" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, drafts_path, .default_dir);
+    for (1..max_draft_entries + 1) |reference| {
+        var path_buffer: [33]u8 = undefined;
+        var name_buffer: [21]u8 = undefined;
+        const path = try draftName(try blobName(reference, &name_buffer), &path_buffer);
+        try tmp.dir.writeFile(io, .{ .sub_path = path, .data = "draft" });
+    }
+    try std.testing.expectEqual(max_draft_entries, try resetDrafts(tmp.dir, io));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, drafts_path, .{}));
+}
+
+test "startup reset rejects one draft over the bound without deleting" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, drafts_path, .default_dir);
+    for (1..max_draft_entries + 2) |reference| {
+        var path_buffer: [33]u8 = undefined;
+        var name_buffer: [21]u8 = undefined;
+        const path = try draftName(try blobName(reference, &name_buffer), &path_buffer);
+        try tmp.dir.writeFile(io, .{ .sub_path = path, .data = "draft" });
+    }
+    try std.testing.expectError(error.DraftEntryLimitExceeded, resetDrafts(tmp.dir, io));
+    try tmp.dir.access(io, ".drafts/0000000000000001.blob.tmp", .{});
+}
+
+test "startup reset rejects an unexpected subdirectory without deleting" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, drafts_path, .default_dir);
+    try tmp.dir.createDir(io, ".drafts/unexpected", .default_dir);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".drafts/0000000000000001.blob.tmp",
+        .data = "draft",
+    });
+    try std.testing.expectError(error.UnexpectedDraftEntry, resetDrafts(tmp.dir, io));
+    try tmp.dir.access(io, ".drafts/0000000000000001.blob.tmp", .{});
+}
+
+test "startup reset rejects an unexpected flat file without deleting" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, drafts_path, .default_dir);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".drafts/0000000000000001.blob.tmp",
+        .data = "draft",
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = ".drafts/unknown", .data = "unknown" });
+    try std.testing.expectError(error.UnexpectedDraftEntry, resetDrafts(tmp.dir, io));
+    try tmp.dir.access(io, ".drafts/0000000000000001.blob.tmp", .{});
+    try tmp.dir.access(io, ".drafts/unknown", .{});
 }
 
 test "blob validation rejects corruption before returning a window" {

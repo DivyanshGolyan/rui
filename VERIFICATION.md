@@ -78,6 +78,41 @@ Provider contract tests use the versioned semantic request and Captured Model Ou
 
 Before QuickJS or Workflow Run integration becomes the main workstream, one opt-in live Codex tracer must use the same production Provider and capacity-one Harness seams to inspect a controlled failing repository, request Bash and patch Actions, consume their canonical Tool Results, verify the repair, and finish with a durable Final Answer. The test asserts OnePage lifecycle and protocol facts rather than deterministic model wording. Ordinary CI covers the same transport, tool-call, capture, admission, and failure paths through deterministic fake authorization and transport. Issue #43 later repeats the live proof through asynchronous durable Workflow Runs and measured provider concurrency without adding another adapter.
 
+`zig build codex-live-repair` is that opt-in tracer. It requires prior `onepage --codex-login`
+authorization, creates a disposable Git repository outside the worktree, and runs with the production
+Codex Provider, Harness, Bash and one-file patch implementation. It is excluded from `zig build check`;
+ordinary release checks use fake authorization and transport and make no network or Keychain access.
+On failure it reports and preserves the disposable root so the bounded CLI diagnostic and durable state
+can be inspected; a successful run removes the root. Fake failures distinguish local refresh rejection,
+missing refresh authority, provider HTTP 401/403, model rejection, rate or quota rejection, and backend
+failure. The shared diagnostic admits only a generic source (`none`, `local_credentials`, or
+`provider`) and one bounded 64-byte opaque ASCII code. Shared protocol, Harness, and CLI code validate
+and preserve those bytes but never interpret adapter semantics. The Codex adapter privately defines stable
+`codex.refresh.<class>` and `codex.http.<class>.<decimal-status>` codes. The latter encodes the exact
+received non-2xx status while distinguishing authentication, authorization, model, rate, quota, backend,
+and general rejection classes. Provider `error.code`, `error.type`, and the exact bounded ChatGPT
+unsupported-model detail shape may inform that classification but are not retained. Detail prose is never
+retained. The native transport reads ordinary content-length or chunked
+diagnostic bodies through the response reader under
+the existing request timeout, retaining no body when it is malformed or exceeds 4,096 bytes.
+
+The live tracer selects `gpt-5.6-sol` as the supported V1 default without adding a model registry or
+catalog lookup. Callers may still provide another raw model. If that model receives the bounded ChatGPT
+unsupported-model response, one durable Attempt fails without an invisible retry as
+`model_unavailable (provider, code=codex.http.model.400)`.
+
+A single test-only loopback fixture drives the production native transport. It asserts the exact bounded
+request headers and JSON shape, including that the adapter advertises only lifecycle-supported catalog
+tools and omits `input_request` until issue #38 supplies durable admission, a two-turn tool-result continuation, non-2xx classification without an
+invisible retry, and immediate return after the first terminal SSE event even if the response body remains
+open. Its rejection cases cover a diagnostic delivered after the response head in chunked encoding and
+oversized, malformed, or stalled bodies that preserve status without retaining content. Semantic capture
+fixtures separately prove that more than 128 ordinary reasoning and lifecycle events remain valid below
+the total-byte bound, that the total-byte bound is exact, and that failed, cancelled, or incomplete terminal status
+overrides partial candidate output. The loopback fixture does not validate public backend acceptance of
+OnePage's truthful `originator`; that remains an opt-in live compatibility question rather than a hermetic
+CI assertion.
+
 Ingress tests distinguish three outcomes: `full` or `busy` leaves ownership with the producer; `accepted` transfers volatile custody to the live Harness; only a later committed semantic transition acknowledges durable acceptance. Interaction Responses are first validated and committed through the Run Service, then offered only after a fresh Harness acquires an Active Credit. Adapter tests destroy the admitting Harness, publish terminal Inbox evidence, drop every wake hint, and prove bounded durable readiness reconciliation opens a new Harness and applies the Completion. Tests fill ingress while every Active Credit is occupied and prove bounded retry without an unbounded fallback queue.
 
 Run-interface crash and race tests terminate after Run creation, Interaction Request creation, response commit, terminal outcome commit, and each corresponding point before stdout acknowledgement. They cover identical and conflicting replay, withdrawn requests, descriptor mismatch, multiple simultaneous open requests, full actionable-request visibility beside paginated history, SIGINT detachment without cancellation, two concurrent in-process drivers, a second CLI process receiving `busy`, content survival after evaluator and Harness destruction, and all opaque integer-class values round-tripping through QuickJS without precision loss.
