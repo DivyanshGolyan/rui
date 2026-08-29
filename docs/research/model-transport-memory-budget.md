@@ -28,19 +28,21 @@ No live provider call was made for this update, and no real credential was read.
 
 ## Decision
 
-For a V1 lane of 100 concurrent HTTPS model calls, use **768 KiB per active call as the planning
-estimate** and **1 MiB per active call as provisional guarded headroom**. This revision reflects the
-compile-time worst-case escaped SSE frame rather than the smaller ordinary-response frame:
+For a V1 lane of 100 concurrent HTTPS model calls, use **768 KiB of process-resident memory per active
+call as the planning estimate** and **1 MiB per active call as provisional whole-machine guarded
+headroom**. This revision reflects the compile-time worst-case escaped SSE frame rather than the
+smaller ordinary-response frame:
 
 | Transport-only budget | Per active call | 100 active calls |
 | --- | ---: | ---: |
-| Low, measured target | 128 KiB | 12.5 MiB |
-| Planning estimate | 768 KiB | 75 MiB |
-| Provisional guarded headroom | 1 MiB | 100 MiB |
+| Ordinary-frame measured target, not a hard bound | 128 KiB | 12.5 MiB |
+| Worst-case process-resident planning estimate | 768 KiB | 75 MiB |
+| Provisional whole-machine guarded headroom | 1 MiB | 100 MiB |
 
-These figures include process-resident transport state and an allowance for kernel socket memory.
-They exclude the Activation Slot, QuickJS, SQLite, durable prompt and result storage, subprocesses,
-and shared host baseline. The 1 MiB figure is not yet a proved hard ceiling. It becomes defensible
+The 768 KiB figure covers process-resident transport state. The 1 MiB figure additionally leaves
+provisional room for measured kernel socket memory. Both exclude the Activation Slot, QuickJS,
+SQLite, durable prompt and result storage, subprocesses, and shared host baseline. The 1 MiB figure
+is not yet a proved hard ceiling. It becomes defensible
 only if OnePage incrementally parses streaming events, bounds transient frames, controls socket
 autotuning, and does not create one native thread per call.
 
@@ -196,7 +198,6 @@ resident or physical-footprint measurements.
 | Zig fixed HTTPS allocation | 64 KiB | 64 KiB | 64 KiB |
 | Transfer/SSE/request metadata and allocator slack | 576-592 KiB | 576-608 KiB | 608-672 KiB |
 | Resident stack/fiber pages | small/shared | 16-32 KiB | 32-64 KiB |
-| Actual kernel socket memory allowance | separately measured | separately measured | separately measured |
 | Interpretation | stretch target | expected planning slope | provisional headroom |
 
 The rows are intentionally rounded and are not independent maxima. The low figure assumes the prompt
