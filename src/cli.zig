@@ -136,7 +136,11 @@ pub fn main(init: std.process.Init) !void {
         var owner = try harness.Harness.open(.{
             .runtime = runtime,
             .permission_mode = if (arguments.dangerously_bypass_permissions) .bypass else .ask,
-            .mode = .{ .restore = .{ .session_id = session_id, .provider = provider } },
+            .mode = .{ .restore = .{
+                .session_id = session_id,
+                .provider = provider,
+                .expected_model = arguments.model,
+            } },
         });
         defer owner.close();
         const identified = try owner.drive();
@@ -436,6 +440,7 @@ fn parseArguments(args: []const []const u8) !Arguments {
         }
         return parsed;
     }
+    if (parsed.model) |model| try validateModelArgument(model);
     if (parsed.resume_id != null) {
         if (parsed.task != null or parsed.repo_path != null or
             parsed.fixture_bash_command != null or parsed.fixture_patch_path != null)
@@ -454,6 +459,30 @@ fn parseArguments(args: []const []const u8) !Arguments {
         }
     }
     return parsed;
+}
+
+const ModelProvider = enum { codex, fixture };
+
+fn validateModelArgument(model: []const u8) !void {
+    if (model.len == 0 or model.len > session_store.model_name_capacity or
+        !std.unicode.utf8ValidateSlice(model))
+    {
+        return error.InvalidModelArgument;
+    }
+    const provider, const suffix = if (std.mem.startsWith(u8, model, "codex:"))
+        .{ ModelProvider.codex, model["codex:".len..] }
+    else if (std.mem.startsWith(u8, model, "fixture:"))
+        .{ ModelProvider.fixture, model["fixture:".len..] }
+    else
+        return error.UnsupportedModel;
+    if (suffix.len == 0 or suffix[0] == ' ' or suffix[suffix.len - 1] == ' ') {
+        return error.InvalidModelArgument;
+    }
+    for (suffix) |byte| {
+        if (byte < 0x20 or byte == 0x7f or (provider == .codex and byte == ' ')) {
+            return error.InvalidModelArgument;
+        }
+    }
 }
 
 fn loginCodex(
@@ -703,6 +732,41 @@ test "CLI arguments distinguish create from exact resume" {
         "codex:caller-selected-model",
     });
     try std.testing.expectEqualStrings("codex:caller-selected-model", codex_resume.model.?);
+
+    const invalid_models = [_][]const u8{
+        "codex:",
+        "codex: ",
+        "codex:gpt 5",
+        "codex:gpt\n5",
+        "fixture:",
+        "fixture: ",
+        "fixture:answer ",
+    };
+    for (invalid_models) |model| {
+        try std.testing.expectError(
+            error.InvalidModelArgument,
+            parseArguments(&.{ "onepage", "--model", model, "task" }),
+        );
+    }
+    try std.testing.expectError(
+        error.UnsupportedModel,
+        parseArguments(&.{ "onepage", "--model", "unknown:model", "task" }),
+    );
+    var oversized_model: [session_store.model_name_capacity + 1]u8 = @splat('m');
+    @memcpy(oversized_model[0.."codex:".len], "codex:");
+    try std.testing.expectError(
+        error.InvalidModelArgument,
+        parseArguments(&.{ "onepage", "--model", &oversized_model, "task" }),
+    );
+    const invalid_utf8_model = [_]u8{ 'c', 'o', 'd', 'e', 'x', ':', 0xff };
+    try std.testing.expectError(
+        error.InvalidModelArgument,
+        parseArguments(&.{ "onepage", "--model", &invalid_utf8_model, "task" }),
+    );
+    try std.testing.expectEqualStrings(
+        "fixture:path with space",
+        (try parseArguments(&.{ "onepage", "--model", "fixture:path with space", "task" })).model.?,
+    );
 
     try std.testing.expect((try parseArguments(&.{ "onepage", "--codex-login" })).codex_login);
     try std.testing.expect((try parseArguments(&.{ "onepage", "--codex-logout" })).codex_logout);

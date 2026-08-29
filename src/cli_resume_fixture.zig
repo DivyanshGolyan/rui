@@ -8,7 +8,8 @@ const task = "Resume this interrupted fixture Session.";
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len != 2) return error.InvalidArguments;
+    if (args.len < 2 or args.len > 3) return error.InvalidArguments;
+    const model = if (args.len == 3) args[2] else "fixture:interrupted";
     const runtime = try harness.HostRuntime.open(init.io, allocator, args[1], .{});
     defer runtime.close() catch unreachable;
     var fixture: deterministic_provider.Fixture = .{
@@ -20,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
-            .model = "fixture:interrupted",
+            .model = model,
             .task = task,
             .provider = fixture.provider(),
             .fault = crash.hook(),

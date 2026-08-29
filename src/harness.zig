@@ -37,6 +37,7 @@ pub const Create = struct {
 pub const Restore = struct {
     session_id: u64,
     provider: ?model_operation.Provider = null,
+    expected_model: ?[]const u8 = null,
     fault: ?FaultHook = null,
 };
 
@@ -222,7 +223,16 @@ const HarnessState = struct {
                     return error.InvalidCreateRequest;
                 }
             },
-            .restore => |restore| if (restore.session_id == 0) return error.InvalidSessionIdentity,
+            .restore => |restore| {
+                if (restore.session_id == 0) return error.InvalidSessionIdentity;
+                if (restore.expected_model) |model| {
+                    if (model.len == 0 or model.len > session_store.model_name_capacity or
+                        !std.unicode.utf8ValidateSlice(model))
+                    {
+                        return error.InvalidRestoreModel;
+                    }
+                }
+            },
         }
         var owner: HarnessState = .{
             .config = switch (config.mode) {
@@ -257,7 +267,13 @@ const HarnessState = struct {
                 .task = create.task,
             }),
             .restore => |restore| {
-                const restored = try lease.restoreSession(restore.session_id);
+                var restored = try lease.restoreSession(restore.session_id);
+                if (restore.expected_model) |expected| {
+                    if (!std.mem.eql(u8, restored.session.modelName(), expected)) {
+                        restored.session.close();
+                        return error.RestoreModelMismatch;
+                    }
+                }
                 owner.session = restored.session;
                 owner.recovery_pending = true;
                 const session = &owner.session.?;
