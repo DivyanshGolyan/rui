@@ -354,6 +354,8 @@ pub const Capture = struct {
         }
     }
 
+    // Model-controlled candidate semantics are classified before encoder entry.
+    // Encoder errors remain uncaught because CandidateWriter failures are Host-owned.
     fn consumeFrame(self: *Capture, frame: []u8) !void {
         const payload = compactSseData(frame) catch |err| return self.exceeded(err);
         if (payload.len == 0) return;
@@ -1619,6 +1621,9 @@ test "input request arguments require the exact closed shape" {
         "{\"prompt\":\"Explain\",\"prompt\":\"Again\",\"response_type\":\"text\",\"choices\":[]}",
         "{\"prompt\":42,\"response_type\":\"text\",\"choices\":[]}",
         "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[]}",
+        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"\",\"label\":\"Alpha\"}]}",
+        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"\"}]}",
+        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\"}]}",
         "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"Alpha\",\"extra\":true}]}",
         "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"Alpha\"},{\"id\":\"a\",\"label\":\"Again\"}]}",
         "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"\\uD800\"}]}",
@@ -1632,7 +1637,66 @@ test "input request arguments require the exact closed shape" {
         try capture.captureInputRequest(mutable[0..arguments.len]);
         try std.testing.expect(capture.malformed or capture.resource_exceeded);
         try std.testing.expectEqual(@as(usize, 0), output.length);
+        capture.completed = true;
+        capture.terminal_count = 1;
+        capture.terminal_status = .completed;
+        capture.candidate_count = 1;
+        const outcome = try capture.publish();
+        try std.testing.expectEqual(
+            if (capture.resource_exceeded) model_protocol.Failure.oversized else .malformed,
+            outcome.failure.failure,
+        );
     }
+}
+
+test "input request semantic bounds publish one typed oversized outcome" {
+    const Field = enum { prompt, choice_id, choice_label };
+    const cases = [_]struct { field: Field, length: usize }{
+        .{ .field = .prompt, .length = model_contract.max_prompt_size + 1 },
+        .{ .field = .choice_id, .length = model_contract.max_choice_id_size + 1 },
+        .{ .field = .choice_label, .length = model_contract.max_choice_label_size + 1 },
+    };
+    for (cases) |case| {
+        var arguments: [16 * 1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&arguments);
+        try writer.writeAll("{\"prompt\":\"");
+        if (case.field == .prompt) {
+            for (0..case.length) |_| try writer.writeByte('p');
+        } else try writer.writeAll("Choose");
+        try writer.writeAll("\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"");
+        if (case.field == .choice_id) {
+            for (0..case.length) |_| try writer.writeByte('i');
+        } else try writer.writeAll("a");
+        try writer.writeAll("\",\"label\":\"");
+        if (case.field == .choice_label) {
+            for (0..case.length) |_| try writer.writeByte('l');
+        } else try writer.writeAll("Alpha");
+        try writer.writeAll("\"}]}");
+
+        var output: TestCandidate = .{};
+        var capture = output.capture();
+        try capture.captureInputRequest(writer.buffered());
+        capture.completed = true;
+        capture.terminal_count = 1;
+        capture.terminal_status = .completed;
+        capture.candidate_count = 1;
+        const outcome = try capture.publish();
+        try std.testing.expectEqual(model_protocol.Failure.oversized, outcome.failure.failure);
+        try std.testing.expectEqual(@as(usize, 0), output.length);
+    }
+}
+
+test "duplicate input choice IDs publish one typed malformed provider outcome" {
+    var output: TestCandidate = .{};
+    var capture = output.capture();
+    try capture.appendSse(
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"onepage_input_request\",\"arguments\":\"{\\\"prompt\\\":\\\"Choose\\\",\\\"response_type\\\":\\\"single_choice\\\",\\\"choices\\\":[{\\\"id\\\":\\\"same\\\",\\\"label\\\":\\\"First\\\"},{\\\"id\\\":\\\"same\\\",\\\"label\\\":\\\"Second\\\"}]}\"}}\n\n" ++
+            "data: {\"type\":\"response.completed\"}\n\n",
+    );
+
+    const outcome = try capture.publish();
+    try std.testing.expectEqual(model_protocol.Failure.malformed, outcome.failure.failure);
+    try std.testing.expectEqual(@as(usize, 0), output.length);
 }
 
 test "JSON strings escape every control and reject malformed UTF-8" {
