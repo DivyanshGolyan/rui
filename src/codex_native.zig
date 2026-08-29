@@ -508,7 +508,7 @@ fn readProviderFailureCode(
     const expected_length = response.head.content_length;
     const reader = response.reader(&transfer_buffer);
     const length = reader.readSliceShort(&body) catch return;
-    if (length == 0 or length > 4096) return;
+    if (length == 0 or length > diagnostic_body_limit) return;
     if (expected_length) |expected| if (length != expected) return;
     setProviderFailureCode(body[0..length], result);
 }

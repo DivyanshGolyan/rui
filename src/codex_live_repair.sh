@@ -2,13 +2,32 @@
 set -eu
 
 onepage_binary=$1
-memory_contract_binary=${2:-}
-memory_report_path=${3:-}
+memory_contract_binary=$2
+memory_report_path=$3
+# A failed rerun must not leave an older successful observation at the
+# canonical evidence path.
+rm -f "$memory_report_path"
 live_root=$(mktemp -d "${TMPDIR:-/tmp}/onepage-codex-live.XXXXXX")
 report_temp=
+onepage_pid=
+footprint_pid=
+
+terminate_child() {
+  child_pid=$1
+  if test -z "$child_pid"; then
+    return
+  fi
+  # The child may exit between sampling and termination. A non-zero wait is
+  # also expected after SIGTERM; either result is safe once the child is gone.
+  kill "$child_pid" 2>/dev/null || true
+  wait "$child_pid" 2>/dev/null || true
+}
+
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
+  terminate_child "$footprint_pid"
+  terminate_child "$onepage_pid"
   if test -n "$report_temp"; then
     rm -f "$report_temp"
   fi
@@ -140,8 +159,9 @@ done
 
 wait "$onepage_pid"
 onepage_status=$?
-kill "$footprint_pid" 2>/dev/null || true
-wait "$footprint_pid" 2>/dev/null || true
+onepage_pid=
+terminate_child "$footprint_pid"
+footprint_pid=
 set -e
 
 peak_phys_footprint_bytes=$(awk '
@@ -153,37 +173,32 @@ if test "$active_transport_peak_rss_bytes" -gt "$transport_baseline_rss_bytes"; 
   observed_transport_rss_increase_bytes=$((active_transport_peak_rss_bytes - transport_baseline_rss_bytes))
 fi
 
-if test -n "$memory_report_path"; then
-  if test -z "$memory_contract_binary"; then
-    printf 'Memory report requested without contract reporter.\n' >&2
-    exit 1
-  fi
-  adapter_contract=$("$memory_contract_binary")
-  if test "$onepage_status" -eq 0; then
-    for required_measurement in \
-      "$peak_rss_bytes" \
-      "$peak_phys_footprint_bytes" \
-      "$active_transport_peak_rss_bytes" \
-      "$peak_thread_count" \
-      "$stack_virtual_bytes" \
-      "$peak_tcp_connection_count"
-    do
-      if test "$required_measurement" -eq 0; then
-        printf 'Successful live run produced an incomplete memory report.\n' >&2
-        exit 1
-      fi
-    done
-  fi
-  report_directory=$(dirname "$memory_report_path")
-  mkdir -p "$report_directory"
-  report_temp="${memory_report_path}.tmp.$$"
-  measured_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-  os_version=$(sw_vers -productVersion)
-  machine_model=$(sysctl -n hw.model)
-  architecture=$(uname -m)
-  script_directory=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-  source_commit=$(git -C "$script_directory/.." rev-parse HEAD)
-  {
+adapter_contract=$("$memory_contract_binary")
+if test "$onepage_status" -eq 0; then
+  for required_measurement in \
+    "$peak_rss_bytes" \
+    "$peak_phys_footprint_bytes" \
+    "$active_transport_peak_rss_bytes" \
+    "$peak_thread_count" \
+    "$stack_virtual_bytes" \
+    "$peak_tcp_connection_count"
+  do
+    if test "$required_measurement" -eq 0; then
+      printf 'Successful live run produced an incomplete memory report.\n' >&2
+      exit 1
+    fi
+  done
+fi
+report_directory=$(dirname "$memory_report_path")
+mkdir -p "$report_directory"
+report_temp="${memory_report_path}.tmp.$$"
+measured_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+os_version=$(sw_vers -productVersion)
+machine_model=$(sysctl -n hw.model)
+architecture=$(uname -m)
+script_directory=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+source_commit=$(git -C "$script_directory/.." rev-parse HEAD)
+{
     printf '{\n'
     printf '  "schema_version": 1,\n'
     printf '  "scope": "capacity_one_live_codex_harness",\n'
@@ -216,11 +231,10 @@ if test -n "$memory_report_path"; then
     printf '  },\n'
     printf '  "run_exit_status": %s\n' "$onepage_status"
     printf '}\n'
-  } > "$report_temp"
-  mv "$report_temp" "$memory_report_path"
-  report_temp=
-  printf 'Capacity-one memory report: %s\n' "$memory_report_path"
-fi
+} > "$report_temp"
+mv "$report_temp" "$memory_report_path"
+report_temp=
+printf 'Capacity-one memory report: %s\n' "$memory_report_path"
 
 cat "$live_root/output.txt"
 if test "$onepage_status" -ne 0; then
