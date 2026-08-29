@@ -1154,8 +1154,7 @@ pub fn encodeRequest(
         try sink.write(definition.input_schema);
         try sink.write(",\"strict\":true}");
     }
-    if (!first) try sink.write(",");
-    try sink.write("{\"type\":\"function\",\"name\":\"onepage_input_request\",\"description\":\"Request bounded non-secret user input only when the task cannot continue without it.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":2048},\"response_type\":{\"type\":\"string\",\"enum\":[\"text\",\"single_choice\"]},\"choices\":{\"type\":\"array\",\"maxItems\":8,\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"label\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256}},\"required\":[\"id\",\"label\"],\"additionalProperties\":false}}},\"required\":[\"prompt\",\"response_type\",\"choices\"],\"additionalProperties\":false},\"strict\":true}],\"tool_choice\":\"auto\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[]}");
+    try sink.write("],\"tool_choice\":\"auto\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[]}");
 }
 
 fn writeEntry(sink: ByteSink, mapping: *const ToolMapping, entry: model_operation.RequestEntry) !void {

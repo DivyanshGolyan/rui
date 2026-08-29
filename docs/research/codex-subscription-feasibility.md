@@ -97,6 +97,11 @@ instructions, model contract, selected model, admitted Tool Catalog, and ordered
 A Tool Call and Tool Result must remain adjacent; context selection cannot split the pair. The exact
 canonical Tool Result, including bounded Base64 output fields, reaches the next model turn.
 
+Capability advertisement follows durable lifecycle support. Until issue #38 supplies the Interaction
+Request layer, the live Codex request offers only the admitted Tool Catalog and does not advertise the
+synthetic `input_request` function. The strict Codex-private decoder remains in place so unexpected or
+future provider input dispositions fail closed without changing the shared response format.
+
 A drive that admits externally produced Completion evidence returns before the next causally
 dependent Provider or Tool dispatch. The deterministic restart test closes immediately after Tool
 Result admission, creates a fresh provider and Harness, reconstructs the exact result, proves the tool

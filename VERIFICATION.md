@@ -102,7 +102,8 @@ unsupported-model response, one durable Attempt fails without an invisible retry
 `model_unavailable (provider, code=codex.http.model.400)`.
 
 A single test-only loopback fixture drives the production native transport. It asserts the exact bounded
-request headers and JSON shape, a two-turn tool-result continuation, non-2xx classification without an
+request headers and JSON shape, including that the adapter advertises only lifecycle-supported catalog
+tools and omits `input_request` until issue #38 supplies durable admission, a two-turn tool-result continuation, non-2xx classification without an
 invisible retry, and immediate return after the first terminal SSE event even if the response body remains
 open. Its rejection cases cover a diagnostic delivered after the response head in chunked encoding and
 oversized, malformed, or stalled bodies that preserve status without retaining content. Semantic capture

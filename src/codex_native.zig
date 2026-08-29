@@ -3,6 +3,7 @@ const codex_auth = @import("codex_auth.zig");
 const codex_provider = @import("codex_provider.zig");
 const conversation = @import("conversation.zig");
 const host_store = @import("host_store.zig");
+const model_contract = @import("model_contract.zig");
 const model_operation = @import("model_operation.zig");
 const model_protocol = @import("model_protocol.zig");
 const session_store = @import("session.zig");
@@ -1354,6 +1355,14 @@ const WireFixture = struct {
         try std.testing.expect(object.get("stream").?.bool);
         try std.testing.expect(!object.get("parallel_tool_calls").?.bool);
         try std.testing.expectEqualStrings("auto", object.get("tool_choice").?.string);
+        const tools = object.get("tools").?.array;
+        try std.testing.expectEqual(model_contract.default_catalog.len, tools.items.len);
+        for (tools.items, model_contract.default_catalog) |tool, definition| {
+            try std.testing.expectEqualStrings(
+                definition.provider_tool_name,
+                tool.object.get("name").?.string,
+            );
+        }
         const input = object.get("input").?.array;
         try std.testing.expectEqual(@as(usize, if (two_turn) 3 else 1), input.items.len);
         try std.testing.expectEqualStrings("user", input.items[0].object.get("role").?.string);
