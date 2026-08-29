@@ -555,6 +555,8 @@ fn completeCodexLogin(
 }
 
 fn logoutCodex(http: codex_auth.Http, store: codex_auth.Store) !void {
+    // Loading, decoding, and remotely revoking credentials are best-effort:
+    // logout must still delete the local Keychain item, whose failure is authoritative.
     revokeStoredCodexCredential(http, store) catch {};
     try store.delete();
 }
