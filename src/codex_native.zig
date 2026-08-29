@@ -15,6 +15,11 @@ const err_sec_success: i32 = 0;
 const err_sec_item_not_found: i32 = -25300;
 const transport_timeout = codex_auth.request_timeout;
 
+pub const response_head_window_size: usize = 1024;
+pub const stream_transfer_window_size: usize = 64;
+pub const diagnostic_body_limit: usize = 4096;
+pub const diagnostic_transfer_window_size: usize = 1024;
+
 const SecKeychainItemRef = *anyopaque;
 extern "Security" fn SecKeychainFindGenericPassword(
     keychain_or_array: ?*anyopaque,
@@ -213,9 +218,9 @@ pub const NativeHttp = struct {
         try request_body.writer.writeAll(body);
         try request_body.end();
         try request.connection.?.flush();
-        var redirect_buffer: [1024]u8 = undefined;
+        var redirect_buffer: [response_head_window_size]u8 = undefined;
         var response = try request.receiveHead(&redirect_buffer);
-        var transfer_buffer: [1024]u8 = undefined;
+        var transfer_buffer: [diagnostic_transfer_window_size]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
         var length: usize = 0;
         while (true) {
@@ -384,7 +389,7 @@ pub const NativeTransport = struct {
             };
         body.end() catch return .{ .disposition = .may_have_started };
         request.connection.?.flush() catch return .{ .disposition = .may_have_started };
-        var redirect_buffer: [1024]u8 = undefined;
+        var redirect_buffer: [response_head_window_size]u8 = undefined;
         var response = request.receiveHead(&redirect_buffer) catch return .{ .disposition = .may_have_started };
         const status: u16 = @intFromEnum(response.head.status);
         if (status < 200 or status >= 300) {
@@ -397,7 +402,7 @@ pub const NativeTransport = struct {
             request_control.observeTerminal(self.io, result, completed_result);
             return result;
         }
-        var transfer_buffer: [64]u8 = undefined;
+        var transfer_buffer: [stream_transfer_window_size]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
         while (true) {
             const chunk = reader.peekGreedy(1) catch |err| switch (err) {
@@ -498,8 +503,8 @@ fn readProviderFailureCode(
     response: *std.http.Client.Response,
     result: *codex_provider.TransportResult,
 ) void {
-    var body: [4097]u8 = undefined;
-    var transfer_buffer: [1024]u8 = undefined;
+    var body: [diagnostic_body_limit + 1]u8 = undefined;
+    var transfer_buffer: [diagnostic_transfer_window_size]u8 = undefined;
     const expected_length = response.head.content_length;
     const reader = response.reader(&transfer_buffer);
     const length = reader.readSliceShort(&body) catch return;

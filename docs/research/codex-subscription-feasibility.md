@@ -9,11 +9,11 @@ produced successful streamed model responses and completed the controlled live r
 ordinary Harness, Bash, `apply_patch`, and durable follow-up turn. The implementation does not need a
 provider registry, model catalog, response transaction API, or resumable provider stream.
 
-**No-go for a 100-active-call release claim until the live memory gate is measured.** Process RSS,
-physical footprint, touched async-stack pages, TLS handshake peak, allocator live bytes, and actual
-kernel socket memory remain open evidence. The source-derived and OS-sourced planning values in
-[the transport memory budget](model-transport-memory-budget.md) are not substitutes for that live
-measurement.
+**No-go for a 100-active-call release claim until the concurrency slope is measured.** The capacity-one
+live tracer records compiled adapter bounds, whole-process RSS and physical footprint, virtual stack
+reservation, threads, and observable macOS TCP queue evidence. That single-call observation is not a
+substitute for issue #43's production-shaped 1, 10, 50, and 100 call matrix or complete kernel socket
+accounting. See [the transport memory budget](model-transport-memory-budget.md).
 
 ## Pinned protocol
 
@@ -118,8 +118,9 @@ is no resume token or public progress boundary.
 
 ## Remaining release evidence
 
-The functional feasibility question is closed for capacity one. The concurrency and physical-memory
-claim is not. Run the opt-in live measurement matrix described in the transport memory budget before
-claiming support for 100 simultaneous active Codex calls. Keep the live tracer focused on the real
-vertical slice; do not replace this gate with a deterministic local server or a single whole-process
-peak that cannot attribute TLS, stack, allocator, and socket costs.
+The functional feasibility question is closed and the capacity-one command now produces the required
+report. One successful recorded run of that command remains the final issue #11 evidence. The concurrency
+and physical-memory slope belongs to issue #43, which must run the opt-in matrix described in the
+transport memory budget before claiming support for 100 simultaneous active Codex calls. Keep that work
+focused on the real vertical slice; do not replace the gate with a deterministic local server or
+extrapolate from one whole-process peak that cannot isolate TLS, stack, allocator, and socket costs.

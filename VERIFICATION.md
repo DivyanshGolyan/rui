@@ -79,11 +79,20 @@ Provider contract tests use the versioned semantic request and Captured Model Ou
 Before QuickJS or Workflow Run integration becomes the main workstream, one opt-in live Codex tracer must use the same production Provider and capacity-one Harness seams to inspect a controlled failing repository, request Bash and patch Actions, consume their canonical Tool Results, verify the repair, and finish with a durable Final Answer. The test asserts OnePage lifecycle and protocol facts rather than deterministic model wording. Ordinary CI covers the same transport, tool-call, capture, admission, and failure paths through deterministic fake authorization and transport. Issue #43 later repeats the live proof through asynchronous durable Workflow Runs and measured provider concurrency without adding another adapter.
 
 `zig build codex-live-repair` is that opt-in tracer. It requires prior `onepage --codex-login`
-authorization, creates a disposable Git repository outside the worktree, and runs with the production
-Codex Provider, Harness, Bash and one-file patch implementation. It is excluded from `zig build check`;
+authorization, creates a disposable Git repository outside the worktree, and runs the same installed
+`zig-out/bin/onepage` executable used for login with the production Codex Provider, Harness, Bash and
+one-file patch implementation. Reusing that exact installed executable avoids treating Zig's changing
+cache paths as the documented login target. A rebuilt ad-hoc-signed binary may still require one new
+Keychain approval. The tracer is excluded from `zig build check`;
 ordinary release checks use fake authorization and transport and make no network or Keychain access.
 On failure it reports and preserves the disposable root so the bounded CLI diagnostic and durable state
-can be inspected; a successful run removes the root. Fake failures distinguish local refresh rejection,
+can be inspected; a successful run removes the root. Every invocation atomically writes
+`.zig-cache/codex-live-capacity-one.json`. A successful report must include the exact compiled adapter
+structures and windows, whole-process RSS and physical footprint, virtual size, live thread count,
+active-transport stack reservation, observed TCP queues and configured queue high-water limits, and the
+zero-capacity idle-pool policy. The report labels the process figures as a capacity-one whole-process
+observation and the macOS socket high-water values as limits rather than allocated kernel memory. It is
+not the concurrency slope owned by issue #43. Fake failures distinguish local refresh rejection,
 missing refresh authority, provider HTTP 401/403, model rejection, rate or quota rejection, and backend
 failure. The shared diagnostic admits only a generic source (`none`, `local_credentials`, or
 `provider`) and one bounded 64-byte opaque ASCII code. Shared protocol, Harness, and CLI code validate

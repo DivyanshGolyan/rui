@@ -117,7 +117,10 @@ ordinary callers may still select another raw Codex model with `--model codex:MO
 zig build codex-live-repair
 ```
 
-The live step is deliberately opt-in and is not part of `zig build check`. Credentials are never
+The live step is deliberately opt-in and is not part of `zig build check`. It reuses the installed
+executable used for login and writes its raw capacity-one transport evidence to
+`.zig-cache/codex-live-capacity-one.json`. This report is a single-call observation, not the later
+supported-concurrency slope. Credentials are never
 written to the Host Store, repository, Conversation, transcripts, child-tool environments, or test
 fixtures. `./zig-out/bin/onepage --codex-logout` revokes the credential when possible and deletes the
 Keychain item.

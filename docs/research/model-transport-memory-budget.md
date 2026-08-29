@@ -23,7 +23,18 @@ The issue #11 adapter now has the following capacity-one bounds. These are class
 
 The adapter compacts SSE `data:` lines in its one frame, decodes JSON strings in place with a bounded non-allocating cursor, and writes the provider-neutral candidate directly to Host-owned provisional storage after structural validation. It retains neither a JSON DOM, a nested `input_request` arena, a complete canonical result buffer, nor a second payload-sized SSE copy. The wire-frame bound deliberately covers six-byte JSON escape amplification at the maximum decoded candidate size. The total-stream bound limits cumulative parser and transport work, and the whole-call deadline limits elapsed time. A separate event count would add no independent resource guarantee because each event already consumes the byte budget.
 
-No live provider call was made for this update, and no real credential was read. Process RSS, physical footprint, touched async-stack pages, TLS handshake peak, allocator live bytes, and actual per-socket queued memory remain unmeasured for the capacity-one live path. The source and OS figures above are bounds or configuration evidence, not a measured whole-process slope. A later opt-in run must report those observations before this document can replace the existing planning estimate with a measured capacity-one result.
+The opt-in `zig build codex-live-repair` command now writes the raw capacity-one observation to
+`.zig-cache/codex-live-capacity-one.json`. The report separates exact compiled structures and declared
+windows from whole-process RSS, macOS physical footprint, virtual size, thread count, active-transport
+stack reservation, observed TCP queues, and configured socket high-water limits. It also records that
+the adapter has no idle connection pool. The report rejects a successful live repair when any required
+dynamic measurement was missed.
+
+This capacity-one observation does not establish a per-call slope. RSS and physical footprint include
+the complete Harness process, the phase-to-phase RSS increase is only an upper bound on transport
+growth, and macOS `netstat` exposes queued bytes and high-water limits rather than complete allocated
+kernel socket memory. Issue #43 must still run the production-shaped 1, 10, 50, and 100 call matrix
+before OnePage claims a supported concurrency.
 
 ## Decision
 
