@@ -295,18 +295,17 @@ fn parseTokensWithFallback(bytes: []const u8, fallback: ?*const Tokens) !Tokens 
     const access = string(object.get("access_token")) orelse return error.MalformedTokenResponse;
     const refresh_token = string(object.get("refresh_token")) orelse
         if (fallback) |tokens| tokens.refreshToken() else "";
-    const provided_id_token = string(object.get("id_token"));
-    const id_token = provided_id_token orelse
+    const id_token = string(object.get("id_token")) orelse
         if (fallback) |tokens| tokens.idToken() else return error.MalformedTokenResponse;
     const stored_account = string(object.get("account_id")) orelse "";
     var decoded_account: [codex_provider.max_account_id_size]u8 = undefined;
     const account = if (stored_account.len != 0)
         stored_account
     else
-        accountIdFromJwt(id_token, &decoded_account) catch if (provided_id_token == null)
-            if (fallback) |tokens| tokens.accountId() else return error.MalformedIdToken
+        accountIdFromAccessToken(access, &decoded_account) catch if (fallback) |tokens|
+            tokens.accountId()
         else
-            return error.MalformedIdToken;
+            return error.MalformedAccessToken;
     if (access.len == 0 or access.len > max_token_size or refresh_token.len > max_token_size or
         id_token.len == 0 or id_token.len > max_token_size or account.len == 0 or
         account.len > codex_provider.max_account_id_size)
@@ -325,23 +324,26 @@ fn parseTokensWithFallback(bytes: []const u8, fallback: ?*const Tokens) !Tokens 
     return tokens;
 }
 
-fn accountIdFromJwt(jwt: []const u8, out: []u8) ![]const u8 {
+fn accountIdFromAccessToken(jwt: []const u8, out: []u8) ![]const u8 {
     var pieces = std.mem.splitScalar(u8, jwt, '.');
-    _ = pieces.next() orelse return error.MalformedIdToken;
-    const payload = pieces.next() orelse return error.MalformedIdToken;
+    _ = pieces.next() orelse return error.MalformedAccessToken;
+    const payload = pieces.next() orelse return error.MalformedAccessToken;
     var decoded: [max_token_size]u8 = undefined;
     const length = try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(payload);
-    if (length > decoded.len) return error.MalformedIdToken;
+    if (length > decoded.len) return error.MalformedAccessToken;
     try std.base64.url_safe_no_pad.Decoder.decode(decoded[0..length], payload);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, decoded[0..length], .{});
     defer parsed.deinit();
     const object = switch (parsed.value) {
         .object => |value| value,
-        else => return error.MalformedIdToken,
+        else => return error.MalformedAccessToken,
     };
-    const account = string(object.get("https://api.openai.com/auth.chatgpt_account_id")) orelse
-        string(object.get("chatgpt_account_id")) orelse return error.MalformedIdToken;
-    if (account.len == 0 or account.len > out.len) return error.MalformedIdToken;
+    const auth = switch (object.get("https://api.openai.com/auth") orelse return error.MalformedAccessToken) {
+        .object => |value| value,
+        else => return error.MalformedAccessToken,
+    };
+    const account = string(auth.get("chatgpt_account_id")) orelse return error.MalformedAccessToken;
+    if (account.len == 0 or account.len > out.len) return error.MalformedAccessToken;
     @memcpy(out[0..account.len], account);
     return out[0..account.len];
 }
@@ -410,9 +412,18 @@ test "device authorization and refresh use the official subscription protocol" {
     try std.testing.expectError(error.AccountBindingChanged, refresh(changed_http, &tokens));
 }
 
+test "account binding comes from the nested access-token auth claim" {
+    var tokens = try parseTokens(
+        "{\"access_token\":\"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1saXZlIn19.sig\"," ++
+            "\"refresh_token\":\"refresh\",\"id_token\":\"e30.e30.sig\"}",
+    );
+    defer tokens.scrub();
+    try std.testing.expectEqualStrings("acct-live", tokens.accountId());
+}
+
 const ChangedAccountHttp = struct {
     fn post(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8, out: []u8) anyerror!HttpResponse {
-        const body = "{\"access_token\":\"changed\",\"refresh_token\":\"refresh\",\"id_token\":\"e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0LTIifQ.sig\"}";
+        const body = "{\"access_token\":\"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0yIn19.sig\",\"refresh_token\":\"refresh\"}";
         @memcpy(out[0..body.len], body);
         return .{ .status = 200, .body = out[0..body.len] };
     }
@@ -431,7 +442,7 @@ const FakeHttp = struct {
         else if (std.mem.endsWith(u8, url, "/deviceauth/token"))
             "{\"authorization_code\":\"code\",\"code_challenge\":\"challenge\",\"code_verifier\":\"verifier\"}"
         else if (std.mem.endsWith(u8, url, "/oauth/token") and self.calls == 4)
-            "{\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"id_token\":\"e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0LTEifQ.sig\"}"
+            "{\"access_token\":\"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0xIn19.sig\",\"refresh_token\":\"refresh\",\"id_token\":\"e30.e30.sig\"}"
         else
             "{\"access_token\":\"new-access\"}";
         if (body.len > out.len) return error.ResponseTooLarge;
