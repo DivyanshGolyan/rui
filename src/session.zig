@@ -799,7 +799,7 @@ pub const Session = struct {
         // recovery/admission path outside that namespace.
         var blobs = try dir.openDir(io, blobs_path, .{});
         defer blobs.close(io);
-        try blob_store.resetDrafts(blobs, io);
+        _ = try blob_store.resetDrafts(blobs, io);
         return .{
             .session = fromStored(io, storage, dir, lock_file, stored, false),
         };
