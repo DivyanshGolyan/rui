@@ -16,6 +16,7 @@ The issue #11 adapter now has the following capacity-one bounds. These are class
 | HTTP response transfer window | compile-time source bound | 64 bytes on the Codex success path |
 | HTTP rejection diagnostic body | compile-time source bound | 4,097 bytes read, at most 4,096 accepted |
 | HTTPS connection byte buffers | Zig 0.16 source-derived | 59,151 bytes before structs and allocator rounding |
+| HTTP content decoding | implementation observation | identity encoding only; no decompression window |
 | TCP send and receive defaults | measured with `sysctl` on the development host, 2026-08-29 | 131,072 bytes each |
 | TCP autotuning maxima | measured with `sysctl` on the development host, 2026-08-29 | 4,194,304 bytes each |
 | Async task stack reservation | Zig 0.16 source-derived | 4 MiB virtual minimum per Kqueue task; resident pages unmeasured |

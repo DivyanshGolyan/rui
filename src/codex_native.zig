@@ -208,6 +208,7 @@ pub const NativeHttp = struct {
         var request = try client.request(.POST, uri, .{
             .redirect_behavior = .unhandled,
             .keep_alive = false,
+            .headers = .{ .accept_encoding = .{ .override = "identity" } },
             .extra_headers = &headers,
         });
         defer request.deinit();
@@ -370,6 +371,7 @@ pub const NativeTransport = struct {
         var request = client.request(.POST, uri, .{
             .redirect_behavior = .unhandled,
             .keep_alive = false,
+            .headers = .{ .accept_encoding = .{ .override = "identity" } },
             .extra_headers = &headers,
         }) catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -720,6 +722,7 @@ test "authorization HTTP primitive deadlines and joins every OAuth call class" {
         try std.testing.expect(elapsed.nanoseconds < std.Io.Duration.fromMilliseconds(500).nanoseconds);
         try std.testing.expect(fixture.peer_closed);
         try std.testing.expectEqual(std.http.Method.POST, fixture.method);
+        try std.testing.expect(fixture.accept_encoding_identity);
     }
 }
 
@@ -1220,6 +1223,7 @@ const WireFixture = struct {
     accept: bool = false,
     content_type: bool = false,
     beta: bool = false,
+    accept_encoding_identity: bool = false,
     body: [96 * 1024]u8 = undefined,
     body_length: usize = 0,
     peer_closed: bool = false,
@@ -1273,6 +1277,8 @@ const WireFixture = struct {
                 self.content_type = std.mem.eql(u8, header.value, "application/json");
             } else if (std.ascii.eqlIgnoreCase(header.name, "openai-beta")) {
                 self.beta = std.mem.eql(u8, header.value, "responses=experimental");
+            } else if (std.ascii.eqlIgnoreCase(header.name, "accept-encoding")) {
+                self.accept_encoding_identity = std.mem.eql(u8, header.value, "identity");
             }
         }
         const body_length = request.head.content_length orelse return error.MissingContentLength;
@@ -1344,6 +1350,7 @@ const WireFixture = struct {
         try std.testing.expect(self.accept);
         try std.testing.expect(self.content_type);
         try std.testing.expect(self.beta);
+        try std.testing.expect(self.accept_encoding_identity);
         var parsed = try std.json.parseFromSlice(
             std.json.Value,
             std.testing.allocator,

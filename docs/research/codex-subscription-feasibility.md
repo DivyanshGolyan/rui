@@ -93,6 +93,10 @@ contract. The dedicated draft-entry count bounds startup cleanup work independen
 writer. There is no event-count limit: every event consumes the total byte budget, so a separate count
 would reject valid fine-grained streams without bounding another resource.
 
+OAuth and model HTTP requests explicitly require identity content encoding. Compressed provider bytes
+therefore never enter the bounded JSON or SSE readers, and no decompression window or hidden allocator
+is needed.
+
 Durable failure diagnostics keep the shared source generic (`local_credentials` or `provider`). The
 opaque code is Codex-owned. Stable codes distinguish refresh rejection, missing refresh authority,
 HTTP authentication and authorization rejection, model rejection, rate limiting, quota exhaustion,
