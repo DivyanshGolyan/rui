@@ -4,6 +4,7 @@ const binding = @import("binding.zig");
 pub const header_size = 64;
 pub const max_blob_size = 1024 * 1024;
 pub const validation_window_size = 4096;
+pub const max_startup_sweep_entries: usize = 65_536;
 pub const version: u16 = 2;
 
 const magic = "ONEBLOB\x00";
@@ -137,6 +138,33 @@ pub fn readWindow(
     return reader.readWindow(io, offset, out);
 }
 
+/// Removes crash-left unpublished writers. The caller must hold the owning
+/// Session lock and open `dir` with iteration capability. Final `.blob` files
+/// are immutable evidence and are never considered by this sweep.
+pub fn sweepIncomplete(dir: std.Io.Dir, io: std.Io) !usize {
+    var iterator = dir.iterate();
+    var scanned: usize = 0;
+    var removed: usize = 0;
+    while (try iterator.next(io)) |entry| {
+        if (scanned == max_startup_sweep_entries) return error.BlobSweepEntryLimitExceeded;
+        scanned += 1;
+        if (entry.kind != .file or !isIncompleteName(entry.name)) continue;
+        try dir.deleteFile(io, entry.name);
+        removed += 1;
+    }
+    if (removed != 0) try syncDir(dir, io);
+    return removed;
+}
+
+fn isIncompleteName(name: []const u8) bool {
+    if (name.len != 25 or !std.mem.eql(u8, name[16..], ".blob.tmp")) return false;
+    for (name[0..16]) |byte| switch (byte) {
+        '0'...'9', 'a'...'f' => {},
+        else => return false,
+    };
+    return true;
+}
+
 fn validateFile(file: std.Io.File, io: std.Io) !Metadata {
     const stat = try file.stat(io);
     if (stat.size < header_size) return error.TruncatedBlob;
@@ -222,6 +250,30 @@ test "blob publication and bounded reads are canonical" {
     var window: [7]u8 = undefined;
     try std.testing.expectEqualStrings("bounded", try readWindow(tmp.dir, io, 42, 2, &window));
     try std.testing.expectError(error.BlobAlreadyExists, put(tmp.dir, io, 42, payload));
+}
+
+test "startup sweep removes only crash-left provisional drafts" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try put(tmp.dir, io, 41, "sealed before semantic admission");
+    var interrupted = try Writer.begin(tmp.dir, io, 42);
+    try interrupted.append(io, "partial and non-authoritative");
+    interrupted.file.close(io);
+    interrupted.open = false; // Simulate process loss before abort or finish.
+    try tmp.dir.writeFile(io, .{ .sub_path = "not-a-blob.tmp", .data = "unrelated" });
+
+    try std.testing.expectEqual(@as(usize, 1), try sweepIncomplete(tmp.dir, io));
+    try std.testing.expectEqualStrings(
+        "sealed before semantic admission",
+        blk: {
+            var bytes: [64]u8 = undefined;
+            break :blk try readWindow(tmp.dir, io, 41, 0, &bytes);
+        },
+    );
+    try std.testing.expectError(error.FileNotFound, metadata(tmp.dir, io, 42));
+    try tmp.dir.access(io, "not-a-blob.tmp", .{});
 }
 
 test "blob validation rejects corruption before returning a window" {

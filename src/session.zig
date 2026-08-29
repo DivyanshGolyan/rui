@@ -791,6 +791,14 @@ pub const Session = struct {
         var stored = try storage.readSession(session_id);
         try validateWorkspace(io, stored.workspacePath());
         stored.ownership_epoch = try storage.claimSession(session_id);
+
+        // Provisional response drafts are scratch. Once this ownership epoch
+        // holds the Session lock, no live writer from an earlier process can
+        // exist, so crash-left `.tmp` files are safe to discard. Sealed blobs
+        // remain available for the normal recovery/admission path.
+        var blobs = try dir.openDir(io, blobs_path, .{ .iterate = true });
+        defer blobs.close(io);
+        _ = try blob_store.sweepIncomplete(blobs, io);
         return .{
             .session = fromStored(io, storage, dir, lock_file, stored, false),
         };
@@ -1639,6 +1647,38 @@ test "Session creation enforces recoverable root task content" {
         error.FileNotFound,
         layout.sessions.access(io, sessionName(40, &name_buffer), .{}),
     );
+}
+
+test "Session startup sweeps provisional drafts but preserves sealed unadmitted evidence" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(
+        layout.sessions,
+        &layout.storage,
+        io,
+        testConfig(layout.workspacePath(), 25),
+    );
+    var sealed = try created.beginBlob(90);
+    try sealed.append("sealed before ledger admission");
+    try sealed.finish();
+
+    var interrupted = try created.beginBlob(91);
+    try interrupted.append("partial provisional bytes");
+    interrupted.writer.file.close(io);
+    interrupted.writer.open = false;
+    interrupted.blobs.close(io);
+    interrupted.open = false; // Simulate process loss before ProviderIo.close.
+    created.close();
+
+    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 25);
+    defer restored.session.close();
+    var bytes: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "sealed before ledger admission",
+        try restored.session.readBlob(90, 0, &bytes),
+    );
+    try std.testing.expectError(error.FileNotFound, restored.session.readBlob(91, 0, &bytes));
 }
 
 const TestLayout = struct {
