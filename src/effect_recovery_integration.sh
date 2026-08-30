@@ -5,6 +5,15 @@ root=$(mktemp -d "${TMPDIR:-/tmp}/onepage-effect-recovery.XXXXXX")
 trap 'rm -rf "$root"' EXIT
 root=$(cd "$root" && pwd -P)
 
+mkdir -p "$root/sealed-orphan/state" "$root/sealed-orphan/repo"
+git -C "$root/sealed-orphan/repo" init -q
+set +e
+sealed_orphan_session=$($fixture crash-sealed-model "$root/sealed-orphan/state" "$root/sealed-orphan/repo")
+crash_status=$?
+set -e
+test "$crash_status" -eq 86
+test "$($fixture recover-sealed-model "$root/sealed-orphan/state" "$sealed_orphan_session")" = finished
+
 mkdir -p "$root/model/state" "$root/model/repo"
 git -C "$root/model/repo" init -q
 model_session=$($fixture start-model "$root/model/state" "$root/model/repo")

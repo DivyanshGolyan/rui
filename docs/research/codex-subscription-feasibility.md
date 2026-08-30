@@ -75,7 +75,7 @@ and stays within the 15-minute attended deadline.
 | Provider-neutral request window | 4,096 bytes |
 | Canonical response | 98,372 bytes |
 | SSE projection window | 4,096 bytes |
-| Assistant-text decoded buffer | grows with content, capped at 20,436 bytes |
+| Assistant-text decoded buffer | grows with content, capped at 20,456 bytes |
 | Tool-arguments decoded buffer | grows with content, capped at 98,316 bytes |
 | One SSE wire event work limit | 598,424 bytes |
 | Total SSE bytes per dispatch | 2,393,696 bytes |
