@@ -567,8 +567,8 @@ internal module test once the harness-seam tests cover it.
 
 The foundation through the deterministic repair, Host Store, and provider-neutral model contract is complete. Remaining V1 work is organized as risk gates followed by vertical production slices with small review units:
 
-1. Prove the official Codex subscription transport, implement one narrow Provider adapter, and let a real model complete a controlled repair through the existing capacity-one Harness. This happens before QuickJS so the current agent runtime and provider seam receive real-world feedback early.
-2. Prove the disposable QuickJS kernel independently, including complete blocked-demand capture and deterministic Promise joins.
+1. Implement and deterministically verify the official Codex subscription transport through the existing capacity-one Harness. Run the attended real-model repair at the earliest credentialed opportunity; it remains required before issue #11 closes, but its availability does not block independent work.
+2. Prove the disposable QuickJS kernel independently, including complete blocked-demand capture and deterministic Promise joins. This may proceed once the Codex implementation gate is clean, even while the attended compatibility run remains pending.
 3. Build one durable one-Job Run through the bounded foreground advancement engine, keyed Job identity, disposable evaluation, cold-open resume, and committed observation.
 4. Extend that path first with Active Credits, fan-out, and deterministic whole-blocked-set barriers, then with Workspace effect fencing.
 5. Add durable interactions and stabilize the complete Run Service and CLI contract.

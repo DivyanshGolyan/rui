@@ -4,10 +4,13 @@ Date: 2026-08-29
 
 ## Verdict
 
-**Go for the capacity-one OnePage V1 provider path.** The pinned Codex subscription protocol has
-produced successful streamed model responses and completed the controlled live repair through the
-ordinary Harness, Bash, `apply_patch`, and durable follow-up turn. The implementation does not need a
-provider registry, model catalog, response transaction API, or resumable provider stream.
+**Go for the capacity-one OnePage V1 provider path.** Earlier protocol evidence produced successful
+streamed model responses and completed the controlled live repair through the ordinary Harness, Bash,
+`apply_patch`, and durable follow-up turn. The current adapter's deterministic implementation gate is
+complete; one fresh attended run and its capacity-one report remain required before issue #11 closes.
+That pending compatibility evidence does not block independent evaluator or Run Service work. The
+implementation does not need a provider registry, model catalog, response transaction API, or
+resumable provider stream.
 
 **No-go for a 100-active-call release claim until the concurrency slope is measured.** The capacity-one
 live tracer records compiled adapter bounds, whole-process RSS and physical footprint, whole-process
@@ -134,7 +137,9 @@ is no resume token or public progress boundary.
 
 The functional feasibility question is closed and the capacity-one command writes configured windows
 and work limits separately from live decoded-buffer occupancy, allocator capacity, and spare capacity.
-One successful recorded run of that command remains the final issue #11 evidence. The concurrency
+One fresh successful recorded run of that command remains the final issue #11 evidence and the issue
+stays open until it is available. Independent QuickJS and Workflow Run implementation may proceed in
+the meantime. The concurrency
 and physical-memory slope belongs to issue #43, which must run the opt-in matrix described in the
 transport memory budget before claiming support for 100 simultaneous active Codex calls. Keep that work
 focused on the real vertical slice; do not replace the gate with a deterministic local server or
