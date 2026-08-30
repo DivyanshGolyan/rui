@@ -236,7 +236,7 @@ pub const CaptureMetrics = struct {
         );
         self.decoded_capacity_high_water_bytes = @max(
             self.decoded_capacity_high_water_bytes,
-            capture.decoded_capacity_high_water,
+            capture.text.items.capacity + capture.arguments.items.capacity,
         );
         self.assistant_text_occupied_high_water_bytes = @max(
             self.assistant_text_occupied_high_water_bytes,
@@ -244,7 +244,7 @@ pub const CaptureMetrics = struct {
         );
         self.assistant_text_capacity_high_water_bytes = @max(
             self.assistant_text_capacity_high_water_bytes,
-            capture.text.high_water_capacity,
+            capture.text.items.capacity,
         );
         self.tool_arguments_occupied_high_water_bytes = @max(
             self.tool_arguments_occupied_high_water_bytes,
@@ -252,7 +252,7 @@ pub const CaptureMetrics = struct {
         );
         self.tool_arguments_capacity_high_water_bytes = @max(
             self.tool_arguments_capacity_high_water_bytes,
-            capture.arguments.high_water_capacity,
+            capture.arguments.items.capacity,
         );
     }
 };
@@ -415,7 +415,6 @@ const CappedBytes = struct {
     items: std.ArrayList(u8) = .empty,
     overflowed: bool = false,
     high_water_length: usize = 0,
-    high_water_capacity: usize = 0,
 
     fn append(
         self: *CappedBytes,
@@ -439,7 +438,6 @@ const CappedBytes = struct {
                 std.math.mul(usize, self.items.capacity, 2) catch maximum;
             const next_capacity = @min(maximum, @max(new_length, growth));
             try self.items.ensureTotalCapacityPrecise(allocator, next_capacity);
-            self.high_water_capacity = @max(self.high_water_capacity, self.items.capacity);
         }
         self.items.appendSliceAssumeCapacity(bytes);
         self.high_water_length = @max(self.high_water_length, self.items.items.len);
@@ -467,10 +465,8 @@ const EventProjection = struct {
     root_seen: bool = false,
     root_closed: bool = false,
     document_finished: bool = false,
-    syntax_invalid: bool = false,
-    structure_invalid: bool = false,
+    invalid: bool = false,
     capture_values: bool = false,
-    parser_steps: usize = 0,
     skip_depth: usize = 0,
     discard_scalar: DiscardScalar = .none,
     string_target: StringTarget = .none,
@@ -582,16 +578,13 @@ pub const Capture = struct {
     candidate_failure: model_protocol.Failure = .none,
     mapping: ToolMapping = .{},
     candidate_count: u8 = 0,
-    terminal_count: u8 = 0,
     terminal_status: TerminalStatus = .none,
-    completed: bool = false,
     malformed: bool = false,
     resource_exceeded: bool = false,
     total_sse_bytes: usize = 0,
     projected_json_bytes: usize = 0,
     parser_steps: usize = 0,
     decoded_occupied_high_water: usize = 0,
-    decoded_capacity_high_water: usize = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -607,27 +600,21 @@ pub const Capture = struct {
         self.* = undefined;
     }
 
-    pub fn requestSink(self: *Capture) ByteSink {
-        return .{ .context = self, .write_fn = discardRequestBytes };
-    }
-
-    fn discardRequestBytes(_: *anyopaque, _: []const u8) anyerror!void {}
-
     pub fn appendSse(self: *Capture, bytes: []const u8) !void {
-        if (self.completed) return;
+        if (self.terminalObserved()) return;
         for (bytes) |byte| {
             try self.chargeWireByte();
             if (self.pending_cr) {
                 self.pending_cr = false;
                 try self.finishLine();
-                if (self.completed) return;
+                if (self.terminalObserved()) return;
                 if (byte == '\n') continue;
             }
             if (byte == '\r') {
                 self.pending_cr = true;
             } else if (byte == '\n') {
                 try self.finishLine();
-                if (self.completed) return;
+                if (self.terminalObserved()) return;
             } else {
                 try self.consumeLineByte(byte);
             }
@@ -769,7 +756,7 @@ pub const Capture = struct {
                 self.scanner.endInput();
                 try self.drainScanner(true);
             }
-            if (!self.event.document_finished) self.event.syntax_invalid = true;
+            if (!self.event.document_finished) self.event.invalid = true;
             try self.finalizeEvent();
         }
         self.resetEventParser();
@@ -791,19 +778,18 @@ pub const Capture = struct {
             const token = self.scanner.next() catch |err| switch (err) {
                 error.BufferUnderrun => {
                     if (end_of_input) {
-                        self.event.syntax_invalid = true;
+                        self.event.invalid = true;
                         self.parser_dead = true;
                     }
                     return;
                 },
                 error.OutOfMemory => return err,
                 else => {
-                    self.event.syntax_invalid = true;
+                    self.event.invalid = true;
                     self.parser_dead = true;
                     return;
                 },
             };
-            self.event.parser_steps +|= 1;
             self.parser_steps +|= 1;
             if (self.scanner.stackHeight() > max_json_nesting_depth) {
                 self.resource_exceeded = true;
@@ -824,7 +810,7 @@ pub const Capture = struct {
     }
 
     pub fn terminalObserved(self: *const Capture) bool {
-        return self.completed;
+        return self.terminal_status != .none;
     }
 
     pub fn finishSse(self: *Capture) void {
@@ -834,9 +820,7 @@ pub const Capture = struct {
                 self.malformed = true;
             };
         }
-        if (self.line_nonempty or self.data_seen or self.scanner_initialized or
-            !self.completed or self.terminal_count != 1)
-        {
+        if (self.line_nonempty or self.data_seen or self.scanner_initialized or !self.terminalObserved()) {
             self.malformed = true;
         }
     }
@@ -864,7 +848,7 @@ pub const Capture = struct {
                 self.event.root_seen = true;
                 self.pushContext(.root_object);
             } else if (token != .end_of_document) {
-                self.event.structure_invalid = true;
+                self.event.invalid = true;
                 try self.skipTokenValue(token);
             }
             return;
@@ -898,7 +882,7 @@ pub const Capture = struct {
             .partial_string, .partial_string_escaped_1, .partial_string_escaped_2, .partial_string_escaped_3, .partial_string_escaped_4 => self.event.discard_scalar = .string,
             .partial_number => self.event.discard_scalar = .number,
             .string, .number, .true, .false, .null => self.completeParentValue(),
-            else => self.event.structure_invalid = true,
+            else => self.event.invalid = true,
         }
     }
 
@@ -910,7 +894,7 @@ pub const Capture = struct {
                     self.event.discard_scalar = .none;
                     self.completeParentValue();
                 },
-                else => self.event.syntax_invalid = true,
+                else => self.event.invalid = true,
             },
             .number => switch (token) {
                 .partial_number => {},
@@ -918,7 +902,7 @@ pub const Capture = struct {
                     self.event.discard_scalar = .none;
                     self.completeParentValue();
                 },
-                else => self.event.syntax_invalid = true,
+                else => self.event.invalid = true,
             },
             .none => unreachable,
         }
@@ -935,7 +919,7 @@ pub const Capture = struct {
             .string => true,
             .partial_string, .partial_string_escaped_1, .partial_string_escaped_2, .partial_string_escaped_3, .partial_string_escaped_4 => false,
             else => {
-                self.event.syntax_invalid = true;
+                self.event.invalid = true;
                 self.event.string_target = .none;
                 return;
             },
@@ -982,10 +966,6 @@ pub const Capture = struct {
         self.decoded_occupied_high_water = @max(
             self.decoded_occupied_high_water,
             self.text.items.items.len + self.arguments.items.items.len,
-        );
-        self.decoded_capacity_high_water = @max(
-            self.decoded_capacity_high_water,
-            self.text.items.capacity + self.arguments.items.capacity,
         );
     }
 
@@ -1165,8 +1145,7 @@ pub const Capture = struct {
     }
 
     fn finalizeEvent(self: *Capture) !void {
-        if (self.event.syntax_invalid or self.event.structure_invalid or
-            !self.event.root_seen or !self.event.root_closed or
+        if (self.event.invalid or !self.event.root_seen or !self.event.root_closed or
             !self.event.event_type.valid())
         {
             self.malformed = true;
@@ -1293,12 +1272,10 @@ pub const Capture = struct {
     }
 
     fn captureTerminal(self: *Capture, status: TerminalStatus) !void {
-        if (self.completed) {
+        if (self.terminalObserved()) {
             self.malformed = true;
             return;
         }
-        self.completed = true;
-        self.terminal_count +|= 1;
         self.terminal_status = status;
     }
 
@@ -2092,7 +2069,7 @@ test "terminal status agreement and first-terminal-wins are chunk independent" {
     defer coalesced.deinit();
     coalesced.total_sse_bytes = max_total_sse_bytes - terminal.len;
     try coalesced.appendSse(terminal ++ "trailing bytes beyond the stream budget");
-    try std.testing.expect(coalesced.completed);
+    try std.testing.expect(coalesced.terminalObserved());
     try std.testing.expectEqual(max_total_sse_bytes, coalesced.total_sse_bytes);
 
     var partitioned_output: TestCandidate = .{};
@@ -2101,7 +2078,7 @@ test "terminal status agreement and first-terminal-wins are chunk independent" {
     partitioned.total_sse_bytes = max_total_sse_bytes - terminal.len;
     try partitioned.appendSse(terminal);
     try partitioned.appendSse("trailing bytes beyond the stream budget");
-    try std.testing.expect(partitioned.completed);
+    try std.testing.expect(partitioned.terminalObserved());
     try std.testing.expectEqual(coalesced.total_sse_bytes, partitioned.total_sse_bytes);
 }
 
@@ -2329,7 +2306,7 @@ test "unknown semantic variants are typed as unsupported provider output" {
         var capture = output.capture();
         defer capture.deinit();
         try capture.appendSse(event);
-        if (!capture.completed) try capture.appendSse(
+        if (!capture.terminalObserved()) try capture.appendSse(
             "data: {\"type\":\"response.completed\"}\n\n",
         );
         try std.testing.expectEqual(
@@ -2368,14 +2345,14 @@ test "capture owns only a small fixed window and releases growable candidate buf
             "data: {\"type\":\"response.completed\"}\n\n",
     );
     try std.testing.expect(capture.text.high_water_length < 32);
-    try std.testing.expect(capture.text.high_water_capacity < model_protocol.max_assistant_text_size);
-    try std.testing.expectEqual(@as(usize, 0), capture.arguments.high_water_capacity);
+    try std.testing.expect(capture.text.items.capacity < model_protocol.max_assistant_text_size);
+    try std.testing.expectEqual(@as(usize, 0), capture.arguments.items.capacity);
     try std.testing.expectEqual(model_operation.DispatchOutcome.candidate, try capture.publish());
     var metrics: CaptureMetrics = .{};
     metrics.observe(&capture);
     try std.testing.expectEqual(@as(usize, 1), metrics.dispatch_count);
     try std.testing.expectEqual(capture.text.high_water_length, metrics.decoded_occupied_high_water_bytes);
-    try std.testing.expectEqual(capture.text.high_water_capacity, metrics.decoded_capacity_high_water_bytes);
+    try std.testing.expectEqual(capture.text.items.capacity, metrics.decoded_capacity_high_water_bytes);
 }
 
 test "recognized provider conversions reject ambiguous consumed fields" {
@@ -2409,7 +2386,7 @@ test "recognized provider conversions reject ambiguous consumed fields" {
         var capture = output.capture();
         defer capture.deinit();
         try capture.appendSse(event);
-        if (!capture.completed) try capture.appendSse(
+        if (!capture.terminalObserved()) try capture.appendSse(
             "data: {\"type\":\"response.completed\"}\n\n",
         );
         const outcome = try capture.publish();
@@ -2538,8 +2515,6 @@ test "input request arguments require the exact closed shape" {
         try capture.captureInputRequest(mutable[0..arguments.len]);
         try std.testing.expect(capture.malformed or capture.resource_exceeded);
         try std.testing.expectEqual(@as(usize, 0), output.length);
-        capture.completed = true;
-        capture.terminal_count = 1;
         capture.terminal_status = .completed;
         capture.candidate_count = 1;
         const outcome = try capture.publish();
@@ -2578,8 +2553,6 @@ test "input request semantic bounds publish one typed oversized outcome" {
         var capture = output.capture();
         defer capture.deinit();
         try capture.captureInputRequest(writer.buffered());
-        capture.completed = true;
-        capture.terminal_count = 1;
         capture.terminal_status = .completed;
         capture.candidate_count = 1;
         const outcome = try capture.publish();
