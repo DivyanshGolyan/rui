@@ -14,16 +14,6 @@ const Request = struct {
     pending: bool,
 };
 
-const EntryBudget = struct {
-    used: usize = 0,
-
-    fn add(self: *EntryBudget, count: usize) !void {
-        self.used = std.math.add(usize, self.used, count) catch
-            return error.ExcessiveEntries;
-        if (self.used > protocol.Limits.data_entries) return error.ExcessiveEntries;
-    }
-};
-
 const Evaluation = struct {
     allocator: std.mem.Allocator,
     source: [:0]const u8,
@@ -197,6 +187,7 @@ fn evaluateParsed(state: *Evaluation, builder: *protocol.Builder) []const u8 {
     }
     defer qjs.JS_FreeValue(context, module_result);
     if (!drainJobs(runtime, state)) return classifyFailure(state, builder, "ModuleEvaluationFailed");
+    if (state.resource_code) |code| return writeSimpleOutcome(builder, .resource_exceeded, code);
     if (state.import_attempted) return writeSimpleOutcome(builder, .protocol_failed, "ImportsDisabled");
 
     if (qjs.JS_IsPromise(module_result)) {
@@ -271,17 +262,13 @@ fn evaluateParsed(state: *Evaluation, builder: *protocol.Builder) []const u8 {
     defer qjs.JS_FreeValue(context, root);
     if (!qjs.JS_IsPromise(root)) return writeSimpleOutcome(builder, .failed, "WorkflowDefaultMustReturnPromise");
     if (!drainJobs(runtime, state)) return classifyFailure(state, builder, "WorkflowJobFailed");
+    if (state.resource_code) |code| return writeSimpleOutcome(builder, .resource_exceeded, code);
     if (state.import_attempted) return writeSimpleOutcome(builder, .protocol_failed, "ImportsDisabled");
     if (state.job_request_invalid) return classifyFailure(state, builder, "WorkflowFailed");
 
     if (qjs.JS_PromiseState(context, root) == qjs.JS_PROMISE_REJECTED) {
         qjs.JS_PromiseMarkAsHandled(context, root);
         if (state.resource_code) |code| return writeSimpleOutcome(builder, .resource_exceeded, code);
-        const reason = qjs.JS_PromiseResult(context, root);
-        defer qjs.JS_FreeValue(context, reason);
-        if (isEngineResourceError(context, reason)) {
-            return writeSimpleOutcome(builder, .resource_exceeded, "EngineMemoryOrStack");
-        }
         return writeSimpleOutcome(builder, .failed, "WorkflowRejected");
     }
     if (state.unhandled_rejections != 0) return writeSimpleOutcome(builder, .failed, "UnhandledRejection");
@@ -297,7 +284,7 @@ fn evaluateParsed(state: *Evaluation, builder: *protocol.Builder) []const u8 {
             const result = qjs.JS_PromiseResult(context, root);
             defer qjs.JS_FreeValue(context, result);
             builder.writeByte(@intFromEnum(protocol.OutcomeTag.completed)) catch return &.{};
-            var output_budget = EntryBudget{};
+            var output_budget = protocol.EntryBudget{};
             encodeData(context, state, builder, result, 0, &.{}, &output_budget) catch |err| {
                 return switch (err) {
                     error.ExcessiveBytes => rewriteSimpleOutcome(
@@ -672,7 +659,7 @@ fn encodeAgentDescriptor(
     var field_count: u32 = 3;
     if (fields.input_present) field_count += 1;
     if (fields.schema_present) field_count += 1;
-    var entry_budget = EntryBudget{};
+    var entry_budget = protocol.EntryBudget{};
     try entry_budget.add(field_count);
     try builder.writeInt(u32, field_count);
 
@@ -778,17 +765,6 @@ fn decodeData(
                     return error.OutOfMemory;
                 }
                 defer qjs.JS_FreeAtom(context, atom);
-                var existing: qjs.JSPropertyDescriptor = undefined;
-                const present = qjs.JS_GetOwnProperty(context, &existing, result, atom);
-                if (present < 0) {
-                    qjs.JS_FreeValue(context, item);
-                    return error.OutOfMemory;
-                }
-                if (present == 1) {
-                    freeDescriptor(context, &existing);
-                    qjs.JS_FreeValue(context, item);
-                    return error.DuplicateKey;
-                }
                 if (qjs.JS_DefinePropertyValue(
                     context,
                     result,
@@ -809,7 +785,7 @@ fn encodeData(
     value: qjs.JSValueConst,
     depth: usize,
     ancestors: []const qjs.JSValueConst,
-    budget: *EntryBudget,
+    budget: *protocol.EntryBudget,
 ) anyerror!void {
     if (depth > protocol.Limits.data_depth) return error.ExcessiveDepth;
     if (qjs.JS_IsNull(value)) return builder.writeByte(@intFromEnum(protocol.DataTag.null_value));
@@ -888,7 +864,7 @@ fn encodeArray(
     value: qjs.JSValueConst,
     depth: usize,
     ancestors: []const qjs.JSValueConst,
-    budget: *EntryBudget,
+    budget: *protocol.EntryBudget,
 ) anyerror!void {
     var length: i64 = 0;
     if (qjs.JS_GetLength(context, value, &length) < 0 or length < 0 or length > protocol.Limits.data_entries) {
@@ -926,7 +902,7 @@ fn encodeObject(
     value: qjs.JSValueConst,
     depth: usize,
     ancestors: []const qjs.JSValueConst,
-    budget: *EntryBudget,
+    budget: *protocol.EntryBudget,
 ) anyerror!void {
     var table: [*c]qjs.JSPropertyEnum = null;
     var count: u32 = 0;
@@ -1112,23 +1088,6 @@ fn isJobFailureCode(code: []const u8) bool {
 fn discardException(context: *qjs.JSContext) void {
     const exception = qjs.JS_GetException(context);
     qjs.JS_FreeValue(context, exception);
-}
-
-fn isEngineResourceError(context: *qjs.JSContext, reason: qjs.JSValueConst) bool {
-    if (!qjs.JS_IsError(reason)) return false;
-    const message = qjs.JS_GetPropertyStr(context, reason, "message");
-    if (qjs.JS_IsException(message)) {
-        discardException(context);
-        return false;
-    }
-    defer qjs.JS_FreeValue(context, message);
-    if (!qjs.JS_IsString(message)) return false;
-    var length: usize = 0;
-    const bytes = qjs.JS_ToCStringLen(context, &length, message) orelse return false;
-    defer qjs.JS_FreeCString(context, bytes);
-    const slice = bytes[0..length];
-    return std.mem.eql(u8, slice, "out of memory") or
-        std.mem.eql(u8, slice, "Maximum call stack size exceeded");
 }
 
 fn monotonicNanoseconds() i128 {

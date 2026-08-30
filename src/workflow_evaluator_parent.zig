@@ -48,7 +48,7 @@ pub fn run(
     var stdout_future = try io.concurrent(readBounded, .{
         io,
         child.stdout.?,
-        output_storage,
+        output_storage[0..protocol.Limits.output_frame_bytes],
     });
     defer _ = stdout_future.cancel(io);
     var diagnostic_storage: [protocol.Limits.diagnostic_bytes]u8 = undefined;

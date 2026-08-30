@@ -138,6 +138,22 @@ pub fn main(init: std.process.Init) !void {
     };
     if (!output_overflow_classified) return error.OutputOverflowWasTrusted;
 
+    const oversized_output = try allocator.alloc(u8, protocol.Limits.output_frame_bytes + 1);
+    defer allocator.free(oversized_output);
+    output_overflow_classified = false;
+    _ = parent.run(
+        init.io,
+        allocator,
+        arguments[2],
+        &.{0xfb},
+        oversized_output,
+        1_000,
+    ) catch |err| switch (err) {
+        error.OutputFrameExceeded => output_overflow_classified = true,
+        else => return err,
+    };
+    if (!output_overflow_classified) return error.OversizedCallerStorageWeakenedOutputLimit;
+
     var closed_pipes_deadline = false;
     _ = parent.run(
         init.io,

@@ -66,6 +66,16 @@ pub const ProtocolError = error{
     OutOfMemory,
 };
 
+pub const EntryBudget = struct {
+    used: usize = 0,
+
+    pub fn add(self: *EntryBudget, count: usize) ProtocolError!void {
+        self.used = std.math.add(usize, self.used, count) catch
+            return error.ExcessiveEntries;
+        if (self.used > Limits.data_entries) return error.ExcessiveEntries;
+    }
+};
+
 pub const Cursor = struct {
     bytes: []const u8,
     index: usize = 0,
@@ -141,16 +151,6 @@ pub const Cursor = struct {
     const KeyScratch = struct {
         storage: [][]const u8,
         used: usize = 0,
-    };
-
-    const EntryBudget = struct {
-        used: usize = 0,
-
-        fn add(self: *EntryBudget, count: usize) ProtocolError!void {
-            self.used = std.math.add(usize, self.used, count) catch
-                return error.ExcessiveEntries;
-            if (self.used > Limits.data_entries) return error.ExcessiveEntries;
-        }
     };
 
     fn skipValueDepth(

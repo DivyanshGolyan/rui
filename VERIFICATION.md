@@ -217,6 +217,8 @@ Before the V1 demonstration is considered credible:
 - SIGINT, caller timeout, terminal closure, and broken output detach without implicitly cancelling the Run;
 - no blocked or terminal Workflow Run retains a QuickJS process, heap, Promise graph, or native resolver;
 - workflow source, bridge, replay, semantics-version, structured-concurrency, watchdog, C undefined-behavior sanitizer, supported-platform leak detection, and all four deterministic mutation/property gates pass;
+- user-authored exception messages cannot forge `ResourceExceeded`; only evaluator- or parent-observed
+  budget and termination evidence produces that outcome, including during module initialization;
 - the closed deterministic crash-point catalogue terminates fixture subprocesses without cleanup, and the targeted effect-specific crash cases and residual storage classifications pass after fresh-process reopen;
 - the Session reconstructs from canonical transactions with rebuildable indexes deleted;
 - the Host Runtime exclusively owns the Host Store and every durable path traverses the Storage Owner;

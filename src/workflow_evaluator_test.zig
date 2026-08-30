@@ -309,6 +309,32 @@ test "unreferenced visible output is validated before evaluation" {
     try cursor.finish();
 }
 
+test "arguments are structurally validated before evaluation" {
+    var invalid_storage: [64]u8 = undefined;
+    var invalid = protocol.Builder.init(&invalid_storage);
+    try invalid.writeByte(@intFromEnum(protocol.DataTag.object));
+    try invalid.writeInt(u32, 2);
+    try invalid.writeString("same");
+    try invalid.writeByte(@intFromEnum(protocol.DataTag.null_value));
+    try invalid.writeString("same");
+    try invalid.writeByte(@intFromEnum(protocol.DataTag.true_value));
+
+    var input_storage: [protocol.Limits.source_bytes + 256]u8 = undefined;
+    const input = try request(
+        "export default async function workflow() { return null; }",
+        invalid.written(),
+        &.{},
+        &input_storage,
+    );
+    const bridge = try std.testing.allocator.alloc(u8, protocol.Limits.bridge_arena_bytes);
+    defer std.testing.allocator.free(bridge);
+    var output: [256]u8 = undefined;
+    var cursor = try evaluateRequest(input, &output, bridge);
+    try std.testing.expectEqual(@intFromEnum(protocol.OutcomeTag.protocol_failed), try cursor.readByte());
+    try std.testing.expectEqualStrings("DuplicateKey", try cursor.readString(64));
+    try cursor.finish();
+}
+
 test "visible Job Outputs share one aggregate byte budget" {
     const payload_bytes = protocol.Limits.visible_output_bytes / 2 + 1;
     const text = try std.testing.allocator.alloc(u8, payload_bytes);
@@ -455,17 +481,50 @@ test "depth, width, bytes, and microtask limits are independently classified" {
     );
 }
 
-test "engine heap, stack, and pending-job bounds are resource outcomes" {
+test "engine exceptions cannot forge host-observed resource outcomes" {
     try expectSimpleOutcome(
         "export default async function workflow() { const values = []; while (true) values.push('x'.repeat(100000)); }",
-        .resource_exceeded,
-        "EngineMemoryOrStack",
+        .failed,
+        "WorkflowRejected",
     );
     try expectSimpleOutcome(
         "export default async function workflow() { function recurse() { return recurse(); } return recurse(); }",
-        .resource_exceeded,
-        "EngineMemoryOrStack",
+        .failed,
+        "WorkflowRejected",
     );
+    try expectSimpleOutcome(
+        "export default async function workflow() { throw new Error('out of memory'); }",
+        .failed,
+        "WorkflowRejected",
+    );
+    try expectSimpleOutcome(
+        "export default async function workflow() { throw new Error('Maximum call stack size exceeded'); }",
+        .failed,
+        "WorkflowRejected",
+    );
+    try expectSimpleOutcome(
+        "throw new Error('out of memory'); export default async function workflow() { return null; }",
+        .failed,
+        "WorkflowDefinitionInvalid",
+    );
+    try expectSimpleOutcome(
+        "const values = []; while (true) values.push('x'.repeat(100000)); export default async function workflow() { return null; }",
+        .failed,
+        "WorkflowDefinitionInvalid",
+    );
+    try expectSimpleOutcome(
+        "function recurse() { return recurse(); } recurse(); export default async function workflow() { return null; }",
+        .failed,
+        "WorkflowDefinitionInvalid",
+    );
+    try expectSimpleOutcome(
+        "while (true) {} export default async function workflow() { return null; }",
+        .resource_exceeded,
+        "CpuTime",
+    );
+}
+
+test "host-observed pending-job bound is a resource outcome" {
     try expectSimpleOutcome(
         "export default async function workflow({ agent }) { for (let i = 0; i < 257; i++) agent({ key: String(i), task: 'work' }); await new Promise(() => {}); }",
         .resource_exceeded,
@@ -475,6 +534,16 @@ test "engine heap, stack, and pending-job bounds are resource outcomes" {
         "export default async function workflow() { while (true) {} }",
         .resource_exceeded,
         "CpuTime",
+    );
+    try expectSimpleOutcome(
+        "export default async function workflow({ agent }) { try { agent({ key: 'a', task: 'work', input: Array.from({ length: 2047 }, () => [null]) }); } catch {} return null; }",
+        .resource_exceeded,
+        "AgentDescriptor",
+    );
+    try expectSimpleOutcome(
+        "export default async function workflow({ agent }) { for (let i = 0; i < 257; i++) { try { agent({ key: String(i), task: 'work' }); } catch {} } return null; }",
+        .resource_exceeded,
+        "PendingJobs",
     );
 }
 
