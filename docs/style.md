@@ -109,6 +109,14 @@ deferred explicitly.
   flow control.
 - Before adding an architectural surface, sketch its maximum resident memory, durable bytes, CPU work,
   I/O, and recovery work.
+- Keep a blocking external dependency behind a synchronous deep module when its population is already
+  bounded and an asynchronous implementation would require a second lifecycle merely to save a small
+  measured amount. Count its worker, stack, resolver, socket, descriptor, callback, and library-owned
+  allocation state separately from the semantic capacity token that bounds the population.
+- Distinguish graceful in-process shutdown from process-exit recovery. Never free Host state beneath a
+  callback or worker that failed to join, and never claim a hard cancellation bound across an operating-
+  system call the selected dependency cannot cancel. Durable recovery may make process termination safe;
+  it does not make a partially completed in-process close correct.
 
 ### Preserve ownership and ordering
 

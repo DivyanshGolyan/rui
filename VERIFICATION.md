@@ -125,6 +125,26 @@ overrides partial candidate output. The loopback fixture does not validate publi
 OnePage's truthful `originator`; that remains an opt-in live compatibility question rather than a hermetic
 CI assertion.
 
+The production model transport test links the supported macOS system libcurl and exercises its blocking
+easy path through the existing synchronous Provider seam. It proves that the easy handle is touched and
+destroyed only by its owning worker; request bytes stream from the immutable house request through a
+resumable bounded encoder rather than a request-sized buffer or disk spool; redirects, transparent content
+decoding, environment proxy inheritance, automatic request replay, and transport retries are disabled;
+and callback aborts classify from OnePage's first local disposition rather than `CURLcode` alone. The
+matrix covers terminal-before-cancel, cancel-before-terminal, whole-call timeout, connect failure before
+upload, failure after upload bytes are supplied, HTTP rejection with incomplete or oversized diagnostics,
+compressed success, malformed capture, and Host-side read or candidate-publication failure. No deterministic
+protocol or resource failure is redispatched by the transport.
+
+The capacity 1, 10, 50, and 100 transport gate records cold and warm DNS separately. It reports process
+threads, transient resolver threads, file descriptors, sockets, worker regular and alternate stack virtual
+reservation and committed pages, physical footprint, retained post-churn memory, idle wakeups, cancellation
+latency, and graceful-shutdown latency. Ordinary non-DNS cancellation must return within the recorded V1
+SLA and functioning-resolver shutdown must join every worker before Host destruction. A deliberately wedged
+resolver is a separate result: V1 does not average it into ordinary cancellation or claim a hard reusable-
+process close bound. A fixture subprocess terminated after the shutdown grace period must reopen the admitted
+Attempt through normal durable recovery without treating process exit as semantic cancellation.
+
 Ingress tests distinguish three outcomes: `full` or `busy` leaves ownership with the producer; `accepted` transfers volatile custody to the live Harness; only a later committed semantic transition acknowledges durable acceptance. Interaction Responses are first validated and committed through the Run Service, then offered only after a fresh Harness acquires an Active Credit. Adapter tests destroy the admitting Harness, publish terminal Inbox evidence, drop every wake hint, and prove bounded durable readiness reconciliation opens a new Harness and applies the Completion. Tests fill ingress while every Active Credit is occupied and prove bounded retry without an unbounded fallback queue.
 
 Run-interface crash and race tests terminate after Run creation, Interaction Request creation, response commit, terminal outcome commit, and each corresponding point before stdout acknowledgement. They cover identical and conflicting replay, withdrawn requests, descriptor mismatch, multiple simultaneous open requests, full actionable-request visibility beside paginated history, SIGINT detachment without cancellation, two concurrent in-process drivers, a second CLI process receiving `busy`, content survival after evaluator and Harness destruction, and all opaque integer-class values round-tripping through QuickJS without precision loss.
