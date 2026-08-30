@@ -19,6 +19,8 @@ const err_sec_success: i32 = 0;
 const err_sec_item_not_found: i32 = -25300;
 const transport_timeout = codex_auth.request_timeout;
 const minimum_curl_version: c_uint = 0x075500; // 7.85.0: thread-safe lifecycle and protocol strings.
+const authorization_header_prefix = "Authorization: Bearer ";
+const authorization_header_capacity = authorization_header_prefix.len + codex_auth.max_token_size + 1;
 
 const CurlInitState = enum(u8) { uninitialized, initializing, ready, failed };
 var curl_init_state: std.atomic.Value(CurlInitState) = .init(.uninitialized);
@@ -401,9 +403,13 @@ pub const NativeTransport = struct {
             return error.InvalidProviderEndpoint;
         }
 
-        var authorization: [codex_auth.max_token_size + 8]u8 = undefined;
+        var authorization: [authorization_header_capacity]u8 = undefined;
         defer std.crypto.secureZero(u8, &authorization);
-        const bearer = try std.fmt.bufPrintZ(&authorization, "Authorization: Bearer {s}", .{credential.token()});
+        const bearer = try std.fmt.bufPrintZ(
+            &authorization,
+            authorization_header_prefix ++ "{s}",
+            .{credential.token()},
+        );
         var account_header_buffer: [codex_provider.max_account_id_size + 32]u8 = undefined;
         const account_header = try std.fmt.bufPrintZ(
             &account_header_buffer,
@@ -466,20 +472,18 @@ pub const NativeTransport = struct {
         }
 
         const code = c.curl_easy_perform(easy);
-        if (transfer.first_error) |err| return err;
         return transfer.result(code);
     }
 };
 
 const EasyTransfer = struct {
-    const CallbackDisposition = enum {
+    const CallbackDisposition = union(enum) {
         none,
         terminal_observed,
         cancelled,
         invalid_encoding,
         capture_resource_exceeded,
-        request_read_failed,
-        capture_failed,
+        host_error: anyerror,
     };
 
     io: std.Io,
@@ -492,7 +496,6 @@ const EasyTransfer = struct {
     diagnostic_overflowed: bool = false,
     upload_bytes: u64 = 0,
     disposition: CallbackDisposition = .none,
-    first_error: ?anyerror = null,
 
     fn readCallback(
         pointer: [*]u8,
@@ -503,23 +506,20 @@ const EasyTransfer = struct {
         const self: *EasyTransfer = @ptrCast(@alignCast(userdata orelse
             return c.CURL_READFUNC_ABORT));
         const capacity = std.math.mul(usize, size, count) catch {
-            self.disposition = .request_read_failed;
-            self.first_error = error.ProviderRequestWriteFailed;
+            self.recordDisposition(.{ .host_error = error.ProviderRequestWriteFailed });
             return c.CURL_READFUNC_ABORT;
         };
         if (capacity == 0) return 0;
         std.Io.checkCancel(self.io) catch {
-            self.disposition = .cancelled;
+            self.recordDisposition(.cancelled);
             return c.CURL_READFUNC_ABORT;
         };
         const written = self.reader.read(pointer[0..capacity]) catch |err| {
-            self.disposition = .request_read_failed;
-            self.first_error = err;
+            self.recordDisposition(.{ .host_error = err });
             return c.CURL_READFUNC_ABORT;
         };
         self.upload_bytes = std.math.add(u64, self.upload_bytes, written) catch {
-            self.disposition = .request_read_failed;
-            self.first_error = error.ProviderRequestTooLarge;
+            self.recordDisposition(.{ .host_error = error.ProviderRequestTooLarge });
             return c.CURL_READFUNC_ABORT;
         };
         return written;
@@ -535,11 +535,11 @@ const EasyTransfer = struct {
         const length = std.math.mul(usize, size, count) catch return 0;
         const bytes = pointer[0..length];
         std.Io.checkCancel(self.io) catch {
-            self.disposition = .cancelled;
+            self.recordDisposition(.cancelled);
             return 0;
         };
         if (!self.encoding_is_identity) {
-            self.disposition = .invalid_encoding;
+            self.recordDisposition(.invalid_encoding);
             return 0;
         }
         if (self.status < 200 or self.status >= 300) {
@@ -548,15 +548,14 @@ const EasyTransfer = struct {
         }
         self.capture.appendSse(bytes) catch |err| {
             if (self.capture.resource_exceeded) {
-                self.disposition = .capture_resource_exceeded;
+                self.recordDisposition(.capture_resource_exceeded);
             } else {
-                self.disposition = .capture_failed;
-                self.first_error = err;
+                self.recordDisposition(.{ .host_error = err });
             }
             return 0;
         };
         if (self.capture.terminalObserved()) {
-            self.disposition = .terminal_observed;
+            self.recordDisposition(.terminal_observed);
             return 0;
         }
         return length;
@@ -598,10 +597,25 @@ const EasyTransfer = struct {
     ) callconv(.c) c_int {
         const self: *EasyTransfer = @ptrCast(@alignCast(userdata orelse return 1));
         std.Io.checkCancel(self.io) catch {
-            self.disposition = .cancelled;
+            self.recordDisposition(.cancelled);
             return 1;
         };
         return 0;
+    }
+
+    /// libcurl can invoke a progress callback after another callback has
+    /// already decided the OnePage outcome. Preserve the callback that first
+    /// crossed the semantic boundary; CURLcode only explains why libcurl
+    /// returned after that decision.
+    fn recordDisposition(
+        self: *EasyTransfer,
+        disposition: CallbackDisposition,
+    ) void {
+        switch (self.disposition) {
+            .none => {},
+            else => return,
+        }
+        self.disposition = disposition;
     }
 
     fn appendDiagnostic(self: *EasyTransfer, bytes: []const u8) void {
@@ -616,10 +630,9 @@ const EasyTransfer = struct {
     }
 
     fn result(self: *EasyTransfer, code: c.CURLcode) !codex_provider.TransportResult {
-        if (self.disposition == .terminal_observed or
-            self.disposition == .capture_resource_exceeded)
-        {
-            return .{ .disposition = .complete };
+        switch (self.disposition) {
+            .terminal_observed, .capture_resource_exceeded => return .{ .disposition = .complete },
+            else => {},
         }
         if (self.status != 0 and (self.status < 200 or self.status >= 300)) {
             var transport_result: codex_provider.TransportResult = .{ .disposition = .provider_rejected };
@@ -633,13 +646,64 @@ const EasyTransfer = struct {
             );
             return transport_result;
         }
-        if (self.disposition == .invalid_encoding) return .{ .disposition = .invalid_encoding };
-        if (self.disposition == .cancelled) return .{ .disposition = .cancelled };
+        switch (self.disposition) {
+            .invalid_encoding => return .{ .disposition = .invalid_encoding },
+            .cancelled => return .{ .disposition = .cancelled },
+            .host_error => |err| return err,
+            .none => {},
+            .terminal_observed, .capture_resource_exceeded => unreachable,
+        }
         if (code == c.CURLE_OPERATION_TIMEDOUT) return .{ .disposition = .timed_out };
         if (code == c.CURLE_OK) return .{ .disposition = .complete };
         return .{ .disposition = if (self.upload_bytes == 0) .not_started else .may_have_started };
     }
 };
+
+test "model transport keeps the first callback disposition" {
+    var terminal_first: EasyTransfer = undefined;
+    terminal_first.disposition = .none;
+    terminal_first.recordDisposition(.terminal_observed);
+    terminal_first.recordDisposition(.cancelled);
+    try std.testing.expect(terminal_first.disposition == .terminal_observed);
+
+    var cancel_first: EasyTransfer = undefined;
+    cancel_first.disposition = .none;
+    cancel_first.recordDisposition(.cancelled);
+    cancel_first.recordDisposition(.{ .host_error = error.MalformedSseFrame });
+    try std.testing.expect(cancel_first.disposition == .cancelled);
+
+    var host_failure_first: EasyTransfer = undefined;
+    host_failure_first.disposition = .none;
+    host_failure_first.recordDisposition(.{ .host_error = error.InjectedHostReadFailure });
+    host_failure_first.recordDisposition(.terminal_observed);
+    switch (host_failure_first.disposition) {
+        .host_error => |err| try std.testing.expect(err == error.InjectedHostReadFailure),
+        else => return error.ExpectedHostReadFailure,
+    }
+}
+
+test "model transport classifies pre-upload and post-upload failures" {
+    var transfer: EasyTransfer = undefined;
+    transfer.status = 0;
+    transfer.disposition = .none;
+    transfer.upload_bytes = 0;
+    try std.testing.expectEqual(
+        codex_provider.TransportDisposition.not_started,
+        (try transfer.result(c.CURLE_COULDNT_CONNECT)).disposition,
+    );
+
+    transfer.upload_bytes = 1;
+    try std.testing.expectEqual(
+        codex_provider.TransportDisposition.may_have_started,
+        (try transfer.result(c.CURLE_RECV_ERROR)).disposition,
+    );
+
+    transfer.upload_bytes = 0;
+    try std.testing.expectEqual(
+        codex_provider.TransportDisposition.timed_out,
+        (try transfer.result(c.CURLE_OPERATION_TIMEDOUT)).disposition,
+    );
+}
 
 fn appendCurlHeader(
     list: ?*c.struct_curl_slist,
@@ -827,6 +891,22 @@ fn tokenExpiresSoon(token: []const u8, io: std.Io) !bool {
 test "live-shaped integer expiry does not force premature refresh" {
     const token = "e30.eyJleHAiOjQxMDI0NDQ4MDAsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2NvdW50In19.sig";
     try std.testing.expect(!try tokenExpiresSoon(token, std.testing.io));
+}
+
+test "authorization header admits the exact credential bound" {
+    var token: [codex_auth.max_token_size]u8 = @splat('a');
+    defer std.crypto.secureZero(u8, &token);
+    var header: [authorization_header_capacity]u8 = undefined;
+    defer std.crypto.secureZero(u8, &header);
+    const encoded = try std.fmt.bufPrintZ(
+        &header,
+        authorization_header_prefix ++ "{s}",
+        .{&token},
+    );
+    try std.testing.expectEqual(
+        authorization_header_prefix.len + codex_auth.max_token_size,
+        encoded.len,
+    );
 }
 
 test "HTTP diagnostics retain only bounded provider error code or type" {
@@ -1083,6 +1163,112 @@ test "NativeTransport classifies compressed HTTP rejection from status" {
     try std.testing.expectEqualStrings("", result.diagnosticCode());
     try std.testing.expect(!capture.terminalObserved());
     try std.testing.expect(fixture.accept_encoding_identity);
+}
+
+test "NativeTransport distinguishes failure before and after upload" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wire = try WireSession.init(io, &tmp);
+    defer wire.deinit(io);
+    _ = try model_operation.buildRequest(&wire.session, 1040, 1, 1);
+
+    var closed_fixture = try WireFixture.init(io, .ok, "", .complete);
+    var closed_endpoint_buffer: [128]u8 = undefined;
+    const closed_endpoint_value = try closed_fixture.endpoint(&closed_endpoint_buffer);
+    var closed_endpoint: [128]u8 = undefined;
+    @memcpy(closed_endpoint[0..closed_endpoint_value.len], closed_endpoint_value);
+    closed_fixture.deinit(io);
+    var before_io = try model_operation.ProviderIo.open(&wire.session, 1040, 1041);
+    defer before_io.close();
+    var before_capture = codex_provider.Capture.init(std.testing.allocator, null);
+    defer before_capture.deinit();
+    var credential = fakeCredential();
+    defer credential.scrub();
+    var before_transport: NativeTransport = .{
+        .io = io,
+        .endpoint = closed_endpoint[0..closed_endpoint_value.len],
+    };
+    const before = try before_transport.capability().perform_fn(
+        &before_transport,
+        &credential,
+        try before_io.request(),
+        &before_capture,
+    );
+    try std.testing.expectEqual(codex_provider.TransportDisposition.not_started, before.disposition);
+
+    var after_io = try model_operation.ProviderIo.open(&wire.session, 1040, 1042);
+    defer after_io.close();
+    var after_fixture = try WireFixture.init(io, .ok, "", .close_after_request);
+    defer after_fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &after_fixture, io });
+    var after_endpoint_buffer: [128]u8 = undefined;
+    var after_transport: NativeTransport = .{
+        .io = io,
+        .endpoint = try after_fixture.endpoint(&after_endpoint_buffer),
+    };
+    var after_capture = codex_provider.Capture.init(std.testing.allocator, null);
+    defer after_capture.deinit();
+    const after = try after_transport.capability().perform_fn(
+        &after_transport,
+        &credential,
+        try after_io.request(),
+        &after_capture,
+    );
+    try server_future.await(io);
+    try std.testing.expectEqual(codex_provider.TransportDisposition.may_have_started, after.disposition);
+    try std.testing.expect(after_fixture.body_length != 0);
+}
+
+test "NativeTransport preserves malformed capture and Host read failures" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wire = try WireSession.init(io, &tmp);
+    defer wire.deinit(io);
+    _ = try model_operation.buildRequest(&wire.session, 1045, 1, 1);
+    var credential = fakeCredential();
+    defer credential.scrub();
+
+    var malformed_io = try model_operation.ProviderIo.open(&wire.session, 1045, 1046);
+    defer malformed_io.close();
+    const malformed_response =
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"bad\\x\"}]}}\n\n" ++
+        "data: {\"type\":\"response.completed\"}\n\n";
+    var fixture = try WireFixture.init(io, .ok, malformed_response, .complete);
+    defer fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    var endpoint_buffer: [128]u8 = undefined;
+    var transport: NativeTransport = .{
+        .io = io,
+        .endpoint = try fixture.endpoint(&endpoint_buffer),
+    };
+    var malformed_capture = codex_provider.Capture.init(std.testing.allocator, null);
+    defer malformed_capture.deinit();
+    const malformed_result = try transport.capability().perform_fn(
+        &transport,
+        &credential,
+        try malformed_io.request(),
+        &malformed_capture,
+    );
+    try server_future.await(io);
+    try std.testing.expectEqual(codex_provider.TransportDisposition.complete, malformed_result.disposition);
+    try std.testing.expect(malformed_capture.malformed);
+
+    var closed_io = try model_operation.ProviderIo.open(&wire.session, 1045, 1047);
+    const closed_request = try closed_io.request();
+    closed_io.close();
+    var closed_capture = codex_provider.Capture.init(std.testing.allocator, null);
+    defer closed_capture.deinit();
+    try std.testing.expectError(
+        error.BlobReaderClosed,
+        transport.capability().perform_fn(
+            &transport,
+            &credential,
+            closed_request,
+            &closed_capture,
+        ),
+    );
 }
 
 test "NativeTransport timeout bounds the entire call and closes an open response body" {
@@ -1574,7 +1760,7 @@ fn commitConversation(session: *session_store.Session, entry: session_store.Conv
 }
 
 const WireFixture = struct {
-    const ResponseMode = enum { complete, keep_open, stall, chunked };
+    const ResponseMode = enum { complete, keep_open, stall, chunked, close_after_request };
 
     listener: std.Io.net.Server,
     status: std.http.Status,
@@ -1653,6 +1839,7 @@ const WireFixture = struct {
         const body_reader = try request.readerExpectContinue(&.{});
         try body_reader.readSliceAll(self.body[0..@intCast(body_length)]);
         self.body_length = @intCast(body_length);
+        if (self.response_mode == .close_after_request) return;
         const response_headers = [_]std.http.Header{
             .{ .name = "content-type", .value = "text/event-stream" },
             .{ .name = "content-encoding", .value = self.response_encoding },

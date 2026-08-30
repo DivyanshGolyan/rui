@@ -36,6 +36,7 @@ test "Codex fake authorization and transport complete through the existing Harne
     };
     const FakeTransport = struct {
         requests: u8 = 0,
+        saw_escaped_task: bool = false,
 
         fn perform(
             context: *anyopaque,
@@ -43,15 +44,22 @@ test "Codex fake authorization and transport complete through the existing Harne
             request: model_operation.RequestCursor,
             capture: *codex_provider.Capture,
         ) anyerror!codex_provider.TransportResult {
-            const DiscardRequest = struct {
-                fn write(_: *anyopaque, _: []const u8) anyerror!void {}
-            };
             const self: *@This() = @ptrCast(@alignCast(context));
             self.requests += 1;
-            try codex_provider.encodeRequest(request, .{
-                .context = self,
-                .write_fn = DiscardRequest.write,
-            }, &capture.mapping);
+            var reader = try codex_provider.RequestReader.init(request, &capture.mapping);
+            var encoded: [128 * 1024]u8 = undefined;
+            var encoded_length: usize = 0;
+            while (true) {
+                const count = try reader.read(encoded[encoded_length..][0..1]);
+                if (count == 0) break;
+                encoded_length += count;
+                if (encoded_length == encoded.len) return error.TestRequestTooLarge;
+            }
+            self.saw_escaped_task = std.mem.indexOf(
+                u8,
+                encoded[0..encoded_length],
+                "quote\\\" slash\\\\\\u0000\\u0001\\b\\t\\n\\u000b\\f\\r\\u001f é",
+            ) != null;
             try capture.appendSse(
                 "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"completed by Codex\"}]}}\n\n" ++
                     "data: {\"type\":\"response.completed\"}\n\n",
@@ -75,7 +83,7 @@ test "Codex fake authorization and transport complete through the existing Harne
         .mode = .{ .create = .{
             .workspace_path = ".",
             .model_binding = .{ .model = "codex:test-model", .provider = codex.provider() },
-            .task = "task",
+            .task = "quote\" slash\\\x00\x01\x08\x09\x0a\x0b\x0c\x0d\x1f é",
         } },
     });
     defer owner.close();
@@ -85,6 +93,7 @@ test "Codex fake authorization and transport complete through the existing Harne
     const finished = try owner.drive();
     try std.testing.expectEqual(State.finished, finished.state);
     try std.testing.expectEqual(@as(u8, 1), fake_transport.requests);
+    try std.testing.expect(fake_transport.saw_escaped_task);
     var saw_final = false;
     for (finished.projectionSlice()) |projection| {
         if (projection.kind == .final_answer) saw_final = true;

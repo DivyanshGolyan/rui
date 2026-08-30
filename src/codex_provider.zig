@@ -2143,14 +2143,6 @@ pub fn encodeRequest(
     }
 }
 
-fn writeJsonString(sink: ByteSink, bytes: []const u8) !void {
-    if (!model_contract.utf8Valid(bytes)) return error.InvalidJsonString;
-    try sink.write("\"");
-    var encoded: [6]u8 = undefined;
-    for (bytes) |byte| try sink.write(escapeJsonByte(byte, &encoded));
-    try sink.write("\"");
-}
-
 const TestCandidate = struct {
     bytes: [model_protocol.max_response_size]u8 = undefined,
     length: usize = 0,
@@ -2197,6 +2189,25 @@ test "Codex dispatch preserves Host errors and captures declared external failur
             return error.InjectedHostCandidateFailure;
         }
     };
+    const CompletingTransport = struct {
+        fn perform(
+            _: *anyopaque,
+            _: *const Credential,
+            _: model_operation.RequestCursor,
+            capture: *Capture,
+        ) anyerror!TransportResult {
+            try capture.appendSse(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n\n" ++
+                    "data: {\"type\":\"response.completed\"}\n\n",
+            );
+            return .{ .disposition = .complete };
+        }
+    };
+    const FailingCandidate = struct {
+        fn append(_: *anyopaque, _: []const u8) anyerror!void {
+            return error.InjectedHostPublicationFailure;
+        }
+    };
     var output: TestCandidate = .{};
     var authorization: AuthorizationFixture = .{};
     var transport: u8 = 0;
@@ -2213,6 +2224,15 @@ test "Codex dispatch preserves Host errors and captures declared external failur
     try std.testing.expectError(
         error.InjectedHostCandidateFailure,
         CodexProvider.dispatch(&provider, undefined, output.capture().candidate.?),
+    );
+
+    provider.transport = .{ .context = &transport, .perform_fn = CompletingTransport.perform };
+    try std.testing.expectError(
+        error.InjectedHostPublicationFailure,
+        CodexProvider.dispatch(&provider, undefined, .{
+            .context = &transport,
+            .append_fn = FailingCandidate.append,
+        }),
     );
 
     authorization.disposition = .failed;
@@ -2866,28 +2886,4 @@ test "duplicate input choice IDs publish one typed malformed provider outcome" {
     const outcome = try capture.publish();
     try std.testing.expectEqual(model_protocol.Failure.malformed, outcome.failure.failure);
     try std.testing.expectEqual(@as(usize, 0), output.length);
-}
-
-test "JSON strings escape every control and reject malformed UTF-8" {
-    const Sink = struct {
-        bytes: [128]u8 = undefined,
-        length: usize = 0,
-        fn sink(self: *@This()) ByteSink {
-            return .{ .context = self, .write_fn = write };
-        }
-        fn write(context: *anyopaque, bytes: []const u8) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (bytes.len > self.bytes.len - self.length) return error.NoSpaceLeft;
-            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
-            self.length += bytes.len;
-        }
-    };
-    var sink: Sink = .{};
-    try writeJsonString(sink.sink(), "quote\" slash\\\x00\x01\x08\x09\x0a\x0b\x0c\x0d\x1f é");
-    try std.testing.expectEqualStrings(
-        "\"quote\\\" slash\\\\\\u0000\\u0001\\b\\t\\n\\u000b\\f\\r\\u001f é\"",
-        sink.bytes[0..sink.length],
-    );
-    const malformed = [_]u8{ 0xc3, 0x28 };
-    try std.testing.expectError(error.InvalidJsonString, writeJsonString(sink.sink(), &malformed));
 }

@@ -125,16 +125,19 @@ overrides partial candidate output. The loopback fixture does not validate publi
 OnePage's truthful `originator`; that remains an opt-in live compatibility question rather than a hermetic
 CI assertion.
 
-The production model transport test links the supported macOS system libcurl and exercises its blocking
-easy path through the existing synchronous Provider seam. It proves that the easy handle is touched and
-destroyed only by its owning worker; request bytes stream from the immutable house request through a
-resumable bounded encoder rather than a request-sized buffer or disk spool; redirects, transparent content
-decoding, environment proxy inheritance, automatic request replay, and transport retries are disabled;
-and callback aborts classify from OnePage's first local disposition rather than `CURLcode` alone. The
-matrix covers terminal-before-cancel, cancel-before-terminal, whole-call timeout, connect failure before
-upload, failure after upload bytes are supplied, HTTP rejection with incomplete or oversized diagnostics,
-compressed success, malformed capture, and Host-side read or candidate-publication failure. No deterministic
-protocol or resource failure is redispatched by the transport.
+The production model transport links the supported macOS system libcurl and uses its blocking easy path
+through the existing synchronous Provider seam. The implementation restricts each easy handle to its owning
+worker and configures redirects, transparent content decoding, environment proxy inheritance, automatic
+request replay, and transport retries off. Request bytes stream from the immutable house request through a
+resumable bounded encoder rather than a request-sized buffer or disk spool.
+
+Current hermetic evidence covers arbitrary one-byte output partitions through that production encoder,
+terminal-before-cancel and cancel-before-terminal precedence, whole-call timeout, connect failure before
+upload, failure after upload bytes are supplied, HTTP rejection, compressed success, malformed Capture,
+and Host-side request-read or candidate-publication failure. Callback abort classification preserves the
+first OnePage disposition rather than deriving meaning from `CURLcode` alone. Before issue #34 closes, the
+selected-path gate must additionally prove every configured prohibition against a loopback fixture and show
+that no deterministic protocol or resource failure is redispatched by the transport.
 
 The capacity 1, 10, 50, and 100 transport gate records cold and warm DNS separately. It reports process
 threads, transient resolver threads, file descriptors, sockets, worker regular and alternate stack virtual
