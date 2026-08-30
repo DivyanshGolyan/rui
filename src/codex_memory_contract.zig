@@ -5,11 +5,6 @@ const model_contract = @import("model_contract.zig");
 const model_operation = @import("model_operation.zig");
 const model_protocol = @import("model_protocol.zig");
 
-const http_read_buffer_size: usize = 8192;
-const http_write_buffer_size: usize = 1024;
-const https_connection_byte_buffer_floor = 3 * std.crypto.tls.Client.min_buffer_len +
-    http_read_buffer_size + http_write_buffer_size;
-
 pub fn main(init: std.process.Init) !void {
     var buffer: [2048]u8 = undefined;
     const report = try std.fmt.bufPrint(
@@ -19,12 +14,12 @@ pub fn main(init: std.process.Init) !void {
             "  \"credential_struct_bytes\": {d},\n" ++
             "  \"provider_io_struct_bytes\": {d},\n" ++
             "  \"tool_mapping_struct_bytes\": {d},\n" ++
+            "  \"request_reader_struct_bytes\": {d},\n" ++
             "  \"request_read_window_bytes\": {d},\n" ++
             "  \"response_head_window_bytes\": {d},\n" ++
-            "  \"stream_transfer_window_bytes\": {d},\n" ++
             "  \"diagnostic_body_limit_bytes\": {d},\n" ++
             "  \"diagnostic_transfer_window_bytes\": {d},\n" ++
-            "  \"zig_https_connection_byte_buffer_floor_bytes\": {d},\n" ++
+            "  \"transport_library_state_measured_separately\": true,\n" ++
             "  \"sse_projection_window_bytes\": {d},\n" ++
             "  \"assistant_text_buffer_limit_bytes\": {d},\n" ++
             "  \"tool_arguments_buffer_limit_bytes\": {d},\n" ++
@@ -37,12 +32,11 @@ pub fn main(init: std.process.Init) !void {
             @sizeOf(codex_provider.Credential),
             @sizeOf(model_operation.ProviderIo),
             @sizeOf(codex_provider.ToolMapping),
+            @sizeOf(codex_provider.RequestReader),
             codex_provider.request_window_size,
             codex_native.response_head_window_size,
-            codex_native.stream_transfer_window_size,
             codex_native.diagnostic_body_limit,
             codex_native.diagnostic_transfer_window_size,
-            https_connection_byte_buffer_floor,
             codex_provider.sse_projection_window_size,
             model_protocol.max_assistant_text_size,
             model_contract.max_tool_arguments_envelope_size,

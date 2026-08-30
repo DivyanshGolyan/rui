@@ -104,6 +104,13 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    const uses_codex_transport = if (arguments.model) |model|
+        std.mem.startsWith(u8, model, "codex:")
+    else
+        false;
+    if (uses_codex_transport) try codex_native.initializeModelTransport();
+    defer if (uses_codex_transport) codex_native.deinitializeModelTransport();
+
     const state_path = try resolveStatePath(
         init.minimal.environ,
         allocator,
@@ -122,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
             .store = keychain.capability(),
             .http = native_http.capability(),
         };
-        var transport: codex_native.NativeTransport = .{ .io = init.io, .allocator = allocator };
+        var transport: codex_native.NativeTransport = .{ .io = init.io };
         var codex: codex_provider.CodexProvider = .{
             .allocator = allocator,
             .authorization = authorization.capability(),
@@ -167,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
                 .store = keychain.capability(),
                 .http = native_http.capability(),
             };
-            var transport: codex_native.NativeTransport = .{ .io = init.io, .allocator = allocator };
+            var transport: codex_native.NativeTransport = .{ .io = init.io };
             var capture_metrics: codex_provider.CaptureMetrics = .{};
             var codex: codex_provider.CodexProvider = .{
                 .allocator = allocator,

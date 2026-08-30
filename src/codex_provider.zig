@@ -56,15 +56,6 @@ pub const AuthorizationDisposition = enum {
     timed_out,
 };
 
-pub const ByteSink = struct {
-    context: *anyopaque,
-    write_fn: *const fn (*anyopaque, []const u8) anyerror!void,
-
-    pub fn write(self: ByteSink, bytes: []const u8) !void {
-        try self.write_fn(self.context, bytes);
-    }
-};
-
 pub const TransportDisposition = enum {
     complete,
     http_unauthorized,
@@ -1741,136 +1732,390 @@ fn classifyInputField(kind: InputContextKind, key: []const u8) InputField {
     };
 }
 
-/// Streams the provider-neutral request into Responses JSON. The caller chooses
-/// a bounded memory sink for tests or a file/socket sink for production.
-pub fn encodeRequest(
-    request_value: model_operation.RequestCursor,
-    sink: ByteSink,
+/// Pull-based form of the provider request encoder. Libcurl owns the upload
+/// callback cadence, so the adapter retains only cursors and one bounded
+/// content window rather than materializing provider JSON or introducing a
+/// spool. A fresh reader is used for the length pass and the upload pass.
+pub const RequestReader = struct {
+    const Phase = enum {
+        model_prefix,
+        model,
+        instructions_prefix,
+        instructions,
+        input_prefix,
+        entries,
+        entry,
+        tools_prefix,
+        tools,
+        tool,
+        tail,
+        done,
+    };
+    const EntryPhase = enum {
+        comma,
+        prefix,
+        first_value,
+        middle,
+        second_value,
+        call_id_prefix,
+        call_id,
+        suffix,
+        done,
+    };
+    const ToolPhase = enum { comma, prefix, name, description_prefix, description, schema_prefix, schema, suffix, done };
+    const Token = union(enum) {
+        raw: []const u8,
+        json_slice: []const u8,
+        json_content: model_operation.ContentView,
+    };
+    const QuotePhase = enum { open, body, close };
+
+    request: model_operation.RequestCursor,
+    tools: model_operation.ToolCatalogCursor,
     mapping: *ToolMapping,
-) !void {
-    var request = request_value;
-    var catalog = request.toolCatalog();
-    var definition_buffer: model_operation.ToolDefinitionBuffer = .{};
-    while (try catalog.next(&definition_buffer)) |definition| try mapping.add(definition);
+    definition_buffer: model_operation.ToolDefinitionBuffer = .{},
+    current_tool: ?model_contract.ToolDefinition = null,
+    current_entry: ?model_operation.RequestEntry = null,
+    phase: Phase = .model_prefix,
+    entry_phase: EntryPhase = .comma,
+    tool_phase: ToolPhase = .comma,
+    first_entry: bool = true,
+    first_tool: bool = true,
+    inline_bytes: [32]u8 = undefined,
+    inline_length: u8 = 0,
 
-    try sink.write("{\"model\":");
-    const model_name = request.modelName();
-    if (!std.mem.startsWith(u8, model_name, "codex:") or model_name.len == "codex:".len) {
-        return error.InvalidCodexModel;
-    }
-    try writeJsonString(sink, model_name["codex:".len..]);
-    try sink.write(",\"instructions\":");
-    try writeJsonString(sink, request.instructions());
-    try sink.write(",\"input\":[");
-    var first = true;
-    while (try request.next()) |entry| {
-        if (!first) try sink.write(",");
-        first = false;
-        try writeEntry(sink, mapping, entry);
-    }
-    try sink.write("],\"tools\":[");
-    var tools = request.toolCatalog();
-    first = true;
-    while (try tools.next(&definition_buffer)) |definition| {
-        if (!first) try sink.write(",");
-        first = false;
-        try sink.write("{\"type\":\"function\",\"name\":");
-        try writeJsonString(sink, definition.provider_tool_name);
-        try sink.write(",\"description\":");
-        try writeJsonString(sink, definition.description);
-        try sink.write(",\"parameters\":");
-        try sink.write(definition.input_schema);
-        try sink.write(",\"strict\":true}");
-    }
-    try sink.write("],\"tool_choice\":\"auto\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[]}");
-}
+    token: ?Token = null,
+    token_offset: u64 = 0,
+    quote_phase: QuotePhase = .open,
+    escape_bytes: [6]u8 = undefined,
+    escape_offset: u8 = 0,
+    escape_length: u8 = 0,
+    content_window: [request_window_size]u8 = undefined,
+    content_window_offset: usize = 0,
+    content_window_length: usize = 0,
 
-fn writeEntry(sink: ByteSink, mapping: *const ToolMapping, entry: model_operation.RequestEntry) !void {
-    switch (entry) {
-        .user_text => |text| try writeMessage(sink, "user", "input_text", text.content),
-        .assistant_text => |text| try writeMessage(sink, "assistant", "output_text", text.content),
-        .context_checkpoint => |text| try writeMessage(sink, "developer", "input_text", text.content),
-        .tool_call => |call| {
-            try sink.write("{\"type\":\"function_call\",\"name\":");
-            try writeJsonString(sink, mapping.nameForKey(call.key()) orelse return error.UnknownRequestTool);
-            try sink.write(",\"arguments\":");
-            try writeJsonContent(sink, call.arguments);
-            try sink.write(",\"call_id\":");
-            try writeCallId(sink, call.entry_id);
-            try sink.write("}");
-        },
-        .tool_result => |result| {
-            try sink.write("{\"type\":\"function_call_output\",\"call_id\":");
-            try writeCallId(sink, result.call_entry_id);
-            try sink.write(",\"output\":");
-            try writeJsonContent(sink, result.content);
-            try sink.write("}");
-        },
-    }
-}
-
-fn writeMessage(
-    sink: ByteSink,
-    role: []const u8,
-    content_type: []const u8,
-    content: model_operation.ContentView,
-) !void {
-    try sink.write("{\"role\":");
-    try writeJsonString(sink, role);
-    try sink.write(",\"content\":[{\"type\":");
-    try writeJsonString(sink, content_type);
-    try sink.write(",\"text\":");
-    try writeJsonContent(sink, content);
-    try sink.write("}]}");
-}
-
-fn writeCallId(sink: ByteSink, id: u64) !void {
-    var buffer: [32]u8 = undefined;
-    const value = try std.fmt.bufPrint(&buffer, "onepage_{d}", .{id});
-    try writeJsonString(sink, value);
-}
-
-fn writeJsonContent(sink: ByteSink, content: model_operation.ContentView) !void {
-    try sink.write("\"");
-    var window: [request_window_size]u8 = undefined;
-    var offset: u64 = 0;
-    while (offset < content.length()) {
-        const bytes = try content.readWindow(offset, &window);
-        if (bytes.len == 0) return error.TruncatedSemanticContent;
-        try writeJsonEscaped(sink, bytes);
-        offset += bytes.len;
-    }
-    try sink.write("\"");
-}
-
-fn writeJsonString(sink: ByteSink, bytes: []const u8) !void {
-    if (!model_contract.utf8Valid(bytes)) return error.InvalidJsonString;
-    try sink.write("\"");
-    try writeJsonEscaped(sink, bytes);
-    try sink.write("\"");
-}
-
-fn writeJsonEscaped(sink: ByteSink, bytes: []const u8) !void {
-    var encoded: [6 * request_window_size]u8 = undefined;
-    var cursor: usize = 0;
-    for (bytes) |byte| {
-        const replacement: []const u8 = switch (byte) {
-            '"' => "\\\"",
-            '\\' => "\\\\",
-            '\n' => "\\n",
-            '\r' => "\\r",
-            '\t' => "\\t",
-            0...7 => &[_]u8{ '\\', 'u', '0', '0', '0', "0123456789abcdef"[byte] },
-            8 => "\\b",
-            11 => &[_]u8{ '\\', 'u', '0', '0', '0', "0123456789abcdef"[byte] },
-            12 => "\\f",
-            14...31 => &[_]u8{ '\\', 'u', '0', '0', "0123456789abcdef"[byte >> 4], "0123456789abcdef"[byte & 0xf] },
-            else => &[_]u8{byte},
+    pub fn init(request_value: model_operation.RequestCursor, mapping: *ToolMapping) !RequestReader {
+        mapping.* = .{};
+        var catalog = request_value.toolCatalog();
+        var definition_buffer: model_operation.ToolDefinitionBuffer = .{};
+        while (try catalog.next(&definition_buffer)) |definition| try mapping.add(definition);
+        return .{
+            .request = request_value,
+            .tools = request_value.toolCatalog(),
+            .mapping = mapping,
         };
-        @memcpy(encoded[cursor..][0..replacement.len], replacement);
-        cursor += replacement.len;
     }
-    try sink.write(encoded[0..cursor]);
+
+    pub fn read(self: *RequestReader, out: []u8) !usize {
+        var written: usize = 0;
+        while (written < out.len) {
+            if (self.token == null) {
+                self.token = try self.nextToken() orelse break;
+                switch (self.token.?) {
+                    .json_slice => |bytes| if (!model_contract.utf8Valid(bytes)) {
+                        return error.InvalidJsonString;
+                    },
+                    .raw, .json_content => {},
+                }
+                self.token_offset = 0;
+                self.quote_phase = .open;
+                self.escape_offset = 0;
+                self.escape_length = 0;
+                self.content_window_offset = 0;
+                self.content_window_length = 0;
+            }
+            const complete = try self.readToken(out, &written);
+            if (complete) self.token = null;
+        }
+        return written;
+    }
+
+    fn nextToken(self: *RequestReader) !?Token {
+        while (true) switch (self.phase) {
+            .model_prefix => {
+                self.phase = .model;
+                return .{ .raw = "{\"model\":" };
+            },
+            .model => {
+                const model_name = self.request.modelName();
+                if (!std.mem.startsWith(u8, model_name, "codex:") or model_name.len == "codex:".len) {
+                    return error.InvalidCodexModel;
+                }
+                self.phase = .instructions_prefix;
+                return .{ .json_slice = model_name["codex:".len..] };
+            },
+            .instructions_prefix => {
+                self.phase = .instructions;
+                return .{ .raw = ",\"instructions\":" };
+            },
+            .instructions => {
+                self.phase = .input_prefix;
+                return .{ .json_slice = self.request.instructions() };
+            },
+            .input_prefix => {
+                self.phase = .entries;
+                return .{ .raw = ",\"input\":[" };
+            },
+            .entries => {
+                self.current_entry = try self.request.next();
+                if (self.current_entry == null) {
+                    self.phase = .tools_prefix;
+                    continue;
+                }
+                self.entry_phase = .comma;
+                self.phase = .entry;
+                continue;
+            },
+            .entry => if (try self.nextEntryToken()) |token| return token else {
+                self.current_entry = null;
+                self.first_entry = false;
+                self.phase = .entries;
+                continue;
+            },
+            .tools_prefix => {
+                self.phase = .tools;
+                return .{ .raw = "],\"tools\":[" };
+            },
+            .tools => {
+                self.current_tool = try self.tools.next(&self.definition_buffer);
+                if (self.current_tool == null) {
+                    self.phase = .tail;
+                    continue;
+                }
+                self.tool_phase = .comma;
+                self.phase = .tool;
+                continue;
+            },
+            .tool => if (self.nextToolToken()) |token| return token else {
+                self.current_tool = null;
+                self.first_tool = false;
+                self.phase = .tools;
+                continue;
+            },
+            .tail => {
+                self.phase = .done;
+                return .{ .raw = "],\"tool_choice\":\"auto\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[]}" };
+            },
+            .done => return null,
+        };
+    }
+
+    fn nextEntryToken(self: *RequestReader) !?Token {
+        const entry = self.current_entry.?;
+        while (true) switch (self.entry_phase) {
+            .comma => {
+                self.entry_phase = .prefix;
+                if (!self.first_entry) return .{ .raw = "," };
+            },
+            .prefix => {
+                self.entry_phase = .first_value;
+                return .{ .raw = switch (entry) {
+                    .user_text => "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":",
+                    .assistant_text => "{\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":",
+                    .context_checkpoint => "{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":",
+                    .tool_call => "{\"type\":\"function_call\",\"name\":",
+                    .tool_result => "{\"type\":\"function_call_output\",\"call_id\":",
+                } };
+            },
+            .first_value => {
+                self.entry_phase = switch (entry) {
+                    .user_text, .assistant_text, .context_checkpoint => .suffix,
+                    .tool_call, .tool_result => .middle,
+                };
+                return switch (entry) {
+                    .user_text => |value| .{ .json_content = value.content },
+                    .assistant_text => |value| .{ .json_content = value.content },
+                    .context_checkpoint => |value| .{ .json_content = value.content },
+                    .tool_call => |value| .{ .json_slice = self.mapping.nameForKey(value.key()) orelse return error.UnknownRequestTool },
+                    .tool_result => |value| try self.callIdToken(value.call_entry_id),
+                };
+            },
+            .middle => {
+                self.entry_phase = .second_value;
+                return .{ .raw = switch (entry) {
+                    .tool_call => ",\"arguments\":",
+                    .tool_result => ",\"output\":",
+                    else => unreachable,
+                } };
+            },
+            .second_value => {
+                self.entry_phase = switch (entry) {
+                    .tool_call => .call_id_prefix,
+                    .tool_result => .suffix,
+                    else => unreachable,
+                };
+                return switch (entry) {
+                    .tool_call => |value| .{ .json_content = value.arguments },
+                    .tool_result => |value| .{ .json_content = value.content },
+                    else => unreachable,
+                };
+            },
+            .call_id_prefix => {
+                self.entry_phase = .call_id;
+                return .{ .raw = ",\"call_id\":" };
+            },
+            .call_id => {
+                self.entry_phase = .suffix;
+                return switch (entry) {
+                    .tool_call => |value| try self.callIdToken(value.entry_id),
+                    else => unreachable,
+                };
+            },
+            .suffix => {
+                self.entry_phase = .done;
+                return .{ .raw = switch (entry) {
+                    .user_text, .assistant_text, .context_checkpoint => "}]}",
+                    .tool_call, .tool_result => "}",
+                } };
+            },
+            .done => return null,
+        };
+    }
+
+    fn nextToolToken(self: *RequestReader) ?Token {
+        const definition = self.current_tool.?;
+        while (true) switch (self.tool_phase) {
+            .comma => {
+                self.tool_phase = .prefix;
+                if (!self.first_tool) return .{ .raw = "," };
+            },
+            .prefix => {
+                self.tool_phase = .name;
+                return .{ .raw = "{\"type\":\"function\",\"name\":" };
+            },
+            .name => {
+                self.tool_phase = .description_prefix;
+                return .{ .json_slice = definition.provider_tool_name };
+            },
+            .description_prefix => {
+                self.tool_phase = .description;
+                return .{ .raw = ",\"description\":" };
+            },
+            .description => {
+                self.tool_phase = .schema_prefix;
+                return .{ .json_slice = definition.description };
+            },
+            .schema_prefix => {
+                self.tool_phase = .schema;
+                return .{ .raw = ",\"parameters\":" };
+            },
+            .schema => {
+                self.tool_phase = .suffix;
+                return .{ .raw = definition.input_schema };
+            },
+            .suffix => {
+                self.tool_phase = .done;
+                return .{ .raw = ",\"strict\":true}" };
+            },
+            .done => return null,
+        };
+    }
+
+    fn callIdToken(self: *RequestReader, id: u64) !Token {
+        const value = try std.fmt.bufPrint(&self.inline_bytes, "onepage_{d}", .{id});
+        self.inline_length = @intCast(value.len);
+        return .{ .json_slice = self.inline_bytes[0..self.inline_length] };
+    }
+
+    fn readToken(self: *RequestReader, out: []u8, written: *usize) !bool {
+        return switch (self.token.?) {
+            .raw => |bytes| blk: {
+                const offset: usize = @intCast(self.token_offset);
+                const count = @min(out.len - written.*, bytes.len - offset);
+                @memcpy(out[written.*..][0..count], bytes[offset..][0..count]);
+                written.* += count;
+                self.token_offset += count;
+                break :blk self.token_offset == bytes.len;
+            },
+            .json_slice, .json_content => try self.readJsonToken(out, written),
+        };
+    }
+
+    fn readJsonToken(self: *RequestReader, out: []u8, written: *usize) !bool {
+        if (self.quote_phase == .open) {
+            out[written.*] = '"';
+            written.* += 1;
+            self.quote_phase = .body;
+            if (written.* == out.len) return false;
+        }
+        while (self.quote_phase == .body and written.* < out.len) {
+            if (self.escape_offset < self.escape_length) {
+                const count = @min(
+                    out.len - written.*,
+                    @as(usize, self.escape_length - self.escape_offset),
+                );
+                @memcpy(
+                    out[written.*..][0..count],
+                    self.escape_bytes[self.escape_offset..][0..count],
+                );
+                written.* += count;
+                self.escape_offset += @intCast(count);
+                if (self.escape_offset < self.escape_length) return false;
+                continue;
+            }
+            const byte = (try self.nextSourceByte()) orelse {
+                self.quote_phase = .close;
+                break;
+            };
+            self.setEscapedByte(byte);
+        }
+        if (self.quote_phase == .close and written.* < out.len) {
+            out[written.*] = '"';
+            written.* += 1;
+            return true;
+        }
+        return false;
+    }
+
+    fn nextSourceByte(self: *RequestReader) !?u8 {
+        return switch (self.token.?) {
+            .json_slice => |bytes| if (self.token_offset == bytes.len)
+                null
+            else blk: {
+                const byte = bytes[@intCast(self.token_offset)];
+                self.token_offset += 1;
+                break :blk byte;
+            },
+            .json_content => |content| blk: {
+                if (self.token_offset == content.length()) break :blk null;
+                if (self.content_window_offset == self.content_window_length) {
+                    const bytes = try content.readWindow(self.token_offset, &self.content_window);
+                    if (bytes.len == 0) return error.TruncatedSemanticContent;
+                    self.content_window_offset = 0;
+                    self.content_window_length = bytes.len;
+                }
+                const byte = self.content_window[self.content_window_offset];
+                self.content_window_offset += 1;
+                self.token_offset += 1;
+                break :blk byte;
+            },
+            .raw => unreachable,
+        };
+    }
+
+    fn setEscapedByte(self: *RequestReader, byte: u8) void {
+        const replacement = escapeJsonByte(byte, &self.escape_bytes);
+        self.escape_offset = 0;
+        self.escape_length = @intCast(replacement.len);
+    }
+};
+
+fn escapeJsonByte(byte: u8, out: *[6]u8) []const u8 {
+    const replacement: []const u8 = switch (byte) {
+        '"' => "\\\"",
+        '\\' => "\\\\",
+        '\n' => "\\n",
+        '\r' => "\\r",
+        '\t' => "\\t",
+        0...7 => &[_]u8{ '\\', 'u', '0', '0', '0', "0123456789abcdef"[byte] },
+        8 => "\\b",
+        11 => &[_]u8{ '\\', 'u', '0', '0', '0', "0123456789abcdef"[byte] },
+        12 => "\\f",
+        14...31 => &[_]u8{ '\\', 'u', '0', '0', "0123456789abcdef"[byte >> 4], "0123456789abcdef"[byte & 0xf] },
+        else => &[_]u8{byte},
+    };
+    @memcpy(out[0..replacement.len], replacement);
+    return out[0..replacement.len];
 }
 
 const TestCandidate = struct {
@@ -1919,6 +2164,25 @@ test "Codex dispatch preserves Host errors and captures declared external failur
             return error.InjectedHostCandidateFailure;
         }
     };
+    const CompletingTransport = struct {
+        fn perform(
+            _: *anyopaque,
+            _: *const Credential,
+            _: model_operation.RequestCursor,
+            capture: *Capture,
+        ) anyerror!TransportResult {
+            try capture.appendSse(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n\n" ++
+                    "data: {\"type\":\"response.completed\"}\n\n",
+            );
+            return .{ .disposition = .complete };
+        }
+    };
+    const FailingCandidate = struct {
+        fn append(_: *anyopaque, _: []const u8) anyerror!void {
+            return error.InjectedHostPublicationFailure;
+        }
+    };
     var output: TestCandidate = .{};
     var authorization: AuthorizationFixture = .{};
     var transport: u8 = 0;
@@ -1935,6 +2199,15 @@ test "Codex dispatch preserves Host errors and captures declared external failur
     try std.testing.expectError(
         error.InjectedHostCandidateFailure,
         CodexProvider.dispatch(&provider, undefined, output.capture().candidate.?),
+    );
+
+    provider.transport = .{ .context = &transport, .perform_fn = CompletingTransport.perform };
+    try std.testing.expectError(
+        error.InjectedHostPublicationFailure,
+        CodexProvider.dispatch(&provider, undefined, .{
+            .context = &transport,
+            .append_fn = FailingCandidate.append,
+        }),
     );
 
     authorization.disposition = .failed;
@@ -2588,28 +2861,4 @@ test "duplicate input choice IDs publish one typed malformed provider outcome" {
     const outcome = try capture.publish();
     try std.testing.expectEqual(model_protocol.Failure.malformed, outcome.failure.failure);
     try std.testing.expectEqual(@as(usize, 0), output.length);
-}
-
-test "JSON strings escape every control and reject malformed UTF-8" {
-    const Sink = struct {
-        bytes: [128]u8 = undefined,
-        length: usize = 0,
-        fn sink(self: *@This()) ByteSink {
-            return .{ .context = self, .write_fn = write };
-        }
-        fn write(context: *anyopaque, bytes: []const u8) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (bytes.len > self.bytes.len - self.length) return error.NoSpaceLeft;
-            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
-            self.length += bytes.len;
-        }
-    };
-    var sink: Sink = .{};
-    try writeJsonString(sink.sink(), "quote\" slash\\\x00\x01\x08\x09\x0a\x0b\x0c\x0d\x1f é");
-    try std.testing.expectEqualStrings(
-        "\"quote\\\" slash\\\\\\u0000\\u0001\\b\\t\\n\\u000b\\f\\r\\u001f é\"",
-        sink.bytes[0..sink.length],
-    );
-    const malformed = [_]u8{ 0xc3, 0x28 };
-    try std.testing.expectError(error.InvalidJsonString, writeJsonString(sink.sink(), &malformed));
 }

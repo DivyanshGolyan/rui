@@ -40,14 +40,32 @@ before OnePage claims a supported concurrency.
 
 ## Decision
 
-Do not size the V1 transport lane from the largest legal SSE spelling. The windowed design has a
-roughly **64 KiB fixed userspace byte-buffer floor per active HTTPS call**, plus small parser state,
-actual decoded candidate occupancy, task-stack residency, allocator slack, and kernel socket memory.
+Updated 2026-08-30: V1 replaces the per-call Zig `std.http.Client` with blocking
+system libcurl easy on the population-bounded executor. The Zig byte-buffer and
+trust-bundle analysis below remains historical evidence for rejecting the old
+transport; it is not the selected libcurl allocation model. At capacity 100,
+the controlled spike measured blocking easy at about 8.4 MiB active and 10.0 MiB
+post-churn physical footprint, versus about 4.8 MiB active and 4.9 MiB post-churn
+for multi. The single-digit-MiB saving does not justify a second asynchronous
+transfer lifecycle in V1. Production evidence must still include libcurl-owned
+TLS and request state, cold resolver threads, descriptors, kernel sockets,
+worker stacks, cancellation latency, idle wakeups, and graceful shutdown.
+
+Do not size the V1 transport lane from the largest legal SSE spelling. The selected adapter reports
+its source-level fixed structures directly: a 10,928-byte resumable request reader containing its
+4 KiB content window, a 5,880-byte Capture containing its 4 KiB projection window, and a 16,516-byte
+credential. The model-call frame also has bounded authorization-header, endpoint, account-header,
+and 4,097-byte diagnostic storage. A conservative sum is roughly **55 KiB of OnePage-owned fixed
+state per live call**, before compiler stack-slot reuse. This is not a measured RSS floor: stack
+pages are committed on touch, libcurl owns additional heap and TLS state, and its header list copies
+the authorization value.
+
 Before the concurrency gate, use these analytical ranges rather than one false per-call constant:
 
 | Transport component | Per active call | 100 active calls |
 | --- | ---: | ---: |
-| Fixed HTTPS and parser windows | about 64-72 KiB | about 6-7 MiB |
+| OnePage-owned fixed request, capture, credential, header, and diagnostic state | conservatively about 55 KiB | about 5.4 MiB |
+| libcurl, TLS, resolver, and connection state | measured, not structurally byte-bounded by OnePage | measured |
 | Typical decoded candidate | actual content, normally well below 20 KiB | workload-dependent |
 | Pathological simultaneous text plus arguments | at most about 118 KiB before allocator slack | about 11.5 MiB |
 | Kernel sockets and touched task stacks | measured separately | measured separately |
@@ -65,10 +83,10 @@ The most useful napkin formula is:
 
 ```text
 process RSS transport ~= shared transport baseline
-                      + C * (59,151
-                             + connection/request metadata
-                             + transfer and SSE parser windows
-                             + resident stack or fiber pages
+                      + C * (about 55 KiB OnePage fixed state
+                             + actual bounded decoded candidate
+                             + measured libcurl/TLS/resolver state
+                             + committed worker-stack pages
                              + allocator slack)
 
 whole-machine transport ~= process RSS transport
@@ -76,12 +94,12 @@ whole-machine transport ~= process RSS transport
                          + transport-attributable file-cache/writeback pages
 ```
 
-`C` is concurrently active HTTPS connections. With Zig's current HTTP/1.1 client, 100 concurrent
+`C` is concurrently active HTTPS connections. With the selected HTTP/1.1 easy handles, 100 concurrent
 requests mean approximately 100 TCP/TLS connections, not 100 multiplexed streams on one connection.
 
-## The fixed user-space floor is about 58 KiB per connection
+## Historical rejected Zig transport: 58 KiB of TLS buffers per connection
 
-OnePage currently requires Zig 0.16.0. Its installed standard library's HTTPS connection allocation
+The earlier Zig 0.16.0 `std.http` design's HTTPS connection allocation
 matches the current upstream implementation: the client defaults to an 8,192-byte HTTP read buffer,
 a 1,024-byte write buffer, and a TLS buffer sized to the maximum ciphertext record. The HTTPS
 allocation contains three TLS-sized regions plus those HTTP buffers. See Zig's
@@ -98,14 +116,12 @@ minimum TLS buffer; its constants are in
 3 * 16,645 + 8,192 + 1,024 = 59,151 bytes = 57.8 KiB
 ```
 
-That is byte-buffer storage only. It excludes the TLS and connection structs, hostname, allocator
+That was byte-buffer storage only. It excluded the TLS and connection structs, hostname, allocator
 rounding, request object, caller-supplied body transfer buffer, SSE/JSON parsing state, and transient
 handshake stack use. **64 KiB per live connection is therefore a reasonable rounded fixed
-user-space floor, not a complete per-connection budget.**
+user-space floor for the rejected transport, not a complete per-connection budget.**
 
-Zig's response-body API makes the caller supply its transfer buffer. That is a useful design lever:
-OnePage can select a fixed 4-16 KiB window and consume it into a bounded incremental parser rather
-than accumulating the response body.
+That result motivated the windowed adapter but is not part of the selected libcurl allocation model.
 
 ## OnePage avoids prompt and canonical-result-sized transport buffers
 
@@ -172,10 +188,11 @@ queues into MiBs per socket.
 
 ## Threads, fibers, virtual memory, and RSS
 
-The transport should use readiness-driven I/O or a bounded worker pool, not one native thread per
-request. A native thread's reserved stack inflates virtual size; only touched stack pages become
-resident, so multiplying the configured stack reservation by 100 overstates RSS but correctly warns
-about address-space consumption.
+The transport should use readiness-driven I/O or a population-bounded worker pool, never an
+unbounded thread population. V1 deliberately chooses the latter: one blocking worker per active
+model Attempt, bounded by Active Credits. A native thread's reserved stack inflates virtual size;
+only touched stack pages become resident, so multiplying the configured stack reservation by 100
+overstates RSS but correctly warns about address-space consumption.
 
 There is also a Zig-specific trap. On macOS, Zig 0.16's
 [`std.Io.Kqueue`](https://github.com/ziglang/zig/blob/master/lib/std/Io/Kqueue.zig) currently allocates
@@ -243,7 +260,7 @@ Acceptance gates for a 100-call V1 lane should be:
   depth, and time bounds;
 - socket send/receive limits set and verified with `getsockopt` on each supported OS, or an explicit
   measured justification for autotuning;
-- no native thread per call and a recorded virtual-stack/fiber reservation;
+- no unbounded thread creation; record the bounded worker high-water and virtual-stack reservation;
 - idle connection retention included in baseline measurements.
 
 Until that spike passes, the defensible statement is: **the windowed design removes the 57 MiB
