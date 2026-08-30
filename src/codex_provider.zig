@@ -56,15 +56,6 @@ pub const AuthorizationDisposition = enum {
     timed_out,
 };
 
-pub const ByteSink = struct {
-    context: *anyopaque,
-    write_fn: *const fn (*anyopaque, []const u8) anyerror!void,
-
-    pub fn write(self: ByteSink, bytes: []const u8) !void {
-        try self.write_fn(self.context, bytes);
-    }
-};
-
 pub const TransportDisposition = enum {
     complete,
     http_unauthorized,
@@ -2125,22 +2116,6 @@ fn escapeJsonByte(byte: u8, out: *[6]u8) []const u8 {
     };
     @memcpy(out[0..replacement.len], replacement);
     return out[0..replacement.len];
-}
-
-/// Streams the provider-neutral request into Responses JSON. The caller chooses
-/// a bounded memory sink for tests or a file/socket sink for production.
-pub fn encodeRequest(
-    request_value: model_operation.RequestCursor,
-    sink: ByteSink,
-    mapping: *ToolMapping,
-) !void {
-    var window: [request_window_size]u8 = undefined;
-    var reader = try RequestReader.init(request_value, mapping);
-    while (true) {
-        const count = try reader.read(&window);
-        if (count == 0) return;
-        try sink.write(window[0..count]);
-    }
 }
 
 const TestCandidate = struct {
