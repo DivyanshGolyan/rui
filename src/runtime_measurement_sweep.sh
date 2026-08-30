@@ -31,23 +31,29 @@ run_point() {
   scenario=$1
   count=$2
   repetition=$3
+  capacity=$4
   # The fixture emits pretty JSON for one human-run point. Newlines are JSON
   # whitespace, so removing them makes one JSONL record without adding a JSON
   # processor to the measured path.
-  "$fixture" "$scenario" "$count" | tr -d '\n' >> "$temporary"
+  "$fixture" "$scenario" "$count" "$capacity" | tr -d '\n' >> "$temporary"
   printf '\n' >> "$temporary"
-  printf '%s count=%s repetition=%s/%s\n' \
-    "$scenario" "$count" "$repetition" "$repetitions" >&2
+  printf '%s count=%s active_capacity=%s repetition=%s/%s\n' \
+    "$scenario" "$count" "$capacity" "$repetition" "$repetitions" >&2
 }
 
 repetition=1
 while test "$repetition" -le "$repetitions"; do
   for count in 0 100 1000 10000; do
-    run_point dormant "$count" "$repetition"
+    run_point dormant "$count" "$repetition" 1
   done
   # This is the complete Harness -> SQLite -> provider -> semantic closure
   # path, intentionally not a parser or transport microbenchmark.
-  run_point completion 100 "$repetition"
+  # These sequential points measure the exact startup reservation slope. Their
+  # reported occupied high-water remains one Slot; true concurrent occupancy is
+  # a separate async-execution gate and must not be inferred from this sweep.
+  for capacity in 1 10 100; do
+    run_point completion 100 "$repetition" "$capacity"
+  done
   repetition=$((repetition + 1))
 done
 
