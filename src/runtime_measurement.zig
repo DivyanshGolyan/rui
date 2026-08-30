@@ -24,15 +24,16 @@ const Observation = struct {
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len != 3) return error.InvalidArguments;
+    if (args.len != 4) return error.InvalidArguments;
     const scenario = std.meta.stringToEnum(Scenario, args[1]) orelse return error.InvalidScenario;
     const count = try std.fmt.parseInt(usize, args[2], 10);
+    const active_capacity = try std.fmt.parseInt(usize, args[3], 10);
     if (count > 100_000) return error.MeasurementCountTooLarge;
 
     var layout = try Layout.init(init.io, allocator);
     defer layout.deinit(init.io);
     const baseline = try process_metrics.sample();
-    try layout.openRuntime(init.io);
+    try layout.openRuntime(init.io, active_capacity);
     const runtime_open = try process_metrics.sample();
     const wall_start = try monotonicNanoseconds();
     const cpu_start = try processCpuNanoseconds();
@@ -46,6 +47,14 @@ pub fn main(init: std.process.Init) !void {
     const cpu_end = try processCpuNanoseconds();
     const workload_complete = try process_metrics.sample();
     const durable_bytes = try layout.durableBytes(init.io);
+    const runtime = layout.runtime.?;
+    const activation: ActivationObservation = .{
+        .active_capacity = runtime.activeCapacity(),
+        .slot_bytes = @sizeOf(core_image.ActivationSlot),
+        .reserved_bytes = runtime.reservedActivationBytes(),
+        .pool_overhead_bytes = runtime.activationPoolOverheadBytes(),
+        .occupied_high_water_bytes = runtime.occupiedActivationHighWaterBytes(),
+    };
     layout.closeRuntime();
     const runtime_closed = try process_metrics.sample();
     const observations: Observation = .{
@@ -63,6 +72,7 @@ pub fn main(init: std.process.Init) !void {
         @intCast(wall_end - wall_start),
         @intCast(cpu_end - cpu_start),
         durable_bytes,
+        activation,
     );
     try std.Io.File.stdout().writeStreamingAll(init.io, report);
 }
@@ -158,9 +168,11 @@ const Layout = struct {
         };
     }
 
-    fn openRuntime(self: *Layout, io: std.Io) !void {
+    fn openRuntime(self: *Layout, io: std.Io, active_capacity: usize) !void {
         if (self.runtime != null) return error.RuntimeAlreadyOpen;
-        self.runtime = try harness.HostRuntime.open(io, self.allocator, self.root_path, .{});
+        self.runtime = try harness.HostRuntime.open(io, self.allocator, self.root_path, .{
+            .active_capacity = active_capacity,
+        });
     }
 
     fn closeRuntime(self: *Layout) void {
@@ -224,6 +236,7 @@ fn formatReport(
     wall_time_ns: u64,
     cpu_time_ns: u64,
     durable_bytes: u64,
+    activation: ActivationObservation,
 ) ![]const u8 {
     return std.fmt.bufPrint(buffer,
         \\{{
@@ -231,8 +244,11 @@ fn formatReport(
         \\  "scenario": "{s}",
         \\  "build_mode": "{s}",
         \\  "count": {d},
-        \\  "active_capacity": 1,
+        \\  "active_capacity": {d},
         \\  "activation_slot_bytes": {d},
+        \\  "activation_reservation_bytes": {d},
+        \\  "activation_pool_overhead_bytes": {d},
+        \\  "activation_occupied_high_water_bytes": {d},
         \\  "measurement_scope": "whole OnePage process; workload subprocesses excluded",
         \\  "timing": {{"wall_ns": {d}, "cpu_ns": {d}, "operations_per_second": {d:.3}}},
         \\  "durable_bytes": {d},
@@ -249,7 +265,11 @@ fn formatReport(
         @tagName(scenario),
         @tagName(builtin.mode),
         count,
-        @sizeOf(core_image.ActivationSlot),
+        activation.active_capacity,
+        activation.slot_bytes,
+        activation.reserved_bytes,
+        activation.pool_overhead_bytes,
+        activation.occupied_high_water_bytes,
         wall_time_ns,
         cpu_time_ns,
         operationsPerSecond(count, wall_time_ns),
@@ -260,6 +280,14 @@ fn formatReport(
         std.json.fmt(observations.runtime_closed, .{}),
     });
 }
+
+const ActivationObservation = struct {
+    active_capacity: usize,
+    slot_bytes: usize,
+    reserved_bytes: usize,
+    pool_overhead_bytes: usize,
+    occupied_high_water_bytes: usize,
+};
 
 fn operationsPerSecond(count: usize, wall_time_ns: u64) f64 {
     if (wall_time_ns == 0) return 0;

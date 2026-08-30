@@ -305,9 +305,15 @@ pub fn build(b: *std.Build) void {
         "measurement-count",
         "Number of Sessions exercised by the runtime measurement",
     ) orelse 100;
+    const measurement_active_capacity = b.option(
+        usize,
+        "measurement-active-capacity",
+        "Startup Active Capacity used by the runtime measurement",
+    ) orelse 1;
     const run_runtime_measurement = b.addRunArtifact(runtime_measurement);
     run_runtime_measurement.addArg(measurement_scenario);
     run_runtime_measurement.addArg(b.fmt("{d}", .{measurement_count}));
+    run_runtime_measurement.addArg(b.fmt("{d}", .{measurement_active_capacity}));
     const runtime_measurement_step = b.step(
         "measure-runtime",
         "Measure whole-process runtime memory and end-to-end lifecycle speed",
