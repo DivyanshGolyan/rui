@@ -1385,7 +1385,112 @@ test "known provider failure is one durable terminal Result" {
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }
 
-test "captured noncanonical tool call closes once after crash without redispatch" {
+test "sealed orphan records possible duplicate work before replacement model Attempt" {
+    const ReplacementProvider = struct {
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            var buffer: [model_protocol.max_response_size]u8 = undefined;
+            const encoded = try model_protocol.encodeText(
+                &buffer,
+                if (self.calls == 1) "orphan answer" else "replacement answer",
+            );
+            try response.append(encoded);
+            return .candidate;
+        }
+    };
+    const CrashAfterSeal = struct {
+        armed: bool = true,
+
+        fn reached(context: *anyopaque, boundary: FaultBoundary) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.armed and boundary == .after_model_dispatch) {
+                self.armed = false;
+                return error.InjectedCrash;
+            }
+        }
+    };
+    const Attempts = struct {
+        records: [session_transition.max_operation_attempts]?session_transition.AttemptRecord =
+            @splat(null),
+        count: usize = 0,
+
+        fn apply(context: *anyopaque, fact: session_transition.Fact) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (fact) {
+                .attempt_admitted => |attempt| if (attempt.recovery_class == .model) {
+                    self.records[self.count] = attempt;
+                    self.count += 1;
+                },
+                else => {},
+            }
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var provider: ReplacementProvider = .{};
+    var crash: CrashAfterSeal = .{};
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model_binding = .{ .model = "fixture:sealed-orphan", .provider = provider.provider() },
+            .task = "task",
+            .fault = .{ .context = &crash, .reached = CrashAfterSeal.reached },
+        } },
+    });
+    _ = try owner.drive();
+    const session_id = harnessState(owner).session.?.session_id;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    try std.testing.expectError(error.InjectedCrash, owner.drive());
+    try std.testing.expectEqual(@as(u8, 1), provider.calls);
+    owner.close();
+
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .model_binding = .{ .model = "fixture:sealed-orphan", .provider = provider.provider() },
+        } },
+    });
+    defer restored.close();
+    var progress: Progress = undefined;
+    for (0..12) |_| {
+        progress = try restored.drive();
+        if (progress.state == .finished) break;
+    }
+    try std.testing.expectEqual(State.finished, progress.state);
+    try std.testing.expectEqual(@as(u8, 2), provider.calls);
+
+    const session = &harnessState(restored).session.?;
+    var attempts: Attempts = .{};
+    _ = try session.inspectSemantic(&attempts, Attempts.apply);
+    try std.testing.expectEqual(@as(usize, 2), attempts.count);
+    try std.testing.expectEqual(@as(u8, 0), attempts.records[0].?.possible_duplicate_attempts);
+    try std.testing.expectEqual(@as(u8, 1), attempts.records[1].?.possible_duplicate_attempts);
+    const final_entry = try session.readEntry(session.activeLeafId());
+    try std.testing.expectEqual(session_store.EntryKind.assistant_text, final_entry.kind);
+    var answer: [model_protocol.max_assistant_text_size]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "replacement answer",
+        try session.readBlob(final_entry.content_ref, 0, &answer),
+    );
+}
+
+test "committed model Completion admits exact bytes after crash without redispatch" {
     const exact_arguments = "{ \"timeout_ms\" : 1000, \"command\" : \"true\" }";
     const ToolProvider = struct {
         calls: u8 = 0,
@@ -1477,7 +1582,7 @@ test "captured noncanonical tool call closes once after crash without redispatch
     try std.testing.expectEqualStrings(exact_arguments, call.arguments);
 }
 
-test "provider candidate settlement rejects malformed framing without publishing" {
+test "candidate seal validation failure publishes no Completion" {
     const MalformedProvider = struct {
         calls: u8 = 0,
 
@@ -1516,6 +1621,14 @@ test "provider candidate settlement rejects malformed framing without publishing
     const rejected = try owner.drive();
     try std.testing.expectEqual(State.unavailable, rejected.state);
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
+    const Ignore = struct {
+        fn apply(_: *anyopaque, _: completion_inbox.Envelope) !void {}
+    };
+    var context: u8 = 0;
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        try harnessState(owner).session.?.scanCompletionEvidence(&context, Ignore.apply),
+    );
 }
 
 test "typed durable model failures share one failed Harness projection" {

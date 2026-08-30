@@ -1650,7 +1650,7 @@ test "Session creation enforces recoverable root task content" {
     );
 }
 
-test "Session startup resets provisional drafts but preserves sealed unadmitted evidence" {
+test "Session startup removes drafts and does not infer Completion from a sealed orphan" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
@@ -1663,6 +1663,14 @@ test "Session startup resets provisional drafts but preserves sealed unadmitted 
     var sealed = try created.beginBlob(90);
     try sealed.append("sealed before ledger admission");
     try sealed.finish();
+    const Ignore = struct {
+        fn apply(_: *anyopaque, _: completion_inbox.Envelope) !void {}
+    };
+    var context: u8 = 0;
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        try created.scanCompletionEvidence(&context, Ignore.apply),
+    );
 
     var interrupted = try created.beginBlob(91);
     try interrupted.append("partial provisional bytes");
@@ -1680,6 +1688,32 @@ test "Session startup resets provisional drafts but preserves sealed unadmitted 
         try restored.session.readBlob(90, 0, &bytes),
     );
     try std.testing.expectError(error.FileNotFound, restored.session.readBlob(91, 0, &bytes));
+}
+
+test "failed blob seal remains unpublished" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(
+        layout.sessions,
+        &layout.storage,
+        io,
+        testConfig(layout.workspacePath(), 26),
+    );
+    defer created.close();
+
+    var candidate = try created.beginBlob(92);
+    try candidate.append("complete candidate bytes");
+    candidate.writer.file.close(io);
+    if (candidate.finish()) |_| {
+        return error.ExpectedBlobSealFailure;
+    } else |_| {}
+    // The test closed the raw file to inject the write failure. Mark that
+    // injected resource closed before the wrapper releases its directory.
+    candidate.writer.open = false;
+    candidate.abort();
+    var bytes: [1]u8 = undefined;
+    try std.testing.expectError(error.FileNotFound, created.readBlob(92, 0, &bytes));
 }
 
 const TestLayout = struct {

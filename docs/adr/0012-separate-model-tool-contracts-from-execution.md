@@ -9,14 +9,17 @@ request at the edge and durably capture one bounded candidate assistant text, ge
 input request, or typed failure. Captured bytes remain non-authoritative until the Host validates them
 once and commits their provider-neutral Result meaning through the Session Ledger.
 
-Provider conversion uses open envelopes and closed semantic conversion. The configured provider is a
-non-adversarial dependency in V1. Adapters bound the framing, bytes, nesting, deadline, and canonical
-output they own, but ignore unknown provider events, fields, item types, and content-part types after
-valid syntactic traversal. They first resolve the relevant discriminator, then strictly validate only
-the fields consumed to produce a house disposition. Unknown metadata receives no schema-member bound.
-Malformed framing, exhausted resources, duplicates or type errors in consumed fields, and contradictory
-terminal meaning fail deterministically. OnePage-owned canonical records, tool-input shapes,
-`input_request`, durable facts, and authority-bearing objects remain closed and exact.
+Provider conversion uses open records, strict syntax, closed must-understand semantic unions, and
+closed OnePage facts. The configured provider is a cooperative authenticated dependency in V1, not an
+authority. Adapters bound framing, bytes, nesting, deadline, and canonical output. They ignore unknown
+record members and exact variants that the adapter classifies as non-authoritative. Unknown output-item,
+content-part, provider-side action, and terminal-state variants instead produce
+`unsupported_provider_output` unless the adapter establishes that exact variant as safely ignorable.
+Recognized conversions strictly validate every consumed field needed to produce one unambiguous house
+disposition. Unknown metadata receives no schema-member bound. Malformed framing, exhausted resources,
+duplicates or type errors in consumed fields, and contradictory terminal meaning fail deterministically.
+OnePage-owned canonical records, tool-input shapes, `input_request`, durable facts, and authority-bearing
+objects remain closed and exact.
 
 The exact catalog, model contract, instructions, Model Context, and semantic request digest are bound
 to a model Operation. Replacement Attempts under that Operation dispatch identical semantic request
