@@ -9,6 +9,38 @@ const fixture_state_namespace = std.fmt.comptimePrint(
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const native_target = b.standardTargetOptions(.{});
+    const quickjs_release_safe = addQuickJsLibrary(
+        b,
+        "onepage-quickjs-release-safe",
+        native_target,
+        .ReleaseSafe,
+        null,
+    );
+    const quickjs_release_small = addQuickJsLibrary(
+        b,
+        "onepage-quickjs-release-small",
+        native_target,
+        .ReleaseSmall,
+        null,
+    );
+    const quickjs_primary = switch (optimize) {
+        .ReleaseSafe => quickjs_release_safe,
+        .ReleaseSmall => quickjs_release_small,
+        else => addQuickJsLibrary(
+            b,
+            b.fmt("onepage-quickjs-{s}", .{@tagName(optimize)}),
+            native_target,
+            optimize,
+            null,
+        ),
+    };
+    const quickjs_sanitize = addQuickJsLibrary(
+        b,
+        "onepage-quickjs-release-safe-sanitize",
+        native_target,
+        .ReleaseSafe,
+        .full,
+    );
 
     const cli = b.addExecutable(.{
         .name = "onepage",
@@ -24,9 +56,27 @@ pub fn build(b: *std.Build) void {
     configureSqlite(b, cli);
     const install_cli = b.addInstallArtifact(cli, .{});
     b.getInstallStep().dependOn(&install_cli.step);
+    b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
+
+    const workflow_evaluator = addWorkflowEvaluator(
+        b,
+        "onepage-workflow-evaluator",
+        native_target,
+        optimize,
+        quickjs_primary,
+    );
+    b.installArtifact(workflow_evaluator);
 
     const test_step = b.step("test", "Run the deterministic product and storage tests");
-    addTestGraph(b, test_step, cli, native_target, optimize);
+    addTestGraph(
+        b,
+        test_step,
+        cli,
+        workflow_evaluator,
+        native_target,
+        optimize,
+        quickjs_primary,
+    );
 
     const check_step = b.step(
         "check",
@@ -41,7 +91,22 @@ pub fn build(b: *std.Build) void {
         b.pathFromRoot("src"),
     });
     check_step.dependOn(&format_check.step);
-    addTestGraph(b, check_step, cli, native_target, .ReleaseSafe);
+    const release_safe_workflow_evaluator = addWorkflowEvaluator(
+        b,
+        "onepage-workflow-evaluator-release-safe-check",
+        native_target,
+        .ReleaseSafe,
+        quickjs_release_safe,
+    );
+    addTestGraph(
+        b,
+        check_step,
+        cli,
+        release_safe_workflow_evaluator,
+        native_target,
+        .ReleaseSafe,
+        quickjs_release_safe,
+    );
 
     const release_small_cli = addNativeExecutable(
         b,
@@ -51,6 +116,89 @@ pub fn build(b: *std.Build) void {
         .ReleaseSmall,
     );
     check_step.dependOn(&release_small_cli.step);
+    const release_small_workflow_evaluator = addWorkflowEvaluator(
+        b,
+        "onepage-workflow-evaluator-release-small-check",
+        native_target,
+        .ReleaseSmall,
+        quickjs_release_small,
+    );
+    check_step.dependOn(&release_small_workflow_evaluator.step);
+
+    const workflow_sanitize_step = b.step(
+        "workflow-sanitize",
+        "Run the focused evaluator suite with C undefined-behavior sanitization",
+    );
+    const workflow_sanitize_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/workflow_evaluator_test.zig"),
+            .target = native_target,
+            .optimize = .ReleaseSafe,
+            .sanitize_c = .full,
+        }),
+    });
+    linkQuickJs(b, workflow_sanitize_tests, quickjs_sanitize);
+    const run_workflow_sanitize = b.addRunArtifact(workflow_sanitize_tests);
+    workflow_sanitize_step.dependOn(&run_workflow_sanitize.step);
+
+    const workflow_leaks_step = b.step(
+        "workflow-leaks",
+        "Run repeated evaluator teardown under the macOS leaks detector",
+    );
+    if (native_target.result.os.tag == .macos) {
+        const workflow_leak_fixture = addNativeExecutable(
+            b,
+            "onepage-workflow-evaluator-leak-fixture",
+            "src/workflow_evaluator_leak_fixture.zig",
+            native_target,
+            .ReleaseSafe,
+        );
+        linkQuickJs(b, workflow_leak_fixture, quickjs_release_safe);
+        const run_workflow_leaks = b.addSystemCommand(&.{"sh"});
+        run_workflow_leaks.addFileArg(b.path("src/workflow_evaluator_leak_check.sh"));
+        run_workflow_leaks.addArtifactArg(workflow_leak_fixture);
+        workflow_leaks_step.dependOn(&run_workflow_leaks.step);
+    }
+
+    const workflow_fuzz = addNativeExecutable(
+        b,
+        "onepage-workflow-evaluator-fuzz",
+        "src/workflow_evaluator_fuzz.zig",
+        native_target,
+        .ReleaseSafe,
+    );
+    linkQuickJs(b, workflow_fuzz, quickjs_release_safe);
+    const workflow_fuzz_step = b.step(
+        "workflow-fuzz",
+        "Run every deterministic evaluator mutation target",
+    );
+    const fuzz_targets = [_]struct {
+        argument: []const u8,
+        step_name: []const u8,
+        description: []const u8,
+    }{
+        .{ .argument = "protocol_decoder", .step_name = "protocol-decoder", .description = "Mutate private evaluator protocol frames" },
+        .{ .argument = "js_value_encoder", .step_name = "js-value-encoder", .description = "Generate strict and rejected JavaScript values" },
+        .{ .argument = "result_decoder", .step_name = "result-decoder", .description = "Mutate visible Job Result values" },
+        .{ .argument = "workflow_capability", .step_name = "workflow-capability", .description = "Generate workflow and agent capability sequences" },
+    };
+    for (fuzz_targets) |target| {
+        const target_step = b.step(
+            b.fmt("workflow-fuzz-{s}", .{target.step_name}),
+            target.description,
+        );
+        const run_target = b.addRunArtifact(workflow_fuzz);
+        run_target.addArg(target.argument);
+        target_step.dependOn(&run_target.step);
+        workflow_fuzz_step.dependOn(&run_target.step);
+    }
+    const workflow_check_step = b.step(
+        "workflow-check",
+        "Run the heavyweight evaluator sanitizer, leak, and mutation gates",
+    );
+    workflow_check_step.dependOn(workflow_sanitize_step);
+    workflow_check_step.dependOn(workflow_leaks_step);
+    workflow_check_step.dependOn(workflow_fuzz_step);
 
     const fixture_answer_step = b.step(
         "fixture-answer",
@@ -176,8 +324,10 @@ fn addTestGraph(
     b: *std.Build,
     parent: *std.Build.Step,
     cli: *std.Build.Step.Compile,
+    workflow_evaluator: *std.Build.Step.Compile,
     native_target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    quickjs: *std.Build.Step.Compile,
 ) void {
     const plain_test_roots = [_][]const u8{
         "src/binding.zig",
@@ -206,6 +356,35 @@ fn addTestGraph(
     for (libc_test_roots) |root| {
         addTestRun(b, parent, root, native_target, optimize, true);
     }
+
+    const workflow_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/workflow_evaluator_test.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    linkQuickJs(b, workflow_tests, quickjs);
+    parent.dependOn(&b.addRunArtifact(workflow_tests).step);
+
+    const workflow_parent_fixture = addNativeExecutable(
+        b,
+        "onepage-workflow-evaluator-parent-fixture",
+        "src/workflow_evaluator_parent_fixture.zig",
+        native_target,
+        optimize,
+    );
+    const workflow_abnormal_fixture = addNativeExecutable(
+        b,
+        "onepage-workflow-evaluator-abnormal-fixture",
+        "src/workflow_evaluator_abnormal_fixture.zig",
+        native_target,
+        optimize,
+    );
+    const run_workflow_integration = b.addRunArtifact(workflow_parent_fixture);
+    run_workflow_integration.addArtifactArg(workflow_evaluator);
+    run_workflow_integration.addArtifactArg(workflow_abnormal_fixture);
+    parent.dependOn(&run_workflow_integration.step);
 
     const agent_integration = addNativeExecutable(
         b,
@@ -327,6 +506,74 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_TEMP_STORE", "1");
     module.addCMacro("SQLITE_USE_URI", "0");
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
+}
+
+fn addQuickJsLibrary(
+    b: *std.Build,
+    name: []const u8,
+    native_target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitize_c: ?std.zig.SanitizeC,
+) *std.Build.Step.Compile {
+    const quickjs = b.dependency("quickjs_ng", .{});
+    const module = b.createModule(.{
+        .target = native_target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    module.link_libc = true;
+    module.addIncludePath(quickjs.path("."));
+    module.addCMacro("QUICKJS_NG_BUILD", "1");
+    module.addCMacro("_GNU_SOURCE", "1");
+    module.addCSourceFiles(.{
+        .root = quickjs.path("."),
+        .files = &.{
+            "dtoa.c",
+            "libregexp.c",
+            "libunicode.c",
+            "quickjs.c",
+        },
+        .flags = &.{
+            "-std=gnu11",
+            "-funsigned-char",
+            "-fvisibility=hidden",
+        },
+    });
+    return b.addLibrary(.{ .name = name, .root_module = module });
+}
+
+fn linkQuickJs(
+    b: *std.Build,
+    compile: *std.Build.Step.Compile,
+    quickjs_library: *std.Build.Step.Compile,
+) void {
+    const quickjs = b.dependency("quickjs_ng", .{});
+    const module = compile.root_module;
+    module.link_libc = true;
+    module.addIncludePath(quickjs.path("."));
+    module.addIncludePath(b.path("src"));
+    module.addCMacro("QUICKJS_NG_BUILD", "1");
+    module.addCMacro("_GNU_SOURCE", "1");
+    module.linkLibrary(quickjs_library);
+}
+
+fn addWorkflowEvaluator(
+    b: *std.Build,
+    name: []const u8,
+    native_target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    quickjs: *std.Build.Step.Compile,
+) *std.Build.Step.Compile {
+    const evaluator = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/workflow_evaluator_main.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    linkQuickJs(b, evaluator, quickjs);
+    return evaluator;
 }
 
 fn addNativeExecutable(

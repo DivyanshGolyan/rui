@@ -723,6 +723,14 @@ Run the runner and bridge under:
 - UndefinedBehaviorSanitizer;
 - leak detection where supported.
 
+V1 implementation note: Zig 0.16 exposes C undefined-behavior and thread sanitizer modes but no
+AddressSanitizer mode for OnePage's mixed Zig/C evaluator target. The implemented
+`workflow-sanitize` gate is therefore explicitly C undefined-behavior detection, and V1 does not
+claim ASan evidence. The supported macOS target additionally runs repeated evaluator teardown under
+`/usr/bin/leaks` and requires zero leaked allocations. AddressSanitizer becomes a release gate only
+when the supported Zig toolchain can provide it; the research recommendation is not evidence that
+the current toolchain already does.
+
 Exercise:
 
 - the 39-script corpus;
@@ -746,6 +754,12 @@ workflow source + capability call sequences
 ```
 
 The most valuable downstream fuzz target is not generic ECMAScript parsing alone. It is the interaction between arbitrary JavaScript objects and OnePage’s native `agent()` conversion logic.
+
+V1 implementation note: the canonical local gate implements these as four independently runnable,
+seeded mutation/property targets rather than claiming a coverage-guided runner. Protocol and result
+targets apply truncation, multi-byte overwrite, deletion, insertion, and word corruption. The other
+targets generate strict and rejected JavaScript values plus bounded workflow/capability sequences.
+Each case must return a closed bounded outcome and repeat byte-for-byte.
 
 #### OOM and ownership fault injection
 
@@ -779,7 +793,8 @@ A credible minimum policy is:
 - review every release for untrusted-source, memory-safety, interrupt, parser, Promise, and embedding changes;
 - critical applicable fixes block new releases;
 - if an applicable high-impact issue cannot be patched promptly, disable workflow execution while keeping the single-agent client available;
-- rerun the complete corpus, sanitizer, fuzz-smoke, memory, and replay suite before each engine bump.
+- rerun the complete corpus, sanitizer, deterministic mutation/property, memory, and replay suite
+  before each engine bump.
 
 Do not auto-upgrade QuickJS in an existing durable run.
 

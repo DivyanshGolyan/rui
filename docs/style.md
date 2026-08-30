@@ -67,6 +67,9 @@ deferred explicitly.
 - Bound workflow source, arguments, Job count, blocked set, visible Results, JavaScript heap and stack,
   native bridge arena, protocol bytes, microtasks, diagnostics, evaluation time, and cumulative replay.
   Destroy the evaluator at every Job barrier; never retain a Promise resolver across durable waits.
+- Apply structural-cardinality limits cumulatively to each complete strict value, canonicalize object
+  keys at every depth, and apply visible-result byte limits to the complete Visibility Snapshot rather
+  than independently to each member.
 - Keep speculative reserve out of fixed resident structures. Every Activation Slot field and other
   per-capacity buffer must have a current production reader and writer; add future scratch when its
   consumer exists.
@@ -237,6 +240,11 @@ for every development tool.
 `zig build check` is the canonical local and CI gate. It performs formatting and AST validation, runs
 the complete native test graph in `ReleaseSafe`, and compiles the native deliverables in
 `ReleaseSmall`.
+
+Changes to the Workflow Evaluator, its private protocol, QuickJS dependency, or evaluator build graph
+must additionally pass `zig build workflow-check`. That separate heavyweight gate owns the focused C
+undefined-behaviour sanitizer, supported-platform leak detector, and deterministic mutation/property
+targets; routine checks do not acquire those platform and runtime costs.
 
 Changes to dependencies, build logic, persisted formats, or CI bootstrap must also pass the canonical
 gate from a clean checkout with an empty cache. CI creates the cache layout explicitly and fetches the

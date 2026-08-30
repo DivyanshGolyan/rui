@@ -40,5 +40,8 @@ jobs:
       - name: Check source and artifacts
         run: zig build check --summary all
 
+      - name: Check disposable workflow evaluator
+        run: zig build workflow-check --summary all
+
       - name: Check repository whitespace
         run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD --
