@@ -8,6 +8,10 @@
             .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip",
             .hash = "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
         },
+        .quickjs_ng = .{
+            .url = "https://github.com/quickjs-ng/quickjs/archive/1ab8676f4b6d6d669baeb5f21790fb9734636a20.tar.gz",
+            .hash = "N-V-__8AAC-eRACa__taXkae9pRIZde7nn8oQSxb9n9rhkFp",
+        },
     },
     .paths = .{
         "build.zig",
@@ -15,5 +19,6 @@
         "fixtures",
         "src",
         "README.md",
+        "THIRD_PARTY_NOTICES.md",
     },
 }

@@ -24,9 +24,18 @@ pub fn build(b: *std.Build) void {
     configureSqlite(b, cli);
     const install_cli = b.addInstallArtifact(cli, .{});
     b.getInstallStep().dependOn(&install_cli.step);
+    b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
+
+    const workflow_evaluator = addWorkflowEvaluator(
+        b,
+        "onepage-workflow-evaluator",
+        native_target,
+        optimize,
+    );
+    b.installArtifact(workflow_evaluator);
 
     const test_step = b.step("test", "Run the deterministic product and storage tests");
-    addTestGraph(b, test_step, cli, native_target, optimize);
+    addTestGraph(b, test_step, cli, workflow_evaluator, native_target, optimize);
 
     const check_step = b.step(
         "check",
@@ -41,7 +50,20 @@ pub fn build(b: *std.Build) void {
         b.pathFromRoot("src"),
     });
     check_step.dependOn(&format_check.step);
-    addTestGraph(b, check_step, cli, native_target, .ReleaseSafe);
+    const release_safe_workflow_evaluator = addWorkflowEvaluator(
+        b,
+        "onepage-workflow-evaluator-release-safe-check",
+        native_target,
+        .ReleaseSafe,
+    );
+    addTestGraph(
+        b,
+        check_step,
+        cli,
+        release_safe_workflow_evaluator,
+        native_target,
+        .ReleaseSafe,
+    );
 
     const release_small_cli = addNativeExecutable(
         b,
@@ -51,6 +73,30 @@ pub fn build(b: *std.Build) void {
         .ReleaseSmall,
     );
     check_step.dependOn(&release_small_cli.step);
+    const release_small_workflow_evaluator = addWorkflowEvaluator(
+        b,
+        "onepage-workflow-evaluator-release-small-check",
+        native_target,
+        .ReleaseSmall,
+    );
+    check_step.dependOn(&release_small_workflow_evaluator.step);
+
+    const workflow_sanitize_step = b.step(
+        "workflow-sanitize",
+        "Run the focused evaluator suite with C undefined-behavior sanitization",
+    );
+    const workflow_sanitize_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/workflow_evaluator_test.zig"),
+            .target = native_target,
+            .optimize = .ReleaseSafe,
+            .sanitize_c = .full,
+        }),
+    });
+    configureQuickJs(b, workflow_sanitize_tests);
+    const run_workflow_sanitize = b.addRunArtifact(workflow_sanitize_tests);
+    workflow_sanitize_step.dependOn(&run_workflow_sanitize.step);
+    check_step.dependOn(&run_workflow_sanitize.step);
 
     const fixture_answer_step = b.step(
         "fixture-answer",
@@ -176,6 +222,7 @@ fn addTestGraph(
     b: *std.Build,
     parent: *std.Build.Step,
     cli: *std.Build.Step.Compile,
+    workflow_evaluator: *std.Build.Step.Compile,
     native_target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) void {
@@ -206,6 +253,35 @@ fn addTestGraph(
     for (libc_test_roots) |root| {
         addTestRun(b, parent, root, native_target, optimize, true);
     }
+
+    const workflow_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/workflow_evaluator_test.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    configureQuickJs(b, workflow_tests);
+    parent.dependOn(&b.addRunArtifact(workflow_tests).step);
+
+    const workflow_parent_fixture = addNativeExecutable(
+        b,
+        "onepage-workflow-evaluator-parent-fixture",
+        "src/workflow_evaluator_parent_fixture.zig",
+        native_target,
+        optimize,
+    );
+    const workflow_abnormal_fixture = addNativeExecutable(
+        b,
+        "onepage-workflow-evaluator-abnormal-fixture",
+        "src/workflow_evaluator_abnormal_fixture.zig",
+        native_target,
+        optimize,
+    );
+    const run_workflow_integration = b.addRunArtifact(workflow_parent_fixture);
+    run_workflow_integration.addArtifactArg(workflow_evaluator);
+    run_workflow_integration.addArtifactArg(workflow_abnormal_fixture);
+    parent.dependOn(&run_workflow_integration.step);
 
     const agent_integration = addNativeExecutable(
         b,
@@ -327,6 +403,48 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_TEMP_STORE", "1");
     module.addCMacro("SQLITE_USE_URI", "0");
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
+}
+
+fn configureQuickJs(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    const module = compile.root_module;
+    const quickjs = b.dependency("quickjs_ng", .{});
+    module.link_libc = true;
+    module.addIncludePath(quickjs.path("."));
+    module.addIncludePath(b.path("src"));
+    module.addCMacro("QUICKJS_NG_BUILD", "1");
+    module.addCMacro("_GNU_SOURCE", "1");
+    module.addCSourceFiles(.{
+        .root = quickjs.path("."),
+        .files = &.{
+            "dtoa.c",
+            "libregexp.c",
+            "libunicode.c",
+            "quickjs.c",
+        },
+        .flags = &.{
+            "-std=gnu11",
+            "-funsigned-char",
+            "-fvisibility=hidden",
+        },
+    });
+}
+
+fn addWorkflowEvaluator(
+    b: *std.Build,
+    name: []const u8,
+    native_target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const evaluator = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/workflow_evaluator_main.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    configureQuickJs(b, evaluator);
+    return evaluator;
 }
 
 fn addNativeExecutable(
