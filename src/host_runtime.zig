@@ -18,14 +18,6 @@ const State = struct {
     storage: host_store.StorageOwner,
     execution: lifecycle.Host = .{},
     harness_owners: std.atomic.Value(usize) = .init(0),
-    retired_lock: std.Io.Mutex = .init,
-    retired: ?*Retired = null,
-};
-
-pub const Retired = struct {
-    next: ?*Retired = null,
-    context: *anyopaque,
-    destroy: *const fn (std.mem.Allocator, *anyopaque) void,
 };
 
 pub const Lease = struct {
@@ -73,16 +65,6 @@ pub const Lease = struct {
         if (!self.active) return;
         releaseHarness(self.runtime);
         self.active = false;
-    }
-
-    pub fn retire(self: *Lease, retired: *Retired) void {
-        if (!self.active) return;
-        const value = state(self.runtime);
-        value.retired_lock.lockUncancelable(self.io);
-        retired.next = value.retired;
-        value.retired = retired;
-        value.retired_lock.unlock(self.io);
-        self.release();
     }
 };
 
@@ -135,12 +117,6 @@ pub const HostRuntime = opaque {
         host_store.disableProcessHeapLimit();
         runtime.state_root.close(runtime.io);
         const allocator = runtime.allocator;
-        var retired = runtime.retired;
-        while (retired) |node| {
-            const next = node.next;
-            node.destroy(allocator, node.context);
-            retired = next;
-        }
         allocator.destroy(runtime);
         runtime_open.store(false, .release);
     }

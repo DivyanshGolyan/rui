@@ -165,10 +165,6 @@ pub const Harness = opaque {
         const owner = try lease.allocator.create(HarnessState);
         errdefer lease.allocator.destroy(owner);
         owner.* = try HarnessState.init(config, lease);
-        owner.retired = .{
-            .context = owner,
-            .destroy = destroyRetiredHarness,
-        };
         return @ptrCast(owner);
     }
 
@@ -195,14 +191,15 @@ pub const Harness = opaque {
     }
 
     pub fn close(self: *Harness) void {
-        harnessState(self).close();
+        const owner = harnessState(self);
+        const allocator = owner.close();
+        allocator.destroy(owner);
     }
 };
 
 const HarnessState = struct {
     config: RetainedConfig,
     lease: host_runtime.Lease,
-    retired: host_runtime.Retired = undefined,
     pending: ?Input = null,
     state: State,
     session: ?session_store.Session = null,
@@ -213,7 +210,6 @@ const HarnessState = struct {
     settling_control: ?lifecycle.Control = null,
     recovery_pending: bool = false,
     task_started: bool = false,
-    closing: bool = false,
     ingress_lock: std.Io.Mutex = .init,
     drive_lock: std.Io.Mutex = .init,
 
@@ -859,32 +855,25 @@ const HarnessState = struct {
         self.settling_control = control;
     }
 
-    fn close(self: *HarnessState) void {
+    fn close(self: *HarnessState) std.mem.Allocator {
         self.drive_lock.lockUncancelable(self.lease.io);
         defer self.drive_lock.unlock(self.lease.io);
         self.ingress_lock.lockUncancelable(self.lease.io);
-        if (self.closing or !self.lease.active) {
-            self.ingress_lock.unlock(self.lease.io);
-            return;
-        }
-        self.closing = true;
+        std.debug.assert(self.lease.active);
         if (self.projection_generation != std.math.maxInt(u64)) self.projection_generation += 1;
         self.state = .closed;
         self.pending = null;
         self.ingress_lock.unlock(self.lease.io);
         if (self.session) |*session| session.close();
         self.session = null;
-        self.lease.retire(&self.retired);
+        const allocator = self.lease.allocator;
+        self.lease.release();
+        return allocator;
     }
 };
 
 fn harnessState(harness: *Harness) *HarnessState {
     return @ptrCast(@alignCast(harness));
-}
-
-fn destroyRetiredHarness(allocator: std.mem.Allocator, context: *anyopaque) void {
-    const owner: *HarnessState = @ptrCast(@alignCast(context));
-    allocator.destroy(owner);
 }
 
 fn openTestRuntime(tmp: *const std.testing.TmpDir) !*HostRuntime {
@@ -910,7 +899,7 @@ fn openTestRuntimeConfigured(
 }
 
 test "Harness owner retains only live lifecycle state" {
-    try std.testing.expectEqual(@as(usize, 8_112), @sizeOf(HarnessState));
+    try std.testing.expectEqual(@as(usize, 8_088), @sizeOf(HarnessState));
 }
 
 test "open retains no Activation Slot and offer transfers one bounded input" {
@@ -950,7 +939,7 @@ test "one process owns one SQLite Host Runtime budget" {
     );
 }
 
-test "Harness close is idempotent and releases one Runtime lease" {
+test "Harness close consumes the handle and releases one Runtime lease" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
@@ -966,7 +955,6 @@ test "Harness close is idempotent and releases one Runtime lease" {
             .task = "task",
         } },
     });
-    owner.close();
     owner.close();
     try runtime.close();
 }
@@ -1203,32 +1191,33 @@ test "shutdown denies Approval Required before closing" {
         .final_answer = "done",
         .expected_tool_status = .denied,
     };
-    var owner = try Harness.open(.{
-        .runtime = runtime,
-        .mode = .{ .create = .{
-            .workspace_path = ".",
-            .model_binding = .{ .model = "fixture:shutdown-approval", .provider = fixture.provider() },
-            .task = "task",
-        } },
-    });
-    defer owner.close();
-    _ = try owner.drive();
-    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
-    _ = try owner.drive();
-    _ = try owner.drive();
-    const waiting = try owner.drive();
-    try std.testing.expectEqual(State.waiting, waiting.state);
-    try std.testing.expectEqual(ProjectionKind.approval_required, waiting.projections[0].kind);
-    var facts: PermissionFacts = .{};
-    const owner_state = harnessState(owner);
-    _ = try owner_state.session.?.inspectSemantic(
-        &facts,
-        PermissionFacts.apply,
-    );
-    try std.testing.expectEqual(@as(u8, 1), facts.approval_required);
-    try std.testing.expectEqual(@as(u8, 0), facts.undecided_authorization);
-    const session_id = owner_state.session.?.session_id;
-    owner.close();
+    const session_id = active: {
+        var owner = try Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .create = .{
+                .workspace_path = ".",
+                .model_binding = .{ .model = "fixture:shutdown-approval", .provider = fixture.provider() },
+                .task = "task",
+            } },
+        });
+        defer owner.close();
+        _ = try owner.drive();
+        try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+        _ = try owner.drive();
+        _ = try owner.drive();
+        const waiting = try owner.drive();
+        try std.testing.expectEqual(State.waiting, waiting.state);
+        try std.testing.expectEqual(ProjectionKind.approval_required, waiting.projections[0].kind);
+        var facts: PermissionFacts = .{};
+        const owner_state = harnessState(owner);
+        _ = try owner_state.session.?.inspectSemantic(
+            &facts,
+            PermissionFacts.apply,
+        );
+        try std.testing.expectEqual(@as(u8, 1), facts.approval_required);
+        try std.testing.expectEqual(@as(u8, 0), facts.undecided_authorization);
+        break :active owner_state.session.?.session_id;
+    };
 
     var restored = try Harness.open(.{
         .runtime = runtime,
