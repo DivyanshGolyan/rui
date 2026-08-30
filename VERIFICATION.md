@@ -75,7 +75,7 @@ Workflow fixtures use the production runner kernel and private bounded child pro
 
 The highest deterministic lifecycle seam is `Harness.open / offer / drive` with the production Core reducer, real SQLite Host Store and immutable blob store, fixed Host-owned pools, deterministic adapters, and semantic fault injection. Lifecycle tests assert durable behaviour, adapter admission, Conversation advancement, Projections, and Outcomes rather than private table names, SQL text, row identifiers, numeric Core fields, or helper calls.
 
-Provider contract tests use the versioned semantic request and Captured Model Output rather than a provider wire fixture. They cover exact Tool Catalog binding, deterministic name-to-Key mapping, one complete assistant text or tool call, and bounded exact JSON arguments under `StrictToolJsonV1`. Admission rejects partial, multiple, unknown, duplicate-field, malformed, excessive-depth, excessive-member/token, schema-invalid, or oversized outputs exactly once; it does not require whitespace, key-order, or number-spelling normalization when exact bytes already identify the call. Conversion consumes request windows and appends capture windows without materializing a second request-sized JSON value or buffering an entire stream event without a declared frame bound. Repeated terminal content does not duplicate already-spooled output. Tests terminate after capture publication and after Completion Inbox publication, then prove a fresh owner commits the same Result or typed failure. Provider replay state is tested only if the Codex feasibility work proves that the accepted transport requires a bounded sidecar; local Conversation must still reconstruct the request without it.
+Provider contract tests use the versioned semantic request and Captured Model Output rather than a provider wire fixture. They cover exact Tool Catalog binding, deterministic name-to-Key mapping, one complete assistant text or tool call, and bounded exact JSON arguments under `StrictToolJsonV1`. Admission rejects partial, multiple, unknown, duplicate-field, malformed, excessive-depth, excessive-member/token, schema-invalid, or oversized outputs exactly once; it does not require whitespace, key-order, or number-spelling normalization when exact bytes already identify the call. Conversion consumes request and response windows without materializing a second request-sized JSON value, a complete SSE event, a JSON DOM, or a complete canonical result beside the selected decoded value. The same wire bytes produce the same outcome under arbitrary transport partitioning and object-field order. Unknown record members and explicitly ignorable variants leave the result unchanged; unknown must-understand semantic variants produce `unsupported_provider_output`. Repeated terminal content does not duplicate already-spooled output. Tests terminate after capture publication and after Completion Inbox publication, then prove a fresh owner commits the same Result or typed failure. Provider replay state is tested only if the Codex feasibility work proves that the accepted transport requires a bounded sidecar; local Conversation must still reconstruct the request without it.
 
 Before QuickJS or Workflow Run integration becomes the main workstream, one opt-in live Codex tracer must use the same production Provider and capacity-one Harness seams to inspect a controlled failing repository, request Bash and patch Actions, consume their canonical Tool Results, verify the repair, and finish with a durable Final Answer. The test asserts OnePage lifecycle and protocol facts rather than deterministic model wording. Ordinary CI covers the same transport, tool-call, capture, admission, and failure paths through deterministic fake authorization and transport. Issue #43 later repeats the live proof through asynchronous durable Workflow Runs and measured provider concurrency without adding another adapter.
 
@@ -180,12 +180,17 @@ Every density and product run reports these categories separately:
   bytes, allocator-observed bytes where available, allocation count, reusable reservation, and
   high-water use; distinguish live payload from spare capacity, alignment, allocator rounding, and
   fragmentation rather than inferring process cost from `@sizeOf` alone;
+- for every new allocation topology, the recorded design decision naming its owner, multiplier,
+  maximum and ordinary occupancy, release boundary, failure behavior, and rejected reuse or sharing
+  alternatives;
 - actual Activation Slot size and production-used components, exact configured reservation, and occupied high-water bytes;
 - native executor stack and thread count;
 - live Harness ingress, Completion, adapter-record, and recovery buffers; allocator bytes before and after repeated open/close cycles;
 - semantic-validation capacity, exact workspace components and reservation, occupancy, queue depth, wait time, and high-water bytes; ordinary, maximally escaped, maximum-depth, many-member, and burst-completion cases;
 - process-wide SQLite hard heap allowance and current/high-water total; overlapping page-cache, lookaside, and prepared-statement diagnostics; separate Storage Owner request/result bytes;
-- model transport permit count, userspace, virtual-stack, idle-pool, and kernel-socket memory; bounded capture windows;
+- model transport permit count, userspace, virtual-stack, idle-pool, and kernel-socket memory; fixed
+  transfer and parser windows; actual and high-water decoded-candidate allocation separate from the
+  counted wire-event maximum;
 - effect permit count and adapter-owned bounded state separately from model-requested subprocess memory;
 - workflow evaluator process count, engine heap limit and high water, native bridge arena, source and protocol bytes, visible Job-result bytes, evaluation CPU and wall time, cumulative replay count, and parent-observed physical footprint;
 - whole-process virtual size, physical RSS or platform physical-footprint measure, compressed memory where available, and measurement conditions after warm-up, steady-state occupancy, and slots have been dirtied and released;
@@ -216,7 +221,8 @@ Before the V1 demonstration is considered credible:
 - arbitrary Bash uncertainty is visibly indeterminate, never silently replayed, and reaches the Agent as a Tool Result before any terminal `JobIndeterminate` decision;
 - one-file patch reconciliation passes all three Workspace states;
 - both Permission Modes exercise the same validation, Session Ledger, Attempt, and recovery paths;
-- large model and tool outputs remain bounded in resident memory and complete on disk;
+- large model and tool outputs remain bounded in resident memory and complete on disk; no provider
+  call allocates its maximum legal wire-event size merely to frame or parse that event;
 - Captured Model Output remains non-authoritative until one shared semantic-admission workspace commits its Result or typed failure; provider waits retain no validation scratch, and matching admitted JSON is not parsed and reserialized by later readers;
 - a burst completing every Active Credit cannot starve semantic admission, require another credit, or cause model redispatch;
 - repeated Harness open and consuming close under one Host Runtime leaves no allocation proportional to historical handle count;

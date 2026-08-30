@@ -70,6 +70,12 @@ deferred explicitly.
 - Keep speculative reserve out of fixed resident structures. Every Activation Slot field and other
   per-capacity buffer must have a current production reader and writer; add future scratch when its
   consumer exists.
+- Treat a new allocation topology as an architectural change, not a local implementation detail.
+  Before introducing a new pool, cache, arena, spool, growable buffer, per-call or per-capacity
+  allocation, file-backed scratch class, or allocation lifetime, discuss its owner, multiplier,
+  maximum and ordinary occupancy, release boundary, failure behavior, and why an existing owner
+  cannot serve it. Record that decision in the governing issue or design documentation before code
+  makes the allocation part of the architecture.
 - Assign every substantial resident resource to the narrowest stage that needs it. Name the capacity
   that multiplies it, whether it survives a wait, and why it cannot be shared or reconstructed. Active
   Capacity multiplies only resources that every concurrent semantic activation can actually retain.
@@ -160,20 +166,22 @@ deferred explicitly.
 - Do not equate external with adversarial. State the trust assumption at each seam and validate only
   what is needed for framing, an owned resource, unambiguous semantic conversion, durable authority, or
   a consequential effect.
-- Treat provider wire formats as open envelopes. Within framing, byte, depth, and deadline bounds,
-  determine the event or variant discriminator before interpreting dependent fields; ignore unknown
-  events, fields, item types, and content-part types. Do not assign a schema-cardinality limit to
-  provider metadata unless it bounds an independently named resource.
+- Treat provider wire records as open envelopes. Within framing, byte, depth, and deadline bounds,
+  ignore unknown object members and explicitly classified non-authoritative events or variants. Keep
+  discriminated semantic unions closed by default: an unknown output item, content part, provider-side
+  action, or terminal state is `unsupported_provider_output` unless the adapter has established that
+  exact variant as safely ignorable. Do not assign a schema-cardinality limit to provider metadata
+  unless it bounds an independently named resource.
 - Make conversion into OnePage semantic state closed. Reject missing, duplicated, wrongly typed,
   inconsistent, or oversized fields that OnePage consumes to create a canonical fact. Never guess,
   coerce, or default ambiguous provider meaning.
 - Keep OnePage-owned canonical, durable, authority-bearing, tool-input, interaction, and cross-process
   formats closed and exact. Trusting a provider does not grant provider metadata authority inside those
   formats.
-- Add GREASE-like compatibility fixtures at open provider seams: inject bounded unknown events, fields,
-  variant types, and valid arbitrary values in different orders and chunk partitions, and prove the
-  recognized canonical result is unchanged. Pair them with strict negative fixtures for every consumed
-  field.
+- Add GREASE-like compatibility fixtures only at declared open provider seams: inject bounded unknown
+  fields and explicitly ignorable variants with valid arbitrary values in different orders and chunk
+  partitions, and prove the recognized canonical result is unchanged. Pair them with strict negative
+  fixtures for every consumed field and must-understand semantic variant.
 
 - Use fixed-width integers, explicit byte order, versioning, lengths, and checksums in OnePage-owned
   binary durable, cross-process, and network formats. Do not persist `usize`, native enums, pointers,
