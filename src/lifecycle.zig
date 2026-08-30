@@ -14,31 +14,55 @@ const session_store = @import("session.zig");
 const session_transition = @import("session_transition.zig");
 
 const agent_generation: u32 = 1;
-const production_active_capacity: usize = 1;
-const ProductionSlotPool = core_image.SlotPool(production_active_capacity);
 
 comptime {
     std.debug.assert(model_contract.max_patch_input_bytes == patch_tool.max_patch_size);
 }
 
-/// Process-owned bounded activation capacity. Construct this once at host
+/// Process-owned bounded activation capacity. Construct this once at Host
 /// startup and pass it through every agent lifecycle entry point.
-fn HostWithCapacity(comptime active_capacity: usize) type {
-    return struct {
-        slots: core_image.SlotPool(active_capacity) = .{},
-        semantic_validation: SemanticValidationWorkspacePool = .{},
-        patch_workspace: PatchWorkspacePool = .{},
+pub const Host = struct {
+    allocator: std.mem.Allocator,
+    slots: core_image.RuntimeSlotPool,
+    semantic_validation: SemanticValidationWorkspacePool = .{},
+    patch_workspace: PatchWorkspacePool = .{},
 
-        pub fn resourceLedger(self: *const @This()) HostResourceLedger {
-            return .{
-                .semantic_validation = self.semantic_validation.measurements(),
-                .patch_workspace = self.patch_workspace.measurements(),
-            };
-        }
-    };
-}
+    pub fn init(allocator: std.mem.Allocator, active_capacity: usize) !Host {
+        return .{
+            .allocator = allocator,
+            .slots = try core_image.RuntimeSlotPool.init(allocator, active_capacity),
+        };
+    }
 
-pub const Host = HostWithCapacity(production_active_capacity);
+    pub fn deinit(self: *Host) void {
+        self.slots.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn resourceLedger(self: *const Host) HostResourceLedger {
+        return .{
+            .activation = .{
+                .capacity = self.slots.capacity(),
+                .slot_bytes = @sizeOf(core_image.ActivationSlot),
+                .slot_reservation_bytes = self.slots.residentBytes(),
+                .pool_overhead_bytes = self.slots.hostOverheadBytes(),
+                .occupied_bytes = self.slots.occupiedBytes(),
+                .occupied_high_water_bytes = self.slots.occupiedHighWaterBytes(),
+            },
+            .semantic_validation = self.semantic_validation.measurements(),
+            .patch_workspace = self.patch_workspace.measurements(),
+        };
+    }
+};
+
+pub const ActivationResourceLedger = struct {
+    capacity: usize,
+    slot_bytes: usize,
+    slot_reservation_bytes: usize,
+    pool_overhead_bytes: usize,
+    occupied_bytes: usize,
+    occupied_high_water_bytes: usize,
+};
 
 pub const SemanticValidationResourceLedger = struct {
     multiplier: usize,
@@ -75,6 +99,7 @@ pub const PatchWorkspaceResourceLedger = struct {
 };
 
 pub const HostResourceLedger = struct {
+    activation: ActivationResourceLedger,
     semantic_validation: SemanticValidationResourceLedger,
     patch_workspace: PatchWorkspaceResourceLedger,
 };
@@ -451,7 +476,7 @@ const Core = struct {
     encoded_state: [core_state.encoded_size]u8 = undefined,
     active: bool = false,
 
-    fn open(pool: *ProductionSlotPool) !Core {
+    fn open(pool: *core_image.RuntimeSlotPool) !Core {
         const lease = try pool.borrow();
         return .{ .lease = lease, .slot = lease.slot };
     }
@@ -3230,7 +3255,8 @@ test "committed typed child descriptors select execution without captured output
 }
 
 test "generic tool and input dispositions cannot bypass the closed Action mapping" {
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
     var core = try Core.open(&host.slots);
     defer core.close();
     try core.initialize(1);
@@ -3333,7 +3359,8 @@ test "model dispatch releases Core and rejects substituted request bytes" {
     });
     defer session.close();
 
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
     const SlotProbeProvider = struct {
         host: *Host,
         observed_released_slot: bool = false,
@@ -3501,30 +3528,32 @@ fn expectPatchArgumentBoundary(
 }
 
 test "Host owns one semantic validation workspace independent of Activation Slot capacity" {
-    var host: Host = .{};
-    const HostFour = HostWithCapacity(4);
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
+    var host_four = try Host.init(std.testing.allocator, 4);
+    defer host_four.deinit();
     try std.testing.expectEqual(@as(usize, 256_200), semantic_validation_workspace_size);
     try std.testing.expectEqual(@as(usize, 256_224), @sizeOf(SemanticValidationWorkspacePool));
     try std.testing.expectEqual(@as(usize, 16_384), @sizeOf(PatchWorkspace));
     try std.testing.expectEqual(@as(usize, 16_408), @sizeOf(PatchWorkspacePool));
-    try std.testing.expectEqual(@as(usize, 281_008), @sizeOf(Host));
-    try std.testing.expectEqual(@as(usize, 306_112), @sizeOf(HostFour));
-    try std.testing.expectEqual(@as(usize, 8_360), @sizeOf(core_image.ActivationSlot));
+    try std.testing.expectEqual(@sizeOf(core_state.State), @sizeOf(core_image.ActivationSlot));
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
         @sizeOf(@TypeOf(host.semantic_validation)),
     );
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
-        @sizeOf(@TypeOf(@as(HostFour, .{}).semantic_validation)),
+        @sizeOf(@TypeOf(host_four.semantic_validation)),
     );
     try std.testing.expectEqual(
         @sizeOf(PatchWorkspacePool),
         @sizeOf(@TypeOf(host.patch_workspace)),
     );
+    try std.testing.expectEqual(@as(usize, 1), host.slots.capacity());
+    try std.testing.expectEqual(@as(usize, 4), host_four.slots.capacity());
     try std.testing.expectEqual(
-        @sizeOf(ProductionSlotPool),
-        @offsetOf(Host, "semantic_validation"),
+        4 * host.slots.residentBytes(),
+        host_four.slots.residentBytes(),
     );
     var lease = try host.semantic_validation.borrow();
     @memset(std.mem.asBytes(lease.workspace), 0xa5);
@@ -3536,8 +3565,14 @@ test "Host owns one semantic validation workspace independent of Activation Slot
 }
 
 test "Host resource ledger measures each fixed scratch stage" {
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 3);
+    defer host.deinit();
     const initial = host.resourceLedger();
+    try std.testing.expectEqual(@as(usize, 3), initial.activation.capacity);
+    try std.testing.expectEqual(@sizeOf(core_image.ActivationSlot), initial.activation.slot_bytes);
+    try std.testing.expectEqual(3 * @sizeOf(core_image.ActivationSlot), initial.activation.slot_reservation_bytes);
+    try std.testing.expectEqual(@as(usize, 0), initial.activation.occupied_bytes);
+    try std.testing.expectEqual(@as(usize, 0), initial.activation.occupied_high_water_bytes);
     try std.testing.expectEqual(@as(usize, 1), initial.semantic_validation.multiplier);
     try std.testing.expectEqual(@as(usize, model_protocol.max_response_size), initial.semantic_validation.response_bytes);
     try std.testing.expectEqual(@sizeOf(model_operation.ToolDefinitionBuffer), initial.semantic_validation.tool_definition_bytes);
@@ -3603,7 +3638,8 @@ test "Host resource ledger measures each fixed scratch stage" {
 }
 
 test "shared patch workspace contends fail-fast without retaining semantic validation" {
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
     var patch = try host.patch_workspace.borrow();
     defer patch.release() catch unreachable;
     patch.workspace.patch[0] = 0xa5;
@@ -3623,7 +3659,8 @@ test "shared patch workspace contends fail-fast without retaining semantic valid
 }
 
 test "stale copied semantic validation lease cannot scrub a new borrower" {
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
     var original = try host.semantic_validation.borrow();
     var stale = original;
     try original.release();
@@ -3636,7 +3673,8 @@ test "stale copied semantic validation lease cannot scrub a new borrower" {
 }
 
 test "stale copied patch workspace lease cannot scrub a new borrower" {
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
     var original = try host.patch_workspace.borrow();
     var stale = original;
     try original.release();

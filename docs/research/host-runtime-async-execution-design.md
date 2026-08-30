@@ -252,10 +252,12 @@ not evidence. A production decision still requires the real SSE parser and
 durable sink to prove that bounded callbacks do not stall unrelated libcurl
 transfers.
 
-The current OnePage `ActivationSlot` is 8,360 bytes, so 100 Slots occupy about
-816 KiB before pool metadata. The measured Threaded executor topology already
-dominates Slot memory by an order of magnitude. Optimizing the Slot cannot
-solve a transport/thread multiplier.
+The production OnePage `ActivationSlot` is now the 168-byte decoded Core State,
+so 100 Slots reserve 16,800 bytes plus 832 bytes of measured pool metadata. The
+removed parser and transition arrays had no production readers or writers. This
+strengthens the original result: executor and transport topology dominate Slot
+memory by orders of magnitude, so Slot optimization cannot solve a
+transport/thread multiplier.
 
 A separate ReleaseSafe two-cell ownership prototype passed four focused tests:
 credit transfer across Harness/Attempt/closure owners, recovery of durable
@@ -464,7 +466,7 @@ index owned by issue #35.
 
 | Resource | Owner | Multiplier and maximum | Release boundary | Failure behavior |
 | --- | --- | --- | --- | --- |
-| Activation Slot | Host Runtime | Exactly `active_capacity`; current size 8,360 B each | End of every Harness owner quantum | Borrow failure is bounded `busy`; no overflow allocation. |
+| Activation Slot | Host Runtime | Exactly `active_capacity`; current size 168 B each | End of every Harness owner quantum | Borrow failure is bounded `busy`; no overflow allocation. |
 | Execution Cell and detached `AttemptIo` storage | Host Runtime | Exactly `active_capacity`; exact type size and live handle counts must be asserted and reported | Task release-stores its generation after closing `AttemptIo`; owner acquire-loads it before `closure_ready`; cell returns to `free` only after closure/control settlement | No overflow cell, unlocked draft writer, data race, or waiting-node allocation. |
 | Group task closure | Injected `Io.Threaded` | At most admitted/reserved executor tasks, itself bounded by Active Credits | Automatically when that task returns | Reservation failure occurs before Attempt commit. |
 | Native worker stack, alternate signal stack, and TLS | Injected `Io.Threaded`/OS | Worker high-water; ordinarily approaches simultaneous blocking work and may include nested `std.Io` tasks | Workers persist until process `Io.Threaded` deinit | Host must measure and report this retained high-water. |

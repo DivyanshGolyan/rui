@@ -29,14 +29,14 @@ exits. It never owns durable workflow state, a Session, provider, tool, permissi
 decision, and no evaluator remains resident while a Workflow Run is Blocked on Jobs.
 Workflow code cannot observe physical Job completion order: V1 supports deterministic joins through
 `Promise.all` and `Promise.allSettled` and does not expose `Promise.race` or `Promise.any`.
-The target architecture separates compact, canonically encoded Core State from transient
-Activation Slot scratch. Core State's encoded size is derived from `core_state.encoded_size` and is
-currently 176 bytes; authoritative semantic transactions
-carry it directly. Activation decodes that state into one Host-owned slot containing only named
-bounded scratch; V1 removes sizing filler and enforces a 32 KiB ceiling. Suspension scrubs the
-complete slot. A fixed Host-owned pool returns closed capacity instead of allocating a
-fallback slot. Native invariant traces check typed outcomes, rejection-state preservation, semantic
-observations, and canonical restoration rather than slot bytes. Complete Session semantics reconstruct
+The target architecture separates compact, canonically encoded Core State from its reusable native
+Activation Slot. Core State's encoded size is derived from `core_state.encoded_size` and is currently
+176 bytes; authoritative semantic transactions carry it directly. The native slot currently contains
+only the 168-byte decoded Core State. Stage-specific scratch belongs to the narrower Host stage that
+uses it rather than multiplying with Active Capacity. V1 removes sizing filler and enforces a 32 KiB
+ceiling. Suspension scrubs the complete slot. A startup-sized Host-owned pool returns closed capacity
+instead of allocating a fallback slot. Native invariant traces check typed outcomes, rejection-state
+preservation, semantic observations, and canonical restoration rather than slot bytes. Complete Session semantics reconstruct
 from one ordered Session Ledger inside a bounded host-wide SQLite Host Store.
 
 [`PRODUCT.md`](PRODUCT.md), [`ARCHITECTURE.md`](ARCHITECTURE.md),

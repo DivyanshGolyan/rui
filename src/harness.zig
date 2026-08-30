@@ -2,6 +2,7 @@ const std = @import("std");
 const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
 const blob_store = @import("blob_store.zig");
+const core_image = @import("core_image.zig");
 const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const conversation = @import("conversation.zig");
@@ -924,6 +925,31 @@ test "open retains no Activation Slot and offer transfers one bounded input" {
     try std.testing.expectEqual(@as(usize, 0), runtime.occupiedActivationBytes());
     try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
     try std.testing.expectEqual(OfferResult.full, owner.offer(.task));
+}
+
+test "Host Runtime reports its exact startup Slot reservation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}",
+        .{tmp.sub_path},
+    );
+    const runtime = try HostRuntime.open(
+        std.testing.io,
+        std.testing.allocator,
+        path,
+        .{ .active_capacity = 4 },
+    );
+    defer runtime.close() catch unreachable;
+    try std.testing.expectEqual(@as(usize, 4), runtime.activeCapacity());
+    try std.testing.expectEqual(
+        4 * @sizeOf(core_image.ActivationSlot),
+        runtime.reservedActivationBytes(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), runtime.occupiedActivationBytes());
+    try std.testing.expectEqual(@as(usize, 0), runtime.occupiedActivationHighWaterBytes());
 }
 
 test "one process owns one SQLite Host Runtime budget" {

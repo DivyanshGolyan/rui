@@ -5,9 +5,12 @@ const model_contract = @import("model_contract.zig");
 const session_store = @import("session.zig");
 
 pub const Config = struct {
+    active_capacity: usize = 1,
     sqlite_heap_limit_bytes: u64 = 8 * 1024 * 1024,
     storage: host_store.Config = .{},
 };
+
+pub const max_active_capacity: usize = 100;
 
 var runtime_open: std.atomic.Value(bool) = .init(false);
 
@@ -16,7 +19,7 @@ const State = struct {
     allocator: std.mem.Allocator,
     state_root: std.Io.Dir,
     storage: host_store.StorageOwner,
-    execution: lifecycle.Host = .{},
+    execution: lifecycle.Host,
     harness_owners: std.atomic.Value(usize) = .init(0),
 };
 
@@ -76,6 +79,9 @@ pub const HostRuntime = opaque {
         config: Config,
     ) !*HostRuntime {
         if (state_path.len == 0) return error.InvalidStatePath;
+        if (config.active_capacity == 0 or config.active_capacity > max_active_capacity) {
+            return error.InvalidActiveCapacity;
+        }
         try model_contract.validateBuiltinCatalog();
         if (runtime_open.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
             return error.HostRuntimeAlreadyOpen;
@@ -93,12 +99,15 @@ pub const HostRuntime = opaque {
         defer allocator.free(database_path);
         var storage = try host_store.StorageOwner.open(io, database_path, config.storage);
         errdefer storage.close();
+        var execution = try lifecycle.Host.init(allocator, config.active_capacity);
+        errdefer execution.deinit();
         const runtime = try allocator.create(State);
         runtime.* = .{
             .io = io,
             .allocator = allocator,
             .state_root = state_root,
             .storage = storage,
+            .execution = execution,
         };
         return @ptrCast(runtime);
     }
@@ -113,6 +122,7 @@ pub const HostRuntime = opaque {
             if (owners == closing) return error.HostRuntimeClosed;
             return error.HostRuntimeBusy;
         }
+        runtime.execution.deinit();
         runtime.storage.close();
         host_store.disableProcessHeapLimit();
         runtime.state_root.close(runtime.io);
@@ -123,6 +133,22 @@ pub const HostRuntime = opaque {
 
     pub fn occupiedActivationBytes(self: *const HostRuntime) usize {
         return state(self).execution.slots.occupiedBytes();
+    }
+
+    pub fn activeCapacity(self: *const HostRuntime) usize {
+        return state(self).execution.slots.capacity();
+    }
+
+    pub fn reservedActivationBytes(self: *const HostRuntime) usize {
+        return state(self).execution.slots.residentBytes();
+    }
+
+    pub fn occupiedActivationHighWaterBytes(self: *const HostRuntime) usize {
+        return state(self).execution.slots.occupiedHighWaterBytes();
+    }
+
+    pub fn activationPoolOverheadBytes(self: *const HostRuntime) usize {
+        return state(self).execution.slots.hostOverheadBytes();
     }
 };
 
@@ -153,4 +179,19 @@ fn releaseHarness(runtime: *HostRuntime) void {
 
 fn state(runtime: *const HostRuntime) *State {
     return @ptrCast(@alignCast(@constCast(runtime)));
+}
+
+test "invalid Active Capacity is rejected before Host resources are opened" {
+    try std.testing.expectError(
+        error.InvalidActiveCapacity,
+        HostRuntime.open(std.testing.io, std.testing.allocator, "unused-zero-capacity", .{
+            .active_capacity = 0,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidActiveCapacity,
+        HostRuntime.open(std.testing.io, std.testing.allocator, "unused-over-capacity", .{
+            .active_capacity = max_active_capacity + 1,
+        }),
+    );
 }
