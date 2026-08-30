@@ -9,6 +9,38 @@ const fixture_state_namespace = std.fmt.comptimePrint(
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const native_target = b.standardTargetOptions(.{});
+    const quickjs_release_safe = addQuickJsLibrary(
+        b,
+        "onepage-quickjs-release-safe",
+        native_target,
+        .ReleaseSafe,
+        null,
+    );
+    const quickjs_release_small = addQuickJsLibrary(
+        b,
+        "onepage-quickjs-release-small",
+        native_target,
+        .ReleaseSmall,
+        null,
+    );
+    const quickjs_primary = switch (optimize) {
+        .ReleaseSafe => quickjs_release_safe,
+        .ReleaseSmall => quickjs_release_small,
+        else => addQuickJsLibrary(
+            b,
+            b.fmt("onepage-quickjs-{s}", .{@tagName(optimize)}),
+            native_target,
+            optimize,
+            null,
+        ),
+    };
+    const quickjs_sanitize = addQuickJsLibrary(
+        b,
+        "onepage-quickjs-release-safe-sanitize",
+        native_target,
+        .ReleaseSafe,
+        .full,
+    );
 
     const cli = b.addExecutable(.{
         .name = "onepage",
@@ -31,11 +63,20 @@ pub fn build(b: *std.Build) void {
         "onepage-workflow-evaluator",
         native_target,
         optimize,
+        quickjs_primary,
     );
     b.installArtifact(workflow_evaluator);
 
     const test_step = b.step("test", "Run the deterministic product and storage tests");
-    addTestGraph(b, test_step, cli, workflow_evaluator, native_target, optimize);
+    addTestGraph(
+        b,
+        test_step,
+        cli,
+        workflow_evaluator,
+        native_target,
+        optimize,
+        quickjs_primary,
+    );
 
     const check_step = b.step(
         "check",
@@ -55,6 +96,7 @@ pub fn build(b: *std.Build) void {
         "onepage-workflow-evaluator-release-safe-check",
         native_target,
         .ReleaseSafe,
+        quickjs_release_safe,
     );
     addTestGraph(
         b,
@@ -63,6 +105,7 @@ pub fn build(b: *std.Build) void {
         release_safe_workflow_evaluator,
         native_target,
         .ReleaseSafe,
+        quickjs_release_safe,
     );
 
     const release_small_cli = addNativeExecutable(
@@ -78,6 +121,7 @@ pub fn build(b: *std.Build) void {
         "onepage-workflow-evaluator-release-small-check",
         native_target,
         .ReleaseSmall,
+        quickjs_release_small,
     );
     check_step.dependOn(&release_small_workflow_evaluator.step);
 
@@ -93,10 +137,9 @@ pub fn build(b: *std.Build) void {
             .sanitize_c = .full,
         }),
     });
-    configureQuickJs(b, workflow_sanitize_tests);
+    linkQuickJs(b, workflow_sanitize_tests, quickjs_sanitize);
     const run_workflow_sanitize = b.addRunArtifact(workflow_sanitize_tests);
     workflow_sanitize_step.dependOn(&run_workflow_sanitize.step);
-    check_step.dependOn(&run_workflow_sanitize.step);
 
     const workflow_leaks_step = b.step(
         "workflow-leaks",
@@ -110,12 +153,11 @@ pub fn build(b: *std.Build) void {
             native_target,
             .ReleaseSafe,
         );
-        configureQuickJs(b, workflow_leak_fixture);
+        linkQuickJs(b, workflow_leak_fixture, quickjs_release_safe);
         const run_workflow_leaks = b.addSystemCommand(&.{"sh"});
         run_workflow_leaks.addFileArg(b.path("src/workflow_evaluator_leak_check.sh"));
         run_workflow_leaks.addArtifactArg(workflow_leak_fixture);
         workflow_leaks_step.dependOn(&run_workflow_leaks.step);
-        check_step.dependOn(&run_workflow_leaks.step);
     }
 
     const workflow_fuzz = addNativeExecutable(
@@ -125,7 +167,7 @@ pub fn build(b: *std.Build) void {
         native_target,
         .ReleaseSafe,
     );
-    configureQuickJs(b, workflow_fuzz);
+    linkQuickJs(b, workflow_fuzz, quickjs_release_safe);
     const workflow_fuzz_step = b.step(
         "workflow-fuzz",
         "Run every deterministic evaluator mutation target",
@@ -150,7 +192,13 @@ pub fn build(b: *std.Build) void {
         target_step.dependOn(&run_target.step);
         workflow_fuzz_step.dependOn(&run_target.step);
     }
-    check_step.dependOn(workflow_fuzz_step);
+    const workflow_check_step = b.step(
+        "workflow-check",
+        "Run the heavyweight evaluator sanitizer, leak, and mutation gates",
+    );
+    workflow_check_step.dependOn(workflow_sanitize_step);
+    workflow_check_step.dependOn(workflow_leaks_step);
+    workflow_check_step.dependOn(workflow_fuzz_step);
 
     const fixture_answer_step = b.step(
         "fixture-answer",
@@ -279,6 +327,7 @@ fn addTestGraph(
     workflow_evaluator: *std.Build.Step.Compile,
     native_target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    quickjs: *std.Build.Step.Compile,
 ) void {
     const plain_test_roots = [_][]const u8{
         "src/binding.zig",
@@ -315,7 +364,7 @@ fn addTestGraph(
             .optimize = optimize,
         }),
     });
-    configureQuickJs(b, workflow_tests);
+    linkQuickJs(b, workflow_tests, quickjs);
     parent.dependOn(&b.addRunArtifact(workflow_tests).step);
 
     const workflow_parent_fixture = addNativeExecutable(
@@ -459,12 +508,21 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
 }
 
-fn configureQuickJs(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    const module = compile.root_module;
+fn addQuickJsLibrary(
+    b: *std.Build,
+    name: []const u8,
+    native_target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitize_c: ?std.zig.SanitizeC,
+) *std.Build.Step.Compile {
     const quickjs = b.dependency("quickjs_ng", .{});
+    const module = b.createModule(.{
+        .target = native_target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
     module.link_libc = true;
     module.addIncludePath(quickjs.path("."));
-    module.addIncludePath(b.path("src"));
     module.addCMacro("QUICKJS_NG_BUILD", "1");
     module.addCMacro("_GNU_SOURCE", "1");
     module.addCSourceFiles(.{
@@ -481,6 +539,22 @@ fn configureQuickJs(b: *std.Build, compile: *std.Build.Step.Compile) void {
             "-fvisibility=hidden",
         },
     });
+    return b.addLibrary(.{ .name = name, .root_module = module });
+}
+
+fn linkQuickJs(
+    b: *std.Build,
+    compile: *std.Build.Step.Compile,
+    quickjs_library: *std.Build.Step.Compile,
+) void {
+    const quickjs = b.dependency("quickjs_ng", .{});
+    const module = compile.root_module;
+    module.link_libc = true;
+    module.addIncludePath(quickjs.path("."));
+    module.addIncludePath(b.path("src"));
+    module.addCMacro("QUICKJS_NG_BUILD", "1");
+    module.addCMacro("_GNU_SOURCE", "1");
+    module.linkLibrary(quickjs_library);
 }
 
 fn addWorkflowEvaluator(
@@ -488,6 +562,7 @@ fn addWorkflowEvaluator(
     name: []const u8,
     native_target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    quickjs: *std.Build.Step.Compile,
 ) *std.Build.Step.Compile {
     const evaluator = b.addExecutable(.{
         .name = name,
@@ -497,7 +572,7 @@ fn addWorkflowEvaluator(
             .optimize = optimize,
         }),
     });
-    configureQuickJs(b, evaluator);
+    linkQuickJs(b, evaluator, quickjs);
     return evaluator;
 }
 

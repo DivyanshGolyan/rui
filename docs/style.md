@@ -241,6 +241,11 @@ for every development tool.
 the complete native test graph in `ReleaseSafe`, and compiles the native deliverables in
 `ReleaseSmall`.
 
+Changes to the Workflow Evaluator, its private protocol, QuickJS dependency, or evaluator build graph
+must additionally pass `zig build workflow-check`. That separate heavyweight gate owns the focused C
+undefined-behaviour sanitizer, supported-platform leak detector, and deterministic mutation/property
+targets; routine checks do not acquire those platform and runtime costs.
+
 Changes to dependencies, build logic, persisted formats, or CI bootstrap must also pass the canonical
 gate from a clean checkout with an empty cache. CI creates the cache layout explicitly and fetches the
 pinned dependency graph in a named step before it compiles source, so bootstrap and product failures

@@ -214,6 +214,9 @@ zig build test -Doptimize=ReleaseSafe
 zig build native-core -Doptimize=ReleaseSafe
 ```
 
+Changes to the disposable Workflow Evaluator or its QuickJS dependency must also run
+`zig build workflow-check`.
+
 `native-core` reports the current exact slot, the two fixed Host scratch-stage resource ledgers, compact Dormant
 Session state bytes, process RSS, and 32 randomized native invariant traces through canonical suspend and
 poisoned-slot restore.

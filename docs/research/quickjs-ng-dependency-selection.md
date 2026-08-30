@@ -74,5 +74,12 @@ ordinary Zig tests continue to use `std.testing.allocator` for Zig-owned leak de
 seeded cases twice: protocol and result mutations use truncation, multi-byte overwrite, deletion,
 insertion, and 32-bit length corruption; JavaScript-value and workflow targets generate bounded value
 and capability-call combinations. Every case must return a completely decodable bounded outcome and
-repeat byte-for-byte. This is a reproducible mutation/property harness for the canonical local gate,
-not coverage-guided fuzzing.
+repeat byte-for-byte. This is a reproducible mutation/property harness, not coverage-guided fuzzing.
+`zig build workflow-check` composes this harness with `workflow-sanitize` and, on supported macOS
+targets, `workflow-leaks`. It is the evaluator-specific CI gate and remains separate from the routine
+`zig build check` graph.
+
+For each target, optimization mode, and sanitizer configuration, the build compiles the four upstream
+QuickJS C sources once into a private static library. The evaluator executable, focused tests, mutation
+harness, and leak fixture link that artifact rather than independently recompiling the engine. The
+library remains private build machinery; it is not a public engine or provider abstraction.
