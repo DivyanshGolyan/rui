@@ -183,6 +183,9 @@ Every density and product run reports these categories separately:
 - for every new allocation topology, the recorded design decision naming its owner, multiplier,
   maximum and ordinary occupancy, release boundary, failure behavior, and rejected reuse or sharing
   alternatives;
+- for every large value path, the semantic, compatibility, work, storage, and resident-memory bounds;
+  the live representation at each stage; and any interval in which two complete representations
+  coexist;
 - actual Activation Slot size and production-used components, exact configured reservation, and occupied high-water bytes;
 - native executor stack and thread count;
 - live Harness ingress, Completion, adapter-record, and recovery buffers; allocator bytes before and after repeated open/close cycles;
@@ -223,6 +226,9 @@ Before the V1 demonstration is considered credible:
 - both Permission Modes exercise the same validation, Session Ledger, Attempt, and recovery paths;
 - large model and tool outputs remain bounded in resident memory and complete on disk; no provider
   call allocates its maximum legal wire-event size merely to frame or parse that event;
+- workflow visibility, Run snapshots, Markdown rendering, Bash output, patches, provider capture, and
+  evaluator bridges retain no overlapping complete representations without a recorded and measured
+  necessity;
 - Captured Model Output remains non-authoritative until one shared semantic-admission workspace commits its Result or typed failure; provider waits retain no validation scratch, and matching admitted JSON is not parsed and reserialized by later readers;
 - a burst completing every Active Credit cannot starve semantic admission, require another credit, or cause model redispatch;
 - repeated Harness open and consuming close under one Host Runtime leaves no allocation proportional to historical handle count;
