@@ -43,9 +43,9 @@ validates duplicate-free closed protocol objects before any JavaScript executes;
 the evaluator and does not multiply by Job count. The interrupt handler reports a typed resource outcome after
 one second of process CPU time, with a two-second kernel limit as the non-cooperative backstop. It also
 enforces a five-second monotonic evaluation deadline; the parent uses a later outer deadline and
-treats timeout, distinct input/output overflow, CPU-limit termination, crash, external kill, stop,
-unknown termination, nonzero exit, or oversized diagnostics as separate failures rather than trusting
-child bytes or inferring that every `SIGKILL` was a resource limit.
+treats timeout, distinct input/output overflow, and observed CPU-limit termination separately. Every
+other signal, stop, unknown termination, or nonzero exit becomes one closed abnormal-child failure;
+the parent neither trusts child bytes nor infers that every `SIGKILL` was a resource limit.
 
 The parent supplies an empty environment and only pipe-backed standard input, output, and error. The
 trusted child bootstrap closes every inherited descriptor above standard error before reading the
@@ -67,3 +67,12 @@ AddressSanitizer build mode for this mixed Zig/C target, so the V1 gate does not
 On the supported macOS target, `zig build workflow-leaks` runs 64 complete evaluator
 construction/destruction cycles under `/usr/bin/leaks` and requires zero leaked allocations. The
 ordinary Zig tests continue to use `std.testing.allocator` for Zig-owned leak detection.
+
+`zig build workflow-fuzz` runs four deterministic focused targets, each also independently available as
+`workflow-fuzz-protocol-decoder`, `workflow-fuzz-js-value-encoder`,
+`workflow-fuzz-result-decoder`, and `workflow-fuzz-workflow-capability`. Together they run 1,536
+seeded cases twice: protocol and result mutations use truncation, multi-byte overwrite, deletion,
+insertion, and 32-bit length corruption; JavaScript-value and workflow targets generate bounded value
+and capability-call combinations. Every case must return a completely decodable bounded outcome and
+repeat byte-for-byte. This is a reproducible mutation/property harness for the canonical local gate,
+not coverage-guided fuzzing.

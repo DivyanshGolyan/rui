@@ -12,11 +12,7 @@ pub const RunError = error{
     OutputFrameExceeded,
     DiagnosticExceeded,
     CpuLimitExceeded,
-    ChildCrashed,
-    ChildKilled,
-    ChildStopped,
-    UnknownTermination,
-    AbnormalExit,
+    AbnormalChild,
 } || std.process.SpawnError || std.process.Child.WaitError || std.Io.File.Writer.Error ||
     std.Io.File.Reader.Error || std.Io.Cancelable || std.Io.ConcurrentError || std.posix.KillError;
 
@@ -93,15 +89,12 @@ pub fn run(
     if (timed_out) return error.DeadlineExceeded;
     if (input_write_error) |err| return err;
     switch (term) {
-        .exited => |code| if (code != 0) return error.AbnormalExit,
+        .exited => |code| if (code != 0) return error.AbnormalChild,
         .signal => |signal| switch (signal) {
             .XCPU => return error.CpuLimitExceeded,
-            .KILL, .TERM, .INT, .HUP => return error.ChildKilled,
-            .ABRT, .SEGV, .BUS, .ILL, .FPE, .TRAP => return error.ChildCrashed,
-            else => return error.ChildKilled,
+            else => return error.AbnormalChild,
         },
-        .stopped => return error.ChildStopped,
-        .unknown => return error.UnknownTermination,
+        .stopped, .unknown => return error.AbnormalChild,
     }
     return .{
         .output = output_storage[0..stdout_result.length],

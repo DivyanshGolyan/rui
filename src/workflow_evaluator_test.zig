@@ -75,30 +75,6 @@ fn expectSimpleOutcome(source: []const u8, expected: protocol.OutcomeTag, expect
     try cursor.finish();
 }
 
-fn expectMutatedFramesTyped(valid: []const u8, output: []u8, bridge: []u8) !void {
-    const mutated = try std.testing.allocator.alloc(u8, valid.len);
-    defer std.testing.allocator.free(mutated);
-    for (0..valid.len) |mutation_index| {
-        @memcpy(mutated, valid);
-        mutated[mutation_index] ^= @as(u8, 1) << @intCast(mutation_index % 8);
-        const result = evaluator.evaluate(mutated, output, bridge);
-        try std.testing.expect(result.len <= output.len);
-        var cursor = protocol.Cursor.init(result);
-        try protocol.readHeader(&cursor, protocol.outcome_magic);
-        const tag = std.enums.fromInt(protocol.OutcomeTag, try cursor.readByte()) orelse
-            return error.InvalidOutcomeTag;
-        switch (tag) {
-            .completed => _ = try cursor.skipValue(protocol.Limits.workflow_output_bytes),
-            .blocked => {
-                const count = try cursor.readInt(u16);
-                for (0..count) |_| _ = try cursor.readLengthBytes(protocol.Limits.output_frame_bytes);
-            },
-            else => _ = try cursor.readString(protocol.Limits.diagnostic_bytes),
-        }
-        try cursor.finish();
-    }
-}
-
 test "standard async default export completes with strict data" {
     const bridge = try std.testing.allocator.alloc(u8, protocol.Limits.bridge_arena_bytes);
     defer std.testing.allocator.free(bridge);
@@ -584,62 +560,6 @@ test "repeated construction and teardown retains no evaluator state" {
             bridge,
         );
         try std.testing.expectEqual(@intFromEnum(protocol.OutcomeTag.completed), try cursor.readByte());
-    }
-}
-
-test "private protocol mutation smoke covers bridge inputs and agent conversion" {
-    var nested_storage: [128]u8 = undefined;
-    var nested = protocol.Builder.init(&nested_storage);
-    try nested.writeByte(@intFromEnum(protocol.DataTag.object));
-    try nested.writeInt(u32, 1);
-    try nested.writeString("items");
-    try nested.writeByte(@intFromEnum(protocol.DataTag.array));
-    try nested.writeInt(u32, 2);
-    try nested.writeByte(@intFromEnum(protocol.DataTag.true_value));
-    try nested.writeByte(@intFromEnum(protocol.DataTag.string));
-    try nested.writeString("value");
-
-    var nested_input_storage: [1024]u8 = undefined;
-    const nested_input = try request(
-        "export default async function workflow(_, args) { return args; }",
-        nested.written(),
-        &.{},
-        &nested_input_storage,
-    );
-    var visible_input_storage: [1024]u8 = undefined;
-    const visible_input = try request(
-        "export default async function workflow({ agent }) { return await agent({ key: 'visible', task: 'work', input: { nested: true } }); }",
-        &.{@intFromEnum(protocol.DataTag.null_value)},
-        &.{.{ .key = "visible", .tag = .output, .payload = nested.written() }},
-        &visible_input_storage,
-    );
-    var failure_input_storage: [1024]u8 = undefined;
-    const failure_input = try request(
-        "export default async function workflow({ agent }) { const result = await Promise.allSettled([agent({ key: 'failed', task: 'work' })]); return result[0].reason.code; }",
-        &.{@intFromEnum(protocol.DataTag.null_value)},
-        &.{.{ .key = "failed", .tag = .failure, .payload = "JobFailed" }},
-        &failure_input_storage,
-    );
-    var blocked_input_storage: [1024]u8 = undefined;
-    const blocked_input = try request(
-        "export default async function workflow({ agent }) { return await agent({ key: 'blocked', task: 'work', schema: { type: 'object' } }); }",
-        &.{@intFromEnum(protocol.DataTag.null_value)},
-        &.{},
-        &blocked_input_storage,
-    );
-
-    const output = try std.testing.allocator.alloc(u8, protocol.Limits.output_frame_bytes);
-    defer std.testing.allocator.free(output);
-    const bridge = try std.testing.allocator.alloc(u8, protocol.Limits.bridge_arena_bytes);
-    defer std.testing.allocator.free(bridge);
-    const corpus = [_][]const u8{
-        nested_input,
-        visible_input,
-        failure_input,
-        blocked_input,
-    };
-    for (corpus) |valid| {
-        try expectMutatedFramesTyped(valid, output, bridge);
     }
 }
 

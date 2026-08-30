@@ -118,6 +118,40 @@ pub fn build(b: *std.Build) void {
         check_step.dependOn(&run_workflow_leaks.step);
     }
 
+    const workflow_fuzz = addNativeExecutable(
+        b,
+        "onepage-workflow-evaluator-fuzz",
+        "src/workflow_evaluator_fuzz.zig",
+        native_target,
+        .ReleaseSafe,
+    );
+    configureQuickJs(b, workflow_fuzz);
+    const workflow_fuzz_step = b.step(
+        "workflow-fuzz",
+        "Run every deterministic evaluator mutation target",
+    );
+    const fuzz_targets = [_]struct {
+        argument: []const u8,
+        step_name: []const u8,
+        description: []const u8,
+    }{
+        .{ .argument = "protocol_decoder", .step_name = "protocol-decoder", .description = "Mutate private evaluator protocol frames" },
+        .{ .argument = "js_value_encoder", .step_name = "js-value-encoder", .description = "Generate strict and rejected JavaScript values" },
+        .{ .argument = "result_decoder", .step_name = "result-decoder", .description = "Mutate visible Job Result values" },
+        .{ .argument = "workflow_capability", .step_name = "workflow-capability", .description = "Generate workflow and agent capability sequences" },
+    };
+    for (fuzz_targets) |target| {
+        const target_step = b.step(
+            b.fmt("workflow-fuzz-{s}", .{target.step_name}),
+            target.description,
+        );
+        const run_target = b.addRunArtifact(workflow_fuzz);
+        run_target.addArg(target.argument);
+        target_step.dependOn(&run_target.step);
+        workflow_fuzz_step.dependOn(&run_target.step);
+    }
+    check_step.dependOn(workflow_fuzz_step);
+
     const fixture_answer_step = b.step(
         "fixture-answer",
         "Run one durable fixture-model operation and print its Final Answer",

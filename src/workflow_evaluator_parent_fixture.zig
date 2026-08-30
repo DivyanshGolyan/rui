@@ -76,17 +76,17 @@ pub fn main(init: std.process.Init) !void {
         output,
         1_000,
     ) catch |err| switch (err) {
-        error.AbnormalExit => {
+        error.AbnormalChild => {
             abnormal_classified = true;
         },
         else => return err,
     };
-    if (!abnormal_classified) return error.AbnormalExitWasTrusted;
+    if (!abnormal_classified) return error.AbnormalChildWasTrusted;
 
     const terminations = [_]struct { input: u8, expected: anyerror }{
         .{ .input = 0xfc, .expected = error.CpuLimitExceeded },
-        .{ .input = 0xfd, .expected = error.ChildCrashed },
-        .{ .input = 0xfe, .expected = error.ChildKilled },
+        .{ .input = 0xfd, .expected = error.AbnormalChild },
+        .{ .input = 0xfe, .expected = error.AbnormalChild },
     };
     for (terminations) |termination| {
         var classified = false;

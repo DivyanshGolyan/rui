@@ -755,6 +755,12 @@ workflow source + capability call sequences
 
 The most valuable downstream fuzz target is not generic ECMAScript parsing alone. It is the interaction between arbitrary JavaScript objects and OnePage’s native `agent()` conversion logic.
 
+V1 implementation note: the canonical local gate implements these as four independently runnable,
+seeded mutation/property targets rather than claiming a coverage-guided runner. Protocol and result
+targets apply truncation, multi-byte overwrite, deletion, insertion, and word corruption. The other
+targets generate strict and rejected JavaScript values plus bounded workflow/capability sequences.
+Each case must return a closed bounded outcome and repeat byte-for-byte.
+
 #### OOM and ownership fault injection
 
 QuickJS uses explicit reference counting and requires the embedder to check exceptions and correctly duplicate or free every retained `JSValue`. The official embedding guide calls out these ownership and exception rules.
@@ -787,7 +793,8 @@ A credible minimum policy is:
 - review every release for untrusted-source, memory-safety, interrupt, parser, Promise, and embedding changes;
 - critical applicable fixes block new releases;
 - if an applicable high-impact issue cannot be patched promptly, disable workflow execution while keeping the single-agent client available;
-- rerun the complete corpus, sanitizer, fuzz-smoke, memory, and replay suite before each engine bump.
+- rerun the complete corpus, sanitizer, deterministic mutation/property, memory, and replay suite
+  before each engine bump.
 
 Do not auto-upgrade QuickJS in an existing durable run.
 

@@ -85,18 +85,12 @@ const Evaluation = struct {
                 return error.InvalidTag;
             const payload = switch (tag) {
                 .output => output: {
+                    const remaining = protocol.Limits.visible_output_bytes - visible_output_bytes;
                     const value = try cursor.skipValueExact(
-                        protocol.Limits.visible_output_bytes,
+                        remaining,
                         key_storage,
                     );
-                    visible_output_bytes = std.math.add(
-                        usize,
-                        visible_output_bytes,
-                        value.len,
-                    ) catch return error.ExcessiveBytes;
-                    if (visible_output_bytes > protocol.Limits.visible_output_bytes) {
-                        return error.ExcessiveBytes;
-                    }
+                    visible_output_bytes += value.len;
                     break :output value;
                 },
                 .failure => failure: {
@@ -250,8 +244,7 @@ fn evaluateParsed(state: *Evaluation, builder: *protocol.Builder) []const u8 {
     }
 
     var argument_cursor = protocol.Cursor.init(state.arguments);
-    var argument_budget = EntryBudget{};
-    const arguments = decodeData(context, &argument_cursor, 0, &argument_budget) catch |err| {
+    const arguments = decodeData(context, &argument_cursor, 0) catch |err| {
         discardException(context);
         return switch (err) {
             error.OutOfMemory => writeSimpleOutcome(
@@ -548,8 +541,7 @@ fn promiseForVisible(context: *qjs.JSContext, state: *Evaluation, key: []const u
     return switch (visible.tag) {
         .output => output: {
             var cursor = protocol.Cursor.init(visible.payload);
-            var output_budget = EntryBudget{};
-            const value = decodeData(context, &cursor, 0, &output_budget) catch {
+            const value = decodeData(context, &cursor, 0) catch {
                 state.resource_code = "EngineMemoryOrStack";
                 return qjs.JS_ThrowOutOfMemory(context);
             };
@@ -742,7 +734,6 @@ fn decodeData(
     context: *qjs.JSContext,
     cursor: *protocol.Cursor,
     depth: usize,
-    budget: *EntryBudget,
 ) !qjs.JSValue {
     if (depth > protocol.Limits.data_depth) return error.ExcessiveDepth;
     const tag = std.enums.fromInt(protocol.DataTag, try cursor.readByte()) orelse return error.InvalidTag;
@@ -764,25 +755,23 @@ fn decodeData(
         },
         .array => array: {
             const count = try cursor.readInt(u32);
-            try budget.add(count);
             const result = qjs.JS_NewArray(context);
             if (qjs.JS_IsException(result)) return error.OutOfMemory;
             errdefer qjs.JS_FreeValue(context, result);
             for (0..count) |index| {
-                const item = try decodeData(context, cursor, depth + 1, budget);
+                const item = try decodeData(context, cursor, depth + 1);
                 if (qjs.JS_SetPropertyUint32(context, result, @intCast(index), item) < 0) return error.OutOfMemory;
             }
             break :array result;
         },
         .object => object: {
             const count = try cursor.readInt(u32);
-            try budget.add(count);
             const result = qjs.JS_NewObject(context);
             if (qjs.JS_IsException(result)) return error.OutOfMemory;
             errdefer qjs.JS_FreeValue(context, result);
             for (0..count) |_| {
                 const key = try cursor.readString(protocol.Limits.output_frame_bytes);
-                const item = try decodeData(context, cursor, depth + 1, budget);
+                const item = try decodeData(context, cursor, depth + 1);
                 const atom = qjs.JS_NewAtomLen(context, key.ptr, key.len);
                 if (atom == qjs.JS_ATOM_NULL) {
                     qjs.JS_FreeValue(context, item);
