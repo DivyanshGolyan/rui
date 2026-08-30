@@ -14,6 +14,15 @@ set -e
 test "$crash_status" -eq 86
 test "$($fixture recover-sealed-model "$root/sealed-orphan/state" "$sealed_orphan_session")" = finished
 
+mkdir -p "$root/published-completion/state" "$root/published-completion/repo"
+git -C "$root/published-completion/repo" init -q
+set +e
+published_session=$($fixture crash-published-model "$root/published-completion/state" "$root/published-completion/repo")
+completion_crash_status=$?
+set -e
+test "$completion_crash_status" -eq 87
+test "$($fixture recover-published-model "$root/published-completion/state" "$published_session")" = finished
+
 mkdir -p "$root/model/state" "$root/model/repo"
 git -C "$root/model/repo" init -q
 model_session=$($fixture start-model "$root/model/state" "$root/model/repo")

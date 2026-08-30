@@ -13,6 +13,7 @@ const session_transition = @import("session_transition.zig");
 const task = "Recover one deterministic external effect.";
 const answer = "Recovered with a new model Attempt.";
 const crash_exit_status: u8 = 86;
+const completion_crash_exit_status: u8 = 87;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
@@ -28,6 +29,10 @@ pub fn main(init: std.process.Init) !void {
         try crashSealedModel(init.io, runtime, args[3]);
     } else if (std.mem.eql(u8, mode, "recover-sealed-model")) {
         try recoverSealedModel(init.io, runtime, try parseCrashIdentity(args[3]));
+    } else if (std.mem.eql(u8, mode, "crash-published-model")) {
+        try crashPublishedModel(init.io, runtime, args[3]);
+    } else if (std.mem.eql(u8, mode, "recover-published-model")) {
+        try recoverPublishedModel(init.io, runtime, try parseSessionId(args[3]));
     } else if (std.mem.eql(u8, mode, "retry-model")) {
         try retryModel(init.io, runtime, try parseSessionId(args[3]));
     } else if (std.mem.eql(u8, mode, "finish-model")) {
@@ -122,6 +127,114 @@ fn recoverSealedModel(io: std.Io, runtime: *harness.HostRuntime, identity: Crash
         if (fixture.calls != 1) return error.ModelAttemptNotDispatched;
         owner.close();
         try expectModelAttempts(runtime, session_id, 2);
+        try std.Io.File.stdout().writeStreamingAll(io, "finished\n");
+        return;
+    }
+    return error.SessionDidNotFinish;
+}
+
+fn crashPublishedModel(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !void {
+    var fixture: deterministic_provider.Fixture = .{
+        .expected_task = task,
+        .final_answer = "published exact answer",
+    };
+    var crash: CompletionProcessCrash = .{ .io = io };
+    var owner = try harness.Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = workspace,
+            .model_binding = .{ .model = "fixture:published-capture", .provider = fixture.provider() },
+            .task = task,
+            .fault = crash.hook(),
+        } },
+    });
+    defer owner.close();
+    const identity = try owner.drive();
+    crash.session_id = try sessionProjection(&identity);
+    if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+    for (0..48) |_| _ = try owner.drive();
+    return error.CrashBoundaryNotReached;
+}
+
+fn recoverPublishedModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
+    const RejectingProvider = struct {
+        calls: u8 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            _: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return error.UnexpectedProviderRedispatch;
+        }
+    };
+    {
+        const CapturedCompletion = struct {
+            envelope: ?completion_inbox.Envelope = null,
+
+            fn apply(context: *anyopaque, envelope: completion_inbox.Envelope) !void {
+                const self: *@This() = @ptrCast(@alignCast(context));
+                if (self.envelope != null) return error.UnexpectedCompletionCount;
+                self.envelope = envelope;
+            }
+        };
+        var lease = try host_runtime.Lease.acquire(runtime);
+        defer lease.release();
+        var restored = try lease.restoreSession(session_id);
+        defer restored.session.close();
+        while ((try lease.recoverSemanticWindow(&restored.session, 32)).more) {}
+        var capture: CapturedCompletion = .{};
+        if (try restored.session.scanCompletionEvidence(&capture, CapturedCompletion.apply) != 1) {
+            return error.CommittedCompletionMissing;
+        }
+        const envelope = capture.envelope orelse return error.CommittedCompletionMissing;
+        var bytes: [model_protocol.max_response_size]u8 = undefined;
+        var expected_bytes: [model_protocol.max_response_size]u8 = undefined;
+        if (!std.mem.eql(
+            u8,
+            try restored.session.readBlob(envelope.result_ref, 0, &bytes),
+            try model_protocol.encodeText(&expected_bytes, "published exact answer"),
+        )) return error.PublishedCaptureChanged;
+    }
+    var provider: RejectingProvider = .{};
+    var owner = try harness.Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .model_binding = .{
+                .model = "fixture:published-capture",
+                .provider = provider.provider(),
+            },
+        } },
+    });
+    defer owner.close();
+    for (0..48) |_| {
+        const progress = try owner.drive();
+        if (progress.state != .finished) continue;
+        if (provider.calls != 0) return error.ProviderRedispatched;
+        var found = false;
+        for (progress.projectionSlice()) |projection| {
+            if (projection.kind != .final_answer) continue;
+            var reader = try owner.openProjectionContent(projection);
+            var bytes: [64]u8 = undefined;
+            const content = try reader.readWindow(0, &bytes);
+            reader.close();
+            if (!std.mem.eql(
+                u8,
+                content,
+                "published exact answer",
+            )) return error.PublishedAnswerChanged;
+            found = true;
+        }
+        if (!found) return error.FinalAnswerProjectionMissing;
+        owner.close();
+        try expectModelAttempts(runtime, session_id, 1);
         try std.Io.File.stdout().writeStreamingAll(io, "finished\n");
         return;
     }
@@ -448,6 +561,22 @@ const ProcessCrash = struct {
     }
 
     fn hook(self: *ProcessCrash) harness.FaultHook {
+        return .{ .context = self, .reached = reached };
+    }
+};
+
+const CompletionProcessCrash = struct {
+    io: std.Io,
+    session_id: u64 = 0,
+
+    fn reached(context: *anyopaque, boundary: harness.FaultBoundary) anyerror!void {
+        if (boundary != .after_completion_inbox) return;
+        const self: *CompletionProcessCrash = @ptrCast(@alignCast(context));
+        writeSessionId(self.io, self.session_id) catch std.process.exit(completion_crash_exit_status + 1);
+        std.process.exit(completion_crash_exit_status);
+    }
+
+    fn hook(self: *CompletionProcessCrash) harness.FaultHook {
         return .{ .context = self, .reached = reached };
     }
 };

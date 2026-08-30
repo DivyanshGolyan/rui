@@ -1,6 +1,7 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
+const blob_store = @import("blob_store.zig");
 const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const conversation = @import("conversation.zig");
@@ -1385,7 +1386,7 @@ test "known provider failure is one durable terminal Result" {
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }
 
-test "committed model Completion admits exact bytes after crash without redispatch" {
+test "injected post-Completion interruption preserves exact bytes without redispatch" {
     const exact_arguments = "{ \"timeout_ms\" : 1000, \"command\" : \"true\" }";
     const ToolProvider = struct {
         calls: u8 = 0,
@@ -1594,6 +1595,30 @@ test "failure replacement seal storage error remains a Host failure" {
     };
     var context: u8 = 0;
     const session = provider.session.?;
+    var drafts = try session.dir.openDir(session.io, "blobs/.drafts", .{ .iterate = true });
+    defer drafts.close(session.io);
+    var iterator = drafts.iterate();
+    var draft_count: u8 = 0;
+    while (try iterator.next(session.io)) |entry| {
+        try std.testing.expect(entry.kind == .file);
+        draft_count += 1;
+        var file = try drafts.openFile(session.io, entry.name, .{});
+        const stat = try file.stat(session.io);
+        try std.testing.expectEqual(
+            @as(u64, blob_store.header_size + model_protocol.header_size),
+            stat.size,
+        );
+        var header: [blob_store.header_size]u8 = undefined;
+        try std.testing.expectEqual(
+            header.len,
+            try file.readPositionalAll(session.io, &header, 0),
+        );
+        file.close(session.io);
+        // A written header proves failure replacement reached BlobWriter.finish.
+        // Read-only destination permissions then reject only its final rename.
+        try std.testing.expectEqualStrings("ONEBLOB\x00", header[0..8]);
+    }
+    try std.testing.expectEqual(@as(u8, 1), draft_count);
     try std.testing.expectEqual(
         @as(u32, 0),
         try session.scanCompletionEvidence(&context, Ignore.apply),
