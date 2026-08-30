@@ -11,6 +11,7 @@ live_root=$(mktemp -d "${TMPDIR:-/tmp}/onepage-codex-live.XXXXXX")
 report_temp=
 onepage_pid=
 footprint_pid=
+capture_metrics_path="$live_root/codex-capture-metrics.json"
 
 terminate_child() {
   child_pid=$1
@@ -134,6 +135,7 @@ set +e
   --state "$live_root/state" \
   --repo "$repo_dir" \
   --model codex:gpt-5.6-sol \
+  --codex-capture-metrics "$capture_metrics_path" \
   --dangerously-bypass-permissions \
   "Run ./test.sh, diagnose the failure, change only status.txt so the test passes, run ./test.sh again, and finish with a concise summary." \
   > "$live_root/output.txt" 2>&1 &
@@ -188,6 +190,11 @@ if test "$transport_baseline_rss_bytes" -gt 0; then
 fi
 
 adapter_contract=$("$memory_contract_binary")
+if ! test -s "$capture_metrics_path"; then
+  printf 'Successful live run produced no Codex capture metrics.\n' >&2
+  exit 1
+fi
+capture_metrics=$(cat "$capture_metrics_path")
 for required_measurement in \
   "$peak_rss_bytes" \
   "$peak_phys_footprint_bytes" \
@@ -218,6 +225,7 @@ source_commit=$(git -C "$script_directory/.." rev-parse HEAD)
     printf '  "source_commit": "%s",\n' "$source_commit"
     printf '  "platform": {"os": "macOS", "version": "%s", "architecture": "%s", "model": "%s"},\n' "$os_version" "$architecture" "$machine_model"
     printf '  "adapter_contract": %s,\n' "$adapter_contract"
+    printf '  "capture_observation": %s,\n' "$capture_metrics"
     printf '  "process": {\n'
     printf '    "measurement_scope": "whole_onepage_process_not_transport_delta",\n'
     printf '    "sampling_interval_milliseconds": 200,\n'

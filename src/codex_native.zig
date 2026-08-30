@@ -809,7 +809,11 @@ test "NativeTransport sends the production request and stops at terminal SSE" {
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{ .candidate = provider_io.candidateCapability() };
+    var capture = codex_provider.Capture.init(
+        std.testing.allocator,
+        provider_io.candidateCapability(),
+    );
+    defer capture.deinit();
     const capability = transport.capability();
     const disposition = capability.perform_fn(
         capability.context,
@@ -847,7 +851,11 @@ test "NativeTransport rejects compressed response bytes before SSE capture" {
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{ .candidate = provider_io.candidateCapability() };
+    var capture = codex_provider.Capture.init(
+        std.testing.allocator,
+        provider_io.candidateCapability(),
+    );
+    defer capture.deinit();
     const capability = transport.capability();
     const result = try capability.perform_fn(
         capability.context,
@@ -883,7 +891,11 @@ test "NativeTransport classifies compressed HTTP rejection from status" {
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{ .candidate = provider_io.candidateCapability() };
+    var capture = codex_provider.Capture.init(
+        std.testing.allocator,
+        provider_io.candidateCapability(),
+    );
+    defer capture.deinit();
     const capability = transport.capability();
     const result = try capability.perform_fn(
         capability.context,
@@ -940,7 +952,8 @@ test "NativeTransport timeout bounds the entire call and closes an open response
         };
         var credential = fakeCredential();
         defer credential.scrub();
-        var capture: codex_provider.Capture = .{};
+        var capture = codex_provider.Capture.init(std.testing.allocator, null);
+        defer capture.deinit();
 
         const started = std.Io.Clock.awake.now(io);
         const capability = transport.capability();
@@ -1004,7 +1017,11 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{ .candidate = provider_io.candidateCapability() };
+    var capture = codex_provider.Capture.init(
+        std.testing.allocator,
+        provider_io.candidateCapability(),
+    );
+    defer capture.deinit();
     const capability = transport.capability();
     const disposition = try capability.perform_fn(
         capability.context,
@@ -1056,7 +1073,8 @@ test "NativeTransport classifies every received HTTP rejection without retry" {
         };
         var credential = fakeCredential();
         defer credential.scrub();
-        var capture: codex_provider.Capture = .{};
+        var capture = codex_provider.Capture.init(std.testing.allocator, null);
+        defer capture.deinit();
         var provider_io = try model_operation.ProviderIo.open(
             &wire.session,
             1200,
@@ -1100,7 +1118,8 @@ test "NativeTransport reads a chunked provider diagnostic after the response hea
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{};
+    var capture = codex_provider.Capture.init(std.testing.allocator, null);
+    defer capture.deinit();
     const capability = transport.capability();
     const disposition = try capability.perform_fn(
         capability.context,
@@ -1188,7 +1207,8 @@ fn expectUnsupportedModelWireCase(
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{};
+    var capture = codex_provider.Capture.init(std.testing.allocator, null);
+    defer capture.deinit();
     const capability = transport.capability();
     const disposition = try capability.perform_fn(
         capability.context,
@@ -1232,7 +1252,8 @@ test "NativeTransport keeps status without retaining oversized or malformed prov
         };
         var credential = fakeCredential();
         defer credential.scrub();
-        var capture: codex_provider.Capture = .{};
+        var capture = codex_provider.Capture.init(std.testing.allocator, null);
+        defer capture.deinit();
         var provider_io = try model_operation.ProviderIo.open(
             &wire.session,
             1400,

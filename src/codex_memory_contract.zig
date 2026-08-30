@@ -1,6 +1,7 @@
 const std = @import("std");
 const codex_native = @import("codex_native.zig");
 const codex_provider = @import("codex_provider.zig");
+const model_contract = @import("model_contract.zig");
 const model_operation = @import("model_operation.zig");
 const model_protocol = @import("model_protocol.zig");
 
@@ -24,8 +25,11 @@ pub fn main(init: std.process.Init) !void {
             "  \"diagnostic_body_limit_bytes\": {d},\n" ++
             "  \"diagnostic_transfer_window_bytes\": {d},\n" ++
             "  \"zig_https_connection_byte_buffer_floor_bytes\": {d},\n" ++
-            "  \"decoded_candidate_limit_bytes\": {d},\n" ++
-            "  \"sse_frame_limit_bytes\": {d},\n" ++
+            "  \"sse_projection_window_bytes\": {d},\n" ++
+            "  \"assistant_text_buffer_limit_bytes\": {d},\n" ++
+            "  \"tool_arguments_buffer_limit_bytes\": {d},\n" ++
+            "  \"decoded_buffers_allocate_to_actual_content\": true,\n" ++
+            "  \"sse_event_work_limit_bytes\": {d},\n" ++
             "  \"sse_stream_limit_bytes\": {d}\n" ++
             "}}\n",
         .{
@@ -39,8 +43,10 @@ pub fn main(init: std.process.Init) !void {
             codex_native.diagnostic_body_limit,
             codex_native.diagnostic_transfer_window_size,
             https_connection_byte_buffer_floor,
-            model_protocol.max_response_size,
-            codex_provider.max_sse_frame_size,
+            codex_provider.sse_projection_window_size,
+            model_protocol.max_assistant_text_size,
+            model_contract.max_tool_arguments_envelope_size,
+            codex_provider.max_sse_event_bytes,
             codex_provider.max_total_sse_bytes,
         },
     );

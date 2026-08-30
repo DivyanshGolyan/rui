@@ -28,6 +28,7 @@ pub const Failure = enum(u8) {
     timeout = 12,
     transport_not_started = 13,
     transport_may_have_started = 14,
+    unsupported_provider_output = 15,
 };
 
 pub const DiagnosticSource = enum(u8) {
