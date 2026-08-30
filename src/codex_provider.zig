@@ -1157,19 +1157,18 @@ pub const Capture = struct {
                 !self.event.response_status.validOptional())
             {
                 self.malformed = true;
-                return;
+                return self.captureTerminal(.malformed);
             }
             const status = (terminalStatus(
                 event_type,
                 if (self.event.response_status.seen) self.event.response_status.slice() else null,
             ) catch |err| switch (err) {
                 error.UnsupportedTerminalStatus => {
-                    self.candidate_failure = .unsupported_provider_output;
-                    return;
+                    return self.captureTerminal(.unsupported);
                 },
                 else => {
                     self.malformed = true;
-                    return;
+                    return self.captureTerminal(.malformed);
                 },
             }).?;
             return self.captureTerminal(status);
@@ -1334,6 +1333,8 @@ pub const Capture = struct {
             .incomplete => return failureOutcome(.truncated),
             .failed => return failureOutcome(.provider_error),
             .cancelled => return failureOutcome(.aborted),
+            .malformed => return failureOutcome(.malformed),
+            .unsupported => return failureOutcome(.unsupported_provider_output),
             .completed => {},
         }
         if (self.malformed) return failureOutcome(.malformed);
@@ -1347,7 +1348,15 @@ pub const Capture = struct {
     }
 };
 
-const TerminalStatus = enum { none, completed, incomplete, failed, cancelled };
+const TerminalStatus = enum {
+    none,
+    completed,
+    incomplete,
+    failed,
+    cancelled,
+    malformed,
+    unsupported,
+};
 
 fn terminalStatus(event_type: []const u8, response_status: ?[]const u8) !?TerminalStatus {
     const fallback: TerminalStatus = if (std.mem.eql(u8, event_type, "response.completed") or
@@ -2061,8 +2070,13 @@ test "terminal status agreement and first-terminal-wins are chunk independent" {
     try contradictory.appendSse(
         "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"completed\"}}\n\n",
     );
+    try std.testing.expect(contradictory.terminalObserved());
     contradictory.finishSse();
     try std.testing.expect(contradictory.malformed);
+    try std.testing.expectEqual(
+        model_protocol.Failure.malformed,
+        (try contradictory.publish()).failure.failure,
+    );
 
     var coalesced_output: TestCandidate = .{};
     var coalesced = coalesced_output.capture();
@@ -2295,17 +2309,18 @@ test "open provider envelopes ignore metadata and explicitly ignorable reasoning
 }
 
 test "unknown semantic variants are typed as unsupported provider output" {
-    const cases = [_][]const u8{
-        "data: {\"type\":\"future.lifecycle\"}\n\n",
-        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"hosted_tool_call\"}}\n\n",
-        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_content\",\"text\":\"x\"}]}}\n\n",
-        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"future_terminal\"}}\n\n",
+    const cases = [_]struct { event: []const u8, terminal: bool }{
+        .{ .event = "data: {\"type\":\"future.lifecycle\"}\n\n", .terminal = false },
+        .{ .event = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"hosted_tool_call\"}}\n\n", .terminal = false },
+        .{ .event = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_content\",\"text\":\"x\"}]}}\n\n", .terminal = false },
+        .{ .event = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"future_terminal\"}}\n\n", .terminal = true },
     };
     for (cases) |event| {
         var output: TestCandidate = .{};
         var capture = output.capture();
         defer capture.deinit();
-        try capture.appendSse(event);
+        try capture.appendSse(event.event);
+        try std.testing.expectEqual(event.terminal, capture.terminalObserved());
         if (!capture.terminalObserved()) try capture.appendSse(
             "data: {\"type\":\"response.completed\"}\n\n",
         );
