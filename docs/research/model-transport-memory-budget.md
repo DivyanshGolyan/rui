@@ -10,40 +10,52 @@ The issue #11 adapter now has the following capacity-one bounds. These are class
 | --- | --- | ---: |
 | Provider-neutral request window | compile-time source bound | 4,096 bytes |
 | Canonical decoded candidate | compile-time source bound | 98,372 bytes |
-| SSE wire frame | compile-time source bound | 598,424 bytes |
+| SSE wire event | compile-time work/compatibility bound | 598,424 bytes counted; the pre-refactor adapter also allocates this amount per call |
 | Total SSE response | compile-time source bound | 2,393,696 bytes cumulatively; not retained |
-| JSON parser | compile-time source bound | one in-place cursor, depth 32; no payload-sized arena |
+| JSON parser | pre-refactor compile-time source bound | one in-place cursor over the complete event, depth 32; no payload-sized arena |
 | HTTP response transfer window | compile-time source bound | 64 bytes on the Codex success path |
 | HTTP rejection diagnostic body | compile-time source bound | 4,097 bytes read, at most 4,096 accepted |
 | HTTPS connection byte buffers | Zig 0.16 source-derived | 59,151 bytes before structs and allocator rounding |
+| HTTP content decoding | implementation observation | identity encoding only; no decompression window |
 | TCP send and receive defaults | measured with `sysctl` on the development host, 2026-08-29 | 131,072 bytes each |
 | TCP autotuning maxima | measured with `sysctl` on the development host, 2026-08-29 | 4,194,304 bytes each |
 | Async task stack reservation | Zig 0.16 source-derived | 4 MiB virtual minimum per Kqueue task; resident pages unmeasured |
 | Retained connection state | implementation observation | zero idle Codex connections; each request uses `keep_alive = false` and deinitializes its client |
 
-The adapter compacts SSE `data:` lines in its one frame, decodes JSON strings in place with a bounded non-allocating cursor, and writes the provider-neutral candidate directly to Host-owned provisional storage after structural validation. It retains neither a JSON DOM, a nested `input_request` arena, a complete canonical result buffer, nor a second payload-sized SSE copy. The wire-frame bound deliberately covers six-byte JSON escape amplification at the maximum decoded candidate size. The total-stream bound limits cumulative parser and transport work, and the whole-call deadline limits elapsed time. A separate event count would add no independent resource guarantee because each event already consumes the byte budget.
+The capacity-one implementation initially compacted SSE `data:` lines in one 598,424-byte frame and decoded JSON strings in place. That avoided duplicate payloads but made the maximum wire spelling a per-call resident allocation. The replacement keeps the same wire-event and total-stream limits as counted work bounds, parses through a small transfer window, and retains only potentially authoritative decoded values in capped buffers that grow with actual content. It retains no complete event, JSON DOM, complete canonical result buffer, or second payload-sized copy. The whole-call deadline independently limits elapsed time.
 
-No live provider call was made for this update, and no real credential was read. Process RSS, physical footprint, touched async-stack pages, TLS handshake peak, allocator live bytes, and actual per-socket queued memory remain unmeasured for the capacity-one live path. The source and OS figures above are bounds or configuration evidence, not a measured whole-process slope. A later opt-in run must report those observations before this document can replace the existing planning estimate with a measured capacity-one result.
+The opt-in `zig build codex-live-repair` command now writes the raw capacity-one observation to
+`.zig-cache/codex-live-capacity-one.json`. The report separates exact compiled structures and declared
+windows from whole-process RSS, macOS physical footprint, virtual size, thread count, whole-process
+stack reservation sampled while TCP is active, observed TCP queues, and configured socket high-water
+limits. It also records that
+the adapter has no idle connection pool. The report rejects a successful live repair when any required
+dynamic measurement was missed.
+
+This capacity-one observation does not establish a per-call slope. RSS and physical footprint include
+the complete Harness process, the phase-to-phase RSS increase is only an upper bound on transport
+growth, and macOS `netstat` exposes queued bytes and high-water limits rather than complete allocated
+kernel socket memory. Issue #43 must still run the production-shaped 1, 10, 50, and 100 call matrix
+before OnePage claims a supported concurrency.
 
 ## Decision
 
-For a V1 lane of 100 concurrent HTTPS model calls, use **768 KiB of process-resident memory per active
-call as the planning estimate** and **1 MiB per active call as provisional whole-machine guarded
-headroom**. This revision reflects the compile-time worst-case escaped SSE frame rather than the
-smaller ordinary-response frame:
+Do not size the V1 transport lane from the largest legal SSE spelling. The windowed design has a
+roughly **64 KiB fixed userspace byte-buffer floor per active HTTPS call**, plus small parser state,
+actual decoded candidate occupancy, task-stack residency, allocator slack, and kernel socket memory.
+Before the concurrency gate, use these analytical ranges rather than one false per-call constant:
 
-| Transport-only budget | Per active call | 100 active calls |
+| Transport component | Per active call | 100 active calls |
 | --- | ---: | ---: |
-| Ordinary-frame measured target, not a hard bound | 128 KiB | 12.5 MiB |
-| Worst-case process-resident planning estimate | 768 KiB | 75 MiB |
-| Provisional whole-machine guarded headroom | 1 MiB | 100 MiB |
+| Fixed HTTPS and parser windows | about 64-72 KiB | about 6-7 MiB |
+| Typical decoded candidate | actual content, normally well below 20 KiB | workload-dependent |
+| Pathological simultaneous text plus arguments | at most about 118 KiB before allocator slack | about 11.5 MiB |
+| Kernel sockets and touched task stacks | measured separately | measured separately |
 
-The 768 KiB figure covers process-resident transport state. The 1 MiB figure additionally leaves
-provisional room for measured kernel socket memory. Both exclude the Activation Slot, QuickJS,
-SQLite, durable prompt and result storage, subprocesses, and shared host baseline. The 1 MiB figure
-is not yet a proved hard ceiling. It becomes defensible
-only if OnePage incrementally parses streaming events, bounds transient frames, controls socket
-autotuning, and does not create one native thread per call.
+These figures exclude the Activation Slot, QuickJS, SQLite, durable prompt and result storage,
+subprocesses, and shared host baseline. They are analytical components, not a proved RSS ceiling.
+Issue #43 must measure their aggregate effect at 1, 10, 50, and 100 concurrent transports before
+OnePage declares a supported capacity.
 
 Subprocesses intentionally launched by a model are workload memory under ADR-0013, not part of this
 OnePage-owned transport budget. Provider transport and its kernel socket memory remain orchestration
@@ -95,9 +107,9 @@ Zig's response-body API makes the caller supply its transfer buffer. That is a u
 OnePage can select a fixed 4-16 KiB window and consume it into a bounded incremental parser rather
 than accumulating the response body.
 
-## OnePage already avoids prompt and result-sized transport buffers
+## OnePage avoids prompt and canonical-result-sized transport buffers
 
-There is no live provider transport in the repository yet. The current provider contract reads an
+The provider contract reads an
 immutable request through a caller-provided window and appends a response into a predetermined
 durable writer. [`model_operation.zig`](../../src/model_operation.zig) fixes the request window at
 4 KiB. [`blob_store.zig`](../../src/blob_store.zig) bounds each durable blob at 1 MiB and writes it
@@ -154,9 +166,9 @@ send, forward-allocation, and queued-memory counters separately from configured 
 For a streamed model response that OnePage drains immediately, the send queue should be nearly empty
 after the prompt is uploaded and the receive queue should normally contain only a small number of
 records. Charging the full platform high-water marks is useful as guarded headroom, not as a
-steady-state prediction. Conversely, leaving autotuning unbounded means neither 768 KiB nor 1 MiB is a
-hard per-call ceiling: a slow consumer or high-bandwidth/high-latency path can grow the queues into
-MiBs per socket.
+steady-state prediction. Conversely, leaving autotuning unbounded means no userspace-derived per-call
+figure is a whole-machine ceiling: a slow consumer or high-bandwidth/high-latency path can grow the
+queues into MiBs per socket.
 
 ## Threads, fibers, virtual memory, and RSS
 
@@ -190,20 +202,14 @@ the RSS components and the need for subsystem-specific measures such as socket s
 Virtual size is useful for catching runaway stack/fiber reservation, but is not a substitute for
 resident or physical-footprint measurements.
 
-## Assumptions behind the three estimates
+## Assumptions behind the estimate
 
-| Component per live call | 672 KiB low | 768 KiB planning | 1 MiB guarded |
-| --- | ---: | ---: | ---: |
-| Zig fixed HTTPS allocation | 64 KiB | 64 KiB | 64 KiB |
-| Transfer/SSE/request metadata and allocator slack | 576-592 KiB | 576-608 KiB | 608-672 KiB |
-| Resident stack/fiber pages | small/shared | 16-32 KiB | 32-64 KiB |
-| Interpretation | stretch target | expected planning slope | provisional headroom |
-
-The rows are intentionally rounded and are not independent maxima. The low figure assumes the prompt
-has been sent, the response is slow and immediately drained, parsing is incremental, and the event
-loop has no per-call native thread. The planning figure permits realistic allocator occupancy above
-the worst-case frame and fixed TLS buffers. Kernel socket memory remains a separately reported
-whole-machine slope because platform autotuning can exceed every user-space estimate in this table.
+The fixed estimate assumes the prompt has been sent, the response is immediately drained through a
+4 KiB window, parsing is incremental, and the event loop has no native thread per call. Decoded
+candidate buffers are a separate variable component: ordinary text usually allocates only its actual
+size, while arbitrary JSON field order permits assistant text and function arguments to coexist until
+the discriminator is known. Kernel socket memory remains a separately reported whole-machine slope
+because platform autotuning can exceed every user-space estimate here.
 
 Handshake bursts, DNS resolver behavior, the shared certificate bundle, connection-pool metadata,
 and allocator fragmentation remain unmeasured. The certificate bundle and event-loop workers should
@@ -229,16 +235,16 @@ intercept. Record steady p50, steady p95, and peak-handshake slopes over repeate
 
 Acceptance gates for a 100-call V1 lane should be:
 
-- process-RSS slope no greater than 768 KiB per active transport in worst-case-frame streaming;
-- process plus measured kernel/socket slope no greater than 1 MiB per active transport during the
-  slow-consumer and simultaneous-handshake tests;
+- no 598,424-byte or other maximum-wire-event-sized resident allocation per call;
+- fixed transport and parser windows, decoded-candidate current/high-water occupancy, allocator slack,
+  task-stack residency, and kernel socket memory reported as separate components;
 - no whole-request JSON copy and no whole-response/SSE-event accumulation;
-- fixed request, transfer, parser, canonical response, and maximum-frame bounds;
+- fixed request, transfer and parser windows plus distinct decoded-candidate, event-work, total-stream,
+  depth, and time bounds;
 - socket send/receive limits set and verified with `getsockopt` on each supported OS, or an explicit
   measured justification for autotuning;
 - no native thread per call and a recorded virtual-stack/fiber reservation;
 - idle connection retention included in baseline measurements.
 
-Until that spike passes, the defensible capacity statement is: **100 active model transports add
-about 25 MiB under the intended streaming design; reserve 50 MiB for the lane, and keep the host's
-larger 256 MiB safety limit because transport, handshake, and socket peaks have not yet been measured.**
+Until that spike passes, the defensible statement is: **the windowed design removes the 57 MiB
+100-call frame-array floor; its remaining slope is analytical but not yet a measured Host contract.**

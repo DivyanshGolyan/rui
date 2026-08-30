@@ -4,16 +4,20 @@ Date: 2026-08-29
 
 ## Verdict
 
-**Go for the capacity-one OnePage V1 provider path.** The pinned Codex subscription protocol has
-produced successful streamed model responses and completed the controlled live repair through the
-ordinary Harness, Bash, `apply_patch`, and durable follow-up turn. The implementation does not need a
-provider registry, model catalog, response transaction API, or resumable provider stream.
+**Go for the capacity-one OnePage V1 provider path.** Earlier protocol evidence produced successful
+streamed model responses and completed the controlled live repair through the ordinary Harness, Bash,
+`apply_patch`, and durable follow-up turn. The current adapter's deterministic implementation gate is
+complete; one fresh attended run and its capacity-one report remain required before issue #11 closes.
+That pending compatibility evidence does not block independent evaluator or Run Service work. The
+implementation does not need a provider registry, model catalog, response transaction API, or
+resumable provider stream.
 
-**No-go for a 100-active-call release claim until the live memory gate is measured.** Process RSS,
-physical footprint, touched async-stack pages, TLS handshake peak, allocator live bytes, and actual
-kernel socket memory remain open evidence. The source-derived and OS-sourced planning values in
-[the transport memory budget](model-transport-memory-budget.md) are not substitutes for that live
-measurement.
+**No-go for a 100-active-call release claim until the concurrency slope is measured.** The capacity-one
+live tracer records compiled adapter bounds, whole-process RSS and physical footprint, whole-process
+virtual stack reservation sampled while TCP is active, threads, and observable macOS TCP queue evidence.
+That single-call observation is not a
+substitute for issue #43's production-shaped 1, 10, 50, and 100 call matrix or complete kernel socket
+accounting. See [the transport memory budget](model-transport-memory-budget.md).
 
 ## Pinned protocol
 
@@ -73,24 +77,37 @@ and stays within the 15-minute attended deadline.
 | Account identifier | 128 bytes |
 | Provider-neutral request window | 4,096 bytes |
 | Canonical response | 98,372 bytes |
-| One SSE wire frame | 598,424 bytes |
+| SSE projection window | 4,096 bytes |
+| Assistant-text decoded buffer | grows with content, capped at 20,456 bytes |
+| Tool-arguments decoded buffer | grows with content, capped at 98,316 bytes |
+| One SSE wire event work limit | 598,424 bytes |
 | Total SSE bytes per dispatch | 2,393,696 bytes |
 | JSON nesting | 32 levels |
 | Rejection body accepted for diagnostics | 4,096 bytes |
 | Durable opaque diagnostic code | 64 bytes |
 
-The adapter compacts one SSE frame in place and uses a bounded non-allocating two-pass cursor. It does
-not retain a payload copy, JSON DOM arena, or complete canonical result buffer. The first valid
+The adapter projects SSE `data:` bytes through one fixed 4 KiB window into Zig's standard JSON scanner.
+It retains only the decoded assistant text and tool arguments that arbitrary provider field order can
+leave potentially authoritative. Those adapter-private buffers grow with actual content, reject their
+semantic maxima before allocation, and are released at dispatch settlement. The adapter retains no
+complete SSE event, payload copy, JSON DOM arena, or complete canonical result buffer. The first valid
 terminal ends the logical response, and later bytes are ignored independently of HTTP chunking.
 
 Each retained limit owns a distinct resource. The canonical response bounds decoded semantic content
-and provisional storage. The frame bounds resident parser memory and worst-case JSON escape expansion.
-Total SSE bytes bound cumulative parser and transport work, while the whole-call deadline independently
-bounds elapsed time. JSON depth and object-member limits bound the cursor's fixed stack and duplicate-key
-storage. Tool, choice, field, and argument counts or sizes bound semantic cardinality in the model
-contract. The dedicated draft-entry count bounds startup cleanup work independently of the one live
-writer. There is no event-count limit: every event consumes the total byte budget, so a separate count
-would reject valid fine-grained streams without bounding another resource.
+and provisional storage. The 598,424-byte event limit bounds compatible wire spelling and per-event
+work, not resident parser memory. The fixed 4 KiB projection window bounds the resident SSE-to-JSON
+transfer stage. Total SSE bytes bound cumulative parser and transport work, while the whole-call
+deadline independently bounds elapsed time. JSON depth bounds the scanner state. Duplicate checks
+cover only the fields
+whose semantics the adapter consumes; unknown provider metadata is skipped and remains bounded by the
+event and total byte budgets. Tool, choice, field, and argument counts or sizes bound semantic
+cardinality in the model contract. The dedicated draft-entry count bounds startup cleanup work
+independently of the one live writer. There is no event-count limit: every event consumes the total byte
+budget, so a separate count would reject valid fine-grained streams without bounding another resource.
+
+OAuth and model HTTP requests explicitly require identity content encoding. Compressed provider bytes
+therefore never enter the bounded JSON or SSE readers, and no decompression window or hidden allocator
+is needed.
 
 Durable failure diagnostics keep the shared source generic (`local_credentials` or `provider`). The
 opaque code is Codex-owned. Stable codes distinguish refresh rejection, missing refresh authority,
@@ -118,8 +135,12 @@ is no resume token or public progress boundary.
 
 ## Remaining release evidence
 
-The functional feasibility question is closed for capacity one. The concurrency and physical-memory
-claim is not. Run the opt-in live measurement matrix described in the transport memory budget before
-claiming support for 100 simultaneous active Codex calls. Keep the live tracer focused on the real
-vertical slice; do not replace this gate with a deterministic local server or a single whole-process
-peak that cannot attribute TLS, stack, allocator, and socket costs.
+The functional feasibility question is closed and the capacity-one command writes configured windows
+and work limits separately from live decoded-buffer occupancy, allocator capacity, and spare capacity.
+One fresh successful recorded run of that command remains the final issue #11 evidence and the issue
+stays open until it is available. Independent QuickJS and Workflow Run implementation may proceed in
+the meantime. The concurrency
+and physical-memory slope belongs to issue #43, which must run the opt-in matrix described in the
+transport memory budget before claiming support for 100 simultaneous active Codex calls. Keep that work
+focused on the real vertical slice; do not replace the gate with a deterministic local server or
+extrapolate from one whole-process peak that cannot isolate TLS, stack, allocator, and socket costs.

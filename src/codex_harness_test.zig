@@ -43,9 +43,15 @@ test "Codex fake authorization and transport complete through the existing Harne
             request: model_operation.RequestCursor,
             capture: *codex_provider.Capture,
         ) anyerror!codex_provider.TransportResult {
+            const DiscardRequest = struct {
+                fn write(_: *anyopaque, _: []const u8) anyerror!void {}
+            };
             const self: *@This() = @ptrCast(@alignCast(context));
             self.requests += 1;
-            try codex_provider.encodeRequest(request, capture.requestSink(), &capture.mapping);
+            try codex_provider.encodeRequest(request, .{
+                .context = self,
+                .write_fn = DiscardRequest.write,
+            }, &capture.mapping);
             try capture.appendSse(
                 "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"completed by Codex\"}]}}\n\n" ++
                     "data: {\"type\":\"response.completed\"}\n\n",

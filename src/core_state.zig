@@ -332,6 +332,7 @@ fn responseFailure(value: u8) !model_protocol.Failure {
         12 => .timeout,
         13 => .transport_not_started,
         14 => .transport_may_have_started,
+        15 => .unsupported_provider_output,
         else => error.UnknownResponseFailure,
     };
 }

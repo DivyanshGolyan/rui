@@ -15,6 +15,11 @@ const err_sec_success: i32 = 0;
 const err_sec_item_not_found: i32 = -25300;
 const transport_timeout = codex_auth.request_timeout;
 
+pub const response_head_window_size: usize = 1024;
+pub const stream_transfer_window_size: usize = 64;
+pub const diagnostic_body_limit: usize = 4096;
+pub const diagnostic_transfer_window_size: usize = 1024;
+
 const SecKeychainItemRef = *anyopaque;
 extern "Security" fn SecKeychainFindGenericPassword(
     keychain_or_array: ?*anyopaque,
@@ -203,6 +208,7 @@ pub const NativeHttp = struct {
         var request = try client.request(.POST, uri, .{
             .redirect_behavior = .unhandled,
             .keep_alive = false,
+            .headers = .{ .accept_encoding = .{ .override = "identity" } },
             .extra_headers = &headers,
         });
         defer request.deinit();
@@ -213,9 +219,17 @@ pub const NativeHttp = struct {
         try request_body.writer.writeAll(body);
         try request_body.end();
         try request.connection.?.flush();
-        var redirect_buffer: [1024]u8 = undefined;
+        var redirect_buffer: [response_head_window_size]u8 = undefined;
         var response = try request.receiveHead(&redirect_buffer);
-        var transfer_buffer: [1024]u8 = undefined;
+        if (response.head.content_encoding != .identity) {
+            const status: u16 = @intFromEnum(response.head.status);
+            if (status >= 200 and status < 300) return error.UnexpectedContentEncoding;
+            const result: codex_auth.HttpResponse = .{ .status = status, .body = "" };
+            completed_response.* = result;
+            request_control.observeComplete(self.io);
+            return result;
+        }
+        var transfer_buffer: [diagnostic_transfer_window_size]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
         var length: usize = 0;
         while (true) {
@@ -365,6 +379,7 @@ pub const NativeTransport = struct {
         var request = client.request(.POST, uri, .{
             .redirect_behavior = .unhandled,
             .keep_alive = false,
+            .headers = .{ .accept_encoding = .{ .override = "identity" } },
             .extra_headers = &headers,
         }) catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -384,7 +399,7 @@ pub const NativeTransport = struct {
             };
         body.end() catch return .{ .disposition = .may_have_started };
         request.connection.?.flush() catch return .{ .disposition = .may_have_started };
-        var redirect_buffer: [1024]u8 = undefined;
+        var redirect_buffer: [response_head_window_size]u8 = undefined;
         var response = request.receiveHead(&redirect_buffer) catch return .{ .disposition = .may_have_started };
         const status: u16 = @intFromEnum(response.head.status);
         if (status < 200 or status >= 300) {
@@ -392,12 +407,16 @@ pub const NativeTransport = struct {
             try result.setHttpStatus(status);
             result.disposition = classifyHttpFailure(status, "");
             request_control.observeTerminal(self.io, result, completed_result);
+            if (response.head.content_encoding != .identity) return result;
             readProviderFailureCode(&response, &result);
             result.disposition = classifyHttpFailure(status, result.diagnosticCode());
             request_control.observeTerminal(self.io, result, completed_result);
             return result;
         }
-        var transfer_buffer: [64]u8 = undefined;
+        if (response.head.content_encoding != .identity) {
+            return .{ .disposition = .invalid_encoding };
+        }
+        var transfer_buffer: [stream_transfer_window_size]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
         while (true) {
             const chunk = reader.peekGreedy(1) catch |err| switch (err) {
@@ -498,12 +517,12 @@ fn readProviderFailureCode(
     response: *std.http.Client.Response,
     result: *codex_provider.TransportResult,
 ) void {
-    var body: [4097]u8 = undefined;
-    var transfer_buffer: [1024]u8 = undefined;
+    var body: [diagnostic_body_limit + 1]u8 = undefined;
+    var transfer_buffer: [diagnostic_transfer_window_size]u8 = undefined;
     const expected_length = response.head.content_length;
     const reader = response.reader(&transfer_buffer);
     const length = reader.readSliceShort(&body) catch return;
-    if (length == 0 or length > 4096) return;
+    if (length == 0 or length > diagnostic_body_limit) return;
     if (expected_length) |expected| if (length != expected) return;
     setProviderFailureCode(body[0..length], result);
 }
@@ -715,7 +734,52 @@ test "authorization HTTP primitive deadlines and joins every OAuth call class" {
         try std.testing.expect(elapsed.nanoseconds < std.Io.Duration.fromMilliseconds(500).nanoseconds);
         try std.testing.expect(fixture.peer_closed);
         try std.testing.expectEqual(std.http.Method.POST, fixture.method);
+        try std.testing.expect(fixture.accept_encoding_identity);
     }
+}
+
+test "authorization rejects compressed response bytes before JSON decoding" {
+    const io = std.testing.io;
+    var fixture = try WireFixture.init(io, .ok, "not actually compressed", .complete);
+    fixture.response_encoding = "gzip";
+    defer fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    var endpoint_buffer: [128]u8 = undefined;
+    const endpoint = try fixture.endpoint(&endpoint_buffer);
+    const path_start = std.mem.indexOf(u8, endpoint, "/backend-api/") orelse unreachable;
+    var http: NativeHttp = .{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .authorization_origin_override = endpoint[0..path_start],
+    };
+    try std.testing.expectError(
+        error.AuthorizationTransportFailed,
+        codex_auth.requestDeviceCode(http.capability()),
+    );
+    try server_future.await(io);
+    try std.testing.expect(fixture.accept_encoding_identity);
+}
+
+test "authorization classifies compressed refresh rejection from status" {
+    const io = std.testing.io;
+    var fixture = try WireFixture.init(io, .unauthorized, "not actually compressed", .complete);
+    fixture.response_encoding = "gzip";
+    defer fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    var endpoint_buffer: [128]u8 = undefined;
+    const endpoint = try fixture.endpoint(&endpoint_buffer);
+    const path_start = std.mem.indexOf(u8, endpoint, "/backend-api/") orelse unreachable;
+    var http: NativeHttp = .{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .authorization_origin_override = endpoint[0..path_start],
+    };
+    var tokens: codex_auth.Tokens = .{ .refresh_length = "refresh".len };
+    defer tokens.scrub();
+    @memcpy(tokens.refresh[0.."refresh".len], "refresh");
+    try std.testing.expectError(error.RefreshRejected, codex_auth.refresh(http.capability(), &tokens));
+    try server_future.await(io);
+    try std.testing.expect(fixture.accept_encoding_identity);
 }
 
 test "NativeTransport sends the production request and stops at terminal SSE" {
@@ -745,7 +809,11 @@ test "NativeTransport sends the production request and stops at terminal SSE" {
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{ .candidate = provider_io.candidateCapability() };
+    var capture = codex_provider.Capture.init(
+        std.testing.allocator,
+        provider_io.candidateCapability(),
+    );
+    defer capture.deinit();
     const capability = transport.capability();
     const disposition = capability.perform_fn(
         capability.context,
@@ -759,6 +827,88 @@ test "NativeTransport sends the production request and stops at terminal SSE" {
     try std.testing.expectEqual(codex_provider.TransportDisposition.complete, (try disposition).disposition);
     try std.testing.expect(capture.terminalObserved());
     try fixture.expectProductionRequest(false);
+}
+
+test "NativeTransport rejects compressed response bytes before SSE capture" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wire = try WireSession.init(io, &tmp);
+    defer wire.deinit(io);
+    _ = try model_operation.buildRequest(&wire.session, 1025, 1, 1);
+    var provider_io = try model_operation.ProviderIo.open(&wire.session, 1025, 1026);
+    defer provider_io.close();
+
+    var fixture = try WireFixture.init(io, .ok, "not actually compressed", .complete);
+    fixture.response_encoding = "gzip";
+    defer fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    var endpoint_buffer: [128]u8 = undefined;
+    var transport: NativeTransport = .{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .endpoint = try fixture.endpoint(&endpoint_buffer),
+    };
+    var credential = fakeCredential();
+    defer credential.scrub();
+    var capture = codex_provider.Capture.init(
+        std.testing.allocator,
+        provider_io.candidateCapability(),
+    );
+    defer capture.deinit();
+    const capability = transport.capability();
+    const result = try capability.perform_fn(
+        capability.context,
+        &credential,
+        try provider_io.request(),
+        &capture,
+    );
+    try server_future.await(io);
+    try std.testing.expectEqual(codex_provider.TransportDisposition.invalid_encoding, result.disposition);
+    try std.testing.expect(!capture.terminalObserved());
+    try std.testing.expect(fixture.accept_encoding_identity);
+}
+
+test "NativeTransport classifies compressed HTTP rejection from status" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var wire = try WireSession.init(io, &tmp);
+    defer wire.deinit(io);
+    _ = try model_operation.buildRequest(&wire.session, 1030, 1, 1);
+    var provider_io = try model_operation.ProviderIo.open(&wire.session, 1030, 1031);
+    defer provider_io.close();
+
+    var fixture = try WireFixture.init(io, .unauthorized, "not actually compressed", .complete);
+    fixture.response_encoding = "gzip";
+    defer fixture.deinit(io);
+    var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    var endpoint_buffer: [128]u8 = undefined;
+    var transport: NativeTransport = .{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .endpoint = try fixture.endpoint(&endpoint_buffer),
+    };
+    var credential = fakeCredential();
+    defer credential.scrub();
+    var capture = codex_provider.Capture.init(
+        std.testing.allocator,
+        provider_io.candidateCapability(),
+    );
+    defer capture.deinit();
+    const capability = transport.capability();
+    const result = try capability.perform_fn(
+        capability.context,
+        &credential,
+        try provider_io.request(),
+        &capture,
+    );
+    try server_future.await(io);
+    try std.testing.expectEqual(codex_provider.TransportDisposition.http_unauthorized, result.disposition);
+    try std.testing.expectEqual(@as(?u16, 401), result.httpStatus());
+    try std.testing.expectEqualStrings("", result.diagnosticCode());
+    try std.testing.expect(!capture.terminalObserved());
+    try std.testing.expect(fixture.accept_encoding_identity);
 }
 
 test "NativeTransport timeout bounds the entire call and closes an open response body" {
@@ -802,7 +952,8 @@ test "NativeTransport timeout bounds the entire call and closes an open response
         };
         var credential = fakeCredential();
         defer credential.scrub();
-        var capture: codex_provider.Capture = .{};
+        var capture = codex_provider.Capture.init(std.testing.allocator, null);
+        defer capture.deinit();
 
         const started = std.Io.Clock.awake.now(io);
         const capability = transport.capability();
@@ -866,7 +1017,11 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{ .candidate = provider_io.candidateCapability() };
+    var capture = codex_provider.Capture.init(
+        std.testing.allocator,
+        provider_io.candidateCapability(),
+    );
+    defer capture.deinit();
     const capability = transport.capability();
     const disposition = try capability.perform_fn(
         capability.context,
@@ -918,7 +1073,8 @@ test "NativeTransport classifies every received HTTP rejection without retry" {
         };
         var credential = fakeCredential();
         defer credential.scrub();
-        var capture: codex_provider.Capture = .{};
+        var capture = codex_provider.Capture.init(std.testing.allocator, null);
+        defer capture.deinit();
         var provider_io = try model_operation.ProviderIo.open(
             &wire.session,
             1200,
@@ -962,7 +1118,8 @@ test "NativeTransport reads a chunked provider diagnostic after the response hea
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{};
+    var capture = codex_provider.Capture.init(std.testing.allocator, null);
+    defer capture.deinit();
     const capability = transport.capability();
     const disposition = try capability.perform_fn(
         capability.context,
@@ -1050,7 +1207,8 @@ fn expectUnsupportedModelWireCase(
     };
     var credential = fakeCredential();
     defer credential.scrub();
-    var capture: codex_provider.Capture = .{};
+    var capture = codex_provider.Capture.init(std.testing.allocator, null);
+    defer capture.deinit();
     const capability = transport.capability();
     const disposition = try capability.perform_fn(
         capability.context,
@@ -1094,7 +1252,8 @@ test "NativeTransport keeps status without retaining oversized or malformed prov
         };
         var credential = fakeCredential();
         defer credential.scrub();
-        var capture: codex_provider.Capture = .{};
+        var capture = codex_provider.Capture.init(std.testing.allocator, null);
+        defer capture.deinit();
         var provider_io = try model_operation.ProviderIo.open(
             &wire.session,
             1400,
@@ -1206,6 +1365,7 @@ const WireFixture = struct {
     status: std.http.Status,
     response: []const u8,
     response_mode: ResponseMode,
+    response_encoding: []const u8 = "identity",
     method: std.http.Method = .GET,
     target: [128]u8 = @splat(0),
     target_length: usize = 0,
@@ -1215,6 +1375,7 @@ const WireFixture = struct {
     accept: bool = false,
     content_type: bool = false,
     beta: bool = false,
+    accept_encoding_identity: bool = false,
     body: [96 * 1024]u8 = undefined,
     body_length: usize = 0,
     peer_closed: bool = false,
@@ -1268,6 +1429,8 @@ const WireFixture = struct {
                 self.content_type = std.mem.eql(u8, header.value, "application/json");
             } else if (std.ascii.eqlIgnoreCase(header.name, "openai-beta")) {
                 self.beta = std.mem.eql(u8, header.value, "responses=experimental");
+            } else if (std.ascii.eqlIgnoreCase(header.name, "accept-encoding")) {
+                self.accept_encoding_identity = std.mem.eql(u8, header.value, "identity");
             }
         }
         const body_length = request.head.content_length orelse return error.MissingContentLength;
@@ -1275,10 +1438,14 @@ const WireFixture = struct {
         const body_reader = try request.readerExpectContinue(&.{});
         try body_reader.readSliceAll(self.body[0..@intCast(body_length)]);
         self.body_length = @intCast(body_length);
+        const response_headers = [_]std.http.Header{
+            .{ .name = "content-type", .value = "text/event-stream" },
+            .{ .name = "content-encoding", .value = self.response_encoding },
+        };
         if (self.response_mode == .complete) {
             try request.respond(self.response, .{
                 .status = self.status,
-                .extra_headers = &.{.{ .name = "content-type", .value = "text/event-stream" }},
+                .extra_headers = &response_headers,
             });
             return;
         }
@@ -1290,7 +1457,7 @@ const WireFixture = struct {
                 null,
             .respond_options = .{
                 .status = self.status,
-                .extra_headers = &.{.{ .name = "content-type", .value = "text/event-stream" }},
+                .extra_headers = &response_headers,
             },
         });
         try response_writer.writer.writeAll(self.response);
@@ -1339,6 +1506,7 @@ const WireFixture = struct {
         try std.testing.expect(self.accept);
         try std.testing.expect(self.content_type);
         try std.testing.expect(self.beta);
+        try std.testing.expect(self.accept_encoding_identity);
         var parsed = try std.json.parseFromSlice(
             std.json.Value,
             std.testing.allocator,

@@ -85,6 +85,7 @@ const Arguments = struct {
     resume_id: ?u64 = null,
     codex_login: bool = false,
     codex_logout: bool = false,
+    codex_capture_metrics_path: ?[]const u8 = null,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -123,6 +124,7 @@ pub fn main(init: std.process.Init) !void {
         };
         var transport: codex_native.NativeTransport = .{ .io = init.io, .allocator = allocator };
         var codex: codex_provider.CodexProvider = .{
+            .allocator = allocator,
             .authorization = authorization.capability(),
             .transport = transport.capability(),
         };
@@ -166,15 +168,24 @@ pub fn main(init: std.process.Init) !void {
                 .http = native_http.capability(),
             };
             var transport: codex_native.NativeTransport = .{ .io = init.io, .allocator = allocator };
+            var capture_metrics: codex_provider.CaptureMetrics = .{};
             var codex: codex_provider.CodexProvider = .{
+                .allocator = allocator,
                 .authorization = authorization.capability(),
                 .transport = transport.capability(),
+                .capture_metrics = if (arguments.codex_capture_metrics_path != null)
+                    &capture_metrics
+                else
+                    null,
             };
             try runCreate(init.io, runtime, arguments.dangerously_bypass_permissions, .{
                 .workspace_path = workspace_path,
                 .model_binding = .{ .model = model, .provider = codex.provider() },
                 .task = task,
             });
+            if (arguments.codex_capture_metrics_path) |path| {
+                try writeCaptureMetrics(init.io, path, capture_metrics);
+            }
             return;
         }
         if (!std.mem.startsWith(u8, model, "fixture:")) return error.UnsupportedModel;
@@ -413,6 +424,10 @@ fn parseArguments(args: []const []const u8) !Arguments {
             parsed.codex_login = true;
         } else if (std.mem.eql(u8, argument, "--codex-logout")) {
             parsed.codex_logout = true;
+        } else if (std.mem.eql(u8, argument, "--codex-capture-metrics")) {
+            index += 1;
+            if (index == args.len) return error.InvalidArguments;
+            parsed.codex_capture_metrics_path = args[index];
         } else if (std.mem.eql(u8, argument, "--resume")) {
             index += 1;
             if (index == args.len) return error.InvalidArguments;
@@ -429,13 +444,20 @@ fn parseArguments(args: []const []const u8) !Arguments {
         if (parsed.codex_login == parsed.codex_logout or parsed.task != null or parsed.model != null or
             parsed.resume_id != null or parsed.repo_path != null or parsed.state_path != null or
             parsed.fixture_response != null or parsed.fixture_bash_command != null or
-            parsed.fixture_patch_path != null or parsed.dangerously_bypass_permissions)
+            parsed.fixture_patch_path != null or parsed.dangerously_bypass_permissions or
+            parsed.codex_capture_metrics_path != null)
         {
             return error.AuthorizationArgumentsConflict;
         }
         return parsed;
     }
     if (parsed.model) |model| try validateModelArgument(model);
+    if (parsed.codex_capture_metrics_path != null and
+        (parsed.resume_id != null or parsed.model == null or
+            !std.mem.startsWith(u8, parsed.model.?, "codex:")))
+    {
+        return error.CodexCaptureMetricsArgumentsConflict;
+    }
     if (parsed.resume_id != null) {
         if (parsed.task != null or parsed.repo_path != null or
             parsed.fixture_bash_command != null or parsed.fixture_patch_path != null)
@@ -454,6 +476,41 @@ fn parseArguments(args: []const []const u8) !Arguments {
         }
     }
     return parsed;
+}
+
+fn writeCaptureMetrics(
+    io: std.Io,
+    path: []const u8,
+    metrics: codex_provider.CaptureMetrics,
+) !void {
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer file.close(io);
+    var buffer: [768]u8 = undefined;
+    const report = try std.fmt.bufPrint(
+        &buffer,
+        "{{\n" ++
+            "  \"dispatch_count\": {d},\n" ++
+            "  \"decoded_occupied_high_water_bytes\": {d},\n" ++
+            "  \"decoded_capacity_high_water_bytes\": {d},\n" ++
+            "  \"decoded_spare_capacity_at_high_water_bytes\": {d},\n" ++
+            "  \"assistant_text_occupied_high_water_bytes\": {d},\n" ++
+            "  \"assistant_text_capacity_high_water_bytes\": {d},\n" ++
+            "  \"tool_arguments_occupied_high_water_bytes\": {d},\n" ++
+            "  \"tool_arguments_capacity_high_water_bytes\": {d}\n" ++
+            "}}\n",
+        .{
+            metrics.dispatch_count,
+            metrics.decoded_occupied_high_water_bytes,
+            metrics.decoded_capacity_high_water_bytes,
+            metrics.decoded_capacity_high_water_bytes -|
+                metrics.decoded_occupied_high_water_bytes,
+            metrics.assistant_text_occupied_high_water_bytes,
+            metrics.assistant_text_capacity_high_water_bytes,
+            metrics.tool_arguments_occupied_high_water_bytes,
+            metrics.tool_arguments_capacity_high_water_bytes,
+        },
+    );
+    try file.writeStreamingAll(io, report);
 }
 
 const ModelProvider = enum { codex, fixture };
@@ -718,9 +775,12 @@ test "CLI arguments distinguish create from exact resume" {
         "onepage",
         "--model",
         "codex:gpt-5.6-sol",
+        "--codex-capture-metrics",
+        "capture.json",
         "task",
     });
     try std.testing.expectEqualStrings("codex:gpt-5.6-sol", codex_create.model.?);
+    try std.testing.expectEqualStrings("capture.json", codex_create.codex_capture_metrics_path.?);
     const codex_resume = try parseArguments(&.{
         "onepage",
         "--resume",
@@ -770,6 +830,17 @@ test "CLI arguments distinguish create from exact resume" {
     try std.testing.expectError(
         error.AuthorizationArgumentsConflict,
         parseArguments(&.{ "onepage", "--codex-login", "--fixture-response", "ignored" }),
+    );
+    try std.testing.expectError(
+        error.CodexCaptureMetricsArgumentsConflict,
+        parseArguments(&.{
+            "onepage",
+            "--model",
+            "fixture:answer",
+            "--codex-capture-metrics",
+            "capture.json",
+            "task",
+        }),
     );
 
     const patch = try parseArguments(&.{

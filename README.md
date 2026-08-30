@@ -11,12 +11,13 @@ permissioned Bash and patch execution, and repair fixtures described below. The 
 asynchronous Workflow Run architecture is the planned V1 destination tracked by issues #33–#39 and
 #43; it is not yet implemented.
 
-Codex is the required first live provider target. Before workflow orchestration, issue #11 must prove
-that OnePage can use an existing ChatGPT subscription through the official authorization and
-model-transport path, then let a real Codex model complete one controlled coding repair through the
-existing capacity-one Harness. Issue #43 later carries that same adapter into durable Workflow Runs
-and measured concurrency. Neither step embeds a second agent loop. Until #11 passes, this repository
-does not claim that the live subscription experience is available.
+Codex is the required first live provider target. Issue #11 implements and deterministically verifies
+the official authorization, model transport, bounded capture, recovery, and capacity-one Harness
+path. Its attended live tracer is a separate compatibility gate: it remains required before #11
+closes and before #43 completes final Codex integration, but it does not block independent QuickJS or
+Workflow Run implementation. Issue #43 later carries the same adapter into durable Workflow Runs and
+measured concurrency. Neither step embeds a second agent loop. Until the issue #11 live evidence is
+recorded, this repository does not claim that the live subscription experience is available.
 
 The V1 CLI will expose `run`, `inspect`, `respond`, `advance`, `cancel`, and `read` over one
 protocol-independent Run Service. JSON `RunSnapshot` is the complete automation contract; Markdown is
@@ -117,7 +118,10 @@ ordinary callers may still select another raw Codex model with `--model codex:MO
 zig build codex-live-repair
 ```
 
-The live step is deliberately opt-in and is not part of `zig build check`. Credentials are never
+The live step is deliberately opt-in and is not part of `zig build check`. It reuses the installed
+executable used for login and writes its raw capacity-one transport evidence to
+`.zig-cache/codex-live-capacity-one.json`. This report is a single-call observation, not the later
+supported-concurrency slope. Credentials are never
 written to the Host Store, repository, Conversation, transcripts, child-tool environments, or test
 fixtures. `./zig-out/bin/onepage --codex-logout` revokes the credential when possible and deletes the
 Keychain item.

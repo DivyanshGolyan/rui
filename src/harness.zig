@@ -1,6 +1,7 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
+const blob_store = @import("blob_store.zig");
 const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const conversation = @import("conversation.zig");
@@ -1385,7 +1386,7 @@ test "known provider failure is one durable terminal Result" {
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
 }
 
-test "captured noncanonical tool call closes once after crash without redispatch" {
+test "injected post-Completion interruption preserves exact bytes without redispatch" {
     const exact_arguments = "{ \"timeout_ms\" : 1000, \"command\" : \"true\" }";
     const ToolProvider = struct {
         calls: u8 = 0,
@@ -1477,7 +1478,7 @@ test "captured noncanonical tool call closes once after crash without redispatch
     try std.testing.expectEqualStrings(exact_arguments, call.arguments);
 }
 
-test "provider candidate settlement rejects malformed framing without publishing" {
+test "candidate seal validation failure publishes no Completion" {
     const MalformedProvider = struct {
         calls: u8 = 0,
 
@@ -1516,6 +1517,114 @@ test "provider candidate settlement rejects malformed framing without publishing
     const rejected = try owner.drive();
     try std.testing.expectEqual(State.unavailable, rejected.state);
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
+    const Ignore = struct {
+        fn apply(_: *anyopaque, _: completion_inbox.Envelope) !void {}
+    };
+    var context: u8 = 0;
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        try harnessState(owner).session.?.scanCompletionEvidence(&context, Ignore.apply),
+    );
+}
+
+test "failure replacement seal storage error remains a Host failure" {
+    const StorageFailureProvider = struct {
+        session: ?*session_store.Session = null,
+        response_ref: u64 = 0,
+        restricted: bool = false,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try model_protocol.writeText(response, "candidate that must be discarded");
+            const provider_io: *model_operation.ProviderIo = @ptrCast(@alignCast(response.context));
+            self.response_ref = provider_io.response_ref;
+
+            const session = self.session orelse return error.MissingTestSession;
+            var blobs = try session.dir.openDir(session.io, "blobs", .{ .iterate = true });
+            defer blobs.close(session.io);
+            try blobs.setPermissions(session.io, .fromMode(0o555));
+            self.restricted = true;
+            return .{ .failure = .{ .failure = .provider_error } };
+        }
+
+        fn restorePermissions(self: *@This()) !void {
+            if (!self.restricted) return;
+            const session = self.session orelse return error.MissingTestSession;
+            var blobs = try session.dir.openDir(session.io, "blobs", .{ .iterate = true });
+            defer blobs.close(session.io);
+            try blobs.setPermissions(session.io, .fromMode(0o755));
+            self.restricted = false;
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var provider: StorageFailureProvider = .{};
+    var owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model_binding = .{ .model = "fixture:failure-seal-storage-error", .provider = provider.provider() },
+            .task = "task",
+        } },
+    });
+    defer owner.close();
+    _ = try owner.drive();
+    provider.session = &harnessState(owner).session.?;
+    defer provider.restorePermissions() catch unreachable;
+    try std.testing.expectEqual(OfferResult.accepted, owner.offer(.task));
+    const unavailable = try owner.drive();
+    try provider.restorePermissions();
+
+    try std.testing.expectEqual(State.unavailable, unavailable.state);
+    try std.testing.expectEqual(@as(u8, 1), unavailable.projection_count);
+    try std.testing.expectEqual(ProjectionKind.failure, unavailable.projections[0].kind);
+    try std.testing.expectEqual(model_protocol.Failure.none, unavailable.projections[0].failure);
+    const Ignore = struct {
+        fn apply(_: *anyopaque, _: completion_inbox.Envelope) !void {}
+    };
+    var context: u8 = 0;
+    const session = provider.session.?;
+    var drafts = try session.dir.openDir(session.io, "blobs/.drafts", .{ .iterate = true });
+    defer drafts.close(session.io);
+    var iterator = drafts.iterate();
+    var draft_count: u8 = 0;
+    while (try iterator.next(session.io)) |entry| {
+        try std.testing.expect(entry.kind == .file);
+        draft_count += 1;
+        var file = try drafts.openFile(session.io, entry.name, .{});
+        const stat = try file.stat(session.io);
+        try std.testing.expectEqual(
+            @as(u64, blob_store.header_size + model_protocol.header_size),
+            stat.size,
+        );
+        var header: [blob_store.header_size]u8 = undefined;
+        try std.testing.expectEqual(
+            header.len,
+            try file.readPositionalAll(session.io, &header, 0),
+        );
+        file.close(session.io);
+        // A written header proves failure replacement reached BlobWriter.finish.
+        // Read-only destination permissions then reject only its final rename.
+        try std.testing.expectEqualStrings("ONEBLOB\x00", header[0..8]);
+    }
+    try std.testing.expectEqual(@as(u8, 1), draft_count);
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        try session.scanCompletionEvidence(&context, Ignore.apply),
+    );
+    var bytes: [1]u8 = undefined;
+    try std.testing.expectError(error.FileNotFound, session.readBlob(provider.response_ref, 0, &bytes));
 }
 
 test "typed durable model failures share one failed Harness projection" {

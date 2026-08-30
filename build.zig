@@ -22,7 +22,8 @@ pub fn build(b: *std.Build) void {
     cli.root_module.linkFramework("Security", .{});
     cli.root_module.linkFramework("CoreFoundation", .{});
     configureSqlite(b, cli);
-    b.installArtifact(cli);
+    const install_cli = b.addInstallArtifact(cli, .{});
+    b.getInstallStep().dependOn(&install_cli.step);
 
     const test_step = b.step("test", "Run the deterministic product and storage tests");
     addTestGraph(b, test_step, cli, native_target, optimize);
@@ -149,12 +150,26 @@ pub fn build(b: *std.Build) void {
 
     const codex_live_step = b.step(
         "codex-live-repair",
-        "Run the opt-in controlled repair through the live Codex subscription Provider",
+        "Run and measure the opt-in controlled repair through the live Codex subscription Provider",
+    );
+    const codex_memory_contract = addNativeExecutable(
+        b,
+        "onepage-codex-memory-contract",
+        "src/codex_memory_contract.zig",
+        native_target,
+        optimize,
     );
     const run_codex_live = b.addSystemCommand(&.{"sh"});
     run_codex_live.addFileArg(b.path("src/codex_live_repair.sh"));
-    run_codex_live.addArtifactArg(cli);
+    run_codex_live.addArg(b.getInstallPath(.bin, "onepage"));
+    run_codex_live.addArtifactArg(codex_memory_contract);
+    run_codex_live.addArg(".zig-cache/codex-live-capacity-one.json");
+    run_codex_live.step.dependOn(&install_cli.step);
     codex_live_step.dependOn(&run_codex_live.step);
+    check_step.dependOn(&codex_memory_contract.step);
+    const check_codex_live_script = b.addSystemCommand(&.{ "sh", "-n" });
+    check_codex_live_script.addFileArg(b.path("src/codex_live_repair.sh"));
+    check_step.dependOn(&check_codex_live_script.step);
 }
 
 fn addTestGraph(

@@ -9,6 +9,8 @@ pub const max_response_size: usize = 64 * 1024;
 pub const max_device_id_size: usize = 512;
 pub const max_user_code_size: usize = 64;
 pub const request_timeout = std.Io.Duration.fromSeconds(300);
+const max_json_nesting_depth: usize = 32;
+const json_scanner_stack_size: usize = 2 * std.atomic.cache_line;
 
 pub const HttpResponse = struct {
     status: u16,
@@ -129,6 +131,43 @@ pub const Tokens = struct {
     }
 };
 
+const DeviceCodeEnvelope = struct {
+    device_auth_id: ?[]const u8 = null,
+    user_code: ?[]const u8 = null,
+    usercode: ?[]const u8 = null,
+    interval: ?std.json.Value = null,
+};
+
+const AuthorizationEnvelope = struct {
+    authorization_code: ?[]const u8 = null,
+    code_verifier: ?[]const u8 = null,
+};
+
+const ProviderTokenEnvelope = struct {
+    access_token: ?[]const u8 = null,
+    refresh_token: ?[]const u8 = null,
+    id_token: ?[]const u8 = null,
+    account_id: ?[]const u8 = null,
+};
+
+const StoredTokenEnvelope = struct {
+    access_token: []const u8,
+    refresh_token: []const u8,
+    id_token: []const u8,
+    account_id: []const u8,
+};
+
+const AccessTokenClaims = struct {
+    @"https://api.openai.com/auth": ?struct {
+        chatgpt_account_id: ?[]const u8 = null,
+    } = null,
+};
+
+const ErrorEnvelope = struct {
+    @"error": ?[]const u8 = null,
+    code: ?[]const u8 = null,
+};
+
 pub fn requestDeviceCode(http: Http) !DeviceCode {
     var body: [128]u8 = undefined;
     const request = try std.fmt.bufPrint(&body, "{{\"client_id\":\"{s}\"}}", .{client_id});
@@ -141,16 +180,15 @@ pub fn requestDeviceCode(http: Http) !DeviceCode {
         &response_bytes,
     );
     if (response.status != 200) return error.DeviceAuthorizationUnavailable;
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, response.body, .{});
+    var parsed = try parseProviderEnvelope(DeviceCodeEnvelope, response.body);
     defer parsed.deinit();
-    const object = switch (parsed.value) {
-        .object => |value| value,
-        else => return error.MalformedAuthorizationResponse,
-    };
-    const device_id = string(object.get("device_auth_id")) orelse return error.MalformedAuthorizationResponse;
-    const user_code = string(object.get("user_code")) orelse string(object.get("usercode")) orelse
+    const device_id = parsed.value.device_auth_id orelse return error.MalformedAuthorizationResponse;
+    if (parsed.value.user_code != null and parsed.value.usercode != null) {
         return error.MalformedAuthorizationResponse;
-    const interval: u16 = switch (object.get("interval") orelse return error.MalformedAuthorizationResponse) {
+    }
+    const user_code = parsed.value.user_code orelse parsed.value.usercode orelse
+        return error.MalformedAuthorizationResponse;
+    const interval: u16 = switch (parsed.value.interval orelse return error.MalformedAuthorizationResponse) {
         .string => |value| try std.fmt.parseInt(u16, value, 10),
         .integer => |value| std.math.cast(u16, value) orelse return error.MalformedAuthorizationResponse,
         else => return error.MalformedAuthorizationResponse,
@@ -193,14 +231,10 @@ pub fn pollDeviceCode(http: Http, device: *const DeviceCode) !PollResult {
     if (responseErrorIs(response.body, "slow_down")) return .slow_down;
     if (response.status == 429) return .slow_down;
     if (response.status != 200) return error.DeviceAuthorizationFailed;
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, response.body, .{});
+    var parsed = try parseProviderEnvelope(AuthorizationEnvelope, response.body);
     defer parsed.deinit();
-    const object = switch (parsed.value) {
-        .object => |value| value,
-        else => return error.MalformedAuthorizationResponse,
-    };
-    const code = string(object.get("authorization_code")) orelse return error.MalformedAuthorizationResponse;
-    const verifier = string(object.get("code_verifier")) orelse return error.MalformedAuthorizationResponse;
+    const code = parsed.value.authorization_code orelse return error.MalformedAuthorizationResponse;
+    const verifier = parsed.value.code_verifier orelse return error.MalformedAuthorizationResponse;
     if (code.len == 0 or code.len > max_token_size or verifier.len == 0 or verifier.len > max_token_size) {
         return error.MalformedAuthorizationResponse;
     }
@@ -285,7 +319,14 @@ pub fn encodeStored(tokens: *const Tokens, out: []u8) ![]const u8 {
 }
 
 pub fn decodeStored(bytes: []const u8) !Tokens {
-    return parseTokens(bytes);
+    var parsed = try parseStoredEnvelope(StoredTokenEnvelope, bytes);
+    defer parsed.deinit();
+    return buildTokens(
+        parsed.value.access_token,
+        parsed.value.refresh_token,
+        parsed.value.id_token,
+        parsed.value.account_id,
+    );
 }
 
 fn parseTokens(bytes: []const u8) !Tokens {
@@ -293,27 +334,27 @@ fn parseTokens(bytes: []const u8) !Tokens {
 }
 
 fn parseTokensWithFallback(bytes: []const u8, fallback: ?*const Tokens) !Tokens {
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, bytes, .{
-        .allocate = .alloc_if_needed,
-    });
+    var parsed = try parseProviderEnvelope(ProviderTokenEnvelope, bytes);
     defer parsed.deinit();
-    const object = switch (parsed.value) {
-        .object => |value| value,
-        else => return error.MalformedTokenResponse,
-    };
-    const access = string(object.get("access_token")) orelse return error.MalformedTokenResponse;
-    const refresh_token = string(object.get("refresh_token")) orelse
+    const access = parsed.value.access_token orelse return error.MalformedTokenResponse;
+    const refresh_token = parsed.value.refresh_token orelse
         if (fallback) |tokens| tokens.refreshToken() else "";
-    const id_token = string(object.get("id_token")) orelse
+    const id_token = parsed.value.id_token orelse
         if (fallback) |tokens| tokens.idToken() else return error.MalformedTokenResponse;
-    const stored_account = string(object.get("account_id")) orelse "";
     var decoded_account: [codex_provider.max_account_id_size]u8 = undefined;
-    const account = if (fallback != null)
-        try accountIdFromAccessToken(access, &decoded_account)
-    else if (stored_account.len != 0)
-        stored_account
-    else
-        try accountIdFromAccessToken(access, &decoded_account);
+    const account = try accountIdFromAccessToken(access, &decoded_account);
+    if (parsed.value.account_id) |provider_account| {
+        if (!std.mem.eql(u8, provider_account, account)) return error.AccountBindingMismatch;
+    }
+    return buildTokens(access, refresh_token, id_token, account);
+}
+
+fn buildTokens(
+    access: []const u8,
+    refresh_token: []const u8,
+    id_token: []const u8,
+    account: []const u8,
+) !Tokens {
     if (access.len == 0 or access.len > max_token_size or refresh_token.len > max_token_size or
         id_token.len == 0 or id_token.len > max_token_size or account.len == 0 or
         account.len > codex_provider.max_account_id_size)
@@ -340,40 +381,56 @@ fn accountIdFromAccessToken(jwt: []const u8, out: []u8) ![]const u8 {
     const length = try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(payload);
     if (length > decoded.len) return error.MalformedAccessToken;
     try std.base64.url_safe_no_pad.Decoder.decode(decoded[0..length], payload);
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, decoded[0..length], .{});
+    var parsed = try parseProviderEnvelope(AccessTokenClaims, decoded[0..length]);
     defer parsed.deinit();
-    const object = switch (parsed.value) {
-        .object => |value| value,
-        else => return error.MalformedAccessToken,
-    };
-    const auth = switch (object.get("https://api.openai.com/auth") orelse return error.MalformedAccessToken) {
-        .object => |value| value,
-        else => return error.MalformedAccessToken,
-    };
-    const account = string(auth.get("chatgpt_account_id")) orelse return error.MalformedAccessToken;
+    const auth = @field(parsed.value, "https://api.openai.com/auth") orelse
+        return error.MalformedAccessToken;
+    const account = auth.chatgpt_account_id orelse return error.MalformedAccessToken;
     if (account.len == 0 or account.len > out.len) return error.MalformedAccessToken;
     @memcpy(out[0..account.len], account);
     return out[0..account.len];
 }
 
-fn string(value: ?std.json.Value) ?[]const u8 {
-    return switch (value orelse return null) {
-        .string => |text| text,
-        else => null,
-    };
+fn responseErrorIs(bytes: []const u8, expected: []const u8) bool {
+    var parsed = parseProviderEnvelope(ErrorEnvelope, bytes) catch return false;
+    defer parsed.deinit();
+    if (@field(parsed.value, "error") != null and parsed.value.code != null) return false;
+    const code = @field(parsed.value, "error") orelse parsed.value.code orelse return false;
+    return std.mem.eql(u8, code, expected);
 }
 
-fn responseErrorIs(bytes: []const u8, expected: []const u8) bool {
-    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, bytes, .{
+fn parseProviderEnvelope(comptime T: type, bytes: []const u8) !std.json.Parsed(T) {
+    try preflightJsonDepth(bytes);
+    return std.json.parseFromSlice(T, std.heap.page_allocator, bytes, .{
         .allocate = .alloc_if_needed,
-    }) catch return false;
-    defer parsed.deinit();
-    const object = switch (parsed.value) {
-        .object => |value| value,
-        else => return false,
-    };
-    const code = string(object.get("error")) orelse string(object.get("code")) orelse return false;
-    return std.mem.eql(u8, code, expected);
+        .ignore_unknown_fields = true,
+    });
+}
+
+fn parseStoredEnvelope(comptime T: type, bytes: []const u8) !std.json.Parsed(T) {
+    try preflightJsonDepth(bytes);
+    return std.json.parseFromSlice(T, std.heap.page_allocator, bytes, .{
+        .allocate = .alloc_if_needed,
+    });
+}
+
+fn preflightJsonDepth(bytes: []const u8) !void {
+    var stack: [json_scanner_stack_size]u8 align(@alignOf(usize)) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&stack);
+    var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), bytes);
+    defer scanner.deinit();
+    scanner.ensureTotalStackCapacity(max_json_nesting_depth + 1) catch
+        return error.JsonNestingTooDeep;
+    while (true) {
+        const token = scanner.next() catch |err| return err;
+        switch (token) {
+            .object_begin, .array_begin => if (scanner.stackHeight() > max_json_nesting_depth) {
+                return error.JsonNestingTooDeep;
+            },
+            .end_of_document => return,
+            else => {},
+        }
+    }
 }
 
 fn percentEncode(writer: *std.Io.Writer, bytes: []const u8) !void {
@@ -416,7 +473,10 @@ test "device authorization and refresh use the official subscription protocol" {
     var reopened = try decodeStored(try encodeStored(&renewed, &stored));
     defer reopened.scrub();
     try std.testing.expectEqualStrings(renewed.accountId(), reopened.accountId());
-    try std.testing.expect(responseErrorIs("{\"error\":\"slow_down\"}", "slow_down"));
+    try std.testing.expect(responseErrorIs(
+        "{\"future\":1,\"error\":\"slow_down\",\"future\":{}}",
+        "slow_down",
+    ));
 
     var changed = ChangedAccountHttp{};
     const changed_http: Http = .{ .context = &changed, .post_fn = ChangedAccountHttp.post };
@@ -430,6 +490,152 @@ test "account binding comes from the nested access-token auth claim" {
     );
     defer tokens.scrub();
     try std.testing.expectEqualStrings("acct-live", tokens.accountId());
+}
+
+test "provider token envelopes ignore unknown extensions but keep consumed fields strict" {
+    const jwt = "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1saXZlIn19.sig";
+    var tokens = try parseTokens(
+        "{\"future\":1,\"access_token\":\"" ++ jwt ++
+            "\",\"future\":{\"nested\":true},\"refresh_token\":\"refresh\",\"id_token\":\"e30.e30.sig\"}",
+    );
+    defer tokens.scrub();
+    try std.testing.expectEqualStrings("acct-live", tokens.accountId());
+    try std.testing.expectError(
+        error.DuplicateField,
+        parseTokens(
+            "{\"access_token\":\"" ++ jwt ++ "\",\"access_token\":\"" ++ jwt ++
+                "\",\"refresh_token\":\"refresh\",\"id_token\":\"e30.e30.sig\"}",
+        ),
+    );
+
+    const claim =
+        "{\"future\":1,\"https://api.openai.com/auth\":{\"future\":1,\"chatgpt_account_id\":\"acct-live\",\"future\":2},\"future\":2}";
+    var encoded_claim: [512]u8 = undefined;
+    const encoded = std.base64.url_safe_no_pad.Encoder.encode(&encoded_claim, claim);
+    var jwt_bytes: [640]u8 = undefined;
+    const claim_jwt = try std.fmt.bufPrint(&jwt_bytes, "e30.{s}.sig", .{encoded});
+    var account: [codex_provider.max_account_id_size]u8 = undefined;
+    try std.testing.expectEqualStrings("acct-live", try accountIdFromAccessToken(claim_jwt, &account));
+}
+
+test "provider account metadata cannot contradict the access-token claim" {
+    const jwt = "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1saXZlIn19.sig";
+    try std.testing.expectError(
+        error.AccountBindingMismatch,
+        parseTokens(
+            "{\"access_token\":\"" ++ jwt ++
+                "\",\"refresh_token\":\"refresh\",\"id_token\":\"e30.e30.sig\",\"account_id\":\"acct-other\"}",
+        ),
+    );
+}
+
+test "open authorization envelopes reject ambiguous consumed fields" {
+    {
+        var parsed = try parseProviderEnvelope(
+            DeviceCodeEnvelope,
+            "{\"device_auth_id\":\"device\",\"user_code\":\"code\",\"future\":1,\"future\":{}}",
+        );
+        parsed.deinit();
+    }
+    try std.testing.expectError(
+        error.DuplicateField,
+        parseProviderEnvelope(
+            DeviceCodeEnvelope,
+            "{\"device_auth_id\":\"device\",\"device_auth_id\":\"other\",\"user_code\":\"code\"}",
+        ),
+    );
+    try std.testing.expectError(
+        error.UnexpectedToken,
+        parseProviderEnvelope(
+            DeviceCodeEnvelope,
+            "{\"device_auth_id\":1,\"user_code\":\"code\"}",
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateField,
+        parseProviderEnvelope(
+            AuthorizationEnvelope,
+            "{\"authorization_code\":\"code\",\"authorization_code\":\"other\",\"code_verifier\":\"verifier\"}",
+        ),
+    );
+    var wrong_authorization = WrongAuthorizationHttp{};
+    const wrong_authorization_http: Http = .{
+        .context = &wrong_authorization,
+        .post_fn = WrongAuthorizationHttp.post,
+    };
+    const device: DeviceCode = .{
+        .device_id_length = 0,
+        .user_code_length = 0,
+        .interval_seconds = 1,
+    };
+    try std.testing.expectError(
+        error.MalformedAuthorizationResponse,
+        pollDeviceCode(wrong_authorization_http, &device),
+    );
+    try std.testing.expect(!responseErrorIs(
+        "{\"error\":\"slow_down\",\"code\":\"slow_down\"}",
+        "slow_down",
+    ));
+    try std.testing.expect(!responseErrorIs("{\"error\":1}", "slow_down"));
+}
+
+test "open access-token claims reject ambiguous consumed fields" {
+    const duplicate_claim =
+        "{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"acct-a\",\"chatgpt_account_id\":\"acct-b\"}}";
+    var duplicate_encoded_bytes: [512]u8 = undefined;
+    const duplicate_encoded = std.base64.url_safe_no_pad.Encoder.encode(&duplicate_encoded_bytes, duplicate_claim);
+    var duplicate_jwt_bytes: [640]u8 = undefined;
+    const duplicate_jwt = try std.fmt.bufPrint(&duplicate_jwt_bytes, "e30.{s}.sig", .{duplicate_encoded});
+    var account: [codex_provider.max_account_id_size]u8 = undefined;
+    try std.testing.expectError(error.DuplicateField, accountIdFromAccessToken(duplicate_jwt, &account));
+
+    const wrong_type_claim =
+        "{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":42}}";
+    var wrong_type_encoded_bytes: [512]u8 = undefined;
+    const wrong_type_encoded = std.base64.url_safe_no_pad.Encoder.encode(&wrong_type_encoded_bytes, wrong_type_claim);
+    var wrong_type_jwt_bytes: [640]u8 = undefined;
+    const wrong_type_jwt = try std.fmt.bufPrint(&wrong_type_jwt_bytes, "e30.{s}.sig", .{wrong_type_encoded});
+    try std.testing.expectError(error.UnexpectedToken, accountIdFromAccessToken(wrong_type_jwt, &account));
+}
+
+test "authorization JSON has an explicit nesting bound" {
+    var exact_bytes: [256]u8 = undefined;
+    var exact = std.Io.Writer.fixed(&exact_bytes);
+    try exact.writeAll("{\"future\":");
+    for (0..max_json_nesting_depth - 1) |_| try exact.writeByte('[');
+    try exact.writeByte('0');
+    for (0..max_json_nesting_depth - 1) |_| try exact.writeByte(']');
+    try exact.writeByte('}');
+    var parsed = try parseProviderEnvelope(ErrorEnvelope, exact.buffered());
+    parsed.deinit();
+
+    var exceeded_bytes: [256]u8 = undefined;
+    var exceeded = std.Io.Writer.fixed(&exceeded_bytes);
+    try exceeded.writeAll("{\"future\":");
+    for (0..max_json_nesting_depth) |_| try exceeded.writeByte('[');
+    try exceeded.writeByte('0');
+    for (0..max_json_nesting_depth) |_| try exceeded.writeByte(']');
+    try exceeded.writeByte('}');
+    try std.testing.expectError(
+        error.JsonNestingTooDeep,
+        parseProviderEnvelope(ErrorEnvelope, exceeded.buffered()),
+    );
+}
+
+test "stored credentials use one closed exact shape" {
+    const stored =
+        "{\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"id_token\":\"id\",\"account_id\":\"account\",\"future\":true}";
+    try std.testing.expectError(error.UnknownField, decodeStored(stored));
+    try std.testing.expectError(
+        error.MissingField,
+        decodeStored("{\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"id_token\":\"id\"}"),
+    );
+    try std.testing.expectError(
+        error.DuplicateField,
+        decodeStored(
+            "{\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"id_token\":\"id\",\"account_id\":\"account\",\"account_id\":\"account\"}",
+        ),
+    );
 }
 
 test "refresh rejects a new access token without a trustworthy account claim" {
@@ -459,6 +665,14 @@ const MissingAccountHttp = struct {
     }
 };
 
+const WrongAuthorizationHttp = struct {
+    fn post(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8, out: []u8, _: std.Io.Duration) anyerror!HttpResponse {
+        const body = "{\"authorization_code\":[],\"code_verifier\":\"verifier\"}";
+        @memcpy(out[0..body.len], body);
+        return .{ .status = 200, .body = out[0..body.len] };
+    }
+};
+
 const FakeHttp = struct {
     calls: u8 = 0,
 
@@ -466,11 +680,11 @@ const FakeHttp = struct {
         const self: *FakeHttp = @ptrCast(@alignCast(context));
         self.calls += 1;
         const body = if (std.mem.endsWith(u8, url, "/deviceauth/usercode"))
-            "{\"device_auth_id\":\"device-1\",\"user_code\":\"ABCD-EFGH\",\"interval\":\"1\"}"
+            "{\"future\":1,\"device_auth_id\":\"device-1\",\"user_code\":\"ABCD-EFGH\",\"interval\":\"1\",\"future\":{}}"
         else if (std.mem.endsWith(u8, url, "/deviceauth/token") and self.calls == 2)
             ""
         else if (std.mem.endsWith(u8, url, "/deviceauth/token"))
-            "{\"authorization_code\":\"code\",\"code_challenge\":\"challenge\",\"code_verifier\":\"verifier\"}"
+            "{\"future\":1,\"authorization_code\":\"code\",\"code_challenge\":\"challenge\",\"code_verifier\":\"verifier\",\"future\":{}}"
         else if (std.mem.endsWith(u8, url, "/oauth/token") and self.calls == 4)
             "{\"access_token\":\"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0xIn19.sig\",\"refresh_token\":\"refresh\",\"id_token\":\"e30.e30.sig\"}"
         else
