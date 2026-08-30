@@ -288,6 +288,47 @@ pub fn build(b: *std.Build) void {
     );
     native_core_step.dependOn(&run_native_core_spike.step);
 
+    const runtime_measurement = addNativeExecutable(
+        b,
+        "onepage-runtime-measurement",
+        "src/runtime_measurement.zig",
+        native_target,
+        .ReleaseSafe,
+    );
+    const measurement_scenario = b.option(
+        []const u8,
+        "measurement-scenario",
+        "Runtime measurement scenario: dormant or completion",
+    ) orelse "dormant";
+    const measurement_count = b.option(
+        usize,
+        "measurement-count",
+        "Number of Sessions exercised by the runtime measurement",
+    ) orelse 100;
+    const run_runtime_measurement = b.addRunArtifact(runtime_measurement);
+    run_runtime_measurement.addArg(measurement_scenario);
+    run_runtime_measurement.addArg(b.fmt("{d}", .{measurement_count}));
+    const runtime_measurement_step = b.step(
+        "measure-runtime",
+        "Measure whole-process runtime memory and end-to-end lifecycle speed",
+    );
+    runtime_measurement_step.dependOn(&run_runtime_measurement.step);
+    const measurement_repetitions = b.option(
+        usize,
+        "measurement-repetitions",
+        "Independent processes per runtime measurement point",
+    ) orelse 3;
+    const run_runtime_measurement_sweep = b.addSystemCommand(&.{"sh"});
+    run_runtime_measurement_sweep.addFileArg(b.path("src/runtime_measurement_sweep.sh"));
+    run_runtime_measurement_sweep.addArtifactArg(runtime_measurement);
+    run_runtime_measurement_sweep.addArg(".zig-cache/onepage-runtime-measurements.jsonl");
+    run_runtime_measurement_sweep.addArg(b.fmt("{d}", .{measurement_repetitions}));
+    const runtime_measurement_sweep_step = b.step(
+        "measure-runtime-sweep",
+        "Run repeated dormant-memory and completion-throughput measurements",
+    );
+    runtime_measurement_sweep_step.dependOn(&run_runtime_measurement_sweep.step);
+
     const release_safe_native_core = addNativeExecutable(
         b,
         "onepage-native-core-check",
@@ -296,6 +337,9 @@ pub fn build(b: *std.Build) void {
         .ReleaseSafe,
     );
     check_step.dependOn(&b.addRunArtifact(release_safe_native_core).step);
+    const check_runtime_measurement_script = b.addSystemCommand(&.{ "sh", "-n" });
+    check_runtime_measurement_script.addFileArg(b.path("src/runtime_measurement_sweep.sh"));
+    check_step.dependOn(&check_runtime_measurement_script.step);
 
     const codex_live_step = b.step(
         "codex-live-repair",
@@ -637,6 +681,7 @@ fn usesHostStore(root: []const u8) bool {
         "src/host_store_test.zig",
         "src/model_operation.zig",
         "src/patch_recovery_fixture.zig",
+        "src/runtime_measurement.zig",
         "src/session.zig",
     };
     for (roots) |candidate| {
