@@ -197,6 +197,37 @@ Operational tests enforce maximum page count by filling a transaction until admi
 
 ## Resource ledger
 
+### Measurement order
+
+Optimize the production-shaped path before an isolated component. The first evidence is end-to-end
+wall and CPU time, throughput, whole-process physical footprint, RSS, virtual size, threads, wakeups,
+I/O, and durable bytes for a real Host Runtime, Host Store, Harness, provider, and semantic closure.
+Phase timing then identifies which owned stage is material. A parser, allocator, SQLite, transport, or
+Core microbenchmark earns release weight only when the phase evidence shows that component materially
+affects the product path. A locally faster component is not a product improvement when transfer,
+synchronization, retained memory, or insufficient concurrency dominates the complete workload.
+
+`zig build measure-runtime` runs one isolated ReleaseSafe point and emits a versioned JSON record to
+stdout. `-Dmeasurement-scenario=dormant -Dmeasurement-count=N` measures durable Session population and
+historical Harness churn. `-Dmeasurement-scenario=completion -Dmeasurement-count=N` measures complete
+deterministic Session lifecycles rather than provider/parser throughput in isolation.
+`zig build measure-runtime-sweep` runs the required dormant points in independent processes plus the
+end-to-end completion point and writes raw JSONL under `.zig-cache`; use
+`-Dmeasurement-repetitions=N` to control repetitions. Report the median and complete observed range,
+the exact commit, build mode, machine, and cold/warm conditions. Numeric performance results are release
+evidence, not a noise-sensitive normal-`check` assertion.
+
+The capacity-one fixture is the measurement foundation, not the final density proof. Issue #3 must reuse
+the same schema after runtime-sized Active Capacity exists; issue #34 must add its production-shaped
+1/10/50/100 provider-transport points. macOS `physical_footprint` is the primary whole-process memory
+measure. RSS, lifetime peak footprint, and virtual size remain separate observations: virtual size
+includes large platform mappings and stack reservation and must not be presented as committed memory.
+Once the durable Run/Job seam exists, the product benchmark must invoke the agent population from an
+ordinary JavaScript Workflow through the real disposable evaluator. It reports Host and evaluator-child
+memory separately and together, and verifies zero evaluator processes at Blocked and terminal boundaries.
+The standalone evaluator fixture remains component evidence; it must not be presented as an end-to-end
+agent-workflow measurement.
+
 Every density and product run reports these categories separately:
 
 - for every resident stage, the capacity that multiplies it, occupied count, requested allocation

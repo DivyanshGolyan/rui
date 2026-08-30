@@ -1,0 +1,56 @@
+#!/bin/sh
+set -eu
+
+if test "$#" -ne 3; then
+  echo "usage: runtime_measurement_sweep.sh FIXTURE OUTPUT REPETITIONS" >&2
+  exit 2
+fi
+
+fixture=$1
+output=$2
+repetitions=$3
+
+case "$repetitions" in
+  ''|*[!0-9]*|0)
+    echo "repetitions must be a positive integer" >&2
+    exit 2
+    ;;
+esac
+
+output_dir=$(dirname "$output")
+mkdir -p "$output_dir"
+temporary="$output.tmp.$$"
+trap 'rm -f "$temporary"' EXIT HUP INT TERM
+
+source_commit=$(git rev-parse HEAD)
+platform=$(uname -srvmp | tr '"' "'")
+printf '{"schema":"onepage.runtime-measurement-sweep.v1","source_commit":"%s","platform":"%s","repetitions":%s}\n' \
+  "$source_commit" "$platform" "$repetitions" > "$temporary"
+
+run_point() {
+  scenario=$1
+  count=$2
+  repetition=$3
+  # The fixture emits pretty JSON for one human-run point. Newlines are JSON
+  # whitespace, so removing them makes one JSONL record without adding a JSON
+  # processor to the measured path.
+  "$fixture" "$scenario" "$count" | tr -d '\n' >> "$temporary"
+  printf '\n' >> "$temporary"
+  printf '%s count=%s repetition=%s/%s\n' \
+    "$scenario" "$count" "$repetition" "$repetitions" >&2
+}
+
+repetition=1
+while test "$repetition" -le "$repetitions"; do
+  for count in 0 100 1000 10000; do
+    run_point dormant "$count" "$repetition"
+  done
+  # This is the complete Harness -> SQLite -> provider -> semantic closure
+  # path, intentionally not a parser or transport microbenchmark.
+  run_point completion 100 "$repetition"
+  repetition=$((repetition + 1))
+done
+
+mv "$temporary" "$output"
+trap - EXIT HUP INT TERM
+printf 'Wrote raw runtime measurements to %s\n' "$output" >&2
