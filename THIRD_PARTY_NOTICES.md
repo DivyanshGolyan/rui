@@ -6,6 +6,7 @@ OnePage's disposable Workflow Evaluator links unmodified QuickJS-ng v0.16.2 at c
 `1ab8676f4b6d6d669baeb5f21790fb9734636a20`.
 
 - Source: `https://github.com/quickjs-ng/quickjs/archive/1ab8676f4b6d6d669baeb5f21790fb9734636a20.tar.gz`
+- Upstream archive SHA-256: `c788fe4f65c95ecfa4055c8778e7cb221f68fcc3315686627b0856da5c38514e`
 - Zig package content hash: `N-V-__8AAC-eRACa__taXkae9pRIZde7nn8oQSxb9n9rhkFp`
 - License: MIT
 

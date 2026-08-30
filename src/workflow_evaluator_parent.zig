@@ -8,8 +8,14 @@ pub const RunResult = struct {
 
 pub const RunError = error{
     DeadlineExceeded,
+    InputFrameExceeded,
     OutputFrameExceeded,
     DiagnosticExceeded,
+    CpuLimitExceeded,
+    ChildCrashed,
+    ChildKilled,
+    ChildStopped,
+    UnknownTermination,
     AbnormalExit,
 } || std.process.SpawnError || std.process.Child.WaitError || std.Io.File.Writer.Error ||
     std.Io.File.Reader.Error || std.Io.Cancelable || std.Io.ConcurrentError || std.posix.KillError;
@@ -28,11 +34,8 @@ pub fn run(
     output_storage: []u8,
     timeout_milliseconds: u64,
 ) RunError!RunResult {
-    if (input.len > protocol.Limits.input_frame_bytes or
-        output_storage.len < protocol.Limits.output_frame_bytes)
-    {
-        return error.OutputFrameExceeded;
-    }
+    if (input.len > protocol.Limits.input_frame_bytes) return error.InputFrameExceeded;
+    if (output_storage.len < protocol.Limits.output_frame_bytes) return error.OutputFrameExceeded;
 
     var empty_environment = std.process.Environ.Map.init(allocator);
     defer empty_environment.deinit();
@@ -91,7 +94,14 @@ pub fn run(
     if (input_write_error) |err| return err;
     switch (term) {
         .exited => |code| if (code != 0) return error.AbnormalExit,
-        else => return error.AbnormalExit,
+        .signal => |signal| switch (signal) {
+            .XCPU => return error.CpuLimitExceeded,
+            .KILL, .TERM, .INT, .HUP => return error.ChildKilled,
+            .ABRT, .SEGV, .BUS, .ILL, .FPE, .TRAP => return error.ChildCrashed,
+            else => return error.ChildKilled,
+        },
+        .stopped => return error.ChildStopped,
+        .unknown => return error.UnknownTermination,
     }
     return .{
         .output = output_storage[0..stdout_result.length],

@@ -67,6 +67,9 @@ deferred explicitly.
 - Bound workflow source, arguments, Job count, blocked set, visible Results, JavaScript heap and stack,
   native bridge arena, protocol bytes, microtasks, diagnostics, evaluation time, and cumulative replay.
   Destroy the evaluator at every Job barrier; never retain a Promise resolver across durable waits.
+- Apply structural-cardinality limits cumulatively to each complete strict value, canonicalize object
+  keys at every depth, and apply visible-result byte limits to the complete Visibility Snapshot rather
+  than independently to each member.
 - Keep speculative reserve out of fixed resident structures. Every Activation Slot field and other
   per-capacity buffer must have a current production reader and writer; add future scratch when its
   consumer exists.

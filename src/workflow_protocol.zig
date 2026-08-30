@@ -69,7 +69,6 @@ pub const ProtocolError = error{
 pub const Cursor = struct {
     bytes: []const u8,
     index: usize = 0,
-    entries: usize = 0,
 
     pub fn init(bytes: []const u8) Cursor {
         return .{ .bytes = bytes };
@@ -117,8 +116,9 @@ pub const Cursor = struct {
     }
 
     pub fn skipValue(self: *Cursor, maximum_bytes: usize) ProtocolError![]const u8 {
+        var budget = EntryBudget{};
         const start = self.index;
-        try self.skipValueDepth(0, null);
+        try self.skipValueDepth(0, null, &budget);
         const result = self.bytes[start..self.index];
         if (result.len > maximum_bytes) return error.ExcessiveBytes;
         return result;
@@ -130,8 +130,9 @@ pub const Cursor = struct {
         key_storage: [][]const u8,
     ) ProtocolError![]const u8 {
         var keys = KeyScratch{ .storage = key_storage };
+        var budget = EntryBudget{};
         const start = self.index;
-        try self.skipValueDepth(0, &keys);
+        try self.skipValueDepth(0, &keys, &budget);
         const result = self.bytes[start..self.index];
         if (result.len > maximum_bytes) return error.ExcessiveBytes;
         return result;
@@ -142,7 +143,22 @@ pub const Cursor = struct {
         used: usize = 0,
     };
 
-    fn skipValueDepth(self: *Cursor, depth: usize, keys: ?*KeyScratch) ProtocolError!void {
+    const EntryBudget = struct {
+        used: usize = 0,
+
+        fn add(self: *EntryBudget, count: usize) ProtocolError!void {
+            self.used = std.math.add(usize, self.used, count) catch
+                return error.ExcessiveEntries;
+            if (self.used > Limits.data_entries) return error.ExcessiveEntries;
+        }
+    };
+
+    fn skipValueDepth(
+        self: *Cursor,
+        depth: usize,
+        keys: ?*KeyScratch,
+        budget: *EntryBudget,
+    ) ProtocolError!void {
         if (depth > Limits.data_depth) return error.ExcessiveDepth;
         const tag = std.enums.fromInt(DataTag, try self.readByte()) orelse return error.InvalidTag;
         switch (tag) {
@@ -154,12 +170,12 @@ pub const Cursor = struct {
             .string => _ = try self.readString(Limits.output_frame_bytes),
             .array => {
                 const count = try self.readInt(u32);
-                try self.addEntries(count);
-                for (0..count) |_| try self.skipValueDepth(depth + 1, keys);
+                try budget.add(count);
+                for (0..count) |_| try self.skipValueDepth(depth + 1, keys, budget);
             },
             .object => {
                 const count = try self.readInt(u32);
-                try self.addEntries(count);
+                try budget.add(count);
                 const key_start = if (keys) |scratch| start: {
                     if (count > scratch.storage.len - scratch.used) return error.ExcessiveEntries;
                     const start = scratch.used;
@@ -174,7 +190,7 @@ pub const Cursor = struct {
                     if (keys) |scratch| {
                         scratch.storage[key_start + index] = key;
                     }
-                    try self.skipValueDepth(depth + 1, keys);
+                    try self.skipValueDepth(depth + 1, keys, budget);
                 }
                 if (keys) |scratch| {
                     const object_keys = scratch.storage[key_start .. key_start + count];
@@ -191,11 +207,6 @@ pub const Cursor = struct {
                 }
             },
         }
-    }
-
-    fn addEntries(self: *Cursor, count: usize) ProtocolError!void {
-        self.entries = std.math.add(usize, self.entries, count) catch return error.ExcessiveEntries;
-        if (self.entries > Limits.data_entries) return error.ExcessiveEntries;
     }
 };
 
@@ -314,4 +325,32 @@ test "exact protocol validation rejects duplicate object keys" {
         error.DuplicateKey,
         cursor.skipValueExact(bytes.len, &key_storage),
     );
+}
+
+test "entry budget is cumulative within one value and resets between values" {
+    var bytes: [32 * 1024]u8 = undefined;
+    var builder = Builder.init(&bytes);
+    try builder.writeByte(@intFromEnum(DataTag.array));
+    try builder.writeInt(u32, 2049);
+    for (0..2049) |_| {
+        try builder.writeByte(@intFromEnum(DataTag.array));
+        try builder.writeInt(u32, 1);
+        try builder.writeByte(@intFromEnum(DataTag.null_value));
+    }
+    var excessive = Cursor.init(builder.written());
+    try std.testing.expectError(
+        error.ExcessiveEntries,
+        excessive.skipValue(bytes.len),
+    );
+
+    builder.index = 0;
+    for (0..2) |_| {
+        try builder.writeByte(@intFromEnum(DataTag.array));
+        try builder.writeInt(u32, 3000);
+        for (0..3000) |_| try builder.writeByte(@intFromEnum(DataTag.null_value));
+    }
+    var independent = Cursor.init(builder.written());
+    _ = try independent.skipValue(bytes.len);
+    _ = try independent.skipValue(bytes.len);
+    try independent.finish();
 }

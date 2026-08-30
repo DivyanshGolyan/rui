@@ -98,6 +98,26 @@ pub fn build(b: *std.Build) void {
     workflow_sanitize_step.dependOn(&run_workflow_sanitize.step);
     check_step.dependOn(&run_workflow_sanitize.step);
 
+    const workflow_leaks_step = b.step(
+        "workflow-leaks",
+        "Run repeated evaluator teardown under the macOS leaks detector",
+    );
+    if (native_target.result.os.tag == .macos) {
+        const workflow_leak_fixture = addNativeExecutable(
+            b,
+            "onepage-workflow-evaluator-leak-fixture",
+            "src/workflow_evaluator_leak_fixture.zig",
+            native_target,
+            .ReleaseSafe,
+        );
+        configureQuickJs(b, workflow_leak_fixture);
+        const run_workflow_leaks = b.addSystemCommand(&.{"sh"});
+        run_workflow_leaks.addFileArg(b.path("src/workflow_evaluator_leak_check.sh"));
+        run_workflow_leaks.addArtifactArg(workflow_leak_fixture);
+        workflow_leaks_step.dependOn(&run_workflow_leaks.step);
+        check_step.dependOn(&run_workflow_leaks.step);
+    }
+
     const fixture_answer_step = b.step(
         "fixture-answer",
         "Run one durable fixture-model operation and print its Final Answer",

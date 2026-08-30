@@ -6,7 +6,8 @@ build APIs, expects the removed `cutils.c`, and pins an older QuickJS revision. 
 the smaller direct path allowed by the issue.
 
 Zig's package manager fetches unmodified QuickJS-ng v0.16.2 from immutable commit
-`1ab8676f4b6d6d669baeb5f21790fb9734636a20` with content hash
+`1ab8676f4b6d6d669baeb5f21790fb9734636a20`. The upstream archive has SHA-256
+`c788fe4f65c95ecfa4055c8778e7cb221f68fcc3315686627b0856da5c38514e` and Zig verifies package content hash
 `N-V-__8AAC-eRACa__taXkae9pRIZde7nn8oQSxb9n9rhkFp`. The evaluator compiles only the four sources in
 the upstream library build: `dtoa.c`, `libregexp.c`, `libunicode.c`, and `quickjs.c`. It does not build
 or link `quickjs-libc.c`, `qjs.c`, or `qjsc.c`.
@@ -35,15 +36,16 @@ Evaluation Generation is active. It is not retained or pooled. Process exit rele
 | QuickJS stack guard | 512 KiB | one per live evaluator |
 | Whole evaluator process | 64 MiB | one per live evaluator |
 
-Within those envelopes, source is limited to 64 KiB, arguments to 64 KiB, visible Job Output bytes to
-512 KiB, final Workflow Output to 64 KiB, strict data to depth 32 and 4,096 entries, pending Jobs to
+Within those envelopes, source is limited to 64 KiB, arguments to 64 KiB, aggregate visible Job Output bytes to
+512 KiB, final Workflow Output to 64 KiB, each complete strict data value to depth 32 and 4,096 cumulative entries, pending Jobs to
 256, and executed microtasks to 4,096. The bridge arena includes one 64 KiB key-slice workspace that
 validates duplicate-free closed protocol objects before any JavaScript executes; it is released with
 the evaluator and does not multiply by Job count. The interrupt handler reports a typed resource outcome after
 one second of process CPU time, with a two-second kernel limit as the non-cooperative backstop. It also
 enforces a five-second monotonic evaluation deadline; the parent uses a later outer deadline and
-treats timeout, abnormal exit, oversized output, or oversized diagnostics as failure rather than
-trusting child bytes.
+treats timeout, distinct input/output overflow, CPU-limit termination, crash, external kill, stop,
+unknown termination, nonzero exit, or oversized diagnostics as separate failures rather than trusting
+child bytes or inferring that every `SIGKILL` was a resource limit.
 
 The parent supplies an empty environment and only pipe-backed standard input, output, and error. The
 trusted child bootstrap closes every inherited descriptor above standard error before reading the
@@ -52,3 +54,16 @@ buffers or evaluating source. A supported kernel-limit failure stops the child r
 without the promised bound. There is no evaluator cache, retained runner, spool, growable response
 buffer, or per-Job native allocation that survives the generation. These limits restrict model-written
 workflow source on the trusted local machine; they do not claim hostile-machine isolation.
+
+QuickJS-ng's `JS_AddIntrinsicEval` is retained because v0.16.2 uses it to initialize the internal
+`ctx->eval_internal` hook required by Host-side `JS_Eval` source-module compilation. It does not add a
+JavaScript global by itself. Realm bootstrap removes JavaScript-visible `eval`, `Function`, and the
+ordinary, async, generator, and async-generator constructor paths before model-written source is
+compiled; focused tests verify those paths remain absent.
+
+`zig build workflow-sanitize` compiles and runs the focused suite with Zig 0.16's
+`-fsanitize-c=full`, which is C undefined-behavior detection, not AddressSanitizer. Zig 0.16 exposes no
+AddressSanitizer build mode for this mixed Zig/C target, so the V1 gate does not claim ASan evidence.
+On the supported macOS target, `zig build workflow-leaks` runs 64 complete evaluator
+construction/destruction cycles under `/usr/bin/leaks` and requires zero leaked allocations. The
+ordinary Zig tests continue to use `std.testing.allocator` for Zig-owned leak detection.

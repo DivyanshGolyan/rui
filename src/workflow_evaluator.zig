@@ -14,6 +14,16 @@ const Request = struct {
     pending: bool,
 };
 
+const EntryBudget = struct {
+    used: usize = 0,
+
+    fn add(self: *EntryBudget, count: usize) !void {
+        self.used = std.math.add(usize, self.used, count) catch
+            return error.ExcessiveEntries;
+        if (self.used > protocol.Limits.data_entries) return error.ExcessiveEntries;
+    }
+};
+
 const Evaluation = struct {
     allocator: std.mem.Allocator,
     source: [:0]const u8,
@@ -64,6 +74,7 @@ const Evaluation = struct {
                 @as(i128, protocol.Limits.cpu_milliseconds) * std.time.ns_per_ms,
         };
 
+        var visible_output_bytes: usize = 0;
         for (0..visible_count) |_| {
             const key = try cursor.readString(512);
             if (key.len == 0) return error.InvalidTag;
@@ -73,7 +84,21 @@ const Evaluation = struct {
             const tag = std.enums.fromInt(protocol.VisibleTag, try cursor.readByte()) orelse
                 return error.InvalidTag;
             const payload = switch (tag) {
-                .output => try cursor.skipValueExact(protocol.Limits.visible_output_bytes, key_storage),
+                .output => output: {
+                    const value = try cursor.skipValueExact(
+                        protocol.Limits.visible_output_bytes,
+                        key_storage,
+                    );
+                    visible_output_bytes = std.math.add(
+                        usize,
+                        visible_output_bytes,
+                        value.len,
+                    ) catch return error.ExcessiveBytes;
+                    if (visible_output_bytes > protocol.Limits.visible_output_bytes) {
+                        return error.ExcessiveBytes;
+                    }
+                    break :output value;
+                },
                 .failure => failure: {
                     const code = try cursor.readString(256);
                     if (!isJobFailureCode(code)) return error.InvalidTag;
@@ -225,7 +250,8 @@ fn evaluateParsed(state: *Evaluation, builder: *protocol.Builder) []const u8 {
     }
 
     var argument_cursor = protocol.Cursor.init(state.arguments);
-    const arguments = decodeData(context, &argument_cursor, 0) catch |err| {
+    var argument_budget = EntryBudget{};
+    const arguments = decodeData(context, &argument_cursor, 0, &argument_budget) catch |err| {
         discardException(context);
         return switch (err) {
             error.OutOfMemory => writeSimpleOutcome(
@@ -278,7 +304,8 @@ fn evaluateParsed(state: *Evaluation, builder: *protocol.Builder) []const u8 {
             const result = qjs.JS_PromiseResult(context, root);
             defer qjs.JS_FreeValue(context, result);
             builder.writeByte(@intFromEnum(protocol.OutcomeTag.completed)) catch return &.{};
-            encodeData(context, state, builder, result, 0, &.{}) catch |err| {
+            var output_budget = EntryBudget{};
+            encodeData(context, state, builder, result, 0, &.{}, &output_budget) catch |err| {
                 return switch (err) {
                     error.ExcessiveBytes => rewriteSimpleOutcome(
                         builder,
@@ -521,7 +548,8 @@ fn promiseForVisible(context: *qjs.JSContext, state: *Evaluation, key: []const u
     return switch (visible.tag) {
         .output => output: {
             var cursor = protocol.Cursor.init(visible.payload);
-            const value = decodeData(context, &cursor, 0) catch {
+            var output_budget = EntryBudget{};
+            const value = decodeData(context, &cursor, 0, &output_budget) catch {
                 state.resource_code = "EngineMemoryOrStack";
                 return qjs.JS_ThrowOutOfMemory(context);
             };
@@ -652,11 +680,13 @@ fn encodeAgentDescriptor(
     var field_count: u32 = 3;
     if (fields.input_present) field_count += 1;
     if (fields.schema_present) field_count += 1;
+    var entry_budget = EntryBudget{};
+    try entry_budget.add(field_count);
     try builder.writeInt(u32, field_count);
 
     try builder.writeString("key");
     const key_start = builder.index;
-    try encodeData(context, state, builder, fields.key, 0, &.{});
+    try encodeData(context, state, builder, fields.key, 0, &.{}, &entry_budget);
     var key_cursor = protocol.Cursor.init(builder.bytes[key_start..builder.index]);
     if (try key_cursor.readByte() != @intFromEnum(protocol.DataTag.string)) return error.InvalidKey;
     const key = try key_cursor.readString(512);
@@ -664,18 +694,18 @@ fn encodeAgentDescriptor(
 
     try builder.writeString("task");
     const task_start = builder.index;
-    try encodeData(context, state, builder, fields.task, 0, &.{});
+    try encodeData(context, state, builder, fields.task, 0, &.{}, &entry_budget);
     var task_cursor = protocol.Cursor.init(builder.bytes[task_start..builder.index]);
     if (try task_cursor.readByte() != @intFromEnum(protocol.DataTag.string)) return error.InvalidTask;
     if ((try task_cursor.readString(32 * 1024)).len == 0) return error.InvalidTask;
 
     if (fields.input_present) {
         try builder.writeString("input");
-        try encodeData(context, state, builder, fields.input, 0, &.{});
+        try encodeData(context, state, builder, fields.input, 0, &.{}, &entry_budget);
     }
     if (fields.schema_present) {
         try builder.writeString("schema");
-        try encodeData(context, state, builder, fields.schema, 0, &.{});
+        try encodeData(context, state, builder, fields.schema, 0, &.{}, &entry_budget);
     }
     try builder.writeString("agent_profile");
     if (!fields.agent_profile_present) {
@@ -684,7 +714,15 @@ fn encodeAgentDescriptor(
     } else {
         if (!qjs.JS_IsString(fields.agent_profile)) return error.InvalidProfile;
         const profile_start = builder.index;
-        try encodeData(context, state, builder, fields.agent_profile, 0, &.{});
+        try encodeData(
+            context,
+            state,
+            builder,
+            fields.agent_profile,
+            0,
+            &.{},
+            &entry_budget,
+        );
         var profile_cursor = protocol.Cursor.init(builder.bytes[profile_start..builder.index]);
         if (try profile_cursor.readByte() != @intFromEnum(protocol.DataTag.string) or
             !std.mem.eql(u8, try profile_cursor.readString(64), "default")) return error.InvalidProfile;
@@ -700,7 +738,12 @@ fn descriptorKey(cursor: *protocol.Cursor) ![]const u8 {
     return cursor.readString(512);
 }
 
-fn decodeData(context: *qjs.JSContext, cursor: *protocol.Cursor, depth: usize) !qjs.JSValue {
+fn decodeData(
+    context: *qjs.JSContext,
+    cursor: *protocol.Cursor,
+    depth: usize,
+    budget: *EntryBudget,
+) !qjs.JSValue {
     if (depth > protocol.Limits.data_depth) return error.ExcessiveDepth;
     const tag = std.enums.fromInt(protocol.DataTag, try cursor.readByte()) orelse return error.InvalidTag;
     return switch (tag) {
@@ -721,25 +764,25 @@ fn decodeData(context: *qjs.JSContext, cursor: *protocol.Cursor, depth: usize) !
         },
         .array => array: {
             const count = try cursor.readInt(u32);
-            if (count > protocol.Limits.data_entries) return error.ExcessiveEntries;
+            try budget.add(count);
             const result = qjs.JS_NewArray(context);
             if (qjs.JS_IsException(result)) return error.OutOfMemory;
             errdefer qjs.JS_FreeValue(context, result);
             for (0..count) |index| {
-                const item = try decodeData(context, cursor, depth + 1);
+                const item = try decodeData(context, cursor, depth + 1, budget);
                 if (qjs.JS_SetPropertyUint32(context, result, @intCast(index), item) < 0) return error.OutOfMemory;
             }
             break :array result;
         },
         .object => object: {
             const count = try cursor.readInt(u32);
-            if (count > protocol.Limits.data_entries) return error.ExcessiveEntries;
+            try budget.add(count);
             const result = qjs.JS_NewObject(context);
             if (qjs.JS_IsException(result)) return error.OutOfMemory;
             errdefer qjs.JS_FreeValue(context, result);
             for (0..count) |_| {
                 const key = try cursor.readString(protocol.Limits.output_frame_bytes);
-                const item = try decodeData(context, cursor, depth + 1);
+                const item = try decodeData(context, cursor, depth + 1, budget);
                 const atom = qjs.JS_NewAtomLen(context, key.ptr, key.len);
                 if (atom == qjs.JS_ATOM_NULL) {
                     qjs.JS_FreeValue(context, item);
@@ -777,6 +820,7 @@ fn encodeData(
     value: qjs.JSValueConst,
     depth: usize,
     ancestors: []const qjs.JSValueConst,
+    budget: *EntryBudget,
 ) anyerror!void {
     if (depth > protocol.Limits.data_depth) return error.ExcessiveDepth;
     if (qjs.JS_IsNull(value)) return builder.writeByte(@intFromEnum(protocol.DataTag.null_value));
@@ -805,10 +849,10 @@ fn encodeData(
     if (qjs.JS_IsArray(value)) {
         if (qjs.JS_GetClassID(value) != state.array_class) return error.UnsupportedClass;
         if (!hasExactPrototype(context, value, state.array_prototype)) return error.UnsupportedPrototype;
-        return encodeArray(context, state, builder, value, depth, chain);
+        return encodeArray(context, state, builder, value, depth, chain, budget);
     }
     if (!isPlainObject(context, state, value)) return error.UnsupportedPrototype;
-    return encodeObject(context, state, builder, value, depth, chain);
+    return encodeObject(context, state, builder, value, depth, chain, budget);
 }
 
 fn encodeString(context: *qjs.JSContext, builder: *protocol.Builder, value: qjs.JSValueConst) !void {
@@ -855,11 +899,13 @@ fn encodeArray(
     value: qjs.JSValueConst,
     depth: usize,
     ancestors: []const qjs.JSValueConst,
+    budget: *EntryBudget,
 ) anyerror!void {
     var length: i64 = 0;
     if (qjs.JS_GetLength(context, value, &length) < 0 or length < 0 or length > protocol.Limits.data_entries) {
         return error.ExcessiveEntries;
     }
+    try budget.add(@intCast(length));
     var table: [*c]qjs.JSPropertyEnum = null;
     var count: u32 = 0;
     if (qjs.JS_GetOwnPropertyNames(context, &table, &count, value, qjs.JS_GPN_STRING_MASK | qjs.JS_GPN_SYMBOL_MASK) < 0) {
@@ -880,7 +926,7 @@ fn encodeArray(
         if (present != 1) return error.SparseArray;
         defer freeDescriptor(context, &descriptor);
         if (descriptor.flags & qjs.JS_PROP_GETSET != 0) return error.AccessorRejected;
-        try encodeData(context, state, builder, descriptor.value, depth + 1, ancestors);
+        try encodeData(context, state, builder, descriptor.value, depth + 1, ancestors, budget);
     }
 }
 
@@ -891,6 +937,7 @@ fn encodeObject(
     value: qjs.JSValueConst,
     depth: usize,
     ancestors: []const qjs.JSValueConst,
+    budget: *EntryBudget,
 ) anyerror!void {
     var table: [*c]qjs.JSPropertyEnum = null;
     var count: u32 = 0;
@@ -898,7 +945,8 @@ fn encodeObject(
         return error.EnumerationFailed;
     }
     defer qjs.JS_FreePropertyEnum(context, table, count);
-    if (count > protocol.Limits.data_entries) return error.ExcessiveEntries;
+    try budget.add(count);
+    try canonicalizePropertyOrder(context, table[0..count]);
     try builder.writeByte(@intFromEnum(protocol.DataTag.object));
     try builder.writeInt(u32, count);
     for (table[0..count]) |entry| {
@@ -914,8 +962,72 @@ fn encodeObject(
         if (present != 1) return error.PropertyMissing;
         defer freeDescriptor(context, &descriptor);
         if (descriptor.flags & qjs.JS_PROP_GETSET != 0) return error.AccessorRejected;
-        try encodeData(context, state, builder, descriptor.value, depth + 1, ancestors);
+        try encodeData(context, state, builder, descriptor.value, depth + 1, ancestors, budget);
     }
+}
+
+fn canonicalizePropertyOrder(
+    context: *qjs.JSContext,
+    entries: []qjs.JSPropertyEnum,
+) !void {
+    if (entries.len < 2) return;
+
+    var start = entries.len / 2;
+    while (start != 0) {
+        start -= 1;
+        try siftPropertyHeap(context, entries, start, entries.len);
+    }
+    var end = entries.len;
+    while (end > 1) {
+        end -= 1;
+        std.mem.swap(qjs.JSPropertyEnum, &entries[0], &entries[end]);
+        try siftPropertyHeap(context, entries, 0, end);
+    }
+}
+
+fn siftPropertyHeap(
+    context: *qjs.JSContext,
+    entries: []qjs.JSPropertyEnum,
+    start: usize,
+    end: usize,
+) !void {
+    var root = start;
+    while (root * 2 + 1 < end) {
+        var child = root * 2 + 1;
+        if (child + 1 < end and
+            try atomLessThan(context, entries[child].atom, entries[child + 1].atom))
+        {
+            child += 1;
+        }
+        if (!try atomLessThan(context, entries[root].atom, entries[child].atom)) return;
+        std.mem.swap(qjs.JSPropertyEnum, &entries[root], &entries[child]);
+        root = child;
+    }
+}
+
+fn atomLessThan(context: *qjs.JSContext, lhs: qjs.JSAtom, rhs: qjs.JSAtom) !bool {
+    const lhs_value = qjs.JS_AtomToValue(context, lhs);
+    if (qjs.JS_IsException(lhs_value)) return error.StringConversion;
+    defer qjs.JS_FreeValue(context, lhs_value);
+    const rhs_value = qjs.JS_AtomToValue(context, rhs);
+    if (qjs.JS_IsException(rhs_value)) return error.StringConversion;
+    defer qjs.JS_FreeValue(context, rhs_value);
+    if (!qjs.JS_IsString(lhs_value) or !qjs.JS_IsString(rhs_value)) return error.SymbolKey;
+
+    var lhs_length: usize = 0;
+    const lhs_units = qjs.JS_ToCStringLenUTF16(context, &lhs_length, lhs_value) orelse
+        return error.StringConversion;
+    defer qjs.JS_FreeCStringUTF16(context, lhs_units);
+    var rhs_length: usize = 0;
+    const rhs_units = qjs.JS_ToCStringLenUTF16(context, &rhs_length, rhs_value) orelse
+        return error.StringConversion;
+    defer qjs.JS_FreeCStringUTF16(context, rhs_units);
+
+    const common_length = @min(lhs_length, rhs_length);
+    for (0..common_length) |index| {
+        if (lhs_units[index] != rhs_units[index]) return lhs_units[index] < rhs_units[index];
+    }
+    return lhs_length < rhs_length;
 }
 
 fn isPlainObject(context: *qjs.JSContext, state: *Evaluation, value: qjs.JSValueConst) bool {

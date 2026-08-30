@@ -723,6 +723,14 @@ Run the runner and bridge under:
 - UndefinedBehaviorSanitizer;
 - leak detection where supported.
 
+V1 implementation note: Zig 0.16 exposes C undefined-behavior and thread sanitizer modes but no
+AddressSanitizer mode for OnePage's mixed Zig/C evaluator target. The implemented
+`workflow-sanitize` gate is therefore explicitly C undefined-behavior detection, and V1 does not
+claim ASan evidence. The supported macOS target additionally runs repeated evaluator teardown under
+`/usr/bin/leaks` and requires zero leaked allocations. AddressSanitizer becomes a release gate only
+when the supported Zig toolchain can provide it; the research recommendation is not evidence that
+the current toolchain already does.
+
 Exercise:
 
 - the 39-script corpus;

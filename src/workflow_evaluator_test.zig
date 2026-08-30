@@ -121,7 +121,9 @@ test "allowlisted realm keeps deterministic joins and removes ambient authority"
     const source =
         \\export default async function workflow({ agent }, args) {
         \\  const ambient = [
-        \\    typeof eval, typeof Function, typeof (async () => {}).constructor,
+        \\    typeof eval, typeof Function, typeof (() => {}).constructor,
+        \\    typeof (async () => {}).constructor, typeof (function*(){}).constructor,
+        \\    typeof (async function*(){}).constructor, typeof ({}).constructor.constructor,
         \\    typeof Math.random, typeof globalThis.process, typeof globalThis.env,
         \\    typeof globalThis.std, typeof globalThis.os, typeof globalThis.Date,
         \\    typeof globalThis.performance, typeof globalThis.fetch,
@@ -145,7 +147,7 @@ test "allowlisted realm keeps deterministic joins and removes ambient authority"
     try std.testing.expectEqual(@intFromEnum(protocol.OutcomeTag.completed), try cursor.readByte());
     try std.testing.expectEqual(@intFromEnum(protocol.DataTag.array), try cursor.readByte());
     const count = try cursor.readInt(u32);
-    try std.testing.expectEqual(17, count);
+    try std.testing.expectEqual(21, count);
     for (0..count) |index| {
         try std.testing.expectEqual(@intFromEnum(protocol.DataTag.string), try cursor.readByte());
         const value = try cursor.readString(32);
@@ -331,6 +333,38 @@ test "unreferenced visible output is validated before evaluation" {
     try cursor.finish();
 }
 
+test "visible Job Outputs share one aggregate byte budget" {
+    const payload_bytes = protocol.Limits.visible_output_bytes / 2 + 1;
+    const text = try std.testing.allocator.alloc(u8, payload_bytes);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'x');
+    const first_storage = try std.testing.allocator.alloc(u8, payload_bytes + 5);
+    defer std.testing.allocator.free(first_storage);
+    const second_storage = try std.testing.allocator.alloc(u8, payload_bytes + 5);
+    defer std.testing.allocator.free(second_storage);
+    const first = try stringValue(text, first_storage);
+    const second = try stringValue(text, second_storage);
+    var argument_storage: [1]u8 = undefined;
+    const input_storage = try std.testing.allocator.alloc(u8, protocol.Limits.input_frame_bytes);
+    defer std.testing.allocator.free(input_storage);
+    const input = try request(
+        "export default async function workflow() { return null; }",
+        try nullValue(&argument_storage),
+        &.{
+            .{ .key = "first", .tag = .output, .payload = first },
+            .{ .key = "second", .tag = .output, .payload = second },
+        },
+        input_storage,
+    );
+    const bridge = try std.testing.allocator.alloc(u8, protocol.Limits.bridge_arena_bytes);
+    defer std.testing.allocator.free(bridge);
+    var output: [256]u8 = undefined;
+    var cursor = try evaluateRequest(input, &output, bridge);
+    try std.testing.expectEqual(@intFromEnum(protocol.OutcomeTag.protocol_failed), try cursor.readByte());
+    try std.testing.expectEqualStrings("ExcessiveBytes", try cursor.readString(64));
+    try cursor.finish();
+}
+
 test "strict output bridge rejects unsupported JavaScript values" {
     const expressions = [_][]const u8{
         "undefined",
@@ -373,13 +407,48 @@ test "valid surrogate pairs and negative zero cross canonically" {
     try std.testing.expectEqual(@intFromEnum(protocol.OutcomeTag.completed), try cursor.readByte());
     try std.testing.expectEqual(@intFromEnum(protocol.DataTag.object), try cursor.readByte());
     try std.testing.expectEqual(2, try cursor.readInt(u32));
-    try std.testing.expectEqualStrings("text", try cursor.readString(16));
-    try std.testing.expectEqual(@intFromEnum(protocol.DataTag.string), try cursor.readByte());
-    try std.testing.expectEqualStrings("🚀", try cursor.readString(16));
     try std.testing.expectEqualStrings("number", try cursor.readString(16));
     try std.testing.expectEqual(@intFromEnum(protocol.DataTag.number), try cursor.readByte());
     try std.testing.expectEqual(@as(u64, @bitCast(@as(f64, 0.0))), try cursor.readInt(u64));
+    try std.testing.expectEqualStrings("text", try cursor.readString(16));
+    try std.testing.expectEqual(@intFromEnum(protocol.DataTag.string), try cursor.readByte());
+    try std.testing.expectEqualStrings("🚀", try cursor.readString(16));
     try cursor.finish();
+}
+
+test "object output and nested Job descriptor keys are canonical" {
+    const bridge = try std.testing.allocator.alloc(u8, protocol.Limits.bridge_arena_bytes);
+    defer std.testing.allocator.free(bridge);
+    const output = try std.testing.allocator.alloc(u8, protocol.Limits.output_frame_bytes);
+    defer std.testing.allocator.free(output);
+    var canonical_output = try evaluateSource(
+        "export default async function workflow() { return { zebra: 1, alpha: { delta: 2, beta: 3 } }; }",
+        output,
+        bridge,
+    );
+    try std.testing.expectEqual(@intFromEnum(protocol.OutcomeTag.completed), try canonical_output.readByte());
+    try std.testing.expectEqual(@intFromEnum(protocol.DataTag.object), try canonical_output.readByte());
+    try std.testing.expectEqual(2, try canonical_output.readInt(u32));
+    try std.testing.expectEqualStrings("alpha", try canonical_output.readString(16));
+    try std.testing.expectEqual(@intFromEnum(protocol.DataTag.object), try canonical_output.readByte());
+    try std.testing.expectEqual(2, try canonical_output.readInt(u32));
+    try std.testing.expectEqualStrings("beta", try canonical_output.readString(16));
+    _ = try canonical_output.skipValue(16);
+    try std.testing.expectEqualStrings("delta", try canonical_output.readString(16));
+    _ = try canonical_output.skipValue(16);
+    try std.testing.expectEqualStrings("zebra", try canonical_output.readString(16));
+    _ = try canonical_output.skipValue(16);
+    try canonical_output.finish();
+
+    var canonical_descriptor = try evaluateSource(
+        "export default async function workflow({ agent }) { agent({ key: 'same', task: 'work', input: { zebra: 1, alpha: { delta: 2, beta: 3 } }, schema: { type: 'object', properties: { zebra: { type: 'number' }, alpha: { type: 'number' } }, required: ['alpha'], additionalProperties: false } }); agent({ key: 'same', task: 'work', input: { alpha: { beta: 3, delta: 2 }, zebra: 1 }, schema: { additionalProperties: false, required: ['alpha'], properties: { alpha: { type: 'number' }, zebra: { type: 'number' } }, type: 'object' } }); await new Promise(() => {}); }",
+        output,
+        bridge,
+    );
+    try std.testing.expectEqual(@intFromEnum(protocol.OutcomeTag.blocked), try canonical_descriptor.readByte());
+    try std.testing.expectEqual(1, try canonical_descriptor.readInt(u16));
+    _ = try canonical_descriptor.readLengthBytes(protocol.Limits.workflow_output_bytes);
+    try canonical_descriptor.finish();
 }
 
 test "depth, width, bytes, and microtask limits are independently classified" {
@@ -390,6 +459,11 @@ test "depth, width, bytes, and microtask limits are independently classified" {
     );
     try expectSimpleOutcome(
         "export default async function workflow() { return Array(4097).fill(null); }",
+        .failed,
+        "WorkflowOutputInvalid",
+    );
+    try expectSimpleOutcome(
+        "export default async function workflow() { return Array.from({ length: 2049 }, () => [null]); }",
         .failed,
         "WorkflowOutputInvalid",
     );
@@ -467,6 +541,11 @@ test "agent bridge validates before publishing any request" {
         "export default async function workflow({ agent }) { await agent({ key: 'a', task: 'work', agent_profile: undefined }); return null; }",
         .failed,
         "JobRequestInvalid",
+    );
+    try expectSimpleOutcome(
+        "export default async function workflow({ agent }) { await agent({ key: 'a', task: 'work', input: Array.from({ length: 2047 }, () => [null]) }); return null; }",
+        .resource_exceeded,
+        "AgentDescriptor",
     );
 }
 

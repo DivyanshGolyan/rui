@@ -83,6 +83,61 @@ pub fn main(init: std.process.Init) !void {
     };
     if (!abnormal_classified) return error.AbnormalExitWasTrusted;
 
+    const terminations = [_]struct { input: u8, expected: anyerror }{
+        .{ .input = 0xfc, .expected = error.CpuLimitExceeded },
+        .{ .input = 0xfd, .expected = error.ChildCrashed },
+        .{ .input = 0xfe, .expected = error.ChildKilled },
+    };
+    for (terminations) |termination| {
+        var classified = false;
+        _ = parent.run(
+            init.io,
+            allocator,
+            arguments[2],
+            &.{termination.input},
+            output,
+            1_000,
+        ) catch |err| {
+            if (err == termination.expected) {
+                classified = true;
+            } else {
+                return err;
+            }
+        };
+        if (!classified) return error.TerminationWasTrusted;
+    }
+
+    const oversized_input = try allocator.alloc(u8, protocol.Limits.input_frame_bytes + 1);
+    defer allocator.free(oversized_input);
+    var input_overflow_classified = false;
+    _ = parent.run(
+        init.io,
+        allocator,
+        arguments[2],
+        oversized_input,
+        output,
+        1_000,
+    ) catch |err| switch (err) {
+        error.InputFrameExceeded => input_overflow_classified = true,
+        else => return err,
+    };
+    if (!input_overflow_classified) return error.InputOverflowWasTrusted;
+
+    var short_output: [protocol.Limits.output_frame_bytes - 1]u8 = undefined;
+    var output_overflow_classified = false;
+    _ = parent.run(
+        init.io,
+        allocator,
+        arguments[2],
+        &.{},
+        &short_output,
+        1_000,
+    ) catch |err| switch (err) {
+        error.OutputFrameExceeded => output_overflow_classified = true,
+        else => return err,
+    };
+    if (!output_overflow_classified) return error.OutputOverflowWasTrusted;
+
     var closed_pipes_deadline = false;
     _ = parent.run(
         init.io,
