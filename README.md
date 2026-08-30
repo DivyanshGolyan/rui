@@ -205,6 +205,7 @@ rewritable storage tamper-proof.
 - macOS on Apple Silicon
 - Zig 0.16.0
 - the system Git at `/usr/bin/git`
+- macOS system libcurl 7.85.0 or newer with HTTPS, asynchronous DNS, and thread-safe global initialization
 
 ## Run the spike
 

@@ -53,6 +53,7 @@ pub fn build(b: *std.Build) void {
     cli.root_module.link_libc = true;
     cli.root_module.linkFramework("Security", .{});
     cli.root_module.linkFramework("CoreFoundation", .{});
+    configureCurl(cli);
     configureSqlite(b, cli);
     const install_cli = b.addInstallArtifact(cli, .{});
     b.getInstallStep().dependOn(&install_cli.step);
@@ -479,6 +480,7 @@ fn addTestRun(
     {
         tests.root_module.linkFramework("Security", .{});
         tests.root_module.linkFramework("CoreFoundation", .{});
+        configureCurl(tests);
     }
     if (usesHostStore(root)) configureSqlite(b, tests);
     parent.dependOn(&b.addRunArtifact(tests).step);
@@ -506,6 +508,11 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_TEMP_STORE", "1");
     module.addCMacro("SQLITE_USE_URI", "0");
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
+}
+
+fn configureCurl(compile: *std.Build.Step.Compile) void {
+    compile.root_module.link_libc = true;
+    compile.root_module.linkSystemLibrary("curl", .{});
 }
 
 fn addQuickJsLibrary(
@@ -592,6 +599,7 @@ fn addNativeExecutable(
         }),
     });
     executable.root_module.link_libc = true;
+    if (std.mem.eql(u8, root, "src/cli.zig")) configureCurl(executable);
     if (usesHostStore(root)) configureSqlite(b, executable);
     return executable;
 }
