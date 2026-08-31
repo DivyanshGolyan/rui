@@ -1514,7 +1514,7 @@ pub fn acceptCompletion(
     offered: completion_inbox.Envelope,
     config: RuntimeConfig,
 ) !u64 {
-    _ = try session.classifyCompletionOffer(offered);
+    try session.validateCompletionOffer(offered);
     return settleRestored(host, session, config);
 }
 

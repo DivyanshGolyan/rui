@@ -786,8 +786,6 @@ pub const CompletionEvidence = struct {
     result_digest: binding.Result,
 };
 
-pub const CompletionOfferState = enum { pending, settled };
-
 pub const OperationView = struct {
     const max_attempts = session_transition.max_operation_attempts;
 
@@ -3106,13 +3104,13 @@ pub const Session = struct {
         };
     }
 
-    /// Classifies an offered Completion only after matching the complete
-    /// envelope against both committed semantic authority and its exact Inbox
-    /// row. Callers do not reconstruct history or compare evidence fields.
-    pub fn classifyCompletionOffer(
+    /// Validates an offered Completion against committed semantic authority.
+    /// Live pending evidence is already resident and needs no storage query;
+    /// settled or historical evidence is checked against its durable Inbox row.
+    pub fn validateCompletionOffer(
         self: *Session,
         offered: completion_inbox.Envelope,
-    ) !CompletionOfferState {
+    ) !void {
         try self.ensureUsable();
         if (self.recovery != .ready) return error.SessionRecoveryIncomplete;
         try completion_inbox.validate(offered);
@@ -3121,38 +3119,33 @@ pub const Session = struct {
         {
             return error.StaleCompletion;
         }
-        const operation = self.resident.semantic.operation(
+        if (self.resident.semantic.operation(
             self.operationContext(offered.operation_id, offered.operation_generation),
-        ) orelse {
+        )) |operation| {
+            const attempt = operation.findAttempt(offered.attempt_id) orelse
+                return error.StaleCompletion;
+            const descriptor = operation.descriptor orelse return error.MissingOperationDescriptor;
+            if (attempt.descriptor_ref != descriptor.descriptor_ref or
+                !binding.descriptorEql(attempt.descriptor_digest, descriptor.descriptor_digest))
+            {
+                return error.AttemptDescriptorMismatch;
+            }
+            if (offered.ownership_epoch != attempt.operation.agent.ownership_epoch) {
+                return error.CompletionAttemptEpochMismatch;
+            }
+            if (offered.kind != std.meta.activeTag(descriptor.descriptor_digest)) {
+                return error.CompletionEvidenceKindMismatch;
+            }
+            const result = operation.result orelse {
+                const pending = (try self.pendingCompletionEnvelope(
+                    attempt.operation,
+                    attempt.attempt_id,
+                )) orelse return error.CompletionEvidenceMissing;
+                if (!std.meta.eql(pending, offered)) return error.ConflictingCompletionEvidence;
+                return;
+            };
             const stored = (try self.storage.matchCompletion(offered)) orelse
                 return error.CompletionEvidenceMissing;
-            const terminal_sequence = try self.historicalAuditSequence(offered) orelse
-                return error.StaleCompletion;
-            return switch (stored) {
-                .pending => error.InvalidCompletionDisposition,
-                .consumed => |sequence| if (sequence == terminal_sequence)
-                    .settled
-                else
-                    error.InvalidCompletionDisposition,
-            };
-        };
-        const attempt = operation.findAttempt(offered.attempt_id) orelse
-            return error.StaleCompletion;
-        const descriptor = operation.descriptor orelse return error.MissingOperationDescriptor;
-        if (attempt.descriptor_ref != descriptor.descriptor_ref or
-            !binding.descriptorEql(attempt.descriptor_digest, descriptor.descriptor_digest))
-        {
-            return error.AttemptDescriptorMismatch;
-        }
-        if (offered.ownership_epoch != attempt.operation.agent.ownership_epoch) {
-            return error.CompletionAttemptEpochMismatch;
-        }
-        if (offered.kind != std.meta.activeTag(descriptor.descriptor_digest)) {
-            return error.CompletionEvidenceKindMismatch;
-        }
-        const stored = (try self.storage.matchCompletion(offered)) orelse
-            return error.CompletionEvidenceMissing;
-        if (operation.result) |result| {
             const consumed_sequence = switch (stored) {
                 .pending => return error.InvalidCompletionDisposition,
                 .consumed => |sequence| sequence,
@@ -3166,16 +3159,17 @@ pub const Session = struct {
             {
                 return error.ConflictingCompletionEvidence;
             }
-            return .settled;
+            return;
         }
-        switch (stored) {
-            .pending => {},
-            .consumed => return error.InvalidCompletionDisposition,
-        }
-        const pending = (try self.pendingCompletionEnvelope(attempt.operation, attempt.attempt_id)) orelse
+        const stored = (try self.storage.matchCompletion(offered)) orelse
             return error.CompletionEvidenceMissing;
-        if (!std.meta.eql(pending, offered)) return error.ConflictingCompletionEvidence;
-        return .pending;
+        const terminal_sequence = try self.historicalAuditSequence(offered) orelse
+            return error.StaleCompletion;
+        switch (stored) {
+            .pending => return error.InvalidCompletionDisposition,
+            .consumed => |sequence| if (sequence != terminal_sequence)
+                return error.InvalidCompletionDisposition,
+        }
     }
 
     const ExpectedCompletion = struct {
@@ -4904,10 +4898,7 @@ test "late evidence for a prior Operation audits through durable history" {
         });
         try created.storeContent(live_result_ref, "live late result");
         try created.publishCompletionEvidence(live_late);
-        try std.testing.expectEqual(
-            CompletionOfferState.settled,
-            try created.classifyCompletionOffer(live_late),
-        );
+        try created.validateCompletionOffer(live_late);
         const live_audit = try layout.storage.readCompletion(session_id, winner_inbox_id + 1);
         try std.testing.expectEqual(terminal_sequence, live_audit.consumed_by_sequence.?);
         try std.testing.expectEqualDeep(live_late, live_audit.envelope);
@@ -4944,6 +4935,10 @@ test "late evidence for a prior Operation audits through durable history" {
         try std.testing.expectError(
             error.ConflictingCompletionEvidence,
             created.publishCompletionEvidence(conflicting),
+        );
+        try std.testing.expectError(
+            error.ConflictingCompletionEvidence,
+            created.validateCompletionOffer(conflicting),
         );
         try std.testing.expectEqual(sequence_before_late, try layout.storage.sessionHead(session_id));
         try std.testing.expectEqualDeep(resident_before_late, created.resident);
@@ -5192,17 +5187,14 @@ test "typed final completion compiles one exact atomic semantic transaction" {
         .result_digest = response_digest,
     });
     try created.publishCompletionEvidence(exact_evidence);
-    try std.testing.expectEqual(
-        CompletionOfferState.pending,
-        try created.classifyCompletionOffer(exact_evidence),
-    );
+    try created.validateCompletionOffer(exact_evidence);
     var conflicting_offer = exact_evidence;
     conflicting_offer.result_ref = 903;
     conflicting_offer.result_digest = binding.hash(binding.Result, "substituted");
     conflicting_offer = testReboundEnvelope(conflicting_offer);
     try std.testing.expectError(
         error.ConflictingCompletionEvidence,
-        created.classifyCompletionOffer(conflicting_offer),
+        created.validateCompletionOffer(conflicting_offer),
     );
     var validation: model_protocol.ValidationScratch = undefined;
     var substituted = ModelCompletionMaterial{
@@ -5263,9 +5255,10 @@ test "typed final completion compiles one exact atomic semantic transaction" {
         .admission = model_protocol.admit(&validation, response).admission,
         .consequence = .{ .final_answer = .{ .content_ref = 902 } },
     });
-    try std.testing.expectEqual(
-        CompletionOfferState.settled,
-        try created.classifyCompletionOffer(exact_evidence),
+    try created.validateCompletionOffer(exact_evidence);
+    try std.testing.expectError(
+        error.ConflictingCompletionEvidence,
+        created.validateCompletionOffer(conflicting_offer),
     );
 
     var stored: host_store.StoredTransition = undefined;
@@ -5277,6 +5270,48 @@ test "typed final completion compiles one exact atomic semantic transaction" {
     try std.testing.expectEqual(session_transition.Kind.conversation_advanced, committed.facts[2].kind());
     try std.testing.expectEqual(session_transition.Kind.outcome, committed.facts[3].kind());
     try std.testing.expect(committed.core != null);
+}
+
+test "pending Completion offer validation needs no durable history query" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(
+        layout.sessions,
+        layout.scratch,
+        &layout.storage,
+        io,
+        testConfig(layout.workspacePath(), 812),
+    );
+    defer created.close();
+
+    var slot: core_image.ActivationSlot = undefined;
+    _ = try created.startTask(&slot);
+    try created.storeContent(920, "request");
+    const operation = try created.admitModelAttempt(&slot, .{
+        .operation_id = 100,
+        .sequence = 1,
+        .attempt_id = 101,
+        .request_ref = 920,
+        .request_digest = binding.hash(binding.ModelDescriptor, "request"),
+    });
+    try created.storeContent(921, "response");
+    const exact = completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = created.session_id,
+        .ownership_epoch = created.ownership_epoch,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = 101,
+        .result_ref = 921,
+        .result_digest = binding.hash(binding.Result, "response"),
+    });
+    try created.publishCompletionEvidence(exact);
+
+    layout.storage.close();
+    try created.validateCompletionOffer(exact);
 }
 
 test "typed tool completion derives the Action and binds the exact Result" {
