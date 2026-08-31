@@ -209,12 +209,14 @@ pub fn requestDeviceCode(http: Http) !DeviceCode {
 }
 
 pub fn pollDeviceCode(http: Http, device: *const DeviceCode) !PollResult {
-    var body: [max_device_id_size + max_user_code_size + 96]u8 = undefined;
-    const request = try std.fmt.bufPrint(
-        &body,
-        "{{\"device_auth_id\":\"{s}\",\"user_code\":\"{s}\"}}",
-        .{ device.deviceId(), device.userCode() },
-    );
+    var body: [6 * (max_device_id_size + max_user_code_size) + 96]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&body);
+    try writer.writeAll("{\"device_auth_id\":");
+    try writeJsonString(&writer, device.deviceId());
+    try writer.writeAll(",\"user_code\":");
+    try writeJsonString(&writer, device.userCode());
+    try writer.writeByte('}');
+    const request = writer.buffered();
     var response_bytes: [max_response_size]u8 = undefined;
     defer std.crypto.secureZero(u8, &response_bytes);
     const response = try http.post(
@@ -361,6 +363,10 @@ fn buildTokens(
     {
         return error.MalformedTokenResponse;
     }
+    try validateCompactAccessToken(access);
+    try validateOpaqueToken(refresh_token);
+    try validateOpaqueToken(id_token);
+    try validateAccountId(account);
     var tokens: Tokens = .{};
     @memcpy(tokens.access[0..access.len], access);
     tokens.access_length = @intCast(access.len);
@@ -374,9 +380,10 @@ fn buildTokens(
 }
 
 fn accountIdFromAccessToken(jwt: []const u8, out: []u8) ![]const u8 {
+    try validateCompactAccessToken(jwt);
     var pieces = std.mem.splitScalar(u8, jwt, '.');
-    _ = pieces.next() orelse return error.MalformedAccessToken;
-    const payload = pieces.next() orelse return error.MalformedAccessToken;
+    _ = pieces.next().?;
+    const payload = pieces.next().?;
     var decoded: [max_token_size]u8 = undefined;
     const length = try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(payload);
     if (length > decoded.len) return error.MalformedAccessToken;
@@ -387,8 +394,39 @@ fn accountIdFromAccessToken(jwt: []const u8, out: []u8) ![]const u8 {
         return error.MalformedAccessToken;
     const account = auth.chatgpt_account_id orelse return error.MalformedAccessToken;
     if (account.len == 0 or account.len > out.len) return error.MalformedAccessToken;
+    validateAccountId(account) catch return error.MalformedAccessToken;
     @memcpy(out[0..account.len], account);
     return out[0..account.len];
+}
+
+fn validateCompactAccessToken(token: []const u8) !void {
+    var pieces = std.mem.splitScalar(u8, token, '.');
+    for (0..3) |_| {
+        const piece = pieces.next() orelse return error.MalformedAccessToken;
+        if (piece.len == 0) return error.MalformedAccessToken;
+        for (piece) |byte| if (!(std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_')) {
+            return error.MalformedAccessToken;
+        };
+    }
+    if (pieces.next() != null) return error.MalformedAccessToken;
+}
+
+fn validateOpaqueToken(token: []const u8) !void {
+    for (token) |byte| if (byte < 0x21 or byte > 0x7e) return error.MalformedTokenResponse;
+}
+
+fn validateAccountId(account: []const u8) !void {
+    for (account) |byte| if (byte < 0x21 or byte > 0x7e) return error.MalformedAccountId;
+}
+
+pub fn validateHeaderValues(access_token: []const u8, account_id: []const u8) !void {
+    if (access_token.len == 0 or access_token.len > max_token_size or
+        account_id.len == 0 or account_id.len > codex_provider.max_account_id_size)
+    {
+        return error.MalformedCredential;
+    }
+    for (access_token) |byte| if (byte < 0x21 or byte > 0x7e) return error.MalformedCredential;
+    validateAccountId(account_id) catch return error.MalformedCredential;
 }
 
 fn responseErrorIs(bytes: []const u8, expected: []const u8) bool {
@@ -443,10 +481,18 @@ fn percentEncode(writer: *std.Io.Writer, bytes: []const u8) !void {
 }
 
 fn writeJsonString(writer: *std.Io.Writer, bytes: []const u8) !void {
+    const hex = "0123456789abcdef";
     try writer.writeByte('"');
     for (bytes) |byte| switch (byte) {
         '"' => try writer.writeAll("\\\""),
         '\\' => try writer.writeAll("\\\\"),
+        '\x08' => try writer.writeAll("\\b"),
+        '\x0c' => try writer.writeAll("\\f"),
+        '\n' => try writer.writeAll("\\n"),
+        '\r' => try writer.writeAll("\\r"),
+        '\t' => try writer.writeAll("\\t"),
+        0...0x07, 0x0b, 0x0e...0x1f =>
+            try writer.writeAll(&.{ '\\', 'u', '0', '0', hex[byte >> 4], hex[byte & 15] }),
         else => try writer.writeByte(byte),
     };
     try writer.writeByte('"');
@@ -490,6 +536,33 @@ test "account binding comes from the nested access-token auth claim" {
     );
     defer tokens.scrub();
     try std.testing.expectEqualStrings("acct-live", tokens.accountId());
+}
+
+test "authorization JSON escapes every JSON control byte" {
+    var bytes: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try writeJsonString(&writer, "quote\" slash\\\x00\x08\x0c\n\r\t\x1f");
+    try std.testing.expectEqualStrings(
+        "\"quote\\\" slash\\\\\\u0000\\b\\f\\n\\r\\t\\u001f\"",
+        writer.buffered(),
+    );
+}
+
+test "access tokens require exactly three nonempty base64url segments" {
+    var account: [codex_provider.max_account_id_size]u8 = undefined;
+    try std.testing.expectError(error.MalformedAccessToken, accountIdFromAccessToken("e30.payload", &account));
+    try std.testing.expectError(error.MalformedAccessToken, accountIdFromAccessToken(".payload.sig", &account));
+    try std.testing.expectError(error.MalformedAccessToken, accountIdFromAccessToken("e30.payload.", &account));
+    try std.testing.expectError(error.MalformedAccessToken, accountIdFromAccessToken("e30.payload.sig.extra", &account));
+    try std.testing.expectError(error.MalformedAccessToken, accountIdFromAccessToken("e30.pay=load.sig", &account));
+}
+
+test "credential header values keep opaque visible ASCII and reject unsafe bytes" {
+    try validateHeaderValues("opaque-test-token", "acct:opaque/value");
+    try std.testing.expectError(error.MalformedCredential, validateHeaderValues("token\r\nInjected: yes", "acct_1"));
+    try std.testing.expectError(error.MalformedCredential, validateHeaderValues("token\x80", "acct_1"));
+    try std.testing.expectError(error.MalformedCredential, validateHeaderValues("token", "acct 1"));
+    try std.testing.expectError(error.MalformedCredential, validateHeaderValues("token", "acct\x80"));
 }
 
 test "provider token envelopes ignore unknown extensions but keep consumed fields strict" {

@@ -402,6 +402,7 @@ pub const NativeTransport = struct {
         if (!builtin.is_test and !std.mem.startsWith(u8, self.endpoint, "https://")) {
             return error.InvalidProviderEndpoint;
         }
+        try codex_auth.validateHeaderValues(credential.token(), credential.accountId());
 
         var authorization: [authorization_header_capacity]u8 = undefined;
         defer std.crypto.secureZero(u8, &authorization);
