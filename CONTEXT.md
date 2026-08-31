@@ -206,10 +206,6 @@ _Avoid_: Conversation, transcript, prompt
 An operation that derives a bounded replacement model context from an older part of a branch without deleting the source conversation entries.
 _Avoid_: Deletion, truncation, transcript rewrite
 
-**Context Checkpoint**:
-An immutable conversation entry that defines the replacement projection produced by compaction and the branch range from which it was derived.
-_Avoid_: Snapshot, rewritten transcript, operation checkpoint
-
 **Delegation**:
 An action that creates a child agent with a task and returns that child's outcome to the parent as a result.
 _Avoid_: Agent call, recursive call, subroutine
@@ -256,6 +252,10 @@ _Avoid_: Authorization, Runtime lease, ownership epoch, durable semaphore, preal
 The bounded Host-owned step that validates one Captured Model Output and atomically commits either its typed Result meaning or a typed terminal failure into the Session Ledger.
 _Avoid_: provider parsing, blob publication, Completion notification, Conversation replay
 
+**Semantic View**:
+The immutable bounded Session value derived from committed transactions for direct lifecycle observation: current Operations, relevant Attempts, control state, indeterminate Result, ledger head, and committed Core State.
+_Avoid_: ledger replay callback, Run Snapshot, secondary index, durable authority
+
 **Semantic Validation Capacity**:
 The fixed number of Captured Model Outputs the Host may semantically admit at once.
 _Avoid_: Active Capacity, provider concurrency, per-Agent scratch
@@ -277,11 +277,11 @@ One policy-valid request by the agent for external work. Harness may map an allo
 _Avoid_: Tool call, command, Final Answer, event
 
 **Operation**:
-A uniquely identified instance of external work initiated by an action. An operation progresses through submitted, accepted, and completed states and may require more than one attempt. A model Operation fixes its complete semantic request contract for every Attempt.
+A uniquely identified instance of model or external work. One durable admission binds its opaque identity and exact typed descriptor; an Action Operation also names the model Operation that proposed it. It may require more than one Attempt, and a model Operation fixes its complete semantic request contract for every Attempt.
 _Avoid_: Action, job, request
 
 **Attempt**:
-One uniquely identified try to execute an accepted operation. Its disposition states whether execution definitely did not occur, may have occurred, or produced a durable terminal result. A model Attempt also records how many earlier Attempts under that Operation may already have reached the provider.
+One uniquely identified try to execute an admitted Operation. Its disposition states whether execution definitely did not occur, may have occurred, or produced a durable terminal Result. A model Attempt also records how many earlier Attempts under that Operation may already have reached the provider.
 _Avoid_: Operation, retry, request
 
 **Result**:

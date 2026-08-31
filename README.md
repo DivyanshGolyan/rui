@@ -155,8 +155,8 @@ Authority covers its exact operation and descriptor binding. An explicit invocat
 mode admits validated calls without creating the request; it does not bypass validation, durability,
 patch preimage checks, or recovery rules.
 
-The model-facing representation is provider-neutral. Conversation records generic text,
-tool-call, tool-result, and checkpoint entries; each model Operation binds an immutable bounded Tool
+The model-facing representation is provider-neutral. Conversation records generic user text,
+assistant text, tool-call, and tool-result entries; each model Operation binds an immutable bounded Tool
 Catalog and stable Tool Keys. Provider adapters translate that house request at the edge. Harness then
 maps only the two admitted V1 keys to concrete Actions, so adding a provider does not change durable
 history and generic model data does not become a runtime plugin or permission system.
@@ -212,15 +212,14 @@ rewritable storage tamper-proof.
 ```sh
 zig build check
 zig build test -Doptimize=ReleaseSafe
-zig build native-core -Doptimize=ReleaseSafe
 ```
 
 Changes to the disposable Workflow Evaluator or its QuickJS dependency must also run
 `zig build workflow-check`.
 
-`native-core` reports the current exact slot, the two fixed Host scratch-stage resource ledgers, compact Dormant
-Session state bytes, process RSS, and 32 randomized native invariant traces through canonical suspend and
-poisoned-slot restore.
+The canonical Core tests exercise 32 randomized invariant traces through the production interface,
+including canonical suspension, rejected-transition preservation, and poisoned-slot restore. Runtime
+memory and speed measurements use `zig build measure-runtime-sweep`.
 
 See the spike notes for architecture, measurements, caveats, and next questions:
 

@@ -1,7 +1,7 @@
 # Separate model-tool data from execution authority
 
 OnePage uses one provider-neutral Conversation and model-tool data contract. Conversation distinguishes
-user text, assistant text, tool calls, tool results, and context checkpoints. A bounded immutable Tool
+exactly user text, assistant text, tool calls, and tool results in V1. A bounded immutable Tool
 Catalog gives each model-visible Tool Definition a stable Tool Key, provider-facing metadata, bounded
 input JSON Schema, and result-content contract. The exact Model Contract additionally declares one
 provider-neutral, non-effecting `input_request` disposition. Provider adapters translate this semantic

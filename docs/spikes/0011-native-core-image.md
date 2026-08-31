@@ -47,8 +47,8 @@ the 4 KiB stack, so placing state at byte 4,096 was not safe.
 
 ## Differential trace
 
-`zig build native-core -Doptimize=ReleaseSafe` executes the following trace through both native Zig
-and the Wasm conformance build:
+The removed `zig build native-core -Doptimize=ReleaseSafe` spike command executed the following trace
+through both native Zig and the Wasm conformance build:
 
 1. initialize and deliver an event;
 2. start a task and accept a model operation;
@@ -57,7 +57,9 @@ and the Wasm conformance build:
 5. classify and commit the Final Answer.
 
 After every semantic boundary, all bytes from the state boundary to the end of the image must match.
-The spike also checkpoints and restores 1,000 logical agents through one reused native image.
+The spike also checkpointed and restored 1,000 logical agents through one reused native image. Current
+canonical Core tests carry the retained randomized invariant evidence through the production interface;
+there is no parallel spike executable or release gate.
 
 ## Measurement
 
