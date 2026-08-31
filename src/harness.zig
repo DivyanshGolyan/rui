@@ -704,6 +704,12 @@ const HarnessState = struct {
             error.CompletionOffered,
             => .{ .outcome, .waiting },
             error.InjectedCrash => return err,
+            error.SemanticValidationWorkspaceBusy,
+            error.PatchWorkspaceBusy,
+            => {
+                self.setState(progress.state);
+                return err;
+            },
             else => {
                 self.setState(.unavailable);
                 result.state = .unavailable;
@@ -1034,6 +1040,100 @@ test "active credit rejects a second Harness before scratch allocation or Sessio
     try std.testing.expectEqual(@as(u64, 2), harnessState(restored).session.?.ownership_epoch);
     restored.close();
     try runtime.close();
+}
+
+test "concurrent Harness closure contends without sharing semantic workspace" {
+    const Gate = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+
+        fn reached(context: *anyopaque, boundary: FaultBoundary) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (boundary != .after_semantic_workspace_borrow) return;
+            self.entered.store(true, .release);
+            while (!self.release.load(.acquire)) std.atomic.spinLoopHint();
+        }
+    };
+    const DriveWorker = struct {
+        fn run(owner: *Harness, progress: *?Progress, failure: *?anyerror) void {
+            progress.* = owner.drive() catch |err| {
+                failure.* = err;
+                return;
+            };
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const runtime = try HostRuntime.open(
+        std.testing.io,
+        std.testing.allocator,
+        path,
+        .{ .active_capacity = 2 },
+    );
+    var first_fixture: deterministic_provider.Fixture = .{
+        .expected_task = "first",
+        .final_answer = "first done",
+    };
+    var second_fixture: deterministic_provider.Fixture = .{
+        .expected_task = "second",
+        .final_answer = "second done",
+    };
+    var gate: Gate = .{};
+    const first = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model_binding = .{ .model = "fixture:first", .provider = first_fixture.provider() },
+            .task = "first",
+            .fault = .{ .context = &gate, .reached = Gate.reached },
+        } },
+    });
+    const second = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model_binding = .{ .model = "fixture:second", .provider = second_fixture.provider() },
+            .task = "second",
+        } },
+    });
+    defer {
+        first.close();
+        second.close();
+        runtime.close() catch unreachable;
+    }
+
+    _ = try first.drive();
+    _ = try second.drive();
+    try std.testing.expectEqual(OfferResult.accepted, first.offer(.task));
+    try std.testing.expectEqual(OfferResult.accepted, second.offer(.task));
+    try std.testing.expectEqual(State.waiting, (try first.drive()).state);
+    try std.testing.expectEqual(State.waiting, (try second.drive()).state);
+
+    var first_progress: ?Progress = null;
+    var first_failure: ?anyerror = null;
+    const worker = try std.Thread.spawn(.{}, DriveWorker.run, .{
+        first,
+        &first_progress,
+        &first_failure,
+    });
+    var worker_joined = false;
+    defer if (!worker_joined) {
+        gate.release.store(true, .release);
+        worker.join();
+    };
+    while (!gate.entered.load(.acquire)) std.atomic.spinLoopHint();
+    try std.testing.expectError(error.SemanticValidationWorkspaceBusy, second.drive());
+    gate.release.store(true, .release);
+    worker.join();
+    worker_joined = true;
+
+    try std.testing.expect(first_failure == null);
+    try std.testing.expectEqual(State.finished, first_progress.?.state);
+    try std.testing.expectEqual(State.finished, (try second.drive()).state);
+    try std.testing.expectEqual(@as(usize, 0), runtime.occupiedActivationBytes());
 }
 
 test "failed Harness construction returns its active credit" {
