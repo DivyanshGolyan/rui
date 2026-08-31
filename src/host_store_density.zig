@@ -86,7 +86,7 @@ fn measure(
     var owner = try host_store.StorageOwner.open(io, path, .{ .fault = journal.hook() });
     defer owner.close();
     _ = try owner.memoryAccounting(true);
-    _ = try owner.physicalAccounting(true);
+    _ = try owner.sqlitePagerAccounting(true);
     const usage_before = try processUsage();
     const started = std.Io.Clock.awake.now(io);
     var transaction_latencies: [populations[populations.len - 1]]u64 = undefined;
@@ -117,7 +117,7 @@ fn measure(
     const elapsed = started.untilNow(io, .awake);
     const usage_after = try processUsage();
     const memory = try owner.memoryAccounting(false);
-    const physical = try owner.physicalAccounting(false);
+    const physical = try owner.sqlitePagerAccounting(false);
     const database_file_bytes = try fileSize(io, path);
     const database_allocated_bytes = try fileAllocatedBytes(io, path);
     const journal_file_bytes = fileSize(io, journal_path) catch |err| switch (err) {
@@ -149,9 +149,9 @@ fn measure(
             journal.maximum_logical_bytes,
             journal.maximum_allocated_bytes,
             physical.page_count * physical.page_size_bytes,
-            physical.free_page_count * physical.page_size_bytes,
-            physical.cache_page_writes,
-            physical.cache_spills,
+            physical.freelist_pages * physical.page_size_bytes,
+            physical.cache_pages_written,
+            physical.cache_spill_events,
             disk_read_bytes,
             disk_write_bytes,
             elapsed_ns,
@@ -263,7 +263,7 @@ fn measureTransientCapture(
     }
 
     _ = try owner.memoryAccounting(true);
-    _ = try owner.physicalAccounting(true);
+    _ = try owner.sqlitePagerAccounting(true);
     _ = try session.appendConversation(.assistant_text, response_ref, null);
     var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
     transaction.facts[0] = session_transition.conversationAdvanced(.{
@@ -279,7 +279,7 @@ fn measureTransientCapture(
     });
     _ = try session.commitSemantic(&.{transaction.facts[0]}, null);
     const memory = try owner.memoryAccounting(false);
-    const physical = try owner.physicalAccounting(false);
+    const physical = try owner.sqlitePagerAccounting(false);
     var line: [512]u8 = undefined;
     const encoded = try std.fmt.bufPrint(
         &line,
@@ -293,8 +293,8 @@ fn measureTransientCapture(
             session_store.max_transient_scratch_bytes,
             session_store.transient_scratch_allocation_bytes,
             session_store.transient_scratch_allocation_bytes * 100,
-            physical.cache_page_writes,
-            physical.cache_spills,
+            physical.cache_pages_written,
+            physical.cache_spill_events,
             memory.heap_highwater_bytes,
         },
     );
@@ -360,10 +360,10 @@ fn measureMaximumSessionScratch(
     }
 
     _ = try owner.memoryAccounting(true);
-    _ = try owner.physicalAccounting(true);
+    _ = try owner.sqlitePagerAccounting(true);
     _ = try session.commitSemantic(&facts, null);
     const memory = try owner.memoryAccounting(false);
-    const physical = try owner.physicalAccounting(false);
+    const physical = try owner.sqlitePagerAccounting(false);
     var line: [768]u8 = undefined;
     const encoded = try std.fmt.bufPrint(
         &line,
@@ -375,8 +375,8 @@ fn measureMaximumSessionScratch(
             host_store.content_window_bytes,
             session_store.transient_scratch_allocation_bytes,
             session_store.transient_scratch_allocation_bytes * 100,
-            physical.cache_page_writes,
-            physical.cache_spills,
+            physical.cache_pages_written,
+            physical.cache_spill_events,
             memory.heap_highwater_bytes,
         },
     );

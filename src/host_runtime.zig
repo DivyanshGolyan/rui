@@ -1,13 +1,17 @@
 const std = @import("std");
+const core_image = @import("core_image.zig");
 const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
 const model_contract = @import("model_contract.zig");
 const session_store = @import("session.zig");
 
 pub const Config = struct {
+    active_capacity: usize = 1,
     sqlite_heap_limit_bytes: u64 = 8 * 1024 * 1024,
     storage: host_store.Config = .{},
 };
+
+pub const max_active_capacity: usize = 100;
 
 var runtime_open: std.atomic.Value(bool) = .init(false);
 
@@ -16,16 +20,8 @@ const State = struct {
     allocator: std.mem.Allocator,
     state_root: std.Io.Dir,
     storage: host_store.StorageOwner,
-    execution: lifecycle.Host = .{},
+    execution: lifecycle.Host,
     harness_owners: std.atomic.Value(usize) = .init(0),
-    retired_lock: std.Io.Mutex = .init,
-    retired: ?*Retired = null,
-};
-
-pub const Retired = struct {
-    next: ?*Retired = null,
-    context: *anyopaque,
-    destroy: *const fn (std.mem.Allocator, *anyopaque) void,
 };
 
 pub const Lease = struct {
@@ -91,16 +87,6 @@ pub const Lease = struct {
         releaseHarness(self.runtime);
         self.active = false;
     }
-
-    pub fn retire(self: *Lease, retired: *Retired) void {
-        if (!self.active) return;
-        const value = state(self.runtime);
-        value.retired_lock.lockUncancelable(self.io);
-        retired.next = value.retired;
-        value.retired = retired;
-        value.retired_lock.unlock(self.io);
-        self.release();
-    }
 };
 
 pub const HostRuntime = opaque {
@@ -111,6 +97,9 @@ pub const HostRuntime = opaque {
         config: Config,
     ) !*HostRuntime {
         if (state_path.len == 0) return error.InvalidStatePath;
+        if (config.active_capacity == 0 or config.active_capacity > max_active_capacity) {
+            return error.InvalidActiveCapacity;
+        }
         try model_contract.validateBuiltinCatalog();
         if (runtime_open.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
             return error.HostRuntimeAlreadyOpen;
@@ -128,12 +117,15 @@ pub const HostRuntime = opaque {
         defer allocator.free(database_path);
         var storage = try host_store.StorageOwner.open(io, database_path, config.storage);
         errdefer storage.close();
+        var execution = try lifecycle.Host.init(allocator, config.active_capacity);
+        errdefer execution.deinit();
         const runtime = try allocator.create(State);
         runtime.* = .{
             .io = io,
             .allocator = allocator,
             .state_root = state_root,
             .storage = storage,
+            .execution = execution,
         };
         return @ptrCast(runtime);
     }
@@ -148,22 +140,81 @@ pub const HostRuntime = opaque {
             if (owners == closing) return error.HostRuntimeClosed;
             return error.HostRuntimeBusy;
         }
+        runtime.execution.deinit();
         runtime.storage.close();
         host_store.disableProcessHeapLimit();
         runtime.state_root.close(runtime.io);
         const allocator = runtime.allocator;
-        var retired = runtime.retired;
-        while (retired) |node| {
-            const next = node.next;
-            node.destroy(allocator, node.context);
-            retired = next;
-        }
         allocator.destroy(runtime);
         runtime_open.store(false, .release);
     }
 
     pub fn occupiedActivationBytes(self: *const HostRuntime) usize {
         return state(self).execution.slots.occupiedBytes();
+    }
+
+    pub fn occupiedActivationHighWaterBytes(self: *const HostRuntime) usize {
+        return state(self).execution.slots.occupiedHighWaterBytes();
+    }
+
+    pub fn activeCapacity(self: *const HostRuntime) usize {
+        return state(self).execution.slots.capacity();
+    }
+
+    pub fn activationReservationBytes(self: *const HostRuntime) usize {
+        return state(self).execution.slots.residentBytes();
+    }
+
+    pub fn activationPoolOverheadBytes(self: *const HostRuntime) usize {
+        return state(self).execution.slots.hostOverheadBytes();
+    }
+
+    pub fn resourceLedger(self: *const HostRuntime) lifecycle.HostResourceLedger {
+        return state(self).execution.resourceLedger();
+    }
+
+    pub fn liveHarnessCount(self: *const HostRuntime) usize {
+        const owners = state(self).harness_owners.load(.acquire);
+        return if (owners == std.math.maxInt(usize)) 0 else owners;
+    }
+
+    /// Measurement-only residency probe over the production Slot pool. Every
+    /// configured Slot is borrowed, dirtied, and held while `observe` samples
+    /// the process. All leases are then released through the ordinary pool
+    /// path, which scrubs them before this function returns.
+    pub fn withAllActivationSlotsDirty(
+        self: *HostRuntime,
+        context: *anyopaque,
+        observe: *const fn (*anyopaque) anyerror!void,
+    ) !void {
+        const slots = &state(self).execution.slots;
+        var leases: [max_active_capacity]core_image.SlotLease = undefined;
+        var lease_count: usize = 0;
+        defer {
+            while (lease_count != 0) {
+                lease_count -= 1;
+                leases[lease_count].release() catch unreachable;
+            }
+        }
+        while (lease_count < slots.capacity()) : (lease_count += 1) {
+            leases[lease_count] = try slots.borrow();
+            @memset(std.mem.asBytes(leases[lease_count].slot), 0xa5);
+        }
+        try observe(context);
+    }
+
+    pub fn sqlitePagerAccounting(
+        self: *HostRuntime,
+        reset_counters: bool,
+    ) !host_store.SqlitePagerAccounting {
+        return state(self).storage.sqlitePagerAccounting(reset_counters);
+    }
+
+    pub fn sqliteMemoryAccounting(
+        self: *HostRuntime,
+        reset_highwater: bool,
+    ) !host_store.MemoryAccounting {
+        return state(self).storage.memoryAccounting(reset_highwater);
     }
 };
 
@@ -194,4 +245,69 @@ fn releaseHarness(runtime: *HostRuntime) void {
 
 fn state(runtime: *const HostRuntime) *State {
     return @ptrCast(@alignCast(@constCast(runtime)));
+}
+
+test "Host Runtime validates and exposes startup-fixed active capacity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expectError(
+        error.InvalidActiveCapacity,
+        HostRuntime.open(std.testing.io, std.testing.allocator, path, .{ .active_capacity = 0 }),
+    );
+    try std.testing.expectError(
+        error.InvalidActiveCapacity,
+        HostRuntime.open(std.testing.io, std.testing.allocator, path, .{
+            .active_capacity = max_active_capacity + 1,
+        }),
+    );
+
+    const runtime = try HostRuntime.open(std.testing.io, std.testing.allocator, path, .{
+        .active_capacity = max_active_capacity,
+    });
+    try std.testing.expectEqual(max_active_capacity, runtime.activeCapacity());
+    try std.testing.expectEqual(
+        max_active_capacity * @sizeOf(core_image.ActivationSlot),
+        runtime.activationReservationBytes(),
+    );
+    try runtime.close();
+}
+
+test "activation residency probe holds and releases the complete production pool" {
+    const Observation = struct {
+        runtime: *HostRuntime,
+        expected_bytes: usize,
+        observed: bool = false,
+
+        fn sample(context: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try std.testing.expectEqual(
+                self.expected_bytes,
+                self.runtime.occupiedActivationBytes(),
+            );
+            self.observed = true;
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const capacity = 4;
+    const runtime = try HostRuntime.open(std.testing.io, std.testing.allocator, path, .{
+        .active_capacity = capacity,
+    });
+    var observation: Observation = .{
+        .runtime = runtime,
+        .expected_bytes = capacity * @sizeOf(core_image.ActivationSlot),
+    };
+    try runtime.withAllActivationSlotsDirty(&observation, Observation.sample);
+    try std.testing.expect(observation.observed);
+    try std.testing.expectEqual(@as(usize, 0), runtime.occupiedActivationBytes());
+    try std.testing.expectEqual(
+        observation.expected_bytes,
+        runtime.occupiedActivationHighWaterBytes(),
+    );
+    try runtime.close();
 }
