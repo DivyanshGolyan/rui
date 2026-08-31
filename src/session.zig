@@ -621,7 +621,6 @@ pub const OwnerToken = host_store.OwnerToken;
 pub const PatchContent = struct {
     intent_reference: u64,
     patch_reference: u64,
-    patch_digest: binding.PatchDescriptor,
 };
 
 pub const ModelAttemptMaterial = struct {
@@ -701,7 +700,6 @@ pub const Control = enum { cancel, shutdown };
 pub const AuthorizationMaterial = struct {
     operation_id: u64,
     operation_generation: u32,
-    permission_ref: u64,
     allowed: bool,
 };
 
@@ -781,6 +779,14 @@ pub const FailureObservation = struct {
     response_ref: u64,
     failure: model_protocol.Failure,
 };
+
+pub const CompletionEvidence = struct {
+    ownership_epoch: u64,
+    result_ref: u64,
+    result_digest: binding.Result,
+};
+
+pub const CompletionOfferState = enum { pending, settled };
 
 pub const OperationView = struct {
     const max_attempts = session_transition.max_operation_attempts;
@@ -2346,12 +2352,33 @@ pub const Session = struct {
             material.operation_generation,
         );
         const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
-        if (material.permission_ref != 0 and material.permission_ref != descriptor.descriptor_ref) {
-            return error.InvalidAuthorizationBinding;
+        if (operation.authorization != null or operation.result != null or
+            operation.latestAttempt() != null)
+        {
+            return error.AuthorizationNoLongerRequired;
         }
+        const permission_ref: u64 = switch (descriptor.descriptor_digest) {
+            .model => return error.InvalidActionDescriptor,
+            .bash => 0,
+            .apply_patch => descriptor.descriptor_ref,
+        };
+        if (!material.allowed and operation.approval_required == null) {
+            return error.ApprovalNotCommitted;
+        }
+        if (operation.approval_required) |approval| switch (descriptor.descriptor_digest) {
+            .model => unreachable,
+            .bash => if (approval.binding_ref != 0 or
+                approval.descriptor_ref != descriptor.descriptor_ref)
+            {
+                return error.InvalidAuthorizationBinding;
+            },
+            .apply_patch => if (approval.binding_ref != descriptor.descriptor_ref) {
+                return error.InvalidAuthorizationBinding;
+            },
+        };
         return self.commitDerived(&.{session_transition.authorization(.{
             .operation = self.operationContext(material.operation_id, material.operation_generation),
-            .permission_ref = material.permission_ref,
+            .permission_ref = permission_ref,
             .allowed = material.allowed,
         })}, null, .facts_only);
     }
@@ -2542,8 +2569,7 @@ pub const Session = struct {
                 const patch_digest = patch_tool.patchDigest(patch_content);
                 if (intent.patch_ref != patch.patch_reference or
                     !std.mem.eql(u8, intent.workspace_path, self.workspacePath()) or
-                    !binding.eql(binding.PatchDescriptor, intent.patch_digest, patch.patch_digest) or
-                    !binding.eql(binding.PatchDescriptor, patch.patch_digest, patch_digest))
+                    !binding.eql(binding.PatchDescriptor, intent.patch_digest, patch_digest))
                 {
                     return error.InvalidActionDescriptor;
                 }
@@ -3023,10 +3049,7 @@ pub const Session = struct {
         return completed.terminal_result_sequence;
     }
 
-    /// Returns the one validated pending Completion for an admitted Attempt.
-    /// The resident Inbox already binds identity, epoch, and kind to the
-    /// Operation descriptor; callers do not reclassify raw envelopes.
-    pub fn pendingCompletion(
+    fn pendingCompletionEnvelope(
         self: *Session,
         operation: session_transition.OperationContext,
         attempt_id: u64,
@@ -3067,6 +3090,94 @@ pub const Session = struct {
         return match;
     }
 
+    /// Returns only the external material from one semantically validated
+    /// pending Completion. Operation, Attempt, and kind remain Session-owned.
+    pub fn pendingCompletionEvidence(
+        self: *Session,
+        operation: session_transition.OperationContext,
+        attempt_id: u64,
+    ) !?CompletionEvidence {
+        const envelope = (try self.pendingCompletionEnvelope(operation, attempt_id)) orelse
+            return null;
+        return .{
+            .ownership_epoch = envelope.ownership_epoch,
+            .result_ref = envelope.result_ref,
+            .result_digest = envelope.result_digest,
+        };
+    }
+
+    /// Classifies an offered Completion only after matching the complete
+    /// envelope against both committed semantic authority and its exact Inbox
+    /// row. Callers do not reconstruct history or compare evidence fields.
+    pub fn classifyCompletionOffer(
+        self: *Session,
+        offered: completion_inbox.Envelope,
+    ) !CompletionOfferState {
+        try self.ensureUsable();
+        if (self.recovery != .ready) return error.SessionRecoveryIncomplete;
+        try completion_inbox.validate(offered);
+        if (offered.session_id != self.session_id or offered.agent_id != self.agent_id or
+            offered.agent_generation != 1)
+        {
+            return error.StaleCompletion;
+        }
+        const operation = self.resident.semantic.operation(
+            self.operationContext(offered.operation_id, offered.operation_generation),
+        ) orelse {
+            const stored = (try self.storage.matchCompletion(offered)) orelse
+                return error.CompletionEvidenceMissing;
+            const terminal_sequence = try self.historicalAuditSequence(offered) orelse
+                return error.StaleCompletion;
+            return switch (stored) {
+                .pending => error.InvalidCompletionDisposition,
+                .consumed => |sequence| if (sequence == terminal_sequence)
+                    .settled
+                else
+                    error.InvalidCompletionDisposition,
+            };
+        };
+        const attempt = operation.findAttempt(offered.attempt_id) orelse
+            return error.StaleCompletion;
+        const descriptor = operation.descriptor orelse return error.MissingOperationDescriptor;
+        if (attempt.descriptor_ref != descriptor.descriptor_ref or
+            !binding.descriptorEql(attempt.descriptor_digest, descriptor.descriptor_digest))
+        {
+            return error.AttemptDescriptorMismatch;
+        }
+        if (offered.ownership_epoch != attempt.operation.agent.ownership_epoch) {
+            return error.CompletionAttemptEpochMismatch;
+        }
+        if (offered.kind != std.meta.activeTag(descriptor.descriptor_digest)) {
+            return error.CompletionEvidenceKindMismatch;
+        }
+        const stored = (try self.storage.matchCompletion(offered)) orelse
+            return error.CompletionEvidenceMissing;
+        if (operation.result) |result| {
+            const consumed_sequence = switch (stored) {
+                .pending => return error.InvalidCompletionDisposition,
+                .consumed => |sequence| sequence,
+            };
+            if (consumed_sequence != operation.terminal_result_sequence.?) {
+                return error.InvalidCompletionDisposition;
+            }
+            if (resultAttemptId(result) == offered.attempt_id and
+                (result.result_ref != offered.result_ref or
+                    !binding.eql(binding.Result, result.result_digest, offered.result_digest)))
+            {
+                return error.ConflictingCompletionEvidence;
+            }
+            return .settled;
+        }
+        switch (stored) {
+            .pending => {},
+            .consumed => return error.InvalidCompletionDisposition,
+        }
+        const pending = (try self.pendingCompletionEnvelope(attempt.operation, attempt.attempt_id)) orelse
+            return error.CompletionEvidenceMissing;
+        if (!std.meta.eql(pending, offered)) return error.ConflictingCompletionEvidence;
+        return .pending;
+    }
+
     const ExpectedCompletion = struct {
         ownership_epoch: u64,
         result_ref: u64,
@@ -3080,7 +3191,7 @@ pub const Session = struct {
         attempt_id: u64,
         expected: ExpectedCompletion,
     ) !completion_inbox.Envelope {
-        const envelope = (try self.pendingCompletion(operation, attempt_id)) orelse
+        const envelope = (try self.pendingCompletionEnvelope(operation, attempt_id)) orelse
             return error.MissingCompletionEvidence;
         if (envelope.kind != kind or envelope.session_id != self.session_id or
             envelope.agent_id != self.agent_id or envelope.agent_generation != 1 or
@@ -4793,6 +4904,10 @@ test "late evidence for a prior Operation audits through durable history" {
         });
         try created.storeContent(live_result_ref, "live late result");
         try created.publishCompletionEvidence(live_late);
+        try std.testing.expectEqual(
+            CompletionOfferState.settled,
+            try created.classifyCompletionOffer(live_late),
+        );
         const live_audit = try layout.storage.readCompletion(session_id, winner_inbox_id + 1);
         try std.testing.expectEqual(terminal_sequence, live_audit.consumed_by_sequence.?);
         try std.testing.expectEqualDeep(live_late, live_audit.envelope);
@@ -5064,7 +5179,7 @@ test "typed final completion compiles one exact atomic semantic transaction" {
     try created.storeContent(902, "done");
     try created.storeContent(903, "substituted");
     const response_digest = binding.hash(binding.Result, response);
-    try created.publishCompletionEvidence(completion_inbox.bind(.{
+    const exact_evidence = completion_inbox.bind(.{
         .kind = .model,
         .session_id = created.session_id,
         .ownership_epoch = created.ownership_epoch,
@@ -5075,7 +5190,20 @@ test "typed final completion compiles one exact atomic semantic transaction" {
         .attempt_id = 101,
         .result_ref = 901,
         .result_digest = response_digest,
-    }));
+    });
+    try created.publishCompletionEvidence(exact_evidence);
+    try std.testing.expectEqual(
+        CompletionOfferState.pending,
+        try created.classifyCompletionOffer(exact_evidence),
+    );
+    var conflicting_offer = exact_evidence;
+    conflicting_offer.result_ref = 903;
+    conflicting_offer.result_digest = binding.hash(binding.Result, "substituted");
+    conflicting_offer = testReboundEnvelope(conflicting_offer);
+    try std.testing.expectError(
+        error.ConflictingCompletionEvidence,
+        created.classifyCompletionOffer(conflicting_offer),
+    );
     var validation: model_protocol.ValidationScratch = undefined;
     var substituted = ModelCompletionMaterial{
         .operation_id = operation.id,
@@ -5135,6 +5263,10 @@ test "typed final completion compiles one exact atomic semantic transaction" {
         .admission = model_protocol.admit(&validation, response).admission,
         .consequence = .{ .final_answer = .{ .content_ref = 902 } },
     });
+    try std.testing.expectEqual(
+        CompletionOfferState.settled,
+        try created.classifyCompletionOffer(exact_evidence),
+    );
 
     var stored: host_store.StoredTransition = undefined;
     try layout.storage.readTransition(created.session_id, 4, &stored);
@@ -5268,6 +5400,25 @@ test "typed tool completion derives the Action and binds the exact Result" {
         } },
     });
     const action_id = completion.action.?.operation_id;
+    const approval = try created.requestApproval(action_id, 1);
+    try std.testing.expectEqual(@as(u64, 914), approval.descriptor_ref);
+    _ = try created.authorizeAction(.{
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .allowed = true,
+    });
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        (try created.semanticView()).consequential.authorization.?.permission_ref,
+    );
+    try std.testing.expectError(
+        error.AuthorizationNoLongerRequired,
+        created.authorizeAction(.{
+            .operation_id = action_id,
+            .operation_generation = 1,
+            .allowed = true,
+        }),
+    );
 
     try created.storeContent(915, "action result");
     const result_digest = binding.hash(binding.Result, "action result");
@@ -5420,6 +5571,15 @@ fn runPatchApprovalCase(
             const view = try created.semanticView();
             try std.testing.expectEqual(intent_ref, view.consequential.approval_required.?.binding_ref);
             try std.testing.expectEqual(patch_ref, view.consequential.approval_required.?.descriptor_ref);
+            _ = try created.authorizeAction(.{
+                .operation_id = 2,
+                .operation_generation = 1,
+                .allowed = false,
+            });
+            try std.testing.expectEqual(
+                intent_ref,
+                (try created.semanticView()).consequential.authorization.?.permission_ref,
+            );
         },
         .substituted_intent_digest, .substituted_patch => try std.testing.expectError(
             error.InvalidApprovalBinding,

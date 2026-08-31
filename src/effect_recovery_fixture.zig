@@ -238,7 +238,7 @@ fn recoverPublishedModel(io: std.Io, runtime: *harness.HostRuntime, session_id: 
         while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
         const view = try restored.semanticView();
         const attempt = view.model.latestAttempt() orelse return error.CommittedCompletionMissing;
-        const envelope = try restored.pendingCompletion(attempt.operation, attempt.attempt_id) orelse {
+        const envelope = try restored.pendingCompletionEvidence(attempt.operation, attempt.attempt_id) orelse {
             return error.CommittedCompletionMissing;
         };
         var bytes: [model_protocol.max_response_size]u8 = undefined;

@@ -214,6 +214,8 @@ pub const StoredCompletion = struct {
     consumed_by_sequence: ?u64,
 };
 
+pub const CompletionMatch = union(enum) { pending, consumed: u64 };
+
 /// The exact admitted Attempt and the first terminal Result transaction for
 /// its Operation. This is reconstructed from the authoritative bounded ledger
 /// rather than retained as an unbounded resident history.
@@ -817,6 +819,56 @@ pub const StorageOwner = struct {
         try self.reach(.before_commit);
         try self.execute("COMMIT");
         return @intCast(inbox_id);
+    }
+
+    /// Matches one complete evidence envelope against the immutable Inbox row
+    /// selected by its semantic identity. The caller receives no row fields to
+    /// reinterpret or use as a second source of authority.
+    pub fn matchCompletion(
+        self: *StorageOwner,
+        envelope: completion_inbox.Envelope,
+    ) !?CompletionMatch {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
+        try self.ensureOpen();
+        try completion_inbox.validate(envelope);
+
+        const statement = try self.prepare(find_completion_sql);
+        defer finalize(statement);
+        var identities: [4][8]u8 = undefined;
+        try bindIdentity(statement, 1, envelope.session_id, &identities[0]);
+        try bindIdentity(statement, 2, envelope.agent_id, &identities[1]);
+        try bindU64(statement, 3, envelope.agent_generation);
+        try bindIdentity(statement, 4, envelope.operation_id, &identities[2]);
+        try bindU64(statement, 5, envelope.operation_generation);
+        try bindIdentity(statement, 6, envelope.attempt_id, &identities[3]);
+        try bindU64(statement, 7, @intFromEnum(envelope.kind));
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return null;
+        if (result != c.SQLITE_ROW) return mapSqliteError(result);
+        const inbox_id = c.sqlite3_column_int64(statement, 0);
+        if (inbox_id <= 0) return error.CorruptHostStore;
+        const result_ref = try readIdentityColumn(statement, 1);
+        const result_digest = try readBindingColumn(binding.Result, statement, 2);
+        const completion_digest = try readBindingColumn(binding.Completion, statement, 3);
+        const ownership_epoch = try readIdentityColumn(statement, 4);
+        if (ownership_epoch != envelope.ownership_epoch or result_ref != envelope.result_ref or
+            !binding.eql(binding.Result, result_digest, envelope.result_digest) or
+            !binding.eql(binding.Completion, completion_digest, envelope.completion_digest))
+        {
+            return error.ConflictingCompletionEvidence;
+        }
+        const disposition: CompletionMatch = switch (c.sqlite3_column_type(statement, 5)) {
+            c.SQLITE_NULL => .pending,
+            c.SQLITE_INTEGER => consumed: {
+                const sequence = c.sqlite3_column_int64(statement, 5);
+                if (sequence <= 0) return error.CorruptHostStore;
+                break :consumed .{ .consumed = @intCast(sequence) };
+            },
+            else => return error.CorruptHostStore,
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return disposition;
     }
 
     pub fn readCompletion(
