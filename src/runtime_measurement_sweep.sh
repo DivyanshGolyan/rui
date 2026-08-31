@@ -1,14 +1,16 @@
 #!/bin/sh
 set -eu
 
-if test "$#" -ne 3; then
-  echo "usage: runtime_measurement_sweep.sh FIXTURE OUTPUT REPETITIONS" >&2
+if test "$#" -ne 5; then
+  echo "usage: runtime_measurement_sweep.sh FIXTURE RAW_OUTPUT SUMMARIZER SUMMARY_OUTPUT REPETITIONS" >&2
   exit 2
 fi
 
 fixture=$1
 output=$2
-repetitions=$3
+summarizer=$3
+summary_output=$4
+repetitions=$5
 
 case "$repetitions" in
   ''|*[!0-9]*|0)
@@ -16,6 +18,10 @@ case "$repetitions" in
     exit 2
     ;;
 esac
+if test $((repetitions % 2)) -eq 0; then
+  echo "repetitions must be odd so integer counter medians remain exact" >&2
+  exit 2
+fi
 
 output_dir=$(dirname "$output")
 mkdir -p "$output_dir"
@@ -24,8 +30,12 @@ trap 'rm -f "$temporary"' EXIT HUP INT TERM
 
 source_commit=$(git rev-parse HEAD)
 platform=$(uname -srvmp | tr '"' "'")
-printf '{"schema":"onepage.runtime-measurement-sweep.v1","source_commit":"%s","platform":"%s","repetitions":%s}\n' \
-  "$source_commit" "$platform" "$repetitions" > "$temporary"
+source_dirty=false
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  source_dirty=true
+fi
+printf '{"schema":"onepage.runtime-measurement-sweep.v1","source_commit":"%s","platform":"%s","repetitions":%s,"source_dirty":%s}\n' \
+  "$source_commit" "$platform" "$repetitions" "$source_dirty" > "$temporary"
 
 run_point() {
   scenario=$1
@@ -59,4 +69,6 @@ done
 
 mv "$temporary" "$output"
 trap - EXIT HUP INT TERM
+"$summarizer" "$output" "$summary_output"
 printf 'Wrote raw runtime measurements to %s\n' "$output" >&2
+printf 'Wrote runtime measurement summary to %s\n' "$summary_output" >&2

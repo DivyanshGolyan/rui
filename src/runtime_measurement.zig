@@ -94,11 +94,11 @@ fn createDormantSessions(layout: *Layout, count: usize) !void {
                 .task = fixture_task,
             } },
         });
+        defer owner.close();
         const identity = try owner.drive();
         if (identity.projection_count != 1 or identity.projections[0].kind != .session) {
             return error.SessionIdentityMissing;
         }
-        owner.close();
     }
 }
 
@@ -119,18 +119,19 @@ fn completeSessions(layout: *Layout, count: usize) !void {
                 .task = fixture_task,
             } },
         });
+        defer owner.close();
         _ = try owner.drive();
         if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
         _ = try owner.drive();
         const finished = try owner.drive();
         if (finished.state != .finished or fixture.calls != 1) return error.SessionDidNotFinish;
-        owner.close();
     }
 }
 
 const Layout = struct {
     allocator: std.mem.Allocator,
     root_path: []u8,
+    state_path: []u8,
     workspace_path: []u8,
     runtime: ?*harness.HostRuntime,
 
@@ -146,7 +147,10 @@ const Layout = struct {
         var root = try std.Io.Dir.cwd().createDirPathOpen(io, root_path, .{});
         defer root.close(io);
         errdefer std.Io.Dir.cwd().deleteTree(io, root_path) catch {};
+        try root.createDir(io, "state", .default_dir);
         try root.createDir(io, "workspace", .default_dir);
+        const state_path = try std.fs.path.join(allocator, &.{ root_path, "state" });
+        errdefer allocator.free(state_path);
         const workspace_path = try std.fs.path.join(allocator, &.{ root_path, "workspace" });
         errdefer allocator.free(workspace_path);
         const initialized = try std.process.run(allocator, io, .{
@@ -163,6 +167,7 @@ const Layout = struct {
         return .{
             .allocator = allocator,
             .root_path = root_path,
+            .state_path = state_path,
             .workspace_path = workspace_path,
             .runtime = null,
         };
@@ -170,7 +175,7 @@ const Layout = struct {
 
     fn openRuntime(self: *Layout, io: std.Io, active_capacity: usize) !void {
         if (self.runtime != null) return error.RuntimeAlreadyOpen;
-        self.runtime = try harness.HostRuntime.open(io, self.allocator, self.root_path, .{
+        self.runtime = try harness.HostRuntime.open(io, self.allocator, self.state_path, .{
             .active_capacity = active_capacity,
         });
     }
@@ -182,15 +187,16 @@ const Layout = struct {
     }
 
     fn durableBytes(self: *const Layout, io: std.Io) !u64 {
-        var root = try std.Io.Dir.cwd().openDir(io, self.root_path, .{ .iterate = true });
-        defer root.close(io);
-        return directoryBytes(io, root);
+        var state = try std.Io.Dir.cwd().openDir(io, self.state_path, .{ .iterate = true });
+        defer state.close(io);
+        return directoryBytes(io, state);
     }
 
     fn deinit(self: *Layout, io: std.Io) void {
         self.closeRuntime();
         std.Io.Dir.cwd().deleteTree(io, self.root_path) catch {};
         self.allocator.free(self.workspace_path);
+        self.allocator.free(self.state_path);
         self.allocator.free(self.root_path);
     }
 };
@@ -297,4 +303,46 @@ fn operationsPerSecond(count: usize, wall_time_ns: u64) f64 {
 
 test "zero work has zero throughput" {
     try std.testing.expectEqual(@as(f64, 0), operationsPerSecond(0, 1));
+}
+
+test "measurement durable bytes exclude fixture Workspace" {
+    var layout = try Layout.init(std.testing.io, std.testing.allocator);
+    defer layout.deinit(std.testing.io);
+    try layout.openRuntime(std.testing.io, 1);
+    const before = try layout.durableBytes(std.testing.io);
+    var workspace = try std.Io.Dir.cwd().openDir(std.testing.io, layout.workspace_path, .{});
+    defer workspace.close(std.testing.io);
+    try workspace.writeFile(std.testing.io, .{
+        .sub_path = "measurement-noise",
+        .data = "this fixture byte is not Host state",
+    });
+    try std.testing.expectEqual(before, try layout.durableBytes(std.testing.io));
+}
+
+test "measurement failure releases the Harness Runtime lease" {
+    var layout = try Layout.init(std.testing.io, std.testing.allocator);
+    defer layout.deinit(std.testing.io);
+    try layout.openRuntime(std.testing.io, 1);
+    try std.testing.expectError(error.InjectedMeasurementFailure, failAfterHarnessOpen(&layout));
+    layout.closeRuntime();
+}
+
+fn failAfterHarnessOpen(layout: *Layout) !void {
+    var fixture: deterministic_provider.Fixture = .{
+        .expected_task = fixture_task,
+        .final_answer = fixture_answer,
+    };
+    const owner = try harness.Harness.open(.{
+        .runtime = layout.runtime.?,
+        .mode = .{ .create = .{
+            .workspace_path = layout.workspace_path,
+            .model_binding = .{
+                .model = "fixture:measurement-failure",
+                .provider = fixture.provider(),
+            },
+            .task = fixture_task,
+        } },
+    });
+    defer owner.close();
+    return error.InjectedMeasurementFailure;
 }

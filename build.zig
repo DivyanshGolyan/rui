@@ -324,10 +324,19 @@ pub fn build(b: *std.Build) void {
         "measurement-repetitions",
         "Independent processes per runtime measurement point",
     ) orelse 3;
+    const runtime_measurement_summary = addNativeExecutable(
+        b,
+        "onepage-runtime-measurement-summary",
+        "src/runtime_measurement_summary.zig",
+        native_target,
+        .ReleaseSafe,
+    );
     const run_runtime_measurement_sweep = b.addSystemCommand(&.{"sh"});
     run_runtime_measurement_sweep.addFileArg(b.path("src/runtime_measurement_sweep.sh"));
     run_runtime_measurement_sweep.addArtifactArg(runtime_measurement);
     run_runtime_measurement_sweep.addArg(".zig-cache/onepage-runtime-measurements.jsonl");
+    run_runtime_measurement_sweep.addArtifactArg(runtime_measurement_summary);
+    run_runtime_measurement_sweep.addArg(".zig-cache/onepage-runtime-measurements-summary.json");
     run_runtime_measurement_sweep.addArg(b.fmt("{d}", .{measurement_repetitions}));
     const runtime_measurement_sweep_step = b.step(
         "measure-runtime-sweep",
@@ -418,6 +427,8 @@ fn addTestGraph(
         "src/codex_native.zig",
         "src/host_store_test.zig",
         "src/patch_tool.zig",
+        "src/runtime_measurement.zig",
+        "src/runtime_measurement_summary.zig",
         "src/cli.zig",
     };
     for (libc_test_roots) |root| {
