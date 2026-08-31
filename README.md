@@ -30,10 +30,10 @@ decision, and no evaluator remains resident while a Workflow Run is Blocked on J
 Workflow code cannot observe physical Job completion order: V1 supports deterministic joins through
 `Promise.all` and `Promise.allSettled` and does not expose `Promise.race` or `Promise.any`.
 The target architecture separates compact, canonically encoded Core State from stage-specific
-transient scratch. Core State's encoded size is derived from `core_state.encoded_size` and is
-currently 176 bytes; authoritative semantic transactions
-carry it directly. Activation decodes that state into one Host-owned slot containing only decoded
-Core State; V1 removes sizing filler and enforces a 32 KiB ceiling. Suspension scrubs the
+transient scratch. Session privately owns the reducer, state type, and 176-byte canonical encoding;
+authoritative semantic transactions carry that encoding directly. Activation restores it into one
+opaque 184-byte Host-owned slot containing only decoded Core State; V1 removes sizing filler and
+enforces a 32 KiB ceiling. Suspension scrubs the
 complete slot. A fixed Host-owned pool returns closed capacity instead of allocating a
 fallback slot. Native invariant traces check typed outcomes, rejection-state preservation, semantic
 observations, and canonical restoration rather than slot bytes. Complete Session semantics reconstruct
@@ -192,7 +192,8 @@ Inbox, Conversation, checkpoint, manifest, and blob-tree files are no longer pro
 Implemented authoritative descriptor, Patch Intent, preimage, expected-postimage,
 Result, Completion, immutable-content, and ledger-record bytes use distinct versioned SHA-256 binding
 types. Bash persists one descriptor binding its canonical Workspace and working directory, fixed
-environment authority, timeout, command, Operation identity, and generation. Patch preparation uses Git
+environment authority, timeout, and command. Session separately allocates the opaque Action Operation
+identity and records complete model parentage. Patch preparation uses Git
 in a private scratch copy to prepare the expected postimage without mutating the Workspace, then stores
 the complete Intent before Authorization. Preparation, observation, and application each admit at most
 1 MiB of target or expected-postimage work. The all-zero value remains valid data; absence is represented

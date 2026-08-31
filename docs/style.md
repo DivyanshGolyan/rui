@@ -56,6 +56,10 @@ deferred explicitly.
 - Let an admitted Operation's typed descriptor be the only effect-kind authority. Attempts must repeat
   its exact descriptor binding; child authorization, approval, and Completion facts must not add a
   parallel classifier. Persist parentage with the complete parent identity, including generation.
+  Allocate opaque Action identities inside Session and never encode kind, parentage, references, or
+  order into identity bits. Session must derive Approval Required from the admitted descriptor and bind
+  model or durable Action Result admission to the exact pending Completion envelope; callers cannot
+  supply either relationship as proof.
 - Add the narrowest complete vertical behavior through existing deep modules. Provider-neutral model
   data must not encode the current concrete tool inventory, but do not turn that data contract into a
   runtime registry, plugin surface, generic effect executor, scheduler, terminal framework, or

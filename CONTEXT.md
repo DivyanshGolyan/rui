@@ -237,7 +237,7 @@ A temporary period in which an agent occupies an Activation Slot and advances it
 _Avoid_: Agent, session, process, checkpoint
 
 **Activation Slot**:
-One reusable, fixed-capacity resident workspace containing only decoded Core State for a bounded pure reduction.
+One reusable, fixed-capacity opaque resident workspace that Session uses only for decoded Core State during a bounded pure reduction.
 _Avoid_: Agent, Core State, execution page, checkpoint
 
 **Active Capacity**:
