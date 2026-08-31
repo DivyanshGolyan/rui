@@ -56,8 +56,10 @@ deferred explicitly.
 - Let an admitted Operation's typed descriptor be the only effect-kind authority. Attempts must repeat
   its exact descriptor binding; child authorization, approval, and Completion facts must not add a
   parallel classifier. Persist parentage with the complete parent identity, including generation.
-  Allocate opaque Action identities inside Session and never encode kind, parentage, references, or
-  order into identity bits. Session must derive Approval Required from the admitted descriptor and bind
+  Allocate opaque Action identities inside Session. A monotonic allocator is allowed, but consumers must
+  never derive kind, parentage, recovery behavior, or authoritative order from numeric identity values;
+  ledger sequence and explicit relationships remain the only order and parentage authority. Session must
+  derive Approval Required from the admitted descriptor and bind
   model or durable Action Result admission to the exact pending Completion envelope; callers cannot
   supply either relationship as proof.
 - Add the narrowest complete vertical behavior through existing deep modules. Provider-neutral model
