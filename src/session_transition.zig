@@ -2,7 +2,7 @@ const std = @import("std");
 const binding = @import("binding.zig");
 const core_state = @import("core_state.zig");
 
-pub const payload_version: u16 = 8;
+pub const payload_version: u16 = 9;
 pub const max_facts: usize = 8;
 pub const max_transitions: u32 = 32_768;
 pub const max_operation_attempts: usize = 8;
@@ -63,12 +63,17 @@ pub const OperationContext = struct {
     generation: u32 = 0,
 };
 
+pub const OperationIdentity = struct {
+    operation_id: u64,
+    generation: u32,
+};
+
 pub const OperationRecord = struct {
     operation: OperationContext,
-    /// The model Operation that proposed this Action. Zero for model
+    /// The model Operation that proposed this Action. Null for model
     /// Operations. This relationship is explicit; Operation identity carries
     /// no kind or parent encoding.
-    source_operation_id: u64,
+    source_operation: ?OperationIdentity,
     descriptor_ref: u64,
     descriptor_digest: binding.Descriptor,
 };
@@ -92,7 +97,6 @@ pub const AttemptRecord = struct {
 pub const AuthorizationRecord = struct {
     operation: OperationContext,
     permission_ref: u64,
-    descriptor_digest: binding.Descriptor,
     allowed: bool,
 };
 
@@ -129,7 +133,6 @@ pub const ApprovalRequiredRecord = struct {
     operation: OperationContext,
     binding_ref: u64,
     descriptor_ref: u64,
-    descriptor_digest: binding.Descriptor,
 };
 
 pub const ContentReferenceRole = enum {
@@ -245,13 +248,13 @@ pub fn taskAdmitted(agent: AgentContext, task_id: u64, content_ref: u64) Fact {
 
 pub fn operationAdmitted(
     operation: OperationContext,
-    source_operation_id: u64,
+    source_operation: ?OperationIdentity,
     descriptor_ref: u64,
     descriptor_digest: binding.Descriptor,
 ) Fact {
     return .{ .operation_admitted = .{
         .operation = operation,
-        .source_operation_id = source_operation_id,
+        .source_operation = source_operation,
         .descriptor_ref = descriptor_ref,
         .descriptor_digest = descriptor_digest,
     } };
@@ -459,11 +462,14 @@ fn validateRawFact(fact: RawFact) !void {
             }
         },
         .operation_admitted => {
-            if (fact.attempt_id != 0 or fact.reference == 0 or fact.auxiliary != 0 or
+            if (fact.attempt_id != 0 or fact.reference == 0 or
                 !validDescriptorKind(fact.digest_kind) or fact.flags != 0 or
                 fact.evidence_kind != 0 or
-                (fact.digest_kind == @intFromEnum(binding.DescriptorKind.model) and fact.subject != 0) or
-                (fact.digest_kind != @intFromEnum(binding.DescriptorKind.model) and fact.subject == 0))
+                (fact.digest_kind == @intFromEnum(binding.DescriptorKind.model) and
+                    (fact.subject != 0 or fact.auxiliary != 0)) or
+                (fact.digest_kind != @intFromEnum(binding.DescriptorKind.model) and
+                    (fact.subject == 0 or fact.auxiliary == 0 or
+                        fact.auxiliary > std.math.maxInt(u32))))
             {
                 return error.InvalidKindSpecificPayload;
             }
@@ -479,15 +485,15 @@ fn validateRawFact(fact: RawFact) !void {
             }
         },
         .approval_required => {
-            if (fact.reference == 0 or fact.auxiliary != 0 or
-                !validDescriptorKind(fact.digest_kind) or fact.flags != 0 or
+            if (fact.reference == 0 or fact.auxiliary != 0 or fact.digest_kind != 0 or
+                fact.flags != 0 or
                 fact.attempt_id != 0 or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .authorization => {
-            if (fact.auxiliary != 0 or !validDescriptorKind(fact.digest_kind) or
+            if (fact.auxiliary != 0 or fact.digest_kind != 0 or
                 (fact.flags != 1 and fact.flags != 2) or
                 fact.attempt_id != 0 or fact.subject != 0 or
                 fact.evidence_kind != 0)
@@ -569,7 +575,10 @@ fn rawFact(fact: Fact) RawFact {
         },
         .operation_admitted => |value| {
             setOperation(&raw, value.operation);
-            raw.subject = value.source_operation_id;
+            if (value.source_operation) |source| {
+                raw.subject = source.operation_id;
+                raw.auxiliary = source.generation;
+            }
             raw.reference = value.descriptor_ref;
             setDescriptor(&raw, value.descriptor_digest);
         },
@@ -583,7 +592,6 @@ fn rawFact(fact: Fact) RawFact {
         .authorization => |value| {
             setOperation(&raw, value.operation);
             raw.reference = value.permission_ref;
-            setDescriptor(&raw, value.descriptor_digest);
             raw.flags = if (value.allowed) 1 else 2;
         },
         .result => |value| {
@@ -624,7 +632,6 @@ fn rawFact(fact: Fact) RawFact {
             setOperation(&raw, value.operation);
             raw.subject = value.binding_ref;
             raw.reference = value.descriptor_ref;
-            setDescriptor(&raw, value.descriptor_digest);
         },
     }
     return raw;
@@ -689,7 +696,10 @@ fn factFromRaw(raw: RawFact) Fact {
         } },
         .operation_admitted => .{ .operation_admitted = .{
             .operation = operation,
-            .source_operation_id = raw.subject,
+            .source_operation = if (raw.subject == 0) null else .{
+                .operation_id = raw.subject,
+                .generation = @intCast(raw.auxiliary),
+            },
             .descriptor_ref = raw.reference,
             .descriptor_digest = descriptorFromRaw(raw),
         } },
@@ -703,7 +713,6 @@ fn factFromRaw(raw: RawFact) Fact {
         .authorization => .{ .authorization = .{
             .operation = operation,
             .permission_ref = raw.reference,
-            .descriptor_digest = descriptorFromRaw(raw),
             .allowed = raw.flags == 1,
         } },
         .result => .{ .result = .{
@@ -744,7 +753,6 @@ fn factFromRaw(raw: RawFact) Fact {
             .operation = operation,
             .binding_ref = raw.subject,
             .descriptor_ref = raw.reference,
-            .descriptor_digest = descriptorFromRaw(raw),
         } },
     };
 }

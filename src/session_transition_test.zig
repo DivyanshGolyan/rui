@@ -86,13 +86,13 @@ test "Operation admission requires explicit source identity only for Actions" {
     };
     const model = transition.operationAdmitted(
         operation,
-        0,
+        null,
         17,
         .{ .model = binding.hash(binding.ModelDescriptor, "model") },
     );
     const action = transition.operationAdmitted(
         operation,
-        19,
+        .{ .operation_id = 19, .generation = 2 },
         23,
         .{ .bash = binding.hash(binding.BashDescriptor, "action") },
     );
@@ -107,7 +107,7 @@ test "Operation admission requires explicit source identity only for Actions" {
     transaction.fact_count = 1;
     transaction.facts[0] = transition.operationAdmitted(
         operation,
-        0,
+        null,
         29,
         .{ .bash = binding.hash(binding.BashDescriptor, "missing source") },
     );
@@ -117,7 +117,7 @@ test "Operation admission requires explicit source identity only for Actions" {
     );
     transaction.facts[0] = transition.operationAdmitted(
         operation,
-        31,
+        .{ .operation_id = 31, .generation = 4 },
         37,
         .{ .model = binding.hash(binding.ModelDescriptor, "unexpected source") },
     );
@@ -142,12 +142,10 @@ test "Approval Required and Authorization have distinct canonical payloads" {
         .operation = operation,
         .binding_ref = 13,
         .descriptor_ref = 17,
-        .descriptor_digest = .{ .bash = binding.hash(binding.BashDescriptor, "descriptor-19") },
     });
     const authorization = transition.authorization(.{
         .operation = operation,
         .permission_ref = 23,
-        .descriptor_digest = .{ .bash = binding.hash(binding.BashDescriptor, "descriptor-19") },
         .allowed = true,
     });
     var approval_buffer: [transition.max_payload_size]u8 = undefined;

@@ -218,12 +218,14 @@ pub const StoredCompletion = struct {
 /// its Operation. This is reconstructed from the authoritative bounded ledger
 /// rather than retained as an unbounded resident history.
 pub const CompletedAttempt = struct {
+    operation: session_transition.OperationRecord,
     attempt: session_transition.AttemptRecord,
     terminal_result_sequence: u64,
 };
 
 pub const CompletedAttemptScan = struct {
     next_sequence: u64 = 1,
+    operation: ?session_transition.OperationRecord = null,
     attempt: ?session_transition.AttemptRecord = null,
     terminal_before_attempt: bool = false,
     completed: ?CompletedAttempt = null,
@@ -1980,6 +1982,17 @@ fn applyCompletedAttemptFacts(
     attempt_id: u64,
 ) !void {
     for (transaction.factSlice()) |fact| switch (fact) {
+        .operation_admitted => |operation| {
+            if (operation.operation.operation_id != operation_id or
+                operation.operation.generation != operation_generation)
+            {
+                continue;
+            }
+            if (scan.terminal_before_attempt) return error.InvalidHistoricalCompletionOrdering;
+            if (scan.operation) |existing| {
+                if (!std.meta.eql(existing, operation)) return error.ConflictingLedgerFacts;
+            } else scan.operation = operation;
+        },
         .attempt_admitted => |attempt| {
             if (attempt.operation.operation_id != operation_id or
                 attempt.operation.generation != operation_generation or
@@ -1988,6 +2001,13 @@ fn applyCompletedAttemptFacts(
                 continue;
             }
             if (scan.terminal_before_attempt) return error.InvalidHistoricalCompletionOrdering;
+            const operation = scan.operation orelse return error.InvalidHistoricalCompletionOrdering;
+            if (!std.meta.eql(operation.operation, attempt.operation) or
+                operation.descriptor_ref != attempt.descriptor_ref or
+                !binding.descriptorEql(operation.descriptor_digest, attempt.descriptor_digest))
+            {
+                return error.InvalidHistoricalCompletionRelationship;
+            }
             if (scan.attempt) |existing| {
                 if (!std.meta.eql(existing, attempt)) return error.ConflictingLedgerFacts;
             } else scan.attempt = attempt;
@@ -2000,10 +2020,15 @@ fn applyCompletedAttemptFacts(
                 continue;
             }
             if (scan.attempt) |attempt| {
+                const operation = scan.operation orelse {
+                    scan.terminal_before_attempt = true;
+                    continue;
+                };
                 if (!std.meta.eql(attempt.operation, result.operation)) {
                     return error.InvalidHistoricalCompletionRelationship;
                 }
                 scan.completed = .{
+                    .operation = operation,
                     .attempt = attempt,
                     .terminal_result_sequence = transaction.sequence,
                 };
@@ -2998,9 +3023,6 @@ test "three first imports succeed while existing references do not consume the c
     }
 
     var existing: session_transition.Transaction = .{ .sequence = 7, .fact_count = 3 };
-    const descriptor_digest: binding.Descriptor = .{
-        .bash = binding.hash(binding.BashDescriptor, "existing-reference-test"),
-    };
     for (0..2) |index| existing.facts[index] = session_transition.approvalRequired(.{
         .operation = .{
             .agent = agent,
@@ -3009,7 +3031,6 @@ test "three first imports succeed while existing references do not consume the c
         },
         .binding_ref = existing_references[index * 2],
         .descriptor_ref = existing_references[index * 2 + 1],
-        .descriptor_digest = descriptor_digest,
     });
     existing.facts[2] = session_transition.outcome(agent, 10, existing_references[4]);
     _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
@@ -3021,7 +3042,6 @@ test "three first imports succeed while existing references do not consume the c
         .operation = .{ .agent = agent, .operation_id = 900, .generation = 1 },
         .binding_ref = 900,
         .descriptor_ref = 901,
-        .descriptor_digest = descriptor_digest,
     });
     exact.facts[1] = session_transition.outcome(agent, 11, 902);
     var exact_imports: [max_first_content_imports]TransactionContentImport = undefined;
@@ -3038,7 +3058,6 @@ test "three first imports succeed while existing references do not consume the c
         .operation = .{ .agent = agent, .operation_id = 910 + index, .generation = 1 },
         .binding_ref = 910 + index * 2,
         .descriptor_ref = 911 + index * 2,
-        .descriptor_digest = descriptor_digest,
     });
     var imports: [max_first_content_imports + 1]TransactionContentImport = undefined;
     for (&imports, 0..) |*content, index| content.* = directContent(testContent(910 + index));
@@ -3097,7 +3116,7 @@ test "patch content requires its first-referenced Intent in the same commit" {
     var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
     transaction.facts[0] = session_transition.operationAdmitted(
         operation,
-        624,
+        .{ .operation_id = 624, .generation = 1 },
         625,
         descriptor,
     );

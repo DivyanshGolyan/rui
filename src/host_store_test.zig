@@ -95,7 +95,7 @@ test "historical Completion scan rejects an Attempt admitted after its terminal 
     };
     _ = try owner.commitPrepared(.{ .session_id = 15, .epoch = 1 }, .{
         .transaction = transaction(2, &.{
-            transition.operationAdmitted(operation, 0, 21, descriptor),
+            transition.operationAdmitted(operation, null, 21, descriptor),
             transition.result(.{
                 .operation = operation,
                 .result_ref = 22,
@@ -134,7 +134,7 @@ test "historical Completion scan requires the Result to share the Attempt contex
     };
     _ = try owner.commitPrepared(.{ .session_id = 25, .epoch = 1 }, .{
         .transaction = transaction(2, &.{
-            transition.operationAdmitted(admitted_operation, 0, 31, descriptor),
+            transition.operationAdmitted(admitted_operation, null, 31, descriptor),
             transition.modelAttemptAdmitted(admitted_operation, 32, 31, descriptor, 0),
         }),
         .content = &.{directContent(31)},

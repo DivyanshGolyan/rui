@@ -153,7 +153,7 @@ fn recoverPrepublicationModel(io: std.Io, runtime: *harness.HostRuntime, identit
         const ledger = try restored.semanticView();
         const audit = try ModelAttemptAudit.from(ledger.model);
         if (audit.count != 1) return error.ModelAttemptCountMismatch;
-        if (try restored.scanCompletionEvidence(undefined, ignoreCompletion) != 0) {
+        if (try restored.pendingCompletionCount() != 0) {
             return error.PrepublicationCrashGainedCompletionAuthority;
         }
         _ = ledger.last_core orelse return error.MissingLedgerCoreState;
@@ -229,15 +229,6 @@ fn recoverPublishedModel(io: std.Io, runtime: *harness.HostRuntime, session_id: 
         }
     };
     {
-        const CapturedCompletion = struct {
-            envelope: ?completion_inbox.Envelope = null,
-
-            fn apply(context: *anyopaque, envelope: completion_inbox.Envelope) !void {
-                const self: *@This() = @ptrCast(@alignCast(context));
-                if (self.envelope != null) return error.UnexpectedCompletionCount;
-                self.envelope = envelope;
-            }
-        };
         var lease = try host_runtime.Lease.acquire(runtime);
         defer lease.release();
         const scratch = try session_store.allocateTransientScratch(lease.allocator);
@@ -245,11 +236,11 @@ fn recoverPublishedModel(io: std.Io, runtime: *harness.HostRuntime, session_id: 
         var restored = try lease.restoreSession(scratch, session_id);
         defer restored.close();
         while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
-        var capture: CapturedCompletion = .{};
-        if (try restored.scanCompletionEvidence(&capture, CapturedCompletion.apply) != 1) {
+        const view = try restored.semanticView();
+        const attempt = view.model.latestAttempt() orelse return error.CommittedCompletionMissing;
+        const envelope = try restored.pendingCompletion(attempt.operation, attempt.attempt_id) orelse {
             return error.CommittedCompletionMissing;
-        }
-        const envelope = capture.envelope orelse return error.CommittedCompletionMissing;
+        };
         var bytes: [model_protocol.max_response_size]u8 = undefined;
         var expected_bytes: [model_protocol.max_response_size]u8 = undefined;
         if (!std.mem.eql(
@@ -387,7 +378,7 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
             .result_digest = binding.hash(binding.Result, response),
         });
         try restored.publishCompletionEvidence(envelope);
-        if (try restored.scanCompletionEvidence(undefined, rejectPendingCompletion) != 0) {
+        if (try restored.pendingCompletionCount() != 0) {
             return error.LateEvidenceRemainedPending;
         }
         break :initial .{ before, audit, envelope };
@@ -427,12 +418,6 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
     }
     try std.Io.File.stdout().writeStreamingAll(io, "audited\n");
 }
-
-fn rejectPendingCompletion(_: *anyopaque, _: completion_inbox.Envelope) anyerror!void {
-    return error.LateEvidenceRemainedPending;
-}
-
-fn ignoreCompletion(_: *anyopaque, _: completion_inbox.Envelope) anyerror!void {}
 
 fn exhaustModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
     var failed = false;

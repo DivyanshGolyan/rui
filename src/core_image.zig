@@ -209,7 +209,27 @@ pub const RuntimeSlotPool = struct {
 pub const Core = struct {
     slot: *ActivationSlot,
     state: *State,
+    change: CommitChange = .none,
     active: bool = true,
+
+    pub const CommitChange = union(enum) {
+        none,
+        unsupported,
+        task_started: u64,
+        model_operation_submitted: Operation,
+        model_operation_admitted: Operation,
+        model_response_applied: struct {
+            operation: OperationIdentity,
+            response_ref: u64,
+            result_digest: binding.Result,
+            disposition: model_protocol.Disposition,
+        },
+        tool_result_committed: struct {
+            call_entry_id: u64,
+            result_entry_id: u64,
+        },
+        final_answer_committed: u64,
+    };
 
     pub fn initialize(slot: *ActivationSlot, identity_value: Identity) !Core {
         if (identity_value.agent_id == 0) return error.InvalidAgentIdentity;
@@ -255,6 +275,11 @@ pub const Core = struct {
             .agent_id = self.state.agent_id,
             .generation = self.state.agent_generation,
         };
+    }
+
+    pub fn pendingCommitChange(self: *const Core) !CommitChange {
+        try self.requireActive();
+        return self.change;
     }
 
     pub fn operation(self: *const Core) !Operation {
@@ -306,6 +331,7 @@ pub const Core = struct {
 
     pub fn deliver(self: *Core, event: u32) !void {
         try self.requireActive();
+        self.change = .unsupported;
         self.state.event_count +%= 1;
         self.state.last_event = event;
         self.state.accumulator = (self.state.accumulator *% 16_777_619) ^ event;
@@ -321,6 +347,7 @@ pub const Core = struct {
         }
         self.state.active_leaf_id = active_leaf_id;
         self.state.task_phase = .ready;
+        self.change = .{ .task_started = active_leaf_id };
     }
 
     pub fn submitOperation(self: *Core, operation_id: u64, sequence: u64) !Operation {
@@ -336,7 +363,9 @@ pub const Core = struct {
         self.state.operation_phase = .submitted;
         self.state.operation_result = 0;
         self.state.operation_sequence = sequence;
-        return self.operation();
+        const prepared = try self.operation();
+        self.change = .{ .model_operation_submitted = prepared };
+        return prepared;
     }
 
     pub fn beginModelOperation(
@@ -364,7 +393,15 @@ pub const Core = struct {
 
     pub fn acceptOperation(self: *Core, identity_value: OperationIdentity) !void {
         try self.requireOperation(identity_value, .submitted);
+        const submitted = switch (self.change) {
+            .model_operation_submitted => |value| value,
+            else => return error.UntrackedCoreTransition,
+        };
+        if (submitted.id != identity_value.id or submitted.generation != identity_value.generation) {
+            return error.UntrackedCoreTransition;
+        }
         self.state.operation_phase = .accepted;
+        self.change = .{ .model_operation_admitted = try self.operation() };
     }
 
     pub fn applyModelResponse(
@@ -410,6 +447,12 @@ pub const Core = struct {
             .input_request => .failed,
             .failure => .failed,
         };
+        self.change = .{ .model_response_applied = .{
+            .operation = identity_value,
+            .response_ref = response_ref,
+            .result_digest = result_digest,
+            .disposition = parsed.disposition,
+        } };
         return self.response();
     }
 
@@ -426,6 +469,7 @@ pub const Core = struct {
         self.state.active_leaf_id = entry_id;
         self.state.final_entry_id = entry_id;
         self.state.task_phase = .finished;
+        self.change = .{ .final_answer_committed = entry_id };
     }
 
     pub fn commitToolResult(self: *Core, call_entry_id: u64, result_entry_id: u64) !void {
@@ -444,6 +488,10 @@ pub const Core = struct {
         }
         self.state.active_leaf_id = result_entry_id;
         self.state.task_phase = .ready;
+        self.change = .{ .tool_result_committed = .{
+            .call_entry_id = call_entry_id,
+            .result_entry_id = result_entry_id,
+        } };
     }
 
     fn requireOperation(

@@ -918,7 +918,7 @@ fn openTestRuntimeConfigured(
 }
 
 test "Harness owner retains only live lifecycle state" {
-    try std.testing.expectEqual(@as(usize, 8_032), Harness.residentOwnerBytes());
+    try std.testing.expectEqual(@as(usize, 7_944), Harness.residentOwnerBytes());
 }
 
 test "Harness close releases opaque transient scratch before retirement" {
@@ -1314,7 +1314,7 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         },
         .operation_id = 10,
         .generation = 1,
-    }, 0, 11, .{ .model = binding.hash(binding.ModelDescriptor, "descriptor-12") });
+    }, null, 11, .{ .model = binding.hash(binding.ModelDescriptor, "descriptor-12") });
     try session.storeContent(
         descriptor.operation_admitted.descriptor_ref,
         "operation descriptor",
@@ -1636,13 +1636,9 @@ test "candidate seal validation failure publishes no Completion" {
     const rejected = try owner.drive();
     try std.testing.expectEqual(State.unavailable, rejected.state);
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
-    const Ignore = struct {
-        fn apply(_: *anyopaque, _: completion_inbox.Envelope) !void {}
-    };
-    var context: u8 = 0;
     try std.testing.expectEqual(
         @as(u32, 0),
-        try harnessState(owner).session.?.scanCompletionEvidence(&context, Ignore.apply),
+        try harnessState(owner).session.?.pendingCompletionCount(),
     );
 }
 
@@ -1706,14 +1702,10 @@ test "failure replacement seal storage error remains a Host failure" {
     try std.testing.expectEqual(@as(u8, 1), unavailable.projection_count);
     try std.testing.expectEqual(ProjectionKind.failure, unavailable.projections[0].kind);
     try std.testing.expectEqual(model_protocol.Failure.none, unavailable.projections[0].failure);
-    const Ignore = struct {
-        fn apply(_: *anyopaque, _: completion_inbox.Envelope) !void {}
-    };
-    var context: u8 = 0;
     const session = provider.session.?;
     try std.testing.expectEqual(
         @as(u32, 0),
-        try session.scanCompletionEvidence(&context, Ignore.apply),
+        try session.pendingCompletionCount(),
     );
     var bytes: [1]u8 = undefined;
     try std.testing.expectError(error.FileNotFound, session.readContent(provider.response_ref, 0, &bytes));

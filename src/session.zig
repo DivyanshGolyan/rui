@@ -56,7 +56,6 @@ pub const OperationView = struct {
     operation_id: u64 = 0,
     generation: u32 = 0,
     descriptor: ?session_transition.OperationRecord = null,
-    attempt: ?session_transition.AttemptRecord = null,
     attempts: [max_attempts]?session_transition.AttemptRecord = @splat(null),
     attempt_count: u8 = 0,
     approval_required: ?session_transition.ApprovalRequiredRecord = null,
@@ -73,7 +72,6 @@ pub const OperationView = struct {
             const existing = maybe_existing.?;
             if (existing.attempt_id != attempt.attempt_id) continue;
             if (!std.meta.eql(existing, attempt)) return error.ConflictingLedgerFacts;
-            self.attempt = existing;
             return;
         }
         const descriptor_kind = std.meta.activeTag(attempt.descriptor_digest);
@@ -86,7 +84,6 @@ pub const OperationView = struct {
         if (self.attempt_count == max_attempts) return error.AttemptCapacityExceeded;
         self.attempts[self.attempt_count] = attempt;
         self.attempt_count += 1;
-        self.attempt = attempt;
     }
 
     pub fn findAttempt(self: OperationView, attempt_id: u64) ?session_transition.AttemptRecord {
@@ -99,6 +96,11 @@ pub const OperationView = struct {
 
     pub fn attemptSlice(self: *const OperationView) []const ?session_transition.AttemptRecord {
         return self.attempts[0..self.attempt_count];
+    }
+
+    pub fn latestAttempt(self: *const OperationView) ?session_transition.AttemptRecord {
+        if (self.attempt_count == 0) return null;
+        return self.attempts[self.attempt_count - 1];
     }
 
     pub fn containsAttempt(self: *const OperationView, attempt_id: u64) bool {
@@ -126,14 +128,20 @@ pub const SemanticView = struct {
                 .operation_admitted => |record| {
                     const descriptor_kind = std.meta.activeTag(record.descriptor_digest);
                     switch (descriptor_kind) {
-                        .model => if (self.consequential.descriptor != null and
-                            self.consequential.accepts(record.operation))
-                        {
-                            return error.OperationIdentityCollision;
+                        .model => {
+                            if (record.source_operation != null) return error.InvalidSourceOperation;
+                            if (self.consequential.descriptor != null and
+                                self.consequential.accepts(record.operation))
+                            {
+                                return error.OperationIdentityCollision;
+                            }
                         },
                         .bash, .apply_patch => {
+                            const source = record.source_operation orelse
+                                return error.InvalidSourceOperation;
                             if (self.model.descriptor == null or
-                                self.model.operation_id != record.source_operation_id)
+                                self.model.operation_id != source.operation_id or
+                                self.model.generation != source.generation)
                             {
                                 return error.InvalidSourceOperation;
                             }
@@ -154,14 +162,32 @@ pub const SemanticView = struct {
                     );
                 },
                 .attempt_admitted => |record| {
-                    const history = historyForDescriptor(self, record.descriptor_digest);
-                    if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    const history = self.operationMut(record.operation) orelse
+                        return error.InvalidOperationHistory;
+                    const descriptor = history.descriptor orelse return error.InvalidOperationHistory;
+                    if (record.descriptor_ref != descriptor.descriptor_ref or
+                        !binding.descriptorEql(record.descriptor_digest, descriptor.descriptor_digest))
+                    {
+                        return error.AttemptDescriptorMismatch;
+                    }
                     try history.appendAttempt(record);
                 },
                 .approval_required => |record| {
                     const history = self.operationMut(record.operation) orelse
                         return error.InvalidOperationHistory;
                     if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    const descriptor = history.descriptor orelse return error.InvalidOperationHistory;
+                    switch (descriptor.descriptor_digest) {
+                        .model => return error.InvalidApprovalDescriptor,
+                        .bash => if (record.binding_ref != 0 or
+                            record.descriptor_ref != descriptor.descriptor_ref)
+                        {
+                            return error.ApprovalDescriptorMismatch;
+                        },
+                        .apply_patch => if (record.binding_ref != descriptor.descriptor_ref) {
+                            return error.ApprovalDescriptorMismatch;
+                        },
+                    }
                     history.approval_required = try uniqueValue(
                         session_transition.ApprovalRequiredRecord,
                         history.approval_required,
@@ -172,6 +198,16 @@ pub const SemanticView = struct {
                     const history = self.operationMut(record.operation) orelse
                         return error.InvalidOperationHistory;
                     if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    const descriptor = history.descriptor orelse return error.InvalidOperationHistory;
+                    switch (descriptor.descriptor_digest) {
+                        .model => return error.InvalidAuthorizationDescriptor,
+                        .bash => if (record.permission_ref != 0) {
+                            return error.AuthorizationDescriptorMismatch;
+                        },
+                        .apply_patch => if (record.permission_ref != descriptor.descriptor_ref) {
+                            return error.AuthorizationDescriptorMismatch;
+                        },
+                    }
                     history.authorization = record;
                 },
                 .result => |record| {
@@ -319,7 +355,11 @@ const InboxIndex = struct {
         {
             return .irrelevant;
         }
-        const history = historyForEnvelope(semantic, envelope);
+        const history = historyForIdentity(
+            semantic,
+            envelope.operation_id,
+            envelope.operation_generation,
+        ) orelse return .irrelevant;
         if (history.operation_id != envelope.operation_id or
             history.generation != envelope.operation_generation)
         {
@@ -329,7 +369,7 @@ const InboxIndex = struct {
         if (envelope.ownership_epoch != attempt.operation.agent.ownership_epoch) {
             return error.CompletionAttemptEpochMismatch;
         }
-        if (envelope.kind != std.meta.activeTag(attempt.descriptor_digest)) {
+        if (envelope.kind != (history.kind() orelse return error.MissingOperationDescriptor)) {
             return error.CompletionEvidenceKindMismatch;
         }
         if (history.result != null) return .{
@@ -354,11 +394,15 @@ const InboxIndex = struct {
                 if (available == null) available = slot;
                 continue;
             };
-            const existing_history = historyForEnvelope(semantic, existing);
-            if (existing_history.operation_id != existing.operation_id or
-                existing_history.generation != existing.operation_generation or
-                !attemptMatchesKind(existing_history, existing.attempt_id, existing.kind))
-            {
+            const existing_history = historyForIdentity(
+                semantic,
+                existing.operation_id,
+                existing.operation_generation,
+            ) orelse {
+                if (available == null) available = slot;
+                continue;
+            };
+            if (!attemptMatchesKind(existing_history, existing.attempt_id, existing.kind)) {
                 if (available == null) available = slot;
                 continue;
             }
@@ -390,40 +434,44 @@ const InboxIndex = struct {
         }
     }
 
-    fn historyForEnvelope(
+    fn historyForIdentity(
         semantic: *const SemanticView,
-        envelope: completion_inbox.Envelope,
-    ) OperationView {
-        return switch (envelope.kind) {
-            .model => semantic.model,
-            .bash, .apply_patch => semantic.consequential,
-        };
+        operation_id: u64,
+        operation_generation: u32,
+    ) ?OperationView {
+        if (semantic.model.operation_id == operation_id and
+            semantic.model.generation == operation_generation) return semantic.model;
+        if (semantic.consequential.operation_id == operation_id and
+            semantic.consequential.generation == operation_generation) return semantic.consequential;
+        return null;
     }
 
     fn keyIsRelevant(semantic: *const SemanticView, key: AttemptKey) bool {
-        const history = switch (key.kind) {
-            .model => semantic.model,
-            .bash, .apply_patch => semantic.consequential,
-        };
-        return history.operation_id == key.operation_id and
-            history.generation == key.operation_generation and
-            attemptMatchesKind(history, key.attempt_id, key.kind);
+        const history = historyForIdentity(
+            semantic,
+            key.operation_id,
+            key.operation_generation,
+        ) orelse return false;
+        return attemptMatchesKind(history, key.attempt_id, key.kind);
     }
 
     fn envelopeIsPending(semantic: *const SemanticView, envelope: completion_inbox.Envelope) bool {
-        const history = historyForEnvelope(semantic, envelope);
-        return history.result == null and history.operation_id == envelope.operation_id and
-            history.generation == envelope.operation_generation and
+        const history = historyForIdentity(
+            semantic,
+            envelope.operation_id,
+            envelope.operation_generation,
+        ) orelse return false;
+        return history.result == null and
             attemptMatchesKind(history, envelope.attempt_id, envelope.kind);
     }
 
     fn keyIsPending(semantic: *const SemanticView, key: AttemptKey) bool {
-        const history = switch (key.kind) {
-            .model => semantic.model,
-            .bash, .apply_patch => semantic.consequential,
-        };
-        return history.result == null and history.operation_id == key.operation_id and
-            history.generation == key.operation_generation and
+        const history = historyForIdentity(
+            semantic,
+            key.operation_id,
+            key.operation_generation,
+        ) orelse return false;
+        return history.result == null and
             attemptMatchesKind(history, key.attempt_id, key.kind);
     }
 
@@ -432,8 +480,8 @@ const InboxIndex = struct {
         attempt_id: u64,
         kind: completion_inbox.EvidenceKind,
     ) bool {
-        const attempt = history.findAttempt(attempt_id) orelse return false;
-        return std.meta.activeTag(attempt.descriptor_digest) == kind;
+        if (!history.containsAttempt(attempt_id)) return false;
+        return history.kind() == kind;
     }
 };
 
@@ -1250,9 +1298,135 @@ pub const Session = struct {
         if (identity.agent_id != self.agent_id or identity.generation != 1) {
             return error.CoreSessionIdentityMismatch;
         }
+        try self.validateCoreCommitChange(try core.pendingCommitChange(), facts);
         var encoded: [core_state.encoded_size]u8 = undefined;
         try core.suspendInto(&encoded);
         return self.commitPrepared(facts, encoded, content_closure);
+    }
+
+    fn validateCoreCommitChange(
+        self: *const Session,
+        change: core_image.Core.CommitChange,
+        facts: []const session_transition.Fact,
+    ) !void {
+        switch (change) {
+            .none, .unsupported, .model_operation_submitted => return error.UntrackedCoreTransition,
+            .task_started => |active_leaf_id| {
+                if (facts.len != 1 or std.meta.activeTag(facts[0]) != .task_admitted) {
+                    return error.CoreCommitFactsMismatch;
+                }
+                const admitted = facts[0].task_admitted;
+                if (active_leaf_id != self.resident.conversation_head_id or
+                    admitted.task_id != self.task_id or admitted.content_ref != self.task_id)
+                {
+                    return error.CoreCommitFactsMismatch;
+                }
+            },
+            .model_operation_admitted => |operation| {
+                if (facts.len != 2 or std.meta.activeTag(facts[0]) != .operation_admitted or
+                    std.meta.activeTag(facts[1]) != .attempt_admitted)
+                {
+                    return error.CoreCommitFactsMismatch;
+                }
+                const admitted = facts[0].operation_admitted;
+                const attempt = facts[1].attempt_admitted;
+                if (admitted.source_operation != null or admitted.operation.operation_id != operation.id or
+                    admitted.operation.generation != operation.generation or
+                    !std.meta.eql(admitted.operation, attempt.operation) or
+                    admitted.descriptor_ref != attempt.descriptor_ref or
+                    !binding.descriptorEql(admitted.descriptor_digest, attempt.descriptor_digest) or
+                    std.meta.activeTag(admitted.descriptor_digest) != .model)
+                {
+                    return error.CoreCommitFactsMismatch;
+                }
+            },
+            .model_response_applied => |applied| {
+                if (facts.len < 2 or std.meta.activeTag(facts[0]) != .result or
+                    std.meta.activeTag(facts[1]) != .result_applied)
+                {
+                    return error.CoreCommitFactsMismatch;
+                }
+                const result = facts[0].result;
+                const result_applied = facts[1].result_applied;
+                const attempt = self.resident.semantic.model.latestAttempt() orelse
+                    return error.CoreCommitFactsMismatch;
+                const evidence_attempt = switch (result.evidence) {
+                    .immediate => return error.CoreCommitFactsMismatch,
+                    .durable => |evidence| switch (evidence) {
+                        .model => |attempt_id| attempt_id,
+                        .bash, .apply_patch => return error.CoreCommitFactsMismatch,
+                    },
+                };
+                if (result.operation.operation_id != applied.operation.id or
+                    result.operation.generation != applied.operation.generation or
+                    result.result_ref != applied.response_ref or
+                    !binding.eql(binding.Result, result.result_digest, applied.result_digest) or
+                    result.class != .ordinary or
+                    evidence_attempt != attempt.attempt_id or
+                    result.operation.operation_id != result_applied.operation.operation_id or
+                    result.operation.generation != result_applied.operation.generation or
+                    resultAttemptId(result) != result_applied.attempt_id or
+                    result.result_ref != result_applied.result_ref or
+                    !binding.eql(binding.Result, result.result_digest, result_applied.result_digest))
+                {
+                    return error.CoreCommitFactsMismatch;
+                }
+                switch (applied.disposition) {
+                    .final_answer, .failure, .input_request => if (facts.len != 2) {
+                        return error.CoreCommitFactsMismatch;
+                    },
+                    .tool_call => {
+                        const action_offset: usize = if (facts.len == 4) 1 else 0;
+                        if ((facts.len != 3 and facts.len != 4) or
+                            (action_offset == 1 and
+                                std.meta.activeTag(facts[2]) != .operation_admitted) or
+                            std.meta.activeTag(facts[2 + action_offset]) != .conversation_advanced)
+                        {
+                            return error.CoreCommitFactsMismatch;
+                        }
+                        if (action_offset == 1) {
+                            const source = facts[2].operation_admitted.source_operation orelse
+                                return error.CoreCommitFactsMismatch;
+                            if (source.operation_id != applied.operation.id or
+                                source.generation != applied.operation.generation)
+                            {
+                                return error.CoreCommitFactsMismatch;
+                            }
+                        }
+                        if (facts[2 + action_offset].conversation_advanced.kind != .tool_call) {
+                            return error.CoreCommitFactsMismatch;
+                        }
+                    },
+                }
+            },
+            .tool_result_committed => |committed| {
+                if (facts.len != 2 or std.meta.activeTag(facts[0]) != .result_applied or
+                    std.meta.activeTag(facts[1]) != .conversation_advanced)
+                {
+                    return error.CoreCommitFactsMismatch;
+                }
+                const advanced = facts[1].conversation_advanced;
+                if (advanced.kind != .tool_result or advanced.entry_id != committed.result_entry_id or
+                    advanced.parent_id != committed.call_entry_id)
+                {
+                    return error.CoreCommitFactsMismatch;
+                }
+            },
+            .final_answer_committed => |entry_id| {
+                if (facts.len != 2 or std.meta.activeTag(facts[0]) != .conversation_advanced or
+                    std.meta.activeTag(facts[1]) != .outcome)
+                {
+                    return error.CoreCommitFactsMismatch;
+                }
+                const advanced = facts[0].conversation_advanced;
+                const outcome = facts[1].outcome;
+                if (advanced.kind != .assistant_text or advanced.entry_id != entry_id or
+                    outcome.content_ref != advanced.content_ref)
+                {
+                    return error.CoreCommitFactsMismatch;
+                }
+            },
+        }
     }
 
     fn commitPrepared(
@@ -1598,6 +1772,7 @@ pub const Session = struct {
     ) !u64 {
         _ = self;
         const attempt = completed.attempt;
+        const operation = completed.operation;
         if (attempt.operation.agent.agent_id != envelope.agent_id or
             attempt.operation.agent.agent_generation != envelope.agent_generation)
         {
@@ -1606,23 +1781,69 @@ pub const Session = struct {
         if (attempt.operation.agent.ownership_epoch != envelope.ownership_epoch) {
             return error.CompletionAttemptEpochMismatch;
         }
-        if (std.meta.activeTag(attempt.descriptor_digest) != envelope.kind) {
+        if (!std.meta.eql(operation.operation, attempt.operation) or
+            operation.descriptor_ref != attempt.descriptor_ref or
+            !binding.descriptorEql(operation.descriptor_digest, attempt.descriptor_digest))
+        {
+            return error.AttemptDescriptorMismatch;
+        }
+        if (std.meta.activeTag(operation.descriptor_digest) != envelope.kind) {
             return error.CompletionEvidenceKindMismatch;
         }
         return completed.terminal_result_sequence;
     }
 
-    pub fn scanCompletionEvidence(
+    /// Returns the one validated pending Completion for an admitted Attempt.
+    /// The resident Inbox already binds identity, epoch, and kind to the
+    /// Operation descriptor; callers do not reclassify raw envelopes.
+    pub fn pendingCompletion(
         self: *Session,
-        context: *anyopaque,
-        apply: *const fn (*anyopaque, completion_inbox.Envelope) anyerror!void,
-    ) !u32 {
+        operation: session_transition.OperationContext,
+        attempt_id: u64,
+    ) !?completion_inbox.Envelope {
+        try self.ensureUsable();
+        if (self.recovery != .ready) return error.SessionRecoveryIncomplete;
+        const history = self.resident.semantic.operation(operation) orelse
+            return error.InvalidOperationHistory;
+        const attempt = history.findAttempt(attempt_id) orelse return error.InvalidAttemptHistory;
+        const descriptor = history.descriptor orelse return error.MissingOperationDescriptor;
+        if (attempt.descriptor_ref != descriptor.descriptor_ref or
+            !binding.descriptorEql(attempt.descriptor_digest, descriptor.descriptor_digest))
+        {
+            return error.AttemptDescriptorMismatch;
+        }
+        for (self.resident.inbox.ambiguous) |maybe_key| {
+            const key = maybe_key orelse continue;
+            if (key.operation_id == operation.operation_id and
+                key.operation_generation == operation.generation and
+                key.attempt_id == attempt_id)
+            {
+                return error.ConflictingCompletionEvidence;
+            }
+        }
+        var match: ?completion_inbox.Envelope = null;
+        for (self.resident.inbox.entries) |maybe_envelope| {
+            const envelope = maybe_envelope orelse continue;
+            if (envelope.operation_id != operation.operation_id or
+                envelope.operation_generation != operation.generation or
+                envelope.attempt_id != attempt_id)
+            {
+                continue;
+            }
+            if (match) |existing| {
+                if (!std.meta.eql(existing, envelope)) return error.ConflictingCompletionEvidence;
+            } else match = envelope;
+        }
+        return match;
+    }
+
+    /// Diagnostic count of the bounded, already validated pending Inbox.
+    pub fn pendingCompletionCount(self: *Session) !u32 {
         try self.ensureUsable();
         if (self.recovery != .ready) return error.SessionRecoveryIncomplete;
         var count: u32 = 0;
-        for (self.resident.inbox.entries) |maybe_envelope| {
-            if (maybe_envelope) |envelope| try apply(context, envelope);
-            if (maybe_envelope != null) count += 1;
+        for (self.resident.inbox.entries) |entry| {
+            if (entry != null) count += 1;
         }
         return count;
     }
@@ -1994,13 +2215,9 @@ test "transient content disappears unless its reference commits" {
     var staged = try created.beginContent(90);
     try staged.append("staged before ledger admission");
     try staged.finish();
-    const Ignore = struct {
-        fn apply(_: *anyopaque, _: completion_inbox.Envelope) !void {}
-    };
-    var context: u8 = 0;
     try std.testing.expectEqual(
         @as(u32, 0),
-        try created.scanCompletionEvidence(&context, Ignore.apply),
+        try created.pendingCompletionCount(),
     );
 
     var interrupted = try created.beginContent(91);
@@ -2110,7 +2327,7 @@ fn admitTestModelSource(session: *Session, operation_id: u64) !void {
         },
         .operation_id = operation_id,
         .generation = 1,
-    }, 0, descriptor_ref, .{
+    }, null, descriptor_ref, .{
         .model = binding.hash(binding.ModelDescriptor, descriptor_bytes),
     })});
 }
@@ -2328,7 +2545,7 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
         _ = try created.commitFacts(&.{
             session_transition.operationAdmitted(
                 operation,
-                if (case.kind == .model) 0 else 99,
+                if (case.kind == .model) null else .{ .operation_id = 99, .generation = 1 },
                 descriptor_ref,
                 case.descriptor,
             ),
@@ -2438,7 +2655,7 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
         _ = try created.commitFacts(&.{
             session_transition.operationAdmitted(
                 operation,
-                299,
+                .{ .operation_id = 299, .generation = 1 },
                 descriptor_ref,
                 case.descriptor,
             ),
@@ -2544,7 +2761,7 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
         _ = try created.commitFacts(&.{
             session_transition.operationAdmitted(
                 operation,
-                399,
+                .{ .operation_id = 399, .generation = 1 },
                 descriptor_ref,
                 case.descriptor,
             ),
@@ -2630,7 +2847,7 @@ test "late evidence audits against the first terminal Result sequence" {
     try created.storeContent(201, "descriptor");
     try created.storeContent(202, "winning result");
     _ = try created.commitFacts(&.{
-        session_transition.operationAdmitted(operation, 0, 201, descriptor),
+        session_transition.operationAdmitted(operation, null, 201, descriptor),
         session_transition.modelAttemptAdmitted(operation, 211, 201, descriptor, 0),
         session_transition.modelAttemptAdmitted(operation, 212, 201, descriptor, 1),
     });
@@ -2745,7 +2962,7 @@ test "late evidence for a prior Operation audits through durable history" {
         var admission: [6]session_transition.Fact = undefined;
         admission[0] = session_transition.operationAdmitted(
             operation_a,
-            if (case.kind == .model) 0 else 499,
+            if (case.kind == .model) null else .{ .operation_id = 499, .generation = 1 },
             descriptor_a_ref,
             case.descriptor_a,
         );
@@ -2789,7 +3006,7 @@ test "late evidence for a prior Operation audits through durable history" {
         _ = try created.commitFacts(&.{
             session_transition.operationAdmitted(
                 operation_b,
-                if (case.kind == .model) 0 else 499,
+                if (case.kind == .model) null else .{ .operation_id = 499, .generation = 1 },
                 descriptor_b_ref,
                 case.descriptor_b,
             ),
@@ -2861,7 +3078,7 @@ test "late evidence for a prior Operation audits through durable history" {
         const current = try created.semanticView();
         const current_operation = if (case.kind == .model) current.model else current.consequential;
         try std.testing.expectEqual(operation_b.operation_id, current_operation.operation_id);
-        try std.testing.expectEqual(current_attempt, current_operation.attempt.?.attempt_id);
+        try std.testing.expectEqual(current_attempt, current_operation.latestAttempt().?.attempt_id);
 
         const recovered_late = completion_inbox.bind(.{
             .kind = case.kind,
@@ -2935,7 +3152,7 @@ test "late evidence for a prior Operation audits through durable history" {
         const restored_current = try restored.semanticView();
         const restored_operation = if (case.kind == .model) restored_current.model else restored_current.consequential;
         try std.testing.expectEqual(operation_b.operation_id, restored_operation.operation_id);
-        try std.testing.expectEqual(current_attempt, restored_operation.attempt.?.attempt_id);
+        try std.testing.expectEqual(current_attempt, restored_operation.latestAttempt().?.attempt_id);
     }
 }
 
@@ -2958,7 +3175,7 @@ test "fallible Inbox publication is prepared before durable Completion commit" {
         .generation = 1,
     };
     var semantic: session_transition.Transaction = .{ .sequence = 2, .fact_count = 3 };
-    semantic.facts[0] = session_transition.operationAdmitted(operation, 0, 101, testDescriptor("102"));
+    semantic.facts[0] = session_transition.operationAdmitted(operation, null, 101, testDescriptor("102"));
     semantic.facts[1] = session_transition.modelAttemptAdmitted(operation, 103, 101, testDescriptor("102"), 0);
     semantic.facts[2] = session_transition.modelAttemptAdmitted(operation, 108, 101, testDescriptor("102"), 1);
     try created.resident.semantic.apply(semantic);
@@ -3053,7 +3270,7 @@ test "semantic commits reject missing immutable content references before advanc
             },
             .operation_id = 100,
             .generation = 1,
-        }, 0, 999, testDescriptor("123"))},
+        }, null, 999, testDescriptor("123"))},
     ));
     try std.testing.expectEqual(@as(u64, 1), created.resident.semantic.last_sequence);
     try std.testing.expectEqual(@as(u64, 1), try layout.storage.sessionHead(created.session_id));
@@ -3089,6 +3306,45 @@ test "Core-bearing commits reject a reducer from another Session" {
     try std.testing.expectEqual(@as(u64, 1), try layout.storage.sessionHead(created.session_id));
 }
 
+test "Core-bearing commits reject facts unrelated to the reducer change" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(
+        layout.sessions,
+        layout.scratch,
+        &layout.storage,
+        io,
+        testConfig(layout.workspacePath(), 812),
+    );
+    defer created.close();
+
+    var slot: core_image.ActivationSlot = undefined;
+    var core = try core_image.Core.initialize(&slot, .{
+        .agent_id = created.agent_id,
+        .generation = 1,
+    });
+    defer core.abandon();
+    try core.startTask(created.activeLeafId());
+    try std.testing.expectError(
+        error.CoreCommitFactsMismatch,
+        created.commitCoreFacts(&core, &.{session_transition.taskAdmitted(.{
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .ownership_epoch = created.ownership_epoch,
+        }, created.task_id + 1, created.task_id)}),
+    );
+    try std.testing.expectError(
+        error.CoreCommitFactsMismatch,
+        created.commitCoreFacts(&core, &.{session_transition.cancellation(.{
+            .agent_id = created.agent_id,
+            .agent_generation = 1,
+            .ownership_epoch = created.ownership_epoch,
+        })}),
+    );
+    try std.testing.expectEqual(@as(u64, 1), try layout.storage.sessionHead(created.session_id));
+}
+
 test "Semantic View validates Action source and opaque Operation identity" {
     const agent: session_transition.AgentContext = .{
         .agent_id = 7,
@@ -3104,7 +3360,14 @@ test "Semantic View validates Action source and opaque Operation identity" {
     var model_admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
     model_admission.facts[0] = session_transition.operationAdmitted(
         model,
-        0,
+        .{ .operation_id = model.operation_id, .generation = model.generation },
+        43,
+        testDescriptor("model"),
+    );
+    try std.testing.expectError(error.InvalidSourceOperation, view.apply(model_admission));
+    model_admission.facts[0] = session_transition.operationAdmitted(
+        model,
+        null,
         43,
         testDescriptor("model"),
     );
@@ -3121,31 +3384,113 @@ test "Semantic View validates Action source and opaque Operation identity" {
     var action_admission: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
     action_admission.facts[0] = session_transition.operationAdmitted(
         action,
-        model.operation_id,
+        .{ .operation_id = model.operation_id, .generation = model.generation },
         79,
         action_descriptor,
     );
     var admitted = view;
     try admitted.apply(action_admission);
     try std.testing.expectEqual(binding.DescriptorKind.bash, admitted.consequential.kind().?);
-    try std.testing.expectEqual(model.operation_id, admitted.consequential.descriptor.?.source_operation_id);
+    try std.testing.expectEqual(
+        session_transition.OperationIdentity{ .operation_id = model.operation_id, .generation = model.generation },
+        admitted.consequential.descriptor.?.source_operation.?,
+    );
     try std.testing.expectEqual(action.operation_id, admitted.consequential.operation_id);
 
     action_admission.facts[0] = session_transition.operationAdmitted(
         action,
-        model.operation_id + 1,
+        .{ .operation_id = model.operation_id + 1, .generation = model.generation },
         79,
         action_descriptor,
     );
     try std.testing.expectError(error.InvalidSourceOperation, view.apply(action_admission));
 
     action_admission.facts[0] = session_transition.operationAdmitted(
+        action,
+        .{ .operation_id = model.operation_id, .generation = model.generation + 1 },
+        79,
+        action_descriptor,
+    );
+    try std.testing.expectError(error.InvalidSourceOperation, view.apply(action_admission));
+
+    var reused_model = model_admission;
+    reused_model.sequence = 2;
+    reused_model.facts[0] = session_transition.operationAdmitted(
+        .{ .agent = agent, .operation_id = model.operation_id, .generation = model.generation + 1 },
+        null,
+        43,
+        testDescriptor("model"),
+    );
+    var replaced = view;
+    try replaced.apply(reused_model);
+    action_admission.sequence = 3;
+    action_admission.facts[0] = session_transition.operationAdmitted(
+        action,
+        .{ .operation_id = model.operation_id, .generation = model.generation },
+        79,
+        action_descriptor,
+    );
+    try std.testing.expectError(error.InvalidSourceOperation, replaced.apply(action_admission));
+
+    action_admission.sequence = 2;
+    action_admission.facts[0] = session_transition.operationAdmitted(
         model,
-        model.operation_id,
+        .{ .operation_id = model.operation_id, .generation = model.generation },
         79,
         action_descriptor,
     );
     try std.testing.expectError(error.OperationIdentityCollision, view.apply(action_admission));
+}
+
+test "child facts cannot reclassify an admitted Action descriptor" {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 9,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    const model: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 51,
+        .generation = 2,
+    };
+    const action: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 52,
+        .generation = 1,
+    };
+    const bash_descriptor: binding.Descriptor = .{
+        .bash = binding.hash(binding.BashDescriptor, "bash"),
+    };
+    var view: SemanticView = .{};
+    var admitted: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    admitted.facts[0] = session_transition.operationAdmitted(model, null, 61, testDescriptor("model"));
+    admitted.facts[1] = session_transition.operationAdmitted(
+        action,
+        .{ .operation_id = model.operation_id, .generation = model.generation },
+        62,
+        bash_descriptor,
+    );
+    try view.apply(admitted);
+
+    var mismatched_attempt: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    mismatched_attempt.facts[0] = session_transition.consequentialAttemptAdmitted(
+        action,
+        63,
+        62,
+        .{ .apply_patch = binding.hash(binding.PatchIntent, "patch") },
+    );
+    try std.testing.expectError(error.AttemptDescriptorMismatch, view.apply(mismatched_attempt));
+
+    var mismatched_authorization: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    mismatched_authorization.facts[0] = session_transition.authorization(.{
+        .operation = action,
+        .permission_ref = 62,
+        .allowed = true,
+    });
+    try std.testing.expectError(
+        error.AuthorizationDescriptorMismatch,
+        view.apply(mismatched_authorization),
+    );
 }
 
 test "irrelevant inbox records cannot displace admitted Attempt evidence" {
@@ -3161,7 +3506,7 @@ test "irrelevant inbox records cannot displace admitted Attempt evidence" {
     };
     var semantic: SemanticView = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    admission.facts[0] = session_transition.operationAdmitted(operation, 0, 11, testDescriptor("12"));
+    admission.facts[0] = session_transition.operationAdmitted(operation, null, 11, testDescriptor("12"));
     admission.facts[1] = session_transition.modelAttemptAdmitted(
         operation,
         13,
@@ -3215,7 +3560,7 @@ test "late evidence for an earlier model Attempt survives a later admission" {
     };
     var semantic: SemanticView = .{};
     var first: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    first.facts[0] = session_transition.operationAdmitted(operation, 0, 11, testDescriptor("12"));
+    first.facts[0] = session_transition.operationAdmitted(operation, null, 11, testDescriptor("12"));
     first.facts[1] = session_transition.modelAttemptAdmitted(operation, 13, 11, testDescriptor("12"), 0);
     try semantic.apply(first);
     var retry: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
@@ -3253,7 +3598,7 @@ test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
     };
     var semantic: SemanticView = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    admission.facts[0] = session_transition.operationAdmitted(operation, 0, 11, testDescriptor("12"));
+    admission.facts[0] = session_transition.operationAdmitted(operation, null, 11, testDescriptor("12"));
     admission.facts[1] = session_transition.modelAttemptAdmitted(
         operation,
         13,
@@ -3297,14 +3642,13 @@ test "failed recovered frame leaves the published semantic index unchanged" {
     };
     var index: SemanticView = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
-    admission.facts[0] = session_transition.operationAdmitted(operation, 0, 11, testDescriptor("12"));
+    admission.facts[0] = session_transition.operationAdmitted(operation, null, 11, testDescriptor("12"));
     try index.apply(admission);
 
     var invalid: session_transition.Transaction = .{ .sequence = 2, .fact_count = 2 };
     invalid.facts[0] = session_transition.authorization(.{
         .operation = operation,
         .permission_ref = 11,
-        .descriptor_digest = testDescriptor("12"),
         .allowed = true,
     });
     invalid.facts[1] = session_transition.modelAttemptAdmitted(
@@ -3319,7 +3663,7 @@ test "failed recovered frame leaves the published semantic index unchanged" {
         0,
     );
     var prepared = index;
-    try std.testing.expectError(error.InvalidOperationHistory, prepared.apply(invalid));
+    try std.testing.expectError(error.InvalidAuthorizationDescriptor, prepared.apply(invalid));
     try std.testing.expectEqual(@as(u64, 1), index.last_sequence);
     try std.testing.expect(index.model.authorization == null);
 }
