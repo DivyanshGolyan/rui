@@ -59,8 +59,12 @@ The single ordered authority for semantic facts that create, advance, recover, o
 _Avoid_: Session WAL, SQLite WAL, operation journal, event bus, transcript, debug log
 
 **Host Store**:
-The durable container for every Session Ledger and host-wide durable coordination state.
+The sole recoverable OnePage-owned durable store: one host-wide SQLite database containing every Session Ledger, immutable content value, and host-wide coordination record.
 _Avoid_: Session Ledger, blob store, Workspace
+
+**Transient Content Scratch**:
+One bounded unlinked file owned by a live content producer while external work prevents a SQLite transaction. It has no durable identity or recovery meaning and disappears on close or process exit.
+_Avoid_: Host Store, Captured Model Output, durable content, spool directory
 
 **Host Runtime**:
 The sole live owner that coordinates Workflow Runs, Agents, and shared capacities for one Host Store.

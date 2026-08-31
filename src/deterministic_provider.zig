@@ -299,9 +299,9 @@ fn contentStartsWith(content: model_operation.ContentView, expected: []const u8)
     return true;
 }
 
-fn expectBlobReadersEqual(
-    first: *session_store.BlobReader,
-    second: *session_store.BlobReader,
+fn expectContentViewsEqual(
+    first: *session_store.ContentView,
+    second: *session_store.ContentView,
 ) !void {
     if (first.length() != second.length()) return error.RequestLengthMismatch;
     var first_window: [model_operation.request_window_size]u8 = undefined;
@@ -342,7 +342,9 @@ test "deterministic Provider decodes the exact immutable request" {
     const database_path = try std.fmt.bufPrint(&database_path_buffer, ".zig-cache/tmp/{s}/host.sqlite3", .{tmp.sub_path});
     var storage = try host_store.StorageOwner.open(io, database_path, .{});
     defer storage.close();
-    var session = try session_store.Session.create(sessions, &storage, io, .{
+    const scratch = try session_store.allocateTransientScratch(std.testing.allocator);
+    defer session_store.destroyTransientScratch(std.testing.allocator, io, scratch);
+    var session = try session_store.Session.create(sessions, scratch, &storage, io, .{
         .workspace_path = repo_path,
         .model = "fixture:answer",
         .task = "Explain the repository",
@@ -353,12 +355,10 @@ test "deterministic Provider decodes the exact immutable request" {
     try model_operation.verifyRequestDigest(&session, 1001, digest);
     const rebuilt_digest = try model_operation.buildRequest(&session, 1003, 1, 1);
     try std.testing.expect(binding.eql(binding.ModelDescriptor, digest, rebuilt_digest));
-    var first_request = try session.openBlob(1001);
-    defer first_request.close();
-    var second_request = try session.openBlob(1003);
-    defer second_request.close();
+    var first_request = try session.viewContent(1001);
+    var second_request = try session.viewContent(1003);
     try std.testing.expectEqual(first_request.length(), second_request.length());
-    try expectBlobReadersEqual(&first_request, &second_request);
+    try expectContentViewsEqual(&first_request, &second_request);
     var fixture: Fixture = .{
         .expected_task = "Explain the repository",
         .final_answer = "This repository contains one bounded agent core.",
@@ -372,21 +372,34 @@ test "deterministic Provider decodes the exact immutable request" {
         provider_io.candidateCapability(),
     ));
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const response = try session.readBlob(1002, 0, &response_buffer);
+    const response = try session.readContent(1002, 0, &response_buffer);
     var response_validation: model_protocol.ValidationScratch = undefined;
     try std.testing.expectEqual(
         model_protocol.Disposition.final_answer,
         model_protocol.parse(&response_validation, response).disposition,
     );
 
-    var request = try session.openBlob(1001);
-    defer request.close();
+    // These fixture-only requests and response are now durable existing
+    // content. The next staged value must not consume their import closure.
+    const agent: session_transition.AgentContext = .{
+        .agent_id = session.agent_id,
+        .agent_generation = 1,
+        .ownership_epoch = session.ownership_epoch,
+    };
+    _ = try session.commitSemantic(&.{
+        session_transition.outcome(agent, 1001, 1001),
+        session_transition.outcome(agent, 1003, 1003),
+        session_transition.outcome(agent, 1002, 1002),
+    }, null);
+
+    var request = try session.viewContent(1001);
     var first: [model_operation.request_window_size]u8 = undefined;
     try std.testing.expect(request.length() <= first.len);
     const original = try request.readWindow(0, first[0..@intCast(request.length())]);
     first[model_operation.request_header_size] ^= 1;
-    try session.storeBlob(1004, original);
+    try session.storeContent(1004, original);
     try std.testing.expectError(error.ModelRequestDigestMismatch, model_operation.verifyRequestDigest(&session, 1004, digest));
+    _ = try session.commitSemantic(&.{session_transition.outcome(agent, 1004, 1004)}, null);
 
     var call_buffer: [128]u8 = undefined;
     var json_scratch: model_contract.StrictToolJsonScratch = undefined;
@@ -394,7 +407,7 @@ test "deterministic Provider decodes the exact immutable request" {
         .key = "fixture.inspect.v1",
         .arguments = try model_contract.validateStrictToolJson(&json_scratch, "{\"path\":\"README.md\"}"),
     });
-    try session.storeBlob(1100, call_bytes);
+    try session.storeContent(1100, call_bytes);
     const call_entry = try session.appendConversation(.tool_call, 1100, null);
     _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
         .agent = .{
@@ -415,7 +428,7 @@ test "deterministic Provider decodes the exact immutable request" {
         .is_error = false,
         .content = "status=observed",
     });
-    try session.storeBlob(1102, result_bytes);
+    try session.storeContent(1102, result_bytes);
     const result_entry = try session.appendConversation(.tool_result, 1102, null);
     _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
         .agent = .{
@@ -434,7 +447,7 @@ test "deterministic Provider decodes the exact immutable request" {
     for (0..9) |index| {
         const content_ref: u64 = 1200 + index;
         const content: []const u8 = if (index == 0) &large_content else "later context";
-        try session.storeBlob(content_ref, content);
+        try session.storeContent(content_ref, content);
         const entry = try session.appendConversation(.assistant_text, content_ref, null);
         _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
             .agent = .{
@@ -480,9 +493,11 @@ test "deterministic Provider decodes the exact immutable request" {
     var semantic_count: u32 = 1;
     while (try semantic_request.next()) |_| semantic_count += 1;
     try std.testing.expectEqual(@as(u32, 9), semantic_count);
-    var large_request_blob = try session.openBlob(1300);
-    defer large_request_blob.close();
+    var large_request_blob = try session.viewContent(1300);
     try std.testing.expect(large_request_blob.length() > 32 * 1024);
+    // A Session has one external Attempt, hence one provisional response
+    // writer. Release this fixture's unused response before opening the next.
+    large_io.close();
 
     const fixture_catalog = [_]model_contract.ToolDefinition{.{
         .key = "fixture.inspect.v1",

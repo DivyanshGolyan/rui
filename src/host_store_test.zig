@@ -9,13 +9,34 @@ fn pathFor(tmp: *const std.testing.TmpDir, out: []u8) ![]const u8 {
 }
 
 fn create(owner: *host_store.StorageOwner, id: u64) !void {
-    try owner.createSession(.{ .session_id = id, .agent_id = id + 1, .task_id = id + 2, .branch_id = id + 3 });
+    try owner.createSession(.{ .session_id = id, .agent_id = id + 1, .task_id = id + 2 });
 }
 
 fn transaction(sequence: u64, facts: []const transition.Fact) transition.Transaction {
     var value: transition.Transaction = .{ .sequence = sequence, .fact_count = @intCast(facts.len) };
     @memcpy(value.facts[0..facts.len], facts);
     return value;
+}
+
+fn content(reference: u64) host_store.ContentImport {
+    const bytes = "host-store-test-content";
+    return .{
+        .reference = reference,
+        .length = bytes.len,
+        .digest = binding.hash(binding.Blob, bytes),
+        .source = .{ .bytes = bytes },
+    };
+}
+
+fn directContent(reference: u64) host_store.TransactionContentImport {
+    return .{ .transaction_fact = content(reference) };
+}
+
+fn pendingPublication(
+    envelope: completion_inbox.Envelope,
+    result: host_store.CompletionResult,
+) host_store.CompletionPublication {
+    return .{ .pending = .{ .envelope = envelope, .result = result } };
 }
 
 test "one semantic commit occupies one ledger sequence" {
@@ -41,7 +62,10 @@ test "one semantic commit occupies one ledger sequence" {
     };
     try std.testing.expectEqual(
         @as(u64, 2),
-        try owner.commit(.{ .session_id = 11, .epoch = 1 }, transaction(2, &facts)),
+        try owner.commitPrepared(
+            .{ .session_id = 11, .epoch = 1 },
+            .{ .transaction = transaction(2, &facts), .content = &.{directContent(14)} },
+        ),
     );
     var stored: host_store.StoredTransition = undefined;
     try owner.readTransition(11, 2, &stored);
@@ -69,16 +93,19 @@ test "historical Completion scan rejects an Attempt admitted after its terminal 
     const descriptor: binding.Descriptor = .{
         .model = binding.hash(binding.ModelDescriptor, "historical-ordering"),
     };
-    _ = try owner.commit(.{ .session_id = 15, .epoch = 1 }, transaction(2, &.{
-        transition.operationSubmitted(operation, 21, descriptor, .model),
-        transition.result(.{
-            .operation = operation,
-            .result_ref = 22,
-            .result_digest = binding.hash(binding.Result, "terminal-before-attempt"),
-            .class = .ordinary,
-            .evidence = .{ .immediate = .model },
+    _ = try owner.commitPrepared(.{ .session_id = 15, .epoch = 1 }, .{
+        .transaction = transaction(2, &.{
+            transition.operationSubmitted(operation, 21, descriptor, .model),
+            transition.result(.{
+                .operation = operation,
+                .result_ref = 22,
+                .result_digest = binding.hash(binding.Result, "terminal-before-attempt"),
+                .class = .ordinary,
+                .evidence = .{ .immediate = .model },
+            }),
         }),
-    }));
+        .content = &.{ directContent(21), directContent(22) },
+    });
     _ = try owner.commit(.{ .session_id = 15, .epoch = 1 }, transaction(3, &.{
         transition.modelAttemptAdmitted(operation, 23, 21, descriptor, 0),
     }));
@@ -105,20 +132,26 @@ test "historical Completion scan requires the Result to share the Attempt contex
     const descriptor: binding.Descriptor = .{
         .model = binding.hash(binding.ModelDescriptor, "historical-relationship"),
     };
-    _ = try owner.commit(.{ .session_id = 25, .epoch = 1 }, transaction(2, &.{
-        transition.operationSubmitted(admitted_operation, 31, descriptor, .model),
-        transition.modelAttemptAdmitted(admitted_operation, 32, 31, descriptor, 0),
-    }));
+    _ = try owner.commitPrepared(.{ .session_id = 25, .epoch = 1 }, .{
+        .transaction = transaction(2, &.{
+            transition.operationSubmitted(admitted_operation, 31, descriptor, .model),
+            transition.modelAttemptAdmitted(admitted_operation, 32, 31, descriptor, 0),
+        }),
+        .content = &.{directContent(31)},
+    });
     const claimed_epoch = try owner.claimSession(25);
     var terminal_operation = admitted_operation;
     terminal_operation.agent.ownership_epoch = claimed_epoch;
-    _ = try owner.commit(.{ .session_id = 25, .epoch = claimed_epoch }, transaction(3, &.{transition.result(.{
-        .operation = terminal_operation,
-        .result_ref = 33,
-        .result_digest = binding.hash(binding.Result, "mismatched-terminal-context"),
-        .class = .ordinary,
-        .evidence = .{ .immediate = .model },
-    })}));
+    _ = try owner.commitPrepared(.{ .session_id = 25, .epoch = claimed_epoch }, .{
+        .transaction = transaction(3, &.{transition.result(.{
+            .operation = terminal_operation,
+            .result_ref = 33,
+            .result_digest = binding.hash(binding.Result, "mismatched-terminal-context"),
+            .class = .ordinary,
+            .evidence = .{ .immediate = .model },
+        })}),
+        .content = &.{directContent(33)},
+    });
 
     var scan: host_store.CompletedAttemptScan = .{};
     try std.testing.expectError(
@@ -184,7 +217,7 @@ test "Completion publication validates the Session Agent identity" {
     defer owner.close();
     try create(&owner, 27);
 
-    try std.testing.expectError(error.InvalidCompletionIdentity, owner.publishCompletion(completion_inbox.bind(.{
+    try std.testing.expectError(error.InvalidCompletionIdentity, owner.publishCompletion(pendingPublication(completion_inbox.bind(.{
         .kind = .model,
         .session_id = 27,
         .ownership_epoch = 1,
@@ -195,7 +228,7 @@ test "Completion publication validates the Session Agent identity" {
         .attempt_id = 31,
         .result_ref = 32,
         .result_digest = binding.hash(binding.Result, "result-33"),
-    })));
+    }), .existing)));
     try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(27));
 }
 
@@ -217,7 +250,10 @@ test "Conversation metadata and ledger publication are atomic" {
         .kind = .assistant_text,
         .content_ref = 39,
     })});
-    _ = try owner.commit(.{ .session_id = 31, .epoch = 1 }, value);
+    _ = try owner.commitPrepared(.{ .session_id = 31, .epoch = 1 }, .{
+        .transaction = value,
+        .content = &.{directContent(39)},
+    });
     const entry = try owner.readConversationEntry(31, 2);
     try std.testing.expectEqual(@as(u64, 2), entry.committed_by_sequence);
     try std.testing.expectEqual(@as(u64, 1), entry.parent_id);
@@ -248,8 +284,8 @@ test "multiple Completion rows can be consumed by one semantic commit" {
         .result_ref = second.result_ref,
         .result_digest = second.result_digest,
     });
-    _ = try owner.publishCompletion(first);
-    _ = try owner.publishCompletion(second);
+    _ = try owner.publishCompletion(pendingPublication(first, .{ .first_import = content(70) }));
+    _ = try owner.publishCompletion(pendingPublication(second, .{ .first_import = content(71) }));
     const agent: transition.AgentContext = .{
         .agent_id = 42,
         .agent_generation = 1,

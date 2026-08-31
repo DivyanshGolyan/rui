@@ -1,6 +1,7 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const completion_inbox = @import("completion_inbox.zig");
+const patch_tool = @import("patch_tool.zig");
 const persisted_format = @import("persisted_format.zig");
 const session_transition = @import("session_transition.zig");
 
@@ -14,6 +15,16 @@ pub const max_path_bytes: usize = 1024;
 pub const max_transition_payload: usize = session_transition.max_payload_size;
 pub const max_workspace_path_bytes: usize = 1024;
 pub const max_model_bytes: usize = 128;
+pub const max_content_bytes: usize = 1024 * 1024;
+pub const content_window_bytes: usize = 4096;
+/// The largest first-import closure shipped by V1 is one apply-patch admission:
+/// patch bytes, its canonical Patch Intent, and the Tool Call content. Existing
+/// content references do not consume this bound.
+pub const max_first_content_imports: usize = 3;
+// SQLITE_LIMIT_LENGTH covers the encoded row, not only its largest BLOB. The
+// content schema has bounded identity, digest, and record-header overhead.
+const sqlite_row_overhead_bytes: usize = 4096;
+const sqlite_max_length_bytes = max_content_bytes + sqlite_row_overhead_bytes;
 
 const install_schema_version = std.fmt.comptimePrint(
     "PRAGMA user_version={d}",
@@ -29,14 +40,24 @@ const session_schema =
     \\    session_id BLOB PRIMARY KEY CHECK (length(session_id) = 8),
     \\    agent_id BLOB NOT NULL CHECK (length(agent_id) = 8),
     \\    task_id BLOB NOT NULL CHECK (length(task_id) = 8),
-    \\    branch_id BLOB NOT NULL CHECK (length(branch_id) = 8),
     \\    workspace_path TEXT NOT NULL CHECK (length(workspace_path) BETWEEN 1 AND 1024),
     \\    model TEXT NOT NULL CHECK (length(model) BETWEEN 1 AND 128),
     \\    ownership_epoch INTEGER NOT NULL DEFAULT 1 CHECK (ownership_epoch > 0),
     \\    head_sequence INTEGER NOT NULL DEFAULT 0 CHECK (head_sequence >= 0),
     \\    UNIQUE (agent_id),
-    \\    UNIQUE (task_id),
-    \\    UNIQUE (branch_id)
+    \\    UNIQUE (task_id)
+    \\) STRICT
+;
+const content_schema =
+    \\CREATE TABLE content (
+    \\    content_id INTEGER PRIMARY KEY,
+    \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
+    \\    content_ref BLOB NOT NULL CHECK (length(content_ref) = 8),
+    \\    byte_length INTEGER NOT NULL CHECK (byte_length BETWEEN 1 AND 1048576),
+    \\    digest BLOB NOT NULL CHECK (length(digest) = 32),
+    \\    payload BLOB NOT NULL CHECK (length(payload) = byte_length),
+    \\    UNIQUE (session_id, content_ref),
+    \\    FOREIGN KEY (session_id) REFERENCES session (session_id)
     \\) STRICT
 ;
 const transition_schema =
@@ -59,6 +80,8 @@ const conversation_schema =
     \\    committed_by_sequence INTEGER NOT NULL,
     \\    PRIMARY KEY (session_id, entry_id),
     \\    FOREIGN KEY (session_id) REFERENCES session (session_id),
+    \\    FOREIGN KEY (session_id, content_ref)
+    \\        REFERENCES content (session_id, content_ref),
     \\    FOREIGN KEY (session_id, committed_by_sequence)
     \\        REFERENCES session_transition (session_id, sequence)
     \\) STRICT
@@ -82,6 +105,8 @@ const completion_schema =
     \\        operation_generation, attempt_id, evidence_kind
     \\    ),
     \\    FOREIGN KEY (session_id) REFERENCES session (session_id),
+    \\    FOREIGN KEY (session_id, result_reference)
+    \\        REFERENCES content (session_id, content_ref),
     \\    FOREIGN KEY (session_id, consumed_by_sequence)
     \\        REFERENCES session_transition (session_id, sequence)
     \\) STRICT
@@ -92,7 +117,7 @@ const completion_index_schema =
 ;
 
 const read_session_sql: [:0]const u8 =
-    \\SELECT agent_id, task_id, branch_id, ownership_epoch, workspace_path, model
+    \\SELECT agent_id, task_id, ownership_epoch, workspace_path, model
     \\FROM session WHERE session_id = ?1
 ;
 const session_head_sql: [:0]const u8 =
@@ -172,6 +197,10 @@ const read_conversation_sql: [:0]const u8 =
     \\SELECT parent_id, kind, content_ref, committed_by_sequence
     \\FROM conversation_entry WHERE session_id = ?1 AND entry_id = ?2
 ;
+const read_content_sql: [:0]const u8 =
+    \\SELECT content_id, byte_length, digest
+    \\FROM content WHERE session_id = ?1 AND content_ref = ?2
+;
 
 pub const StoredTransition = struct {
     session_id: u64,
@@ -217,6 +246,82 @@ pub const StoredConversationEntry = struct {
     committed_by_sequence: u64,
 };
 
+pub const ContentMetadata = struct {
+    length: u64,
+    digest: binding.Blob,
+};
+
+pub const ContentSource = union(enum) {
+    bytes: []const u8,
+    file: struct {
+        handle: *const std.Io.File,
+        offset: u64,
+    },
+};
+
+/// One already-bounded transient value to import inside the transaction that
+/// first references it. File sources are borrowed, position-independent, and
+/// remain owned by the caller until the transaction returns.
+pub const ContentImport = struct {
+    reference: u64,
+    length: u64,
+    digest: binding.Blob,
+    source: ContentSource,
+};
+
+pub const CompletionResult = union(enum) {
+    existing,
+    first_import: ContentImport,
+};
+
+pub const CompletionPublication = union(enum) {
+    pending: struct {
+        envelope: completion_inbox.Envelope,
+        result: CompletionResult,
+    },
+    audited: struct {
+        envelope: completion_inbox.Envelope,
+        result: CompletionResult,
+        consumed_by_sequence: u64,
+    },
+
+    fn envelope(self: CompletionPublication) completion_inbox.Envelope {
+        return switch (self) {
+            .pending => |value| value.envelope,
+            .audited => |value| value.envelope,
+        };
+    }
+
+    fn result(self: CompletionPublication) CompletionResult {
+        return switch (self) {
+            .pending => |value| value.result,
+            .audited => |value| value.result,
+        };
+    }
+
+    fn auditSequence(self: CompletionPublication) ?u64 {
+        return switch (self) {
+            .pending => null,
+            .audited => |value| value.consumed_by_sequence,
+        };
+    }
+};
+
+/// A closed prepared relationship between content imported by one semantic
+/// transaction and the facts that first reference it.
+pub const TransactionContentImport = union(enum) {
+    transaction_fact: ContentImport,
+    patch_intent: struct {
+        intent: ContentImport,
+        patch: ContentImport,
+    },
+};
+
+pub const PreparedCommit = struct {
+    transaction: session_transition.Transaction,
+    content: []const TransactionContentImport = &.{},
+};
+
 pub const Config = struct {
     page_cache_kib: u16 = 64,
     maximum_page_count: u32 = 262_144,
@@ -232,6 +337,14 @@ pub const MemoryAccounting = struct {
     lookaside_current_slots: u64,
     lookaside_highwater_slots: u64,
     statements_current_bytes: u64,
+};
+
+pub const PhysicalAccounting = struct {
+    page_size_bytes: u64,
+    page_count: u64,
+    free_page_count: u64,
+    cache_page_writes: u64,
+    cache_spills: u64,
 };
 
 pub const FaultBoundary = enum {
@@ -250,14 +363,12 @@ pub const SessionIdentity = struct {
     session_id: u64,
     agent_id: u64,
     task_id: u64,
-    branch_id: u64,
 
     pub fn validate(self: SessionIdentity) !void {
         const values = [_]u64{
             self.session_id,
             self.agent_id,
             self.task_id,
-            self.branch_id,
         };
         for (values, 0..) |value, index| {
             if (value == 0) return error.InvalidIdentity;
@@ -365,17 +476,38 @@ pub const StorageOwner = struct {
     }
 
     pub fn createSession(self: *StorageOwner, identity: SessionIdentity) !void {
-        return self.createSessionWithMetadata(.{
+        const task = "fixture task";
+        return self.createSessionWithContent(.{
             .identities = identity,
             .workspace_path = ".",
             .model = "fixture:test",
-        }, initialTransaction(identity));
+        }, initialTransaction(identity), .{
+            .reference = identity.task_id,
+            .length = task.len,
+            .digest = binding.hash(binding.Blob, task),
+            .source = .{ .bytes = task },
+        });
     }
 
     pub fn createSessionWithMetadata(
         self: *StorageOwner,
         descriptor: SessionDescriptor,
         transaction: session_transition.Transaction,
+    ) !void {
+        const task = "fixture task";
+        return self.createSessionWithContent(descriptor, transaction, .{
+            .reference = descriptor.identities.task_id,
+            .length = task.len,
+            .digest = binding.hash(binding.Blob, task),
+            .source = .{ .bytes = task },
+        });
+    }
+
+    pub fn createSessionWithContent(
+        self: *StorageOwner,
+        descriptor: SessionDescriptor,
+        transaction: session_transition.Transaction,
+        task_content: ContentImport,
     ) !void {
         self.request_lock.lockUncancelable(self.io);
         defer self.request_lock.unlock(self.io);
@@ -390,6 +522,9 @@ pub const StorageOwner = struct {
         }
         if (transaction.sequence != 1) return error.InvalidTransitionSequence;
         try validateTransactionIdentity(descriptor.identities, transaction);
+        if (task_content.reference != descriptor.identities.task_id) {
+            return error.InvalidContentReference;
+        }
         var payload_buffer: [session_transition.max_payload_size]u8 = undefined;
         const payload = try session_transition.encode(&payload_buffer, transaction);
 
@@ -397,20 +532,21 @@ pub const StorageOwner = struct {
         errdefer self.rollbackOrPoison();
         const statement = try self.prepare(
             \\INSERT INTO session (
-            \\    session_id, agent_id, task_id, branch_id, workspace_path, model, head_sequence
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+            \\    session_id, agent_id, task_id, workspace_path, model, head_sequence
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, 1)
         );
         defer finalize(statement);
-        var encoded_identities: [4][8]u8 = undefined;
+        var encoded_identities: [3][8]u8 = undefined;
         try bindIdentity(statement, 1, descriptor.identities.session_id, &encoded_identities[0]);
         try bindIdentity(statement, 2, descriptor.identities.agent_id, &encoded_identities[1]);
         try bindIdentity(statement, 3, descriptor.identities.task_id, &encoded_identities[2]);
-        try bindIdentity(statement, 4, descriptor.identities.branch_id, &encoded_identities[3]);
-        try bindText(statement, 5, descriptor.workspace_path);
-        try bindText(statement, 6, descriptor.model);
+        try bindText(statement, 4, descriptor.workspace_path);
+        try bindText(statement, 5, descriptor.model);
         try expectDone(c.sqlite3_step(statement));
+        try self.insertContent(descriptor.identities.session_id, task_content);
         try self.insertTransaction(descriptor.identities.session_id, transaction, payload);
         try self.ensureAdmissionCapacity();
+        try self.reach(.before_commit);
         try self.execute("COMMIT");
     }
 
@@ -440,6 +576,24 @@ pub const StorageOwner = struct {
         };
     }
 
+    pub fn physicalAccounting(
+        self: *StorageOwner,
+        reset_page_writes: bool,
+    ) !PhysicalAccounting {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
+        try self.ensureOpen();
+        const writes = try self.databaseStatus(c.SQLITE_DBSTATUS_CACHE_WRITE, reset_page_writes);
+        const spills = try self.databaseStatus(c.SQLITE_DBSTATUS_CACHE_SPILL, reset_page_writes);
+        return .{
+            .page_size_bytes = try self.pragmaU64("PRAGMA page_size"),
+            .page_count = try self.pragmaU64("PRAGMA page_count"),
+            .free_page_count = try self.pragmaU64("PRAGMA freelist_count"),
+            .cache_page_writes = writes.current,
+            .cache_spills = spills.current,
+        };
+    }
+
     pub fn readSession(self: *StorageOwner, session_id: u64) !StoredSession {
         self.request_lock.lockUncancelable(self.io);
         defer self.request_lock.unlock(self.io);
@@ -452,9 +606,9 @@ pub const StorageOwner = struct {
         const result = c.sqlite3_step(statement);
         if (result == c.SQLITE_DONE) return error.SessionNotFound;
         if (result != c.SQLITE_ROW) return mapSqliteError(result);
-        const ownership_epoch = c.sqlite3_column_int64(statement, 3);
-        const workspace_length = c.sqlite3_column_bytes(statement, 4);
-        const model_length = c.sqlite3_column_bytes(statement, 5);
+        const ownership_epoch = c.sqlite3_column_int64(statement, 2);
+        const workspace_length = c.sqlite3_column_bytes(statement, 3);
+        const model_length = c.sqlite3_column_bytes(statement, 4);
         if (ownership_epoch <= 0 or workspace_length <= 0 or workspace_length > max_workspace_path_bytes or
             model_length <= 0 or model_length > max_model_bytes)
         {
@@ -465,7 +619,6 @@ pub const StorageOwner = struct {
                 .session_id = session_id,
                 .agent_id = try readIdentityColumn(statement, 0),
                 .task_id = try readIdentityColumn(statement, 1),
-                .branch_id = try readIdentityColumn(statement, 2),
             },
             .ownership_epoch = @intCast(ownership_epoch),
             .workspace_path = undefined,
@@ -474,10 +627,10 @@ pub const StorageOwner = struct {
             .model_length = @intCast(model_length),
         };
         try stored.identities.validate();
-        const workspace_pointer = c.sqlite3_column_text(statement, 4) orelse {
+        const workspace_pointer = c.sqlite3_column_text(statement, 3) orelse {
             return error.CorruptHostStore;
         };
-        const model_pointer = c.sqlite3_column_text(statement, 5) orelse {
+        const model_pointer = c.sqlite3_column_text(statement, 4) orelse {
             return error.CorruptHostStore;
         };
         @memcpy(
@@ -546,28 +699,17 @@ pub const StorageOwner = struct {
 
     pub fn publishCompletion(
         self: *StorageOwner,
-        envelope: completion_inbox.Envelope,
-    ) !u64 {
-        return self.publishCompletionState(envelope, null);
-    }
-
-    pub fn publishAuditedCompletion(
-        self: *StorageOwner,
-        envelope: completion_inbox.Envelope,
-        consumed_by_sequence: u64,
-    ) !u64 {
-        if (consumed_by_sequence == 0) return error.InvalidSequence;
-        return self.publishCompletionState(envelope, consumed_by_sequence);
-    }
-
-    fn publishCompletionState(
-        self: *StorageOwner,
-        envelope: completion_inbox.Envelope,
-        consumed_by_sequence: ?u64,
+        publication: CompletionPublication,
     ) !u64 {
         self.request_lock.lockUncancelable(self.io);
         defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
+        const envelope = publication.envelope();
+        const consumed_by_sequence = publication.auditSequence();
+        const result = publication.result();
+        if (consumed_by_sequence) |sequence| {
+            if (sequence == 0) return error.InvalidSequence;
+        }
         try completion_inbox.validate(envelope);
 
         try self.execute("BEGIN IMMEDIATE");
@@ -609,25 +751,32 @@ pub const StorageOwner = struct {
                 }
             }
             if (c.sqlite3_step(existing) != c.SQLITE_DONE) return error.CorruptHostStore;
+            try self.reach(.before_commit);
             try self.execute("COMMIT");
             return @intCast(sequence);
         }
         if (existing_result != c.SQLITE_DONE) return mapSqliteError(existing_result);
 
-        if (consumed_by_sequence == null) {
-            const count = try self.prepare(pending_completion_count_sql);
-            defer finalize(count);
-            try bindIdentity(count, 1, envelope.session_id, &identities[0]);
-            try bindIdentity(count, 2, envelope.agent_id, &identities[2]);
-            const count_result = c.sqlite3_step(count);
-            if (count_result == c.SQLITE_DONE) return error.InvalidCompletionIdentity;
-            if (count_result != c.SQLITE_ROW) return mapSqliteError(count_result);
-            const pending_count = c.sqlite3_column_int64(count, 0);
-            if (pending_count < 0) return error.CorruptHostStore;
-            if (pending_count >= completion_inbox.max_records) {
-                return error.CompletionCapacityExceeded;
-            }
-            if (c.sqlite3_step(count) != c.SQLITE_DONE) return error.CorruptHostStore;
+        const count = try self.prepare(pending_completion_count_sql);
+        defer finalize(count);
+        try bindIdentity(count, 1, envelope.session_id, &identities[0]);
+        try bindIdentity(count, 2, envelope.agent_id, &identities[2]);
+        const count_result = c.sqlite3_step(count);
+        if (count_result == c.SQLITE_DONE) return error.InvalidCompletionIdentity;
+        if (count_result != c.SQLITE_ROW) return mapSqliteError(count_result);
+        const pending_count = c.sqlite3_column_int64(count, 0);
+        if (pending_count < 0) return error.CorruptHostStore;
+        if (consumed_by_sequence == null and pending_count >= completion_inbox.max_records) {
+            return error.CompletionCapacityExceeded;
+        }
+        if (c.sqlite3_step(count) != c.SQLITE_DONE) return error.CorruptHostStore;
+
+        switch (result) {
+            .first_import => |value| {
+                if (value.reference != envelope.result_ref) return error.CompletionContentMismatch;
+                try self.insertContent(envelope.session_id, value);
+            },
+            .existing => try self.requireContent(envelope.session_id, envelope.result_ref),
         }
 
         const insert = try self.prepare(
@@ -660,6 +809,7 @@ pub const StorageOwner = struct {
         const inbox_id = c.sqlite3_column_int64(insert, 0);
         if (inbox_id <= 0) return error.CorruptHostStore;
         if (c.sqlite3_step(insert) != c.SQLITE_DONE) return error.CorruptHostStore;
+        try self.reach(.before_commit);
         try self.execute("COMMIT");
         return @intCast(inbox_id);
     }
@@ -778,13 +928,25 @@ pub const StorageOwner = struct {
         token: OwnerToken,
         transaction: session_transition.Transaction,
     ) !u64 {
+        return self.commitPrepared(token, .{ .transaction = transaction });
+    }
+
+    pub fn commitPrepared(
+        self: *StorageOwner,
+        token: OwnerToken,
+        prepared: PreparedCommit,
+    ) !u64 {
         self.request_lock.lockUncancelable(self.io);
         defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
+        const transaction = prepared.transaction;
+        const contents = prepared.content;
         if (token.session_id == 0 or token.epoch == 0) return error.StaleOwner;
+        if (contents.len > session_transition.max_facts) return error.ExcessiveContentImports;
         if (transaction.sequence == 0 or transaction.sequence > session_transition.max_transitions) {
             return error.SessionSequenceExhausted;
         }
+        try self.validateTransactionContentImports(transaction, contents);
         var payload_buffer: [session_transition.max_payload_size]u8 = undefined;
         const payload = try session_transition.encode(&payload_buffer, transaction);
         const agent_id = try validateCommitIdentity(token, transaction);
@@ -803,6 +965,14 @@ pub const StorageOwner = struct {
         try expectDone(c.sqlite3_step(advance));
         if (c.sqlite3_changes(self.database) != 1) return error.StaleOwnerOrSequenceConflict;
         try self.reach(.after_transition_head_advance);
+        for (contents) |content| switch (content) {
+            .transaction_fact => |value| try self.insertContent(token.session_id, value),
+            .patch_intent => |value| {
+                try self.insertContent(token.session_id, value.intent);
+                try self.insertContent(token.session_id, value.patch);
+            },
+        };
+        try self.requireTransactionContent(token.session_id, transaction);
         try self.insertTransaction(token.session_id, transaction, payload);
         if (isAdmission(transaction)) try self.ensureAdmissionCapacity();
         try self.reach(.before_commit);
@@ -1036,6 +1206,273 @@ pub const StorageOwner = struct {
         return stored;
     }
 
+    pub fn contentMetadata(
+        self: *StorageOwner,
+        session_id: u64,
+        reference: u64,
+    ) !ContentMetadata {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
+        try self.ensureOpen();
+        const stored = try self.findContent(session_id, reference);
+        return .{ .length = stored.length, .digest = stored.digest };
+    }
+
+    pub fn readContentWindow(
+        self: *StorageOwner,
+        session_id: u64,
+        reference: u64,
+        offset: u64,
+        out: []u8,
+    ) ![]const u8 {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
+        try self.ensureOpen();
+        const stored = try self.findContent(session_id, reference);
+        if (offset > stored.length) return error.InvalidContentOffset;
+        const wanted: usize = @intCast(@min(stored.length - offset, out.len));
+        if (wanted == 0) return out[0..0];
+        var blob: ?*c.sqlite3_blob = null;
+        try expectOk(c.sqlite3_blob_open(
+            self.database,
+            "main",
+            "content",
+            "payload",
+            stored.row_id,
+            0,
+            &blob,
+        ));
+        const opened = blob orelse return error.CorruptHostStore;
+        defer closeBlob(opened);
+        if (offset > std.math.maxInt(c_int) or wanted > std.math.maxInt(c_int)) {
+            return error.InvalidContentOffset;
+        }
+        try expectOk(c.sqlite3_blob_read(
+            opened,
+            out.ptr,
+            @intCast(wanted),
+            @intCast(offset),
+        ));
+        return out[0..wanted];
+    }
+
+    const StoredContent = struct {
+        row_id: c.sqlite3_int64,
+        length: u64,
+        digest: binding.Blob,
+    };
+
+    fn findContent(
+        self: *StorageOwner,
+        session_id: u64,
+        reference: u64,
+    ) !StoredContent {
+        if (session_id == 0 or reference == 0) return error.InvalidContentReference;
+        const statement = try self.prepare(read_content_sql);
+        defer finalize(statement);
+        var ids: [2][8]u8 = undefined;
+        try bindIdentity(statement, 1, session_id, &ids[0]);
+        try bindIdentity(statement, 2, reference, &ids[1]);
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return error.ContentNotFound;
+        if (result != c.SQLITE_ROW) return mapSqliteError(result);
+        const row_id = c.sqlite3_column_int64(statement, 0);
+        const length_value = c.sqlite3_column_int64(statement, 1);
+        if (row_id <= 0 or length_value <= 0 or length_value > max_content_bytes) {
+            return error.CorruptHostStore;
+        }
+        const stored: StoredContent = .{
+            .row_id = row_id,
+            .length = @intCast(length_value),
+            .digest = try readBindingColumn(binding.Blob, statement, 2),
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return stored;
+    }
+
+    fn requireContent(self: *StorageOwner, session_id: u64, reference: u64) !void {
+        if (reference == 0) return;
+        _ = self.findContent(session_id, reference) catch |err| switch (err) {
+            error.ContentNotFound => return error.MissingContentReference,
+            else => return err,
+        };
+    }
+
+    fn requireTransactionContent(
+        self: *StorageOwner,
+        session_id: u64,
+        transaction: session_transition.Transaction,
+    ) !void {
+        for (transaction.factSlice()) |fact| {
+            const references = fact.contentReferences();
+            for (references.slice()) |reference| {
+                try self.requireContent(session_id, reference.reference);
+            }
+        }
+    }
+
+    fn validateTransactionContentImports(
+        self: *StorageOwner,
+        transaction: session_transition.Transaction,
+        contents: []const TransactionContentImport,
+    ) !void {
+        var imported_references: [max_first_content_imports]u64 = undefined;
+        var imported_count: usize = 0;
+        for (contents) |entry| switch (entry) {
+            .transaction_fact => |content| {
+                try appendImportReference(&imported_references, &imported_count, content.reference);
+                if (!transaction.referencesContent(content.reference)) {
+                    return error.UnreferencedContentImport;
+                }
+            },
+            .patch_intent => |pair| {
+                try appendImportReference(&imported_references, &imported_count, pair.intent.reference);
+                try appendImportReference(&imported_references, &imported_count, pair.patch.reference);
+                if (pair.intent.reference == pair.patch.reference or
+                    !transaction.referencesPatchIntent(pair.intent.reference) or
+                    transaction.referencesContent(pair.patch.reference))
+                {
+                    return error.InvalidPatchContentReference;
+                }
+                const patch_reference = try self.decodePatchIntentReference(pair.intent);
+                if (patch_reference != pair.patch.reference) {
+                    return error.InvalidPatchContentReference;
+                }
+            },
+        };
+    }
+
+    fn decodePatchIntentReference(self: *StorageOwner, content: ContentImport) !u64 {
+        if (content.length < patch_tool.intent_header_size or
+            content.length > patch_tool.max_intent_size)
+        {
+            return error.InvalidPatchIntent;
+        }
+        var buffer: [patch_tool.max_intent_size]u8 = undefined;
+        const length: usize = @intCast(content.length);
+        const bytes = switch (content.source) {
+            .bytes => |value| blk: {
+                if (value.len != length) return error.InvalidContentLength;
+                break :blk value;
+            },
+            .file => |source| blk: {
+                const actual = try source.handle.readPositionalAll(
+                    self.io,
+                    buffer[0..length],
+                    source.offset,
+                );
+                if (actual != length) return error.TruncatedContent;
+                break :blk buffer[0..length];
+            },
+        };
+        const intent = patch_tool.decodeIntent(bytes) catch return error.InvalidPatchIntent;
+        return intent.patch_ref;
+    }
+
+    fn appendImportReference(
+        references: *[max_first_content_imports]u64,
+        count: *usize,
+        reference: u64,
+    ) !void {
+        if (reference == 0) return error.InvalidContentReference;
+        for (references[0..count.*]) |prior| {
+            if (prior == reference) return error.DuplicateContentImport;
+        }
+        if (count.* == references.len) return error.ExcessiveContentImports;
+        references[count.*] = reference;
+        count.* += 1;
+    }
+
+    fn insertContent(
+        self: *StorageOwner,
+        session_id: u64,
+        content: ContentImport,
+    ) !void {
+        if (session_id == 0 or content.reference == 0) return error.InvalidContentReference;
+        if (content.length == 0 or content.length > max_content_bytes or
+            content.length > std.math.maxInt(c_int))
+        {
+            return error.InvalidContentLength;
+        }
+        switch (content.source) {
+            .bytes => |bytes| if (bytes.len != content.length) return error.InvalidContentLength,
+            .file => {},
+        }
+        if (self.findContent(session_id, content.reference)) |stored| {
+            if (stored.length != content.length or
+                !binding.eql(binding.Blob, stored.digest, content.digest))
+            {
+                return error.ConflictingContentReference;
+            }
+            return error.ContentAlreadyExists;
+        } else |err| switch (err) {
+            error.ContentNotFound => {},
+            else => return err,
+        }
+
+        const insert = try self.prepare(
+            \\INSERT INTO content (
+            \\    session_id, content_ref, byte_length, digest, payload
+            \\) VALUES (?1, ?2, ?3, ?4, zeroblob(?5))
+            \\RETURNING content_id
+        );
+        defer finalize(insert);
+        var ids: [2][8]u8 = undefined;
+        try bindIdentity(insert, 1, session_id, &ids[0]);
+        try bindIdentity(insert, 2, content.reference, &ids[1]);
+        try bindU64(insert, 3, content.length);
+        try bindBlob(insert, 4, &content.digest.bytes);
+        try bindU64(insert, 5, content.length);
+        const result = c.sqlite3_step(insert);
+        if (result != c.SQLITE_ROW) return mapSqliteError(result);
+        const row_id = c.sqlite3_column_int64(insert, 0);
+        if (row_id <= 0) return error.CorruptHostStore;
+        if (c.sqlite3_step(insert) != c.SQLITE_DONE) return error.CorruptHostStore;
+
+        var blob: ?*c.sqlite3_blob = null;
+        try expectOk(c.sqlite3_blob_open(
+            self.database,
+            "main",
+            "content",
+            "payload",
+            row_id,
+            1,
+            &blob,
+        ));
+        const opened = blob orelse return error.CorruptHostStore;
+        defer closeBlob(opened);
+
+        var hasher = binding.Hasher(binding.Blob).init();
+        var offset: u64 = 0;
+        var window: [content_window_bytes]u8 = undefined;
+        while (offset < content.length) {
+            const wanted: usize = @intCast(@min(content.length - offset, window.len));
+            const bytes = switch (content.source) {
+                .bytes => |source| source[@intCast(offset)..][0..wanted],
+                .file => |file| blk: {
+                    const read = try file.handle.readPositionalAll(
+                        self.io,
+                        window[0..wanted],
+                        file.offset + offset,
+                    );
+                    if (read != wanted) return error.TruncatedContentImport;
+                    break :blk window[0..wanted];
+                },
+            };
+            try expectOk(c.sqlite3_blob_write(
+                opened,
+                bytes.ptr,
+                @intCast(bytes.len),
+                @intCast(offset),
+            ));
+            hasher.update(bytes);
+            offset += bytes.len;
+        }
+        if (!binding.eql(binding.Blob, hasher.final(), content.digest)) {
+            return error.ContentDigestMismatch;
+        }
+    }
+
     fn harden(self: *StorageOwner, config: Config) !void {
         try expectOk(c.sqlite3_extended_result_codes(self.database, 1));
         try dbConfig(self.database, c.SQLITE_DBCONFIG_DEFENSIVE, 1);
@@ -1044,7 +1481,7 @@ pub const StorageOwner = struct {
         try dbConfig(self.database, c.SQLITE_DBCONFIG_DQS_DML, 0);
         try dbConfig(self.database, c.SQLITE_DBCONFIG_ENABLE_FKEY, 1);
 
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_LENGTH, 1_048_576);
+        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_LENGTH, sqlite_max_length_bytes);
         _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_SQL_LENGTH, 65_536);
         _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_COLUMN, 64);
         _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_COMPOUND_SELECT, 8);
@@ -1087,7 +1524,7 @@ pub const StorageOwner = struct {
     fn installSchema(self: *StorageOwner) !void {
         self.execute("BEGIN IMMEDIATE") catch |err| return err;
         errdefer self.rollbackOrPoison();
-        inline for (.{ session_schema, transition_schema, conversation_schema, completion_schema }) |sql| {
+        inline for (.{ session_schema, content_schema, transition_schema, conversation_schema, completion_schema }) |sql| {
             self.execute(sql) catch |err| return err;
         }
         self.execute(completion_index_schema) catch |err| return err;
@@ -1122,13 +1559,14 @@ pub const StorageOwner = struct {
 
     fn validateSchemaShape(self: *StorageOwner) !void {
         try self.expectSchemaSql("table", "session", session_schema);
+        try self.expectSchemaSql("table", "content", content_schema);
         try self.expectSchemaSql("table", "session_transition", transition_schema);
         try self.expectSchemaSql("table", "conversation_entry", conversation_schema);
         try self.expectSchemaSql("table", "completion_inbox", completion_schema);
         try self.expectSchemaSql("index", "completion_inbox_by_session", completion_index_schema);
         try self.expectSchemaCount(
             "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
-            5,
+            6,
         );
     }
 
@@ -1475,6 +1913,12 @@ fn finalize(statement: *c.sqlite3_stmt) void {
     _ = c.sqlite3_finalize(statement);
 }
 
+fn closeBlob(blob: *c.sqlite3_blob) void {
+    // Blob I/O errors are returned by read/write. Close only releases the
+    // short-lived handle before the owning transaction completes.
+    _ = c.sqlite3_blob_close(blob);
+}
+
 fn closeDatabase(database: *c.sqlite3) void {
     // Opening owns no outstanding statements at this cleanup boundary, so a
     // close failure is an internal lifetime defect rather than a recoverable result.
@@ -1589,6 +2033,39 @@ fn mapSqliteError(result: c_int) anyerror {
         c.SQLITE_CONSTRAINT => error.HostStoreConstraint,
         else => error.HostStoreFailure,
     };
+}
+
+fn testContent(reference: u64) ContentImport {
+    const bytes = "host-store-test-content";
+    return .{
+        .reference = reference,
+        .length = bytes.len,
+        .digest = binding.hash(binding.Blob, bytes),
+        .source = .{ .bytes = bytes },
+    };
+}
+
+fn directContent(content: ContentImport) TransactionContentImport {
+    return .{ .transaction_fact = content };
+}
+
+fn pendingPublication(
+    envelope: completion_inbox.Envelope,
+    result: CompletionResult,
+) CompletionPublication {
+    return .{ .pending = .{ .envelope = envelope, .result = result } };
+}
+
+fn auditedPublication(
+    envelope: completion_inbox.Envelope,
+    result: CompletionResult,
+    sequence: u64,
+) CompletionPublication {
+    return .{ .audited = .{
+        .envelope = envelope,
+        .result = result,
+        .consumed_by_sequence = sequence,
+    } };
 }
 
 test "SQLite primary failure classes map to explicit Host Store outcomes" {
@@ -1712,6 +2189,7 @@ test "installed schema retains the exact V1 keys constraints and completion inde
     defer owner.close();
 
     try owner.expectSchemaSql("table", "session", session_schema);
+    try owner.expectSchemaSql("table", "content", content_schema);
     try owner.expectSchemaSql("table", "session_transition", transition_schema);
     try owner.expectSchemaSql("table", "conversation_entry", conversation_schema);
     try owner.expectSchemaSql("table", "completion_inbox", completion_schema);
@@ -1734,7 +2212,6 @@ test "Host Store round trips context checkpoints and rejects hostile kinds" {
         .session_id = 81,
         .agent_id = 82,
         .task_id = 83,
-        .branch_id = 84,
     };
     try owner.createSession(identity);
     var checkpoint: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
@@ -1745,7 +2222,10 @@ test "Host Store round trips context checkpoints and rejects hostile kinds" {
         .kind = .context_checkpoint,
         .content_ref = 85,
     });
-    _ = try owner.commit(.{ .session_id = identity.session_id, .epoch = 1 }, checkpoint);
+    _ = try owner.commitPrepared(
+        .{ .session_id = identity.session_id, .epoch = 1 },
+        .{ .transaction = checkpoint, .content = &.{directContent(testContent(85))} },
+    );
 
     const stored = try owner.readConversationEntry(identity.session_id, 2);
     try std.testing.expectEqual(@intFromEnum(session_transition.ConversationKind.context_checkpoint), stored.kind);
@@ -1809,7 +2289,7 @@ test "model identity is valid UTF-8 before write and after hostile persistence" 
     );
     var owner = try StorageOwner.open(std.testing.io, path, .{});
     defer owner.close();
-    const identity: SessionIdentity = .{ .session_id = 11, .agent_id = 12, .task_id = 13, .branch_id = 14 };
+    const identity: SessionIdentity = .{ .session_id = 11, .agent_id = 12, .task_id = 13 };
     try std.testing.expectError(
         error.InvalidSessionMetadata,
         owner.createSessionWithMetadata(.{
@@ -1850,7 +2330,6 @@ test "admission rolls back before consuming the closure reserve" {
             .session_id = id,
             .agent_id = id + 1,
             .task_id = id + 2,
-            .branch_id = id + 3,
         }) catch |err| switch (err) {
             error.HostStoreCapacityReserved => {
                 rejected = true;
@@ -1884,10 +2363,9 @@ test "Completion recovery range is bounded by its Session index" {
             .session_id = base,
             .agent_id = base + 1,
             .task_id = base + 2,
-            .branch_id = base + 3,
         });
     }
-    _ = try owner.publishCompletion(completion_inbox.bind(.{
+    const completion = completion_inbox.bind(.{
         .kind = .model,
         .session_id = 8,
         .ownership_epoch = 1,
@@ -1898,7 +2376,11 @@ test "Completion recovery range is bounded by its Session index" {
         .attempt_id = 102,
         .result_ref = 103,
         .result_digest = binding.hash(binding.Result, "result-104"),
-    }));
+    });
+    _ = try owner.publishCompletion(pendingPublication(
+        completion,
+        .{ .first_import = testContent(103) },
+    ));
     try owner.execute("ANALYZE");
     const statement = try owner.prepare(read_completion_after_sql);
     defer finalize(statement);
@@ -1940,7 +2422,6 @@ test "historical Completion range is bounded by the Session Ledger key" {
         .session_id = 8,
         .agent_id = 9,
         .task_id = 10,
-        .branch_id = 11,
     });
 
     const populate = try owner.prepare(
@@ -2004,7 +2485,6 @@ test "late Completion evidence is inserted already consumed for audit" {
         .session_id = 8,
         .agent_id = 9,
         .task_id = 10,
-        .branch_id = 11,
     });
     const envelope = completion_inbox.bind(.{
         .kind = .model,
@@ -2018,7 +2498,11 @@ test "late Completion evidence is inserted already consumed for audit" {
         .result_ref = 103,
         .result_digest = binding.hash(binding.Result, "late-result"),
     });
-    const inbox_id = try owner.publishAuditedCompletion(envelope, 1);
+    const inbox_id = try owner.publishCompletion(auditedPublication(
+        envelope,
+        .{ .first_import = testContent(103) },
+        1,
+    ));
     const stored = try owner.readCompletion(8, inbox_id);
     try std.testing.expectEqual(@as(?u64, 1), stored.consumed_by_sequence);
     try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(8));
@@ -2039,9 +2523,16 @@ test "late Completion evidence is inserted already consumed for audit" {
         .result_ref = pending.result_ref,
         .result_digest = pending.result_digest,
     });
-    const pending_id = try owner.publishCompletion(pending);
+    const pending_id = try owner.publishCompletion(pendingPublication(
+        pending,
+        .{ .first_import = testContent(106) },
+    ));
     try std.testing.expectEqual(pending_id, try owner.completionHead(8));
-    try std.testing.expectEqual(pending_id, try owner.publishAuditedCompletion(pending, 1));
+    try std.testing.expectEqual(pending_id, try owner.publishCompletion(auditedPublication(
+        pending,
+        .existing,
+        1,
+    )));
     try std.testing.expectEqual(@as(?u64, 1), (try owner.readCompletion(8, pending_id)).consumed_by_sequence);
     try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(8));
 
@@ -2063,7 +2554,7 @@ test "late Completion evidence is inserted already consumed for audit" {
     });
     try std.testing.expectError(
         error.ConflictingCompletionEvidence,
-        owner.publishAuditedCompletion(cross_epoch, 1),
+        owner.publishCompletion(auditedPublication(cross_epoch, .existing, 1)),
     );
 
     var conflicting = envelope;
@@ -2083,7 +2574,7 @@ test "late Completion evidence is inserted already consumed for audit" {
     });
     try std.testing.expectError(
         error.ConflictingCompletionEvidence,
-        owner.publishAuditedCompletion(conflicting, 1),
+        owner.publishCompletion(auditedPublication(conflicting, .existing, 1)),
     );
 }
 
@@ -2102,7 +2593,6 @@ test "Completion publication enforces the pending per-Session bound" {
         .session_id = 8,
         .agent_id = 9,
         .task_id = 10,
-        .branch_id = 11,
     });
 
     try owner.execute("BEGIN IMMEDIATE");
@@ -2119,6 +2609,7 @@ test "Completion publication enforces the pending per-Session bound" {
     const result_digest = binding.hash(binding.Result, "capacity-result");
     const completion_digest = binding.hash(binding.Completion, "capacity-completion");
     for (0..completion_inbox.max_records) |index| {
+        try owner.insertContent(8, testContent(index + 10_000));
         try bindIdentity(insert, 1, 8, &ids[0]);
         try bindIdentity(insert, 2, 1, &ids[1]);
         try bindIdentity(insert, 3, 100, &ids[2]);
@@ -2132,7 +2623,7 @@ test "Completion publication enforces the pending per-Session bound" {
     }
     try owner.execute("COMMIT");
 
-    try std.testing.expectError(error.CompletionCapacityExceeded, owner.publishCompletion(completion_inbox.bind(.{
+    try std.testing.expectError(error.CompletionCapacityExceeded, owner.publishCompletion(pendingPublication(completion_inbox.bind(.{
         .kind = .model,
         .session_id = 8,
         .ownership_epoch = 1,
@@ -2143,5 +2634,511 @@ test "Completion publication enforces the pending per-Session bound" {
         .attempt_id = completion_inbox.max_records + 1,
         .result_ref = 20_000,
         .result_digest = binding.hash(binding.Result, "result-200"),
-    })));
+    }), .existing)));
+}
+
+test "content and its first durable reference share one SQLite commit" {
+    const FailBeforeCommit = struct {
+        armed: bool = false,
+
+        fn reached(context: *anyopaque, boundary: FaultBoundary) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.armed and boundary == .before_commit) return error.InjectedCrash;
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fault: FailBeforeCommit = .{};
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{
+        .fault = .{ .context = &fault, .reached = FailBeforeCommit.reached },
+    });
+    defer owner.close();
+
+    fault.armed = true;
+    const identity: SessionIdentity = .{
+        .session_id = 301,
+        .agent_id = 302,
+        .task_id = 303,
+    };
+    try std.testing.expectError(error.InjectedCrash, owner.createSession(identity));
+    try std.testing.expectError(error.SessionNotFound, owner.readSession(identity.session_id));
+    try std.testing.expectError(
+        error.ContentNotFound,
+        owner.contentMetadata(identity.session_id, identity.task_id),
+    );
+
+    fault.armed = false;
+    try owner.createSession(identity);
+    var semantic: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    semantic.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
+        .entry_id = 2,
+        .parent_id = 1,
+        .kind = .assistant_text,
+        .content_ref = 305,
+    });
+    fault.armed = true;
+    try std.testing.expectError(
+        error.InjectedCrash,
+        owner.commitPrepared(
+            .{ .session_id = identity.session_id, .epoch = 1 },
+            .{ .transaction = semantic, .content = &.{directContent(testContent(305))} },
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(identity.session_id));
+    try std.testing.expectError(
+        error.ContentNotFound,
+        owner.contentMetadata(identity.session_id, 305),
+    );
+    try std.testing.expectError(
+        error.ConversationEntryNotFound,
+        owner.readConversationEntry(identity.session_id, 2),
+    );
+
+    const completion = completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = identity.session_id,
+        .ownership_epoch = 1,
+        .agent_id = identity.agent_id,
+        .agent_generation = 1,
+        .operation_id = 306,
+        .operation_generation = 1,
+        .attempt_id = 307,
+        .result_ref = 308,
+        .result_digest = binding.hash(binding.Result, "completion-content"),
+    });
+    try std.testing.expectError(
+        error.InjectedCrash,
+        owner.publishCompletion(pendingPublication(
+            completion,
+            .{ .first_import = testContent(308) },
+        )),
+    );
+    try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(identity.session_id));
+    try std.testing.expectError(
+        error.ContentNotFound,
+        owner.contentMetadata(identity.session_id, 308),
+    );
+}
+
+test "content survives reopen through fixed windows and remains Session scoped" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var bytes: [content_window_bytes * 2 + 17]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @intCast(index % 251);
+    const content: ContentImport = .{
+        .reference = 405,
+        .length = bytes.len,
+        .digest = binding.hash(binding.Blob, &bytes),
+        .source = .{ .bytes = &bytes },
+    };
+
+    {
+        var owner = try StorageOwner.open(std.testing.io, path, .{});
+        defer owner.close();
+        try owner.createSession(.{
+            .session_id = 401,
+            .agent_id = 402,
+            .task_id = 403,
+        });
+        var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+        transaction.facts[0] = session_transition.conversationAdvanced(.{
+            .agent = .{ .agent_id = 402, .agent_generation = 1, .ownership_epoch = 1 },
+            .entry_id = 2,
+            .parent_id = 1,
+            .kind = .assistant_text,
+            .content_ref = content.reference,
+        });
+        _ = try owner.commitPrepared(
+            .{ .session_id = 401, .epoch = 1 },
+            .{ .transaction = transaction, .content = &.{directContent(content)} },
+        );
+    }
+
+    {
+        var owner = try StorageOwner.open(std.testing.io, path, .{});
+        defer owner.close();
+        const metadata = try owner.contentMetadata(401, content.reference);
+        try std.testing.expectEqual(@as(u64, bytes.len), metadata.length);
+        try std.testing.expectEqual(content.digest, metadata.digest);
+        var window: [content_window_bytes]u8 = undefined;
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const read = try owner.readContentWindow(401, content.reference, offset, &window);
+            try std.testing.expectEqualSlices(u8, bytes[offset .. offset + read.len], read);
+            offset += read.len;
+        }
+
+        try owner.createSession(.{
+            .session_id = 411,
+            .agent_id = 412,
+            .task_id = 413,
+        });
+        var cross_session: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+        cross_session.facts[0] = session_transition.conversationAdvanced(.{
+            .agent = .{ .agent_id = 412, .agent_generation = 1, .ownership_epoch = 1 },
+            .entry_id = 2,
+            .parent_id = 1,
+            .kind = .assistant_text,
+            .content_ref = content.reference,
+        });
+        try std.testing.expectError(
+            error.MissingContentReference,
+            owner.commit(.{ .session_id = 411, .epoch = 1 }, cross_session),
+        );
+        try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(411));
+    }
+}
+
+test "content import rejects wrong length digest and conflicting identity before commit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+    const identity: SessionIdentity = .{ .session_id = 501, .agent_id = 502, .task_id = 503 };
+    try owner.createSession(identity);
+    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    transaction.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
+        .entry_id = 2,
+        .parent_id = 1,
+        .kind = .assistant_text,
+        .content_ref = 505,
+    });
+    const bytes = "validated content";
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+            .transaction = transaction,
+            .content = &.{directContent(.{
+                .reference = 505,
+                .length = bytes.len - 1,
+                .digest = binding.hash(binding.Blob, bytes),
+                .source = .{ .bytes = bytes },
+            })},
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(identity.session_id));
+
+    try std.testing.expectError(
+        error.ContentDigestMismatch,
+        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+            .transaction = transaction,
+            .content = &.{directContent(.{
+                .reference = 505,
+                .length = bytes.len,
+                .digest = binding.hash(binding.Blob, "different content"),
+                .source = .{ .bytes = bytes },
+            })},
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(identity.session_id));
+    try std.testing.expectError(error.ContentNotFound, owner.contentMetadata(identity.session_id, 505));
+
+    transaction.facts[0].conversation_advanced.content_ref = identity.task_id;
+    try std.testing.expectError(
+        error.ConflictingContentReference,
+        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+            .transaction = transaction,
+            .content = &.{directContent(.{
+                .reference = identity.task_id,
+                .length = bytes.len,
+                .digest = binding.hash(binding.Blob, bytes),
+                .source = .{ .bytes = bytes },
+            })},
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(identity.session_id));
+}
+
+test "content maximum is representable and remains exact" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+    const identity: SessionIdentity = .{ .session_id = 601, .agent_id = 602, .task_id = 603 };
+    try owner.createSession(identity);
+
+    const bytes = try std.testing.allocator.alloc(u8, max_content_bytes + 1);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'x');
+    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    transaction.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
+        .entry_id = 2,
+        .parent_id = 1,
+        .kind = .assistant_text,
+        .content_ref = 605,
+    });
+    _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+        .transaction = transaction,
+        .content = &.{directContent(.{
+            .reference = 605,
+            .length = max_content_bytes,
+            .digest = binding.hash(binding.Blob, bytes[0..max_content_bytes]),
+            .source = .{ .bytes = bytes[0..max_content_bytes] },
+        })},
+    });
+    try std.testing.expectEqual(
+        @as(u64, max_content_bytes),
+        (try owner.contentMetadata(identity.session_id, 605)).length,
+    );
+
+    transaction.sequence = 3;
+    transaction.facts[0].conversation_advanced = .{
+        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
+        .entry_id = 3,
+        .parent_id = 2,
+        .kind = .assistant_text,
+        .content_ref = 606,
+    };
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+            .transaction = transaction,
+            .content = &.{directContent(.{
+                .reference = 606,
+                .length = max_content_bytes + 1,
+                .digest = binding.hash(binding.Blob, bytes),
+                .source = .{ .bytes = bytes },
+            })},
+        }),
+    );
+}
+
+test "semantic commit rejects content without a first reference" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+    const identity: SessionIdentity = .{ .session_id = 611, .agent_id = 612, .task_id = 613 };
+    try owner.createSession(identity);
+    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    transaction.facts[0] = session_transition.conversationAdvanced(.{
+        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
+        .entry_id = 2,
+        .parent_id = 1,
+        .kind = .assistant_text,
+        .content_ref = identity.task_id,
+    });
+    try std.testing.expectError(
+        error.UnreferencedContentImport,
+        owner.commitPrepared(
+            .{ .session_id = identity.session_id, .epoch = 1 },
+            .{ .transaction = transaction, .content = &.{directContent(testContent(615))} },
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(identity.session_id));
+    try std.testing.expectError(error.ContentNotFound, owner.contentMetadata(identity.session_id, 615));
+}
+
+test "three first imports succeed while existing references do not consume the cap" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+    const identity: SessionIdentity = .{ .session_id = 611, .agent_id = 612, .task_id = 613 };
+    try owner.createSession(identity);
+    const agent: session_transition.AgentContext = .{
+        .agent_id = identity.agent_id,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+
+    var existing_references: [max_first_content_imports + 2]u64 = undefined;
+    for (&existing_references, 0..) |*reference, index| {
+        reference.* = 700 + index;
+        var transaction: session_transition.Transaction = .{
+            .sequence = 2 + index,
+            .fact_count = 1,
+        };
+        transaction.facts[0] = session_transition.outcome(agent, index + 1, reference.*);
+        _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+            .transaction = transaction,
+            .content = &.{directContent(testContent(reference.*))},
+        });
+    }
+
+    var existing: session_transition.Transaction = .{ .sequence = 7, .fact_count = 3 };
+    const descriptor_digest: binding.Descriptor = .{
+        .bash = binding.hash(binding.BashDescriptor, "existing-reference-test"),
+    };
+    for (0..2) |index| existing.facts[index] = session_transition.approvalRequired(.{
+        .operation = .{
+            .agent = agent,
+            .operation_id = 800 + index,
+            .generation = 1,
+        },
+        .binding_ref = existing_references[index * 2],
+        .descriptor_ref = existing_references[index * 2 + 1],
+        .descriptor_digest = descriptor_digest,
+    });
+    existing.facts[2] = session_transition.outcome(agent, 10, existing_references[4]);
+    _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+        .transaction = existing,
+    });
+
+    var exact: session_transition.Transaction = .{ .sequence = 8, .fact_count = 2 };
+    exact.facts[0] = session_transition.approvalRequired(.{
+        .operation = .{ .agent = agent, .operation_id = 900, .generation = 1 },
+        .binding_ref = 900,
+        .descriptor_ref = 901,
+        .descriptor_digest = descriptor_digest,
+    });
+    exact.facts[1] = session_transition.outcome(agent, 11, 902);
+    var exact_imports: [max_first_content_imports]TransactionContentImport = undefined;
+    for (&exact_imports, 0..) |*content, index| {
+        content.* = directContent(testContent(900 + index));
+    }
+    _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+        .transaction = exact,
+        .content = &exact_imports,
+    });
+
+    var excessive: session_transition.Transaction = .{ .sequence = 9, .fact_count = 2 };
+    for (0..2) |index| excessive.facts[index] = session_transition.approvalRequired(.{
+        .operation = .{ .agent = agent, .operation_id = 910 + index, .generation = 1 },
+        .binding_ref = 910 + index * 2,
+        .descriptor_ref = 911 + index * 2,
+        .descriptor_digest = descriptor_digest,
+    });
+    var imports: [max_first_content_imports + 1]TransactionContentImport = undefined;
+    for (&imports, 0..) |*content, index| content.* = directContent(testContent(910 + index));
+    try std.testing.expectError(
+        error.ExcessiveContentImports,
+        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+            .transaction = excessive,
+            .content = &imports,
+        }),
+    );
+}
+
+test "patch content requires its first-referenced Intent in the same commit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/host.sqlite3",
+        .{tmp.sub_path},
+    );
+    var owner = try StorageOwner.open(std.testing.io, path, .{});
+    defer owner.close();
+    const identity: SessionIdentity = .{ .session_id = 621, .agent_id = 622, .task_id = 623 };
+    try owner.createSession(identity);
+    const operation: session_transition.OperationContext = .{
+        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
+        .operation_id = 624,
+        .generation = 1,
+    };
+    var target_path: patch_tool.TargetPath = .{ .length = 8, .bytes = @splat(0) };
+    @memcpy(target_path.bytes[0..8], "file.txt");
+    var intent: patch_tool.Intent = .{
+        .operation_id = operation.operation_id,
+        .operation_generation = operation.generation,
+        .patch_ref = 626,
+        .workspace_path = "/tmp/workspace",
+        .target_path = target_path,
+        .patch_digest = binding.hash(binding.PatchDescriptor, "patch"),
+        .intent_digest = undefined,
+        .preimage_digest = binding.hash(binding.Preimage, "before"),
+        .postimage_digest = binding.hash(binding.Postimage, "after"),
+        .preimage_inode = 1,
+        .file_mode = 0o100644,
+    };
+    intent.intent_digest = patch_tool.intentDigest(intent);
+    var intent_buffer: [patch_tool.max_intent_size]u8 = undefined;
+    const intent_bytes = try patch_tool.encodeIntent(&intent_buffer, intent);
+    const intent_content: ContentImport = .{
+        .reference = 625,
+        .length = intent_bytes.len,
+        .digest = binding.hash(binding.Blob, intent_bytes),
+        .source = .{ .bytes = intent_bytes },
+    };
+    const descriptor: binding.Descriptor = .{ .apply_patch = intent.intent_digest };
+    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    transaction.facts[0] = session_transition.operationSubmitted(
+        operation,
+        625,
+        descriptor,
+        .consequential,
+    );
+    const patch: TransactionContentImport = .{ .patch_intent = .{
+        .intent = intent_content,
+        .patch = testContent(626),
+    } };
+    try std.testing.expectError(
+        error.InvalidPatchIntent,
+        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+            .transaction = transaction,
+            .content = &.{.{ .patch_intent = .{
+                .intent = testContent(625),
+                .patch = testContent(626),
+            } }},
+        }),
+    );
+
+    var mismatched_intent = intent;
+    mismatched_intent.patch_ref = 627;
+    mismatched_intent.intent_digest = patch_tool.intentDigest(mismatched_intent);
+    var mismatched_buffer: [patch_tool.max_intent_size]u8 = undefined;
+    const mismatched_bytes = try patch_tool.encodeIntent(&mismatched_buffer, mismatched_intent);
+    try std.testing.expectError(
+        error.InvalidPatchContentReference,
+        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+            .transaction = transaction,
+            .content = &.{.{ .patch_intent = .{
+                .intent = .{
+                    .reference = 625,
+                    .length = mismatched_bytes.len,
+                    .digest = binding.hash(binding.Blob, mismatched_bytes),
+                    .source = .{ .bytes = mismatched_bytes },
+                },
+                .patch = testContent(626),
+            } }},
+        }),
+    );
+    _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
+        .transaction = transaction,
+        .content = &.{patch},
+    });
+    _ = try owner.contentMetadata(identity.session_id, 625);
+    _ = try owner.contentMetadata(identity.session_id, 626);
 }

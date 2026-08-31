@@ -38,21 +38,22 @@ pub fn main(init: std.process.Init) !void {
     const borrowed_final = finalProjection(&finished) orelse return error.FinalAnswerProjectionMissing;
     _ = try owner.drive();
     if (owner.openProjectionContent(borrowed_final)) |reader_value| {
-        var reader = reader_value;
-        reader.close();
+        _ = reader_value;
         return error.StaleProjectionRemainedUsable;
     } else |err| if (err != error.StaleProjection) return err;
     if (fixture.calls != 1) return error.ModelDispatchCountMismatch;
     owner.close();
 
-    var restored = try harness.Harness.open(.{
-        .runtime = layout.runtime,
-        .mode = .{ .restore = .{ .session_id = session_id } },
-    });
-    defer restored.close();
-    _ = try restored.drive();
-    const regenerated = try restored.drive();
-    try expectFinal(restored, &regenerated, answer);
+    {
+        var restored = try harness.Harness.open(.{
+            .runtime = layout.runtime,
+            .mode = .{ .restore = .{ .session_id = session_id } },
+        });
+        defer restored.close();
+        _ = try restored.drive();
+        const regenerated = try restored.drive();
+        try expectFinal(restored, &regenerated, answer);
+    }
 
     try lostCompletionNotificationRecovers(&layout, init.io, allocator);
     try offeredPermissionDenialContinues(&layout, init.io, allocator);
@@ -271,7 +272,6 @@ fn restoredBashApprovalDispatchesExactDescriptor(
         return error.RestoredBashDescriptorMismatch;
     }
     var reader = try restored.openProjectionContent(approval);
-    defer reader.close();
     var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
     const descriptor_length: usize = @intCast(reader.length());
     if (descriptor_length > descriptor_buffer.len) return error.InvalidBashDescriptor;
@@ -378,10 +378,8 @@ fn restoredPatchApprovalUsesExactDescriptor(
     const approval = approvalProjection(&regenerated) orelse
         return error.ApprovalProjectionMissingAfterRestore;
     var descriptor = try restored.openProjectionContent(approval);
-    errdefer descriptor.close();
     var descriptor_bytes: [256]u8 = undefined;
     const actual = try descriptor.readWindow(0, descriptor_bytes[0..patch.len]);
-    descriptor.close();
     if (!std.mem.eql(u8, actual, patch)) return error.RestoredPatchDescriptorMismatch;
     if (restored.offer(.{ .permission = .{
         .operation_id = approval.operation_id,
@@ -676,7 +674,6 @@ fn expectFinal(
     for (progress.projectionSlice()) |projection| {
         if (projection.kind != .final_answer) continue;
         var reader = try owner.openProjectionContent(projection);
-        defer reader.close();
         var bytes: [256]u8 = undefined;
         if (reader.length() != expected.len) return error.FinalAnswerMismatch;
         const actual = try reader.readWindow(0, bytes[0..expected.len]);

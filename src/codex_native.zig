@@ -1196,6 +1196,7 @@ test "NativeTransport distinguishes failure before and after upload" {
         &before_capture,
     );
     try std.testing.expectEqual(codex_provider.TransportDisposition.not_started, before.disposition);
+    before_io.close();
 
     var after_io = try model_operation.ProviderIo.open(&wire.session, 1040, 1042);
     defer after_io.close();
@@ -1254,14 +1255,16 @@ test "NativeTransport preserves malformed capture and Host read failures" {
     try server_future.await(io);
     try std.testing.expectEqual(codex_provider.TransportDisposition.complete, malformed_result.disposition);
     try std.testing.expect(malformed_capture.malformed);
+    malformed_io.close();
 
     var closed_io = try model_operation.ProviderIo.open(&wire.session, 1045, 1047);
     const closed_request = try closed_io.request();
     closed_io.close();
+    wire.session.close();
     var closed_capture = codex_provider.Capture.init(std.testing.allocator, null);
     defer closed_capture.deinit();
     try std.testing.expectError(
-        error.BlobReaderClosed,
+        error.SessionClosed,
         transport.capability().perform_fn(
             &transport,
             &credential,
@@ -1392,7 +1395,7 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
         .key = "bash.v1",
         .arguments = try modelContractJson("{\"command\":\"true\",\"timeout_ms\":1000}"),
     });
-    try wire.session.storeBlob(1100, call_bytes);
+    try wire.session.storeContent(1100, call_bytes);
     const call = try wire.session.appendConversation(.tool_call, 1100, null);
     try commitConversation(&wire.session, call);
     var result_buffer: [256]u8 = undefined;
@@ -1401,7 +1404,7 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
         .is_error = false,
         .content = "exit_code=0",
     });
-    try wire.session.storeBlob(1101, result_bytes);
+    try wire.session.storeContent(1101, result_bytes);
     const result = try wire.session.appendConversation(.tool_result, 1101, null);
     try commitConversation(&wire.session, result);
     _ = try model_operation.buildRequest(&wire.session, 1102, 1, 3);
@@ -1692,6 +1695,7 @@ fn fakeCredential() codex_provider.Credential {
 
 const WireSession = struct {
     storage: *host_store.StorageOwner,
+    scratch: *session_store.TransientScratch,
     sessions: std.Io.Dir,
     session: session_store.Session,
 
@@ -1723,22 +1727,25 @@ const WireSession = struct {
         errdefer std.testing.allocator.destroy(storage);
         storage.* = try host_store.StorageOwner.open(io, database_path, .{});
         errdefer storage.close();
+        const scratch = try session_store.allocateTransientScratch(std.testing.allocator);
+        errdefer session_store.destroyTransientScratch(std.testing.allocator, io, scratch);
         var path_buffer: [128]u8 = undefined;
         const workspace_path = try std.fmt.bufPrint(
             &path_buffer,
             ".zig-cache/tmp/{s}/repo",
             .{tmp.sub_path},
         );
-        const session = try session_store.Session.create(sessions, storage, io, .{
+        const session = try session_store.Session.create(sessions, scratch, storage, io, .{
             .workspace_path = workspace_path,
             .model = "codex:gpt-5.1-codex-mini",
             .task = "Inspect the repository",
         });
-        return .{ .storage = storage, .sessions = sessions, .session = session };
+        return .{ .storage = storage, .scratch = scratch, .sessions = sessions, .session = session };
     }
 
     fn deinit(self: *WireSession, io: std.Io) void {
         self.session.close();
+        session_store.destroyTransientScratch(std.testing.allocator, io, self.scratch);
         self.storage.close();
         std.testing.allocator.destroy(self.storage);
         self.sessions.close(io);

@@ -19,17 +19,65 @@ const ProductionSlotPool = core_image.SlotPool(production_active_capacity);
 
 comptime {
     std.debug.assert(model_contract.max_patch_input_bytes == patch_tool.max_patch_size);
+    std.debug.assert(production_active_capacity <= @bitSizeOf(usize));
+}
+
+fn allActiveCredits(comptime active_capacity: usize) usize {
+    comptime std.debug.assert(active_capacity != 0 and active_capacity <= @bitSizeOf(usize));
+    return if (active_capacity == @bitSizeOf(usize))
+        std.math.maxInt(usize)
+    else
+        (@as(usize, 1) << @intCast(active_capacity)) - 1;
 }
 
 /// Process-owned bounded activation capacity. Construct this once at host
 /// startup and pass it through every agent lifecycle entry point.
 fn HostWithCapacity(comptime active_capacity: usize) type {
     return struct {
+        const Self = @This();
+
         slots: core_image.SlotPool(active_capacity) = .{},
+        available_active_credits: std.atomic.Value(usize) = .init(allActiveCredits(active_capacity)),
         semantic_validation: SemanticValidationWorkspacePool = .{},
         patch_workspace: PatchWorkspacePool = .{},
 
-        pub fn resourceLedger(self: *const @This()) HostResourceLedger {
+        /// The fixed admission token held by one live Harness today. Issue #34
+        /// transfers this same token to an admitted detached Attempt or closure;
+        /// it never creates an additional Attempt budget.
+        pub const ActiveCredit = struct {
+            host: *Self,
+            bit: usize,
+            active: bool = true,
+
+            pub fn release(self: *ActiveCredit) void {
+                if (!self.active) return;
+                const previous = self.host.available_active_credits.fetchOr(self.bit, .release);
+                std.debug.assert(previous & self.bit == 0);
+                self.active = false;
+            }
+        };
+
+        /// Reserve one of the Host's startup-fixed Active Credits before a
+        /// Harness can allocate or claim durable Session ownership.
+        pub fn reserveActiveCredit(self: *Self) !ActiveCredit {
+            var available = self.available_active_credits.load(.acquire);
+            while (available != 0) {
+                const bit = @as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(@ctz(available)));
+                if (self.available_active_credits.cmpxchgWeak(
+                    available,
+                    available & ~bit,
+                    .acq_rel,
+                    .acquire,
+                )) |observed| {
+                    available = observed;
+                    continue;
+                }
+                return .{ .host = self, .bit = bit };
+            }
+            return error.ActiveCapacityExhausted;
+        }
+
+        pub fn resourceLedger(self: *const Self) HostResourceLedger {
             return .{
                 .semantic_validation = self.semantic_validation.measurements(),
                 .patch_workspace = self.patch_workspace.measurements(),
@@ -339,7 +387,7 @@ pub const FaultBoundary = enum {
     after_model_dispatch,
     after_completion_inbox,
     after_completion_persist,
-    after_final_blob,
+    after_final_content,
     after_assistant_entry,
     after_bash_execution,
     after_patch_authorization,
@@ -528,6 +576,10 @@ const ModelSlot = struct {
     const PreparedFacts = struct {
         facts: [3]session_transition.Fact = undefined,
         fact_count: u8 = 0,
+        content: union(enum) {
+            facts_only,
+            patch_intent: session_store.PatchContent,
+        } = .facts_only,
     };
 
     const Tool = union(enum) {
@@ -568,8 +620,7 @@ const ModelSlot = struct {
             completion.request_ref,
             completion.request_digest,
         );
-        var response = try self.session.openBlob(completion.result);
-        defer response.close();
+        var response = try self.session.viewContent(completion.result);
         if (response.length() > model_protocol.max_response_size) return error.ResponseTooLarge;
         const length: usize = @intCast(response.length());
         const bytes = try readModelResponse(&response, self.scratch.response[0..length]);
@@ -631,7 +682,7 @@ const ModelSlot = struct {
                 var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
                 const descriptor_bytes = try bash_tool.encodeDescriptor(&descriptor_buffer, descriptor);
                 const digest = bash_tool.descriptorDigest(descriptor_bytes);
-                try self.session.storeBlob(descriptor_ref, descriptor_bytes);
+                try self.session.storeContent(descriptor_ref, descriptor_bytes);
                 break :blk .{ .bash = .{
                     .descriptor_ref = descriptor_ref,
                     .descriptor_digest = digest,
@@ -639,7 +690,7 @@ const ModelSlot = struct {
             },
             .apply_patch => |patch| blk: {
                 const patch_ref = (@as(u64, 1) << 60) | @as(u32, @truncate(completion.result));
-                try self.session.storeBlob(patch_ref, patch);
+                try self.session.storeContent(patch_ref, patch);
                 break :blk .{ .apply_patch = .{
                     .patch_ref = patch_ref,
                     .patch_digest = patch_tool.patchDigest(patch),
@@ -712,6 +763,10 @@ fn prepareToolAdmission(
                 .consequential,
             );
             prepared.fact_count = 2;
+            prepared.content = .{ .patch_intent = .{
+                .intent_reference = intent_ref,
+                .patch_reference = patch.patch_ref,
+            } };
         },
     }
     const call_ref = toolCallReference(completion);
@@ -737,22 +792,21 @@ fn readAdmittedPatch(
     admitted: AdmittedPatch,
     out: *[patch_tool.max_patch_size]u8,
 ) ![]const u8 {
-    var reader = try session.openBlob(admitted.patch_ref);
-    defer reader.close();
+    var reader = try session.viewContent(admitted.patch_ref);
     if (reader.length() != admitted.patch_length or reader.length() > out.len) {
-        return error.InvalidAdmittedPatchBlob;
+        return error.InvalidAdmittedPatchContent;
     }
     const length: usize = @intCast(reader.length());
     var offset: usize = 0;
     while (offset < length) {
         const bytes = try reader.readWindow(offset, out[offset..length]);
-        if (bytes.len == 0 or bytes.len > length - offset) return error.TruncatedAdmittedPatchBlob;
+        if (bytes.len == 0 or bytes.len > length - offset) return error.TruncatedAdmittedPatchContent;
         if (bytes.ptr != out[offset..].ptr) @memcpy(out[offset..][0..bytes.len], bytes);
         offset += bytes.len;
     }
     const patch = out[0..length];
     if (!binding.eql(binding.PatchDescriptor, patch_tool.patchDigest(patch), admitted.patch_digest)) {
-        return error.InvalidAdmittedPatchBlob;
+        return error.InvalidAdmittedPatchContent;
     }
     return patch;
 }
@@ -950,7 +1004,7 @@ fn retryModelAttempt(
             .operation_generation = operation.generation,
             .attempt_id = attempt.attempt_id,
             .result_ref = result_ref,
-            .result_digest = try blobDigest(session, result_ref),
+            .result_digest = try contentDigest(session, result_ref),
         });
         try session.publishCompletionEvidence(evidence);
         if (completion_hook) |hook| try hook.offered(hook.context, evidence);
@@ -1029,7 +1083,7 @@ fn dispatchModelAttempt(
         .operation_generation = dispatch.operation_generation,
         .attempt_id = dispatch.attempt_id,
         .result_ref = dispatch.response_ref,
-        .result_digest = try blobDigest(session, dispatch.response_ref),
+        .result_digest = try contentDigest(session, dispatch.response_ref),
     });
     try session.publishCompletionEvidence(evidence);
     try reach(fault, .after_completion_inbox);
@@ -1068,7 +1122,7 @@ fn executeBashCall(
     const admitted = history.descriptor orelse return error.MissingActionDescriptor;
     const descriptor_ref = admitted.descriptor_ref;
     var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
-    const descriptor_bytes = try readBoundedBlob(session, descriptor_ref, &descriptor_buffer);
+    const descriptor_bytes = try readBoundedContent(session, descriptor_ref, &descriptor_buffer);
     const admitted_descriptor = try bash_tool.decodeDescriptor(descriptor_bytes);
     const digest = switch (admitted.descriptor_digest) {
         .bash => |value| value,
@@ -1137,7 +1191,7 @@ fn executeBashCall(
     try restoreCoreFromLedger(session, core);
     defer execution.deinit();
     try storeBashResult(session, result_ref, execution);
-    const result_digest = try blobDigest(session, result_ref);
+    const result_digest = try contentDigest(session, result_ref);
     const evidence = completion_inbox.bind(.{
         .kind = .bash,
         .session_id = session.session_id,
@@ -1223,7 +1277,7 @@ fn storePatchIntent(
     intent: patch_tool.Intent,
 ) !void {
     var bytes: [patch_tool.max_intent_size]u8 = undefined;
-    try session.storeBlob(intent_ref, try patch_tool.encodeIntent(&bytes, intent));
+    try session.storeContent(intent_ref, try patch_tool.encodeIntent(&bytes, intent));
 }
 
 fn storeBashResult(
@@ -1233,7 +1287,7 @@ fn storeBashResult(
 ) !void {
     var header: [bash_tool.result_header_size]u8 = undefined;
     const header_bytes = try bash_tool.encodeResultHeader(&header, execution);
-    var writer = try session.beginBlob(result_ref);
+    var writer = try session.beginContent(result_ref);
     errdefer writer.abort();
     try writer.append(header_bytes);
     try writer.append(execution.stdout);
@@ -1406,12 +1460,19 @@ fn reconcileRestored(
             admission_facts[0] = terminal;
             admission_facts[1] = applied;
             @memcpy(admission_facts[2..][0..prepared.fact_count], prepared.facts[0..prepared.fact_count]);
-            try commitCoreFacts(
-                session,
-                core,
-                admission_facts[0 .. 2 + prepared.fact_count],
-                true,
-            );
+            try core.suspendIntoState();
+            switch (prepared.content) {
+                .facts_only => _ = try session.commitSemantic(
+                    admission_facts[0 .. 2 + prepared.fact_count],
+                    &core.encoded_state,
+                ),
+                .patch_intent => |patch| _ = try session.commitSemanticWithPatchContent(
+                    admission_facts[0 .. 2 + prepared.fact_count],
+                    &core.encoded_state,
+                    patch,
+                ),
+            }
+            try core.activate();
             admitted_completion = true;
         } else |err| switch (err) {
             error.SessionOperationPending => return .retry_model,
@@ -1527,8 +1588,7 @@ pub fn resolvePermission(
         .bash => {
             const operation_context = operationContext(session, expected_operation_id, 1);
             var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
-            var reader = try session.openBlob(descriptor.descriptor_ref);
-            defer reader.close();
+            var reader = try session.viewContent(descriptor.descriptor_ref);
             if (reader.length() > descriptor_buffer.len) return error.InvalidBashCallRange;
             const descriptor_length: usize = @intCast(reader.length());
             const descriptor_bytes = try reader.readWindow(0, descriptor_buffer[0..descriptor_length]);
@@ -1589,7 +1649,7 @@ pub fn resolvePermission(
             }
             defer execution.deinit();
             try storeBashResult(session, result_ref, execution);
-            const result_digest = try blobDigest(session, result_ref);
+            const result_digest = try contentDigest(session, result_ref);
             if (allow) {
                 const evidence = completion_inbox.bind(.{
                     .kind = .bash,
@@ -1626,7 +1686,7 @@ pub fn resolvePermission(
         },
         .apply_patch => {
             var intent_bytes: [patch_tool.max_intent_size]u8 = undefined;
-            const intent_slice = try readBoundedBlob(session, pending.binding_ref, &intent_bytes);
+            const intent_slice = try readBoundedContent(session, pending.binding_ref, &intent_bytes);
             const intent = try patch_tool.decodeIntent(intent_slice);
             const patch_descriptor = switch (descriptor.descriptor_digest) {
                 .apply_patch => |value| value,
@@ -1814,11 +1874,11 @@ fn reconcileBash(
         };
         var encoded: [bash_tool.result_header_size]u8 = undefined;
         _ = try bash_tool.encodeResult(&encoded, execution);
-        try storeOrExpectBlob(session, result_ref, &encoded);
+        try storeOrExpectContent(session, result_ref, &encoded);
         const denied = session_transition.result(.{
             .operation = operationContext(session, operation_id, 1),
             .result_ref = result_ref,
-            .result_digest = try blobDigest(session, result_ref),
+            .result_digest = try contentDigest(session, result_ref),
             .class = .ordinary,
             .evidence = .{ .immediate = .consequential },
         });
@@ -1848,7 +1908,7 @@ fn reconcileBash(
     if (inbox.match) |envelope| {
         if (!binding.eql(
             binding.Result,
-            try blobDigest(session, envelope.result_ref),
+            try contentDigest(session, envelope.result_ref),
             envelope.result_digest,
         )) {
             return error.CompletionResultDigestMismatch;
@@ -1869,8 +1929,8 @@ fn reconcileBash(
         };
         var encoded: [bash_tool.result_header_size]u8 = undefined;
         _ = try bash_tool.encodeResult(&encoded, execution);
-        try storeOrExpectBlob(session, result_ref, &encoded);
-        result_digest = try blobDigest(session, result_ref);
+        try storeOrExpectContent(session, result_ref, &encoded);
+        result_digest = try contentDigest(session, result_ref);
         status = .indeterminate;
         try session.publishCompletionEvidence(completion_inbox.bind(.{
             .kind = .bash,
@@ -1905,8 +1965,7 @@ fn readBashStatus(
     session: *session_store.Session,
     reference: u64,
 ) !bash_tool.Status {
-    var reader = try session.openBlob(reference);
-    defer reader.close();
+    var reader = try session.viewContent(reference);
     if (reader.length() < bash_tool.result_header_size) return error.TruncatedBashResult;
     var header: [bash_tool.result_header_size]u8 = undefined;
     const bytes = try reader.readWindow(0, &header);
@@ -1998,7 +2057,7 @@ fn reconcilePatch(
         const ready = blk: {
             var workspace = try host.patch_workspace.borrow();
             defer workspace.release() catch unreachable;
-            const patch = try readBoundedBlob(session, patch_ref, &workspace.workspace.patch);
+            const patch = try readBoundedContent(session, patch_ref, &workspace.workspace.patch);
             break :blk try patch_tool.readyForAttempt(session.io, intent, patch);
         };
         if (!ready) {
@@ -2032,8 +2091,8 @@ fn reconcilePatch(
             .intent_ref = validated.descriptor_ref,
             .intent_digest = patch_descriptor,
         });
-        try storeOrExpectBlob(session, result_ref, &result_bytes);
-        result_digest = try blobDigest(session, result_ref);
+        try storeOrExpectContent(session, result_ref, &result_bytes);
+        result_digest = try contentDigest(session, result_ref);
     } else {
         const admitted = attempt orelse return error.InvalidPatchHistory;
         if (admitted.descriptor_ref != validated.descriptor_ref or
@@ -2056,7 +2115,7 @@ fn reconcilePatch(
         if (inbox.match) |envelope| {
             if (envelope.result_ref != result_ref or !binding.eql(
                 binding.Result,
-                try blobDigest(session, envelope.result_ref),
+                try contentDigest(session, envelope.result_ref),
                 envelope.result_digest,
             )) return error.CompletionResultDigestMismatch;
             result_digest = envelope.result_digest;
@@ -2071,7 +2130,7 @@ fn reconcilePatch(
             const reconciliation = blk: {
                 var workspace = try host.patch_workspace.borrow();
                 defer workspace.release() catch unreachable;
-                const patch = try readBoundedBlob(session, patch_ref, &workspace.workspace.patch);
+                const patch = try readBoundedContent(session, patch_ref, &workspace.workspace.patch);
                 break :blk try patch_tool.reconcile(session.io, intent, patch);
             };
             result_status = reconciliation.status;
@@ -2082,8 +2141,8 @@ fn reconcilePatch(
                 .intent_ref = validated.descriptor_ref,
                 .intent_digest = patch_descriptor,
             });
-            try storeOrExpectBlob(session, result_ref, &result_bytes);
-            result_digest = try blobDigest(session, result_ref);
+            try storeOrExpectContent(session, result_ref, &result_bytes);
+            result_digest = try contentDigest(session, result_ref);
             const envelope = completion_inbox.bind(.{
                 .kind = .apply_patch,
                 .session_id = session.session_id,
@@ -2139,7 +2198,7 @@ fn readPatchIntent(
     intent_ref: u64,
     buffer: *[patch_tool.max_intent_size]u8,
 ) !patch_tool.Intent {
-    return patch_tool.decodeIntent(try readBoundedBlob(session, intent_ref, buffer));
+    return patch_tool.decodeIntent(try readBoundedContent(session, intent_ref, buffer));
 }
 
 fn readPatchResultStatus(
@@ -2149,7 +2208,7 @@ fn readPatchResultStatus(
     intent_digest: binding.PatchIntent,
 ) !patch_tool.ResultStatus {
     var bytes: [patch_tool.result_size]u8 = undefined;
-    try readExactBlob(session, result_ref, &bytes);
+    try readExactContent(session, result_ref, &bytes);
     const result = try patch_tool.decodeResult(&bytes);
     if (result.intent_ref != intent_ref or
         !binding.eql(binding.PatchIntent, result.intent_digest, intent_digest))
@@ -2202,7 +2261,7 @@ fn reconcileToolResult(
             .operation = operationContext(session, result.operation_id, result.operation_generation),
             .attempt_id = result.attempt_id,
             .result_ref = result.result,
-            .result_digest = try blobDigest(session, result.result),
+            .result_digest = try contentDigest(session, result.result),
             .recovery_class = .consequential,
         }),
         session_transition.conversationAdvanced(.{
@@ -2230,10 +2289,10 @@ fn storeVisibleToolResult(
 ) !void {
     var existing_length: ?u64 = null;
     var existing_digest: binding.Blob = undefined;
-    var blob_writer: ?session_store.BlobWriter = null;
-    var existing = session.openBlob(visible_ref) catch |err| switch (err) {
+    var blob_writer: ?session_store.ContentWriter = null;
+    var existing = session.viewContent(visible_ref) catch |err| switch (err) {
         error.FileNotFound => blk: {
-            blob_writer = try session.beginBlob(visible_ref);
+            blob_writer = try session.beginContent(visible_ref);
             break :blk null;
         },
         else => return err,
@@ -2241,7 +2300,6 @@ fn storeVisibleToolResult(
     if (existing) |*reader| {
         existing_length = reader.length();
         existing_digest = reader.digest();
-        reader.close();
     }
     defer if (blob_writer) |*writer| writer.abort();
 
@@ -2255,12 +2313,12 @@ fn storeVisibleToolResult(
     } else if (existing_length.? != target.length or
         !binding.eql(binding.Blob, existing_digest, target.hasher.final()))
     {
-        return error.BlobContentMismatch;
+        return error.ContentMismatch;
     }
 }
 
 const VisibleResultTarget = struct {
-    writer: ?*session_store.BlobWriter,
+    writer: ?*session_store.ContentWriter,
     hasher: binding.Hasher(binding.Blob) = .init(),
     length: u64 = 0,
 
@@ -2282,11 +2340,10 @@ fn emitVisibleToolResult(
 ) !void {
     switch (tool) {
         .bash => {
-            var durable = try session.openBlob(durable_ref);
-            defer durable.close();
+            var durable = try session.viewContent(durable_ref);
             var durable_header: [bash_tool.result_header_size]u8 = undefined;
             const header_bytes = try durable.readWindow(0, &durable_header);
-            if (header_bytes.len != durable_header.len) return error.TruncatedBlob;
+            if (header_bytes.len != durable_header.len) return error.TruncatedContent;
             const result = try bash_tool.decodeResultHeader(&durable_header, durable.length());
             var prefix_buffer: [96]u8 = undefined;
             const prefix = try std.fmt.bufPrint(&prefix_buffer, "status={s}\nexit_code={d}\nstdout_base64=", .{
@@ -2321,7 +2378,7 @@ fn emitVisibleToolResult(
         },
         .apply_patch => {
             var durable: [patch_tool.result_size]u8 = undefined;
-            try readExactBlob(session, durable_ref, &durable);
+            try readExactContent(session, durable_ref, &durable);
             const result = try patch_tool.decodeResult(&durable);
             var content_buffer: [64]u8 = undefined;
             const content = try std.fmt.bufPrint(&content_buffer, "status={s}", .{patchStatusName(result.status)});
@@ -2338,7 +2395,7 @@ fn emitVisibleToolResult(
 }
 
 fn appendBase64Windowed(
-    reader: *session_store.BlobReader,
+    reader: *session_store.ContentView,
     start: u64,
     length: u32,
     target: *VisibleResultTarget,
@@ -2351,7 +2408,7 @@ fn appendBase64Windowed(
         const remaining = @as(u64, length) - consumed;
         const wanted: usize = @intCast(@min(remaining, input.len));
         const bytes = try reader.readWindow(start + consumed, input[0..wanted]);
-        if (bytes.len != wanted) return error.TruncatedBlob;
+        if (bytes.len != wanted) return error.TruncatedContent;
         try target.append(std.base64.standard.Encoder.encode(
             output[0..std.base64.standard.Encoder.calcSize(bytes.len)],
             bytes,
@@ -2434,7 +2491,7 @@ fn durableCompletion(
     }
     if (!binding.eql(
         binding.Result,
-        try blobDigest(session, envelope.result_ref),
+        try contentDigest(session, envelope.result_ref),
         envelope.result_digest,
     )) return error.CompletionResultDigestMismatch;
     if (envelope.result_ref == 0) return error.InvalidOperationHistory;
@@ -2697,16 +2754,15 @@ fn finalizeCandidate(
     if (response_ref == 0) return error.InvalidModelResponseReference;
     const final_ref = finalReference(response_ref);
 
-    var final_blob = session.openBlob(final_ref) catch |err| switch (err) {
+    var final_blob = session.viewContent(final_ref) catch |err| switch (err) {
         error.FileNotFound => blk: {
-            try session.storeBlob(final_ref, expected);
-            break :blk try session.openBlob(final_ref);
+            try session.storeContent(final_ref, expected);
+            break :blk try session.viewContent(final_ref);
         },
         else => return err,
     };
-    defer final_blob.close();
-    try expectBlob(&final_blob, expected);
-    try reach(fault, .after_final_blob);
+    try expectContent(&final_blob, expected);
+    try reach(fault, .after_final_content);
 
     var entry = try session.readEntry(session.activeLeafId());
     if (entry.kind != .assistant_text or entry.content_ref != final_ref) {
@@ -2737,41 +2793,39 @@ fn reach(fault: ?FaultHook, boundary: FaultBoundary) !void {
     if (fault) |hook| try hook.reached(hook.context, boundary);
 }
 
-fn expectBlob(reader: *session_store.BlobReader, expected: []const u8) !void {
-    if (reader.length() != expected.len) return error.FinalAnswerBlobMismatch;
+fn expectContent(reader: *session_store.ContentView, expected: []const u8) !void {
+    if (reader.length() != expected.len) return error.FinalAnswerContentMismatch;
     var window: [4096]u8 = undefined;
     var offset: usize = 0;
     while (offset < expected.len) {
         const actual = try reader.readWindow(offset, &window);
         if (actual.len == 0 or !std.mem.eql(u8, actual, expected[offset..][0..actual.len])) {
-            return error.FinalAnswerBlobMismatch;
+            return error.FinalAnswerContentMismatch;
         }
         offset += actual.len;
     }
 }
 
-fn readExactBlob(
+fn readExactContent(
     session: *session_store.Session,
     reference: u64,
     out: []u8,
 ) !void {
-    var reader = try session.openBlob(reference);
-    defer reader.close();
-    if (reader.length() != out.len) return error.BlobLengthMismatch;
+    var reader = try session.viewContent(reference);
+    if (reader.length() != out.len) return error.ContentLengthMismatch;
     const bytes = try reader.readWindow(0, out);
-    if (bytes.len != out.len) return error.TruncatedBlob;
+    if (bytes.len != out.len) return error.TruncatedContent;
 }
 
-fn readBoundedBlob(
+fn readBoundedContent(
     session: *session_store.Session,
     reference: u64,
     out: []u8,
 ) ![]const u8 {
-    var reader = try session.openBlob(reference);
-    defer reader.close();
-    if (reader.length() == 0 or reader.length() > out.len) return error.BlobLengthMismatch;
+    var reader = try session.viewContent(reference);
+    if (reader.length() == 0 or reader.length() > out.len) return error.ContentLengthMismatch;
     const bytes = try reader.readWindow(0, out[0..@intCast(reader.length())]);
-    if (bytes.len != reader.length()) return error.TruncatedBlob;
+    if (bytes.len != reader.length()) return error.TruncatedContent;
     return bytes;
 }
 
@@ -2792,8 +2846,7 @@ fn readResponseWindow(
     _ = try session.inspectSemantic(&history, FactSearch.applyFact);
     const committed = history.result orelse return error.MissingModelResult;
     if (committed.result_ref != response.content_ref) return error.ModelResultReferenceMismatch;
-    var reader = try session.openBlob(response.content_ref);
-    defer reader.close();
+    var reader = try session.viewContent(response.content_ref);
     if (reader.length() == 0 or reader.length() > model_protocol.max_response_size) {
         return error.ResponseTooLarge;
     }
@@ -2825,7 +2878,7 @@ fn readAdmittedResponseArguments(
 }
 
 fn readModelResponse(
-    reader: *session_store.BlobReader,
+    reader: *session_store.ContentView,
     out: []u8,
 ) ![]const u8 {
     if (reader.length() != out.len) return error.TruncatedModelResponse;
@@ -2838,7 +2891,7 @@ fn readModelResponse(
     return out;
 }
 
-fn verifyModelResponse(reader: *session_store.BlobReader, expected_digest: binding.Result) !void {
+fn verifyModelResponse(reader: *session_store.ContentView, expected_digest: binding.Result) !void {
     var window: [4096]u8 = undefined;
     var hasher = binding.Hasher(binding.Result).init();
     var offset: u64 = 0;
@@ -2854,7 +2907,7 @@ fn verifyModelResponse(reader: *session_store.BlobReader, expected_digest: bindi
     }
 }
 
-test "restored response metadata reads the exact durable content window" {
+test "restored response metadata reads immutable durable content" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2890,7 +2943,9 @@ test "restored response metadata reads the exact durable content window" {
     defer sessions.close(io);
     var storage = try host_store.StorageOwner.open(io, database_path, .{});
     defer storage.close();
-    var session = try session_store.Session.create(sessions, &storage, io, .{
+    const scratch = try session_store.allocateTransientScratch(std.testing.allocator);
+    defer session_store.destroyTransientScratch(std.testing.allocator, io, scratch);
+    var session = try session_store.Session.create(sessions, scratch, &storage, io, .{
         .workspace_path = repo_path,
         .model = "fixture:window",
         .task = "Recover the final answer window",
@@ -2902,10 +2957,10 @@ test "restored response metadata reads the exact durable content window" {
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     var validation: model_protocol.ValidationScratch = undefined;
     const encoded_response = try model_protocol.encodeText(&response_buffer, answer);
-    try session.storeBlob(response_ref, encoded_response);
+    try session.storeContent(response_ref, encoded_response);
     const descriptor_ref: u64 = 2000;
     const descriptor_bytes = "restored response test descriptor";
-    try session.storeBlob(descriptor_ref, descriptor_bytes);
+    try session.storeContent(descriptor_ref, descriptor_bytes);
     const descriptor_digest: binding.Descriptor = .{
         .model = binding.hash(binding.ModelDescriptor, descriptor_bytes),
     };
@@ -2963,18 +3018,15 @@ test "restored response metadata reads the exact durable content window" {
         try readResponseWindow(&session, &restored, response, response.text, &answer_buffer),
     );
 
-    var blob_path: [64]u8 = undefined;
-    const response_path = try std.fmt.bufPrint(&blob_path, "blobs/{x:0>16}.blob", .{response_ref});
-    try session.dir.deleteFile(io, response_path);
     const substituted = try model_protocol.encodeText(&response_buffer, "substituted final answer");
-    try session.storeBlob(response_ref, substituted);
-    try std.testing.expectError(
-        error.CompletionResultDigestMismatch,
-        readResponseWindow(&session, &restored, response, response.text, &answer_buffer),
+    try std.testing.expectError(error.ContentAlreadyExists, session.storeContent(response_ref, substituted));
+    try std.testing.expectEqualStrings(
+        answer,
+        try readResponseWindow(&session, &restored, response, response.text, &answer_buffer),
     );
 }
 
-test "restored tool arguments reject same-reference substitution and oversized blobs" {
+test "restored tool arguments retain immutable stored content" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2989,7 +3041,9 @@ test "restored tool arguments reject same-reference substitution and oversized b
     defer storage.close();
     var sessions = try tmp.dir.openDir(io, "sessions", .{});
     defer sessions.close(io);
-    var session = try session_store.Session.create(sessions, &storage, io, .{
+    const scratch = try session_store.allocateTransientScratch(std.testing.allocator);
+    defer session_store.destroyTransientScratch(std.testing.allocator, io, scratch);
+    var session = try session_store.Session.create(sessions, scratch, &storage, io, .{
         .workspace_path = ".",
         .model = "fixture:window",
         .task = "Recover tool arguments",
@@ -2999,7 +3053,7 @@ test "restored tool arguments reject same-reference substitution and oversized b
     const response_ref: u64 = 3001;
     const descriptor_ref: u64 = 3000;
     const descriptor_bytes = "tool window descriptor";
-    try session.storeBlob(descriptor_ref, descriptor_bytes);
+    try session.storeContent(descriptor_ref, descriptor_bytes);
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     var validation: model_protocol.ValidationScratch = undefined;
     const original = try model_protocol.encodeTool(
@@ -3007,7 +3061,7 @@ test "restored tool arguments reject same-reference substitution and oversized b
         model_contract.bash_key,
         "{\"command\":\"true\",\"timeout_ms\":1000}",
     );
-    try session.storeBlob(response_ref, original);
+    try session.storeContent(response_ref, original);
 
     var slot: core_image.ActivationSlot = undefined;
     var core = try core_image.Core.initialize(&slot, .{ .agent_id = session.agent_id, .generation = 1 });
@@ -3055,26 +3109,15 @@ test "restored tool arguments reject same-reference substitution and oversized b
         (try readAdmittedResponseArguments(&session, &core, response, &arguments_buffer)).bytes(),
     );
 
-    var path_buffer: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "blobs/{x:0>16}.blob", .{response_ref});
-    try session.dir.deleteFile(io, path);
     const replacement = try model_protocol.encodeTool(
         &response_buffer,
         model_contract.bash_key,
         "{\"command\":\"false\",\"timeout_ms\":1000}",
     );
-    try session.storeBlob(response_ref, replacement);
-    try std.testing.expectError(
-        error.CompletionResultDigestMismatch,
-        readAdmittedResponseArguments(&session, &core, response, &arguments_buffer),
-    );
-
-    try session.dir.deleteFile(io, path);
-    var oversized: [model_protocol.max_response_size + 1]u8 = @splat('x');
-    try session.storeBlob(response_ref, &oversized);
-    try std.testing.expectError(
-        error.ResponseTooLarge,
-        readAdmittedResponseArguments(&session, &core, response, &arguments_buffer),
+    try std.testing.expectError(error.ContentAlreadyExists, session.storeContent(response_ref, replacement));
+    try std.testing.expectEqualStrings(
+        "{\"command\":\"true\",\"timeout_ms\":1000}",
+        (try readAdmittedResponseArguments(&session, &core, response, &arguments_buffer)).bytes(),
     );
 }
 
@@ -3099,9 +3142,9 @@ fn storeToolCall(
     hasher.update(arguments);
     const expected_length = header_bytes.len + key.len + arguments.len;
 
-    var existing = session.openBlob(reference) catch |err| switch (err) {
+    var existing = session.viewContent(reference) catch |err| switch (err) {
         error.FileNotFound => {
-            var writer = try session.beginBlob(reference);
+            var writer = try session.beginContent(reference);
             errdefer writer.abort();
             try writer.append(header_bytes);
             try writer.append(key);
@@ -3111,51 +3154,48 @@ fn storeToolCall(
         },
         else => return err,
     };
-    defer existing.close();
     if (existing.length() != expected_length or
         !binding.eql(binding.Blob, existing.digest(), hasher.final()))
     {
-        return error.BlobContentMismatch;
+        return error.ContentMismatch;
     }
 }
 
-fn storeOrExpectBlob(
+fn storeOrExpectContent(
     session: *session_store.Session,
     reference: u64,
     bytes: []const u8,
 ) !void {
-    var reader = session.openBlob(reference) catch |err| switch (err) {
+    var reader = session.viewContent(reference) catch |err| switch (err) {
         error.FileNotFound => {
-            try session.storeBlob(reference, bytes);
+            try session.storeContent(reference, bytes);
             return;
         },
         else => return err,
     };
-    defer reader.close();
-    if (reader.length() != bytes.len) return error.BlobContentMismatch;
+    if (reader.length() != bytes.len) return error.ContentMismatch;
     var window: [4096]u8 = undefined;
     var offset: usize = 0;
     while (offset < bytes.len) {
         const actual = try reader.readWindow(offset, &window);
         if (actual.len == 0 or !std.mem.eql(u8, actual, bytes[offset..][0..actual.len])) {
-            return error.BlobContentMismatch;
+            return error.ContentMismatch;
         }
         offset += actual.len;
     }
 }
 
-fn blobDigest(
+fn contentDigest(
     session: *session_store.Session,
     reference: u64,
 ) !binding.Result {
-    var reader = try session.openBlob(reference);
-    defer reader.close();
+    var reader = try session.viewContent(reference);
     var hasher = binding.Hasher(binding.Result).init();
     var window: [4096]u8 = undefined;
     var offset: u64 = 0;
     while (offset < reader.length()) {
         const bytes = try reader.readWindow(offset, &window);
-        if (bytes.len == 0) return error.TruncatedBlob;
+        if (bytes.len == 0) return error.TruncatedContent;
         hasher.update(bytes);
         offset += bytes.len;
     }
@@ -3290,7 +3330,7 @@ test "generic tool and input dispositions cannot bypass the closed Action mappin
     try std.testing.expectError(error.UnboundToolKey, executableToolFromKey(""));
 }
 
-test "model dispatch releases Core and rejects substituted request bytes" {
+test "model dispatch releases Core and keeps request content immutable" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3326,7 +3366,9 @@ test "model dispatch releases Core and rejects substituted request bytes" {
     defer sessions.close(io);
     var storage = try host_store.StorageOwner.open(io, database_path, .{});
     defer storage.close();
-    var session = try session_store.Session.create(sessions, &storage, io, .{
+    const scratch = try session_store.allocateTransientScratch(std.testing.allocator);
+    defer session_store.destroyTransientScratch(std.testing.allocator, io, scratch);
+    var session = try session_store.Session.create(sessions, scratch, &storage, io, .{
         .workspace_path = repo_path,
         .model = "fixture:bound",
         .task = "Check the request binding",
@@ -3368,55 +3410,13 @@ test "model dispatch releases Core and rejects substituted request bytes" {
     );
     try std.testing.expect(probe.observed_released_slot);
 
-    const request_digest = try model_operation.buildRequest(&session, 1001, 1, 1);
-    var request_blob = try session.openBlob(1001);
+    _ = try model_operation.buildRequest(&session, 1001, 1, 1);
+    var request_blob = try session.viewContent(1001);
     const request_length: usize = @intCast(request_blob.length());
-    request_blob.close();
     var request: [32 * 1024]u8 = undefined;
-    const original = try session.readBlob(1001, 0, request[0..request_length]);
+    const original = try session.readContent(1001, 0, request[0..request_length]);
     request[model_operation.request_header_size] ^= 1;
-    var blob_path: [32]u8 = undefined;
-    const substituted_path = try std.fmt.bufPrint(&blob_path, "blobs/{x:0>16}.blob", .{@as(u64, 1001)});
-    try session.dir.deleteFile(io, substituted_path);
-    try session.storeBlob(1001, original);
-
-    const CountingProvider = struct {
-        calls: u32 = 0,
-
-        fn provider(self: *@This()) model_operation.Provider {
-            return .{ .context = self, .dispatch = dispatch };
-        }
-
-        fn dispatch(
-            context: *anyopaque,
-            _: model_operation.RequestCursor,
-            _: model_operation.CandidateWriter,
-        ) anyerror!model_operation.DispatchOutcome {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.calls += 1;
-            return error.UnexpectedProviderDispatch;
-        }
-    };
-    var fixture: CountingProvider = .{};
-    try std.testing.expectError(
-        error.ModelRequestDigestMismatch,
-        dispatchModelAttempt(
-            &session,
-            session.ownerToken(),
-            fixture.provider(),
-            .{
-                .request_ref = 1001,
-                .request_digest = request_digest,
-                .response_ref = 1002,
-                .operation_id = 1003,
-                .operation_generation = 1,
-                .attempt_id = 1004,
-            },
-            null,
-            null,
-        ),
-    );
-    try std.testing.expectEqual(@as(u32, 0), fixture.calls);
+    try std.testing.expectError(error.ContentAlreadyExists, session.storeContent(1001, original));
 }
 
 fn repeatedUtf8(
@@ -3507,8 +3507,8 @@ test "Host owns one semantic validation workspace independent of Activation Slot
     try std.testing.expectEqual(@as(usize, 256_224), @sizeOf(SemanticValidationWorkspacePool));
     try std.testing.expectEqual(@as(usize, 16_384), @sizeOf(PatchWorkspace));
     try std.testing.expectEqual(@as(usize, 16_408), @sizeOf(PatchWorkspacePool));
-    try std.testing.expectEqual(@as(usize, 281_008), @sizeOf(Host));
-    try std.testing.expectEqual(@as(usize, 306_112), @sizeOf(HostFour));
+    try std.testing.expectEqual(@as(usize, 281_016), @sizeOf(Host));
+    try std.testing.expectEqual(@as(usize, 306_120), @sizeOf(HostFour));
     try std.testing.expectEqual(@as(usize, 8_360), @sizeOf(core_image.ActivationSlot));
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
@@ -3523,7 +3523,7 @@ test "Host owns one semantic validation workspace independent of Activation Slot
         @sizeOf(@TypeOf(host.patch_workspace)),
     );
     try std.testing.expectEqual(
-        @sizeOf(ProductionSlotPool),
+        @as(usize, 8_384),
         @offsetOf(Host, "semantic_validation"),
     );
     var lease = try host.semantic_validation.borrow();

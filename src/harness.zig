@@ -1,7 +1,6 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
-const blob_store = @import("blob_store.zig");
 const core_state = @import("core_state.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const conversation = @import("conversation.zig");
@@ -164,7 +163,7 @@ pub const Harness = opaque {
         errdefer lease.release();
         const owner = try lease.allocator.create(HarnessState);
         errdefer lease.allocator.destroy(owner);
-        owner.* = try HarnessState.init(config, lease);
+        try owner.init(config, lease);
         owner.retired = .{
             .context = owner,
             .destroy = destroyRetiredHarness,
@@ -183,7 +182,7 @@ pub const Harness = opaque {
     pub fn openProjectionContent(
         self: *Harness,
         projection: Projection,
-    ) !session_store.BlobReader {
+    ) !session_store.ContentView {
         const owner = harnessState(self);
         const session = if (owner.session) |*value| value else return error.StaleProjection;
         if (projection.generation != owner.projection_generation or projection.content_ref == 0 or
@@ -191,7 +190,7 @@ pub const Harness = opaque {
         {
             return error.StaleProjection;
         }
-        return session.openBlob(projection.content_ref);
+        return session.viewContent(projection.content_ref);
     }
 
     pub fn close(self: *Harness) void {
@@ -205,6 +204,10 @@ const HarnessState = struct {
     retired: host_runtime.Retired = undefined,
     pending: ?Input = null,
     state: State,
+    /// This allocation owns the file-capable transient state for exactly this
+    /// live Harness. Session borrows the opaque pointer and cannot copy or
+    /// destroy its resource.
+    scratch: ?*session_store.TransientScratch = null,
     session: ?session_store.Session = null,
     session_projection_pending: bool = false,
     final_ref: u64 = 0,
@@ -217,7 +220,7 @@ const HarnessState = struct {
     ingress_lock: std.Io.Mutex = .init,
     drive_lock: std.Io.Mutex = .init,
 
-    fn init(config: Config, lease: host_runtime.Lease) !HarnessState {
+    fn init(self: *HarnessState, config: Config, lease: host_runtime.Lease) !void {
         if (config.recovery_quantum == 0) return error.InvalidRecoveryQuantum;
         switch (config.mode) {
             .create => |create| {
@@ -239,7 +242,7 @@ const HarnessState = struct {
                 }
             },
         }
-        var owner: HarnessState = .{
+        self.* = .{
             .config = switch (config.mode) {
                 .create => |create| .{
                     .provider = create.model_binding.provider,
@@ -264,33 +267,40 @@ const HarnessState = struct {
                 .restore => .restoring,
             },
         };
-        errdefer if (owner.session) |*session| session.close();
+        self.scratch = try session_store.allocateTransientScratch(lease.allocator);
+        errdefer {
+            if (self.session) |*session| session.close();
+            self.session = null;
+            if (self.scratch) |scratch| {
+                session_store.destroyTransientScratch(lease.allocator, lease.io, scratch);
+                self.scratch = null;
+            }
+        }
         switch (config.mode) {
-            .create => |create| owner.session = try lease.createSession(.{
+            .create => |create| self.session = try lease.createSession(self.scratch.?, .{
                 .workspace_path = create.workspace_path,
                 .model = create.model_binding.model,
                 .task = create.task,
             }),
             .restore => |restore| {
-                var restored = try lease.restoreSession(restore.session_id);
+                var restored = try lease.restoreSession(self.scratch.?, restore.session_id);
                 if (restore.model_binding) |binding_value| {
-                    if (!std.mem.eql(u8, restored.session.modelName(), binding_value.model)) {
-                        restored.session.close();
+                    if (!std.mem.eql(u8, restored.modelName(), binding_value.model)) {
+                        restored.close();
                         return error.RestoreModelMismatch;
                     }
                 }
-                owner.session = restored.session;
-                owner.recovery_pending = true;
-                const session = &owner.session.?;
+                self.session = restored;
+                self.recovery_pending = true;
+                const session = &self.session.?;
                 if (try session.recoveryIsEmpty()) {
                     _ = try lease.recoverSemanticWindow(session, 1);
-                    owner.recovery_pending = false;
-                    owner.setState(.ready);
+                    self.recovery_pending = false;
+                    self.setState(.ready);
                 }
             },
         }
-        owner.session_projection_pending = true;
-        return owner;
+        self.session_projection_pending = true;
     }
 
     fn offer(self: *HarnessState, input: Input) OfferResult {
@@ -765,8 +775,7 @@ const HarnessState = struct {
         projection: *Projection,
     ) void {
         if (response_ref == 0) return;
-        var reader = session.openBlob(response_ref) catch return;
-        defer reader.close();
+        var reader = session.viewContent(response_ref) catch return;
         var bytes: [model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size]u8 = undefined;
         if (reader.length() > bytes.len) return;
         const captured = reader.readWindow(0, &bytes) catch return;
@@ -874,6 +883,10 @@ const HarnessState = struct {
         self.ingress_lock.unlock(self.lease.io);
         if (self.session) |*session| session.close();
         self.session = null;
+        if (self.scratch) |scratch| {
+            session_store.destroyTransientScratch(self.lease.allocator, self.lease.io, scratch);
+            self.scratch = null;
+        }
         self.lease.retire(&self.retired);
     }
 };
@@ -910,7 +923,27 @@ fn openTestRuntimeConfigured(
 }
 
 test "Harness owner retains only live lifecycle state" {
-    try std.testing.expectEqual(@as(usize, 8_112), @sizeOf(HarnessState));
+    try std.testing.expectEqual(@as(usize, 8_136), @sizeOf(HarnessState));
+}
+
+test "Harness close releases opaque transient scratch before retirement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    var fixture: deterministic_provider.Fixture = .{
+        .expected_task = "task",
+        .final_answer = "done",
+    };
+    const owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model_binding = .{ .model = "fixture:close-scratch", .provider = fixture.provider() },
+            .task = "task",
+        } },
+    });
+    owner.close();
+    try runtime.close();
 }
 
 test "open retains no Activation Slot and offer transfers one bounded input" {
@@ -971,13 +1004,13 @@ test "Harness close is idempotent and releases one Runtime lease" {
     try runtime.close();
 }
 
-test "Runtime close waits for every opaque Harness lease" {
+test "active credit rejects a second Harness before scratch allocation or Session claim" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
     var first_fixture: deterministic_provider.Fixture = .{ .expected_task = "first", .final_answer = "done" };
     var second_fixture: deterministic_provider.Fixture = .{ .expected_task = "second", .final_answer = "done" };
-    const first = try Harness.open(.{
+    var first = try Harness.open(.{
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
@@ -985,7 +1018,10 @@ test "Runtime close waits for every opaque Harness lease" {
             .task = "first",
         } },
     });
-    const second = try Harness.open(.{
+    const session_id = harnessState(first).session.?.session_id;
+    first.close();
+
+    const blocker = try Harness.open(.{
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = ".",
@@ -993,11 +1029,60 @@ test "Runtime close waits for every opaque Harness lease" {
             .task = "second",
         } },
     });
+    try std.testing.expectError(error.ActiveCapacityExhausted, Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{ .session_id = session_id } },
+    }));
     try std.testing.expectError(error.HostRuntimeBusy, runtime.close());
-    first.close();
-    try std.testing.expectError(error.HostRuntimeBusy, runtime.close());
-    second.close();
+    blocker.close();
+
+    // The rejected restore did not reach Session.openExisting/claimSession.
+    var restored = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{ .session_id = session_id } },
+    });
+    try std.testing.expectEqual(@as(u64, 2), harnessState(restored).session.?.ownership_epoch);
+    restored.close();
     try runtime.close();
+}
+
+test "failed Harness construction returns its active credit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try openTestRuntime(&tmp);
+    defer runtime.close() catch unreachable;
+    var fixture: deterministic_provider.Fixture = .{
+        .expected_task = "task",
+        .final_answer = "done",
+    };
+
+    try std.testing.expectError(error.InvalidRecoveryQuantum, Harness.open(.{
+        .runtime = runtime,
+        .recovery_quantum = 0,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model_binding = .{ .model = "fixture:invalid", .provider = fixture.provider() },
+            .task = "task",
+        } },
+    }));
+
+    const owner = try Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model_binding = .{ .model = "fixture:valid", .provider = fixture.provider() },
+            .task = "task",
+        } },
+    });
+    try std.testing.expectError(error.ActiveCapacityExhausted, Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = ".",
+            .model_binding = .{ .model = "fixture:over-admission", .provider = fixture.provider() },
+            .task = "task",
+        } },
+    }));
+    owner.close();
 }
 
 test "restore withholds projections until the configured recovery quantum reaches safety" {
@@ -1020,7 +1105,7 @@ test "restore withholds projections until the configured recovery quantum reache
     const session = &harnessState(created).session.?;
     const session_id = session.session_id;
     for (0..5) |index| {
-        try session.storeBlob(index + 1, "ledger fixture");
+        try session.storeContent(index + 1, "ledger fixture");
         _ = try session.commitSemantic(&.{session_transition.taskAdmitted(.{
             .agent_id = session.agent_id,
             .agent_generation = 1,
@@ -1156,7 +1241,7 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         .operation_id = 10,
         .generation = 1,
     }, 11, .{ .model = binding.hash(binding.ModelDescriptor, "descriptor-12") }, .none);
-    try session.storeBlob(
+    try session.storeContent(
         descriptor.operation_submitted.descriptor_ref,
         "operation descriptor",
     );
@@ -1472,7 +1557,7 @@ test "injected post-Completion interruption preserves exact bytes without redisp
         conversation.call_header_size + model_contract.max_tool_key_size +
             model_contract.max_tool_arguments_envelope_size
     ]u8 = undefined;
-    const encoded_call = try session.readBlob(call_entry.content_ref, 0, &call_bytes);
+    const encoded_call = try session.readContent(call_entry.content_ref, 0, &call_bytes);
     const call = try conversation.decodeToolCall(encoded_call);
     try std.testing.expectEqualStrings("bash.v1", call.key);
     try std.testing.expectEqualStrings(exact_arguments, call.arguments);
@@ -1548,9 +1633,8 @@ test "failure replacement seal storage error remains a Host failure" {
             self.response_ref = provider_io.response_ref;
 
             const session = self.session orelse return error.MissingTestSession;
-            var blobs = try session.dir.openDir(session.io, "blobs", .{ .iterate = true });
-            defer blobs.close(session.io);
-            try blobs.setPermissions(session.io, .fromMode(0o555));
+            session_store.closeTransientScratchForTest(session);
+            try session.scratch_root.setPermissions(session.io, .fromMode(0o555));
             self.restricted = true;
             return .{ .failure = .{ .failure = .provider_error } };
         }
@@ -1558,9 +1642,7 @@ test "failure replacement seal storage error remains a Host failure" {
         fn restorePermissions(self: *@This()) !void {
             if (!self.restricted) return;
             const session = self.session orelse return error.MissingTestSession;
-            var blobs = try session.dir.openDir(session.io, "blobs", .{ .iterate = true });
-            defer blobs.close(session.io);
-            try blobs.setPermissions(session.io, .fromMode(0o755));
+            try session.scratch_root.setPermissions(session.io, .fromMode(0o700));
             self.restricted = false;
         }
     };
@@ -1595,36 +1677,12 @@ test "failure replacement seal storage error remains a Host failure" {
     };
     var context: u8 = 0;
     const session = provider.session.?;
-    var drafts = try session.dir.openDir(session.io, "blobs/.drafts", .{ .iterate = true });
-    defer drafts.close(session.io);
-    var iterator = drafts.iterate();
-    var draft_count: u8 = 0;
-    while (try iterator.next(session.io)) |entry| {
-        try std.testing.expect(entry.kind == .file);
-        draft_count += 1;
-        var file = try drafts.openFile(session.io, entry.name, .{});
-        const stat = try file.stat(session.io);
-        try std.testing.expectEqual(
-            @as(u64, blob_store.header_size + model_protocol.header_size),
-            stat.size,
-        );
-        var header: [blob_store.header_size]u8 = undefined;
-        try std.testing.expectEqual(
-            header.len,
-            try file.readPositionalAll(session.io, &header, 0),
-        );
-        file.close(session.io);
-        // A written header proves failure replacement reached BlobWriter.finish.
-        // Read-only destination permissions then reject only its final rename.
-        try std.testing.expectEqualStrings("ONEBLOB\x00", header[0..8]);
-    }
-    try std.testing.expectEqual(@as(u8, 1), draft_count);
     try std.testing.expectEqual(
         @as(u32, 0),
         try session.scanCompletionEvidence(&context, Ignore.apply),
     );
     var bytes: [1]u8 = undefined;
-    try std.testing.expectError(error.FileNotFound, session.readBlob(provider.response_ref, 0, &bytes));
+    try std.testing.expectError(error.FileNotFound, session.readContent(provider.response_ref, 0, &bytes));
 }
 
 test "typed durable model failures share one failed Harness projection" {
@@ -1884,7 +1942,7 @@ test "input request fails terminally until the durable interaction layer exists"
     try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_tool_key);
     try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_arguments);
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const response_bytes = try owner_state.session.?.readBlob(
+    const response_bytes = try owner_state.session.?.readContent(
         durable_core.response_ref,
         0,
         &response_buffer,

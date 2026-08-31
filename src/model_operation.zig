@@ -19,8 +19,7 @@ pub fn verifyRequestDigest(
     request_ref: u64,
     expected: binding.ModelDescriptor,
 ) !void {
-    var request = try session.openBlob(request_ref);
-    defer request.close();
+    var request = try session.viewContent(request_ref);
     var hasher = binding.Hasher(binding.ModelDescriptor).init();
     var window: [request_window_size]u8 = undefined;
     var offset: u64 = 0;
@@ -593,8 +592,8 @@ pub const CandidateWriter = struct {
 /// capabilities. Providers can read one immutable request and append one
 /// predetermined response; they receive no Session or owner authority.
 pub const ProviderIo = struct {
-    request_blob: session_store.BlobReader,
-    response: session_store.BlobWriter,
+    request_blob: session_store.ContentView,
+    response: session_store.ContentWriter,
     session: *session_store.Session,
     response_ref: u64,
     response_length: u32 = 0,
@@ -606,9 +605,8 @@ pub const ProviderIo = struct {
         request_ref: u64,
         response_ref: u64,
     ) !ProviderIo {
-        var request_blob = try session.openBlob(request_ref);
-        errdefer request_blob.close();
-        const response = try session.beginBlob(response_ref);
+        const request_blob = try session.viewContent(request_ref);
+        const response = try session.beginContent(response_ref);
         return .{
             .request_blob = request_blob,
             .response = response,
@@ -618,7 +616,6 @@ pub const ProviderIo = struct {
     }
 
     pub fn close(self: *ProviderIo) void {
-        self.request_blob.close();
         self.response.abort();
     }
 
@@ -649,7 +646,7 @@ pub const ProviderIo = struct {
             },
             .failure => |failure| {
                 self.response.abort();
-                self.response = try self.session.beginBlob(self.response_ref);
+                self.response = try self.session.beginContent(self.response_ref);
                 var bytes: [
                     model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size
                 ]u8 = undefined;
@@ -697,16 +694,16 @@ pub const ProviderIo = struct {
     }
 };
 
-const CatalogBlobSource = struct {
-    reader: *session_store.BlobReader,
+const CatalogContentSource = struct {
+    reader: *session_store.ContentView,
 
     fn length(context: *anyopaque) u64 {
-        const self: *CatalogBlobSource = @ptrCast(@alignCast(context));
+        const self: *CatalogContentSource = @ptrCast(@alignCast(context));
         return self.reader.length();
     }
 
     fn read(context: *anyopaque, offset: u64, out: []u8) anyerror![]const u8 {
-        const self: *CatalogBlobSource = @ptrCast(@alignCast(context));
+        const self: *CatalogContentSource = @ptrCast(@alignCast(context));
         return self.reader.readWindow(offset, out);
     }
 };
@@ -717,14 +714,13 @@ pub fn readToolDefinition(
     key: []const u8,
     buffer: *ToolDefinitionBuffer,
 ) !?model_contract.ToolDefinition {
-    var reader = try session.openBlob(request_ref);
-    defer reader.close();
-    var blob_source: CatalogBlobSource = .{ .reader = &reader };
+    var reader = try session.viewContent(request_ref);
+    var blob_source: CatalogContentSource = .{ .reader = &reader };
     var selection: CatalogSelection = .{ .key = key, .definition = buffer };
     _ = try openRequest(.{
         .context = &blob_source,
-        .length_fn = CatalogBlobSource.length,
-        .read_fn = CatalogBlobSource.read,
+        .length_fn = CatalogContentSource.length,
+        .read_fn = CatalogContentSource.read,
     }, &selection);
     return if (selection.found) buffer.definition() else null;
 }
@@ -745,7 +741,7 @@ pub fn publishFailureResult(
     const failure_ref = (@as(u64, 1) << 56) | (identity & ((@as(u64, 1) << 56) - 1));
     var buffer: [model_protocol.header_size]u8 = undefined;
     const encoded = try model_protocol.encodeFailure(&buffer, .provider_error);
-    try session.storeBlob(failure_ref, encoded);
+    try session.storeContent(failure_ref, encoded);
     return failure_ref;
 }
 
@@ -785,7 +781,7 @@ pub fn buildRequestWithCatalog(
 
     const contract_digest = binding.hash(binding.ModelContract, model_contract.model_contract_bytes);
 
-    var writer = try session.beginBlob(request_ref);
+    var writer = try session.beginContent(request_ref);
     errdefer writer.abort();
     var hasher = binding.Hasher(binding.ModelDescriptor).init();
     var request_header: [request_header_size]u8 = @splat(0);
@@ -821,8 +817,7 @@ pub fn buildRequestWithCatalog(
     var sequence: u64 = first_entry;
     while (sequence <= last) : (sequence += 1) {
         const entry = try session.readEntry(sequence);
-        var content = try session.openBlob(entry.content_ref);
-        defer content.close();
+        var content = try session.viewContent(entry.content_ref);
         var entry_header: [entry_header_size]u8 = @splat(0);
         entry_header[0] = @intFromEnum(entry.kind);
         write(u64, &entry_header, 8, entry.entry_id);
@@ -834,7 +829,7 @@ pub fn buildRequestWithCatalog(
         var offset: u64 = 0;
         while (offset < content.length()) {
             const bytes = try content.readWindow(offset, &window);
-            if (bytes.len == 0) return error.TruncatedContextBlob;
+            if (bytes.len == 0) return error.TruncatedContextContent;
             try appendHashed(&writer, &hasher, bytes);
             offset += bytes.len;
         }
@@ -845,7 +840,7 @@ pub fn buildRequestWithCatalog(
 }
 
 fn appendHashed(
-    writer: *session_store.BlobWriter,
+    writer: *session_store.ContentWriter,
     hasher: *binding.Hasher(binding.ModelDescriptor),
     bytes: []const u8,
 ) !void {

@@ -1,6 +1,5 @@
 const std = @import("std");
 const binding = @import("binding.zig");
-const blob_store = @import("blob_store.zig");
 const conversation = @import("conversation.zig");
 const model_contract = @import("model_contract.zig");
 const completion_inbox = @import("completion_inbox.zig");
@@ -10,8 +9,11 @@ const session_transition = @import("session_transition.zig");
 
 pub const workspace_path_capacity = 1024;
 pub const model_name_capacity = host_store.max_model_bytes;
-const lock_path = "owner.lock";
-const blobs_path = "blobs";
+/// One live Session may stage the three values in V1's largest same-transaction
+/// first-import closure: patch bytes, Patch Intent, and Tool Call content.
+/// A transaction may refer to more content that is already durable.
+pub const max_pending_content = host_store.max_first_content_imports;
+pub const max_transient_scratch_bytes = max_pending_content * host_store.max_content_bytes;
 
 pub const Identities = host_store.SessionIdentity;
 
@@ -30,6 +32,11 @@ pub const CreateConfig = struct {
 
 pub const OwnerToken = host_store.OwnerToken;
 
+pub const PatchContent = struct {
+    intent_reference: u64,
+    patch_reference: u64,
+};
+
 pub const EntryKind = session_transition.ConversationKind;
 
 pub const ConversationEntry = struct {
@@ -40,17 +47,6 @@ pub const ConversationEntry = struct {
     task_id: u64,
     content_ref: u64,
     sequence: u64,
-};
-
-pub const Restored = struct {
-    session: Session,
-};
-
-pub const Projection = struct {
-    session_id: u64,
-    task_id: u64,
-    active_leaf_id: u64,
-    ownership_epoch: u64,
 };
 
 pub const LedgerView = struct {
@@ -526,67 +522,169 @@ pub const FaultHook = struct {
     reached: *const fn (*anyopaque, AppendBoundary) anyerror!void,
 };
 
-pub const BlobWriter = struct {
+pub const ContentWriter = struct {
     session: *Session,
-    blobs: std.Io.Dir,
-    writer: blob_store.Writer,
+    reference: u64,
+    slot_index: usize,
+    start_offset: u64,
+    length_value: u64 = 0,
+    hasher: binding.Hasher(binding.Blob) = .init(),
     open: bool = true,
 
-    pub fn append(self: *BlobWriter, bytes: []const u8) !void {
-        if (!self.open) return error.BlobWriterClosed;
+    pub fn append(self: *ContentWriter, bytes: []const u8) !void {
+        if (!self.open) return error.ContentWriterClosed;
         try self.session.ensureUsable();
-        try self.writer.append(self.session.io, bytes);
+        if (bytes.len == 0) return;
+        if (self.length_value + bytes.len > host_store.max_content_bytes) {
+            return error.ContentTooLarge;
+        }
+        const scratch = transientScratchState(self.session.scratch);
+        const file = scratch.file orelse return error.TransientScratchUnavailable;
+        if (self.start_offset + self.length_value + bytes.len > max_transient_scratch_bytes) {
+            return error.TransientScratchCapacityExceeded;
+        }
+        try file.writePositionalAll(
+            self.session.io,
+            bytes,
+            self.start_offset + self.length_value,
+        );
+        self.hasher.update(bytes);
+        self.length_value += bytes.len;
     }
 
-    pub fn finish(self: *BlobWriter) !void {
-        if (!self.open) return error.BlobWriterClosed;
+    pub fn finish(self: *ContentWriter) !void {
+        if (!self.open) return error.ContentWriterClosed;
         try self.session.ensureUsable();
-        try self.writer.finish(self.session.io);
-        self.blobs.close(self.session.io);
+        if (self.length_value == 0) return error.EmptyContent;
+        try self.session.installPendingContent(.{
+            .reference = self.reference,
+            .offset = self.start_offset,
+            .length = self.length_value,
+            .digest = self.hasher.final(),
+        }, self.slot_index);
+        const scratch = transientScratchState(self.session.scratch);
+        scratch.writer_open = false;
         self.open = false;
     }
 
-    pub fn abort(self: *BlobWriter) void {
+    pub fn abort(self: *ContentWriter) void {
         if (!self.open) return;
-        self.writer.abort(self.session.io);
-        self.blobs.close(self.session.io);
+        const scratch = transientScratchState(self.session.scratch);
+        scratch.writer_open = false;
         self.open = false;
     }
 };
 
-pub const BlobReader = struct {
+pub const ContentView = struct {
     session: *Session,
-    blobs: std.Io.Dir,
-    reader: blob_store.Reader,
-    open: bool = true,
+    reference: u64,
+    meta: host_store.ContentMetadata,
+    pending_offset: ?u64,
 
-    pub fn length(self: *const BlobReader) u64 {
-        return self.reader.meta.length;
+    pub fn length(self: *const ContentView) u64 {
+        return self.meta.length;
     }
 
-    pub fn digest(self: *const BlobReader) binding.Blob {
-        return self.reader.meta.digest;
+    pub fn digest(self: *const ContentView) binding.Blob {
+        return self.meta.digest;
     }
 
-    pub fn readWindow(self: *BlobReader, offset: u64, out: []u8) ![]const u8 {
-        if (!self.open) return error.BlobReaderClosed;
+    pub fn readWindow(self: *ContentView, offset: u64, out: []u8) ![]const u8 {
         try self.session.ensureUsable();
-        return self.reader.readWindow(self.session.io, offset, out);
-    }
-
-    pub fn close(self: *BlobReader) void {
-        if (!self.open) return;
-        self.reader.close(self.session.io);
-        self.blobs.close(self.session.io);
-        self.open = false;
+        if (offset > self.meta.length) return error.InvalidContentOffset;
+        const wanted: usize = @intCast(@min(self.meta.length - offset, out.len));
+        if (self.pending_offset) |base| {
+            const file = transientScratchState(self.session.scratch).file orelse
+                return error.TransientScratchUnavailable;
+            const actual = try file.readPositionalAll(self.session.io, out[0..wanted], base + offset);
+            if (actual != wanted) return error.TruncatedContent;
+            return out[0..actual];
+        }
+        return self.session.storage.readContentWindow(
+            self.session.session_id,
+            self.reference,
+            offset,
+            out,
+        );
     }
 };
 
-fn readExactConversationWindow(reader: *BlobReader, offset: u64, out: []u8) !void {
+const PendingContent = struct {
+    reference: u64,
+    offset: u64,
+    length: u64,
+    digest: binding.Blob,
+};
+
+/// Opaque borrowed capability for one live Harness's bounded, non-authoritative
+/// capture scratch. Only the Harness that allocated it may destroy it; Session
+/// receives a pointer and can neither copy nor free the file-owning state.
+pub const TransientScratch = opaque {};
+
+const TransientScratchState = struct {
+    bound: bool = false,
+    file: ?std.Io.File = null,
+    writer_open: bool = false,
+    pending: [max_pending_content]?PendingContent = @splat(null),
+};
+
+pub const transient_scratch_allocation_bytes = @sizeOf(TransientScratchState);
+
+pub fn allocateTransientScratch(allocator: std.mem.Allocator) !*TransientScratch {
+    const state = try allocator.create(TransientScratchState);
+    state.* = .{};
+    return @ptrCast(state);
+}
+
+/// Frees the Harness-local allocation. The owning Harness must first close its
+/// Session; this function also defensively closes any scratch left by a failed
+/// construction path.
+pub fn destroyTransientScratch(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    scratch: *TransientScratch,
+) void {
+    const state = transientScratchState(scratch);
+    if (state.file) |file| file.close(io);
+    state.* = .{};
+    allocator.destroy(state);
+}
+
+/// Test-only fault injection: makes an in-flight writer's scratch backing
+/// unavailable without exposing the file-owning state itself.
+pub fn closeTransientScratchForTest(session: *Session) void {
+    const scratch = transientScratchState(session.scratch);
+    if (scratch.file) |file| file.close(session.io);
+    scratch.file = null;
+    scratch.writer_open = false;
+}
+
+fn transientScratchState(scratch: *TransientScratch) *TransientScratchState {
+    return @ptrCast(@alignCast(scratch));
+}
+
+fn bindTransientScratch(scratch: *TransientScratch) !void {
+    const state = transientScratchState(scratch);
+    if (state.bound) return error.TransientScratchAlreadyBound;
+    state.* = .{ .bound = true };
+}
+
+fn ensureTransientScratchBound(scratch: *TransientScratch) !void {
+    if (!transientScratchState(scratch).bound) return error.TransientScratchUnavailable;
+}
+
+fn releaseTransientScratch(scratch: *TransientScratch, io: std.Io) void {
+    const state = transientScratchState(scratch);
+    if (!state.bound) return;
+    if (state.file) |file| file.close(io);
+    state.* = .{};
+}
+
+fn readExactConversationWindow(reader: *ContentView, offset: u64, out: []u8) !void {
     if ((try reader.readWindow(offset, out)).len != out.len) return error.InvalidConversationContent;
 }
 
-fn validateUtf8ConversationWindows(reader: *BlobReader, start: u64, length: u64) !void {
+fn validateUtf8ConversationWindows(reader: *ContentView, start: u64, length: u64) !void {
     var window: [4096]u8 = undefined;
     var sequence: [4]u8 = undefined;
     var sequence_length: u3 = 0;
@@ -623,13 +721,12 @@ fn validateUtf8ConversationWindows(reader: *BlobReader, start: u64, length: u64)
 
 pub const Session = struct {
     io: std.Io,
-    dir: std.Io.Dir,
+    scratch_root: std.Io.Dir,
+    scratch: *TransientScratch,
     storage: *host_store.StorageOwner,
-    lock_file: std.Io.File,
     session_id: u64,
     agent_id: u64,
     task_id: u64,
-    branch_id: u64,
     ownership_epoch: u64,
     pending_conversation: ?ConversationEntry = null,
     resident: ResidentState = .{},
@@ -643,6 +740,7 @@ pub const Session = struct {
 
     pub fn create(
         root: std.Io.Dir,
+        scratch: *TransientScratch,
         storage: *host_store.StorageOwner,
         io: std.Io,
         config: Config,
@@ -651,13 +749,13 @@ pub const Session = struct {
             var identities: Identities = undefined;
             io.random(std.mem.asBytes(&identities));
             identities.validate() catch continue;
-            return createExact(root, storage, io, .{
+            return createExact(root, scratch, storage, io, .{
                 .identities = identities,
                 .workspace_path = config.workspace_path,
                 .model = config.model,
                 .task = config.task,
             }) catch |err| switch (err) {
-                error.PathAlreadyExists => continue,
+                error.HostStoreConstraint => continue,
                 else => return err,
             };
         }
@@ -666,6 +764,7 @@ pub const Session = struct {
 
     fn createExact(
         root: std.Io.Dir,
+        scratch: *TransientScratch,
         storage: *host_store.StorageOwner,
         io: std.Io,
         config: CreateConfig,
@@ -691,33 +790,6 @@ pub const Session = struct {
         }
         const canonical_workspace = canonical_workspace_buffer[0..canonical_workspace_length];
 
-        var name_buffer: [16]u8 = undefined;
-        const name = sessionName(config.identities.session_id, &name_buffer);
-        try root.createDir(io, name, .fromMode(0o700));
-        errdefer root.deleteTree(io, name) catch {
-            // A leftover directory is non-authoritative and exclusive creation fails closed on reuse.
-        };
-        try syncDir(root, io);
-        var dir = try root.openDir(io, name, .{});
-        errdefer dir.close(io);
-
-        var lock_file = try dir.createFile(io, lock_path, .{
-            .exclusive = true,
-            .lock = .exclusive,
-            .lock_nonblocking = true,
-        });
-        errdefer {
-            lock_file.unlock(io);
-            lock_file.close(io);
-        }
-
-        try dir.createDir(io, blobs_path, .default_dir);
-        try syncDir(dir, io);
-        var blobs = try dir.openDir(io, blobs_path, .{});
-        defer blobs.close(io);
-        try blob_store.put(blobs, io, config.identities.task_id, config.task);
-        try syncDir(dir, io);
-
         const agent: session_transition.AgentContext = .{
             .agent_id = config.identities.agent_id,
             .agent_generation = 1,
@@ -734,15 +806,16 @@ pub const Session = struct {
             },
         );
 
+        try bindTransientScratch(scratch);
+        errdefer releaseTransientScratch(scratch, io);
         var created: Session = .{
             .io = io,
-            .dir = dir,
+            .scratch_root = root,
+            .scratch = scratch,
             .storage = storage,
-            .lock_file = lock_file,
             .session_id = config.identities.session_id,
             .agent_id = config.identities.agent_id,
             .task_id = config.identities.task_id,
-            .branch_id = config.identities.branch_id,
             .ownership_epoch = 1,
             .workspace_path_length = @intCast(canonical_workspace.len),
             .model_name_length = @intCast(config.model.len),
@@ -751,78 +824,56 @@ pub const Session = struct {
         @memcpy(created.model_name[0..config.model.len], config.model);
         created.resident = try created.resident.applyingLedger(initial, created.agent_id, created.ownership_epoch);
 
-        try storage.createSessionWithMetadata(.{
+        try storage.createSessionWithContent(.{
             .identities = .{
                 .session_id = config.identities.session_id,
                 .agent_id = config.identities.agent_id,
                 .task_id = config.identities.task_id,
-                .branch_id = config.identities.branch_id,
             },
             .workspace_path = canonical_workspace,
             .model = config.model,
-        }, initial);
+        }, initial, .{
+            .reference = config.identities.task_id,
+            .length = config.task.len,
+            .digest = binding.hash(binding.Blob, config.task),
+            .source = .{ .bytes = config.task },
+        });
         return created;
     }
 
     pub fn openExisting(
         root: std.Io.Dir,
+        scratch: *TransientScratch,
         storage: *host_store.StorageOwner,
         io: std.Io,
         session_id: u64,
-    ) !Restored {
+    ) !Session {
         if (session_id == 0) return error.InvalidIdentity;
-        var name_buffer: [16]u8 = undefined;
-        const name = sessionName(session_id, &name_buffer);
-        var dir = try root.openDir(io, name, .{});
-        errdefer dir.close(io);
-        var lock_file = dir.openFile(io, lock_path, .{
-            .mode = .read_write,
-            .lock = .exclusive,
-            .lock_nonblocking = true,
-        }) catch |err| switch (err) {
-            error.WouldBlock => return error.SessionBusy,
-            else => return err,
-        };
-        errdefer {
-            lock_file.unlock(io);
-            lock_file.close(io);
-        }
-
+        try bindTransientScratch(scratch);
+        errdefer releaseTransientScratch(scratch, io);
         var stored = try storage.readSession(session_id);
         try validateWorkspace(io, stored.workspacePath());
         stored.ownership_epoch = try storage.claimSession(session_id);
-
-        // Provisional response drafts are scratch. Once this ownership epoch
-        // holds the Session lock, no live writer from an earlier process can
-        // exist, so crash-left drafts in the dedicated scratch namespace are
-        // safe to discard. Sealed blobs remain available for the normal
-        // recovery/admission path outside that namespace.
-        var blobs = try dir.openDir(io, blobs_path, .{});
-        defer blobs.close(io);
-        _ = try blob_store.resetDrafts(blobs, io);
-        return .{
-            .session = fromStored(io, storage, dir, lock_file, stored, false),
-        };
+        return fromStored(io, storage, root, scratch, stored, false);
     }
 
     fn fromStored(
         io: std.Io,
         storage: *host_store.StorageOwner,
-        dir: std.Io.Dir,
-        lock_file: std.Io.File,
+        scratch_root: std.Io.Dir,
+        scratch: *TransientScratch,
         stored: host_store.StoredSession,
         recovery_complete: bool,
     ) Session {
         std.debug.assert(stored.workspacePath().len <= workspace_path_capacity);
         var session: Session = .{
             .io = io,
-            .dir = dir,
+            .scratch_root = scratch_root,
+            .scratch = scratch,
             .storage = storage,
-            .lock_file = lock_file,
             .session_id = stored.identities.session_id,
             .agent_id = stored.identities.agent_id,
             .task_id = stored.identities.task_id,
-            .branch_id = stored.identities.branch_id,
             .ownership_epoch = stored.ownership_epoch,
             .workspace_path_length = stored.workspace_path_length,
             .model_name_length = stored.model_length,
@@ -851,15 +902,6 @@ pub const Session = struct {
         return try self.storage.completionHead(self.session_id) == 0;
     }
 
-    pub fn projection(self: *const Session) Projection {
-        return .{
-            .session_id = self.session_id,
-            .task_id = self.task_id,
-            .active_leaf_id = self.resident.conversation_head_id,
-            .ownership_epoch = self.ownership_epoch,
-        };
-    }
-
     pub fn activeLeafId(self: *const Session) u64 {
         return self.resident.conversation_head_id;
     }
@@ -878,6 +920,7 @@ pub const Session = struct {
 
     fn ensureUsable(self: *Session) !void {
         try self.authorize(self.ownerToken());
+        try ensureTransientScratchBound(self.scratch);
     }
 
     pub fn appendConversation(
@@ -936,7 +979,7 @@ pub const Session = struct {
         {
             return error.ConversationLedgerMismatch;
         }
-        try self.validateConversationBlob(entry.kind, entry.content_ref, entry.parent_id);
+        try self.validateConversationContent(entry.kind, entry.content_ref, entry.parent_id);
     }
 
     fn verifyConversationEntry(
@@ -952,17 +995,16 @@ pub const Session = struct {
         {
             return error.ConversationLedgerMismatch;
         }
-        try self.validateConversationBlob(entry.kind, entry.content_ref, entry.parent_id);
+        try self.validateConversationContent(entry.kind, entry.content_ref, entry.parent_id);
     }
 
-    fn validateConversationBlob(
+    fn validateConversationContent(
         self: *Session,
         kind: EntryKind,
         content_ref: u64,
         parent_id: u64,
     ) !void {
-        var reader = try self.openBlob(content_ref);
-        defer reader.close();
+        var reader = try self.viewContent(content_ref);
         const maximum: usize = switch (kind) {
             .tool_call => conversation.call_header_size + model_contract.max_tool_key_size +
                 model_contract.max_tool_arguments_envelope_size,
@@ -1040,58 +1082,113 @@ pub const Session = struct {
         };
     }
 
-    pub fn storeBlob(
+    pub fn storeContent(
         self: *Session,
         reference: u64,
         bytes: []const u8,
     ) !void {
         try self.ensureUsable();
-        var blobs = try self.dir.openDir(self.io, blobs_path, .{});
-        defer blobs.close(self.io);
-        blob_store.put(blobs, self.io, reference, bytes) catch |err| {
-            self.failed = true;
-            return err;
+        var writer = try self.beginContent(reference);
+        errdefer writer.abort();
+        try writer.append(bytes);
+        try writer.finish();
+    }
+
+    pub fn beginContent(
+        self: *Session,
+        reference: u64,
+    ) !ContentWriter {
+        try self.ensureUsable();
+        const scratch = transientScratchState(self.scratch);
+        if (reference == 0) return error.InvalidContentReference;
+        if (scratch.writer_open) return error.ContentWriterAlreadyOpen;
+        if (self.findPendingContent(reference) != null) return error.ContentAlreadyExists;
+        if (self.storage.contentMetadata(self.session_id, reference)) |_| {
+            return error.ContentAlreadyExists;
+        } else |err| switch (err) {
+            error.ContentNotFound => {},
+            else => return err,
+        }
+        var slot_index: ?usize = null;
+        for (scratch.pending, 0..) |slot, index| if (slot == null) {
+            slot_index = index;
+            break;
+        };
+        const slot = slot_index orelse return error.PendingContentCapacityExceeded;
+        if (scratch.file == null) {
+            scratch.file = try createTransientScratch(self.scratch_root, self.io);
+        }
+        scratch.writer_open = true;
+        return .{
+            .session = self,
+            .reference = reference,
+            .slot_index = slot,
+            .start_offset = slot * host_store.max_content_bytes,
         };
     }
 
-    pub fn beginBlob(
-        self: *Session,
-        reference: u64,
-    ) !BlobWriter {
-        try self.ensureUsable();
-        var blobs = try self.dir.openDir(self.io, blobs_path, .{});
-        errdefer blobs.close(self.io);
-        const writer = try blob_store.Writer.begin(blobs, self.io, reference);
-        return .{ .session = self, .blobs = blobs, .writer = writer };
-    }
-
-    pub fn readBlob(
+    pub fn readContent(
         self: *Session,
         reference: u64,
         offset: u64,
         out: []u8,
     ) ![]const u8 {
-        try self.ensureUsable();
-        var blobs = try self.dir.openDir(self.io, blobs_path, .{});
-        defer blobs.close(self.io);
-        return blob_store.readWindow(blobs, self.io, reference, offset, out);
+        var reader = try self.viewContent(reference);
+        return reader.readWindow(offset, out);
     }
 
-    pub fn openBlob(
+    pub fn viewContent(
         self: *Session,
         reference: u64,
-    ) !BlobReader {
+    ) !ContentView {
         try self.ensureUsable();
-        var blobs = try self.dir.openDir(self.io, blobs_path, .{});
-        errdefer blobs.close(self.io);
-        const reader = try blob_store.Reader.openIn(blobs, self.io, reference);
-        return .{ .session = self, .blobs = blobs, .reader = reader };
+        if (self.findPendingContent(reference)) |pending| return .{
+            .session = self,
+            .reference = reference,
+            .meta = .{ .length = pending.length, .digest = pending.digest },
+            .pending_offset = pending.offset,
+        };
+        const meta = self.storage.contentMetadata(self.session_id, reference) catch |err| switch (err) {
+            error.ContentNotFound => return error.FileNotFound,
+            else => return err,
+        };
+        return .{
+            .session = self,
+            .reference = reference,
+            .meta = meta,
+            .pending_offset = null,
+        };
     }
 
     pub fn commitSemantic(
         self: *Session,
         facts: []const session_transition.Fact,
         encoded_core: ?[]const u8,
+    ) !u64 {
+        return self.commitSemanticPrepared(facts, encoded_core, .facts_only);
+    }
+
+    /// Commits the closed Patch Intent content relationship: the transaction
+    /// first references the Intent, and that Intent first references the patch.
+    pub fn commitSemanticWithPatchContent(
+        self: *Session,
+        facts: []const session_transition.Fact,
+        encoded_core: ?[]const u8,
+        patch: PatchContent,
+    ) !u64 {
+        return self.commitSemanticPrepared(facts, encoded_core, .{ .patch_intent = patch });
+    }
+
+    const ContentClosure = union(enum) {
+        facts_only,
+        patch_intent: PatchContent,
+    };
+
+    fn commitSemanticPrepared(
+        self: *Session,
+        facts: []const session_transition.Fact,
+        encoded_core: ?[]const u8,
+        content_closure: ContentClosure,
     ) !u64 {
         try self.ensureUsable();
         if (self.recovery != .ready) return error.SessionRecoveryIncomplete;
@@ -1105,13 +1202,11 @@ pub const Session = struct {
             if (bytes.len != core_state.encoded_size) return error.InvalidCoreStateLength;
             _ = try core_state.decode(bytes);
         }
-        var blobs = try self.dir.openDir(self.io, blobs_path, .{});
-        defer blobs.close(self.io);
         for (facts) |fact| {
             if (fact.kind() == .conversation_advanced) {
                 try self.validatePreparedConversationEntry(fact);
             }
-            try self.validatePreparedBlobReferences(blobs, fact);
+            try self.validatePreparedContentReferences(fact);
         }
 
         var transaction: session_transition.Transaction = .{
@@ -1126,9 +1221,24 @@ pub const Session = struct {
             self.ownership_epoch,
         );
 
-        const final_sequence = try self.storage.commit(self.ownerToken(), transaction);
+        var imports: [max_pending_content]host_store.TransactionContentImport = undefined;
+        var imported_references: [max_pending_content]u64 = undefined;
+        const collected = try self.collectContentImports(
+            transaction,
+            content_closure,
+            &imports,
+            &imported_references,
+        );
+        const final_sequence = try self.storage.commitPrepared(
+            self.ownerToken(),
+            .{
+                .transaction = transaction,
+                .content = imports[0..collected.import_count],
+            },
+        );
         std.debug.assert(final_sequence == transaction.sequence);
         self.resident = next;
+        self.releasePendingReferences(imported_references[0..collected.reference_count]);
         for (facts) |fact| switch (fact) {
             .conversation_advanced => self.pending_conversation = null,
             .task_admitted,
@@ -1147,31 +1257,16 @@ pub const Session = struct {
         return final_sequence;
     }
 
-    fn validatePreparedBlobReferences(
+    fn validatePreparedContentReferences(
         self: *Session,
-        blobs: std.Io.Dir,
         fact: session_transition.Fact,
     ) !void {
-        switch (fact) {
-            .task_admitted => |value| try validateBlob(blobs, self.io, value.content_ref),
-            .operation_submitted, .operation_accepted => |value| try validateBlob(
-                blobs,
-                self.io,
-                value.descriptor_ref,
-            ),
-            .attempt_admitted => |value| try validateBlob(blobs, self.io, value.descriptor_ref),
-            .authorization => |value| try validateBlob(blobs, self.io, value.permission_ref),
-            .result => |value| try validateBlob(blobs, self.io, value.result_ref),
-            // validatePreparedConversationEntry opens the Conversation blob,
-            // verifies its SHA-256 envelope, and validates its semantics.
-            .conversation_advanced => {},
-            .outcome => |value| try validateBlob(blobs, self.io, value.content_ref),
-            .result_applied => |value| try validateBlob(blobs, self.io, value.result_ref),
-            .approval_required => |value| {
-                try validateBlob(blobs, self.io, value.binding_ref);
-                try validateBlob(blobs, self.io, value.descriptor_ref);
-            },
-            .cancellation, .shutdown => {},
+        // validatePreparedConversationEntry opens the Conversation content,
+        // verifies its SHA-256 envelope, and validates its semantics.
+        if (fact == .conversation_advanced) return;
+        const references = fact.contentReferences();
+        for (references.slice()) |reference| {
+            try self.validateContent(reference.reference);
         }
     }
 
@@ -1283,10 +1378,11 @@ pub const Session = struct {
                             } };
                         },
                         .audit => |terminal_sequence| {
-                            _ = try self.storage.publishAuditedCompletion(
-                                stored.envelope,
-                                terminal_sequence,
-                            );
+                            _ = try self.storage.publishCompletion(.{ .audited = .{
+                                .envelope = stored.envelope,
+                                .result = .existing,
+                                .consumed_by_sequence = terminal_sequence,
+                            } });
                             self.resident = prepared.state;
                             self.recovery = .{ .inbox = .{
                                 .after_id = stored.inbox_id,
@@ -1324,10 +1420,11 @@ pub const Session = struct {
                                 cursor.completion.envelope,
                                 completed,
                             );
-                            _ = try self.storage.publishAuditedCompletion(
-                                cursor.completion.envelope,
-                                terminal_sequence,
-                            );
+                            _ = try self.storage.publishCompletion(.{ .audited = .{
+                                .envelope = cursor.completion.envelope,
+                                .result = .existing,
+                                .consumed_by_sequence = terminal_sequence,
+                            } });
                         }
                         self.recovery = .{ .inbox = .{
                             .after_id = cursor.completion.inbox_id,
@@ -1373,8 +1470,7 @@ pub const Session = struct {
             return error.CompletionIdentityMismatch;
         }
         if (envelope.ownership_epoch > self.ownership_epoch) return error.FutureCompletionEpoch;
-        var result = try self.openBlob(envelope.result_ref);
-        result.close();
+        _ = try self.viewContent(envelope.result_ref);
         const prepared = try self.resident.applyingCompletion(
             envelope,
             self.session_id,
@@ -1383,21 +1479,25 @@ pub const Session = struct {
         );
         switch (prepared.disposition) {
             .irrelevant => {
-                const terminal_sequence = try self.historicalAuditSequence(envelope) orelse return;
-                _ = try self.storage.publishAuditedCompletion(envelope, terminal_sequence);
+                const terminal_sequence = try self.historicalAuditSequence(envelope) orelse {
+                    self.releasePendingReferences(&.{envelope.result_ref});
+                    return;
+                };
+                _ = try self.publishStoredCompletion(envelope, terminal_sequence);
             },
-            .duplicate => return,
+            .duplicate => {
+                self.releasePendingReferences(&.{envelope.result_ref});
+                return;
+            },
             .audit => |terminal_sequence| {
-                _ = try self.storage.publishAuditedCompletion(
-                    envelope,
-                    terminal_sequence,
-                );
+                _ = try self.publishStoredCompletion(envelope, terminal_sequence);
             },
             .persist => {
-                _ = try self.storage.publishCompletion(envelope);
+                _ = try self.publishStoredCompletion(envelope, null);
                 self.resident = prepared.state;
             },
         }
+        self.releasePendingReferences(&.{envelope.result_ref});
     }
 
     fn historicalAuditSequence(
@@ -1460,10 +1560,145 @@ pub const Session = struct {
 
     pub fn close(self: *Session) void {
         if (!self.open) return;
-        self.lock_file.unlock(self.io);
-        self.lock_file.close(self.io);
-        self.dir.close(self.io);
+        releaseTransientScratch(self.scratch, self.io);
         self.open = false;
+    }
+
+    /// Reports disk-backed provisional bytes owned by this live Session. The
+    /// value is diagnostic only and confers no content or publication authority.
+    pub fn transientScratchOccupancy(self: *Session) !u64 {
+        try self.ensureUsable();
+        const file = transientScratchState(self.scratch).file orelse return 0;
+        return (try file.stat(self.io)).size;
+    }
+
+    fn publishStoredCompletion(
+        self: *Session,
+        envelope: completion_inbox.Envelope,
+        consumed_by_sequence: ?u64,
+    ) !u64 {
+        const pending = self.findPendingContent(envelope.result_ref);
+        const scratch = transientScratchState(self.scratch);
+        const result: host_store.CompletionResult = if (pending) |content|
+            .{ .first_import = contentImport(
+                if (scratch.file) |*file| file else return error.TransientScratchUnavailable,
+                content.*,
+            ) }
+        else
+            .existing;
+        const publication: host_store.CompletionPublication = if (consumed_by_sequence) |sequence|
+            .{ .audited = .{
+                .envelope = envelope,
+                .result = result,
+                .consumed_by_sequence = sequence,
+            } }
+        else
+            .{ .pending = .{ .envelope = envelope, .result = result } };
+        return self.storage.publishCompletion(publication);
+    }
+
+    fn installPendingContent(self: *Session, content: PendingContent, slot_index: usize) !void {
+        if (self.findPendingContent(content.reference) != null) return error.ContentAlreadyExists;
+        const slot = &transientScratchState(self.scratch).pending[slot_index];
+        if (slot.* != null) return error.PendingContentCapacityExceeded;
+        slot.* = content;
+    }
+
+    fn findPendingContent(self: *Session, reference: u64) ?*PendingContent {
+        for (&transientScratchState(self.scratch).pending) |*slot| if (slot.*) |*content| {
+            if (content.reference == reference) return content;
+        };
+        return null;
+    }
+
+    fn collectContentImports(
+        self: *Session,
+        transaction: session_transition.Transaction,
+        content_closure: ContentClosure,
+        imports: *[max_pending_content]host_store.TransactionContentImport,
+        references: *[max_pending_content]u64,
+    ) !struct { import_count: usize, reference_count: usize } {
+        var import_count: usize = 0;
+        var reference_count: usize = 0;
+        const scratch = transientScratchState(self.scratch);
+        const scratch_file = if (scratch.file) |*file| file else null;
+        const patch_closure: ?PatchContent = switch (content_closure) {
+            .facts_only => null,
+            .patch_intent => |patch| patch,
+        };
+        if (patch_closure) |patch| {
+            if (patch.intent_reference == 0 or patch.patch_reference == 0 or
+                patch.intent_reference == patch.patch_reference or
+                !transaction.referencesPatchIntent(patch.intent_reference) or
+                transaction.referencesContent(patch.patch_reference))
+            {
+                return error.InvalidPatchContentReference;
+            }
+        }
+        for (scratch.pending) |maybe_content| if (maybe_content) |content| {
+            if (!transaction.referencesContent(content.reference)) continue;
+            if (patch_closure) |patch| {
+                if (content.reference == patch.intent_reference) continue;
+            }
+            imports[import_count] = .{ .transaction_fact = contentImport(
+                scratch_file orelse return error.TransientScratchUnavailable,
+                content,
+            ) };
+            references[reference_count] = content.reference;
+            import_count += 1;
+            reference_count += 1;
+        };
+        if (patch_closure) |patch| {
+            const intent = self.findPendingContent(patch.intent_reference) orelse
+                return error.MissingContentReference;
+            const content = self.findPendingContent(patch.patch_reference) orelse
+                return error.MissingContentReference;
+            if (import_count == imports.len or reference_count + 2 > references.len) {
+                return error.ExcessiveContentImports;
+            }
+            imports[import_count] = .{ .patch_intent = .{
+                .intent = contentImport(
+                    scratch_file orelse return error.TransientScratchUnavailable,
+                    intent.*,
+                ),
+                .patch = contentImport(
+                    scratch_file orelse return error.TransientScratchUnavailable,
+                    content.*,
+                ),
+            } };
+            references[reference_count] = patch.intent_reference;
+            references[reference_count + 1] = patch.patch_reference;
+            import_count += 1;
+            reference_count += 2;
+        }
+        return .{ .import_count = import_count, .reference_count = reference_count };
+    }
+
+    fn releasePendingReferences(self: *Session, references: []const u64) void {
+        const scratch = transientScratchState(self.scratch);
+        for (references) |reference| for (&scratch.pending) |*slot| {
+            if (slot.*) |content| if (content.reference == reference) {
+                slot.* = null;
+                break;
+            };
+        };
+        for (scratch.pending) |slot| if (slot != null) return;
+        if (scratch.file) |file| {
+            file.setLength(self.io, 0) catch {
+                // Scratch is non-authoritative, but a failed reset makes its
+                // live offset state unsafe to reuse.
+                self.failed = true;
+                return;
+            };
+        }
+    }
+
+    fn validateContent(self: *Session, reference: u64) !void {
+        if (reference == 0) return;
+        _ = self.viewContent(reference) catch |err| switch (err) {
+            error.FileNotFound => return error.MissingContentReference,
+            else => return err,
+        };
     }
 };
 
@@ -1476,20 +1711,47 @@ fn sessionName(session_id: u64, buffer: *[16]u8) []const u8 {
     return formatId(session_id, buffer) catch unreachable;
 }
 
-fn syncDir(dir: std.Io.Dir, io: std.Io) !void {
-    const directory_file: std.Io.File = .{
-        .handle = dir.handle,
-        .flags = .{ .nonblocking = false },
+fn contentImport(file: *const std.Io.File, content: PendingContent) host_store.ContentImport {
+    return .{
+        .reference = content.reference,
+        .length = content.length,
+        .digest = content.digest,
+        .source = .{ .file = .{
+            .handle = file,
+            .offset = content.offset,
+        } },
     };
-    try directory_file.sync(io);
 }
 
-fn validateBlob(blobs: std.Io.Dir, io: std.Io, reference: u64) !void {
-    if (reference == 0) return;
-    _ = blob_store.metadata(blobs, io, reference) catch |err| switch (err) {
-        error.FileNotFound => return error.MissingBlobReference,
-        else => return err,
-    };
+fn createTransientScratch(root: std.Io.Dir, io: std.Io) !std.Io.File {
+    for (0..8) |_| {
+        var identity: [8]u8 = undefined;
+        io.random(&identity);
+        var name_buffer: [40]u8 = undefined;
+        const name = try std.fmt.bufPrint(
+            &name_buffer,
+            ".onepage-transient-{x}",
+            .{std.mem.readInt(u64, &identity, .little)},
+        );
+        const file = root.createFile(io, name, .{
+            .read = true,
+            .exclusive = true,
+            .permissions = .fromMode(0o600),
+        }) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return err,
+        };
+        root.deleteFile(io, name) catch |err| {
+            file.close(io);
+            root.deleteFile(io, name) catch {
+                // Best-effort cleanup after the initial unlink failure; the
+                // original platform error remains the caller-visible result.
+            };
+            return err;
+        };
+        return file;
+    }
+    return error.TransientScratchIdentityExhausted;
 }
 
 fn validateWorkspace(io: std.Io, path: []const u8) !void {
@@ -1575,7 +1837,6 @@ fn testConfig(workspace_path: []const u8, session_id: u64) CreateConfig {
             .session_id = session_id,
             .agent_id = session_id + 1,
             .task_id = session_id + 2,
-            .branch_id = session_id + 3,
         },
         .workspace_path = workspace_path,
         .model = "fixture:repair",
@@ -1605,7 +1866,7 @@ test "Session creation rejects a non-UTF-8 model identity" {
     config.model = "fixture:\xff";
     try std.testing.expectError(
         error.InvalidSessionMetadata,
-        Session.createExact(layout.sessions, &layout.storage, io, config),
+        Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, config),
     );
 }
 
@@ -1617,20 +1878,20 @@ test "Session creation enforces recoverable root task content" {
     var exact_task: [conversation.max_result_content_size]u8 = @splat('x');
     var exact = testConfig(layout.workspacePath(), 20);
     exact.task = &exact_task;
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, exact);
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, exact);
     created.close();
-    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 20);
-    defer restored.session.close();
-    const recovered = try restored.session.recoverSemanticWindow(8);
+    var restored = try Session.openExisting(layout.sessions, layout.scratch, &layout.storage, io, 20);
+    defer restored.close();
+    const recovered = try restored.recoverSemanticWindow(8);
     try std.testing.expect(!recovered.more);
-    try std.testing.expectEqual(@as(u64, 1), restored.session.entryCount());
+    try std.testing.expectEqual(@as(u64, 1), restored.entryCount());
 
     var oversized_task: [conversation.max_result_content_size + 1]u8 = @splat('x');
     var oversized = testConfig(layout.workspacePath(), 30);
     oversized.task = &oversized_task;
     try std.testing.expectError(
         error.InvalidSessionMetadata,
-        Session.createExact(layout.sessions, &layout.storage, io, oversized),
+        Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, oversized),
     );
     var name_buffer: [16]u8 = undefined;
     try std.testing.expectError(
@@ -1642,7 +1903,7 @@ test "Session creation enforces recoverable root task content" {
     invalid_utf8.task = "\xff";
     try std.testing.expectError(
         error.InvalidSessionMetadata,
-        Session.createExact(layout.sessions, &layout.storage, io, invalid_utf8),
+        Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, invalid_utf8),
     );
     try std.testing.expectError(
         error.FileNotFound,
@@ -1650,19 +1911,20 @@ test "Session creation enforces recoverable root task content" {
     );
 }
 
-test "Session startup removes drafts and does not infer Completion from a sealed orphan" {
+test "transient content disappears unless its reference commits" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
     var created = try Session.createExact(
         layout.sessions,
+        layout.scratch,
         &layout.storage,
         io,
         testConfig(layout.workspacePath(), 25),
     );
-    var sealed = try created.beginBlob(90);
-    try sealed.append("sealed before ledger admission");
-    try sealed.finish();
+    var staged = try created.beginContent(90);
+    try staged.append("staged before ledger admission");
+    try staged.finish();
     const Ignore = struct {
         fn apply(_: *anyopaque, _: completion_inbox.Envelope) !void {}
     };
@@ -1672,53 +1934,44 @@ test "Session startup removes drafts and does not infer Completion from a sealed
         try created.scanCompletionEvidence(&context, Ignore.apply),
     );
 
-    var interrupted = try created.beginBlob(91);
+    var interrupted = try created.beginContent(91);
     try interrupted.append("partial provisional bytes");
-    interrupted.writer.file.close(io);
-    interrupted.writer.open = false;
-    interrupted.blobs.close(io);
+    closeTransientScratchForTest(&created);
     interrupted.open = false; // Simulate process loss before ProviderIo.close.
     created.close();
 
-    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 25);
-    defer restored.session.close();
+    var restored = try Session.openExisting(layout.sessions, layout.scratch, &layout.storage, io, 25);
+    defer restored.close();
     var bytes: [64]u8 = undefined;
-    try std.testing.expectEqualStrings(
-        "sealed before ledger admission",
-        try restored.session.readBlob(90, 0, &bytes),
-    );
-    try std.testing.expectError(error.FileNotFound, restored.session.readBlob(91, 0, &bytes));
+    try std.testing.expectError(error.FileNotFound, restored.readContent(90, 0, &bytes));
+    try std.testing.expectError(error.FileNotFound, restored.readContent(91, 0, &bytes));
 }
 
-test "failed blob seal remains unpublished" {
+test "failed transient append remains unpublished" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
     var created = try Session.createExact(
         layout.sessions,
+        layout.scratch,
         &layout.storage,
         io,
         testConfig(layout.workspacePath(), 26),
     );
     defer created.close();
 
-    var candidate = try created.beginBlob(92);
-    try candidate.append("complete candidate bytes");
-    candidate.writer.file.close(io);
-    if (candidate.finish()) |_| {
-        return error.ExpectedBlobSealFailure;
-    } else |_| {}
-    // The test closed the raw file to inject the write failure. Mark that
-    // injected resource closed before the wrapper releases its directory.
-    candidate.writer.open = false;
-    candidate.abort();
+    var candidate = try created.beginContent(92);
+    closeTransientScratchForTest(&created);
+    _ = candidate.append("candidate bytes") catch {};
+    candidate.open = false;
     var bytes: [1]u8 = undefined;
-    try std.testing.expectError(error.FileNotFound, created.readBlob(92, 0, &bytes));
+    try std.testing.expectError(error.FileNotFound, created.readContent(92, 0, &bytes));
 }
 
 const TestLayout = struct {
     tmp: std.testing.TmpDir,
     storage: host_store.StorageOwner,
+    scratch: *TransientScratch,
     sessions: std.Io.Dir,
     workspace: std.Io.Dir,
     workspace_path: [128]u8,
@@ -1740,6 +1993,8 @@ const TestLayout = struct {
             .{tmp.sub_path},
         );
         const storage = try host_store.StorageOwner.open(io, rendered_database_path, .{});
+        const scratch = try allocateTransientScratch(std.testing.allocator);
+        errdefer destroyTransientScratch(std.testing.allocator, io, scratch);
         var workspace_path: [128]u8 = undefined;
         const rendered = try std.fmt.bufPrint(
             &workspace_path,
@@ -1749,6 +2004,7 @@ const TestLayout = struct {
         return .{
             .tmp = tmp,
             .storage = storage,
+            .scratch = scratch,
             .sessions = sessions,
             .workspace = workspace,
             .workspace_path = workspace_path,
@@ -1761,6 +2017,7 @@ const TestLayout = struct {
     }
 
     fn deinit(self: *TestLayout, io: std.Io) void {
+        destroyTransientScratch(std.testing.allocator, io, self.scratch);
         self.storage.close();
         self.sessions.close(io);
         self.workspace.close(io);
@@ -1846,7 +2103,7 @@ test "create and exact resume preserve distinct identities and one owner" {
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
 
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 10));
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 10));
     const first_token = created.ownerToken();
     var id_buffer: [16]u8 = undefined;
     try std.testing.expectEqualStrings("000000000000000a", try formatId(created.session_id, &id_buffer));
@@ -1854,16 +2111,13 @@ test "create and exact resume preserve distinct identities and one owner" {
     try std.testing.expectEqual(@as(u64, 1), created.activeLeafId());
     try std.testing.expectEqual(@as(u64, 1), created.entryCount());
 
-    try std.testing.expectError(
-        error.SessionBusy,
-        Session.openExisting(layout.sessions, &layout.storage, io, 10),
-    );
     const live_resident = created.resident;
+    const restored_scratch = try allocateTransientScratch(std.testing.allocator);
+    defer destroyTransientScratch(std.testing.allocator, io, restored_scratch);
+    var restored = try Session.openExisting(layout.sessions, restored_scratch, &layout.storage, io, 10);
+    defer restored.close();
     created.close();
-
-    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 10);
-    defer restored.session.close();
-    try std.testing.expectEqual(@as(u64, 2), restored.session.ownership_epoch);
+    try std.testing.expectEqual(@as(u64, 2), restored.ownership_epoch);
     var expected_workspace: [workspace_path_capacity]u8 = undefined;
     const expected_workspace_length = try std.Io.Dir.cwd().realPathFile(
         io,
@@ -1872,28 +2126,26 @@ test "create and exact resume preserve distinct identities and one owner" {
     );
     try std.testing.expectEqualStrings(
         expected_workspace[0..expected_workspace_length],
-        restored.session.workspacePath(),
+        restored.workspacePath(),
     );
-    try std.testing.expectEqualDeep(Projection{
-        .session_id = 10,
-        .task_id = 12,
-        .active_leaf_id = 0,
-        .ownership_epoch = 2,
-    }, restored.session.projection());
-    try std.testing.expectError(error.StaleOwner, restored.session.authorize(first_token));
-    try restored.session.authorize(restored.session.ownerToken());
-    const recovered = try restored.session.recoverSemanticWindow(8);
+    try std.testing.expectEqual(@as(u64, 10), restored.session_id);
+    try std.testing.expectEqual(@as(u64, 12), restored.task_id);
+    try std.testing.expectEqual(@as(u64, 0), restored.activeLeafId());
+    try std.testing.expectEqual(@as(u64, 2), restored.ownership_epoch);
+    try std.testing.expectError(error.StaleOwner, restored.authorize(first_token));
+    try restored.authorize(restored.ownerToken());
+    const recovered = try restored.recoverSemanticWindow(8);
     try std.testing.expect(!recovered.more);
-    try std.testing.expectEqualDeep(live_resident, restored.session.resident);
+    try std.testing.expectEqualDeep(live_resident, restored.resident);
 
-    const root = try restored.session.readEntry(1);
+    const root = try restored.readEntry(1);
     try std.testing.expectEqual(EntryKind.user_text, root.kind);
     try std.testing.expectEqual(@as(u64, 0), root.parent_id);
-    try std.testing.expectEqual(restored.session.task_id, root.content_ref);
+    try std.testing.expectEqual(restored.task_id, root.content_ref);
     var task_buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings(
         "Fix the failing test",
-        try restored.session.readBlob(root.content_ref, 0, &task_buffer),
+        try restored.readContent(root.content_ref, 0, &task_buffer),
     );
 }
 
@@ -1902,10 +2154,10 @@ test "future ownership epochs never enter the durable Completion Inbox" {
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
 
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 15));
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 15));
     defer created.close();
     const token = created.ownerToken();
-    try created.storeBlob(99, "future result");
+    try created.storeContent(99, "future result");
     try std.testing.expectError(error.FutureCompletionEpoch, created.publishCompletionEvidence(completion_inbox.bind(.{
         .kind = .model,
         .session_id = created.session_id,
@@ -1969,6 +2221,7 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
         const session_id: u64 = 20 + @as(u64, @intCast(index)) * 10;
         var created = try Session.createExact(
             layout.sessions,
+            layout.scratch,
             &layout.storage,
             io,
             testConfig(layout.workspacePath(), session_id),
@@ -1986,8 +2239,8 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
         const descriptor_ref = 200 + index;
         const attempt_id = 210 + index;
         const first_result_ref = 220 + index;
-        try created.storeBlob(descriptor_ref, "epoch descriptor");
-        try created.storeBlob(first_result_ref, "first evidence");
+        try created.storeContent(descriptor_ref, "epoch descriptor");
+        try created.storeContent(first_result_ref, "first evidence");
         const admitted = if (case.recovery_class == .model)
             session_transition.modelAttemptAdmitted(
                 operation,
@@ -2031,13 +2284,14 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
 
         var restored = (try Session.openExisting(
             layout.sessions,
+            layout.scratch,
             &layout.storage,
             io,
             session_id,
-        )).session;
+        ));
         while ((try restored.recoverSemanticWindow(32)).more) {}
         const conflicting_result_ref = 230 + index;
-        try restored.storeBlob(conflicting_result_ref, "cross epoch evidence");
+        try restored.storeContent(conflicting_result_ref, "cross epoch evidence");
         const cross_epoch = completion_inbox.bind(.{
             .kind = case.kind,
             .session_id = restored.session_id,
@@ -2091,6 +2345,7 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
         const session_id = 60 + @as(u64, @intCast(index)) * 10;
         var created = try Session.createExact(
             layout.sessions,
+            layout.scratch,
             &layout.storage,
             io,
             testConfig(layout.workspacePath(), session_id),
@@ -2108,8 +2363,8 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
         const descriptor_ref = 310 + index;
         const attempt_id = 320 + index;
         const result_ref = 330 + index;
-        try created.storeBlob(descriptor_ref, "descriptor");
-        try created.storeBlob(result_ref, "wrong-kind result");
+        try created.storeContent(descriptor_ref, "descriptor");
+        try created.storeContent(result_ref, "wrong-kind result");
         _ = try created.commitSemantic(&.{
             session_transition.operationSubmitted(
                 operation,
@@ -2196,6 +2451,7 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
         const session_id = 80 + @as(u64, @intCast(index)) * 10;
         var created = try Session.createExact(
             layout.sessions,
+            layout.scratch,
             &layout.storage,
             io,
             testConfig(layout.workspacePath(), session_id),
@@ -2212,8 +2468,8 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
         const descriptor_ref = 410 + index;
         const attempt_id = 420 + index;
         const result_ref = 430 + index;
-        try created.storeBlob(descriptor_ref, "descriptor");
-        try created.storeBlob(result_ref, "lost wrong-kind result");
+        try created.storeContent(descriptor_ref, "descriptor");
+        try created.storeContent(result_ref, "lost wrong-kind result");
         _ = try created.commitSemantic(&.{
             session_transition.operationSubmitted(
                 operation,
@@ -2259,15 +2515,19 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
             .result_ref = result_ref,
             .result_digest = testResultDigest("lost wrong-kind result"),
         });
-        const inbox_id = try layout.storage.publishCompletion(wrong);
+        const inbox_id = try layout.storage.publishCompletion(.{ .pending = .{
+            .envelope = wrong,
+            .result = .existing,
+        } });
         created.close();
 
         var restored = (try Session.openExisting(
             layout.sessions,
+            layout.scratch,
             &layout.storage,
             io,
             session_id,
-        )).session;
+        ));
         defer restored.close();
         try std.testing.expectError(
             error.CompletionEvidenceKindMismatch,
@@ -2284,7 +2544,7 @@ test "late evidence audits against the first terminal Result sequence" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 55));
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 55));
     defer created.close();
     const operation: session_transition.OperationContext = .{
         .agent = .{
@@ -2296,10 +2556,8 @@ test "late evidence audits against the first terminal Result sequence" {
         .generation = 1,
     };
     const descriptor = testDescriptor("terminal sequence descriptor");
-    try created.storeBlob(201, "descriptor");
-    try created.storeBlob(202, "winning result");
-    try created.storeBlob(203, "later outcome");
-    try created.storeBlob(204, "late result");
+    try created.storeContent(201, "descriptor");
+    try created.storeContent(202, "winning result");
     _ = try created.commitSemantic(&.{
         session_transition.operationSubmitted(operation, 201, descriptor, .none),
         session_transition.modelAttemptAdmitted(operation, 211, 201, descriptor, 0),
@@ -2317,6 +2575,7 @@ test "late evidence audits against the first terminal Result sequence" {
         .result_ref = 202,
         .result_digest = testResultDigest("winning result"),
     }));
+    try created.storeContent(203, "later outcome");
     const terminal_sequence = try created.commitSemantic(&.{session_transition.result(.{
         .operation = operation,
         .result_ref = 202,
@@ -2330,6 +2589,7 @@ test "late evidence audits against the first terminal Result sequence" {
         203,
     )}, null);
 
+    try created.storeContent(204, "late result");
     try created.publishCompletionEvidence(completion_inbox.bind(.{
         .kind = .model,
         .session_id = created.session_id,
@@ -2377,6 +2637,7 @@ test "late evidence for a prior Operation audits through durable history" {
         const session_id = 110 + @as(u64, @intCast(case_index)) * 10;
         var created = try Session.createExact(
             layout.sessions,
+            layout.scratch,
             &layout.storage,
             io,
             testConfig(layout.workspacePath(), session_id),
@@ -2409,12 +2670,8 @@ test "late evidence for a prior Operation audits through durable history" {
         const live_result_ref = descriptor_a_ref + 9;
         const recovery_result_ref = descriptor_a_ref + 10;
         const conflict_result_ref = descriptor_a_ref + 11;
-        try created.storeBlob(descriptor_a_ref, "prior descriptor");
-        try created.storeBlob(descriptor_b_ref, "current descriptor");
-        try created.storeBlob(winner_result_ref, "winning result");
-        try created.storeBlob(live_result_ref, "live late result");
-        try created.storeBlob(recovery_result_ref, "recovered late result");
-        try created.storeBlob(conflict_result_ref, "conflicting late result");
+        try created.storeContent(descriptor_a_ref, "prior descriptor");
+        try created.storeContent(winner_result_ref, "winning result");
 
         var admission: [6]session_transition.Fact = undefined;
         admission[0] = session_transition.operationSubmitted(
@@ -2459,6 +2716,7 @@ test "late evidence for a prior Operation audits through durable history" {
             .class = .ordinary,
             .evidence = .{ .durable = testDurableEvidence(case.kind, winner_attempt) },
         })}, null);
+        try created.storeContent(descriptor_b_ref, "current descriptor");
         _ = try created.commitSemantic(&.{
             session_transition.operationSubmitted(
                 operation_b,
@@ -2476,7 +2734,7 @@ test "late evidence for a prior Operation audits through durable history" {
             ),
         }, null);
         const sequence_before_late = try layout.storage.sessionHead(session_id);
-        const projection_before_late = created.projection();
+        const resident_before_late = created.resident;
 
         const live_late = completion_inbox.bind(.{
             .kind = case.kind,
@@ -2490,6 +2748,7 @@ test "late evidence for a prior Operation audits through durable history" {
             .result_ref = live_result_ref,
             .result_digest = testResultDigest("live late result"),
         });
+        try created.storeContent(live_result_ref, "live late result");
         try created.publishCompletionEvidence(live_late);
         const live_audit = try layout.storage.readCompletion(session_id, winner_inbox_id + 1);
         try std.testing.expectEqual(terminal_sequence, live_audit.consumed_by_sequence.?);
@@ -2523,12 +2782,13 @@ test "late evidence for a prior Operation audits through durable history" {
             .result_ref = conflict_result_ref,
             .result_digest = testResultDigest("conflicting late result"),
         });
+        try created.storeContent(conflict_result_ref, "conflicting late result");
         try std.testing.expectError(
             error.ConflictingCompletionEvidence,
             created.publishCompletionEvidence(conflicting),
         );
         try std.testing.expectEqual(sequence_before_late, try layout.storage.sessionHead(session_id));
-        try std.testing.expectEqualDeep(projection_before_late, created.projection());
+        try std.testing.expectEqualDeep(resident_before_late, created.resident);
         var current: TestCurrentOperation = .{};
         _ = try created.inspectSemantic(&current, TestCurrentOperation.apply);
         try std.testing.expectEqual(operation_b.operation_id, current.operation_id);
@@ -2546,16 +2806,28 @@ test "late evidence for a prior Operation audits through durable history" {
             .result_ref = recovery_result_ref,
             .result_digest = testResultDigest("recovered late result"),
         });
-        const recovered_inbox_id = try layout.storage.publishCompletion(recovered_late);
+        try created.storeContent(recovery_result_ref, "recovered late result");
+        const recovered_content = created.findPendingContent(recovery_result_ref) orelse {
+            return error.MissingTestContent;
+        };
+        const recovered_inbox_id = try layout.storage.publishCompletion(.{ .pending = .{
+            .envelope = recovered_late,
+            .result = .{ .first_import = contentImport(
+                &transientScratchState(created.scratch).file.?,
+                recovered_content.*,
+            ) },
+        } });
+        created.releasePendingReferences(&.{recovery_result_ref});
         try std.testing.expectEqual(winner_inbox_id + 2, recovered_inbox_id);
         created.close();
 
         var restored = (try Session.openExisting(
             layout.sessions,
+            layout.scratch,
             &layout.storage,
             io,
             session_id,
-        )).session;
+        ));
         defer restored.close();
         const ledger_recovery = try restored.recoverSemanticWindow(
             @intCast(sequence_before_late),
@@ -2603,7 +2875,7 @@ test "fallible Inbox publication is prepared before durable Completion commit" {
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
 
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 16));
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 16));
     defer created.close();
     const token = created.ownerToken();
     const agent: session_transition.AgentContext = .{
@@ -2651,7 +2923,7 @@ test "fallible Inbox publication is prepared before durable Completion commit" {
     conflicting.result_ref = 106;
     conflicting.result_digest = testResultDigest("107");
     conflicting = testReboundEnvelope(conflicting);
-    try created.storeBlob(conflicting.result_ref, "conflicting result");
+    try created.storeContent(conflicting.result_ref, "conflicting result");
     try std.testing.expectError(
         error.InboxSemanticCapacityExceeded,
         created.publishCompletionEvidence(conflicting),
@@ -2664,9 +2936,9 @@ test "recovery advances only within the configured Session Ledger quantum" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 80));
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 80));
     for (0..5) |index| {
-        try created.storeBlob(index + 1, "ledger fixture");
+        try created.storeContent(index + 1, "ledger fixture");
         _ = try created.commitSemantic(&.{session_transition.taskAdmitted(.{
             .agent_id = created.agent_id,
             .agent_generation = 1,
@@ -2677,10 +2949,11 @@ test "recovery advances only within the configured Session Ledger quantum" {
 
     var restored = (try Session.openExisting(
         layout.sessions,
+        layout.scratch,
         &layout.storage,
         io,
         80,
-    )).session;
+    ));
     defer restored.close();
     const first = try restored.recoverSemanticWindow(2);
     try std.testing.expectEqual(@as(u8, 2), first.processed);
@@ -2695,14 +2968,14 @@ test "recovery advances only within the configured Session Ledger quantum" {
     try std.testing.expectEqual(@as(u64, 6), restored.resident.semantic.last_sequence);
 }
 
-test "semantic commits reject missing immutable blob references before advancing the Ledger" {
+test "semantic commits reject missing immutable content references before advancing the Ledger" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 81));
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 81));
     defer created.close();
 
-    try std.testing.expectError(error.MissingBlobReference, created.commitSemantic(
+    try std.testing.expectError(error.MissingContentReference, created.commitSemantic(
         &.{session_transition.operationSubmitted(.{
             .agent = .{
                 .agent_id = created.agent_id,
@@ -2898,9 +3171,9 @@ test "conversation advances only after its Ledger fact commits" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 20));
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 20));
     defer created.close();
-    try created.storeBlob(900, "The test is fixed.");
+    try created.storeContent(900, "The test is fixed.");
     const assistant = try created.appendConversation(.assistant_text, 900, null);
 
     try std.testing.expectEqual(@as(u64, 2), assistant.entry_id);
@@ -2925,7 +3198,7 @@ test "conversation advances only after its Ledger fact commits" {
     var response_buffer: [32]u8 = undefined;
     try std.testing.expectEqualStrings(
         "The test is fixed.",
-        try created.readBlob(900, 0, &response_buffer),
+        try created.readContent(900, 0, &response_buffer),
     );
 }
 
@@ -2933,9 +3206,9 @@ test "prepared Conversation content is validated at commit" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 35));
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 35));
     defer created.close();
-    try created.storeBlob(900, &.{ 0xff, 0xfe });
+    try created.storeContent(900, &.{ 0xff, 0xfe });
     const assistant = try created.appendConversation(.assistant_text, 900, null);
 
     try std.testing.expectError(
@@ -3008,19 +3281,17 @@ test "Conversation UTF-8 validation carries split sequences across bounded windo
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 25));
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 25));
     defer created.close();
     var content: [4098]u8 = @splat('a');
     @memcpy(content[4095..], "€");
-    try created.storeBlob(990, &content);
-    var valid = try created.openBlob(990);
-    defer valid.close();
+    try created.storeContent(990, &content);
+    var valid = try created.viewContent(990);
     try validateUtf8ConversationWindows(&valid, 0, valid.length());
 
     content[4096] = 'x';
-    try created.storeBlob(991, &content);
-    var invalid = try created.openBlob(991);
-    defer invalid.close();
+    try created.storeContent(991, &content);
+    var invalid = try created.viewContent(991);
     try std.testing.expectError(
         error.InvalidConversationContent,
         validateUtf8ConversationWindows(&invalid, 0, invalid.length()),
@@ -3033,6 +3304,7 @@ test "tool-call recovery trusts admitted exact-byte identity without reparsing J
     defer layout.deinit(io);
     var created = try Session.createExact(
         layout.sessions,
+        layout.scratch,
         &layout.storage,
         io,
         testConfig(layout.workspacePath(), 21),
@@ -3050,14 +3322,14 @@ test "tool-call recovery trusts admitted exact-byte identity without reparsing J
     );
     @memcpy(call[conversation.call_header_size..][0..key.len], key);
     @memcpy(call[conversation.call_header_size + key.len ..], admitted_arguments);
-    try created.storeBlob(901, &call);
-    try created.validateConversationBlob(.tool_call, 901, 1);
+    try created.storeContent(901, &call);
+    try created.validateConversationContent(.tool_call, 901, 1);
 
     call[0] = 0;
-    try created.storeBlob(902, &call);
+    try created.storeContent(902, &call);
     try std.testing.expectError(
         error.InvalidConversationContent,
-        created.validateConversationBlob(.tool_call, 902, 1),
+        created.validateConversationContent(.tool_call, 902, 1),
     );
 }
 
@@ -3072,8 +3344,8 @@ test "resume leaves an uncommitted conversation record invisible" {
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
     var marker: u8 = 0;
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 30));
-    try created.storeBlob(901, "uncommitted assistant text");
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 30));
+    try created.storeContent(901, "uncommitted assistant text");
     try std.testing.expectError(
         error.InjectedCrash,
         created.appendConversation(.assistant_text, 901, .{
@@ -3085,13 +3357,13 @@ test "resume leaves an uncommitted conversation record invisible" {
     try std.testing.expectError(error.SessionUnavailable, created.authorize(created.ownerToken()));
     created.close();
 
-    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 30);
-    defer restored.session.close();
-    try std.testing.expectEqual(@as(u64, 0), restored.session.activeLeafId());
-    _ = try restored.session.recoverSemanticWindow(8);
-    try std.testing.expectEqual(@as(u64, 1), restored.session.activeLeafId());
-    try std.testing.expectEqual(@as(u64, 1), restored.session.entryCount());
-    try std.testing.expectError(error.InvalidEntrySequence, restored.session.readEntry(2));
+    var restored = try Session.openExisting(layout.sessions, layout.scratch, &layout.storage, io, 30);
+    defer restored.close();
+    try std.testing.expectEqual(@as(u64, 0), restored.activeLeafId());
+    _ = try restored.recoverSemanticWindow(8);
+    try std.testing.expectEqual(@as(u64, 1), restored.activeLeafId());
+    try std.testing.expectEqual(@as(u64, 1), restored.entryCount());
+    try std.testing.expectError(error.InvalidEntrySequence, restored.readEntry(2));
 }
 
 test "repeating task text creates a distinct session" {
@@ -3103,15 +3375,16 @@ test "repeating task text creates a distinct session" {
         .model = "fixture:repair",
         .task = "Fix the failing test",
     };
-    var first = try Session.create(layout.sessions, &layout.storage, io, config);
+    var first = try Session.create(layout.sessions, layout.scratch, &layout.storage, io, config);
     defer first.close();
-    var second = try Session.create(layout.sessions, &layout.storage, io, config);
+    const second_scratch = try allocateTransientScratch(std.testing.allocator);
+    defer destroyTransientScratch(std.testing.allocator, io, second_scratch);
+    var second = try Session.create(layout.sessions, second_scratch, &layout.storage, io, config);
     defer second.close();
 
     try std.testing.expect(first.session_id != second.session_id);
     try std.testing.expect(first.agent_id != second.agent_id);
     try std.testing.expect(first.task_id != second.task_id);
-    try std.testing.expect(first.branch_id != second.branch_id);
 }
 
 test "creation rejects non Git workspaces and aliased identities" {
@@ -3132,6 +3405,8 @@ test "creation rejects non Git workspaces and aliased identities" {
     );
     var storage = try host_store.StorageOwner.open(io, database_path, .{});
     defer storage.close();
+    const scratch = try allocateTransientScratch(std.testing.allocator);
+    defer destroyTransientScratch(std.testing.allocator, io, scratch);
 
     var plain_path_buffer: [128]u8 = undefined;
     const plain_path = try std.fmt.bufPrint(
@@ -3141,7 +3416,7 @@ test "creation rejects non Git workspaces and aliased identities" {
     );
     try std.testing.expectError(
         error.NotGitWorktree,
-        Session.createExact(sessions, &storage, io, testConfig(plain_path, 60)),
+        Session.createExact(sessions, scratch, &storage, io, testConfig(plain_path, 60)),
     );
 
     try initTestGitWorktree(plain, io);
@@ -3149,7 +3424,7 @@ test "creation rejects non Git workspaces and aliased identities" {
     invalid.identities.agent_id = invalid.identities.session_id;
     try std.testing.expectError(
         error.InvalidIdentity,
-        Session.createExact(sessions, &storage, io, invalid),
+        Session.createExact(sessions, scratch, &storage, io, invalid),
     );
 
     var oversized_bytes: [host_store.max_model_bytes + 1]u8 = undefined;
@@ -3158,7 +3433,7 @@ test "creation rejects non Git workspaces and aliased identities" {
     oversized.model = &oversized_bytes;
     try std.testing.expectError(
         error.InvalidSessionMetadata,
-        Session.createExact(sessions, &storage, io, oversized),
+        Session.createExact(sessions, scratch, &storage, io, oversized),
     );
     var name_buffer: [16]u8 = undefined;
     try std.testing.expectError(
@@ -3171,23 +3446,143 @@ test "session metadata has no per-session manifest projection" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 80));
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 80));
     created.close();
 
     var name_buffer: [16]u8 = undefined;
-    var session_dir = try layout.sessions.openDir(io, sessionName(80, &name_buffer), .{});
-    defer session_dir.close(io);
-    try std.testing.expectError(error.FileNotFound, session_dir.access(io, "manifest", .{}));
-    var restored = try Session.openExisting(layout.sessions, &layout.storage, io, 80);
-    defer restored.session.close();
-    try std.testing.expectEqual(@as(u64, 2), restored.session.ownership_epoch);
+    try std.testing.expectError(
+        error.FileNotFound,
+        layout.sessions.access(io, sessionName(80, &name_buffer), .{}),
+    );
+    var restored = try Session.openExisting(layout.sessions, layout.scratch, &layout.storage, io, 80);
+    defer restored.close();
+    try std.testing.expectEqual(@as(u64, 2), restored.ownership_epoch);
+}
+
+test "transient scratch is an opaque pointer-stable borrowed capability" {
+    const scratch = try allocateTransientScratch(std.testing.allocator);
+    defer destroyTransientScratch(std.testing.allocator, std.testing.io, scratch);
+
+    const borrowed = scratch;
+    try bindTransientScratch(scratch);
+    defer releaseTransientScratch(scratch, std.testing.io);
+    try std.testing.expectEqual(scratch, borrowed);
+    try std.testing.expectError(error.TransientScratchAlreadyBound, bindTransientScratch(borrowed));
+    try ensureTransientScratchBound(borrowed);
+}
+
+test "pending content cap accepts the three-value patch admission closure" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(
+        layout.sessions,
+        layout.scratch,
+        &layout.storage,
+        io,
+        testConfig(layout.workspacePath(), 83),
+    );
+    defer created.close();
+
+    var facts: [max_pending_content]session_transition.Fact = undefined;
+    const agent: session_transition.AgentContext = .{
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .ownership_epoch = created.ownership_epoch,
+    };
+    for (0..max_pending_content) |index| {
+        const reference: u64 = 100 + index;
+        var writer = try created.beginContent(reference);
+        try writer.append("x");
+        try writer.finish();
+        facts[index] = session_transition.outcome(agent, index + 1, reference);
+    }
+    try std.testing.expectError(
+        error.PendingContentCapacityExceeded,
+        created.beginContent(100 + max_pending_content),
+    );
+    _ = try created.commitSemantic(&facts, null);
+    try std.testing.expectEqual(@as(u64, 0), try created.transientScratchOccupancy());
+    for (transientScratchState(created.scratch).pending) |pending| try std.testing.expect(pending == null);
+}
+
+test "committing one pending maximum value reuses only its scratch slot" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(
+        layout.sessions,
+        layout.scratch,
+        &layout.storage,
+        io,
+        testConfig(layout.workspacePath(), 84),
+    );
+    defer created.close();
+
+    const bytes_a = [_]u8{'A'} ** host_store.max_content_bytes;
+    const bytes_b = [_]u8{'B'} ** host_store.max_content_bytes;
+    const bytes_c = [_]u8{'C'} ** host_store.max_content_bytes;
+    const bytes_d = [_]u8{'D'} ** host_store.max_content_bytes;
+    const agent: session_transition.AgentContext = .{
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .ownership_epoch = created.ownership_epoch,
+    };
+
+    try created.storeContent(200, &bytes_a);
+    try created.storeContent(201, &bytes_b);
+    try created.storeContent(202, &bytes_c);
+    try std.testing.expectError(error.PendingContentCapacityExceeded, created.beginContent(203));
+
+    const first = [_]session_transition.Fact{session_transition.outcome(agent, 1, 200)};
+    _ = try created.commitSemantic(&first, null);
+
+    var writer = try created.beginContent(203);
+    try std.testing.expectEqual(@as(u64, 0), writer.start_offset);
+    try writer.append(&bytes_d);
+    try writer.finish();
+
+    var retained: [1]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, "B", try created.readContent(201, 0, &retained));
+    try std.testing.expectEqualSlices(u8, "C", try created.readContent(202, 0, &retained));
+
+    const rest = [_]session_transition.Fact{
+        session_transition.outcome(agent, 2, 201),
+        session_transition.outcome(agent, 3, 202),
+        session_transition.outcome(agent, 4, 203),
+    };
+    _ = try created.commitSemantic(&rest, null);
+    try std.testing.expectEqual(@as(u64, 0), try created.transientScratchOccupancy());
+}
+
+test "resume reserves pointer-stable scratch before claiming ownership" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(
+        layout.sessions,
+        layout.scratch,
+        &layout.storage,
+        io,
+        testConfig(layout.workspacePath(), 82),
+    );
+    created.close();
+
+    try bindTransientScratch(layout.scratch);
+    defer releaseTransientScratch(layout.scratch, io);
+    try std.testing.expectError(
+        error.TransientScratchAlreadyBound,
+        Session.openExisting(layout.sessions, layout.scratch, &layout.storage, io, 82),
+    );
+    const stored = try layout.storage.readSession(82);
+    try std.testing.expectEqual(@as(u64, 1), stored.ownership_epoch);
 }
 
 test "resume rejects a missing recorded workspace before advancing ownership" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
-    var created = try Session.createExact(layout.sessions, &layout.storage, io, testConfig(layout.workspacePath(), 85));
+    var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 85));
     created.close();
     layout.workspace.close(io);
     try layout.tmp.dir.rename("repo", layout.tmp.dir, "moved", io);
@@ -3195,7 +3590,7 @@ test "resume rejects a missing recorded workspace before advancing ownership" {
 
     try std.testing.expectError(
         error.WorkspaceUnavailable,
-        Session.openExisting(layout.sessions, &layout.storage, io, 85),
+        Session.openExisting(layout.sessions, layout.scratch, &layout.storage, io, 85),
     );
     const stored = try layout.storage.readSession(85);
     try std.testing.expectEqual(@as(u64, 1), stored.ownership_epoch);

@@ -709,7 +709,7 @@ pub fn reconcile(io: std.Io, intent: Intent, patch: []const u8) !Reconciliation 
     };
 }
 
-fn intentDigest(intent: Intent) binding_digest.PatchIntent {
+pub fn intentDigest(intent: Intent) binding_digest.PatchIntent {
     var hasher = binding_digest.Hasher(binding_digest.PatchIntent).init();
     var integers: [32]u8 = @splat(0);
     std.mem.writeInt(u64, integers[0..8], intent.operation_id, .little);

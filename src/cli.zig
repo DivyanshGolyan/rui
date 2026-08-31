@@ -653,7 +653,6 @@ fn promptPermission(io: std.Io, owner: *harness.Harness, approval: harness.Proje
     );
     try std.Io.File.stdout().writeStreamingAll(io, prompt);
     var reader = try owner.openProjectionContent(approval);
-    defer reader.close();
     var window: [output_window_size]u8 = undefined;
     var offset: u64 = 0;
     while (offset < reader.length()) {
@@ -725,7 +724,6 @@ fn resolveWorkspacePath(
 
 fn writeFinalAnswer(io: std.Io, owner: *harness.Harness, projection: harness.Projection) !void {
     var reader = try owner.openProjectionContent(projection);
-    defer reader.close();
     var window: [output_window_size]u8 = undefined;
     var safe: [output_window_size]u8 = undefined;
     var offset: u64 = 0;

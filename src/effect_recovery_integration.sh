@@ -5,14 +5,23 @@ root=$(mktemp -d "${TMPDIR:-/tmp}/onepage-effect-recovery.XXXXXX")
 trap 'rm -rf "$root"' EXIT
 root=$(cd "$root" && pwd -P)
 
-mkdir -p "$root/sealed-orphan/state" "$root/sealed-orphan/repo"
-git -C "$root/sealed-orphan/repo" init -q
+mkdir -p "$root/prepublication/state" "$root/prepublication/repo"
+git -C "$root/prepublication/repo" init -q
 set +e
-sealed_orphan_session=$($fixture crash-sealed-model "$root/sealed-orphan/state" "$root/sealed-orphan/repo")
+prepublication_session=$($fixture crash-prepublication-model "$root/prepublication/state" "$root/prepublication/repo")
 crash_status=$?
 set -e
 test "$crash_status" -eq 86
-test "$($fixture recover-sealed-model "$root/sealed-orphan/state" "$sealed_orphan_session")" = finished
+test "$($fixture recover-prepublication-model "$root/prepublication/state" "$prepublication_session")" = finished
+
+mkdir -p "$root/transaction-crash/state" "$root/transaction-crash/repo"
+git -C "$root/transaction-crash/repo" init -q
+set +e
+transaction_crash_session=$($fixture crash-transaction-model "$root/transaction-crash/state" "$root/transaction-crash/repo")
+transaction_crash_status=$?
+set -e
+test "$transaction_crash_status" -eq 88
+test "$($fixture recover-prepublication-model "$root/transaction-crash/state" "$transaction_crash_session")" = finished
 
 mkdir -p "$root/published-completion/state" "$root/published-completion/repo"
 git -C "$root/published-completion/repo" init -q

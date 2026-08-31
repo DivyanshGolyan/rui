@@ -127,10 +127,10 @@ That result motivated the windowed adapter but is not part of the selected libcu
 
 The provider contract reads an
 immutable request through a caller-provided window and appends a response into a predetermined
-durable writer. [`model_operation.zig`](../../src/model_operation.zig) fixes the request window at
-4 KiB. [`blob_store.zig`](../../src/blob_store.zig) bounds each durable blob at 1 MiB and writes it
-incrementally. [`model_protocol.zig`](../../src/model_protocol.zig) bounds the canonical response at
-16 KiB.
+provisional writer. [`model_operation.zig`](../../src/model_operation.zig) fixes the request window at
+4 KiB. [`host_store.zig`](../../src/host_store.zig) bounds each durable content value at 1 MiB and
+imports complete provisional bytes through 4 KiB SQLite windows.
+[`model_protocol.zig`](../../src/model_protocol.zig) bounds the canonical response at 16 KiB.
 
 Those bounds do not automatically carry through a provider adapter. The adapter must preserve them
 when converting the durable house format to provider JSON and when converting SSE events back to the

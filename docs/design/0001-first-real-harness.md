@@ -102,7 +102,7 @@ onepage [--repo PATH] --model PROVIDER:MODEL TASK
 onepage --resume SESSION_ID
 ```
 
-Creating a session prints its stable identity before the first external effect. Resume restores the recorded repository binding, model selection, session, agent, task, and active branch; credentials remain external and must still be available to the relevant adapter. Harness accepts a Provider only as part of a provider-neutral `ModelBinding` that also carries the exact immutable model identity. Create always requires that binding. Resume may omit it for read-only/local reconstruction, but any resumed external model work requires the binding and validates its identity before provider dispatch or a new durable Result. The caller cannot replace the recorded model. If the session lock is held, the command fails without opening a second owner. Repeating task text creates a new session and never implies resume.
+Creating a session prints its stable identity before the first external effect. Resume restores the recorded repository binding, model selection, session, agent, task, and active branch; credentials remain external and must still be available to the relevant adapter. Harness accepts a Provider only as part of a provider-neutral `ModelBinding` that also carries the exact immutable model identity. Create always requires that binding. Resume may omit it for read-only/local reconstruction, but any resumed external model work requires the binding and validates its identity before provider dispatch or a new durable Result. The caller cannot replace the recorded model. The Host Runtime lifetime lock prevents a second process owner, and the Session ownership epoch fences stale in-process values. Repeating task text creates a new session and never implies resume.
 
 ## Workspace continuity
 
@@ -154,13 +154,13 @@ Interface:
 AgentRuntime.command(command) !CommandResult
 AgentRuntime.drive(budget) !Progress
 AgentRuntime.events(cursor, out) !EventBatch
-AgentRuntime.readBlob(blob, offset, out) !BlobRead
+AgentRuntime.readContent(content_ref, offset, out) !ContentRead
 AgentRuntime.close() !void
 ```
 
-This is attractive if several simultaneous clients eventually exist, such as terminal, structured JSON, and editor integrations. It also gives clients durable cursors and explicit blob reads.
+This is attractive if several simultaneous clients eventually exist, such as terminal, structured JSON, and editor integrations. It also gives clients durable cursors and explicit content reads.
 
-It is premature for the first task. No second real client currently needs the event and blob protocol, and exposing it would make callers understand five lifecycle concepts before the core loop has proved useful. A convenience facade would then be required for the common case.
+It is premature for the first task. No second real client currently needs the event and content protocol, and exposing it would make callers understand five lifecycle concepts before the core loop has proved useful. A convenience facade would then be required for the common case.
 
 Decision: reject for v1. Reconsider only after a second real client cannot use the process interface or `Harness` projections.
 
@@ -435,7 +435,7 @@ Adapters:
 - Codex subscription access for live inference.
 - Fixture model that validates the exact model-visible history before returning each response.
 
-The adapter consumes one already-accepted typed request. It receives an append-only candidate writer and synchronously returns one typed candidate-or-failure outcome. The Host alone seals or replaces the unpublished draft and later publishes Completion evidence. The adapter cannot call the core or publish Session authority.
+The adapter consumes one already-accepted typed request. It receives an append-only candidate writer and synchronously returns one typed candidate-or-failure outcome. The Host alone settles the bounded provisional capture, imports complete bytes, and publishes Completion evidence. The adapter cannot call the core or publish Session authority.
 
 Codex-specific SSE framing, first-terminal policy, status agreement, OAuth diagnostics, and the one-frame allocation-free JSON cursor remain inside the Codex adapter. They do not appear in the model port. A future adapter may combine many wire events or use its own bounded Host-owned scratch while returning through the same synchronous candidate-or-failure settlement seam. Authorization and model transports use the same deadline-owned native HTTP pattern: timeout interrupts the owned socket and the request task is joined before return.
 
@@ -447,11 +447,11 @@ Dependency category: local-substitutable.
 
 Adapters:
 
-- File journal, blob spool, and atomic checkpoint publisher.
+- SQLite Host Store and atomic semantic publisher.
 - Temporary fault-injecting store for deterministic durability tests.
 
 The store interface exposes semantic publications, not raw file calls to the harness caller.
-Crash-left provisional `.blob.tmp` writers are not semantic publications. They live in a wholly owned flat scratch namespace, separate from sealed history. After the Session lock establishes a new ownership epoch, startup validates and removes at most 16 exact draft files—sixteen times V1's single live writer capacity—and fails before deletion on excess or unexpected entries. Complete sealed blobs remain recoverable for later admission.
+External work may write one bounded unlinked scratch file, but that scratch has no durable identity and is never recovered. The Storage Owner imports complete content through fixed windows and commits the content row with its first Session-ledger, Conversation, or Completion reference in one SQLite transaction. The Host lifetime lock and ownership epochs fence writers; no per-Session lock or durable draft tree exists.
 
 ### Tool execution port
 
@@ -516,10 +516,10 @@ Adding a tool changes the closed vocabulary, versioned encoding, validation, pro
 - Core mutable state and core-owned scratch: exactly one 64 KiB page.
 - Native call stack and executable text: outside the page claim and measured separately.
 - Native harness metadata and queues: caller-owned fixed storage, measured separately.
-- Task text, conversation entries, request bodies, responses, patches, and command output: durable blobs and bounded windows.
+- Task text, conversation entries, request bodies, responses, patches, and command output: immutable Host Store content rows and bounded windows.
 - Tool output: bounded resident tail plus complete durable spool.
 - Transport buffers, filesystem cache, subprocesses, and UI: outside the one-page claim and reported separately.
-- Sleeping logical agents: durable identity, records, checkpoint, and blob references; no resident object graph.
+- Sleeping logical agents: durable identity, records, checkpoint, and content references; no resident object graph.
 
 ## Testing strategy
 
