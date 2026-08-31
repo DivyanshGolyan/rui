@@ -220,8 +220,9 @@ end-to-end completion point and writes raw JSONL under `.zig-cache`; use
 the exact commit, build mode, machine, and cold/warm conditions. Numeric performance results are release
 evidence, not a noise-sensitive normal-`check` assertion.
 
-The capacity-one fixture is the measurement foundation, not the final density proof. Issue #3 must reuse
-the same schema after runtime-sized Active Capacity exists; issue #34 must add its production-shaped
+The runtime fixture is the measurement foundation, not the final density proof. Issue #3 reuses the
+same schema at startup capacities 1, 10, and 100 while labelling its present completion path as
+sequential; issue #34 must add its production-shaped
 1/10/50/100 provider-transport points. macOS `physical_footprint` is the primary whole-process memory
 measure. RSS, lifetime peak footprint, and virtual size remain separate observations: virtual size
 includes large platform mappings and stack reservation and must not be presented as committed memory.
@@ -230,6 +231,13 @@ ordinary JavaScript Workflow through the real disposable evaluator. It reports H
 memory separately and together, and verifies zero evaluator processes at Blocked and terminal boundaries.
 The standalone evaluator fixture remains component evidence; it must not be presented as an end-to-end
 agent-workflow measurement.
+
+The checked-in [`runtime capacity and density baseline`](docs/measurements/2026-08-31-runtime-sweep.md)
+contains the raw three-repetition sweep and deterministic summary for the sole SQLite Host Store. It
+records exact Slot and Active Credit reservation, fixed shared-workspace reservation and high water,
+live Harness count after each workload, whole-process memory, timing, I/O, and durable bytes. The report
+explicitly preserves the remaining roughly 2.36 GB process-write observation for 10,000 Dormant Sessions
+instead of treating the sole-store ownership simplification as a storage-throughput optimization.
 
 Every density and product run reports these categories separately:
 
