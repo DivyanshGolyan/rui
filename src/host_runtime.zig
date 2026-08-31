@@ -1,13 +1,17 @@
 const std = @import("std");
+const core_image = @import("core_image.zig");
 const host_store = @import("host_store.zig");
 const lifecycle = @import("lifecycle.zig");
 const model_contract = @import("model_contract.zig");
 const session_store = @import("session.zig");
 
 pub const Config = struct {
+    active_capacity: usize = 1,
     sqlite_heap_limit_bytes: u64 = 8 * 1024 * 1024,
     storage: host_store.Config = .{},
 };
+
+pub const max_active_capacity: usize = 100;
 
 var runtime_open: std.atomic.Value(bool) = .init(false);
 
@@ -16,7 +20,7 @@ const State = struct {
     allocator: std.mem.Allocator,
     state_root: std.Io.Dir,
     storage: host_store.StorageOwner,
-    execution: lifecycle.Host = .{},
+    execution: lifecycle.Host,
     harness_owners: std.atomic.Value(usize) = .init(0),
 };
 
@@ -93,6 +97,9 @@ pub const HostRuntime = opaque {
         config: Config,
     ) !*HostRuntime {
         if (state_path.len == 0) return error.InvalidStatePath;
+        if (config.active_capacity == 0 or config.active_capacity > max_active_capacity) {
+            return error.InvalidActiveCapacity;
+        }
         try model_contract.validateBuiltinCatalog();
         if (runtime_open.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
             return error.HostRuntimeAlreadyOpen;
@@ -110,12 +117,15 @@ pub const HostRuntime = opaque {
         defer allocator.free(database_path);
         var storage = try host_store.StorageOwner.open(io, database_path, config.storage);
         errdefer storage.close();
+        var execution = try lifecycle.Host.init(allocator, config.active_capacity);
+        errdefer execution.deinit();
         const runtime = try allocator.create(State);
         runtime.* = .{
             .io = io,
             .allocator = allocator,
             .state_root = state_root,
             .storage = storage,
+            .execution = execution,
         };
         return @ptrCast(runtime);
     }
@@ -130,6 +140,7 @@ pub const HostRuntime = opaque {
             if (owners == closing) return error.HostRuntimeClosed;
             return error.HostRuntimeBusy;
         }
+        runtime.execution.deinit();
         runtime.storage.close();
         host_store.disableProcessHeapLimit();
         runtime.state_root.close(runtime.io);
@@ -140,6 +151,22 @@ pub const HostRuntime = opaque {
 
     pub fn occupiedActivationBytes(self: *const HostRuntime) usize {
         return state(self).execution.slots.occupiedBytes();
+    }
+
+    pub fn activeCapacity(self: *const HostRuntime) usize {
+        return state(self).execution.slots.capacity();
+    }
+
+    pub fn activationSlotBytes(_: *const HostRuntime) usize {
+        return @sizeOf(core_image.ActivationSlot);
+    }
+
+    pub fn activationReservationBytes(self: *const HostRuntime) usize {
+        return state(self).execution.slots.residentBytes();
+    }
+
+    pub fn activationPoolOverheadBytes(self: *const HostRuntime) usize {
+        return state(self).execution.slots.hostOverheadBytes();
     }
 };
 
@@ -170,4 +197,31 @@ fn releaseHarness(runtime: *HostRuntime) void {
 
 fn state(runtime: *const HostRuntime) *State {
     return @ptrCast(@alignCast(@constCast(runtime)));
+}
+
+test "Host Runtime validates and exposes startup-fixed active capacity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expectError(
+        error.InvalidActiveCapacity,
+        HostRuntime.open(std.testing.io, std.testing.allocator, path, .{ .active_capacity = 0 }),
+    );
+    try std.testing.expectError(
+        error.InvalidActiveCapacity,
+        HostRuntime.open(std.testing.io, std.testing.allocator, path, .{
+            .active_capacity = max_active_capacity + 1,
+        }),
+    );
+
+    const runtime = try HostRuntime.open(std.testing.io, std.testing.allocator, path, .{
+        .active_capacity = max_active_capacity,
+    });
+    try std.testing.expectEqual(max_active_capacity, runtime.activeCapacity());
+    try std.testing.expectEqual(
+        max_active_capacity * runtime.activationSlotBytes(),
+        runtime.activationReservationBytes(),
+    );
+    try runtime.close();
 }

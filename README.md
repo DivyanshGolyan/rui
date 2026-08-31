@@ -4,7 +4,7 @@ A resource-bounded, crash-resumable local Run service for programmable coding-ag
 supplies a Workflow Definition and stable Run Key through the local CLI, while one native Zig Host
 Runtime owns the durable Workflow Run, keyed Jobs, and every agent Session. `User` remains a
 Conversation role rather than the Caller or permission authority. Each active Core borrows one
-compile-time-bounded Activation Slot from a fixed resident pool.
+compile-time-bounded Activation Slot from a startup-sized fixed resident pool.
 
 The current checkout implements the deterministic single-Session lifecycle, SQLite Host Store,
 permissioned Bash and patch execution, and repair fixtures described below. The provider-neutral,
@@ -29,11 +29,11 @@ exits. It never owns durable workflow state, a Session, provider, tool, permissi
 decision, and no evaluator remains resident while a Workflow Run is Blocked on Jobs.
 Workflow code cannot observe physical Job completion order: V1 supports deterministic joins through
 `Promise.all` and `Promise.allSettled` and does not expose `Promise.race` or `Promise.any`.
-The target architecture separates compact, canonically encoded Core State from transient
-Activation Slot scratch. Core State's encoded size is derived from `core_state.encoded_size` and is
+The target architecture separates compact, canonically encoded Core State from stage-specific
+transient scratch. Core State's encoded size is derived from `core_state.encoded_size` and is
 currently 176 bytes; authoritative semantic transactions
-carry it directly. Activation decodes that state into one Host-owned slot containing only named
-bounded scratch; V1 removes sizing filler and enforces a 32 KiB ceiling. Suspension scrubs the
+carry it directly. Activation decodes that state into one Host-owned slot containing only decoded
+Core State; V1 removes sizing filler and enforces a 32 KiB ceiling. Suspension scrubs the
 complete slot. A fixed Host-owned pool returns closed capacity instead of allocating a
 fallback slot. Native invariant traces check typed outcomes, rejection-state preservation, semantic
 observations, and canonical restoration rather than slot bytes. Complete Session semantics reconstruct

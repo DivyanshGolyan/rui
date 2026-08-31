@@ -3,12 +3,9 @@ const binding = @import("binding.zig");
 const core_state = @import("core_state.zig");
 const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
-const session_transition = @import("session_transition.zig");
 
 pub const slot_ceiling = 32 * 1024;
 pub const slot_alignment = 8;
-pub const parser_scratch_size = 4 * 1024;
-pub const transition_scratch_size = 4 * 1024;
 
 pub const State = core_state.State;
 pub const ContentWindow = core_state.ContentWindow;
@@ -18,16 +15,12 @@ pub const TaskPhase = core_state.TaskPhase;
 /// Caller-owned working storage for one Activation. None of its layout is durable.
 pub const ActivationSlot = extern struct {
     state: State,
-    parser_scratch: [parser_scratch_size]u8,
-    transition_scratch: [transition_scratch_size]u8,
 };
 
 pub const slot_size = @sizeOf(ActivationSlot);
 
 comptime {
     std.debug.assert(slot_size <= slot_ceiling);
-    std.debug.assert(session_transition.max_payload_size <= transition_scratch_size);
-    std.debug.assert(@sizeOf(session_transition.Transaction) <= transition_scratch_size);
 }
 
 pub const Identity = struct {
@@ -93,66 +86,125 @@ pub const SlotLease = struct {
     }
 };
 
-pub fn SlotPool(comptime capacity: usize) type {
-    if (capacity == 0) @compileError("an Activation Slot pool cannot be empty");
-    return struct {
-        const Self = @This();
+/// Runtime-sized production Slot storage. One Host owns one fixed allocation
+/// for its complete lifetime; Session population never changes its capacity.
+pub const RuntimeSlotPool = struct {
+    const state_mask: u64 = 0b11;
+    const state_free: u64 = 0;
+    const state_occupied: u64 = 1;
+    const state_releasing: u64 = 2;
+    const generation_step: u64 = 4;
 
-        slots: [capacity]ActivationSlot = undefined,
-        occupied: [capacity]bool = @splat(false),
-        generations: [capacity]u64 = @splat(0),
+    const Cell = struct {
+        slot: ActivationSlot = undefined,
+        /// Low two bits: free=0, occupied=1, releasing=2. Higher bits form a
+        /// monotonically increasing generation that fences stale lease copies.
+        state: std.atomic.Value(u64) = .init(0),
+    };
 
-        pub fn borrow(self: *Self) !SlotLease {
-            for (&self.occupied, 0..) |*is_occupied, index| {
-                if (is_occupied.*) continue;
-                if (self.generations[index] == std.math.maxInt(u64)) continue;
-                is_occupied.* = true;
-                self.generations[index] += 1;
-                scrub(&self.slots[index]);
+    cells: []Cell,
+    occupied_count: std.atomic.Value(usize) = .init(0),
+    occupied_high_water: std.atomic.Value(usize) = .init(0),
+
+    pub fn init(allocator: std.mem.Allocator, slot_capacity: usize) !RuntimeSlotPool {
+        if (slot_capacity == 0) return error.InvalidActivationCapacity;
+        const cells = try allocator.alloc(Cell, slot_capacity);
+        for (cells) |*cell| cell.* = .{};
+        return .{ .cells = cells };
+    }
+
+    pub fn deinit(self: *RuntimeSlotPool, allocator: std.mem.Allocator) void {
+        std.debug.assert(self.occupied_count.load(.acquire) == 0);
+        for (self.cells) |*cell| {
+            std.debug.assert(cell.state.load(.acquire) & state_mask == state_free);
+            scrub(&cell.slot);
+        }
+        allocator.free(self.cells);
+        self.* = undefined;
+    }
+
+    pub fn borrow(self: *RuntimeSlotPool) !SlotLease {
+        for (self.cells, 0..) |*cell, index| {
+            var state = cell.state.load(.acquire);
+            while (state & state_mask == state_free) {
+                if (state > std.math.maxInt(u64) - generation_step) break;
+                const occupied_state = state + state_occupied;
+                if (cell.state.cmpxchgWeak(state, occupied_state, .acq_rel, .acquire)) |actual| {
+                    state = actual;
+                    continue;
+                }
+                scrub(&cell.slot);
+                const occupied = self.occupied_count.fetchAdd(1, .acq_rel) + 1;
+                self.raiseHighWater(occupied);
                 return .{
-                    .slot = &self.slots[index],
+                    .slot = &cell.slot,
                     .context = self,
                     .index = index,
-                    .generation = self.generations[index],
+                    .generation = occupied_state,
                     .release_fn = releaseLease,
                 };
             }
-            return error.ActivationCapacityExhausted;
         }
+        return error.ActivationCapacityExhausted;
+    }
 
-        pub fn residentBytes(_: *const Self) usize {
-            return capacity * @sizeOf(ActivationSlot);
-        }
+    pub fn capacity(self: *const RuntimeSlotPool) usize {
+        return self.cells.len;
+    }
 
-        pub fn occupiedBytes(self: *const Self) usize {
-            var count: usize = 0;
-            for (self.occupied) |is_occupied| count += @intFromBool(is_occupied);
-            return count * @sizeOf(ActivationSlot);
-        }
+    pub fn residentBytes(self: *const RuntimeSlotPool) usize {
+        return self.cells.len * @sizeOf(ActivationSlot);
+    }
 
-        pub fn hostOverheadBytes(_: *const Self) usize {
-            return @sizeOf(Self) - capacity * @sizeOf(ActivationSlot);
-        }
+    pub fn occupiedBytes(self: *const RuntimeSlotPool) usize {
+        return self.occupied_count.load(.acquire) * @sizeOf(ActivationSlot);
+    }
 
-        fn releaseLease(
-            context: *anyopaque,
-            index: usize,
-            generation: u64,
-            slot: *ActivationSlot,
-        ) error{StaleSlotLease}!void {
-            const self: *Self = @ptrCast(@alignCast(context));
-            if (index >= capacity or
-                !self.occupied[index] or
-                self.generations[index] != generation or
-                slot != &self.slots[index])
-            {
-                return error.StaleSlotLease;
-            }
-            scrub(slot);
-            self.occupied[index] = false;
+    pub fn occupiedHighWaterBytes(self: *const RuntimeSlotPool) usize {
+        return self.occupied_high_water.load(.acquire) * @sizeOf(ActivationSlot);
+    }
+
+    pub fn hostOverheadBytes(self: *const RuntimeSlotPool) usize {
+        return @sizeOf(RuntimeSlotPool) + self.cells.len * (@sizeOf(Cell) - @sizeOf(ActivationSlot));
+    }
+
+    fn raiseHighWater(self: *RuntimeSlotPool, occupied: usize) void {
+        var high_water = self.occupied_high_water.load(.acquire);
+        while (occupied > high_water) {
+            high_water = self.occupied_high_water.cmpxchgWeak(
+                high_water,
+                occupied,
+                .acq_rel,
+                .acquire,
+            ) orelse return;
         }
-    };
-}
+    }
+
+    fn releaseLease(
+        context: *anyopaque,
+        index: usize,
+        generation: u64,
+        slot: *ActivationSlot,
+    ) error{StaleSlotLease}!void {
+        const self: *RuntimeSlotPool = @ptrCast(@alignCast(context));
+        if (index >= self.cells.len) return error.StaleSlotLease;
+        const cell = &self.cells[index];
+        if (slot != &cell.slot or generation & state_mask != state_occupied or
+            cell.state.cmpxchgStrong(
+                generation,
+                generation + state_releasing - state_occupied,
+                .acq_rel,
+                .acquire,
+            ) != null)
+        {
+            return error.StaleSlotLease;
+        }
+        scrub(slot);
+        const previous = self.occupied_count.fetchSub(1, .acq_rel);
+        std.debug.assert(previous > 0);
+        cell.state.store(generation + generation_step - state_occupied, .release);
+    }
+};
 
 pub const Core = struct {
     slot: *ActivationSlot,
@@ -422,12 +474,8 @@ pub fn scrub(slot: *ActivationSlot) void {
 
 comptime {
     @setEvalBranchQuota(100_000);
-    const VerificationPool = SlotPool(1);
     std.debug.assert(@sizeOf(ActivationSlot) == slot_size);
     std.debug.assert(@alignOf(ActivationSlot) == slot_alignment);
-    std.debug.assert(@offsetOf(ActivationSlot, "parser_scratch") == @sizeOf(State));
-    std.debug.assert(@offsetOf(ActivationSlot, "transition_scratch") ==
-        @sizeOf(State) + parser_scratch_size);
     assertNoAllocatorParameter(Core.initialize);
     assertNoAllocatorParameter(Core.activate);
     assertNoAllocatorParameter(Core.deliver);
@@ -441,8 +489,7 @@ comptime {
     assertNoAllocatorParameter(Core.suspendInto);
     assertNoAllocatorParameter(Core.abandon);
     assertNoAllocatorStorage(Core);
-    assertNoAllocatorParameter(VerificationPool.borrow);
-    assertNoAllocatorStorage(VerificationPool);
+    assertNoAllocatorParameter(RuntimeSlotPool.borrow);
 }
 
 fn assertNoAllocatorParameter(comptime callable: anytype) void {
@@ -644,8 +691,9 @@ test "generation exhaustion is a closed rejection" {
     try std.testing.expectEqual(OperationPhase.idle, (try core.operation()).phase);
 }
 
-test "fixed slot pool returns closed capacity and scrubs before reuse" {
-    var pool: SlotPool(1) = .{};
+test "runtime slot pool returns closed capacity and scrubs before reuse" {
+    var pool = try RuntimeSlotPool.init(std.testing.allocator, 1);
+    defer pool.deinit(std.testing.allocator);
     var lease = try pool.borrow();
     @memset(std.mem.asBytes(lease.slot), 0xa5);
     try std.testing.expectError(error.ActivationCapacityExhausted, pool.borrow());
@@ -657,18 +705,14 @@ test "fixed slot pool returns closed capacity and scrubs before reuse" {
     try std.testing.expectEqual(slot_size, pool.residentBytes());
 }
 
-test "the filler-free Activation Slot and widened transaction scratch stay bounded" {
-    try std.testing.expectEqual(
-        @sizeOf(State) + parser_scratch_size + transition_scratch_size,
-        @sizeOf(ActivationSlot),
-    );
+test "the filler-free Activation Slot contains only decoded Core State" {
+    try std.testing.expectEqual(@sizeOf(State), @sizeOf(ActivationSlot));
     try std.testing.expect(@sizeOf(ActivationSlot) <= slot_ceiling);
-    try std.testing.expect(session_transition.max_payload_size <= transition_scratch_size);
-    try std.testing.expect(@sizeOf(session_transition.Transaction) <= transition_scratch_size);
 }
 
 test "stale copied lease cannot release a newly borrowed slot" {
-    var pool: SlotPool(1) = .{};
+    var pool = try RuntimeSlotPool.init(std.testing.allocator, 1);
+    defer pool.deinit(std.testing.allocator);
     var original = try pool.borrow();
     var stale_copy = original;
     try original.release();
@@ -680,6 +724,63 @@ test "stale copied lease cannot release a newly borrowed slot" {
 
     try std.testing.expectEqual(@as(u64, 99), current.slot.state.agent_id);
     try std.testing.expectError(error.ActivationCapacityExhausted, pool.borrow());
+}
+
+test "runtime Slot pool admits exactly its capacity under concurrent borrowing" {
+    const Worker = struct {
+        fn run(
+            pool: *RuntimeSlotPool,
+            active_mask: *std.atomic.Value(u64),
+            ready: *std.atomic.Value(usize),
+            release: *const std.atomic.Value(bool),
+            failed: *std.atomic.Value(bool),
+        ) void {
+            var lease = pool.borrow() catch {
+                failed.store(true, .release);
+                return;
+            };
+            const bit = @as(u64, 1) << @intCast(lease.index);
+            if (active_mask.fetchOr(bit, .acq_rel) & bit != 0) failed.store(true, .release);
+            _ = ready.fetchAdd(1, .acq_rel);
+            while (!release.load(.acquire)) std.atomic.spinLoopHint();
+            _ = active_mask.fetchAnd(~bit, .acq_rel);
+            lease.release() catch failed.store(true, .release);
+        }
+    };
+
+    var pool = try RuntimeSlotPool.init(std.testing.allocator, 4);
+    defer pool.deinit(std.testing.allocator);
+    var active_mask: std.atomic.Value(u64) = .init(0);
+    var ready: std.atomic.Value(usize) = .init(0);
+    var release: std.atomic.Value(bool) = .init(false);
+    var failed: std.atomic.Value(bool) = .init(false);
+    var workers: [4]std.Thread = undefined;
+    for (&workers) |*worker| {
+        worker.* = try std.Thread.spawn(.{}, Worker.run, .{
+            &pool,
+            &active_mask,
+            &ready,
+            &release,
+            &failed,
+        });
+    }
+    while (ready.load(.acquire) != workers.len and !failed.load(.acquire)) {
+        std.atomic.spinLoopHint();
+    }
+    const all_workers_borrowed = !failed.load(.acquire) and ready.load(.acquire) == workers.len;
+    const unique_slots = active_mask.load(.acquire) == 0b1111;
+    const full_is_closed = if (pool.borrow()) |unexpected| block: {
+        var lease = unexpected;
+        lease.release() catch failed.store(true, .release);
+        break :block false;
+    } else |err| err == error.ActivationCapacityExhausted;
+    const high_water_is_exact = pool.occupiedHighWaterBytes() == 4 * @sizeOf(ActivationSlot);
+    release.store(true, .release);
+    for (workers) |worker| worker.join();
+    try std.testing.expect(all_workers_borrowed);
+    try std.testing.expect(unique_slots);
+    try std.testing.expect(full_is_closed);
+    try std.testing.expect(high_water_is_exact);
 }
 
 test "maximum context window is rejected before operation mutation" {

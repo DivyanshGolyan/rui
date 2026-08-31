@@ -14,79 +14,120 @@ const session_store = @import("session.zig");
 const session_transition = @import("session_transition.zig");
 
 const agent_generation: u32 = 1;
-const production_active_capacity: usize = 1;
-const ProductionSlotPool = core_image.SlotPool(production_active_capacity);
 
 comptime {
     std.debug.assert(model_contract.max_patch_input_bytes == patch_tool.max_patch_size);
-    std.debug.assert(production_active_capacity <= @bitSizeOf(usize));
-}
-
-fn allActiveCredits(comptime active_capacity: usize) usize {
-    comptime std.debug.assert(active_capacity != 0 and active_capacity <= @bitSizeOf(usize));
-    return if (active_capacity == @bitSizeOf(usize))
-        std.math.maxInt(usize)
-    else
-        (@as(usize, 1) << @intCast(active_capacity)) - 1;
 }
 
 /// Process-owned bounded activation capacity. Construct this once at host
 /// startup and pass it through every agent lifecycle entry point.
-fn HostWithCapacity(comptime active_capacity: usize) type {
-    return struct {
-        const Self = @This();
+pub const Host = struct {
+    const CreditCell = std.atomic.Value(bool);
 
-        slots: core_image.SlotPool(active_capacity) = .{},
-        available_active_credits: std.atomic.Value(usize) = .init(allActiveCredits(active_capacity)),
-        semantic_validation: SemanticValidationWorkspacePool = .{},
-        patch_workspace: PatchWorkspacePool = .{},
+    allocator: std.mem.Allocator,
+    slots: core_image.RuntimeSlotPool,
+    credits: []CreditCell,
+    occupied_credits: std.atomic.Value(usize) = .init(0),
+    credit_high_water: std.atomic.Value(usize) = .init(0),
+    semantic_validation: SemanticValidationWorkspacePool = .{},
+    patch_workspace: PatchWorkspacePool = .{},
 
-        /// The fixed admission token held by one live Harness today. Issue #34
-        /// transfers this same token to an admitted detached Attempt or closure;
-        /// it never creates an additional Attempt budget.
-        pub const ActiveCredit = struct {
-            host: *Self,
-            bit: usize,
-            active: bool = true,
+    /// The fixed admission token held by one live Harness today. Issue #34
+    /// transfers this same token to an admitted detached Attempt or closure;
+    /// it never creates an additional Attempt budget.
+    pub const ActiveCredit = struct {
+        host: *Host,
+        index: usize,
+        active: bool = true,
 
-            pub fn release(self: *ActiveCredit) void {
-                if (!self.active) return;
-                const previous = self.host.available_active_credits.fetchOr(self.bit, .release);
-                std.debug.assert(previous & self.bit == 0);
-                self.active = false;
-            }
-        };
-
-        /// Reserve one of the Host's startup-fixed Active Credits before a
-        /// Harness can allocate or claim durable Session ownership.
-        pub fn reserveActiveCredit(self: *Self) !ActiveCredit {
-            var available = self.available_active_credits.load(.acquire);
-            while (available != 0) {
-                const bit = @as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(@ctz(available)));
-                if (self.available_active_credits.cmpxchgWeak(
-                    available,
-                    available & ~bit,
-                    .acq_rel,
-                    .acquire,
-                )) |observed| {
-                    available = observed;
-                    continue;
-                }
-                return .{ .host = self, .bit = bit };
-            }
-            return error.ActiveCapacityExhausted;
-        }
-
-        pub fn resourceLedger(self: *const Self) HostResourceLedger {
-            return .{
-                .semantic_validation = self.semantic_validation.measurements(),
-                .patch_workspace = self.patch_workspace.measurements(),
-            };
+        pub fn release(self: *ActiveCredit) void {
+            if (!self.active) return;
+            const was_occupied = self.host.credits[self.index].swap(false, .acq_rel);
+            std.debug.assert(was_occupied);
+            const previous = self.host.occupied_credits.fetchSub(1, .acq_rel);
+            std.debug.assert(previous > 0);
+            self.active = false;
         }
     };
-}
 
-pub const Host = HostWithCapacity(production_active_capacity);
+    pub fn init(allocator: std.mem.Allocator, active_capacity: usize) !Host {
+        if (active_capacity == 0) return error.InvalidActiveCapacity;
+        var slots = try core_image.RuntimeSlotPool.init(allocator, active_capacity);
+        errdefer slots.deinit(allocator);
+        const credits = try allocator.alloc(CreditCell, active_capacity);
+        for (credits) |*credit| credit.* = .init(false);
+        return .{ .allocator = allocator, .slots = slots, .credits = credits };
+    }
+
+    pub fn deinit(self: *Host) void {
+        std.debug.assert(self.occupied_credits.load(.acquire) == 0);
+        for (self.credits) |credit| std.debug.assert(!credit.load(.acquire));
+        self.allocator.free(self.credits);
+        self.slots.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    /// Reserve one of the Host's startup-fixed Active Credits before a
+    /// Harness can allocate or claim durable Session ownership.
+    pub fn reserveActiveCredit(self: *Host) !ActiveCredit {
+        for (self.credits, 0..) |*credit, index| {
+            if (credit.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) continue;
+            const occupied = self.occupied_credits.fetchAdd(1, .acq_rel) + 1;
+            self.raiseCreditHighWater(occupied);
+            return .{ .host = self, .index = index };
+        }
+        return error.ActiveCapacityExhausted;
+    }
+
+    pub fn resourceLedger(self: *const Host) HostResourceLedger {
+        return .{
+            .activation = .{
+                .capacity = self.slots.capacity(),
+                .slot_bytes = @sizeOf(core_image.ActivationSlot),
+                .slot_reservation_bytes = self.slots.residentBytes(),
+                .pool_overhead_bytes = self.slots.hostOverheadBytes(),
+                .occupied_bytes = self.slots.occupiedBytes(),
+                .occupied_high_water_bytes = self.slots.occupiedHighWaterBytes(),
+            },
+            .active_credits = .{
+                .capacity = self.credits.len,
+                .occupied = self.occupied_credits.load(.acquire),
+                .occupied_high_water = self.credit_high_water.load(.acquire),
+                .reservation_bytes = self.credits.len * @sizeOf(CreditCell),
+            },
+            .semantic_validation = self.semantic_validation.measurements(),
+            .patch_workspace = self.patch_workspace.measurements(),
+        };
+    }
+
+    fn raiseCreditHighWater(self: *Host, occupied: usize) void {
+        var high_water = self.credit_high_water.load(.acquire);
+        while (occupied > high_water) {
+            high_water = self.credit_high_water.cmpxchgWeak(
+                high_water,
+                occupied,
+                .acq_rel,
+                .acquire,
+            ) orelse return;
+        }
+    }
+};
+
+pub const ActivationResourceLedger = struct {
+    capacity: usize,
+    slot_bytes: usize,
+    slot_reservation_bytes: usize,
+    pool_overhead_bytes: usize,
+    occupied_bytes: usize,
+    occupied_high_water_bytes: usize,
+};
+
+pub const ActiveCreditResourceLedger = struct {
+    capacity: usize,
+    occupied: usize,
+    occupied_high_water: usize,
+    reservation_bytes: usize,
+};
 
 pub const SemanticValidationResourceLedger = struct {
     multiplier: usize,
@@ -123,6 +164,8 @@ pub const PatchWorkspaceResourceLedger = struct {
 };
 
 pub const HostResourceLedger = struct {
+    activation: ActivationResourceLedger,
+    active_credits: ActiveCreditResourceLedger,
     semantic_validation: SemanticValidationResourceLedger,
     patch_workspace: PatchWorkspaceResourceLedger,
 };
@@ -499,7 +542,7 @@ const Core = struct {
     encoded_state: [core_state.encoded_size]u8 = undefined,
     active: bool = false,
 
-    fn open(pool: *ProductionSlotPool) !Core {
+    fn open(pool: *core_image.RuntimeSlotPool) !Core {
         const lease = try pool.borrow();
         return .{ .lease = lease, .slot = lease.slot };
     }
@@ -3270,7 +3313,8 @@ test "committed typed child descriptors select execution without captured output
 }
 
 test "generic tool and input dispositions cannot bypass the closed Action mapping" {
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
     var core = try Core.open(&host.slots);
     defer core.close();
     try core.initialize(1);
@@ -3375,7 +3419,8 @@ test "model dispatch releases Core and keeps request content immutable" {
     });
     defer session.close();
 
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
     const SlotProbeProvider = struct {
         host: *Host,
         observed_released_slot: bool = false,
@@ -3501,31 +3546,30 @@ fn expectPatchArgumentBoundary(
 }
 
 test "Host owns one semantic validation workspace independent of Activation Slot capacity" {
-    var host: Host = .{};
-    const HostFour = HostWithCapacity(4);
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
+    var host_four = try Host.init(std.testing.allocator, 4);
+    defer host_four.deinit();
     try std.testing.expectEqual(@as(usize, 256_200), semantic_validation_workspace_size);
     try std.testing.expectEqual(@as(usize, 256_224), @sizeOf(SemanticValidationWorkspacePool));
     try std.testing.expectEqual(@as(usize, 16_384), @sizeOf(PatchWorkspace));
     try std.testing.expectEqual(@as(usize, 16_408), @sizeOf(PatchWorkspacePool));
-    try std.testing.expectEqual(@as(usize, 281_016), @sizeOf(Host));
-    try std.testing.expectEqual(@as(usize, 306_120), @sizeOf(HostFour));
-    try std.testing.expectEqual(@as(usize, 8_360), @sizeOf(core_image.ActivationSlot));
+    try std.testing.expectEqual(@sizeOf(core_state.State), @sizeOf(core_image.ActivationSlot));
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
         @sizeOf(@TypeOf(host.semantic_validation)),
     );
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
-        @sizeOf(@TypeOf(@as(HostFour, .{}).semantic_validation)),
+        @sizeOf(@TypeOf(host_four.semantic_validation)),
     );
     try std.testing.expectEqual(
         @sizeOf(PatchWorkspacePool),
         @sizeOf(@TypeOf(host.patch_workspace)),
     );
-    try std.testing.expectEqual(
-        @as(usize, 8_384),
-        @offsetOf(Host, "semantic_validation"),
-    );
+    try std.testing.expectEqual(@as(usize, 1), host.slots.capacity());
+    try std.testing.expectEqual(@as(usize, 4), host_four.slots.capacity());
+    try std.testing.expectEqual(4 * host.slots.residentBytes(), host_four.slots.residentBytes());
     var lease = try host.semantic_validation.borrow();
     @memset(std.mem.asBytes(lease.workspace), 0xa5);
     try std.testing.expectError(error.SemanticValidationWorkspaceBusy, host.semantic_validation.borrow());
@@ -3536,7 +3580,8 @@ test "Host owns one semantic validation workspace independent of Activation Slot
 }
 
 test "Host resource ledger measures each fixed scratch stage" {
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
     const initial = host.resourceLedger();
     try std.testing.expectEqual(@as(usize, 1), initial.semantic_validation.multiplier);
     try std.testing.expectEqual(@as(usize, model_protocol.max_response_size), initial.semantic_validation.response_bytes);
@@ -3602,8 +3647,23 @@ test "Host resource ledger measures each fixed scratch stage" {
     try std.testing.expectEqual(@as(u64, 2), bounded.busy_count);
 }
 
+test "Active Credits admit the complete runtime-sized capacity" {
+    var host = try Host.init(std.testing.allocator, 100);
+    defer host.deinit();
+    var credits: [100]Host.ActiveCredit = undefined;
+    for (&credits) |*credit| credit.* = try host.reserveActiveCredit();
+    try std.testing.expectError(error.ActiveCapacityExhausted, host.reserveActiveCredit());
+    const full = host.resourceLedger().active_credits;
+    try std.testing.expectEqual(@as(usize, 100), full.capacity);
+    try std.testing.expectEqual(@as(usize, 100), full.occupied);
+    try std.testing.expectEqual(@as(usize, 100), full.occupied_high_water);
+    for (&credits) |*credit| credit.release();
+    try std.testing.expectEqual(@as(usize, 0), host.resourceLedger().active_credits.occupied);
+}
+
 test "shared patch workspace contends fail-fast without retaining semantic validation" {
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
     var patch = try host.patch_workspace.borrow();
     defer patch.release() catch unreachable;
     patch.workspace.patch[0] = 0xa5;
@@ -3623,7 +3683,8 @@ test "shared patch workspace contends fail-fast without retaining semantic valid
 }
 
 test "stale copied semantic validation lease cannot scrub a new borrower" {
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
     var original = try host.semantic_validation.borrow();
     var stale = original;
     try original.release();
@@ -3636,7 +3697,8 @@ test "stale copied semantic validation lease cannot scrub a new borrower" {
 }
 
 test "stale copied patch workspace lease cannot scrub a new borrower" {
-    var host: Host = .{};
+    var host = try Host.init(std.testing.allocator, 1);
+    defer host.deinit();
     var original = try host.patch_workspace.borrow();
     var stale = original;
     try original.release();
