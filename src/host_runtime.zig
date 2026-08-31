@@ -153,6 +153,10 @@ pub const HostRuntime = opaque {
         return state(self).execution.slots.occupiedBytes();
     }
 
+    pub fn occupiedActivationHighWaterBytes(self: *const HostRuntime) usize {
+        return state(self).execution.slots.occupiedHighWaterBytes();
+    }
+
     pub fn activeCapacity(self: *const HostRuntime) usize {
         return state(self).execution.slots.capacity();
     }

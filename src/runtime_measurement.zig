@@ -51,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
     const activation: ActivationObservation = .{
         .active_capacity = runtime.activeCapacity(),
         .slot_bytes = @sizeOf(core_image.ActivationSlot),
-        .reserved_bytes = runtime.reservedActivationBytes(),
+        .reserved_bytes = runtime.activationReservationBytes(),
         .pool_overhead_bytes = runtime.activationPoolOverheadBytes(),
         .occupied_high_water_bytes = runtime.occupiedActivationHighWaterBytes(),
     };
