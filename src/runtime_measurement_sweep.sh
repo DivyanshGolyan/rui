@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-if test "$#" -ne 5; then
-  echo "usage: runtime_measurement_sweep.sh FIXTURE RAW_OUTPUT SUMMARIZER SUMMARY_OUTPUT REPETITIONS" >&2
+if test "$#" -ne 5 && test "$#" -ne 6; then
+  echo "usage: runtime_measurement_sweep.sh FIXTURE RAW_OUTPUT SUMMARIZER SUMMARY_OUTPUT REPETITIONS [--dirty-validation]" >&2
   exit 2
 fi
 
@@ -11,6 +11,15 @@ output=$2
 summarizer=$3
 summary_output=$4
 repetitions=$5
+mode=${6-}
+# Keep this in sync with max_repetitions in runtime_measurement_summary.zig.
+# The summarizer stores this many samples for each measurement point.
+max_repetitions=99
+
+if test -n "$mode" && test "$mode" != "--dirty-validation"; then
+  echo "only --dirty-validation is supported as an optional mode" >&2
+  exit 2
+fi
 
 case "$repetitions" in
   ''|*[!0-9]*|0)
@@ -18,6 +27,10 @@ case "$repetitions" in
     exit 2
     ;;
 esac
+if test "$repetitions" -gt "$max_repetitions"; then
+  echo "repetitions must not exceed $max_repetitions" >&2
+  exit 2
+fi
 if test $((repetitions % 2)) -eq 0; then
   echo "repetitions must be odd so integer counter medians remain exact" >&2
   exit 2
@@ -28,14 +41,30 @@ mkdir -p "$output_dir"
 temporary="$output.tmp.$$"
 trap 'rm -f "$temporary"' EXIT HUP INT TERM
 
+dirty_source=false
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  dirty_source=true
+fi
+# build.zig, build.zig.zon, and src/ are the fixture's checked-in build inputs.
+# Dependencies are fetched from build.zig.zon; this fixture has no checked-in
+# native dependency root beyond those paths.
+if test -n "$(git ls-files --others --exclude-standard -- build.zig build.zig.zon src)"; then
+  dirty_source=true
+fi
+
+if test "$dirty_source" = true; then
+  if test "$mode" != "--dirty-validation"; then
+    echo "runtime measurement publication requires clean tracked and compiled-source inputs; commit them or use --dirty-validation for non-published development evidence" >&2
+    exit 1
+  fi
+  source_provenance=dirty-validation
+else
+  source_provenance=clean-published
+fi
 source_commit=$(git rev-parse HEAD)
 platform=$(uname -srvmp | tr '"' "'")
-source_dirty=false
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  source_dirty=true
-fi
-printf '{"schema":"onepage.runtime-measurement-sweep.v1","source_commit":"%s","platform":"%s","repetitions":%s,"source_dirty":%s}\n' \
-  "$source_commit" "$platform" "$repetitions" "$source_dirty" > "$temporary"
+printf '{"schema":"onepage.runtime-measurement-sweep.v2","source_commit":"%s","platform":"%s","repetitions":%s,"source_provenance":"%s"}\n' \
+  "$source_commit" "$platform" "$repetitions" "$source_provenance" > "$temporary"
 
 run_point() {
   scenario=$1

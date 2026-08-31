@@ -234,6 +234,16 @@ pub const MemoryAccounting = struct {
     statements_current_bytes: u64,
 };
 
+/// SQLite-maintained storage work and pager counters. Production fixes the
+/// journal mode and page size during database initialization; this reports only
+/// values with a measurement consumer.
+pub const SqlitePagerAccounting = struct {
+    page_count: u64,
+    freelist_pages: u64,
+    cache_pages_written: u64,
+    cache_spill_events: u64,
+};
+
 pub const FaultBoundary = enum {
     before_transition_read,
     after_transition_head_advance,
@@ -437,6 +447,20 @@ pub const StorageOwner = struct {
             .lookaside_current_slots = lookaside.current,
             .lookaside_highwater_slots = lookaside.highwater,
             .statements_current_bytes = statements.current,
+        };
+    }
+
+    pub fn sqlitePagerAccounting(self: *StorageOwner) !SqlitePagerAccounting {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
+        try self.ensureOpen();
+        const cache_writes = try self.databaseStatus(c.SQLITE_DBSTATUS_CACHE_WRITE, false);
+        const cache_spills = try self.databaseStatus(c.SQLITE_DBSTATUS_CACHE_SPILL, false);
+        return .{
+            .page_count = try self.pragmaU64("PRAGMA page_count"),
+            .freelist_pages = try self.pragmaU64("PRAGMA freelist_count"),
+            .cache_pages_written = cache_writes.current,
+            .cache_spill_events = cache_spills.current,
         };
     }
 

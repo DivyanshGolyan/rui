@@ -324,6 +324,11 @@ pub fn build(b: *std.Build) void {
         "measurement-repetitions",
         "Independent processes per runtime measurement point",
     ) orelse 3;
+    const measurement_dirty_validation = b.option(
+        bool,
+        "measurement-dirty-validation",
+        "Run a deliberately non-published runtime-measurement validation from dirty compiled source",
+    ) orelse false;
     const runtime_measurement_summary = addNativeExecutable(
         b,
         "onepage-runtime-measurement-summary",
@@ -338,6 +343,9 @@ pub fn build(b: *std.Build) void {
     run_runtime_measurement_sweep.addArtifactArg(runtime_measurement_summary);
     run_runtime_measurement_sweep.addArg(".zig-cache/onepage-runtime-measurements-summary.json");
     run_runtime_measurement_sweep.addArg(b.fmt("{d}", .{measurement_repetitions}));
+    if (measurement_dirty_validation) {
+        run_runtime_measurement_sweep.addArg("--dirty-validation");
+    }
     const runtime_measurement_sweep_step = b.step(
         "measure-runtime-sweep",
         "Run repeated dormant-memory and completion-throughput measurements",

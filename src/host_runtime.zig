@@ -150,6 +150,17 @@ pub const HostRuntime = opaque {
     pub fn activationPoolOverheadBytes(self: *const HostRuntime) usize {
         return state(self).execution.slots.hostOverheadBytes();
     }
+
+    pub fn sqlitePagerAccounting(self: *HostRuntime) !host_store.SqlitePagerAccounting {
+        return state(self).storage.sqlitePagerAccounting();
+    }
+
+    pub fn sqliteMemoryAccounting(
+        self: *HostRuntime,
+        reset_highwater: bool,
+    ) !host_store.MemoryAccounting {
+        return state(self).storage.memoryAccounting(reset_highwater);
+    }
 };
 
 fn retainHarness(runtime: *HostRuntime) !void {

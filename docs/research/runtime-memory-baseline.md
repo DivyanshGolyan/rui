@@ -8,22 +8,46 @@ not yet exercise concurrent asynchronous Attempts, Codex transport, Bash subproc
 JavaScript Workflow Run. Those costs must remain separate rather than being inferred from this
 fixture.
 
-The measurements were taken from a clean tracked tree at source commit
-`b6943d92fddee5efa063a0c42a5adbe83da9be6a` on a
-16 GiB MacBookPro18,1 running Darwin 24.6.0. The command was:
+The historical v1 measurements below were taken from a clean tracked tree at source commit
+`b6943d92fddee5efa063a0c42a5adbe83da9be6a` on a 16 GiB MacBookPro18,1 running
+Darwin 24.6.0. The current v2 values below are a non-published dirty-tree validation sample from
+the implementation under review at `a24cc9c6141d900d33b8b72919c66bce3400f183`; that commit alone
+does not reconstruct the measured source. They are useful only to validate the collection path, not
+as reproducible published evidence. After committing the v2 implementation, publish a replacement
+clean-tree sweep with:
 
 ```sh
 zig build measure-runtime-sweep -Dmeasurement-repetitions=3
 ```
 
+The publishing command refuses tracked source changes and records the exact clean commit. Development
+may deliberately run the following non-publishing validation command; its raw and summary output are
+labeled `dirty-validation` and must not replace published evidence.
+
+```sh
+zig build measure-runtime-sweep -Dmeasurement-repetitions=1 -Dmeasurement-dirty-validation=true
+```
+
 It writes raw observations to `.zig-cache/onepage-runtime-measurements.jsonl` and a deterministic
 summary to `.zig-cache/onepage-runtime-measurements-summary.json`. Each point runs in a fresh process;
-build artifacts are warm, and the filesystem cache is uncontrolled. Values below are medians of three
-independent processes followed by the complete observed range. `Physical delta` and `RSS delta` are
-measured from the opened runtime to the completed workload so startup cost is not counted twice.
-Durable bytes include only the Host state directory, not the fixture Workspace.
+build artifacts are warm, and the filesystem cache is uncontrolled. Physical-footprint and RSS deltas
+are measured from the opened runtime to the completed workload so startup cost is not counted twice.
+They are signed observations: either value may fall as the operating system reclaims or reclassifies
+pages. Cumulative I/O, wakeup, and SQLite pager counters remain checked monotonic deltas.
 
-## Results
+Schema v2 keeps three exhaustive durable-storage buckets: SQLite files, Session directories, and other
+Host files. It does not independently accumulate a mutable total; readers that need one sum those
+buckets. Each bucket reports logical length and filesystem allocated blocks. Production fixes SQLite
+to DELETE journaling and its configured page size, so the schema reports current page/freelist counts
+and pager write/spill counters rather than an unreachable WAL/checkpoint surface. It also records
+SQLite heap and page-cache current use before and after the workload, plus heap high-water since an
+explicit reset immediately after runtime startup. SQLite's heap statistic is process-wide, not a
+workload delta; the fixture has one SQLite connection. The fixture Workspace remains excluded.
+
+## Historical v1 results
+
+The following three-repetition table remains historical v1 reference data. Its `Durable bytes` value
+is a logical Host-state total, so it is not the v2 storage/pager/allocation evidence.
 
 The median cost of opening an empty runtime over the already initialized fixture process was
 966,848 B of macOS physical footprint (868,480–1,114,432 B) and 2,080,768 B of RSS
@@ -52,11 +76,33 @@ identify a cause.
 | 100 completed turns, capacity 10 | 518.625 ms | 475.617 ms | 20,480 B | 71,532,544 B |
 | 100 completed turns, capacity 100 | 550.305 ms | 490.110 ms | 45,056 B | 71,499,776 B |
 
-The durable representation stays small, but the SQLite workload writes far more bytes than the final
-state occupies. This is an observed end-to-end storage cost, not yet proof of one defective component.
-The next storage investigation should attribute transaction, WAL, checkpoint, and filesystem work
-before changing durability behavior. Package idle wakeups were zero at every median point; interrupt
-wakeups were zero except for the 10,000-Session workload, whose median was three.
+The durable representation stays small, but the process writes far more bytes than the final logical
+file lengths. These are different quantities: the process counter is cumulative, while the v1
+`durable_bytes` value retained only the final length of each file. This is an observed end-to-end
+storage cost, not proof of one defective component. Package idle wakeups were zero at every median
+point; interrupt wakeups were zero except for the 10,000-Session workload, whose median was three.
+
+## V2 non-published storage, pager, and allocation validation sample
+
+This is one dirty-tree ReleaseSafe validation sample (`-Dmeasurement-repetitions=1`), not published
+or reproducible evidence and not a performance benchmark. Replace it with the post-commit clean
+three-repetition command before using it for comparisons. `Heap` is current before and after, followed
+by the workload-interval high-water read before pager diagnostics after the post-startup reset. `Cache`
+is current before and after. Allocated storage uses `st_blocks * 512` and may exceed logical length for
+the many small immutable Session files.
+
+| Workload | SQLite logical / allocated | Session logical / allocated | Pager writes / spills | Heap B before -> after / high-water | Cache B before -> after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Empty runtime | 49,152 / 49,152 | 0 / 0 | 0 / 0 | 197,968 -> 197,968 / 197,968 | 57,856 -> 57,856 |
+| 100 Dormant Sessions | 86,016 / 86,016 | 10,000 / 409,600 | 929 / 0 | 197,968 -> 198,000 / 214,896 | 57,856 -> 66,560 |
+| 1,000 Dormant Sessions | 557,056 / 573,440 | 100,000 / 4,096,000 | 10,126 / 676 | 197,968 -> 198,000 / 223,088 | 57,856 -> 66,560 |
+| 10,000 Dormant Sessions | 5,025,792 / 5,271,552 | 1,000,000 / 40,960,000 | 106,083 / 11,431 | 197,968 -> 198,000 / 223,088 | 57,856 -> 66,560 |
+| 100 completed turns, capacity 1 | 344,064 / 344,064 | 187,900 / 1,638,400 | 3,682 / 21 | 197,968 -> 198,064 / 429,648 | 57,856 -> 66,560 |
+
+`other` was zero at every sampled point. The current page count was 12/21/136/1,227/84 for those rows
+respectively, and the freelist count was zero. The sample therefore distinguishes durable database
+growth, filesystem block allocation, and SQLite's bounded in-process allocation without treating any
+of them as RSS or as cumulative process writes.
 
 The completion fixture is sequential. Its occupied high-water is one Slot at every configured
 capacity. These points measure startup reservation and ordinary sequential overhead; they are not
