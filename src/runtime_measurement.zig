@@ -55,6 +55,17 @@ pub fn main(init: std.process.Init) !void {
         .pool_overhead_bytes = runtime.activationPoolOverheadBytes(),
         .occupied_high_water_bytes = runtime.occupiedActivationHighWaterBytes(),
     };
+    const resources = runtime.resourceLedger();
+    const runtime_resources: RuntimeResourceObservation = .{
+        .harness_owner_bytes = harness.Harness.residentOwnerBytes(),
+        .live_harnesses_after_workload = runtime.liveHarnessCount(),
+        .active_credit_reservation_bytes = resources.active_credits.reservation_bytes,
+        .active_credit_occupied_high_water = resources.active_credits.occupied_high_water,
+        .semantic_validation_reservation_bytes = resources.semantic_validation.reservation_bytes,
+        .semantic_validation_occupied_high_water_bytes = resources.semantic_validation.occupied_high_water_bytes,
+        .patch_workspace_reservation_bytes = resources.patch_workspace.reservation_bytes,
+        .patch_workspace_occupied_high_water_bytes = resources.patch_workspace.occupied_high_water_bytes,
+    };
     layout.closeRuntime();
     const runtime_closed = try process_metrics.sample();
     const observations: Observation = .{
@@ -73,6 +84,7 @@ pub fn main(init: std.process.Init) !void {
         @intCast(cpu_end - cpu_start),
         durable_bytes,
         activation,
+        runtime_resources,
     );
     try std.Io.File.stdout().writeStreamingAll(init.io, report);
 }
@@ -243,6 +255,7 @@ fn formatReport(
     cpu_time_ns: u64,
     durable_bytes: u64,
     activation: ActivationObservation,
+    runtime_resources: RuntimeResourceObservation,
 ) ![]const u8 {
     return std.fmt.bufPrint(buffer,
         \\{{
@@ -255,6 +268,7 @@ fn formatReport(
         \\  "activation_reservation_bytes": {d},
         \\  "activation_pool_overhead_bytes": {d},
         \\  "activation_occupied_high_water_bytes": {d},
+        \\  "runtime_resources": {f},
         \\  "measurement_scope": "whole OnePage process; workload subprocesses excluded",
         \\  "timing": {{"wall_ns": {d}, "cpu_ns": {d}, "operations_per_second": {d:.3}}},
         \\  "durable_bytes": {d},
@@ -276,6 +290,7 @@ fn formatReport(
         activation.reserved_bytes,
         activation.pool_overhead_bytes,
         activation.occupied_high_water_bytes,
+        std.json.fmt(runtime_resources, .{}),
         wall_time_ns,
         cpu_time_ns,
         operationsPerSecond(count, wall_time_ns),
@@ -293,6 +308,17 @@ const ActivationObservation = struct {
     reserved_bytes: usize,
     pool_overhead_bytes: usize,
     occupied_high_water_bytes: usize,
+};
+
+const RuntimeResourceObservation = struct {
+    harness_owner_bytes: usize,
+    live_harnesses_after_workload: usize,
+    active_credit_reservation_bytes: usize,
+    active_credit_occupied_high_water: usize,
+    semantic_validation_reservation_bytes: usize,
+    semantic_validation_occupied_high_water_bytes: usize,
+    patch_workspace_reservation_bytes: usize,
+    patch_workspace_occupied_high_water_bytes: usize,
 };
 
 fn operationsPerSecond(count: usize, wall_time_ns: u64) f64 {

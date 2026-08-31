@@ -172,6 +172,15 @@ pub const HostRuntime = opaque {
     pub fn activationPoolOverheadBytes(self: *const HostRuntime) usize {
         return state(self).execution.slots.hostOverheadBytes();
     }
+
+    pub fn resourceLedger(self: *const HostRuntime) lifecycle.HostResourceLedger {
+        return state(self).execution.resourceLedger();
+    }
+
+    pub fn liveHarnessCount(self: *const HostRuntime) usize {
+        const owners = state(self).harness_owners.load(.acquire);
+        return if (owners == std.math.maxInt(usize)) 0 else owners;
+    }
 };
 
 fn retainHarness(runtime: *HostRuntime) !void {

@@ -43,6 +43,17 @@ const Observations = struct {
     runtime_closed: Sample,
 };
 
+const RuntimeResources = struct {
+    harness_owner_bytes: usize,
+    live_harnesses_after_workload: usize,
+    active_credit_reservation_bytes: usize,
+    active_credit_occupied_high_water: usize,
+    semantic_validation_reservation_bytes: usize,
+    semantic_validation_occupied_high_water_bytes: usize,
+    patch_workspace_reservation_bytes: usize,
+    patch_workspace_occupied_high_water_bytes: usize,
+};
+
 const Record = struct {
     schema: []const u8,
     scenario: []const u8,
@@ -53,6 +64,7 @@ const Record = struct {
     activation_reservation_bytes: usize,
     activation_pool_overhead_bytes: usize,
     activation_occupied_high_water_bytes: usize,
+    runtime_resources: RuntimeResources,
     measurement_scope: []const u8,
     timing: Timing,
     durable_bytes: u64,
@@ -85,6 +97,7 @@ const Group = struct {
     activation_reservation_bytes: usize,
     activation_pool_overhead_bytes: usize,
     activation_occupied_high_water_bytes: usize,
+    runtime_resources: RuntimeResources,
     data: [max_repetitions]Datum = undefined,
     data_count: usize = 0,
 };
@@ -255,7 +268,8 @@ fn findOrCreateGroup(
         if (group.activation_slot_bytes != record.activation_slot_bytes or
             group.activation_reservation_bytes != record.activation_reservation_bytes or
             group.activation_pool_overhead_bytes != record.activation_pool_overhead_bytes or
-            group.activation_occupied_high_water_bytes != record.activation_occupied_high_water_bytes)
+            group.activation_occupied_high_water_bytes != record.activation_occupied_high_water_bytes or
+            !std.meta.eql(group.runtime_resources, record.runtime_resources))
         {
             return error.MixedMeasurementMetadata;
         }
@@ -271,6 +285,7 @@ fn findOrCreateGroup(
         .activation_reservation_bytes = record.activation_reservation_bytes,
         .activation_pool_overhead_bytes = record.activation_pool_overhead_bytes,
         .activation_occupied_high_water_bytes = record.activation_occupied_high_water_bytes,
+        .runtime_resources = record.runtime_resources,
     };
     group_count.* += 1;
     return group;
@@ -299,7 +314,8 @@ fn writeGroup(writer: *std.Io.Writer, group: Group) !void {
         "    {{\"scenario\":\"{s}\",\"count\":{d},\"active_capacity\":{d}," ++
             "\"activation_slot_bytes\":{d},\"activation_reservation_bytes\":{d}," ++
             "\"activation_pool_overhead_bytes\":{d}," ++
-            "\"activation_occupied_high_water_bytes\":{d},\n",
+            "\"activation_occupied_high_water_bytes\":{d},\n" ++
+            "      \"runtime_resources\":{f},\n",
         .{
             @tagName(group.scenario),
             group.count,
@@ -308,6 +324,7 @@ fn writeGroup(writer: *std.Io.Writer, group: Group) !void {
             group.activation_reservation_bytes,
             group.activation_pool_overhead_bytes,
             group.activation_occupied_high_water_bytes,
+            std.json.fmt(group.runtime_resources, .{}),
         },
     );
     inline for (std.meta.fields(IntegerMetric), 0..) |field, index| {
@@ -460,6 +477,16 @@ fn writeRecord(
         .activation_reservation_bytes = 168,
         .activation_pool_overhead_bytes = 40,
         .activation_occupied_high_water_bytes = 168,
+        .runtime_resources = .{
+            .harness_owner_bytes = 8_112,
+            .live_harnesses_after_workload = 0,
+            .active_credit_reservation_bytes = 1,
+            .active_credit_occupied_high_water = 1,
+            .semantic_validation_reservation_bytes = 256_248,
+            .semantic_validation_occupied_high_water_bytes = 256_224,
+            .patch_workspace_reservation_bytes = 16_408,
+            .patch_workspace_occupied_high_water_bytes = 0,
+        },
         .measurement_scope = "test",
         .timing = .{ .wall_ns = 100, .cpu_ns = 90, .operations_per_second = 1.0 },
         .durable_bytes = 10,

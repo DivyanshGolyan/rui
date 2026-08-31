@@ -158,6 +158,10 @@ pub const Progress = struct {
 };
 
 pub const Harness = opaque {
+    pub fn residentOwnerBytes() usize {
+        return @sizeOf(HarnessState);
+    }
+
     pub fn open(config: Config) !*Harness {
         var lease = try host_runtime.Lease.acquire(config.runtime);
         errdefer lease.release();
@@ -920,7 +924,7 @@ fn openTestRuntimeConfigured(
 }
 
 test "Harness owner retains only live lifecycle state" {
-    try std.testing.expectEqual(@as(usize, 8_112), @sizeOf(HarnessState));
+    try std.testing.expectEqual(@as(usize, 8_112), Harness.residentOwnerBytes());
 }
 
 test "Harness close releases opaque transient scratch before retirement" {
