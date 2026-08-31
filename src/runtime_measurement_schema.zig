@@ -30,6 +30,8 @@ pub const ProcessSample = struct {
 pub const Observations = struct {
     baseline: ProcessSample,
     runtime_open: ProcessSample,
+    activation_slots_held: ProcessSample,
+    activation_slots_released: ProcessSample,
     workload_complete: ProcessSample,
     runtime_closed: ProcessSample,
 };
@@ -37,12 +39,6 @@ pub const Observations = struct {
 pub const ByteFootprint = struct {
     logical_file_bytes: u64 = 0,
     allocated_file_bytes: u64 = 0,
-};
-
-pub const DurableStorage = struct {
-    sqlite: ByteFootprint = .{},
-    sessions: ByteFootprint = .{},
-    other: ByteFootprint = .{},
 };
 
 pub const SqlitePagerAccounting = struct {
@@ -94,7 +90,7 @@ pub const Record = struct {
     runtime_resources: RuntimeResources,
     measurement_scope: []const u8,
     timing: Timing,
-    durable_storage: DurableStorage,
+    durable_storage: ByteFootprint,
     sqlite_pager: struct {
         before: SqlitePagerAccounting,
         after: SqlitePagerAccounting,

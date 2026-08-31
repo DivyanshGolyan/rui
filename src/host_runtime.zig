@@ -161,10 +161,6 @@ pub const HostRuntime = opaque {
         return state(self).execution.slots.capacity();
     }
 
-    pub fn activationSlotBytes(_: *const HostRuntime) usize {
-        return @sizeOf(core_image.ActivationSlot);
-    }
-
     pub fn activationReservationBytes(self: *const HostRuntime) usize {
         return state(self).execution.slots.residentBytes();
     }
@@ -180,6 +176,31 @@ pub const HostRuntime = opaque {
     pub fn liveHarnessCount(self: *const HostRuntime) usize {
         const owners = state(self).harness_owners.load(.acquire);
         return if (owners == std.math.maxInt(usize)) 0 else owners;
+    }
+
+    /// Measurement-only residency probe over the production Slot pool. Every
+    /// configured Slot is borrowed, dirtied, and held while `observe` samples
+    /// the process. All leases are then released through the ordinary pool
+    /// path, which scrubs them before this function returns.
+    pub fn withAllActivationSlotsDirty(
+        self: *HostRuntime,
+        context: *anyopaque,
+        observe: *const fn (*anyopaque) anyerror!void,
+    ) !void {
+        const slots = &state(self).execution.slots;
+        var leases: [max_active_capacity]core_image.SlotLease = undefined;
+        var lease_count: usize = 0;
+        defer {
+            while (lease_count != 0) {
+                lease_count -= 1;
+                leases[lease_count].release() catch unreachable;
+            }
+        }
+        while (lease_count < slots.capacity()) : (lease_count += 1) {
+            leases[lease_count] = try slots.borrow();
+            @memset(std.mem.asBytes(leases[lease_count].slot), 0xa5);
+        }
+        try observe(context);
     }
 
     pub fn sqlitePagerAccounting(
@@ -247,7 +268,7 @@ test "Host Runtime validates and exposes startup-fixed active capacity" {
     });
     try std.testing.expectEqual(max_active_capacity, runtime.activeCapacity());
     try std.testing.expectEqual(
-        max_active_capacity * runtime.activationSlotBytes(),
+        max_active_capacity * @sizeOf(core_image.ActivationSlot),
         runtime.activationReservationBytes(),
     );
     try runtime.close();

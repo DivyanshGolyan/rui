@@ -35,6 +35,11 @@ pub fn main(init: std.process.Init) !void {
     try layout.openRuntime(init.io, active_capacity);
     const runtime_open = try process_metrics.sample();
     const runtime = layout.runtime.?;
+    var activation_probe: ActivationResidencyProbe = .{};
+    try runtime.withAllActivationSlotsDirty(&activation_probe, ActivationResidencyProbe.observe);
+    const activation_slots_held = activation_probe.held orelse
+        return error.ActivationResidencySampleMissing;
+    const activation_slots_released = try process_metrics.sample();
     _ = try runtime.sqlitePagerAccounting(true);
     const sqlite_pager_before = try runtime.sqlitePagerAccounting(false);
     const sqlite_memory_before = try runtime.sqliteMemoryAccounting(false);
@@ -101,6 +106,8 @@ pub fn main(init: std.process.Init) !void {
         .observations = .{
             .baseline = wireProcessSample(baseline),
             .runtime_open = wireProcessSample(runtime_open),
+            .activation_slots_held = wireProcessSample(activation_slots_held),
+            .activation_slots_released = wireProcessSample(activation_slots_released),
             .workload_complete = wireProcessSample(workload_complete),
             .runtime_closed = wireProcessSample(runtime_closed),
         },
@@ -233,7 +240,7 @@ const Layout = struct {
 };
 
 const ByteFootprint = schema.ByteFootprint;
-const StorageFootprint = schema.DurableStorage;
+const StorageFootprint = schema.ByteFootprint;
 
 fn addFootprint(total: *ByteFootprint, addition: ByteFootprint) void {
     total.logical_file_bytes += addition.logical_file_bytes;
@@ -245,43 +252,20 @@ fn measureStorage(io: std.Io, directory: std.Io.Dir) !StorageFootprint {
     var iterator = directory.iterate();
     while (try iterator.next(io)) |entry| switch (entry.kind) {
         .file => {
-            const footprint = try measureFile(io, directory, entry.name);
-            if (std.mem.eql(u8, entry.name, "host.sqlite3") or
-                std.mem.startsWith(u8, entry.name, "host.sqlite3-"))
-            {
-                addFootprint(&result.sqlite, footprint);
-            } else {
-                addFootprint(&result.other, footprint);
-            }
+            if (std.mem.eql(u8, entry.name, "host.sqlite3.lock")) continue;
+            if (!isSqliteFile(entry.name)) return error.UnexpectedHostStateEntry;
+            addFootprint(&result, try measureFile(io, directory, entry.name));
         },
-        .directory => {
-            var child = try directory.openDir(io, entry.name, .{ .iterate = true });
-            defer child.close(io);
-            const footprint = try directoryFootprint(io, child);
-            if (std.mem.eql(u8, entry.name, "sessions")) {
-                addFootprint(&result.sessions, footprint);
-            } else {
-                addFootprint(&result.other, footprint);
-            }
-        },
-        else => {},
+        else => return error.UnexpectedHostStateEntry,
     };
     return result;
 }
 
-fn directoryFootprint(io: std.Io, directory: std.Io.Dir) !ByteFootprint {
-    var total: ByteFootprint = .{};
-    var iterator = directory.iterate();
-    while (try iterator.next(io)) |entry| switch (entry.kind) {
-        .file => addFootprint(&total, try measureFile(io, directory, entry.name)),
-        .directory => {
-            var child = try directory.openDir(io, entry.name, .{ .iterate = true });
-            defer child.close(io);
-            addFootprint(&total, try directoryFootprint(io, child));
-        },
-        else => {},
-    };
-    return total;
+fn isSqliteFile(name: []const u8) bool {
+    return std.mem.eql(u8, name, "host.sqlite3") or
+        std.mem.eql(u8, name, "host.sqlite3-journal") or
+        std.mem.eql(u8, name, "host.sqlite3-wal") or
+        std.mem.eql(u8, name, "host.sqlite3-shm");
 }
 
 fn measureFile(io: std.Io, directory: std.Io.Dir, name: []const u8) !ByteFootprint {
@@ -334,6 +318,8 @@ pub fn formatReport(buffer: []u8, record: schema.Record) ![]const u8 {
         \\  "observations": {{
         \\    "baseline": {f},
         \\    "runtime_open": {f},
+        \\    "activation_slots_held": {f},
+        \\    "activation_slots_released": {f},
         \\    "workload_complete": {f},
         \\    "runtime_closed": {f}
         \\  }}
@@ -359,6 +345,8 @@ pub fn formatReport(buffer: []u8, record: schema.Record) ![]const u8 {
         std.json.fmt(record.sqlite_memory, .{}),
         std.json.fmt(record.observations.baseline, .{}),
         std.json.fmt(record.observations.runtime_open, .{}),
+        std.json.fmt(record.observations.activation_slots_held, .{}),
+        std.json.fmt(record.observations.activation_slots_released, .{}),
         std.json.fmt(record.observations.workload_complete, .{}),
         std.json.fmt(record.observations.runtime_closed, .{}),
     });
@@ -370,6 +358,15 @@ const ActivationObservation = struct {
     reserved_bytes: usize,
     pool_overhead_bytes: usize,
     occupied_high_water_bytes: usize,
+};
+
+const ActivationResidencyProbe = struct {
+    held: ?process_metrics.Sample = null,
+
+    fn observe(context: *anyopaque) !void {
+        const self: *ActivationResidencyProbe = @ptrCast(@alignCast(context));
+        self.held = try process_metrics.sample();
+    }
 };
 
 /// Runtime sizes remain native-width, but every persisted measurement value is
@@ -515,6 +512,8 @@ test "producer v2 JSON round-trips through the summary" {
         .observations = .{
             .baseline = empty_sample,
             .runtime_open = empty_sample,
+            .activation_slots_held = empty_sample,
+            .activation_slots_released = empty_sample,
             .workload_complete = empty_sample,
             .runtime_closed = empty_sample,
         },
@@ -545,21 +544,20 @@ test "measurement durable storage excludes fixture Workspace" {
     try std.testing.expectEqualDeep(before, try layout.storageFootprint(std.testing.io));
 }
 
-test "measurement storage buckets retain every Host-state category" {
+test "measurement rejects Host state outside the sole SQLite store" {
     var layout = try Layout.init(std.testing.io, std.testing.allocator);
     defer layout.deinit(std.testing.io);
     try layout.openRuntime(std.testing.io, 1);
-    const before = try layout.storageFootprint(std.testing.io);
     var state = try std.Io.Dir.cwd().openDir(std.testing.io, layout.state_path, .{});
     defer state.close(std.testing.io);
     try state.writeFile(std.testing.io, .{
         .sub_path = "measurement-other",
         .data = "other",
     });
-    const after = try layout.storageFootprint(std.testing.io);
-    try std.testing.expectEqualDeep(before.sqlite, after.sqlite);
-    try std.testing.expectEqualDeep(before.sessions, after.sessions);
-    try std.testing.expectEqual(before.other.logical_file_bytes + 5, after.other.logical_file_bytes);
+    try std.testing.expectError(
+        error.UnexpectedHostStateEntry,
+        layout.storageFootprint(std.testing.io),
+    );
 }
 
 test "workload SQLite heap snapshot precedes pager diagnostics" {

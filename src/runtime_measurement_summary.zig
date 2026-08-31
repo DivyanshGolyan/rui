@@ -16,7 +16,7 @@ const Header = struct {
 
 const Record = schema.Record;
 const Sample = schema.ProcessSample;
-const DurableStorage = schema.DurableStorage;
+const DurableStorage = schema.ByteFootprint;
 const SqlitePagerAccounting = schema.SqlitePagerAccounting;
 const SqliteMemoryCurrent = schema.SqliteMemoryCurrent;
 const RuntimeResources = schema.RuntimeResources;
@@ -27,6 +27,10 @@ const BuildMode = enum { Debug, ReleaseSafe, ReleaseFast, ReleaseSmall };
 const Datum = struct {
     runtime_open_physical_delta_bytes: i64,
     runtime_open_rss_delta_bytes: i64,
+    activation_slots_held_physical_delta_bytes: i64,
+    activation_slots_held_rss_delta_bytes: i64,
+    activation_slots_released_physical_delta_bytes: i64,
+    activation_slots_released_rss_delta_bytes: i64,
     physical_delta_bytes: i64,
     rss_delta_bytes: i64,
     wall_ns: i64,
@@ -50,12 +54,8 @@ const Datum = struct {
     sqlite_lookaside_workload_highwater_slots: i64,
     sqlite_statements_before_bytes: i64,
     sqlite_statements_after_bytes: i64,
-    durable_sqlite_logical_file_bytes: i64,
-    durable_sqlite_allocated_file_bytes: i64,
-    durable_session_logical_file_bytes: i64,
-    durable_session_allocated_file_bytes: i64,
-    durable_other_logical_file_bytes: i64,
-    durable_other_allocated_file_bytes: i64,
+    durable_logical_file_bytes: i64,
+    durable_allocated_file_bytes: i64,
 };
 
 const Group = struct {
@@ -74,6 +74,10 @@ const Group = struct {
 const IntegerMetric = enum {
     runtime_open_physical_delta_bytes,
     runtime_open_rss_delta_bytes,
+    activation_slots_held_physical_delta_bytes,
+    activation_slots_held_rss_delta_bytes,
+    activation_slots_released_physical_delta_bytes,
+    activation_slots_released_rss_delta_bytes,
     physical_delta_bytes,
     rss_delta_bytes,
     wall_ns,
@@ -96,12 +100,8 @@ const IntegerMetric = enum {
     sqlite_lookaside_workload_highwater_slots,
     sqlite_statements_before_bytes,
     sqlite_statements_after_bytes,
-    durable_sqlite_logical_file_bytes,
-    durable_sqlite_allocated_file_bytes,
-    durable_session_logical_file_bytes,
-    durable_session_allocated_file_bytes,
-    durable_other_logical_file_bytes,
-    durable_other_allocated_file_bytes,
+    durable_logical_file_bytes,
+    durable_allocated_file_bytes,
 };
 
 const IntegerRange = struct { median: i64, min: i64, max: i64 };
@@ -229,6 +229,22 @@ fn deriveDatum(record: Record) !Datum {
             record.observations.runtime_open.resident_bytes,
             record.observations.baseline.resident_bytes,
         ),
+        .activation_slots_held_physical_delta_bytes = try signedDelta(
+            record.observations.activation_slots_held.physical_footprint_bytes,
+            record.observations.runtime_open.physical_footprint_bytes,
+        ),
+        .activation_slots_held_rss_delta_bytes = try signedDelta(
+            record.observations.activation_slots_held.resident_bytes,
+            record.observations.runtime_open.resident_bytes,
+        ),
+        .activation_slots_released_physical_delta_bytes = try signedDelta(
+            record.observations.activation_slots_released.physical_footprint_bytes,
+            record.observations.runtime_open.physical_footprint_bytes,
+        ),
+        .activation_slots_released_rss_delta_bytes = try signedDelta(
+            record.observations.activation_slots_released.resident_bytes,
+            record.observations.runtime_open.resident_bytes,
+        ),
         .physical_delta_bytes = try signedDelta(after.physical_footprint_bytes, before.physical_footprint_bytes),
         .rss_delta_bytes = try signedDelta(after.resident_bytes, before.resident_bytes),
         .wall_ns = try asSigned(record.timing.wall_ns),
@@ -258,12 +274,8 @@ fn deriveDatum(record: Record) !Datum {
         .sqlite_lookaside_workload_highwater_slots = try asSigned(record.sqlite_memory.workload_highwater.lookaside_slots),
         .sqlite_statements_before_bytes = try asSigned(record.sqlite_memory.before.statements_bytes),
         .sqlite_statements_after_bytes = try asSigned(record.sqlite_memory.after.statements_bytes),
-        .durable_sqlite_logical_file_bytes = try asSigned(record.durable_storage.sqlite.logical_file_bytes),
-        .durable_sqlite_allocated_file_bytes = try asSigned(record.durable_storage.sqlite.allocated_file_bytes),
-        .durable_session_logical_file_bytes = try asSigned(record.durable_storage.sessions.logical_file_bytes),
-        .durable_session_allocated_file_bytes = try asSigned(record.durable_storage.sessions.allocated_file_bytes),
-        .durable_other_logical_file_bytes = try asSigned(record.durable_storage.other.logical_file_bytes),
-        .durable_other_allocated_file_bytes = try asSigned(record.durable_storage.other.allocated_file_bytes),
+        .durable_logical_file_bytes = try asSigned(record.durable_storage.logical_file_bytes),
+        .durable_allocated_file_bytes = try asSigned(record.durable_storage.allocated_file_bytes),
     };
 }
 
@@ -561,6 +573,8 @@ fn testRecordFromSamples(before: Sample, after: Sample, build_mode: []const u8) 
         .observations = .{
             .baseline = before,
             .runtime_open = before,
+            .activation_slots_held = after,
+            .activation_slots_released = after,
             .workload_complete = after,
             .runtime_closed = after,
         },
@@ -568,11 +582,7 @@ fn testRecordFromSamples(before: Sample, after: Sample, build_mode: []const u8) 
 }
 
 fn testStorageFootprint() DurableStorage {
-    return .{
-        .sqlite = .{ .logical_file_bytes = 8, .allocated_file_bytes = 4096 },
-        .sessions = .{ .logical_file_bytes = 2, .allocated_file_bytes = 0 },
-        .other = .{ .logical_file_bytes = 0, .allocated_file_bytes = 0 },
-    };
+    return .{ .logical_file_bytes = 8, .allocated_file_bytes = 4096 };
 }
 
 fn testSqliteAccounting(cache_pages_written: u64) SqlitePagerAccounting {
