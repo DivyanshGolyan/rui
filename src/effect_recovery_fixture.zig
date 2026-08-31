@@ -164,24 +164,27 @@ fn recoverPrepublicationModel(io: std.Io, runtime: *harness.HostRuntime, identit
     }
 
     var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
-    var owner = try harness.Harness.open(.{
-        .runtime = runtime,
-        .mode = .{ .restore = .{
-            .session_id = session_id,
-            .model_binding = .{ .model = "fixture:prepublication", .provider = fixture.provider() },
-        } },
-    });
-    defer owner.close();
-    for (0..48) |_| {
-        const progress = try owner.drive();
-        if (progress.state != .finished) continue;
-        if (fixture.calls != 1) return error.ModelAttemptNotDispatched;
-        owner.close();
-        try expectModelAttempts(runtime, session_id, 2);
-        try std.Io.File.stdout().writeStreamingAll(io, "finished\n");
-        return;
+    var finished = false;
+    {
+        var owner = try harness.Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .restore = .{
+                .session_id = session_id,
+                .model_binding = .{ .model = "fixture:prepublication", .provider = fixture.provider() },
+            } },
+        });
+        defer owner.close();
+        for (0..48) |_| {
+            const progress = try owner.drive();
+            if (progress.state != .finished) continue;
+            if (fixture.calls != 1) return error.ModelAttemptNotDispatched;
+            finished = true;
+            break;
+        }
     }
-    return error.SessionDidNotFinish;
+    if (!finished) return error.SessionDidNotFinish;
+    try expectModelAttempts(runtime, session_id, 2);
+    try std.Io.File.stdout().writeStreamingAll(io, "finished\n");
 }
 
 fn crashPublishedModel(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !void {
@@ -256,61 +259,58 @@ fn recoverPublishedModel(io: std.Io, runtime: *harness.HostRuntime, session_id: 
         )) return error.PublishedCaptureChanged;
     }
     var provider: RejectingProvider = .{};
-    var owner = try harness.Harness.open(.{
-        .runtime = runtime,
-        .mode = .{ .restore = .{
-            .session_id = session_id,
-            .model_binding = .{
-                .model = "fixture:published-capture",
-                .provider = provider.provider(),
-            },
-        } },
-    });
-    defer owner.close();
-    for (0..48) |_| {
-        const progress = try owner.drive();
-        if (progress.state != .finished) continue;
-        if (provider.calls != 0) return error.ProviderRedispatched;
-        var found = false;
-        for (progress.projectionSlice()) |projection| {
-            if (projection.kind != .final_answer) continue;
-            var reader = try owner.openProjectionContent(projection);
-            var bytes: [64]u8 = undefined;
-            const content = try reader.readWindow(0, &bytes);
-            if (!std.mem.eql(
-                u8,
-                content,
-                "published exact answer",
-            )) return error.PublishedAnswerChanged;
-            found = true;
+    var durable_reader: ?session_store.ContentView = null;
+    {
+        var owner = try harness.Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .restore = .{
+                .session_id = session_id,
+                .model_binding = .{
+                    .model = "fixture:published-capture",
+                    .provider = provider.provider(),
+                },
+            } },
+        });
+        defer owner.close();
+        for (0..48) |_| {
+            const progress = try owner.drive();
+            if (progress.state != .finished) continue;
+            if (provider.calls != 0) return error.ProviderRedispatched;
+            for (progress.projectionSlice()) |projection| {
+                if (projection.kind != .final_answer) continue;
+                durable_reader = try owner.openProjectionContent(projection);
+            }
+            break;
         }
-        if (!found) return error.FinalAnswerProjectionMissing;
-        owner.close();
-        try expectModelAttempts(runtime, session_id, 1);
-        try std.Io.File.stdout().writeStreamingAll(io, "finished\n");
-        return;
     }
-    return error.SessionDidNotFinish;
+    var reader = durable_reader orelse return error.FinalAnswerProjectionMissing;
+    var bytes: [64]u8 = undefined;
+    if (!std.mem.eql(u8, try reader.readWindow(0, &bytes), "published exact answer")) {
+        return error.PublishedAnswerChanged;
+    }
+    try expectModelAttempts(runtime, session_id, 1);
+    try std.Io.File.stdout().writeStreamingAll(io, "finished\n");
 }
 
 fn startModel(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !void {
     var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
     var crash: Crash = .{ .target = .after_model_dispatch };
-    var owner = try harness.Harness.open(.{
-        .runtime = runtime,
-        .mode = .{ .create = .{
-            .workspace_path = workspace,
-            .model_binding = .{ .model = "fixture:model-recovery", .provider = fixture.provider() },
-            .task = task,
-            .fault = crash.hook(),
-        } },
-    });
-    defer owner.close();
-    const identity = try owner.drive();
-    const session_id = try sessionProjection(&identity);
-    if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
-    try driveUntilCrash(owner);
-    owner.close();
+    const session_id = initial: {
+        var owner = try harness.Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .create = .{
+                .workspace_path = workspace,
+                .model_binding = .{ .model = "fixture:model-recovery", .provider = fixture.provider() },
+                .task = task,
+                .fault = crash.hook(),
+            } },
+        });
+        defer owner.close();
+        const identity = try owner.drive();
+        if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+        try driveUntilCrash(owner);
+        break :initial try sessionProjection(&identity);
+    };
     try expectModelAttempts(runtime, session_id, 1);
     try writeSessionId(io, session_id);
 }
@@ -334,24 +334,27 @@ fn retryModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void 
 
 fn finishModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
     var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
-    var owner = try harness.Harness.open(.{
-        .runtime = runtime,
-        .mode = .{ .restore = .{ .session_id = session_id, .model_binding = .{
-            .model = "fixture:model-recovery",
-            .provider = fixture.provider(),
-        } } },
-    });
-    defer owner.close();
-    for (0..48) |_| {
-        const progress = try owner.drive();
-        if (progress.state != .finished) continue;
-        if (fixture.calls != 1) return error.ModelAttemptNotDispatched;
-        owner.close();
-        try expectModelAttempts(runtime, session_id, 2);
-        try std.Io.File.stdout().writeStreamingAll(io, "finished\n");
-        return;
+    var finished = false;
+    {
+        var owner = try harness.Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .restore = .{ .session_id = session_id, .model_binding = .{
+                .model = "fixture:model-recovery",
+                .provider = fixture.provider(),
+            } } },
+        });
+        defer owner.close();
+        for (0..48) |_| {
+            const progress = try owner.drive();
+            if (progress.state != .finished) continue;
+            if (fixture.calls != 1) return error.ModelAttemptNotDispatched;
+            finished = true;
+            break;
+        }
     }
-    return error.SessionDidNotFinish;
+    if (!finished) return error.SessionDidNotFinish;
+    try expectModelAttempts(runtime, session_id, 2);
+    try std.Io.File.stdout().writeStreamingAll(io, "finished\n");
 }
 
 fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
@@ -390,36 +393,39 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
         break :initial .{ before, audit, envelope };
     };
 
-    var owner = try harness.Harness.open(.{
-        .runtime = runtime,
-        .mode = .{ .restore = .{ .session_id = session_id } },
-    });
-    defer owner.close();
-    if (owner.offer(.{ .completion = envelope }) != .accepted) return error.LateEvidenceOfferRejected;
-    for (0..24) |_| {
-        const progress = try owner.drive();
-        for (progress.projectionSlice()) |projection| {
-            if (projection.kind == .failure) return error.LateEvidenceProjectedFailure;
+    var finished = false;
+    {
+        var owner = try harness.Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .restore = .{ .session_id = session_id } },
+        });
+        defer owner.close();
+        if (owner.offer(.{ .completion = envelope }) != .accepted) return error.LateEvidenceOfferRejected;
+        for (0..24) |_| {
+            const progress = try owner.drive();
+            for (progress.projectionSlice()) |projection| {
+                if (projection.kind == .failure) return error.LateEvidenceProjectedFailure;
+            }
+            if (progress.state != .finished) continue;
+            finished = true;
+            break;
         }
-        if (progress.state != .finished) continue;
-        owner.close();
-
-        var verification_lease = try host_runtime.Lease.acquire(runtime);
-        defer verification_lease.release();
-        const verification_scratch = try session_store.allocateTransientScratch(verification_lease.allocator);
-        defer session_store.destroyTransientScratch(verification_lease.allocator, verification_lease.io, verification_scratch);
-        var verified = try verification_lease.restoreSession(verification_scratch, session_id);
-        defer verified.close();
-        while ((try verification_lease.recoverSemanticWindow(&verified, 32)).more) {}
-        var after_audit: ModelAttemptAudit = .{};
-        const after = try verified.inspectSemantic(&after_audit, ModelAttemptAudit.apply);
-        if (after.last_sequence != before.last_sequence or after_audit.count != audit.count) {
-            return error.LateEvidenceAdvancedSession;
-        }
-        try std.Io.File.stdout().writeStreamingAll(io, "audited\n");
-        return;
     }
-    return error.LateEvidenceDidNotSettle;
+    if (!finished) return error.LateEvidenceDidNotSettle;
+
+    var verification_lease = try host_runtime.Lease.acquire(runtime);
+    defer verification_lease.release();
+    const verification_scratch = try session_store.allocateTransientScratch(verification_lease.allocator);
+    defer session_store.destroyTransientScratch(verification_lease.allocator, verification_lease.io, verification_scratch);
+    var verified = try verification_lease.restoreSession(verification_scratch, session_id);
+    defer verified.close();
+    while ((try verification_lease.recoverSemanticWindow(&verified, 32)).more) {}
+    var after_audit: ModelAttemptAudit = .{};
+    const after = try verified.inspectSemantic(&after_audit, ModelAttemptAudit.apply);
+    if (after.last_sequence != before.last_sequence or after_audit.count != audit.count) {
+        return error.LateEvidenceAdvancedSession;
+    }
+    try std.Io.File.stdout().writeStreamingAll(io, "audited\n");
 }
 
 fn rejectPendingCompletion(_: *anyopaque, _: completion_inbox.Envelope) anyerror!void {
@@ -429,23 +435,26 @@ fn rejectPendingCompletion(_: *anyopaque, _: completion_inbox.Envelope) anyerror
 fn ignoreCompletion(_: *anyopaque, _: completion_inbox.Envelope) anyerror!void {}
 
 fn exhaustModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
-    var owner = try harness.Harness.open(.{
-        .runtime = runtime,
-        .mode = .{ .restore = .{ .session_id = session_id } },
-    });
-    defer owner.close();
-    for (0..24) |_| {
-        const progress = try owner.drive();
-        if (progress.state != .failed) continue;
-        if (progress.projection_count != 1 or progress.projections[0].kind != .failure) {
-            return error.ModelFailureProjectionMissing;
+    var failed = false;
+    {
+        var owner = try harness.Harness.open(.{
+            .runtime = runtime,
+            .mode = .{ .restore = .{ .session_id = session_id } },
+        });
+        defer owner.close();
+        for (0..24) |_| {
+            const progress = try owner.drive();
+            if (progress.state != .failed) continue;
+            if (progress.projection_count != 1 or progress.projections[0].kind != .failure) {
+                return error.ModelFailureProjectionMissing;
+            }
+            failed = true;
+            break;
         }
-        owner.close();
-        try expectModelAttempts(runtime, session_id, 8);
-        try std.Io.File.stdout().writeStreamingAll(io, "failed\n");
-        return;
     }
-    return error.ModelRetryLimitNotTerminal;
+    if (!failed) return error.ModelRetryLimitNotTerminal;
+    try expectModelAttempts(runtime, session_id, 8);
+    try std.Io.File.stdout().writeStreamingAll(io, "failed\n");
 }
 
 fn startBash(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !void {

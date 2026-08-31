@@ -576,10 +576,18 @@ pub const ContentWriter = struct {
 };
 
 pub const ContentView = struct {
-    session: *Session,
+    source: union(enum) {
+        durable: struct {
+            storage: *host_store.StorageOwner,
+            session_id: u64,
+        },
+        pending: struct {
+            session: *Session,
+            offset: u64,
+        },
+    },
     reference: u64,
     meta: host_store.ContentMetadata,
-    pending_offset: ?u64,
 
     pub fn length(self: *const ContentView) u64 {
         return self.meta.length;
@@ -590,22 +598,28 @@ pub const ContentView = struct {
     }
 
     pub fn readWindow(self: *ContentView, offset: u64, out: []u8) ![]const u8 {
-        try self.session.ensureUsable();
         if (offset > self.meta.length) return error.InvalidContentOffset;
         const wanted: usize = @intCast(@min(self.meta.length - offset, out.len));
-        if (self.pending_offset) |base| {
-            const file = transientScratchState(self.session.scratch).file orelse
-                return error.TransientScratchUnavailable;
-            const actual = try file.readPositionalAll(self.session.io, out[0..wanted], base + offset);
-            if (actual != wanted) return error.TruncatedContent;
-            return out[0..actual];
-        }
-        return self.session.storage.readContentWindow(
-            self.session.session_id,
-            self.reference,
-            offset,
-            out,
-        );
+        return switch (self.source) {
+            .durable => |durable| durable.storage.readContentWindow(
+                durable.session_id,
+                self.reference,
+                offset,
+                out,
+            ),
+            .pending => |pending| blk: {
+                try pending.session.ensureUsable();
+                const file = transientScratchState(pending.session.scratch).file orelse
+                    return error.TransientScratchUnavailable;
+                const actual = try file.readPositionalAll(
+                    pending.session.io,
+                    out[0..wanted],
+                    pending.offset + offset,
+                );
+                if (actual != wanted) return error.TruncatedContent;
+                break :blk out[0..actual];
+            },
+        };
     }
 };
 
@@ -1143,20 +1157,26 @@ pub const Session = struct {
     ) !ContentView {
         try self.ensureUsable();
         if (self.findPendingContent(reference)) |pending| return .{
-            .session = self,
+            .source = .{ .pending = .{ .session = self, .offset = pending.offset } },
             .reference = reference,
             .meta = .{ .length = pending.length, .digest = pending.digest },
-            .pending_offset = pending.offset,
         };
+        return self.viewDurableContent(reference);
+    }
+
+    /// Open committed immutable content without retaining this Session or its
+    /// transient scratch. The returned value remains usable until Host Runtime
+    /// shutdown, even when the originating Harness has been consumed.
+    pub fn viewDurableContent(self: *Session, reference: u64) !ContentView {
+        try self.ensureUsable();
         const meta = self.storage.contentMetadata(self.session_id, reference) catch |err| switch (err) {
             error.ContentNotFound => return error.FileNotFound,
             else => return err,
         };
         return .{
-            .session = self,
+            .source = .{ .durable = .{ .storage = self.storage, .session_id = self.session_id } },
             .reference = reference,
             .meta = meta,
-            .pending_offset = null,
         };
     }
 
