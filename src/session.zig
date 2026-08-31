@@ -3617,15 +3617,19 @@ fn testResultDigest(label: []const u8) binding.Result {
     return binding.hash(binding.Result, label);
 }
 
-fn expectCanonicalContinuation(state: continuation.State) !void {
+fn expectCanonicalContinuation(state: continuation.State, poison_seed: u64) !void {
     var encoded: [continuation.encoded_size]u8 = undefined;
     try continuation.encode(&encoded, state);
     try std.testing.expectEqualDeep(state, try continuation.decode(&encoded));
 
     var slot: core_image.ActivationSlot = undefined;
-    @memset(std.mem.asBytes(&slot), 0xa5);
+    var poison = std.Random.DefaultPrng.init(poison_seed);
+    poison.random().bytes(std.mem.asBytes(&slot));
     slotState(&slot).* = try continuation.decode(&encoded);
     try std.testing.expectEqualDeep(state, slotState(&slot).*);
+    var restored: [continuation.encoded_size]u8 = undefined;
+    try continuation.encode(&restored, slotState(&slot).*);
+    try std.testing.expectEqualSlices(u8, &encoded, &restored);
     core_image.scrub(&slot);
     for (std.mem.asBytes(&slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
@@ -3636,229 +3640,457 @@ fn expectContinuationUnchanged(state: continuation.State, before: [continuation.
     try std.testing.expectEqualSlices(u8, &before, &after);
 }
 
+const RejectedContinuationCommand = union(enum) {
+    start_task: u64,
+    model_attempt: struct { operation_id: u64, sequence: u64 },
+    model_completion: struct {
+        operation: continuation.OperationIdentity,
+        admission: model_protocol.Admission,
+        response_ref: u64,
+        digest: binding.Result,
+        consequence: continuation.CompletionConsequence,
+    },
+    tool_result: struct { call_entry_id: u64, result_entry_id: u64 },
+};
+
+fn expectRejectedContinuation(
+    expected: anyerror,
+    state: continuation.State,
+    command: RejectedContinuationCommand,
+) !void {
+    var before: [continuation.encoded_size]u8 = undefined;
+    try continuation.encode(&before, state);
+    switch (command) {
+        .start_task => |entry_id| try std.testing.expectError(
+            expected,
+            continuation.startTask(state, entry_id),
+        ),
+        .model_attempt => |value| try std.testing.expectError(
+            expected,
+            continuation.admitModelAttempt(state, value.operation_id, value.sequence),
+        ),
+        .model_completion => |value| try std.testing.expectError(
+            expected,
+            continuation.admitModelCompletion(
+                state,
+                value.operation,
+                value.admission,
+                value.response_ref,
+                value.digest,
+                value.consequence,
+            ),
+        ),
+        .tool_result => |value| try std.testing.expectError(
+            expected,
+            continuation.admitToolResult(state, value.call_entry_id, value.result_entry_id),
+        ),
+    }
+    try expectContinuationUnchanged(state, before);
+}
+
+const PropertyTerminal = enum { final_answer, failure, input_request };
+
+const PropertyTrace = struct {
+    tool_rounds: u8,
+    terminal: PropertyTerminal,
+};
+
 test "private continuation reducers cover deterministic accepted and rejected production traces" {
     var prng = std.Random.DefaultPrng.init(0x50_ba_5e);
     const random = prng.random();
 
-    for (0..32) |trace| {
-        const agent_id = random.intRangeAtMost(u64, 1, std.math.maxInt(u32));
+    var traces: [32]PropertyTrace = undefined;
+    for (&traces, 0..) |*trace, index| trace.* = .{
+        .tool_rounds = @intCast(index % 3),
+        .terminal = @enumFromInt((index / 3) % 3),
+    };
+    random.shuffle(PropertyTrace, &traces);
+
+    for (traces) |trace| {
+        const agent_id = switch (random.uintLessThan(u8, 4)) {
+            0 => 1,
+            1 => std.math.maxInt(u32),
+            2 => std.math.maxInt(u64),
+            else => random.intRangeAtMost(u64, 1, std.math.maxInt(u64)),
+        };
+        const agent_generation = switch (random.uintLessThan(u8, 3)) {
+            0 => 1,
+            1 => std.math.maxInt(u32),
+            else => random.intRangeAtMost(u32, 1, std.math.maxInt(u32)),
+        };
+        if (random.boolean()) {
+            try std.testing.expectError(
+                error.InvalidAgentIdentity,
+                continuation.initialize(.{ .agent_id = 0, .generation = agent_generation }),
+            );
+        } else {
+            try std.testing.expectError(
+                error.InvalidAgentGeneration,
+                continuation.initialize(.{ .agent_id = agent_id, .generation = 0 }),
+            );
+        }
         const initialized = try continuation.initialize(.{
             .agent_id = agent_id,
-            .generation = 1,
+            .generation = agent_generation,
         });
-        const ready_a = try continuation.startTask(initialized, 1);
-        const ready_b = try continuation.startTask(initialized, 1);
+        try std.testing.expectEqualDeep(
+            initialized,
+            try continuation.initialize(.{
+                .agent_id = agent_id,
+                .generation = agent_generation,
+            }),
+        );
+        try expectCanonicalContinuation(initialized, random.int(u64));
+
+        var idle_rejections = [_]enum { zero_entry, premature_attempt }{
+            .zero_entry,
+            .premature_attempt,
+        };
+        random.shuffle(@TypeOf(idle_rejections[0]), &idle_rejections);
+        for (idle_rejections) |rejection| switch (rejection) {
+            .zero_entry => try expectRejectedContinuation(
+                error.InvalidConversationEntry,
+                initialized,
+                .{ .start_task = 0 },
+            ),
+            .premature_attempt => try expectRejectedContinuation(
+                error.IllegalModelTransition,
+                initialized,
+                .{ .model_attempt = .{ .operation_id = 1, .sequence = 1 } },
+            ),
+        };
+
+        const first_entry: u64 = if (trace.tool_rounds == 0 and random.boolean())
+            std.math.maxInt(u32) - 1
+        else
+            random.intRangeAtMost(u64, 1, 1_000);
+        const ready_a = try continuation.startTask(initialized, first_entry);
+        const ready_b = try continuation.startTask(initialized, first_entry);
         try std.testing.expectEqualDeep(ready_a, ready_b);
         try std.testing.expectEqual(agent_id, ready_a.agent_id);
-        try std.testing.expectEqual(@as(u64, 1), ready_a.active_leaf_id);
-        try expectCanonicalContinuation(ready_a);
+        try std.testing.expectEqual(first_entry, ready_a.active_leaf_id);
+        try expectCanonicalContinuation(ready_a, random.int(u64));
 
-        const first_operation = random.intRangeAtMost(u64, 1, std.math.maxInt(u32));
-        const attempt_a = try continuation.admitModelAttempt(ready_a, first_operation, 1);
-        const attempt_b = try continuation.admitModelAttempt(ready_a, first_operation, 1);
-        try std.testing.expectEqualDeep(attempt_a, attempt_b);
-        try std.testing.expectEqual(agent_id, attempt_a.state.agent_id);
-        try std.testing.expectEqual(@as(u64, 1), attempt_a.state.active_leaf_id);
-        try expectCanonicalContinuation(attempt_a.state);
+        var ready_rejections = [_]enum { duplicate_start, premature_tool, zero_operation, zero_sequence }{
+            .duplicate_start,
+            .premature_tool,
+            .zero_operation,
+            .zero_sequence,
+        };
+        random.shuffle(@TypeOf(ready_rejections[0]), &ready_rejections);
+        for (ready_rejections) |rejection| switch (rejection) {
+            .duplicate_start => try expectRejectedContinuation(
+                error.IllegalTaskTransition,
+                ready_a,
+                .{ .start_task = first_entry + 1 },
+            ),
+            .premature_tool => try expectRejectedContinuation(
+                error.IllegalToolResultTransition,
+                ready_a,
+                .{ .tool_result = .{ .call_entry_id = first_entry + 1, .result_entry_id = first_entry + 2 } },
+            ),
+            .zero_operation => try expectRejectedContinuation(
+                error.InvalidOperationIdentity,
+                ready_a,
+                .{ .model_attempt = .{ .operation_id = 0, .sequence = 1 } },
+            ),
+            .zero_sequence => try expectRejectedContinuation(
+                error.InvalidOperationIdentity,
+                ready_a,
+                .{ .model_attempt = .{ .operation_id = 1, .sequence = 0 } },
+            ),
+        };
 
-        switch (trace % 3) {
-            0 => {
-                var bytes: [model_protocol.max_response_size]u8 = undefined;
-                const response = try model_protocol.encodeText(&bytes, "done");
-                const digest = binding.hash(binding.Result, response);
-                var scratch_a: model_protocol.ValidationScratch = undefined;
-                var scratch_b: model_protocol.ValidationScratch = undefined;
-                const completed_a = try continuation.admitModelCompletion(
-                    attempt_a.state,
-                    .{ .id = first_operation, .generation = 1 },
-                    model_protocol.admit(&scratch_a, response).admission,
-                    100 + trace,
-                    digest,
-                    .{ .final_answer = 2 },
-                );
-                const completed_b = try continuation.admitModelCompletion(
-                    attempt_a.state,
-                    .{ .id = first_operation, .generation = 1 },
-                    model_protocol.admit(&scratch_b, response).admission,
-                    100 + trace,
-                    digest,
-                    .{ .final_answer = 2 },
-                );
-                try std.testing.expectEqualDeep(completed_a, completed_b);
-                try std.testing.expectEqual(agent_id, completed_a.state.agent_id);
-                try std.testing.expectEqual(@as(u64, 2), completed_a.state.final_entry_id);
-                try expectCanonicalContinuation(completed_a.state);
-            },
-            1 => {
+        var range_exhausted = ready_a;
+        range_exhausted.active_leaf_id = std.math.maxInt(u32);
+        try expectRejectedContinuation(
+            error.IllegalModelTransition,
+            range_exhausted,
+            .{ .model_attempt = .{ .operation_id = 1, .sequence = 1 } },
+        );
+
+        var state = ready_a;
+        var next_operation = random.intRangeAtMost(u64, 1, std.math.maxInt(u64));
+        var next_sequence = random.intRangeAtMost(u64, 1, std.math.maxInt(u64));
+        var round: u8 = 0;
+        while (true) : (round += 1) {
+            const attempt_a = try continuation.admitModelAttempt(state, next_operation, next_sequence);
+            const attempt_b = try continuation.admitModelAttempt(state, next_operation, next_sequence);
+            try std.testing.expectEqualDeep(attempt_a, attempt_b);
+            try std.testing.expectEqual(agent_id, attempt_a.state.agent_id);
+            try expectCanonicalContinuation(attempt_a.state, random.int(u64));
+
+            var context_bytes: [continuation.encoded_size]u8 = undefined;
+            try continuation.encode(&context_bytes, attempt_a.state);
+            continuation.write(
+                u32,
+                &context_bytes,
+                112,
+                if (attempt_a.state.context.length == 1) 2 else attempt_a.state.context.length - 1,
+            );
+            continuation.rewriteChecksum(&context_bytes);
+            try std.testing.expectError(
+                error.InvalidModelContext,
+                continuation.decode(&context_bytes),
+            );
+            var overflow_bytes: [continuation.encoded_size]u8 = undefined;
+            try continuation.encode(&overflow_bytes, attempt_a.state);
+            continuation.write(u32, &overflow_bytes, 108, std.math.maxInt(u32));
+            continuation.write(u32, &overflow_bytes, 112, 1);
+            continuation.rewriteChecksum(&overflow_bytes);
+            try std.testing.expectError(
+                error.ContentWindowOverflow,
+                continuation.decode(&overflow_bytes),
+            );
+
+            var response_bytes: [model_protocol.max_response_size]u8 = undefined;
+            const response = if (round < trace.tool_rounds) blk: {
                 var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+                const command = switch (random.uintLessThan(u8, 3)) {
+                    0 => "true",
+                    1 => "printf property",
+                    else => "pwd",
+                };
                 const arguments = try model_contract.encodeJson(&arguments_buffer, .{
-                    .command = "true",
-                    .timeout_ms = 1_000,
+                    .command = command,
+                    .timeout_ms = random.intRangeAtMost(u32, 1, 60_000),
                 });
-                var bytes: [model_protocol.max_response_size]u8 = undefined;
-                const response = try model_protocol.encodeTool(
-                    &bytes,
+                break :blk try model_protocol.encodeTool(
+                    &response_bytes,
                     model_contract.bash_key,
                     arguments,
                 );
-                const digest = binding.hash(binding.Result, response);
-                var scratch_a: model_protocol.ValidationScratch = undefined;
-                var scratch_b: model_protocol.ValidationScratch = undefined;
-                const completed_a = try continuation.admitModelCompletion(
-                    attempt_a.state,
-                    .{ .id = first_operation, .generation = 1 },
-                    model_protocol.admit(&scratch_a, response).admission,
-                    200 + trace,
-                    digest,
-                    .tool_call,
-                );
-                const completed_b = try continuation.admitModelCompletion(
-                    attempt_a.state,
-                    .{ .id = first_operation, .generation = 1 },
-                    model_protocol.admit(&scratch_b, response).admission,
-                    200 + trace,
-                    digest,
-                    .tool_call,
-                );
-                try std.testing.expectEqualDeep(completed_a, completed_b);
-                try expectCanonicalContinuation(completed_a.state);
+            } else switch (trace.terminal) {
+                .final_answer => try model_protocol.encodeText(
+                    &response_bytes,
+                    switch (random.uintLessThan(u8, 3)) {
+                        0 => "done",
+                        1 => "property trace complete",
+                        else => "ok",
+                    },
+                ),
+                .failure => try model_protocol.encodeFailure(
+                    &response_bytes,
+                    switch (random.uintLessThan(u8, 4)) {
+                        0 => .provider_error,
+                        1 => .timeout,
+                        2 => .malformed,
+                        else => .transport_may_have_started,
+                    },
+                ),
+                .input_request => try model_protocol.encodeInputText(
+                    &response_bytes,
+                    "Which bounded option should continue?",
+                ),
+            };
+            const response_digest = binding.hash(binding.Result, response);
+            var response_scratch: model_protocol.ValidationScratch = undefined;
+            const admission = model_protocol.admit(&response_scratch, response).admission;
+            const response_ref = random.intRangeAtMost(u64, 1, std.math.maxInt(u64));
+            const operation = continuation.OperationIdentity{
+                .id = next_operation,
+                .generation = attempt_a.operation.generation,
+            };
+            const consequence: continuation.CompletionConsequence = if (round < trace.tool_rounds)
+                .tool_call
+            else switch (trace.terminal) {
+                .final_answer => .{ .final_answer = state.active_leaf_id + 1 },
+                .failure, .input_request => .terminal,
+            };
 
-                const resumed_a = try continuation.admitToolResult(completed_a.state, 2, 3);
-                const resumed_b = try continuation.admitToolResult(completed_a.state, 2, 3);
-                try std.testing.expectEqualDeep(resumed_a, resumed_b);
-                try std.testing.expectEqual(agent_id, resumed_a.agent_id);
-                try expectCanonicalContinuation(resumed_a);
-
-                const second_operation = first_operation + std.math.maxInt(u32) + 1;
-                const second_attempt = try continuation.admitModelAttempt(
-                    resumed_a,
-                    second_operation,
-                    2,
-                );
-                try expectCanonicalContinuation(second_attempt.state);
-                var final_bytes: [model_protocol.max_response_size]u8 = undefined;
-                const final_response = try model_protocol.encodeText(&final_bytes, "finished");
-                const final_digest = binding.hash(binding.Result, final_response);
-                var final_scratch: model_protocol.ValidationScratch = undefined;
-                const final = try continuation.admitModelCompletion(
-                    second_attempt.state,
-                    .{ .id = second_operation, .generation = 2 },
-                    model_protocol.admit(&final_scratch, final_response).admission,
-                    300 + trace,
-                    final_digest,
-                    .{ .final_answer = 4 },
-                );
-                try expectCanonicalContinuation(final.state);
-            },
-            else => {
-                var bytes: [model_protocol.max_response_size]u8 = undefined;
-                const response = try model_protocol.encodeFailure(&bytes, .provider_error);
-                const digest = binding.hash(binding.Result, response);
-                var scratch: model_protocol.ValidationScratch = undefined;
-                const failed = try continuation.admitModelCompletion(
+            var completion_rejections = [_]enum {
+                active_attempt,
+                stale_operation,
+                stale_generation,
+                zero_result,
+                substituted_digest,
+                wrong_consequence,
+                premature_tool,
+            }{
+                .active_attempt,
+                .stale_operation,
+                .stale_generation,
+                .zero_result,
+                .substituted_digest,
+                .wrong_consequence,
+                .premature_tool,
+            };
+            random.shuffle(@TypeOf(completion_rejections[0]), &completion_rejections);
+            for (completion_rejections) |rejection| switch (rejection) {
+                .active_attempt => try expectRejectedContinuation(
+                    error.IllegalModelTransition,
                     attempt_a.state,
-                    .{ .id = first_operation, .generation = 1 },
-                    model_protocol.admit(&scratch, response).admission,
-                    400 + trace,
-                    digest,
-                    .terminal,
+                    .{ .model_attempt = .{ .operation_id = next_operation, .sequence = next_sequence } },
+                ),
+                .stale_operation => try expectRejectedContinuation(
+                    error.StaleOperation,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = .{
+                            .id = if (next_operation == std.math.maxInt(u64)) next_operation - 1 else next_operation + 1,
+                            .generation = operation.generation,
+                        },
+                        .admission = admission,
+                        .response_ref = response_ref,
+                        .digest = response_digest,
+                        .consequence = consequence,
+                    } },
+                ),
+                .stale_generation => try expectRejectedContinuation(
+                    error.StaleOperation,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = .{
+                            .id = operation.id,
+                            .generation = if (operation.generation == std.math.maxInt(u32))
+                                operation.generation - 1
+                            else
+                                operation.generation + 1,
+                        },
+                        .admission = admission,
+                        .response_ref = response_ref,
+                        .digest = response_digest,
+                        .consequence = consequence,
+                    } },
+                ),
+                .zero_result => try expectRejectedContinuation(
+                    error.InvalidResultReference,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = operation,
+                        .admission = admission,
+                        .response_ref = 0,
+                        .digest = response_digest,
+                        .consequence = consequence,
+                    } },
+                ),
+                .substituted_digest => try expectRejectedContinuation(
+                    error.InvalidModelResponseEvidence,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = operation,
+                        .admission = admission,
+                        .response_ref = response_ref,
+                        .digest = binding.hash(binding.Result, "substituted property evidence"),
+                        .consequence = consequence,
+                    } },
+                ),
+                .wrong_consequence => try expectRejectedContinuation(
+                    error.InvalidCompletionConsequence,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = operation,
+                        .admission = admission,
+                        .response_ref = response_ref,
+                        .digest = response_digest,
+                        .consequence = switch (admission.parsed_value.disposition) {
+                            .final_answer, .failure, .input_request => .tool_call,
+                            .tool_call => .terminal,
+                        },
+                    } },
+                ),
+                .premature_tool => try expectRejectedContinuation(
+                    error.IllegalToolResultTransition,
+                    attempt_a.state,
+                    .{ .tool_result = .{
+                        .call_entry_id = state.active_leaf_id + 1,
+                        .result_entry_id = state.active_leaf_id + 2,
+                    } },
+                ),
+            };
+            if (admission.parsed_value.disposition == .final_answer) {
+                try expectRejectedContinuation(
+                    error.IllegalFinalAnswerTransition,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = operation,
+                        .admission = admission,
+                        .response_ref = response_ref,
+                        .digest = response_digest,
+                        .consequence = .{ .final_answer = state.active_leaf_id + 2 },
+                    } },
                 );
-                try std.testing.expectEqual(continuation.TaskPhase.failed, failed.state.task_phase);
-                try expectCanonicalContinuation(failed.state);
-            },
+            }
+
+            const completed_a = try continuation.admitModelCompletion(
+                attempt_a.state,
+                operation,
+                admission,
+                response_ref,
+                response_digest,
+                consequence,
+            );
+            const completed_b = try continuation.admitModelCompletion(
+                attempt_a.state,
+                operation,
+                admission,
+                response_ref,
+                response_digest,
+                consequence,
+            );
+            try std.testing.expectEqualDeep(completed_a, completed_b);
+            try expectCanonicalContinuation(completed_a.state, random.int(u64));
+
+            if (round == trace.tool_rounds) break;
+
+            var overflow_state = completed_a.state;
+            overflow_state.active_leaf_id = std.math.maxInt(u64);
+            try expectRejectedContinuation(
+                error.InvalidConversationEntry,
+                overflow_state,
+                .{ .tool_result = .{
+                    .call_entry_id = std.math.maxInt(u64),
+                    .result_entry_id = std.math.maxInt(u64),
+                } },
+            );
+
+            const call_entry_id = state.active_leaf_id + 1;
+            const result_entry_id = call_entry_id + 1;
+            try expectRejectedContinuation(
+                error.IllegalToolResultTransition,
+                completed_a.state,
+                .{ .tool_result = .{
+                    .call_entry_id = call_entry_id,
+                    .result_entry_id = result_entry_id + 1,
+                } },
+            );
+            const resumed_a = try continuation.admitToolResult(
+                completed_a.state,
+                call_entry_id,
+                result_entry_id,
+            );
+            const resumed_b = try continuation.admitToolResult(
+                completed_a.state,
+                call_entry_id,
+                result_entry_id,
+            );
+            try std.testing.expectEqualDeep(resumed_a, resumed_b);
+            try expectCanonicalContinuation(resumed_a, random.int(u64));
+            try expectRejectedContinuation(
+                error.IllegalToolResultTransition,
+                resumed_a,
+                .{ .tool_result = .{
+                    .call_entry_id = call_entry_id,
+                    .result_entry_id = result_entry_id,
+                } },
+            );
+
+            var generation_exhausted = resumed_a;
+            generation_exhausted.operation_generation = std.math.maxInt(u32);
+            try expectRejectedContinuation(
+                error.OperationGenerationExhausted,
+                generation_exhausted,
+                .{ .model_attempt = .{
+                    .operation_id = if (next_operation == std.math.maxInt(u64)) 1 else next_operation + 1,
+                    .sequence = if (next_sequence == std.math.maxInt(u64)) 1 else next_sequence + 1,
+                } },
+            );
+
+            state = resumed_a;
+            next_operation = if (next_operation == std.math.maxInt(u64)) 1 else next_operation + 1;
+            next_sequence = if (next_sequence == std.math.maxInt(u64)) 1 else next_sequence + 1;
         }
     }
-
-    const initialized = try continuation.initialize(.{ .agent_id = 1, .generation = 1 });
-    var before: [continuation.encoded_size]u8 = undefined;
-    try continuation.encode(&before, initialized);
-    try std.testing.expectError(error.InvalidConversationEntry, continuation.startTask(initialized, 0));
-    try expectContinuationUnchanged(initialized, before);
-    try std.testing.expectError(error.IllegalModelTransition, continuation.admitModelAttempt(initialized, 1, 1));
-    try expectContinuationUnchanged(initialized, before);
-
-    const ready = try continuation.startTask(initialized, 1);
-    const attempt = try continuation.admitModelAttempt(ready, 7, 1);
-    try continuation.encode(&before, attempt.state);
-    var final_bytes: [model_protocol.max_response_size]u8 = undefined;
-    const final_response = try model_protocol.encodeText(&final_bytes, "done");
-    const final_digest = binding.hash(binding.Result, final_response);
-    var scratch: model_protocol.ValidationScratch = undefined;
-    const admission = model_protocol.admit(&scratch, final_response).admission;
-    try std.testing.expectError(
-        error.StaleOperation,
-        continuation.admitModelCompletion(
-            attempt.state,
-            .{ .id = 8, .generation = 1 },
-            admission,
-            9,
-            final_digest,
-            .{ .final_answer = 2 },
-        ),
-    );
-    try expectContinuationUnchanged(attempt.state, before);
-    try std.testing.expectError(
-        error.InvalidModelResponseEvidence,
-        continuation.admitModelCompletion(
-            attempt.state,
-            .{ .id = 7, .generation = 1 },
-            admission,
-            9,
-            binding.hash(binding.Result, "substituted"),
-            .{ .final_answer = 2 },
-        ),
-    );
-    try expectContinuationUnchanged(attempt.state, before);
-    try std.testing.expectError(
-        error.InvalidCompletionConsequence,
-        continuation.admitModelCompletion(
-            attempt.state,
-            .{ .id = 7, .generation = 1 },
-            admission,
-            9,
-            final_digest,
-            .tool_call,
-        ),
-    );
-    try expectContinuationUnchanged(attempt.state, before);
-
-    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-    const arguments = try model_contract.encodeJson(&arguments_buffer, .{
-        .command = "true",
-        .timeout_ms = 1_000,
-    });
-    var tool_bytes: [model_protocol.max_response_size]u8 = undefined;
-    const tool_response = try model_protocol.encodeTool(
-        &tool_bytes,
-        model_contract.bash_key,
-        arguments,
-    );
-    var tool_scratch: model_protocol.ValidationScratch = undefined;
-    const tool_completed = try continuation.admitModelCompletion(
-        attempt.state,
-        .{ .id = 7, .generation = 1 },
-        model_protocol.admit(&tool_scratch, tool_response).admission,
-        12,
-        binding.hash(binding.Result, tool_response),
-        .tool_call,
-    );
-    var exhausted = try continuation.admitToolResult(tool_completed.state, 2, 3);
-    exhausted.operation_generation = std.math.maxInt(u32);
-    try continuation.encode(&before, exhausted);
-    try std.testing.expectError(
-        error.OperationGenerationExhausted,
-        continuation.admitModelAttempt(exhausted, 10, 2),
-    );
-    try expectContinuationUnchanged(exhausted, before);
-
-    var out_of_range = ready;
-    out_of_range.active_leaf_id = std.math.maxInt(u32);
-    try continuation.encode(&before, out_of_range);
-    try std.testing.expectError(
-        error.IllegalModelTransition,
-        continuation.admitModelAttempt(out_of_range, 11, 2),
-    );
-    try expectContinuationUnchanged(out_of_range, before);
 }
 
 fn testReboundEnvelope(envelope: completion_inbox.Envelope) completion_inbox.Envelope {
