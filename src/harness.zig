@@ -1194,7 +1194,7 @@ test "restore withholds projections until the configured recovery quantum reache
     const session_id = session.session_id;
     for (0..5) |index| {
         try session.storeContent(index + 1, "ledger fixture");
-        _ = try session.commitFacts(&.{session_transition.taskAdmitted(.{
+        _ = try session.commitFactsForTest(&.{session_transition.taskAdmitted(.{
             .agent_id = session.agent_id,
             .agent_generation = 1,
             .ownership_epoch = session.ownership_epoch,
@@ -1319,7 +1319,7 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         descriptor.operation_admitted.descriptor_ref,
         "operation descriptor",
     );
-    _ = try session.commitFacts(&.{descriptor});
+    _ = try session.commitFactsForTest(&.{descriptor});
     created.close();
     read_fault.armed = true;
 

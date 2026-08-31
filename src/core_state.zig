@@ -3,7 +3,7 @@ const binding = @import("binding.zig");
 const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
 
-pub const schema_version: u16 = 5;
+pub const schema_version: u16 = 6;
 pub const encoded_size: usize = 176;
 
 const magic = "ONECORE\x00";
@@ -11,19 +11,17 @@ const checksum_offset = encoded_size - @sizeOf(u32);
 
 pub const OperationPhase = enum(u8) {
     idle = 0,
-    submitted = 1,
-    accepted = 2,
-    completed = 3,
+    accepted = 1,
+    completed = 2,
 };
 
 pub const TaskPhase = enum(u8) {
     idle = 0,
     ready = 1,
     awaiting_model = 2,
-    final_candidate = 3,
-    awaiting_tool = 4,
-    finished = 5,
-    failed = 6,
+    awaiting_tool = 3,
+    finished = 4,
+    failed = 5,
 };
 
 pub const ContentWindow = extern struct {
@@ -34,9 +32,6 @@ pub const ContentWindow = extern struct {
 pub const State = extern struct {
     agent_id: u64,
     agent_generation: u32,
-    event_count: u64 = 0,
-    accumulator: u64,
-    last_event: u32 = 0,
     operation_id: u64 = 0,
     operation_generation: u32 = 0,
     operation_phase: OperationPhase = .idle,
@@ -79,9 +74,6 @@ pub fn encode(out: []u8, state: State) !void {
     write(u16, out, 10, encoded_size);
     write(u64, out, 16, state.agent_id);
     write(u32, out, 24, state.agent_generation);
-    write(u32, out, 28, state.last_event);
-    write(u64, out, 32, state.event_count);
-    write(u64, out, 40, state.accumulator);
     write(u64, out, 48, state.operation_id);
     write(u32, out, 56, state.operation_generation);
     out[60] = @intFromEnum(state.operation_phase);
@@ -107,6 +99,7 @@ pub fn decode(input: []const u8) !State {
     if (read(u16, input, 8) != schema_version) return error.UnsupportedSchema;
     if (read(u16, input, 10) != encoded_size) return error.InvalidCoreStateLength;
     if (read(u32, input, 12) != 0) return error.UnsupportedCoreStateFlags;
+    for (input[28..48]) |byte| if (byte != 0) return error.NonzeroCoreStateReservedByte;
     for (input[64..68]) |byte| if (byte != 0) return error.NonzeroCoreStateReservedByte;
     if (read(u32, input, checksum_offset) != std.hash.Crc32.hash(input[0..checksum_offset])) {
         return error.CoreStateChecksumMismatch;
@@ -115,9 +108,6 @@ pub fn decode(input: []const u8) !State {
     const state: State = .{
         .agent_id = read(u64, input, 16),
         .agent_generation = read(u32, input, 24),
-        .last_event = read(u32, input, 28),
-        .event_count = read(u64, input, 32),
-        .accumulator = read(u64, input, 40),
         .operation_id = read(u64, input, 48),
         .operation_generation = read(u32, input, 56),
         .operation_phase = try operationPhase(input[60]),
@@ -160,7 +150,7 @@ fn validateOperation(state: State) !void {
             }
             if (state.operation_result != 0) return error.InvalidOperationResult;
         },
-        .submitted, .accepted => {
+        .accepted => {
             if (state.operation_id == 0) return error.InvalidOperationIdentity;
             if (state.operation_generation == 0 or state.operation_sequence == 0) {
                 return error.InvalidOperationGeneration;
@@ -201,7 +191,7 @@ fn validateTask(state: State) !void {
                 return error.InvalidModelContext;
             }
         },
-        .final_candidate, .awaiting_tool, .failed => {
+        .awaiting_tool, .failed => {
             if (state.active_leaf_id == 0 or state.final_entry_id != 0 or
                 state.operation_phase != .completed)
             {
@@ -228,7 +218,7 @@ fn validateResponse(state: State) !void {
         }
         switch (state.task_phase) {
             .idle, .ready, .awaiting_model => {},
-            .final_candidate, .awaiting_tool, .finished, .failed => {
+            .awaiting_tool, .finished, .failed => {
                 return error.InvalidResponseState;
             },
         }
@@ -238,7 +228,7 @@ fn validateResponse(state: State) !void {
         return error.InvalidResponseState;
     }
     switch (state.task_phase) {
-        .final_candidate, .finished => {
+        .finished => {
             if (state.response_disposition != .final_answer or
                 state.response_failure != .none or state.response_text.length == 0 or
                 state.response_tool_key.length != 0 or state.response_arguments.length != 0)
@@ -285,9 +275,8 @@ fn validateWindow(window: ContentWindow, limit: ?usize) !void {
 fn operationPhase(value: u8) !OperationPhase {
     return switch (value) {
         0 => .idle,
-        1 => .submitted,
-        2 => .accepted,
-        3 => .completed,
+        1 => .accepted,
+        2 => .completed,
         else => error.UnknownOperationPhase,
     };
 }
@@ -297,10 +286,9 @@ fn taskPhase(value: u8) !TaskPhase {
         0 => .idle,
         1 => .ready,
         2 => .awaiting_model,
-        3 => .final_candidate,
-        4 => .awaiting_tool,
-        5 => .finished,
-        6 => .failed,
+        3 => .awaiting_tool,
+        4 => .finished,
+        5 => .failed,
         else => error.UnknownTaskPhase,
     };
 }
@@ -362,9 +350,6 @@ test "canonical Core State vector round trips deterministically" {
     const state: State = .{
         .agent_id = 0x0102_0304_0506_0708,
         .agent_generation = 7,
-        .event_count = 9,
-        .accumulator = 0x1112_1314_1516_1718,
-        .last_event = 19,
         .operation_id = 20,
         .operation_generation = 21,
         .operation_phase = .completed,
@@ -404,7 +389,6 @@ test "Core State uses the arguments window for presence even with an all-zero di
     var state: State = .{
         .agent_id = 1,
         .agent_generation = 1,
-        .accumulator = 1,
         .operation_id = 2,
         .operation_generation = 1,
         .operation_phase = .completed,
@@ -430,7 +414,7 @@ test "Core State uses the arguments window for presence even with an all-zero di
 
 test "Core State rejects unsupported schema enums truncation and checksum corruption" {
     var encoded: [encoded_size]u8 = undefined;
-    try encode(&encoded, .{ .agent_id = 1, .agent_generation = 1, .accumulator = 1 });
+    try encode(&encoded, .{ .agent_id = 1, .agent_generation = 1 });
 
     var changed = encoded;
     std.mem.writeInt(u16, changed[8..10], schema_version + 1, .little);
@@ -443,13 +427,13 @@ test "Core State rejects unsupported schema enums truncation and checksum corrup
     try std.testing.expectError(error.UnknownOperationPhase, decode(&changed));
 
     changed = encoded;
-    changed[40] ^= 0x80;
+    changed[100] ^= 0x80;
     try std.testing.expectError(error.CoreStateChecksumMismatch, decode(&changed));
 }
 
 test "Core State rejects every unknown enum and overflowing bounded window" {
     var encoded: [encoded_size]u8 = undefined;
-    try encode(&encoded, .{ .agent_id = 1, .agent_generation = 1, .accumulator = 1 });
+    try encode(&encoded, .{ .agent_id = 1, .agent_generation = 1 });
     const cases = [_]struct { offset: usize, value: u8, expected: anyerror }{
         .{ .offset = 60, .value = 0xff, .expected = error.UnknownOperationPhase },
         .{ .offset = 61, .value = 7, .expected = error.UnknownTaskPhase },
@@ -467,7 +451,6 @@ test "Core State rejects every unknown enum and overflowing bounded window" {
     const invalid: State = .{
         .agent_id = 1,
         .agent_generation = 1,
-        .accumulator = 1,
         .response_text = .{ .offset = std.math.maxInt(u32), .length = 2 },
     };
     try std.testing.expectError(error.ContentWindowOverflow, encode(&encoded, invalid));
@@ -478,7 +461,6 @@ test "Core State rejects impossible operation results after checksum validation"
     try encode(&encoded, .{
         .agent_id = 1,
         .agent_generation = 1,
-        .accumulator = 1,
         .operation_id = 2,
         .operation_generation = 1,
         .operation_phase = .completed,
@@ -503,7 +485,6 @@ test "Core State rejects impossible task and response relationships" {
     const valid: State = .{
         .agent_id = 1,
         .agent_generation = 1,
-        .accumulator = 1,
         .operation_id = 2,
         .operation_generation = 1,
         .operation_phase = .completed,

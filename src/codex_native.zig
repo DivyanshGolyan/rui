@@ -1396,7 +1396,7 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
         .arguments = try modelContractJson("{\"command\":\"true\",\"timeout_ms\":1000}"),
     });
     try wire.session.storeContent(1100, call_bytes);
-    const call = try wire.session.appendConversation(.tool_call, 1100, null);
+    const call = try wire.session.appendConversationForTest(.tool_call, 1100, null);
     try commitConversation(&wire.session, call);
     var result_buffer: [256]u8 = undefined;
     const result_bytes = try conversation.encodeToolResult(&result_buffer, .{
@@ -1405,7 +1405,7 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
         .content = "exit_code=0",
     });
     try wire.session.storeContent(1101, result_bytes);
-    const result = try wire.session.appendConversation(.tool_result, 1101, null);
+    const result = try wire.session.appendConversationForTest(.tool_result, 1101, null);
     try commitConversation(&wire.session, result);
     _ = try model_operation.buildRequest(&wire.session, 1102, 1, 3);
     var provider_io = try model_operation.ProviderIo.open(&wire.session, 1102, 1103);
@@ -1753,7 +1753,7 @@ const WireSession = struct {
 };
 
 fn commitConversation(session: *session_store.Session, entry: session_store.ConversationEntry) !void {
-    _ = try session.commitFacts(&.{session_transition.conversationAdvanced(.{
+    _ = try session.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
         .agent = .{
             .agent_id = session.agent_id,
             .agent_generation = 1,

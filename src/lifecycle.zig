@@ -423,12 +423,7 @@ pub const Control = enum { cancel, shutdown };
 pub fn commitControl(session: *session_store.Session, control: Control) !void {
     const state = try session.semanticView();
     if (state.openOperation() != null) return error.AcceptedOperationUnsettled;
-    const agent = agentContext(session);
-    const fact = if (control == .cancel)
-        session_transition.cancellation(agent)
-    else
-        session_transition.shutdown(agent);
-    _ = try session.commitFacts(&.{fact});
+    _ = try session.commitControl(if (control == .cancel) .cancel else .shutdown);
 }
 
 pub fn restoredControl(session: *session_store.Session) !?Control {
@@ -446,8 +441,7 @@ pub fn recoverSemanticWindow(
     session: *session_store.Session,
     frame_budget: u8,
 ) !session_store.RecoveryProgress {
-    var core = try Core.open(&host.slots);
-    defer core.close();
+    _ = host;
     return session.recoverSemanticWindow(frame_budget);
 }
 
@@ -510,14 +504,13 @@ const AdmittedPatch = struct {
 
 fn admittedExecutableTool(
     session: *session_store.Session,
-    core: *const core_image.Core,
 ) !?ExecutableTool {
-    const observation = try core.operation();
-    if (observation.id > std.math.maxInt(u32)) return error.InvalidModelOperationIdentity;
     const view = try session.semanticView();
+    const model = view.model;
+    if (model.operation_id > std.math.maxInt(u32)) return error.InvalidModelOperationIdentity;
     const descriptor = view.consequential.descriptor orelse return null;
     const source = descriptor.source_operation orelse return null;
-    if (source.operation_id != observation.id or source.generation != observation.generation) return null;
+    if (source.operation_id != model.operation_id or source.generation != model.generation) return null;
     return switch (descriptor.descriptor_digest) {
         .bash => .bash,
         .apply_patch => .apply_patch,
@@ -533,48 +526,6 @@ fn executableToolFromKey(key: []const u8) !ExecutableTool {
 
 fn finalReference(response_ref: u64) u64 {
     return (@as(u64, 1) << 63) | response_ref;
-}
-
-const Core = struct {
-    lease: core_image.SlotLease,
-    slot: *core_image.ActivationSlot,
-    reducer: core_image.Core = undefined,
-    active: bool = false,
-
-    fn open(pool: *core_image.RuntimeSlotPool) !Core {
-        const lease = try pool.borrow();
-        return .{ .lease = lease, .slot = lease.slot };
-    }
-
-    fn initialize(self: *Core, agent_id: u64) !void {
-        self.reducer = try core_image.Core.initialize(self.slot, .{
-            .agent_id = agent_id,
-            .generation = agent_generation,
-        });
-        self.active = true;
-    }
-
-    fn activate(self: *Core, session: *session_store.Session) !void {
-        self.reducer = try session.activateCore(self.slot);
-        self.active = true;
-    }
-
-    fn close(self: *Core) void {
-        if (self.active) self.reducer.abandon();
-        self.lease.release() catch unreachable;
-        self.active = false;
-    }
-};
-
-fn commitCoreFacts(
-    session: *session_store.Session,
-    core: *Core,
-    facts: []const session_transition.Fact,
-    reactivate: bool,
-) !void {
-    _ = try session.commitCoreFacts(&core.reducer, facts);
-    core.active = false;
-    if (reactivate) try core.activate(session);
 }
 
 fn agentContext(session: *const session_store.Session) session_transition.AgentContext {
@@ -624,34 +575,17 @@ fn consequentialHistoryForModel(
     return operation;
 }
 
-fn restoreCoreFromLedger(
-    session: *session_store.Session,
-    core: *Core,
-) !void {
-    try core.activate(session);
-}
-
 const ModelSlot = struct {
     session: *session_store.Session,
     scratch: *SemanticValidationWorkspace,
     workspace_path: []const u8,
 
-    const PreparedFacts = struct {
-        facts: [3]session_transition.Fact = undefined,
-        fact_count: u8 = 0,
-        content: union(enum) {
-            facts_only,
-            patch_intent: session_store.PatchContent,
-        } = .facts_only,
-    };
-
     const Tool = union(enum) {
         none,
         generic,
         bash: struct {
-            operation_id: u64,
             descriptor_ref: u64,
-            descriptor_digest: binding.BashDescriptor,
+            call: session_store.BashCallMaterial,
         },
         apply_patch: AdmittedPatch,
     };
@@ -734,7 +668,7 @@ const ModelSlot = struct {
         const arguments = executable orelse return .generic;
         return switch (arguments) {
             .bash => |bash| blk: {
-                const tool_operation_id = try allocateOperationIdentity(self.session);
+                const tool_operation_id = try session_store.actionOperationId(completion.result);
                 const descriptor_ref = (@as(u64, 1) << 62) | @as(u32, @truncate(completion.result));
                 const descriptor: bash_tool.Descriptor = .{
                     .operation_id = tool_operation_id,
@@ -745,19 +679,17 @@ const ModelSlot = struct {
                 };
                 var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
                 const descriptor_bytes = try bash_tool.encodeDescriptor(&descriptor_buffer, descriptor);
-                const digest = bash_tool.descriptorDigest(descriptor_bytes);
                 try self.session.storeContent(descriptor_ref, descriptor_bytes);
                 break :blk .{ .bash = .{
-                    .operation_id = tool_operation_id,
                     .descriptor_ref = descriptor_ref,
-                    .descriptor_digest = digest,
+                    .call = try session_store.BashCallMaterial.init(descriptor.call),
                 } };
             },
             .apply_patch => |patch| blk: {
                 const patch_ref = (@as(u64, 1) << 60) | @as(u32, @truncate(completion.result));
                 try self.session.storeContent(patch_ref, patch);
                 break :blk .{ .apply_patch = .{
-                    .operation_id = try allocateOperationIdentity(self.session),
+                    .operation_id = try session_store.actionOperationId(completion.result),
                     .patch_ref = patch_ref,
                     .patch_digest = patch_tool.patchDigest(patch),
                     .patch_length = @intCast(patch.len),
@@ -767,37 +699,27 @@ const ModelSlot = struct {
     }
 };
 
+const PreparedTool = struct {
+    call_ref: u64,
+    action: ?session_store.ActionMaterial = null,
+};
+
 fn prepareToolAdmission(
     host: *Host,
     session: *session_store.Session,
     workspace_path: []const u8,
     completion: ModelCompletion,
     tool: ModelSlot.Tool,
-) !ModelSlot.PreparedFacts {
+) !PreparedTool {
+    var prepared: PreparedTool = .{ .call_ref = toolCallReference(completion) };
     switch (tool) {
-        .none => return .{},
-        else => {},
-    }
-    var prepared: ModelSlot.PreparedFacts = .{};
-    switch (tool) {
-        .none => unreachable,
+        .none => return error.MissingAdmittedTool,
         .generic => {},
         .bash => |bash| {
-            const operation = operationContext(
-                session,
-                bash.operation_id,
-                1,
-            );
-            prepared.facts[0] = session_transition.operationAdmitted(
-                operation,
-                .{
-                    .operation_id = completion.operation_id,
-                    .generation = completion.operation_generation,
-                },
-                bash.descriptor_ref,
-                .{ .bash = bash.descriptor_digest },
-            );
-            prepared.fact_count = 1;
+            prepared.action = .{ .bash = .{
+                .descriptor_ref = bash.descriptor_ref,
+                .call = bash.call,
+            } };
         },
         .apply_patch => |patch| {
             var workspace = try host.patch_workspace.borrow();
@@ -812,49 +734,14 @@ fn prepareToolAdmission(
                 .patch_ref = patch.patch_ref,
             });
             try storePatchIntent(session, intent_ref, intent);
-            const operation = operationContext(session, tool_operation_id, 1);
-            prepared.facts[0] = session_transition.operationAdmitted(
-                operation,
-                .{
-                    .operation_id = completion.operation_id,
-                    .generation = completion.operation_generation,
-                },
-                intent_ref,
-                .{ .apply_patch = intent.intent_digest },
-            );
-            prepared.fact_count = 1;
-            prepared.content = .{ .patch_intent = .{
+            prepared.action = .{ .apply_patch = .{
                 .intent_reference = intent_ref,
                 .patch_reference = patch.patch_ref,
+                .patch_digest = patch.patch_digest,
             } };
         },
     }
-    const call_ref = toolCallReference(completion);
-    const call_entry = try session.appendConversation(.tool_call, call_ref, null);
-    const conversation_fact = session_transition.conversationAdvanced(.{
-        .agent = agentContext(session),
-        .entry_id = call_entry.entry_id,
-        .parent_id = call_entry.parent_id,
-        .kind = call_entry.kind,
-        .content_ref = call_ref,
-    });
-    prepared.facts[prepared.fact_count] = conversation_fact;
-    prepared.fact_count += 1;
     return prepared;
-}
-
-fn allocateOperationIdentity(session: *session_store.Session) !u64 {
-    const view = try session.semanticView();
-    for (0..8) |_| {
-        var candidate: u64 = 0;
-        session.io.random(std.mem.asBytes(&candidate));
-        if (candidate != 0 and candidate != view.model.operation_id and
-            candidate != view.consequential.operation_id)
-        {
-            return candidate;
-        }
-    }
-    return error.OperationIdentityAllocationExhausted;
 }
 
 fn toolCallReference(completion: ModelCompletion) u64 {
@@ -949,28 +836,15 @@ pub fn advanceCreated(
     provider: ?model_operation.Provider,
 ) !u64 {
     const io = session.io;
-    var core = try Core.open(&host.slots);
-    var core_open = true;
-    defer if (core_open) core.close();
     const token = session.ownerToken();
-    try core.initialize(session.agent_id);
-    try core.reducer.startTask(session.activeLeafId());
-    try commitCoreFacts(
-        session,
-        &core,
-        &.{session_transition.taskAdmitted(
-            agentContext(session),
-            session.task_id,
-            session.task_id,
-        )},
-        true,
-    );
+    var lease = try host.slots.borrow();
+    _ = try session.startTask(lease.slot);
+    try lease.release();
     _ = try performModelTurn(
+        host,
         io,
         session,
         token,
-        &core,
-        &core_open,
         provider,
         1,
         config.completion_hook,
@@ -980,11 +854,10 @@ pub fn advanceCreated(
 }
 
 fn performModelTurn(
+    host: *Host,
     io: std.Io,
     session: *session_store.Session,
     token: session_store.OwnerToken,
-    core: *Core,
-    core_open: *bool,
     provider: ?model_operation.Provider,
     model_sequence: u32,
     completion_hook: ?CompletionHook,
@@ -992,9 +865,13 @@ fn performModelTurn(
 ) !OperationIds {
     const next_provider = provider orelse return error.SessionOperationPending;
     const ids = try allocateOperationIds(io, session);
-    const operation = try core.reducer.beginModelOperation(ids.operation_id, model_sequence);
-    const context = try core.reducer.modelContext();
-    const operation_generation = operation.generation;
+    var preview_lease = try host.slots.borrow();
+    const context = try session.previewModelContext(
+        preview_lease.slot,
+        ids.operation_id,
+        model_sequence,
+    );
+    try preview_lease.release();
     const request_digest = try model_operation.buildRequest(
         session,
         ids.request_ref,
@@ -1002,53 +879,39 @@ fn performModelTurn(
         context.entry_count,
     );
     try model_operation.verifyRequestDigest(session, ids.request_ref, request_digest);
-    try core.reducer.acceptOperation(.{ .id = ids.operation_id, .generation = operation_generation });
-    const operation_context = operationContext(session, ids.operation_id, operation_generation);
-    const admission_facts = [_]session_transition.Fact{
-        session_transition.operationAdmitted(
-            operation_context,
-            null,
-            ids.request_ref,
-            .{ .model = request_digest },
-        ),
-        session_transition.modelAttemptAdmitted(
-            operation_context,
-            ids.attempt_id,
-            ids.request_ref,
-            .{ .model = request_digest },
-            0,
-        ),
-    };
-    try commitCoreFacts(
-        session,
-        core,
-        &admission_facts,
-        false,
-    );
-    core.close();
-    core_open.* = false;
+    var admission_lease = try host.slots.borrow();
+    const operation = try session.admitModelAttempt(admission_lease.slot, .{
+        .operation_id = ids.operation_id,
+        .sequence = model_sequence,
+        .attempt_id = ids.attempt_id,
+        .request_ref = ids.request_ref,
+        .request_digest = request_digest,
+    });
+    try admission_lease.release();
     try dispatchModelAttempt(session, token, next_provider, .{
         .request_ref = ids.request_ref,
         .request_digest = request_digest,
         .response_ref = ids.response_ref,
         .operation_id = ids.operation_id,
-        .operation_generation = operation_generation,
+        .operation_generation = operation.generation,
         .attempt_id = ids.attempt_id,
     }, completion_hook, fault);
     return error.CompletionExpected;
 }
 
 fn retryModelAttempt(
+    host: *Host,
     io: std.Io,
     session: *session_store.Session,
     token: session_store.OwnerToken,
-    core: *Core,
-    core_open: *bool,
     provider: ?model_operation.Provider,
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !void {
-    const operation = try core.reducer.operation();
+    var view_lease = try host.slots.borrow();
+    const continuation = try session.continuationView(view_lease.slot);
+    try view_lease.release();
+    const operation = continuation.operation;
     const history = try operationHistory(session, operation.id, operation.generation, .model);
     const descriptor = history.descriptor orelse return error.MissingModelDescriptor;
     if (history.attempt_count == session_transition.max_operation_attempts) {
@@ -1089,16 +952,14 @@ fn retryModelAttempt(
         }
     }
     if (attempt_id == 0 or response_ref == 0) return error.OperationIdentityAllocationExhausted;
-    const attempt = session_transition.modelAttemptAdmitted(
-        operationContext(session, operation.id, operation.generation),
-        attempt_id,
-        descriptor.descriptor_ref,
-        descriptor.descriptor_digest,
-        history.attempt_count,
-    );
-    _ = try session.commitFacts(&.{attempt});
-    core.close();
-    core_open.* = false;
+    _ = try session.admitModelRetry(.{
+        .operation_id = operation.id,
+        .sequence = operation.sequence,
+        .attempt_id = attempt_id,
+        .request_ref = descriptor.descriptor_ref,
+        .request_digest = request_digest,
+        .possible_duplicate_attempts = history.attempt_count,
+    });
     return dispatchModelAttempt(session, token, next_provider, .{
         .request_ref = descriptor.descriptor_ref,
         .request_digest = request_digest,
@@ -1154,10 +1015,7 @@ fn executeBashCall(
     allocator: std.mem.Allocator,
     session: *session_store.Session,
     token: session_store.OwnerToken,
-    core: *Core,
-    host: *Host,
     ids: OperationIds,
-    core_open: *bool,
     workspace_path: []const u8,
     permission_mode: PermissionMode,
     cancellation: ?*const std.atomic.Value(bool),
@@ -1165,7 +1023,7 @@ fn executeBashCall(
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !void {
-    const tool = try admittedExecutableTool(session, &core.reducer) orelse
+    const tool = try admittedExecutableTool(session) orelse
         return error.UnsupportedTool;
     if (tool != .bash) {
         return error.UnsupportedTool;
@@ -1189,15 +1047,13 @@ fn executeBashCall(
         return error.InvalidBashDescriptor;
     }
     const result_ref = (@as(u64, 1) << 61) | ids.response_ref;
-    const operation_context = operationContext(session, tool_operation_id, 1);
-
     if (permission_mode == .ask) {
-        const approval = session_transition.approvalRequired(.{
-            .operation = operation_context,
+        _ = try session.requestApproval(.{
+            .operation_id = tool_operation_id,
+            .operation_generation = 1,
             .binding_ref = 0,
             .descriptor_ref = descriptor_ref,
         });
-        _ = try session.commitFacts(&.{approval});
         if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .bash,
             .operation_id = tool_operation_id,
@@ -1207,24 +1063,20 @@ fn executeBashCall(
         });
         return error.PermissionInputRequired;
     }
-    const authorization = session_transition.authorization(.{
-        .operation = operation_context,
+    _ = try session.authorizeAction(.{
+        .operation_id = tool_operation_id,
+        .operation_generation = 1,
         .permission_ref = 0,
         .allowed = true,
     });
-    _ = try session.commitFacts(&.{authorization});
 
     var attempt_id: u64 = 0;
     while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
-    const attempt = session_transition.consequentialAttemptAdmitted(
-        operation_context,
-        attempt_id,
-        descriptor_ref,
-        .{ .bash = digest },
-    );
-    _ = try session.commitFacts(&.{attempt});
-    core.close();
-    core_open.* = false;
+    _ = try session.admitActionAttempt(.{
+        .operation_id = tool_operation_id,
+        .operation_generation = 1,
+        .attempt_id = attempt_id,
+    });
     var execution = try bash_tool.executeDescriptor(
         allocator,
         io,
@@ -1232,9 +1084,6 @@ fn executeBashCall(
         .{ .cancelled = cancellation },
     );
     try reach(fault, .after_bash_execution);
-    core.* = try Core.open(&host.slots);
-    core_open.* = true;
-    try restoreCoreFromLedger(session, core);
     defer execution.deinit();
     try storeBashResult(session, result_ref, execution);
     const result_digest = try contentDigest(session, result_ref);
@@ -1277,15 +1126,13 @@ fn requestPatchPermission(
     {
         return error.InvalidPatchIntent;
     }
-    const operation_context = operationContext(session, tool_operation_id, 1);
-
     if (permission_mode == .ask) {
-        const approval = session_transition.approvalRequired(.{
-            .operation = operation_context,
+        _ = try session.requestApproval(.{
+            .operation_id = tool_operation_id,
+            .operation_generation = 1,
             .binding_ref = intent_ref,
             .descriptor_ref = intent.patch_ref,
         });
-        _ = try session.commitFacts(&.{approval});
         if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .apply_patch,
             .operation_id = tool_operation_id,
@@ -1295,12 +1142,12 @@ fn requestPatchPermission(
         });
         return error.PermissionInputRequired;
     }
-    const authorization = session_transition.authorization(.{
-        .operation = operation_context,
+    _ = try session.authorizeAction(.{
+        .operation_id = tool_operation_id,
+        .operation_generation = 1,
         .permission_ref = intent_ref,
         .allowed = true,
     });
-    _ = try session.commitFacts(&.{authorization});
     try reach(fault, .after_patch_authorization);
 }
 
@@ -1337,21 +1184,16 @@ pub fn advanceRestored(
 ) !u64 {
     const io = session.io;
     const token = session.ownerToken();
-    var core = try Core.open(&host.slots);
-    var core_open = true;
-    defer if (core_open) core.close();
-    try restoreCoreFromLedger(session, &core);
-    switch (try reconcileRestored(host, session, config, &core)) {
+    switch (try reconcileRestored(host, session, config)) {
         .finished => |final_ref| return final_ref,
         .settled_needs_model => return error.SessionNeedsModel,
         .settled_needs_tool => return error.ToolCallDeferred,
         .retry_model => {
             try retryModelAttempt(
+                host,
                 io,
                 session,
                 token,
-                &core,
-                &core_open,
                 provider,
                 config.completion_hook,
                 config.fault,
@@ -1359,7 +1201,7 @@ pub fn advanceRestored(
             return error.CompletionExpected;
         },
         .dispatch_tool => {
-            const observation = try core.reducer.operation();
+            const observation = (try continuationView(host, session)).operation;
             const ids: OperationIds = .{
                 .operation_id = @intCast(observation.id),
                 .attempt_id = 0,
@@ -1367,7 +1209,7 @@ pub fn advanceRestored(
                 .response_ref = @truncate(observation.result_ref),
                 .final_ref = finalReference(observation.result_ref),
             };
-            const tool = try admittedExecutableTool(session, &core.reducer) orelse
+            const tool = try admittedExecutableTool(session) orelse
                 return error.UnboundToolKey;
             switch (tool) {
                 .bash => try executeBashCall(
@@ -1375,10 +1217,7 @@ pub fn advanceRestored(
                     allocator,
                     session,
                     token,
-                    &core,
-                    host,
                     ids,
-                    &core_open,
                     config.workspace_path,
                     config.permission_mode,
                     config.bash_cancelled,
@@ -1397,7 +1236,6 @@ pub fn advanceRestored(
                     _ = try reconcilePatch(
                         host,
                         session,
-                        &core,
                         config.workspace_path,
                         config.completion_hook,
                         config.fault,
@@ -1409,11 +1247,10 @@ pub fn advanceRestored(
         .dispatch_model => {
             if (try hasIndeterminateBash(session)) return error.BashPossiblyExecuted;
             _ = try performModelTurn(
+                host,
                 io,
                 session,
                 token,
-                &core,
-                &core_open,
                 provider orelse return error.SessionNeedsModel,
                 2,
                 config.completion_hook,
@@ -1439,89 +1276,79 @@ fn reconcileRestored(
     host: *Host,
     session: *session_store.Session,
     config: RuntimeConfig,
-    core: *Core,
 ) !LocalRestored {
-    var outcome = (try core.reducer.task()).phase;
+    var continuation = try continuationView(host, session);
+    var outcome = continuation.task.phase;
     var admitted_completion = false;
     if (outcome == .awaiting_model) {
-        if (durableCompletion(session, core)) |completion| {
+        if (durableCompletion(session, continuation.operation)) |completion| {
             const admission = blk: {
                 var scratch = try host.semantic_validation.borrow();
                 defer scratch.release() catch unreachable;
                 try reach(config.fault, .after_semantic_workspace_borrow);
-                var slot: ModelSlot = .{
+                var model_slot: ModelSlot = .{
                     .session = session,
                     .scratch = scratch.workspace,
                     .workspace_path = config.workspace_path,
                 };
-                break :blk try ModelSlot.admit(&slot, completion);
+                break :blk try ModelSlot.admit(&model_slot, completion);
             };
-            const prepared = try prepareToolAdmission(
-                host,
-                session,
-                config.workspace_path,
-                completion,
-                admission.tool,
-            );
-            _ = try core.reducer.applyModelResponse(.{
-                .id = completion.operation_id,
-                .generation = completion.operation_generation,
-            }, admission.response, completion.result, completion.result_digest);
-            var evidence_agent = agentContext(session);
-            evidence_agent.ownership_epoch = completion.ownership_epoch;
-            const terminal = session_transition.result(.{
-                .operation = .{
-                    .agent = evidence_agent,
-                    .operation_id = completion.operation_id,
-                    .generation = completion.operation_generation,
+            const consequence: session_store.ModelCompletionConsequence = switch (admission.response.parsed_value.disposition) {
+                .final_answer => blk: {
+                    const final_ref = finalReference(completion.result);
+                    var buffer: [model_protocol.max_assistant_text_size]u8 = undefined;
+                    var response_reader = try session.viewContent(completion.result);
+                    const parsed = admission.response.parsed_value;
+                    const expected = try response_reader.readWindow(
+                        parsed.text_offset,
+                        buffer[0..parsed.text_length],
+                    );
+                    if (expected.len != parsed.text_length or expected.len == 0) {
+                        return error.InvalidFinalAnswerRange;
+                    }
+                    try storeOrExpectContent(session, final_ref, expected);
+                    try reach(config.fault, .after_final_content);
+                    break :blk .{ .final_answer = .{ .content_ref = final_ref } };
                 },
-                .result_ref = completion.result,
-                .result_digest = completion.result_digest,
-                .class = .ordinary,
-                .evidence = .{ .durable = .{ .model = completion.attempt_id } },
-            });
-            const applied = session_transition.resultApplied(.{
-                .operation = operationContext(session, completion.operation_id, completion.operation_generation),
+                .tool_call => blk: {
+                    const prepared = try prepareToolAdmission(
+                        host,
+                        session,
+                        config.workspace_path,
+                        completion,
+                        admission.tool,
+                    );
+                    break :blk .{ .tool_call = .{
+                        .content_ref = prepared.call_ref,
+                        .action = prepared.action,
+                    } };
+                },
+                else => .terminal,
+            };
+            var admission_lease = try host.slots.borrow();
+            _ = try session.admitModelCompletion(admission_lease.slot, .{
+                .operation_id = completion.operation_id,
+                .operation_generation = completion.operation_generation,
                 .attempt_id = completion.attempt_id,
-                .result_ref = completion.result,
-                .result_digest = completion.result_digest,
+                .evidence_epoch = completion.ownership_epoch,
+                .response_ref = completion.result,
+                .response_digest = completion.result_digest,
+                .admission = admission.response,
+                .consequence = consequence,
             });
-            var admission_facts: [5]session_transition.Fact = undefined;
-            admission_facts[0] = terminal;
-            admission_facts[1] = applied;
-            @memcpy(admission_facts[2..][0..prepared.fact_count], prepared.facts[0..prepared.fact_count]);
-            switch (prepared.content) {
-                .facts_only => _ = try session.commitCoreFacts(
-                    &core.reducer,
-                    admission_facts[0 .. 2 + prepared.fact_count],
-                ),
-                .patch_intent => |patch| _ = try session.commitCoreFactsWithPatchContent(
-                    &core.reducer,
-                    admission_facts[0 .. 2 + prepared.fact_count],
-                    patch,
-                ),
-            }
-            core.active = false;
-            try core.activate(session);
+            try admission_lease.release();
             admitted_completion = true;
         } else |err| switch (err) {
             error.SessionOperationPending => return .retry_model,
             else => return err,
         }
-        outcome = (try core.reducer.task()).phase;
-    }
-    if (outcome == .final_candidate) {
-        return .{ .finished = try finalizeCandidate(
-            session,
-            core,
-            null,
-        ) };
+        continuation = try continuationView(host, session);
+        outcome = continuation.task.phase;
     }
     if (outcome == .awaiting_tool) {
         switch (try reconcileToolCall(
             host,
             session,
-            core,
             session.workspacePath(),
             config.completion_hook,
             config.fault,
@@ -1537,12 +1364,12 @@ fn reconcileRestored(
         }
     }
     if (outcome == .failed) {
-        const response = try core.reducer.response();
+        const response = continuation.response;
         if (response.disposition == .input_request) return error.InteractionRequestLayerRequired;
         return error.TerminalModelFailure;
     }
     if (outcome == .finished) {
-        const entry_id = (try core.reducer.task()).final_entry_id;
+        const entry_id = continuation.task.final_entry_id;
         if (entry_id != session.activeLeafId()) return error.FinalEntryMismatch;
         const entry = try session.readEntry(entry_id);
         if (entry.kind != .assistant_text) return error.InvalidFinalEntry;
@@ -1559,10 +1386,16 @@ pub fn settleRestored(
     session: *session_store.Session,
     config: RuntimeConfig,
 ) !u64 {
-    var core = try Core.open(&host.slots);
-    defer core.close();
-    try restoreCoreFromLedger(session, &core);
-    return localCompletionResult(try reconcileRestored(host, session, config, &core));
+    return localCompletionResult(try reconcileRestored(host, session, config));
+}
+
+fn continuationView(
+    host: *Host,
+    session: *session_store.Session,
+) !session_store.ContinuationView {
+    var lease = try host.slots.borrow();
+    defer lease.release() catch unreachable;
+    return session.continuationView(lease.slot);
 }
 
 pub fn resolvePermission(
@@ -1577,14 +1410,11 @@ pub fn resolvePermission(
 ) !u64 {
     const io = session.io;
     const token = session.ownerToken();
-    var core = try Core.open(&host.slots);
-    var core_open = true;
-    defer if (core_open) core.close();
-    try restoreCoreFromLedger(session, &core);
-    if ((try core.reducer.task()).phase != .awaiting_tool) return error.PermissionNoLongerRequired;
-    const tool = try admittedExecutableTool(session, &core.reducer) orelse
+    const continuation = try continuationView(host, session);
+    if (continuation.task.phase != .awaiting_tool) return error.PermissionNoLongerRequired;
+    const tool = try admittedExecutableTool(session) orelse
         return error.PermissionNoLongerRequired;
-    const observation = try core.reducer.operation();
+    const observation = continuation.operation;
     const expected_kind: binding.DescriptorKind = switch (tool) {
         .bash => .bash,
         .apply_patch => .apply_patch,
@@ -1609,7 +1439,6 @@ pub fn resolvePermission(
 
     switch (tool) {
         .bash => {
-            const operation_context = operationContext(session, expected_operation_id, 1);
             var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
             var reader = try session.viewContent(descriptor.descriptor_ref);
             if (reader.length() > descriptor_buffer.len) return error.InvalidBashCallRange;
@@ -1632,35 +1461,28 @@ pub fn resolvePermission(
             {
                 return error.StalePermissionDecision;
             }
-            const authorization = session_transition.authorization(.{
-                .operation = operation_context,
+            _ = try session.authorizeAction(.{
+                .operation_id = expected_operation_id,
+                .operation_generation = 1,
                 .permission_ref = 0,
                 .allowed = allow,
             });
-            _ = try session.commitFacts(&.{authorization});
             const result_ref = (@as(u64, 1) << 61) | @as(u32, @truncate(observation.result_ref));
             var attempt_id: u64 = 0;
             var execution: bash_tool.Execution = undefined;
             if (allow) {
                 while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
-                const attempt = session_transition.consequentialAttemptAdmitted(
-                    operation_context,
-                    attempt_id,
-                    descriptor.descriptor_ref,
-                    descriptor.descriptor_digest,
-                );
-                _ = try session.commitFacts(&.{attempt});
-                core.close();
-                core_open = false;
+                _ = try session.admitActionAttempt(.{
+                    .operation_id = expected_operation_id,
+                    .operation_generation = 1,
+                    .attempt_id = attempt_id,
+                });
                 execution = try bash_tool.executeDescriptor(
                     allocator,
                     io,
                     bash_descriptor,
                     .{ .cancelled = cancellation },
                 );
-                core = try Core.open(&host.slots);
-                core_open = true;
-                try restoreCoreFromLedger(session, &core);
             } else {
                 execution = .{
                     .allocator = allocator,
@@ -1689,21 +1511,27 @@ pub fn resolvePermission(
                 if (completion_hook) |hook| try hook.offered(hook.context, evidence);
                 return error.CompletionOffered;
             }
-            const terminal = session_transition.result(.{
-                .operation = operation_context,
+            _ = try session.admitActionResult(.{
+                .operation_id = expected_operation_id,
+                .operation_generation = 1,
                 .result_ref = result_ref,
                 .result_digest = result_digest,
                 .class = if (execution.status == .indeterminate) .indeterminate else .ordinary,
-                .evidence = if (attempt_id == 0)
-                    .{ .immediate = {} }
-                else
-                    .{ .durable = .{ .bash = attempt_id } },
+                .evidence = .immediate,
             });
-            _ = try session.commitFacts(&.{terminal});
+            const result = ToolResult{
+                .agent_id = session.agent_id,
+                .agent_generation = agent_generation,
+                .operation_id = expected_operation_id,
+                .operation_generation = 1,
+                .attempt_id = 0,
+                .ownership_epoch = token.epoch,
+                .result = result_ref,
+            };
             try reconcileBashResult(
+                host,
                 session,
-                &core,
-                toolResultFromRecord(terminal.result),
+                result,
             );
         },
         .apply_patch => {
@@ -1722,17 +1550,14 @@ pub fn resolvePermission(
             {
                 return error.StalePermissionDecision;
             }
-            const operation_context = operationContext(session, expected_operation_id, 1);
-            const authorization = session_transition.authorization(.{
-                .operation = operation_context,
+            _ = try session.authorizeAction(.{
+                .operation_id = expected_operation_id,
+                .operation_generation = 1,
                 .permission_ref = pending.binding_ref,
                 .allowed = allow,
             });
-            _ = try session.commitFacts(&.{authorization});
         },
     }
-    core.close();
-    core_open = false;
     const next_provider = provider orelse return error.SessionNeedsModel;
     return advanceRestored(
         host,
@@ -1816,19 +1641,17 @@ const ToolRecovery = enum {
 fn reconcileToolCall(
     host: *Host,
     session: *session_store.Session,
-    core: *Core,
     workspace_path: []const u8,
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !ToolRecovery {
-    const tool = try admittedExecutableTool(session, &core.reducer) orelse
+    const tool = try admittedExecutableTool(session) orelse
         return error.UnboundToolKey;
     return switch (tool) {
-        .bash => reconcileBash(session, core),
+        .bash => reconcileBash(host, session),
         .apply_patch => reconcilePatch(
             host,
             session,
-            core,
             workspace_path,
             completion_hook,
             fault,
@@ -1837,10 +1660,10 @@ fn reconcileToolCall(
 }
 
 fn reconcileBash(
+    host: *Host,
     session: *session_store.Session,
-    core: *Core,
 ) !ToolRecovery {
-    const model_observation = try core.reducer.operation();
+    const model_observation = (try continuationView(host, session)).operation;
     const view = try session.semanticView();
     if (view.consequential.descriptor == null) return .none;
     const history = try consequentialHistoryForModel(session, model_observation.id, .bash);
@@ -1848,8 +1671,8 @@ fn reconcileBash(
     _ = history.descriptor orelse return .none;
     if (history.result) |result| {
         try reconcileBashResult(
+            host,
             session,
-            core,
             toolResultFromRecord(result),
         );
         if (result.class == .indeterminate) return .indeterminate;
@@ -1876,18 +1699,27 @@ fn reconcileBash(
         var encoded: [bash_tool.result_header_size]u8 = undefined;
         _ = try bash_tool.encodeResult(&encoded, execution);
         try storeOrExpectContent(session, result_ref, &encoded);
-        const denied = session_transition.result(.{
-            .operation = operationContext(session, operation_id, 1),
+        const denied_digest = try contentDigest(session, result_ref);
+        _ = try session.admitActionResult(.{
+            .operation_id = operation_id,
+            .operation_generation = 1,
             .result_ref = result_ref,
-            .result_digest = try contentDigest(session, result_ref),
+            .result_digest = denied_digest,
             .class = .ordinary,
-            .evidence = .{ .immediate = {} },
+            .evidence = .immediate,
         });
-        _ = try session.commitFacts(&.{denied});
         try reconcileBashResult(
+            host,
             session,
-            core,
-            toolResultFromRecord(denied.result),
+            .{
+                .agent_id = session.agent_id,
+                .agent_generation = agent_generation,
+                .operation_id = operation_id,
+                .operation_generation = 1,
+                .attempt_id = 0,
+                .ownership_epoch = session.ownership_epoch,
+                .result = result_ref,
+            },
         );
         return .ready_local;
     };
@@ -1935,20 +1767,31 @@ fn reconcileBash(
             .result_digest = result_digest,
         }));
     }
-    const result = session_transition.result(.{
-        .operation = .{ .agent = evidence_agent, .operation_id = operation_id, .generation = 1 },
+    _ = try session.admitActionResult(.{
+        .operation_id = operation_id,
+        .operation_generation = 1,
         .result_ref = result_ref,
         .result_digest = result_digest,
         .class = if (status == .indeterminate) .indeterminate else .ordinary,
-        .evidence = .{ .durable = .{ .bash = attempt.attempt_id } },
+        .evidence = .{ .durable = .{
+            .attempt_id = attempt.attempt_id,
+            .ownership_epoch = evidence_agent.ownership_epoch,
+        } },
     });
-    _ = try session.commitFacts(&.{result});
     try reconcileBashResult(
+        host,
         session,
-        core,
-        toolResultFromRecord(result.result),
+        .{
+            .agent_id = session.agent_id,
+            .agent_generation = agent_generation,
+            .operation_id = operation_id,
+            .operation_generation = 1,
+            .attempt_id = attempt.attempt_id,
+            .ownership_epoch = evidence_agent.ownership_epoch,
+            .result = result_ref,
+        },
     );
-    return if (result.result.class == .indeterminate) .indeterminate else .ready_completion;
+    return if (status == .indeterminate) .indeterminate else .ready_completion;
 }
 
 fn readBashStatus(
@@ -1984,12 +1827,11 @@ fn toolResultFromRecord(result: session_transition.ResultRecord) ToolResult {
 fn reconcilePatch(
     host: *Host,
     session: *session_store.Session,
-    core: *Core,
     workspace_path: []const u8,
     completion_hook: ?CompletionHook,
     fault: ?FaultHook,
 ) !ToolRecovery {
-    const operation_observation = try core.reducer.operation();
+    const operation_observation = (try continuationView(host, session)).operation;
     const model_operation_id = operation_observation.id;
     const response_ref: u32 = @truncate(operation_observation.result_ref);
     const result_ref = (@as(u64, 1) << 57) | response_ref;
@@ -2016,8 +1858,8 @@ fn reconcilePatch(
             return error.InvalidPatchHistory;
         }
         try reconcileToolResult(
+            host,
             session,
-            core,
             (@as(u64, 1) << 59) | response_ref,
             .apply_patch,
             toolResultFromRecord(settled),
@@ -2051,14 +1893,16 @@ fn reconcilePatch(
             // reopens the immutable patch under a new lease only if it needs bytes.
             var attempt_id: u64 = 0;
             while (attempt_id == 0) session.io.random(std.mem.asBytes(&attempt_id));
-            const admitted = session_transition.consequentialAttemptAdmitted(
-                operationContext(session, operation_id, 1),
-                attempt_id,
-                validated.descriptor_ref,
-                validated.descriptor_digest,
-            );
-            _ = try session.commitFacts(&.{admitted});
-            attempt = admitted.attempt_admitted;
+            _ = try session.admitActionAttempt(.{
+                .operation_id = operation_id,
+                .operation_generation = 1,
+                .attempt_id = attempt_id,
+            });
+            attempt = (try consequentialHistoryForModel(
+                session,
+                model_operation_id,
+                .apply_patch,
+            )).latestAttempt();
             try reach(fault, .after_patch_attempt);
         }
     }
@@ -2135,20 +1979,41 @@ fn reconcilePatch(
             }
         }
     }
-    const terminal = session_transition.result(.{
-        .operation = .{ .agent = evidence_agent, .operation_id = operation_id, .generation = 1 },
+    _ = try session.admitActionResult(.{
+        .operation_id = operation_id,
+        .operation_generation = 1,
         .result_ref = result_ref,
         .result_digest = result_digest,
         .class = if (result_status == .indeterminate) .indeterminate else .ordinary,
-        .evidence = result_evidence,
+        .evidence = switch (result_evidence) {
+            .immediate => .immediate,
+            .durable => |durable| .{ .durable = .{
+                .attempt_id = switch (durable) {
+                    inline else => |attempt_id| attempt_id,
+                },
+                .ownership_epoch = evidence_agent.ownership_epoch,
+            } },
+        },
     });
-    _ = try session.commitFacts(&.{terminal});
     try reconcileToolResult(
+        host,
         session,
-        core,
         (@as(u64, 1) << 59) | response_ref,
         .apply_patch,
-        toolResultFromRecord(terminal.result),
+        .{
+            .agent_id = session.agent_id,
+            .agent_generation = agent_generation,
+            .operation_id = operation_id,
+            .operation_generation = 1,
+            .attempt_id = switch (result_evidence) {
+                .immediate => 0,
+                .durable => |durable| switch (durable) {
+                    inline else => |attempt_id| attempt_id,
+                },
+            },
+            .ownership_epoch = evidence_agent.ownership_epoch,
+            .result = result_ref,
+        },
     );
     return switch (result_evidence) {
         .immediate => .ready_local,
@@ -2192,19 +2057,19 @@ fn readPatchResultStatus(
 }
 
 fn reconcileBashResult(
+    host: *Host,
     session: *session_store.Session,
-    core: *Core,
     result: ToolResult,
 ) !void {
     const response_ref: u32 = @truncate(result.result);
     if (result.result != ((@as(u64, 1) << 61) | response_ref)) return error.InvalidToolResultReference;
     const call_ref = (@as(u64, 1) << 59) | response_ref;
-    try reconcileToolResult(session, core, call_ref, .bash, result);
+    try reconcileToolResult(host, session, call_ref, .bash, result);
 }
 
 fn reconcileToolResult(
+    host: *Host,
     session: *session_store.Session,
-    core: *Core,
     call_ref: u64,
     tool: ExecutableTool,
     result: ToolResult,
@@ -2212,44 +2077,32 @@ fn reconcileToolResult(
     const visible_ref = (@as(u64, 1) << 55) | @as(u32, @truncate(result.result));
     const active = try session.readEntry(session.activeLeafId());
     var call_entry: session_store.ConversationEntry = undefined;
-    var result_entry: session_store.ConversationEntry = undefined;
+    var result_entry_id: u64 = undefined;
     if (active.kind == .tool_result and active.content_ref == visible_ref) {
-        result_entry = active;
+        result_entry_id = active.entry_id;
         call_entry = try session.readEntry(active.parent_id);
     } else if (active.kind == .tool_call and active.content_ref == call_ref) {
         call_entry = active;
         try storeVisibleToolResult(session, tool, result.result, visible_ref, call_entry.entry_id);
-        result_entry = try session.appendConversation(.tool_result, visible_ref, null);
+        result_entry_id = call_entry.entry_id + 1;
     } else {
         return error.ToolConversationMismatch;
     }
     if (call_entry.kind != .tool_call or call_entry.content_ref != call_ref or
-        result_entry.parent_id != call_entry.entry_id)
+        result_entry_id != call_entry.entry_id + 1)
     {
         return error.ToolConversationMismatch;
     }
-    try core.reducer.commitToolResult(call_entry.entry_id, result_entry.entry_id);
-    const applied_facts = [_]session_transition.Fact{
-        session_transition.resultApplied(.{
-            .operation = operationContext(session, result.operation_id, result.operation_generation),
-            .attempt_id = result.attempt_id,
-            .result_ref = result.result,
-            .result_digest = try contentDigest(session, result.result),
-        }),
-        session_transition.conversationAdvanced(.{
-            .agent = agentContext(session),
-            .entry_id = result_entry.entry_id,
-            .parent_id = result_entry.parent_id,
-            .kind = result_entry.kind,
-            .content_ref = visible_ref,
-        }),
-    };
-    try commitCoreFacts(
-        session,
-        core,
-        &applied_facts,
-        true,
-    );
+    var lease = try host.slots.borrow();
+    try session.admitToolResult(lease.slot, .{
+        .operation_id = result.operation_id,
+        .operation_generation = result.operation_generation,
+        .attempt_id = result.attempt_id,
+        .result_ref = result.result,
+        .result_digest = try contentDigest(session, result.result),
+        .visible_ref = visible_ref,
+    });
+    try lease.release();
 }
 
 fn storeVisibleToolResult(
@@ -2414,9 +2267,8 @@ fn patchStatusName(status: patch_tool.ResultStatus) []const u8 {
 
 fn durableCompletion(
     session: *session_store.Session,
-    core: *Core,
+    operation: core_image.Operation,
 ) !ModelCompletion {
-    const operation = try core.reducer.operation();
     const operation_id = operation.id;
     const operation_generation = operation.generation;
     const history = try operationHistory(session, operation_id, operation_generation, .model);
@@ -2501,60 +2353,6 @@ fn hasIndeterminateBash(
     return operation.kind() == .bash;
 }
 
-fn finalizeCandidate(
-    session: *session_store.Session,
-    core: *Core,
-    fault: ?FaultHook,
-) !u64 {
-    const task = try core.reducer.task();
-    const response = try core.reducer.response();
-    if (task.phase != .final_candidate or response.disposition != .final_answer) {
-        return error.FinalAnswerNotCandidate;
-    }
-    var final_buffer: [model_protocol.max_assistant_text_size]u8 = undefined;
-    const expected = try readResponseWindow(session, &core.reducer, response, response.text, &final_buffer);
-    if (expected.len == 0) {
-        return error.InvalidFinalAnswerRange;
-    }
-    const response_ref = response.content_ref;
-    if (response_ref == 0) return error.InvalidModelResponseReference;
-    const final_ref = finalReference(response_ref);
-
-    var final_blob = session.viewContent(final_ref) catch |err| switch (err) {
-        error.FileNotFound => blk: {
-            try session.storeContent(final_ref, expected);
-            break :blk try session.viewContent(final_ref);
-        },
-        else => return err,
-    };
-    try expectContent(&final_blob, expected);
-    try reach(fault, .after_final_content);
-
-    var entry = try session.readEntry(session.activeLeafId());
-    if (entry.kind != .assistant_text or entry.content_ref != final_ref) {
-        entry = try session.appendConversation(.assistant_text, final_ref, null);
-    }
-    try reach(fault, .after_assistant_entry);
-    try core.reducer.commitFinalAnswer(entry.entry_id);
-    const final_facts = [_]session_transition.Fact{
-        session_transition.conversationAdvanced(.{
-            .agent = agentContext(session),
-            .entry_id = entry.entry_id,
-            .parent_id = entry.parent_id,
-            .kind = entry.kind,
-            .content_ref = final_ref,
-        }),
-        session_transition.outcome(agentContext(session), session.task_id, final_ref),
-    };
-    try commitCoreFacts(
-        session,
-        core,
-        &final_facts,
-        true,
-    );
-    return final_ref;
-}
-
 fn reach(fault: ?FaultHook, boundary: FaultBoundary) !void {
     if (fault) |hook| try hook.reached(hook.context, boundary);
 }
@@ -2595,49 +2393,6 @@ fn readBoundedContent(
     return bytes;
 }
 
-fn readResponseWindow(
-    session: *session_store.Session,
-    core: *const core_image.Core,
-    response: core_image.Response,
-    window: core_image.ContentWindow,
-    out: []u8,
-) ![]const u8 {
-    if (window.length == 0 or window.length > out.len) return error.InvalidModelResponseWindow;
-    const operation = try core.operation();
-    const history = try operationHistory(session, operation.id, operation.generation, .model);
-    const committed = history.result orelse return error.MissingModelResult;
-    if (committed.result_ref != response.content_ref) return error.ModelResultReferenceMismatch;
-    var reader = try session.viewContent(response.content_ref);
-    if (reader.length() == 0 or reader.length() > model_protocol.max_response_size) {
-        return error.ResponseTooLarge;
-    }
-    try verifyModelResponse(&reader, committed.result_digest);
-    const start: u64 = window.offset;
-    const length: u64 = window.length;
-    if (start > reader.length() or length > reader.length() - start) {
-        return error.InvalidModelResponseWindow;
-    }
-    const bytes = try reader.readWindow(start, out[0..window.length]);
-    if (bytes.len != window.length) return error.TruncatedModelResponse;
-    return bytes;
-}
-
-fn readAdmittedResponseArguments(
-    session: *session_store.Session,
-    core: *const core_image.Core,
-    response: core_image.Response,
-    out: []u8,
-) !model_contract.StrictToolJson {
-    const bytes = try readResponseWindow(
-        session,
-        core,
-        response,
-        response.arguments.contentWindow(),
-        out,
-    );
-    return model_contract.strictToolJsonFromEvidence(bytes, response.arguments.digest);
-}
-
 fn readModelResponse(
     reader: *session_store.ContentView,
     out: []u8,
@@ -2668,226 +2423,6 @@ fn verifyModelResponse(reader: *session_store.ContentView, expected_digest: bind
     }
 }
 
-test "restored response metadata reads immutable durable content" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDir(io, "sessions", .default_dir);
-    try tmp.dir.createDir(io, "repo", .default_dir);
-    var repo = try tmp.dir.openDir(io, "repo", .{});
-    defer repo.close(io);
-    try repo.createDir(io, ".git", .default_dir);
-    var git = try repo.openDir(io, ".git", .{});
-    defer git.close(io);
-    try git.createDir(io, "objects", .default_dir);
-    try git.createDir(io, "refs", .default_dir);
-    var config = try git.createFile(io, "config", .{});
-    defer config.close(io);
-    try config.writePositionalAll(io, "[core]\n\trepositoryformatversion = 0\n", 0);
-    var head = try git.createFile(io, "HEAD", .{});
-    defer head.close(io);
-    try head.writePositionalAll(io, "ref: refs/heads/main\n", 0);
-
-    var repo_path_buffer: [160]u8 = undefined;
-    const repo_path = try std.fmt.bufPrint(
-        &repo_path_buffer,
-        ".zig-cache/tmp/{s}/repo",
-        .{tmp.sub_path},
-    );
-    var database_path_buffer: [160]u8 = undefined;
-    const database_path = try std.fmt.bufPrint(
-        &database_path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var sessions = try tmp.dir.openDir(io, "sessions", .{});
-    defer sessions.close(io);
-    var storage = try host_store.StorageOwner.open(io, database_path, .{});
-    defer storage.close();
-    const scratch = try session_store.allocateTransientScratch(std.testing.allocator);
-    defer session_store.destroyTransientScratch(std.testing.allocator, io, scratch);
-    var session = try session_store.Session.create(sessions, scratch, &storage, io, .{
-        .workspace_path = repo_path,
-        .model = "fixture:window",
-        .task = "Recover the final answer window",
-    });
-    defer session.close();
-
-    const response_ref: u64 = 2001;
-    const answer = "the restored window comes from durable response bytes";
-    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    var validation: model_protocol.ValidationScratch = undefined;
-    const encoded_response = try model_protocol.encodeText(&response_buffer, answer);
-    try session.storeContent(response_ref, encoded_response);
-    const descriptor_ref: u64 = 2000;
-    const descriptor_bytes = "restored response test descriptor";
-    try session.storeContent(descriptor_ref, descriptor_bytes);
-    const descriptor_digest: binding.Descriptor = .{
-        .model = binding.hash(binding.ModelDescriptor, descriptor_bytes),
-    };
-
-    var initial_slot: core_image.ActivationSlot = undefined;
-    var initial = try core_image.Core.initialize(&initial_slot, .{ .agent_id = session.agent_id, .generation = 1 });
-    try initial.startTask(1);
-    const operation = try initial.beginModelOperation(2, 1);
-    const identity: core_image.OperationIdentity = .{
-        .id = operation.id,
-        .generation = operation.generation,
-    };
-    try initial.acceptOperation(identity);
-    const ledger_operation = operationContext(&session, operation.id, operation.generation);
-    const response_digest = binding.hash(binding.Result, encoded_response);
-    _ = try session.commitFacts(&.{
-        session_transition.operationAdmitted(ledger_operation, null, descriptor_ref, descriptor_digest),
-        session_transition.modelAttemptAdmitted(ledger_operation, 9, descriptor_ref, descriptor_digest, 0),
-    });
-    try session.publishCompletionEvidence(completion_inbox.bind(.{
-        .kind = .model,
-        .session_id = session.session_id,
-        .ownership_epoch = session.ownership_epoch,
-        .agent_id = session.agent_id,
-        .agent_generation = agent_generation,
-        .operation_id = operation.id,
-        .operation_generation = operation.generation,
-        .attempt_id = 9,
-        .result_ref = response_ref,
-        .result_digest = response_digest,
-    }));
-    _ = try initial.applyModelResponse(
-        identity,
-        model_protocol.admit(&validation, encoded_response).admission,
-        response_ref,
-        response_digest,
-    );
-    _ = try session.commitCoreFacts(&initial, &.{
-        session_transition.result(.{
-            .operation = ledger_operation,
-            .result_ref = response_ref,
-            .result_digest = response_digest,
-            .class = .ordinary,
-            .evidence = .{ .durable = .{ .model = 9 } },
-        }),
-        session_transition.resultApplied(.{
-            .operation = ledger_operation,
-            .attempt_id = 9,
-            .result_ref = response_ref,
-            .result_digest = response_digest,
-        }),
-    });
-
-    var restored_slot: core_image.ActivationSlot = undefined;
-    var restored = try session.activateCore(&restored_slot);
-    defer restored.abandon();
-    const response = try restored.response();
-    var answer_buffer: [model_protocol.max_assistant_text_size]u8 = undefined;
-    try std.testing.expectEqualStrings(
-        answer,
-        try readResponseWindow(&session, &restored, response, response.text, &answer_buffer),
-    );
-
-    const substituted = try model_protocol.encodeText(&response_buffer, "substituted final answer");
-    try std.testing.expectError(error.ContentAlreadyExists, session.storeContent(response_ref, substituted));
-    try std.testing.expectEqualStrings(
-        answer,
-        try readResponseWindow(&session, &restored, response, response.text, &answer_buffer),
-    );
-}
-
-test "restored tool arguments retain immutable stored content" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDir(io, "sessions", .default_dir);
-    var database_path_buffer: [160]u8 = undefined;
-    const database_path = try std.fmt.bufPrint(
-        &database_path_buffer,
-        ".zig-cache/tmp/{s}/tool-window-test.sqlite3",
-        .{tmp.sub_path},
-    );
-    var storage = try host_store.StorageOwner.open(io, database_path, .{});
-    defer storage.close();
-    var sessions = try tmp.dir.openDir(io, "sessions", .{});
-    defer sessions.close(io);
-    const scratch = try session_store.allocateTransientScratch(std.testing.allocator);
-    defer session_store.destroyTransientScratch(std.testing.allocator, io, scratch);
-    var session = try session_store.Session.create(sessions, scratch, &storage, io, .{
-        .workspace_path = ".",
-        .model = "fixture:window",
-        .task = "Recover tool arguments",
-    });
-    defer session.close();
-
-    const response_ref: u64 = 3001;
-    const descriptor_ref: u64 = 3000;
-    const descriptor_bytes = "tool window descriptor";
-    try session.storeContent(descriptor_ref, descriptor_bytes);
-    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    var validation: model_protocol.ValidationScratch = undefined;
-    const original = try model_protocol.encodeTool(
-        &response_buffer,
-        model_contract.bash_key,
-        "{\"command\":\"true\",\"timeout_ms\":1000}",
-    );
-    try session.storeContent(response_ref, original);
-
-    var slot: core_image.ActivationSlot = undefined;
-    var core = try core_image.Core.initialize(&slot, .{ .agent_id = session.agent_id, .generation = 1 });
-    defer core.abandon();
-    try core.startTask(1);
-    const operation = try core.beginModelOperation(3, 1);
-    const identity: core_image.OperationIdentity = .{ .id = operation.id, .generation = operation.generation };
-    try core.acceptOperation(identity);
-    const response_digest = binding.hash(binding.Result, original);
-    _ = try core.applyModelResponse(
-        identity,
-        model_protocol.admit(&validation, original).admission,
-        response_ref,
-        response_digest,
-    );
-    const context = operationContext(&session, operation.id, operation.generation);
-    const descriptor_digest: binding.Descriptor = .{ .model = binding.hash(binding.ModelDescriptor, descriptor_bytes) };
-    _ = try session.commitFacts(&.{
-        session_transition.operationAdmitted(context, null, descriptor_ref, descriptor_digest),
-        session_transition.modelAttemptAdmitted(context, 10, descriptor_ref, descriptor_digest, 0),
-    });
-    try session.publishCompletionEvidence(completion_inbox.bind(.{
-        .kind = .model,
-        .session_id = session.session_id,
-        .ownership_epoch = session.ownership_epoch,
-        .agent_id = session.agent_id,
-        .agent_generation = agent_generation,
-        .operation_id = operation.id,
-        .operation_generation = operation.generation,
-        .attempt_id = 10,
-        .result_ref = response_ref,
-        .result_digest = response_digest,
-    }));
-    _ = try session.commitFacts(&.{session_transition.result(.{
-        .operation = context,
-        .result_ref = response_ref,
-        .result_digest = response_digest,
-        .class = .ordinary,
-        .evidence = .{ .durable = .{ .model = 10 } },
-    })});
-    const response = try core.response();
-    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-    try std.testing.expectEqualStrings(
-        "{\"command\":\"true\",\"timeout_ms\":1000}",
-        (try readAdmittedResponseArguments(&session, &core, response, &arguments_buffer)).bytes(),
-    );
-
-    const replacement = try model_protocol.encodeTool(
-        &response_buffer,
-        model_contract.bash_key,
-        "{\"command\":\"false\",\"timeout_ms\":1000}",
-    );
-    try std.testing.expectError(error.ContentAlreadyExists, session.storeContent(response_ref, replacement));
-    try std.testing.expectEqualStrings(
-        "{\"command\":\"true\",\"timeout_ms\":1000}",
-        (try readAdmittedResponseArguments(&session, &core, response, &arguments_buffer)).bytes(),
-    );
-}
-
 fn storeToolCall(
     session: *session_store.Session,
     reference: u64,
@@ -2908,7 +2443,6 @@ fn storeToolCall(
     hasher.update(key);
     hasher.update(arguments);
     const expected_length = header_bytes.len + key.len + arguments.len;
-
     var existing = session.viewContent(reference) catch |err| switch (err) {
         error.FileNotFound => {
             var writer = try session.beginContent(reference);
@@ -2996,69 +2530,7 @@ fn allocateOperationIds(io: std.Io, session: *const session_store.Session) !Oper
     return error.OperationIdentityAllocationExhausted;
 }
 
-test "generic tool and input dispositions cannot bypass the closed Action mapping" {
-    var host = try Host.init(std.testing.allocator, 1);
-    defer host.deinit();
-    var core = try Core.open(&host.slots);
-    defer core.close();
-    try core.initialize(1);
-    try core.reducer.startTask(1);
-    const operation = try core.reducer.beginModelOperation(2, 1);
-    try core.reducer.acceptOperation(.{ .id = operation.id, .generation = operation.generation });
-
-    var response: [model_protocol.max_response_size]u8 = undefined;
-    var validation: model_protocol.ValidationScratch = undefined;
-    const fixture_definition: model_contract.ToolDefinition = .{
-        .key = "fixture.inspect.v1",
-        .provider_tool_name = "fixture_inspect",
-        .description = "Inspect a fixture without execution authority.",
-        .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64}},\"required\":[\"query\"],\"additionalProperties\":false}",
-        .result_contract = "Bounded fixture text.",
-    };
-    const fixture_catalog = [_]model_contract.ToolDefinition{fixture_definition};
-    const arguments = " { \"query\" : \"status\" } ";
-    const generic = try model_protocol.encodeTool(&response, fixture_definition.key, arguments);
-    const captured = model_protocol.admitWithCatalog(
-        &validation,
-        generic,
-        &fixture_catalog,
-    );
-    _ = try core.reducer.applyModelResponse(
-        .{ .id = operation.id, .generation = operation.generation },
-        captured.admission,
-        3,
-        binding.hash(binding.Result, generic),
-    );
-    try std.testing.expectEqual(core_state.TaskPhase.awaiting_tool, (try core.reducer.task()).phase);
-    const admitted = captured.tool_arguments.?;
-    var call_bytes: [conversation.call_header_size + model_contract.max_tool_key_size + 128]u8 = undefined;
-    const call = try conversation.encodeToolCall(&call_bytes, .{
-        .key = fixture_definition.key,
-        .arguments = admitted.json,
-    });
-    const decoded_call = try conversation.decodeToolCall(call);
-    try std.testing.expectEqualStrings(fixture_definition.key, decoded_call.key);
-    try std.testing.expectEqualStrings(arguments, decoded_call.arguments);
-    try std.testing.expectError(error.UnboundToolKey, executableToolFromKey(decoded_call.key));
-
-    core.close();
-    core = try Core.open(&host.slots);
-    try core.initialize(4);
-    try core.reducer.startTask(1);
-    const input_operation = try core.reducer.beginModelOperation(5, 1);
-    try core.reducer.acceptOperation(.{ .id = input_operation.id, .generation = input_operation.generation });
-    const input = try model_protocol.encodeInputText(&response, "Which migration should I use?");
-    _ = try core.reducer.applyModelResponse(
-        .{ .id = input_operation.id, .generation = input_operation.generation },
-        model_protocol.admit(&validation, input).admission,
-        6,
-        binding.hash(binding.Result, input),
-    );
-    try std.testing.expectEqual(core_state.TaskPhase.failed, (try core.reducer.task()).phase);
-    try std.testing.expectError(error.UnboundToolKey, executableToolFromKey(""));
-}
-
-test "model dispatch releases Core and keeps request content immutable" {
+test "model dispatch releases continuation slot and keeps request content immutable" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

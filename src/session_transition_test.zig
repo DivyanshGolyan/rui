@@ -172,7 +172,6 @@ test "a kind-specific transition carries canonical Core State without native lay
     try core_state.encode(&state, .{
         .agent_id = 7,
         .agent_generation = 1,
-        .accumulator = 29,
     });
     const fact = transition.taskAdmitted(.{
         .agent_id = 7,

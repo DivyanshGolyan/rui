@@ -385,7 +385,7 @@ test "deterministic Provider decodes the exact immutable request" {
         .agent_generation = 1,
         .ownership_epoch = session.ownership_epoch,
     };
-    _ = try session.commitFacts(&.{
+    _ = try session.commitFactsForTest(&.{
         session_transition.outcome(agent, 1001, 1001),
         session_transition.outcome(agent, 1003, 1003),
         session_transition.outcome(agent, 1002, 1002),
@@ -398,7 +398,7 @@ test "deterministic Provider decodes the exact immutable request" {
     first[model_operation.request_header_size] ^= 1;
     try session.storeContent(1004, original);
     try std.testing.expectError(error.ModelRequestDigestMismatch, model_operation.verifyRequestDigest(&session, 1004, digest));
-    _ = try session.commitFacts(&.{session_transition.outcome(agent, 1004, 1004)});
+    _ = try session.commitFactsForTest(&.{session_transition.outcome(agent, 1004, 1004)});
 
     var call_buffer: [128]u8 = undefined;
     var json_scratch: model_contract.StrictToolJsonScratch = undefined;
@@ -407,8 +407,8 @@ test "deterministic Provider decodes the exact immutable request" {
         .arguments = try model_contract.validateStrictToolJson(&json_scratch, "{\"path\":\"README.md\"}"),
     });
     try session.storeContent(1100, call_bytes);
-    const call_entry = try session.appendConversation(.tool_call, 1100, null);
-    _ = try session.commitFacts(&.{session_transition.conversationAdvanced(.{
+    const call_entry = try session.appendConversationForTest(.tool_call, 1100, null);
+    _ = try session.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
         .agent = .{
             .agent_id = session.agent_id,
             .agent_generation = 1,
@@ -428,8 +428,8 @@ test "deterministic Provider decodes the exact immutable request" {
         .content = "status=observed",
     });
     try session.storeContent(1102, result_bytes);
-    const result_entry = try session.appendConversation(.tool_result, 1102, null);
-    _ = try session.commitFacts(&.{session_transition.conversationAdvanced(.{
+    const result_entry = try session.appendConversationForTest(.tool_result, 1102, null);
+    _ = try session.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
         .agent = .{
             .agent_id = session.agent_id,
             .agent_generation = 1,
@@ -447,8 +447,8 @@ test "deterministic Provider decodes the exact immutable request" {
         const content_ref: u64 = 1200 + index;
         const content: []const u8 = if (index == 0) &large_content else "later context";
         try session.storeContent(content_ref, content);
-        const entry = try session.appendConversation(.assistant_text, content_ref, null);
-        _ = try session.commitFacts(&.{session_transition.conversationAdvanced(.{
+        const entry = try session.appendConversationForTest(.assistant_text, content_ref, null);
+        _ = try session.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
             .agent = .{
                 .agent_id = session.agent_id,
                 .agent_generation = 1,

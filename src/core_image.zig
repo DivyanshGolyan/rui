@@ -206,315 +206,214 @@ pub const RuntimeSlotPool = struct {
     }
 };
 
-pub const Core = struct {
-    slot: *ActivationSlot,
-    state: *State,
-    change: CommitChange = .none,
-    active: bool = true,
-
-    pub const CommitChange = union(enum) {
-        none,
-        unsupported,
-        task_started: u64,
-        model_operation_submitted: Operation,
-        model_operation_admitted: Operation,
-        model_response_applied: struct {
-            operation: OperationIdentity,
-            response_ref: u64,
-            result_digest: binding.Result,
-            disposition: model_protocol.Disposition,
-        },
-        tool_result_committed: struct {
-            call_entry_id: u64,
-            result_entry_id: u64,
-        },
-        final_answer_committed: u64,
+pub fn initialize(identity_value: Identity) !State {
+    if (identity_value.agent_id == 0) return error.InvalidAgentIdentity;
+    if (identity_value.generation == 0) return error.InvalidAgentGeneration;
+    return .{
+        .agent_id = identity_value.agent_id,
+        .agent_generation = identity_value.generation,
     };
+}
 
-    pub fn initialize(slot: *ActivationSlot, identity_value: Identity) !Core {
-        if (identity_value.agent_id == 0) return error.InvalidAgentIdentity;
-        if (identity_value.generation == 0) return error.InvalidAgentGeneration;
-        scrub(slot);
-        slot.state = .{
-            .agent_id = identity_value.agent_id,
-            .agent_generation = identity_value.generation,
-            .accumulator = identity_value.agent_id,
-        };
-        return .{
-            .slot = slot,
-            .state = &slot.state,
-        };
-    }
+pub fn identity(state: State) Identity {
+    return .{ .agent_id = state.agent_id, .generation = state.agent_generation };
+}
 
-    pub fn activate(slot: *ActivationSlot, encoded: []const u8) !Core {
-        scrub(slot);
-        const restored = try core_state.decode(encoded);
-        slot.state = restored;
-        return .{
-            .slot = slot,
-            .state = &slot.state,
-        };
-    }
+pub fn operation(state: State) Operation {
+    return .{
+        .id = state.operation_id,
+        .generation = state.operation_generation,
+        .phase = state.operation_phase,
+        .result_ref = state.operation_result,
+        .sequence = state.operation_sequence,
+    };
+}
 
-    pub fn suspendInto(self: *Core, encoded: []u8) !void {
-        try self.requireActive();
-        try core_state.encode(encoded, self.state.*);
-        scrub(self.slot);
-        self.active = false;
-    }
+pub fn task(state: State) Task {
+    return .{
+        .phase = state.task_phase,
+        .active_leaf_id = state.active_leaf_id,
+        .final_entry_id = state.final_entry_id,
+    };
+}
 
-    pub fn abandon(self: *Core) void {
-        if (!self.active) return;
-        scrub(self.slot);
-        self.active = false;
-    }
+pub fn response(state: State) Response {
+    return .{
+        .content_ref = state.response_ref,
+        .disposition = state.response_disposition,
+        .failure = state.response_failure,
+        .text = state.response_text,
+        .tool_key = state.response_tool_key,
+        .arguments = .{
+            .offset = state.response_arguments.offset,
+            .length = state.response_arguments.length,
+            .digest = state.response_arguments_digest,
+        },
+    };
+}
 
-    pub fn identity(self: *const Core) !Identity {
-        try self.requireActive();
-        return .{
-            .agent_id = self.state.agent_id,
-            .generation = self.state.agent_generation,
-        };
-    }
+pub fn modelContext(state: State) ModelContext {
+    return .{ .first_entry = state.context.offset, .entry_count = state.context.length };
+}
 
-    pub fn pendingCommitChange(self: *const Core) !CommitChange {
-        try self.requireActive();
-        return self.change;
+pub fn startTask(committed: State, active_leaf_id: u64) !State {
+    if (active_leaf_id == 0) return error.InvalidConversationEntry;
+    if (committed.task_phase != .idle or committed.operation_phase != .idle) {
+        return error.IllegalTaskTransition;
     }
+    var candidate = committed;
+    candidate.active_leaf_id = active_leaf_id;
+    candidate.task_phase = .ready;
+    return candidate;
+}
 
-    pub fn operation(self: *const Core) !Operation {
-        try self.requireActive();
-        const state = self.state.*;
-        return .{
-            .id = state.operation_id,
-            .generation = state.operation_generation,
-            .phase = state.operation_phase,
-            .result_ref = state.operation_result,
-            .sequence = state.operation_sequence,
-        };
-    }
-
-    pub fn task(self: *const Core) !Task {
-        try self.requireActive();
-        const state = self.state.*;
-        return .{
-            .phase = state.task_phase,
-            .active_leaf_id = state.active_leaf_id,
-            .final_entry_id = state.final_entry_id,
-        };
-    }
-
-    pub fn response(self: *const Core) !Response {
-        try self.requireActive();
-        const state = self.state.*;
-        return .{
-            .content_ref = state.response_ref,
-            .disposition = state.response_disposition,
-            .failure = state.response_failure,
-            .text = state.response_text,
-            .tool_key = state.response_tool_key,
-            .arguments = .{
-                .offset = state.response_arguments.offset,
-                .length = state.response_arguments.length,
-                .digest = state.response_arguments_digest,
-            },
-        };
-    }
-
-    pub fn modelContext(self: *const Core) !ModelContext {
-        try self.requireActive();
-        return .{
-            .first_entry = self.state.context.offset,
-            .entry_count = self.state.context.length,
-        };
-    }
-
-    pub fn deliver(self: *Core, event: u32) !void {
-        try self.requireActive();
-        self.change = .unsupported;
-        self.state.event_count +%= 1;
-        self.state.last_event = event;
-        self.state.accumulator = (self.state.accumulator *% 16_777_619) ^ event;
-    }
-
-    pub fn startTask(self: *Core, active_leaf_id: u64) !void {
-        try self.requireActive();
-        if (active_leaf_id == 0) return error.InvalidConversationEntry;
-        if (self.state.task_phase != .idle or
-            self.state.operation_phase != .idle)
-        {
-            return error.IllegalTaskTransition;
-        }
-        self.state.active_leaf_id = active_leaf_id;
-        self.state.task_phase = .ready;
-        self.change = .{ .task_started = active_leaf_id };
-    }
-
-    pub fn submitOperation(self: *Core, operation_id: u64, sequence: u64) !Operation {
-        try self.requireActive();
-        if (operation_id == 0 or sequence == 0) return error.InvalidOperationIdentity;
-        const phase = self.state.operation_phase;
-        if (phase != .idle and phase != .completed) return error.OperationAlreadyActive;
-        if (self.state.operation_generation == std.math.maxInt(u32)) {
-            return error.OperationGenerationExhausted;
-        }
-        self.state.operation_id = operation_id;
-        self.state.operation_generation += 1;
-        self.state.operation_phase = .submitted;
-        self.state.operation_result = 0;
-        self.state.operation_sequence = sequence;
-        const prepared = try self.operation();
-        self.change = .{ .model_operation_submitted = prepared };
-        return prepared;
-    }
-
-    pub fn beginModelOperation(
-        self: *Core,
-        operation_id: u64,
-        sequence: u64,
-    ) !Operation {
-        try self.requireActive();
-        const active_leaf_id = self.state.active_leaf_id;
-        if (self.state.task_phase != .ready or active_leaf_id >= std.math.maxInt(u32)) {
-            return error.IllegalModelTransition;
-        }
-        const prepared = try self.submitOperation(operation_id, sequence);
-        self.state.context = .{ .offset = 1, .length = @intCast(active_leaf_id) };
-        self.state.response_ref = 0;
-        self.state.response_disposition = .failure;
-        self.state.response_failure = .none;
-        self.state.response_text = .{};
-        self.state.response_tool_key = .{};
-        self.state.response_arguments = .{};
-        self.state.response_arguments_digest = .{ .bytes = @splat(0) };
-        self.state.task_phase = .awaiting_model;
-        return prepared;
-    }
-
-    pub fn acceptOperation(self: *Core, identity_value: OperationIdentity) !void {
-        try self.requireOperation(identity_value, .submitted);
-        const submitted = switch (self.change) {
-            .model_operation_submitted => |value| value,
-            else => return error.UntrackedCoreTransition,
-        };
-        if (submitted.id != identity_value.id or submitted.generation != identity_value.generation) {
-            return error.UntrackedCoreTransition;
-        }
-        self.state.operation_phase = .accepted;
-        self.change = .{ .model_operation_admitted = try self.operation() };
-    }
-
-    pub fn applyModelResponse(
-        self: *Core,
-        identity_value: OperationIdentity,
-        admission: model_protocol.Admission,
-        response_ref: u64,
-        result_digest: binding.Result,
-    ) !Response {
-        try self.requireOperation(identity_value, .accepted);
-        if (response_ref == 0) return error.InvalidResultReference;
-        if (admission.byte_length > model_protocol.max_response_size) return error.ResponseCapacityExceeded;
-        if (self.state.task_phase != .awaiting_model) return error.IllegalModelResponseTransition;
-        const parsed = try admission.verify(result_digest);
-        if (admission.byte_length == 0 and
-            !(parsed.disposition == .failure and parsed.failure == .empty))
-        {
-            return error.EmptyModelResponse;
-        }
-        self.state.operation_result = response_ref;
-        self.state.operation_phase = .completed;
-        self.state.response_ref = response_ref;
-        self.state.response_disposition = parsed.disposition;
-        self.state.response_failure = parsed.failure;
-        self.state.response_text = if (parsed.disposition == .final_answer) .{
-            .offset = parsed.text_offset,
-            .length = parsed.text_length,
-        } else .{};
-        self.state.response_tool_key = .{
-            .offset = parsed.tool_key_offset,
-            .length = parsed.tool_key_length,
-        };
-        self.state.response_arguments = .{
-            .offset = parsed.arguments_offset,
-            .length = parsed.arguments_length,
-        };
-        self.state.response_arguments_digest = parsed.arguments_digest;
-        self.state.task_phase = switch (parsed.disposition) {
-            .final_answer => .final_candidate,
-            .tool_call => .awaiting_tool,
-            // Issue #38 replaces this terminal boundary with the atomic
-            // Conversation and durable Interaction Request transition.
-            .input_request => .failed,
-            .failure => .failed,
-        };
-        self.change = .{ .model_response_applied = .{
-            .operation = identity_value,
-            .response_ref = response_ref,
-            .result_digest = result_digest,
-            .disposition = parsed.disposition,
-        } };
-        return self.response();
-    }
-
-    pub fn commitFinalAnswer(self: *Core, entry_id: u64) !void {
-        try self.requireActive();
-        if (entry_id == 0 or self.state.active_leaf_id == std.math.maxInt(u64)) {
-            return error.InvalidConversationEntry;
-        }
-        if (self.state.task_phase != .final_candidate or
-            entry_id != self.state.active_leaf_id + 1)
-        {
-            return error.IllegalFinalAnswerTransition;
-        }
-        self.state.active_leaf_id = entry_id;
-        self.state.final_entry_id = entry_id;
-        self.state.task_phase = .finished;
-        self.change = .{ .final_answer_committed = entry_id };
-    }
-
-    pub fn commitToolResult(self: *Core, call_entry_id: u64, result_entry_id: u64) !void {
-        try self.requireActive();
-        if (call_entry_id == 0 or result_entry_id == 0 or
-            self.state.active_leaf_id == std.math.maxInt(u64) or
-            call_entry_id == std.math.maxInt(u64))
-        {
-            return error.InvalidConversationEntry;
-        }
-        if (self.state.task_phase != .awaiting_tool or
-            call_entry_id != self.state.active_leaf_id + 1 or
-            result_entry_id != call_entry_id + 1)
-        {
-            return error.IllegalToolResultTransition;
-        }
-        self.state.active_leaf_id = result_entry_id;
-        self.state.task_phase = .ready;
-        self.change = .{ .tool_result_committed = .{
-            .call_entry_id = call_entry_id,
-            .result_entry_id = result_entry_id,
-        } };
-    }
-
-    fn requireOperation(
-        self: *const Core,
-        identity_value: OperationIdentity,
-        phase: OperationPhase,
-    ) !void {
-        try self.requireActive();
-        if (identity_value.id == 0 or identity_value.generation == 0) {
-            return error.InvalidOperationIdentity;
-        }
-        if (self.state.operation_id != identity_value.id or
-            self.state.operation_generation != identity_value.generation)
-        {
-            return error.StaleOperation;
-        }
-        if (self.state.operation_phase != phase) return error.IllegalOperationTransition;
-    }
-
-    fn requireActive(self: *const Core) !void {
-        if (!self.active) return error.InactiveCore;
-    }
+pub const ModelAttemptReduction = struct {
+    state: State,
+    operation: Operation,
+    context: ModelContext,
 };
+
+pub fn admitModelAttempt(
+    committed: State,
+    operation_id: u64,
+    sequence: u64,
+) !ModelAttemptReduction {
+    if (operation_id == 0 or sequence == 0) return error.InvalidOperationIdentity;
+    if (committed.task_phase != .ready or committed.active_leaf_id >= std.math.maxInt(u32)) {
+        return error.IllegalModelTransition;
+    }
+    if (committed.operation_phase != .idle and committed.operation_phase != .completed) {
+        return error.OperationAlreadyActive;
+    }
+    if (committed.operation_generation == std.math.maxInt(u32)) {
+        return error.OperationGenerationExhausted;
+    }
+    var candidate = committed;
+    candidate.operation_id = operation_id;
+    candidate.operation_generation += 1;
+    candidate.operation_phase = .accepted;
+    candidate.operation_result = 0;
+    candidate.operation_sequence = sequence;
+    candidate.context = .{ .offset = 1, .length = @intCast(committed.active_leaf_id) };
+    candidate.response_ref = 0;
+    candidate.response_disposition = .failure;
+    candidate.response_failure = .none;
+    candidate.response_text = .{};
+    candidate.response_tool_key = .{};
+    candidate.response_arguments = .{};
+    candidate.response_arguments_digest = .{ .bytes = @splat(0) };
+    candidate.task_phase = .awaiting_model;
+    return .{
+        .state = candidate,
+        .operation = operation(candidate),
+        .context = modelContext(candidate),
+    };
+}
+
+pub const CompletionConsequence = union(enum) {
+    final_answer: u64,
+    tool_call,
+    terminal,
+};
+
+pub const ModelCompletionReduction = struct {
+    state: State,
+    response: Response,
+};
+
+pub fn admitModelCompletion(
+    committed: State,
+    identity_value: OperationIdentity,
+    admission: model_protocol.Admission,
+    response_ref: u64,
+    result_digest: binding.Result,
+    consequence: CompletionConsequence,
+) !ModelCompletionReduction {
+    try requireOperation(committed, identity_value, .accepted);
+    if (response_ref == 0) return error.InvalidResultReference;
+    if (admission.byte_length > model_protocol.max_response_size) return error.ResponseCapacityExceeded;
+    if (committed.task_phase != .awaiting_model) return error.IllegalModelResponseTransition;
+    const parsed = try admission.verify(result_digest);
+    if (admission.byte_length == 0 and
+        !(parsed.disposition == .failure and parsed.failure == .empty))
+    {
+        return error.EmptyModelResponse;
+    }
+    switch (consequence) {
+        .final_answer => |entry_id| {
+            if (parsed.disposition != .final_answer) return error.InvalidCompletionConsequence;
+            if (entry_id == 0 or committed.active_leaf_id == std.math.maxInt(u64) or
+                entry_id != committed.active_leaf_id + 1)
+            {
+                return error.IllegalFinalAnswerTransition;
+            }
+        },
+        .tool_call => if (parsed.disposition != .tool_call) return error.InvalidCompletionConsequence,
+        .terminal => if (parsed.disposition == .final_answer or parsed.disposition == .tool_call) {
+            return error.InvalidCompletionConsequence;
+        },
+    }
+    var candidate = committed;
+    candidate.operation_result = response_ref;
+    candidate.operation_phase = .completed;
+    candidate.response_ref = response_ref;
+    candidate.response_disposition = parsed.disposition;
+    candidate.response_failure = parsed.failure;
+    candidate.response_text = if (parsed.disposition == .final_answer) .{
+        .offset = parsed.text_offset,
+        .length = parsed.text_length,
+    } else .{};
+    candidate.response_tool_key = .{
+        .offset = parsed.tool_key_offset,
+        .length = parsed.tool_key_length,
+    };
+    candidate.response_arguments = .{
+        .offset = parsed.arguments_offset,
+        .length = parsed.arguments_length,
+    };
+    candidate.response_arguments_digest = parsed.arguments_digest;
+    candidate.task_phase = switch (consequence) {
+        .final_answer => |entry_id| blk: {
+            candidate.active_leaf_id = entry_id;
+            candidate.final_entry_id = entry_id;
+            break :blk .finished;
+        },
+        .tool_call => .awaiting_tool,
+        .terminal => .failed,
+    };
+    return .{ .state = candidate, .response = response(candidate) };
+}
+
+pub fn admitToolResult(committed: State, call_entry_id: u64, result_entry_id: u64) !State {
+    if (call_entry_id == 0 or result_entry_id == 0 or
+        committed.active_leaf_id == std.math.maxInt(u64) or
+        call_entry_id == std.math.maxInt(u64))
+    {
+        return error.InvalidConversationEntry;
+    }
+    if (committed.task_phase != .awaiting_tool or
+        call_entry_id != committed.active_leaf_id + 1 or
+        result_entry_id != call_entry_id + 1)
+    {
+        return error.IllegalToolResultTransition;
+    }
+    var candidate = committed;
+    candidate.active_leaf_id = result_entry_id;
+    candidate.task_phase = .ready;
+    return candidate;
+}
+
+fn requireOperation(state: State, identity_value: OperationIdentity, phase: OperationPhase) !void {
+    if (identity_value.id == 0 or identity_value.generation == 0) {
+        return error.InvalidOperationIdentity;
+    }
+    if (state.operation_id != identity_value.id or
+        state.operation_generation != identity_value.generation)
+    {
+        return error.StaleOperation;
+    }
+    if (state.operation_phase != phase) return error.IllegalOperationTransition;
+}
 
 pub fn scrub(slot: *ActivationSlot) void {
     @memset(std.mem.asBytes(slot), 0);
@@ -524,19 +423,12 @@ comptime {
     @setEvalBranchQuota(100_000);
     std.debug.assert(@sizeOf(ActivationSlot) == slot_size);
     std.debug.assert(@alignOf(ActivationSlot) == slot_alignment);
-    assertNoAllocatorParameter(Core.initialize);
-    assertNoAllocatorParameter(Core.activate);
-    assertNoAllocatorParameter(Core.deliver);
-    assertNoAllocatorParameter(Core.startTask);
-    assertNoAllocatorParameter(Core.submitOperation);
-    assertNoAllocatorParameter(Core.beginModelOperation);
-    assertNoAllocatorParameter(Core.acceptOperation);
-    assertNoAllocatorParameter(Core.applyModelResponse);
-    assertNoAllocatorParameter(Core.commitFinalAnswer);
-    assertNoAllocatorParameter(Core.commitToolResult);
-    assertNoAllocatorParameter(Core.suspendInto);
-    assertNoAllocatorParameter(Core.abandon);
-    assertNoAllocatorStorage(Core);
+    assertNoAllocatorParameter(initialize);
+    assertNoAllocatorParameter(startTask);
+    assertNoAllocatorParameter(admitModelAttempt);
+    assertNoAllocatorParameter(admitModelCompletion);
+    assertNoAllocatorParameter(admitToolResult);
+    assertNoAllocatorStorage(State);
     assertNoAllocatorParameter(RuntimeSlotPool.borrow);
 }
 
@@ -582,161 +474,165 @@ fn containsAllocator(comptime T: type) bool {
     };
 }
 
-test "Activation Slot is exact and suspension encodes only Core State then scrubs every byte" {
-    var slot: ActivationSlot = undefined;
-    @memset(std.mem.asBytes(&slot), 0xa5);
-    var core = try Core.initialize(&slot, .{ .agent_id = 42, .generation = 7 });
-    try core.deliver(9);
-    var encoded: [core_state.encoded_size]u8 = undefined;
-    try core.suspendInto(&encoded);
-    for (std.mem.asBytes(&slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
-    const state = try core_state.decode(&encoded);
-    try std.testing.expectEqual(@as(u64, 42), state.agent_id);
-    try std.testing.expectEqual(@as(u64, 1), state.event_count);
+fn readyState(agent_id: u64, leaf_id: u64) !State {
+    return startTask(try initialize(.{ .agent_id = agent_id, .generation = 1 }), leaf_id);
 }
 
-test "Core initialization rejects invalid identity and generation" {
-    var slot: ActivationSlot = undefined;
+fn expectCanonical(state: State) !void {
+    var first: [core_state.encoded_size]u8 = undefined;
+    var second: [core_state.encoded_size]u8 = undefined;
+    try core_state.encode(&first, state);
+    const restored = try core_state.decode(&first);
+    try core_state.encode(&second, restored);
+    try std.testing.expectEqualSlices(u8, &first, &second);
+    try std.testing.expectEqualDeep(state, restored);
+}
+
+test "pure continuation reducers reject invalid identity without mutation" {
     try std.testing.expectError(
         error.InvalidAgentIdentity,
-        Core.initialize(&slot, .{ .agent_id = 0, .generation = 1 }),
+        initialize(.{ .agent_id = 0, .generation = 1 }),
     );
     try std.testing.expectError(
         error.InvalidAgentGeneration,
-        Core.initialize(&slot, .{ .agent_id = 1, .generation = 0 }),
+        initialize(.{ .agent_id = 1, .generation = 0 }),
     );
+
+    const ready = try readyState(7, 1);
+    var before: [core_state.encoded_size]u8 = undefined;
+    var after: [core_state.encoded_size]u8 = undefined;
+    try core_state.encode(&before, ready);
+    try std.testing.expectError(error.InvalidOperationIdentity, admitModelAttempt(ready, 0, 1));
+    try core_state.encode(&after, ready);
+    try std.testing.expectEqualSlices(u8, &before, &after);
 }
 
-test "poisoned slots restore to identical semantic outcomes and encodings" {
-    var source: ActivationSlot = undefined;
-    var core = try Core.initialize(&source, .{ .agent_id = 7, .generation = 1 });
-    try core.startTask(1);
-    var initial: [core_state.encoded_size]u8 = undefined;
-    try core.suspendInto(&initial);
-
-    var first_slot: ActivationSlot = undefined;
-    var second_slot: ActivationSlot = undefined;
-    @memset(std.mem.asBytes(&first_slot), 0x11);
-    @memset(std.mem.asBytes(&second_slot), 0xee);
-    var first = try Core.activate(&first_slot, &initial);
-    var second = try Core.activate(&second_slot, &initial);
-    _ = try first.beginModelOperation(10, 2);
-    _ = try second.beginModelOperation(10, 2);
-    var first_encoded: [core_state.encoded_size]u8 = undefined;
-    var second_encoded: [core_state.encoded_size]u8 = undefined;
-    try first.suspendInto(&first_encoded);
-    try second.suspendInto(&second_encoded);
-    try std.testing.expectEqualSlices(u8, &first_encoded, &second_encoded);
+test "model attempt admission is atomic deterministic and canonical" {
+    const ready = try readyState(7, 3);
+    const first = try admitModelAttempt(ready, 10, 2);
+    const second = try admitModelAttempt(ready, 10, 2);
+    try std.testing.expectEqualDeep(first, second);
+    try std.testing.expectEqual(OperationPhase.accepted, first.operation.phase);
+    try std.testing.expectEqual(TaskPhase.awaiting_model, task(first.state).phase);
+    try std.testing.expectEqual(@as(u32, 1), first.context.first_entry);
+    try std.testing.expectEqual(@as(u32, 3), first.context.entry_count);
+    try expectCanonical(first.state);
 }
 
-test "failed activation leaves no prior slot bytes reachable" {
-    var slot: ActivationSlot = undefined;
-    @memset(std.mem.asBytes(&slot), 0xa5);
-    var corrupt: [core_state.encoded_size]u8 = @splat(0xff);
-    try std.testing.expectError(error.InvalidCoreStateMagic, Core.activate(&slot, &corrupt));
-    for (std.mem.asBytes(&slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
-}
-
-test "oversized admission preserves accepted operation state" {
-    var slot: ActivationSlot = undefined;
-    var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
-    try core.startTask(1);
-    const operation_value = try core.beginModelOperation(10, 1);
-    try std.testing.expectError(
-        error.StaleOperation,
-        core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation + 1 }),
+test "model completion binds exact evidence and consequence" {
+    const attempt = try admitModelAttempt(try readyState(7, 1), 10, 1);
+    var bytes: [model_protocol.max_response_size]u8 = undefined;
+    var scratch: model_protocol.ValidationScratch = undefined;
+    const encoded = try model_protocol.encodeText(&bytes, "done");
+    const digest = binding.hash(binding.Result, encoded);
+    const admission = model_protocol.admit(&scratch, encoded).admission;
+    const first = try admitModelCompletion(
+        attempt.state,
+        .{ .id = 10, .generation = 1 },
+        admission,
+        20,
+        digest,
+        .{ .final_answer = 2 },
     );
-    try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
-    const before = try core.operation();
-    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    var validation: model_protocol.ValidationScratch = undefined;
-    const encoded = try model_protocol.encodeText(&response_buffer, "valid");
-    const admitted = model_protocol.admit(&validation, encoded);
-    var oversized = admitted.admission;
-    oversized.byte_length = model_protocol.max_response_size + 1;
-    try std.testing.expectError(
-        error.ResponseCapacityExceeded,
-        core.applyModelResponse(
-            .{ .id = operation_value.id, .generation = operation_value.generation },
-            oversized,
-            99,
-            binding.hash(binding.Result, encoded),
-        ),
+    const second = try admitModelCompletion(
+        attempt.state,
+        .{ .id = 10, .generation = 1 },
+        admission,
+        20,
+        digest,
+        .{ .final_answer = 2 },
     );
-    try std.testing.expectEqualDeep(before, try core.operation());
-
+    try std.testing.expectEqualDeep(first, second);
+    try std.testing.expectEqual(TaskPhase.finished, task(first.state).phase);
+    try std.testing.expectEqual(@as(u64, 2), task(first.state).final_entry_id);
+    try expectCanonical(first.state);
     try std.testing.expectError(
         error.InvalidModelResponseEvidence,
-        core.applyModelResponse(
-            .{ .id = operation_value.id, .generation = operation_value.generation },
-            admitted.admission,
-            99,
+        admitModelCompletion(
+            attempt.state,
+            .{ .id = 10, .generation = 1 },
+            admission,
+            20,
             binding.hash(binding.Result, "substituted"),
+            .{ .final_answer = 2 },
         ),
     );
-    try std.testing.expectEqualDeep(before, try core.operation());
-}
-
-test "responses retain only validated metadata and durable content windows" {
-    var slot: ActivationSlot = undefined;
-    var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
-    defer core.abandon();
-    try core.startTask(1);
-    const operation = try core.beginModelOperation(2, 1);
-    const identity: OperationIdentity = .{ .id = operation.id, .generation = operation.generation };
-    try core.acceptOperation(identity);
-
-    var value: [model_contract.max_patch_input_bytes]u8 = @splat(0x01);
-    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
-    var validation: model_protocol.ValidationScratch = undefined;
-    const arguments = try model_contract.encodeJson(&arguments_buffer, .{ .patch = &value });
-    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const response = try model_protocol.encodeTool(&response_buffer, model_contract.apply_patch_key, arguments);
-    try std.testing.expect(response.len > model_protocol.max_resident_response_size);
-    const parsed = try core.applyModelResponse(
-        identity,
-        model_protocol.admit(&validation, response).admission,
-        3,
-        binding.hash(binding.Result, response),
-    );
-    try std.testing.expectEqual(@as(u32, @intCast(arguments.len)), parsed.arguments.length);
-    try std.testing.expectEqual(@as(u64, 3), parsed.content_ref);
-}
-
-test "complete slot lifecycle is compiler checked to expose no allocator seam" {
-    var first_slot: ActivationSlot = undefined;
-    var core = try Core.initialize(&first_slot, .{ .agent_id = 9, .generation = 1 });
-    try core.startTask(1);
-    const operation_value = try core.beginModelOperation(2, 1);
-    try core.acceptOperation(.{ .id = operation_value.id, .generation = operation_value.generation });
-    var response_bytes: [model_protocol.max_response_size]u8 = undefined;
-    var validation: model_protocol.ValidationScratch = undefined;
-    const response = try model_protocol.encodeText(&response_bytes, "done");
-    _ = try core.applyModelResponse(
-        .{ .id = operation_value.id, .generation = operation_value.generation },
-        model_protocol.admit(&validation, response).admission,
-        3,
-        binding.hash(binding.Result, response),
-    );
-    var encoded: [core_state.encoded_size]u8 = undefined;
-    try core.suspendInto(&encoded);
-
-    var reused_slot: ActivationSlot = undefined;
-    @memset(std.mem.asBytes(&reused_slot), 0xff);
-    var restored = try Core.activate(&reused_slot, &encoded);
-    try restored.commitFinalAnswer(2);
-    try restored.suspendInto(&encoded);
-}
-
-test "generation exhaustion is a closed rejection" {
-    var slot: ActivationSlot = undefined;
-    var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
-    core.state.operation_generation = std.math.maxInt(u32);
     try std.testing.expectError(
-        error.OperationGenerationExhausted,
-        core.submitOperation(1, 1),
+        error.InvalidCompletionConsequence,
+        admitModelCompletion(
+            attempt.state,
+            .{ .id = 10, .generation = 1 },
+            admission,
+            20,
+            digest,
+            .tool_call,
+        ),
     );
-    try std.testing.expectEqual(OperationPhase.idle, (try core.operation()).phase);
+}
+
+test "tool completion retains bounded windows and tool result resumes the task" {
+    const attempt = try admitModelAttempt(try readyState(9, 1), 12, 1);
+    var patch: [model_contract.max_patch_input_bytes]u8 = @splat('x');
+    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+    const arguments = try model_contract.encodeJson(&arguments_buffer, .{ .patch = &patch });
+    var bytes: [model_protocol.max_response_size]u8 = undefined;
+    const encoded = try model_protocol.encodeTool(
+        &bytes,
+        model_contract.apply_patch_key,
+        arguments,
+    );
+    var scratch: model_protocol.ValidationScratch = undefined;
+    const completed = try admitModelCompletion(
+        attempt.state,
+        .{ .id = 12, .generation = 1 },
+        model_protocol.admit(&scratch, encoded).admission,
+        30,
+        binding.hash(binding.Result, encoded),
+        .tool_call,
+    );
+    try std.testing.expectEqual(TaskPhase.awaiting_tool, task(completed.state).phase);
+    try std.testing.expectEqual(@as(u32, @intCast(arguments.len)), completed.response.arguments.length);
+    const resumed = try admitToolResult(completed.state, 2, 3);
+    try std.testing.expectEqual(TaskPhase.ready, task(resumed).phase);
+    try std.testing.expectEqual(@as(u64, 3), task(resumed).active_leaf_id);
+    try expectCanonical(resumed);
+    try std.testing.expectError(error.IllegalToolResultTransition, admitToolResult(resumed, 4, 5));
+}
+
+test "terminal model completion fails atomically" {
+    const attempt = try admitModelAttempt(try readyState(11, 1), 13, 1);
+    var bytes: [model_protocol.max_response_size]u8 = undefined;
+    const encoded = try model_protocol.encodeFailure(&bytes, .provider_error);
+    var scratch: model_protocol.ValidationScratch = undefined;
+    const completed = try admitModelCompletion(
+        attempt.state,
+        .{ .id = 13, .generation = 1 },
+        model_protocol.admit(&scratch, encoded).admission,
+        31,
+        binding.hash(binding.Result, encoded),
+        .terminal,
+    );
+    try std.testing.expectEqual(TaskPhase.failed, task(completed.state).phase);
+    try expectCanonical(completed.state);
+}
+
+test "all production reducers are deterministic across 32 traces" {
+    for (0..32) |index| {
+        const agent_id: u64 = index + 1;
+        const ready = try readyState(agent_id, 1);
+        const operation_id: u64 = index + 100;
+        const first = try admitModelAttempt(ready, operation_id, 1);
+        const second = try admitModelAttempt(ready, operation_id, 1);
+        try std.testing.expectEqualDeep(first, second);
+        try expectCanonical(first.state);
+    }
+}
+
+test "scrub clears every Activation Slot byte" {
+    var slot: ActivationSlot = undefined;
+    @memset(std.mem.asBytes(&slot), 0xa5);
+    scrub(&slot);
+    for (std.mem.asBytes(&slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
 
 test "runtime slot pool returns closed capacity and scrubs before reuse" {
@@ -829,409 +725,4 @@ test "runtime Slot pool admits exactly its capacity under concurrent borrowing" 
     try std.testing.expect(unique_slots);
     try std.testing.expect(full_is_closed);
     try std.testing.expect(high_water_is_exact);
-}
-
-test "maximum context window is rejected before operation mutation" {
-    var slot: ActivationSlot = undefined;
-    var core = try Core.initialize(&slot, .{ .agent_id = 7, .generation = 1 });
-    core.state.active_leaf_id = std.math.maxInt(u32);
-    core.state.task_phase = .ready;
-    const before = try core.operation();
-    try std.testing.expectError(error.IllegalModelTransition, core.beginModelOperation(1, 1));
-    try std.testing.expectEqualDeep(before, try core.operation());
-}
-const TraceView = struct {
-    identity: Identity,
-    operation: Operation,
-    task: Task,
-    response: Response,
-    context: ModelContext,
-};
-
-const trace_count = 32;
-
-fn randomizedStateMachineTraces(slot: *ActivationSlot) !void {
-    var random = std.Random.DefaultPrng.init(0x5354_4154_454d_4143);
-    for (0..trace_count) |trace_index| {
-        const poison: u8 = @intCast(trace_index + 1);
-        const agent_id: u64 = trace_index + 1;
-        var expected: core_state.State = .{
-            .agent_id = agent_id,
-            .agent_generation = 1,
-            .accumulator = agent_id,
-        };
-        var core = try Core.initialize(
-            slot,
-            .{ .agent_id = agent_id, .generation = 1 },
-        );
-        try expectStateAndRestore(&core, expected, poison);
-
-        const delivery_count = random.random().uintLessThan(u8, 5);
-        for (0..delivery_count) |_| {
-            const event = random.random().int(u32);
-            try core.deliver(event);
-            expected.event_count +%= 1;
-            expected.last_event = event;
-            expected.accumulator = (expected.accumulator *% 16_777_619) ^ event;
-            try expectStateAndRestore(&core, expected, poison);
-        }
-
-        var before = try canonicalState(&core);
-        try expectRejectedPreserves(
-            &core,
-            before,
-            expected,
-            error.InvalidConversationEntry,
-            core.startTask(0),
-            poison,
-        );
-        const active_leaf_id: u64 = random.random().intRangeAtMost(u32, 1, 100);
-        try core.startTask(active_leaf_id);
-        expected.active_leaf_id = active_leaf_id;
-        expected.task_phase = .ready;
-        try expectStateAndRestore(&core, expected, poison);
-
-        before = try canonicalState(&core);
-        try expectRejectedPreserves(
-            &core,
-            before,
-            expected,
-            error.InvalidOperationIdentity,
-            discardOperation(core.beginModelOperation(0, 1)),
-            poison,
-        );
-
-        const operation_id: u64 = 1000 + trace_index;
-        const operation = try core.beginModelOperation(operation_id, 1);
-        expected.operation_id = operation_id;
-        expected.operation_generation = 1;
-        expected.operation_phase = .submitted;
-        expected.operation_sequence = 1;
-        expected.context = .{ .offset = 1, .length = @intCast(active_leaf_id) };
-        expected.task_phase = .awaiting_model;
-        try expectOperation(operation, expected);
-        try expectStateAndRestore(&core, expected, poison);
-
-        before = try canonicalState(&core);
-        try expectRejectedPreserves(
-            &core,
-            before,
-            expected,
-            error.StaleOperation,
-            core.acceptOperation(.{
-                .id = operation.id,
-                .generation = operation.generation + 1,
-            }),
-            poison,
-        );
-        if (random.random().boolean()) {
-            before = try canonicalState(&core);
-            try expectRejectedPreserves(
-                &core,
-                before,
-                expected,
-                error.IllegalOperationTransition,
-                discardResponse(core.applyModelResponse(.{
-                    .id = operation.id,
-                    .generation = operation.generation,
-                }, undefined, 9, undefined)),
-                poison,
-            );
-        }
-        try core.acceptOperation(.{ .id = operation.id, .generation = operation.generation });
-        expected.operation_phase = .accepted;
-        try expectStateAndRestore(&core, expected, poison);
-
-        before = try canonicalState(&core);
-        try expectRejectedPreserves(
-            &core,
-            before,
-            expected,
-            error.IllegalOperationTransition,
-            core.acceptOperation(.{ .id = operation.id, .generation = operation.generation }),
-            poison,
-        );
-        before = try canonicalState(&core);
-        try expectRejectedPreserves(
-            &core,
-            before,
-            expected,
-            error.InvalidResultReference,
-            discardResponse(core.applyModelResponse(.{
-                .id = operation.id,
-                .generation = operation.generation,
-            }, undefined, 0, undefined)),
-            poison,
-        );
-
-        const response_ref: u64 = 2000 + trace_index;
-        var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-        var validation: model_protocol.ValidationScratch = undefined;
-        if (trace_index % 2 == 0) {
-            const arguments = "{\"command\":\"true\",\"timeout_ms\":1000}";
-            const response = try model_protocol.encodeTool(
-                &response_buffer,
-                model_contract.bash_key,
-                arguments,
-            );
-            const response_digest = binding.hash(binding.Result, response);
-            const admission = model_protocol.admit(&validation, response).admission;
-            before = try canonicalState(&core);
-            try expectRejectedPreserves(
-                &core,
-                before,
-                expected,
-                error.StaleOperation,
-                discardResponse(core.applyModelResponse(.{
-                    .id = operation.id,
-                    .generation = operation.generation + 1,
-                }, admission, response_ref + 1, response_digest)),
-                poison,
-            );
-            const interpreted = try core.applyModelResponse(.{
-                .id = operation.id,
-                .generation = operation.generation,
-            }, admission, response_ref, response_digest);
-            expected.operation_result = response_ref;
-            expected.operation_phase = .completed;
-            expected.response_ref = response_ref;
-            expected.response_disposition = .tool_call;
-            expected.response_tool_key = .{
-                .offset = model_protocol.header_size,
-                .length = model_contract.bash_key.len,
-            };
-            expected.response_arguments = .{
-                .offset = model_protocol.header_size + model_contract.bash_key.len,
-                .length = arguments.len,
-            };
-            expected.response_arguments_digest = model_contract.strictToolJsonDigest(arguments);
-            expected.task_phase = .awaiting_tool;
-            try expectResponse(interpreted, expected);
-            try expectStateAndRestore(&core, expected, poison);
-            try core.commitToolResult(active_leaf_id + 1, active_leaf_id + 2);
-            expected.active_leaf_id = active_leaf_id + 2;
-            expected.task_phase = .ready;
-            try expectStateAndRestore(&core, expected, poison);
-
-            const second = try core.beginModelOperation(operation_id + 1000, 2);
-            expected.operation_id = operation_id + 1000;
-            expected.operation_generation = 2;
-            expected.operation_phase = .submitted;
-            expected.operation_result = 0;
-            expected.operation_sequence = 2;
-            expected.context = .{ .offset = 1, .length = @intCast(active_leaf_id + 2) };
-            expected.response_ref = 0;
-            expected.response_disposition = .failure;
-            expected.response_failure = .none;
-            expected.response_text = .{};
-            expected.response_tool_key = .{};
-            expected.response_arguments = .{};
-            expected.response_arguments_digest = .{ .bytes = @splat(0) };
-            expected.task_phase = .awaiting_model;
-            try expectOperation(second, expected);
-            try expectStateAndRestore(&core, expected, poison);
-            try core.acceptOperation(.{ .id = second.id, .generation = second.generation });
-            expected.operation_phase = .accepted;
-            try expectStateAndRestore(&core, expected, poison);
-            const final = try model_protocol.encodeText(&response_buffer, "ok");
-            const final_digest = binding.hash(binding.Result, final);
-            const interpreted_final = try core.applyModelResponse(
-                .{ .id = second.id, .generation = second.generation },
-                model_protocol.admit(&validation, final).admission,
-                response_ref + 1000,
-                final_digest,
-            );
-            expected.operation_result = response_ref + 1000;
-            expected.operation_phase = .completed;
-            expected.response_ref = response_ref + 1000;
-            expected.response_disposition = .final_answer;
-            expected.response_text = .{
-                .offset = model_protocol.header_size,
-                .length = 2,
-            };
-            expected.task_phase = .final_candidate;
-            try expectResponse(interpreted_final, expected);
-            try expectStateAndRestore(&core, expected, poison);
-            try core.commitFinalAnswer(active_leaf_id + 3);
-            expected.active_leaf_id = active_leaf_id + 3;
-            expected.final_entry_id = active_leaf_id + 3;
-            expected.task_phase = .finished;
-        } else {
-            const final = try model_protocol.encodeText(&response_buffer, "ok");
-            const final_digest = binding.hash(binding.Result, final);
-            const admission = model_protocol.admit(&validation, final).admission;
-            before = try canonicalState(&core);
-            try expectRejectedPreserves(
-                &core,
-                before,
-                expected,
-                error.StaleOperation,
-                discardResponse(core.applyModelResponse(.{
-                    .id = operation.id,
-                    .generation = operation.generation + 1,
-                }, admission, response_ref + 1, final_digest)),
-                poison,
-            );
-            const interpreted = try core.applyModelResponse(.{
-                .id = operation.id,
-                .generation = operation.generation,
-            }, admission, response_ref, final_digest);
-            expected.operation_result = response_ref;
-            expected.operation_phase = .completed;
-            expected.response_ref = response_ref;
-            expected.response_disposition = .final_answer;
-            expected.response_text = .{
-                .offset = model_protocol.header_size,
-                .length = 2,
-            };
-            expected.task_phase = .final_candidate;
-            try expectResponse(interpreted, expected);
-            try expectStateAndRestore(&core, expected, poison);
-            before = try canonicalState(&core);
-            try expectRejectedPreserves(
-                &core,
-                before,
-                expected,
-                error.IllegalFinalAnswerTransition,
-                core.commitFinalAnswer(active_leaf_id + 2),
-                poison,
-            );
-            try core.commitFinalAnswer(active_leaf_id + 1);
-            expected.active_leaf_id = active_leaf_id + 1;
-            expected.final_entry_id = active_leaf_id + 1;
-            expected.task_phase = .finished;
-        }
-        try expectStateAndRestore(&core, expected, poison);
-        core.abandon();
-    }
-}
-
-fn expectRejectedPreserves(
-    core: *Core,
-    before: [core_state.encoded_size]u8,
-    expected_state: core_state.State,
-    expected_error: anyerror,
-    result: anyerror!void,
-    poison: u8,
-) !void {
-    result catch |actual| {
-        if (actual != expected_error) return error.UnexpectedNativeRejection;
-        const after = try canonicalState(core);
-        if (!std.mem.eql(u8, &before, &after)) return error.RejectionMutatedCoreState;
-        try expectStateAndRestore(core, expected_state, poison);
-        return;
-    };
-    return error.NativeTransitionUnexpectedlyAccepted;
-}
-
-fn expectStateAndRestore(
-    core: *Core,
-    expected: core_state.State,
-    poison: u8,
-) !void {
-    const expected_view = semanticView(expected);
-    if (!std.meta.eql(expected_view, try observe(core))) return error.UnexpectedNativeTraceView;
-
-    const first = try canonicalState(core);
-    var expected_encoding: [core_state.encoded_size]u8 = undefined;
-    try core_state.encode(&expected_encoding, expected);
-    if (!std.mem.eql(u8, &expected_encoding, &first)) return error.UnexpectedNativeCoreState;
-
-    const decoded = try core_state.decode(&first);
-    var second: [core_state.encoded_size]u8 = undefined;
-    try core_state.encode(&second, decoded);
-    if (!std.mem.eql(u8, &first, &second)) return error.NondeterministicCoreState;
-
-    var restored_slot: ActivationSlot = undefined;
-    @memset(std.mem.asBytes(&restored_slot), poison);
-    var restored = try Core.activate(&restored_slot, &first);
-    const restored_view = try observe(&restored);
-    if (!std.meta.eql(expected_view, restored_view)) return error.RestoredTraceViewMismatch;
-    try restored.suspendInto(&second);
-    if (!std.mem.eql(u8, &first, &second)) return error.RestoredCoreStateMismatch;
-    for (std.mem.asBytes(&restored_slot)) |byte| {
-        if (byte != 0) return error.RestoredSlotNotScrubbed;
-    }
-}
-
-fn expectOperation(actual: Operation, expected: core_state.State) !void {
-    if (!std.meta.eql(actual, operationView(expected))) return error.UnexpectedNativeOperation;
-}
-
-fn expectResponse(actual: Response, expected: core_state.State) !void {
-    if (!std.meta.eql(actual, responseView(expected))) return error.UnexpectedNativeResponse;
-}
-
-fn semanticView(state: core_state.State) TraceView {
-    return .{
-        .identity = .{
-            .agent_id = state.agent_id,
-            .generation = state.agent_generation,
-        },
-        .operation = operationView(state),
-        .task = .{
-            .phase = state.task_phase,
-            .active_leaf_id = state.active_leaf_id,
-            .final_entry_id = state.final_entry_id,
-        },
-        .response = responseView(state),
-        .context = .{
-            .first_entry = state.context.offset,
-            .entry_count = state.context.length,
-        },
-    };
-}
-
-fn operationView(state: core_state.State) Operation {
-    return .{
-        .id = state.operation_id,
-        .generation = state.operation_generation,
-        .phase = state.operation_phase,
-        .result_ref = state.operation_result,
-        .sequence = state.operation_sequence,
-    };
-}
-
-fn responseView(state: core_state.State) Response {
-    return .{
-        .content_ref = state.response_ref,
-        .disposition = state.response_disposition,
-        .failure = state.response_failure,
-        .text = state.response_text,
-        .tool_key = state.response_tool_key,
-        .arguments = .{
-            .offset = state.response_arguments.offset,
-            .length = state.response_arguments.length,
-            .digest = state.response_arguments_digest,
-        },
-    };
-}
-
-fn canonicalState(core: *const Core) ![core_state.encoded_size]u8 {
-    var encoded: [core_state.encoded_size]u8 = undefined;
-    try core_state.encode(&encoded, core.state.*);
-    return encoded;
-}
-
-fn observe(core: *const Core) !TraceView {
-    return .{
-        .identity = try core.identity(),
-        .operation = try core.operation(),
-        .task = try core.task(),
-        .response = try core.response(),
-        .context = try core.modelContext(),
-    };
-}
-
-fn discardResponse(result: anyerror!Response) !void {
-    _ = try result;
-}
-
-fn discardOperation(result: anyerror!Operation) !void {
-    _ = try result;
-}
-
-test "production Core passes 32 randomized poison and rejection traces" {
-    var slot: ActivationSlot = undefined;
-    try randomizedStateMachineTraces(&slot);
 }

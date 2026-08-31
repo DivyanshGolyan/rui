@@ -1,4 +1,5 @@
 const std = @import("std");
+const bash_tool = @import("bash_tool.zig");
 const binding = @import("binding.zig");
 const conversation = @import("conversation.zig");
 const model_contract = @import("model_contract.zig");
@@ -6,6 +7,8 @@ const completion_inbox = @import("completion_inbox.zig");
 const core_image = @import("core_image.zig");
 const core_state = @import("core_state.zig");
 const host_store = @import("host_store.zig");
+const model_protocol = @import("model_protocol.zig");
+const patch_tool = @import("patch_tool.zig");
 const session_transition = @import("session_transition.zig");
 
 pub const workspace_path_capacity = 1024;
@@ -36,6 +39,118 @@ pub const OwnerToken = host_store.OwnerToken;
 pub const PatchContent = struct {
     intent_reference: u64,
     patch_reference: u64,
+    patch_digest: binding.PatchDescriptor,
+};
+
+pub const ModelAttemptMaterial = struct {
+    operation_id: u64,
+    sequence: u64,
+    attempt_id: u64,
+    request_ref: u64,
+    request_digest: binding.ModelDescriptor,
+    possible_duplicate_attempts: u8 = 0,
+};
+
+pub const BashCallMaterial = struct {
+    command: [bash_tool.max_command_size]u8 = @splat(0),
+    command_length: u16,
+    timeout_ms: u32,
+
+    pub fn init(call: bash_tool.Call) !BashCallMaterial {
+        if (call.command.len == 0 or call.command.len > bash_tool.max_command_size) {
+            return error.InvalidBashCall;
+        }
+        var result: BashCallMaterial = .{
+            .command_length = @intCast(call.command.len),
+            .timeout_ms = call.timeout_ms,
+        };
+        @memcpy(result.command[0..call.command.len], call.command);
+        return result;
+    }
+
+    pub fn commandSlice(self: *const BashCallMaterial) []const u8 {
+        return self.command[0..self.command_length];
+    }
+};
+
+pub const ActionMaterial = union(enum) {
+    bash: struct {
+        descriptor_ref: u64,
+        call: BashCallMaterial,
+    },
+    apply_patch: PatchContent,
+};
+
+pub const ModelCompletionConsequence = union(enum) {
+    final_answer: struct { content_ref: u64 },
+    tool_call: struct {
+        content_ref: u64,
+        action: ?ActionMaterial = null,
+    },
+    terminal,
+};
+
+pub const ModelCompletionMaterial = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    attempt_id: u64,
+    evidence_epoch: u64,
+    response_ref: u64,
+    response_digest: binding.Result,
+    admission: model_protocol.Admission,
+    consequence: ModelCompletionConsequence,
+};
+
+pub const ToolResultMaterial = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    attempt_id: u64,
+    result_ref: u64,
+    result_digest: binding.Result,
+    visible_ref: u64,
+};
+
+comptime {
+    std.debug.assert(4 <= session_transition.max_facts);
+}
+
+pub const Control = enum { cancel, shutdown };
+
+pub const ApprovalMaterial = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    binding_ref: u64,
+    descriptor_ref: u64,
+};
+
+pub const AuthorizationMaterial = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    permission_ref: u64,
+    allowed: bool,
+};
+
+pub const ActionAttemptMaterial = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    attempt_id: u64,
+};
+
+pub const ActionResultEvidence = union(enum) {
+    immediate,
+    durable: struct {
+        attempt_id: u64,
+        ownership_epoch: u64,
+    },
+};
+
+pub const ActionResultMaterial = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    result_ref: u64,
+    result_digest: binding.Result,
+    class: session_transition.ResultClass,
+    evidence: ActionResultEvidence,
 };
 
 pub const EntryKind = session_transition.ConversationKind;
@@ -49,6 +164,19 @@ pub const ConversationEntry = struct {
     content_ref: u64,
     sequence: u64,
 };
+
+pub const ContinuationView = struct {
+    operation: core_image.Operation,
+    task: core_image.Task,
+    response: core_image.Response,
+};
+
+pub fn actionOperationId(response_ref: u64) !u64 {
+    if (response_ref == 0 or response_ref > std.math.maxInt(u32)) {
+        return error.InvalidModelResponseReference;
+    }
+    return (@as(u64, 1) << 61) | response_ref;
+}
 
 pub const OperationView = struct {
     const max_attempts = session_transition.max_operation_attempts;
@@ -1011,12 +1139,13 @@ pub const Session = struct {
         try ensureTransientScratchBound(self.scratch);
     }
 
-    pub fn appendConversation(
+    pub fn appendConversationForTest(
         self: *Session,
         kind: EntryKind,
         content_ref: u64,
         fault: ?FaultHook,
     ) !ConversationEntry {
+        if (!@import("builtin").is_test) @compileError("test-only Conversation preparation");
         if (content_ref == 0) return error.InvalidContentReference;
         try self.ensureUsable();
         return self.appendAuthorized(kind, content_ref, fault) catch |err| {
@@ -1254,182 +1383,604 @@ pub const Session = struct {
         };
     }
 
-    pub fn commitFacts(
-        self: *Session,
-        facts: []const session_transition.Fact,
-    ) !u64 {
-        return self.commitPrepared(facts, null, .facts_only);
-    }
-
-    /// Serializes the live reducer and commits its exact result with the facts
-    /// produced by that reduction. The reducer is suspended even if durable
-    /// commit later fails; callers restore only from Session authority.
-    pub fn commitCoreFacts(
-        self: *Session,
-        core: *core_image.Core,
-        facts: []const session_transition.Fact,
-    ) !u64 {
-        return self.commitCorePrepared(core, facts, .facts_only);
-    }
-
-    /// Commits the closed Patch Intent content relationship: the transaction
-    /// first references the Intent, and that Intent first references the patch.
-    pub fn commitCoreFactsWithPatchContent(
-        self: *Session,
-        core: *core_image.Core,
-        facts: []const session_transition.Fact,
-        patch: PatchContent,
-    ) !u64 {
-        return self.commitCorePrepared(core, facts, .{ .patch_intent = patch });
-    }
-
     const ContentClosure = union(enum) {
         facts_only,
         patch_intent: PatchContent,
     };
 
-    fn commitCorePrepared(
-        self: *Session,
-        core: *core_image.Core,
-        facts: []const session_transition.Fact,
+    const CompiledAction = struct {
+        descriptor_ref: u64,
+        descriptor_digest: binding.Descriptor,
         content_closure: ContentClosure,
-    ) !u64 {
-        const identity = try core.identity();
-        if (identity.agent_id != self.agent_id or identity.generation != 1) {
+    };
+
+    pub fn startTask(self: *Session, slot: *core_image.ActivationSlot) !u64 {
+        defer core_image.scrub(slot);
+        const committed = try core_image.initialize(.{ .agent_id = self.agent_id, .generation = 1 });
+        const candidate = try core_image.startTask(committed, self.activeLeafId());
+        const facts = [_]session_transition.Fact{session_transition.taskAdmitted(
+            self.agentContext(),
+            self.task_id,
+            self.task_id,
+        )};
+        return self.commitContinuation(slot, candidate, &facts, .facts_only);
+    }
+
+    pub fn previewModelContext(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+        operation_id: u64,
+        sequence: u64,
+    ) !core_image.ModelContext {
+        defer core_image.scrub(slot);
+        const committed = try self.loadContinuation(slot);
+        return (try core_image.admitModelAttempt(committed, operation_id, sequence)).context;
+    }
+
+    pub fn admitModelAttempt(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+        material: ModelAttemptMaterial,
+    ) !core_image.Operation {
+        defer core_image.scrub(slot);
+        const committed = try self.loadContinuation(slot);
+        const reduced = try core_image.admitModelAttempt(
+            committed,
+            material.operation_id,
+            material.sequence,
+        );
+        const operation_context = self.operationContext(
+            reduced.operation.id,
+            reduced.operation.generation,
+        );
+        const descriptor: binding.Descriptor = .{ .model = material.request_digest };
+        const facts = [_]session_transition.Fact{
+            session_transition.operationAdmitted(
+                operation_context,
+                null,
+                material.request_ref,
+                descriptor,
+            ),
+            session_transition.modelAttemptAdmitted(
+                operation_context,
+                material.attempt_id,
+                material.request_ref,
+                descriptor,
+                material.possible_duplicate_attempts,
+            ),
+        };
+        _ = try self.commitContinuation(slot, reduced.state, &facts, .facts_only);
+        return reduced.operation;
+    }
+
+    pub fn admitModelRetry(self: *Session, material: ModelAttemptMaterial) !u64 {
+        const model = self.resident.semantic.model;
+        const descriptor = model.descriptor orelse return error.MissingModelDescriptor;
+        if (model.operation_id != material.operation_id or
+            descriptor.descriptor_ref != material.request_ref or
+            descriptor.descriptor_digest != .model or
+            !binding.eql(
+                binding.ModelDescriptor,
+                descriptor.descriptor_digest.model,
+                material.request_digest,
+            ) or model.attempt_count != material.possible_duplicate_attempts)
+        {
+            return error.InvalidModelAttempt;
+        }
+        return self.commitDerived(&.{session_transition.modelAttemptAdmitted(
+            self.operationContext(material.operation_id, model.generation),
+            material.attempt_id,
+            material.request_ref,
+            .{ .model = material.request_digest },
+            material.possible_duplicate_attempts,
+        )}, null, .facts_only);
+    }
+
+    pub fn admitModelCompletion(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+        material: ModelCompletionMaterial,
+    ) !core_image.Response {
+        defer core_image.scrub(slot);
+        const committed = try self.loadContinuation(slot);
+        const model_history = self.resident.semantic.model;
+        const attempt = model_history.findAttempt(material.attempt_id) orelse
+            return error.InvalidAttemptHistory;
+        if (attempt.operation.operation_id != material.operation_id or
+            attempt.operation.generation != material.operation_generation or
+            attempt.descriptor_ref == 0)
+        {
+            return error.InvalidAttemptHistory;
+        }
+
+        var facts: [4]session_transition.Fact = undefined;
+        const operation = self.operationContext(material.operation_id, material.operation_generation);
+        var evidence_operation = operation;
+        evidence_operation.agent.ownership_epoch = material.evidence_epoch;
+        facts[0] = session_transition.result(.{
+            .operation = evidence_operation,
+            .result_ref = material.response_ref,
+            .result_digest = material.response_digest,
+            .class = .ordinary,
+            .evidence = .{ .durable = .{ .model = material.attempt_id } },
+        });
+        facts[1] = session_transition.resultApplied(.{
+            .operation = operation,
+            .attempt_id = material.attempt_id,
+            .result_ref = material.response_ref,
+            .result_digest = material.response_digest,
+        });
+
+        var fact_count: usize = 2;
+        var closure: ContentClosure = .facts_only;
+        const next_entry_id = std.math.add(u64, self.activeLeafId(), 1) catch
+            return error.EntryIdentityExhausted;
+        const consequence: core_image.CompletionConsequence = switch (material.consequence) {
+            .final_answer => .{ .final_answer = next_entry_id },
+            .tool_call => .tool_call,
+            .terminal => .terminal,
+        };
+        const reduced = try core_image.admitModelCompletion(
+            committed,
+            .{ .id = material.operation_id, .generation = material.operation_generation },
+            material.admission,
+            material.response_ref,
+            material.response_digest,
+            consequence,
+        );
+        try self.validateCompletionContent(reduced.response, material.consequence);
+        switch (material.consequence) {
+            .final_answer => |final| {
+                const entry = try self.appendAuthorized(.assistant_text, final.content_ref, null);
+                std.debug.assert(entry.entry_id == next_entry_id);
+                facts[fact_count] = self.conversationFact(entry);
+                fact_count += 1;
+                facts[fact_count] = session_transition.outcome(
+                    self.agentContext(),
+                    self.task_id,
+                    final.content_ref,
+                );
+                fact_count += 1;
+            },
+            .tool_call => |tool| {
+                const action = if (tool.action) |action|
+                    try self.compileAction(reduced.response, material.response_ref, action)
+                else
+                    null;
+                const entry = try self.appendAuthorized(.tool_call, tool.content_ref, null);
+                std.debug.assert(entry.entry_id == next_entry_id);
+                if (action) |compiled| {
+                    const action_id = try actionOperationId(material.response_ref);
+                    facts[fact_count] = session_transition.operationAdmitted(
+                        self.operationContext(action_id, 1),
+                        .{
+                            .operation_id = material.operation_id,
+                            .generation = material.operation_generation,
+                        },
+                        compiled.descriptor_ref,
+                        compiled.descriptor_digest,
+                    );
+                    fact_count += 1;
+                    closure = compiled.content_closure;
+                }
+                facts[fact_count] = self.conversationFact(entry);
+                fact_count += 1;
+            },
+            .terminal => {},
+        }
+        _ = try self.commitContinuation(slot, reduced.state, facts[0..fact_count], closure);
+        return reduced.response;
+    }
+
+    pub fn admitToolResult(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+        material: ToolResultMaterial,
+    ) !void {
+        defer core_image.scrub(slot);
+        const committed = try self.loadContinuation(slot);
+        const operation = self.operationContext(material.operation_id, material.operation_generation);
+        const history = self.resident.semantic.operation(operation) orelse
+            return error.InvalidOperationHistory;
+        const result = history.result orelse return error.InvalidOperationHistory;
+        if (result.result_ref != material.result_ref or
+            !binding.eql(binding.Result, result.result_digest, material.result_digest) or
+            resultAttemptId(result) != material.attempt_id)
+        {
+            return error.ResultApplicationMismatch;
+        }
+        if (material.attempt_id != 0) {
+            const attempt = history.findAttempt(material.attempt_id) orelse
+                return error.InvalidAttemptHistory;
+            if (attempt.operation.operation_id != operation.operation_id or
+                attempt.operation.generation != operation.generation or
+                attempt.operation.agent.agent_id != operation.agent.agent_id or
+                attempt.operation.agent.agent_generation != operation.agent.agent_generation)
+            {
+                return error.InvalidAttemptHistory;
+            }
+        }
+        const call_entry = try self.readEntry(self.activeLeafId());
+        const next_entry_id = std.math.add(u64, call_entry.entry_id, 1) catch
+            return error.EntryIdentityExhausted;
+        const candidate = try core_image.admitToolResult(
+            committed,
+            call_entry.entry_id,
+            next_entry_id,
+        );
+        const entry = try self.appendAuthorized(.tool_result, material.visible_ref, null);
+        std.debug.assert(entry.entry_id == next_entry_id);
+        const facts = [_]session_transition.Fact{
+            session_transition.resultApplied(.{
+                .operation = operation,
+                .attempt_id = material.attempt_id,
+                .result_ref = material.result_ref,
+                .result_digest = material.result_digest,
+            }),
+            self.conversationFact(entry),
+        };
+        _ = try self.commitContinuation(slot, candidate, &facts, .facts_only);
+    }
+
+    pub fn continuationView(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+    ) !ContinuationView {
+        defer core_image.scrub(slot);
+        const state = try self.loadContinuation(slot);
+        return .{
+            .operation = core_image.operation(state),
+            .task = core_image.task(state),
+            .response = core_image.response(state),
+        };
+    }
+
+    pub fn commitControl(self: *Session, control: Control) !u64 {
+        const fact = switch (control) {
+            .cancel => session_transition.cancellation(self.agentContext()),
+            .shutdown => session_transition.shutdown(self.agentContext()),
+        };
+        return self.commitDerived(&.{fact}, null, .facts_only);
+    }
+
+    pub fn requestApproval(self: *Session, material: ApprovalMaterial) !u64 {
+        const operation = try self.requireActionOperation(
+            material.operation_id,
+            material.operation_generation,
+        );
+        const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
+        if (material.binding_ref != 0 and material.binding_ref != descriptor.descriptor_ref) {
+            return error.InvalidApprovalBinding;
+        }
+        return self.commitDerived(&.{session_transition.approvalRequired(.{
+            .operation = self.operationContext(material.operation_id, material.operation_generation),
+            .binding_ref = material.binding_ref,
+            .descriptor_ref = material.descriptor_ref,
+        })}, null, .facts_only);
+    }
+
+    pub fn authorizeAction(self: *Session, material: AuthorizationMaterial) !u64 {
+        const operation = try self.requireActionOperation(
+            material.operation_id,
+            material.operation_generation,
+        );
+        const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
+        if (material.permission_ref != 0 and material.permission_ref != descriptor.descriptor_ref) {
+            return error.InvalidAuthorizationBinding;
+        }
+        return self.commitDerived(&.{session_transition.authorization(.{
+            .operation = self.operationContext(material.operation_id, material.operation_generation),
+            .permission_ref = material.permission_ref,
+            .allowed = material.allowed,
+        })}, null, .facts_only);
+    }
+
+    pub fn admitActionAttempt(self: *Session, material: ActionAttemptMaterial) !u64 {
+        const operation = try self.requireActionOperation(
+            material.operation_id,
+            material.operation_generation,
+        );
+        const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
+        return self.commitDerived(&.{session_transition.consequentialAttemptAdmitted(
+            self.operationContext(material.operation_id, material.operation_generation),
+            material.attempt_id,
+            descriptor.descriptor_ref,
+            descriptor.descriptor_digest,
+        )}, null, .facts_only);
+    }
+
+    pub fn admitActionResult(self: *Session, material: ActionResultMaterial) !u64 {
+        const operation = try self.requireActionOperation(
+            material.operation_id,
+            material.operation_generation,
+        );
+        const kind = operation.kind() orelse return error.MissingActionDescriptor;
+        if (kind == .model) return error.InvalidActionDescriptor;
+        var evidence_operation = self.operationContext(
+            material.operation_id,
+            material.operation_generation,
+        );
+        const evidence: session_transition.ResultEvidence = switch (material.evidence) {
+            .immediate => .{ .immediate = {} },
+            .durable => |durable| blk: {
+                const attempt = operation.findAttempt(durable.attempt_id) orelse
+                    return error.InvalidAttemptHistory;
+                if (attempt.operation.operation_id != evidence_operation.operation_id or
+                    attempt.operation.generation != evidence_operation.generation or
+                    attempt.operation.agent.agent_id != evidence_operation.agent.agent_id or
+                    attempt.operation.agent.agent_generation != evidence_operation.agent.agent_generation)
+                {
+                    return error.InvalidAttemptHistory;
+                }
+                evidence_operation.agent.ownership_epoch = durable.ownership_epoch;
+                break :blk .{ .durable = switch (kind) {
+                    .bash => .{ .bash = durable.attempt_id },
+                    .apply_patch => .{ .apply_patch = durable.attempt_id },
+                    .model => unreachable,
+                } };
+            },
+        };
+        return self.commitDerived(&.{session_transition.result(.{
+            .operation = evidence_operation,
+            .result_ref = material.result_ref,
+            .result_digest = material.result_digest,
+            .class = material.class,
+            .evidence = evidence,
+        })}, null, .facts_only);
+    }
+
+    fn requireActionOperation(
+        self: *Session,
+        operation_id: u64,
+        generation: u32,
+    ) !OperationView {
+        const operation = self.resident.semantic.operation(
+            self.operationContext(operation_id, generation),
+        ) orelse return error.InvalidOperationHistory;
+        if (operation.kind() == .model) return error.InvalidActionDescriptor;
+        return operation;
+    }
+
+    fn loadContinuation(self: *Session, slot: *core_image.ActivationSlot) !core_state.State {
+        const view = try self.semanticView();
+        const encoded = view.last_core orelse return error.MissingLedgerCoreState;
+        const state = try core_state.decode(&encoded);
+        if (state.agent_id != self.agent_id or state.agent_generation != 1) {
             return error.CoreSessionIdentityMismatch;
         }
-        try self.validateCoreCommitChange(try core.pendingCommitChange(), facts);
-        var encoded: [core_state.encoded_size]u8 = undefined;
-        try core.suspendInto(&encoded);
-        return self.commitPrepared(facts, encoded, content_closure);
+        slot.state = state;
+        return state;
     }
 
-    fn validateCoreCommitChange(
-        self: *const Session,
-        change: core_image.Core.CommitChange,
+    fn commitContinuation(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+        candidate: core_state.State,
         facts: []const session_transition.Fact,
+        closure: ContentClosure,
+    ) !u64 {
+        if (candidate.agent_id != self.agent_id or candidate.agent_generation != 1) {
+            return error.CoreSessionIdentityMismatch;
+        }
+        slot.state = candidate;
+        var encoded: [core_state.encoded_size]u8 = undefined;
+        try core_state.encode(&encoded, slot.state);
+        return self.commitDerived(facts, encoded, closure);
+    }
+
+    fn agentContext(self: *const Session) session_transition.AgentContext {
+        return .{
+            .agent_id = self.agent_id,
+            .agent_generation = 1,
+            .ownership_epoch = self.ownership_epoch,
+        };
+    }
+
+    fn operationContext(
+        self: *const Session,
+        operation_id: u64,
+        generation: u32,
+    ) session_transition.OperationContext {
+        return .{
+            .agent = self.agentContext(),
+            .operation_id = operation_id,
+            .generation = generation,
+        };
+    }
+
+    fn conversationFact(
+        self: *const Session,
+        entry: ConversationEntry,
+    ) session_transition.Fact {
+        return session_transition.conversationAdvanced(.{
+            .agent = self.agentContext(),
+            .entry_id = entry.entry_id,
+            .parent_id = entry.parent_id,
+            .kind = entry.kind,
+            .content_ref = entry.content_ref,
+        });
+    }
+
+    fn validateCompletionContent(
+        self: *Session,
+        response_value: core_image.Response,
+        consequence: ModelCompletionConsequence,
     ) !void {
-        switch (change) {
-            .none, .unsupported, .model_operation_submitted => return error.UntrackedCoreTransition,
-            .task_started => |active_leaf_id| {
-                if (facts.len != 1 or std.meta.activeTag(facts[0]) != .task_admitted) {
-                    return error.CoreCommitFactsMismatch;
-                }
-                const admitted = facts[0].task_admitted;
-                if (active_leaf_id != self.resident.conversation_head_id or
-                    admitted.task_id != self.task_id or admitted.content_ref != self.task_id)
-                {
-                    return error.CoreCommitFactsMismatch;
-                }
+        switch (consequence) {
+            .final_answer => |final| try self.requireContentEqualsWindow(
+                response_value.content_ref,
+                response_value.text,
+                final.content_ref,
+            ),
+            .tool_call => |tool| {
+                try self.requireToolCallMatchesResponse(response_value, tool.content_ref);
             },
-            .model_operation_admitted => |operation| {
-                if (facts.len != 2 or std.meta.activeTag(facts[0]) != .operation_admitted or
-                    std.meta.activeTag(facts[1]) != .attempt_admitted)
-                {
-                    return error.CoreCommitFactsMismatch;
-                }
-                const admitted = facts[0].operation_admitted;
-                const attempt = facts[1].attempt_admitted;
-                if (admitted.source_operation != null or admitted.operation.operation_id != operation.id or
-                    admitted.operation.generation != operation.generation or
-                    !std.meta.eql(admitted.operation, attempt.operation) or
-                    admitted.descriptor_ref != attempt.descriptor_ref or
-                    !binding.descriptorEql(admitted.descriptor_digest, attempt.descriptor_digest) or
-                    std.meta.activeTag(admitted.descriptor_digest) != .model)
-                {
-                    return error.CoreCommitFactsMismatch;
-                }
-            },
-            .model_response_applied => |applied| {
-                if (facts.len < 2 or std.meta.activeTag(facts[0]) != .result or
-                    std.meta.activeTag(facts[1]) != .result_applied)
-                {
-                    return error.CoreCommitFactsMismatch;
-                }
-                const result = facts[0].result;
-                const result_applied = facts[1].result_applied;
-                const attempt = self.resident.semantic.model.latestAttempt() orelse
-                    return error.CoreCommitFactsMismatch;
-                const evidence_attempt = switch (result.evidence) {
-                    .immediate => return error.CoreCommitFactsMismatch,
-                    .durable => |evidence| switch (evidence) {
-                        .model => |attempt_id| attempt_id,
-                        .bash, .apply_patch => return error.CoreCommitFactsMismatch,
-                    },
-                };
-                if (result.operation.operation_id != applied.operation.id or
-                    result.operation.generation != applied.operation.generation or
-                    result.result_ref != applied.response_ref or
-                    !binding.eql(binding.Result, result.result_digest, applied.result_digest) or
-                    result.class != .ordinary or
-                    evidence_attempt != attempt.attempt_id or
-                    result.operation.operation_id != result_applied.operation.operation_id or
-                    result.operation.generation != result_applied.operation.generation or
-                    resultAttemptId(result) != result_applied.attempt_id or
-                    result.result_ref != result_applied.result_ref or
-                    !binding.eql(binding.Result, result.result_digest, result_applied.result_digest))
-                {
-                    return error.CoreCommitFactsMismatch;
-                }
-                switch (applied.disposition) {
-                    .final_answer, .failure, .input_request => if (facts.len != 2) {
-                        return error.CoreCommitFactsMismatch;
-                    },
-                    .tool_call => {
-                        const action_offset: usize = if (facts.len == 4) 1 else 0;
-                        if ((facts.len != 3 and facts.len != 4) or
-                            (action_offset == 1 and
-                                std.meta.activeTag(facts[2]) != .operation_admitted) or
-                            std.meta.activeTag(facts[2 + action_offset]) != .conversation_advanced)
-                        {
-                            return error.CoreCommitFactsMismatch;
-                        }
-                        if (action_offset == 1) {
-                            const source = facts[2].operation_admitted.source_operation orelse
-                                return error.CoreCommitFactsMismatch;
-                            if (source.operation_id != applied.operation.id or
-                                source.generation != applied.operation.generation)
-                            {
-                                return error.CoreCommitFactsMismatch;
-                            }
-                        }
-                        if (facts[2 + action_offset].conversation_advanced.kind != .tool_call) {
-                            return error.CoreCommitFactsMismatch;
-                        }
-                    },
-                }
-            },
-            .tool_result_committed => |committed| {
-                if (facts.len != 2 or std.meta.activeTag(facts[0]) != .result_applied or
-                    std.meta.activeTag(facts[1]) != .conversation_advanced)
-                {
-                    return error.CoreCommitFactsMismatch;
-                }
-                const advanced = facts[1].conversation_advanced;
-                if (advanced.kind != .tool_result or advanced.entry_id != committed.result_entry_id or
-                    advanced.parent_id != committed.call_entry_id)
-                {
-                    return error.CoreCommitFactsMismatch;
-                }
-            },
-            .final_answer_committed => |entry_id| {
-                if (facts.len != 2 or std.meta.activeTag(facts[0]) != .conversation_advanced or
-                    std.meta.activeTag(facts[1]) != .outcome)
-                {
-                    return error.CoreCommitFactsMismatch;
-                }
-                const advanced = facts[0].conversation_advanced;
-                const outcome = facts[1].outcome;
-                if (advanced.kind != .assistant_text or advanced.entry_id != entry_id or
-                    outcome.content_ref != advanced.content_ref)
-                {
-                    return error.CoreCommitFactsMismatch;
-                }
-            },
+            .terminal => {},
         }
     }
 
-    fn commitPrepared(
+    fn compileAction(
+        self: *Session,
+        response_value: core_image.Response,
+        response_ref: u64,
+        material: ActionMaterial,
+    ) !CompiledAction {
+        const operation_id = try actionOperationId(response_ref);
+        return switch (material) {
+            .bash => |bash| blk: {
+                try self.requireResponseToolKey(response_value, model_contract.bash_key);
+                var descriptor_bytes: [bash_tool.max_descriptor_size]u8 = undefined;
+                const bytes = try self.readBoundedContent(bash.descriptor_ref, &descriptor_bytes);
+                const descriptor = try bash_tool.decodeDescriptor(bytes);
+                if (descriptor.operation_id != operation_id or descriptor.operation_generation != 1 or
+                    !std.mem.eql(u8, descriptor.workspace_path, self.workspacePath()) or
+                    !std.mem.eql(u8, descriptor.working_directory, self.workspacePath()) or
+                    descriptor.call.timeout_ms != bash.call.timeout_ms or
+                    !std.mem.eql(u8, descriptor.call.command, bash.call.commandSlice()))
+                {
+                    return error.InvalidActionDescriptor;
+                }
+                break :blk .{
+                    .descriptor_ref = bash.descriptor_ref,
+                    .descriptor_digest = .{ .bash = bash_tool.descriptorDigest(bytes) },
+                    .content_closure = .facts_only,
+                };
+            },
+            .apply_patch => |patch| blk: {
+                try self.requireResponseToolKey(response_value, model_contract.apply_patch_key);
+                if (patch.intent_reference == 0 or patch.patch_reference == 0) {
+                    return error.InvalidActionContentClosure;
+                }
+                var intent_bytes: [patch_tool.max_intent_size]u8 = undefined;
+                const bytes = try self.readBoundedContent(patch.intent_reference, &intent_bytes);
+                const intent = try patch_tool.decodeIntent(bytes);
+                var patch_bytes: [patch_tool.max_patch_size]u8 = undefined;
+                const patch_content = try self.readBoundedContent(patch.patch_reference, &patch_bytes);
+                const patch_digest = patch_tool.patchDigest(patch_content);
+                if (intent.operation_id != operation_id or intent.operation_generation != 1 or
+                    intent.patch_ref != patch.patch_reference or
+                    !std.mem.eql(u8, intent.workspace_path, self.workspacePath()) or
+                    !binding.eql(binding.PatchDescriptor, intent.patch_digest, patch.patch_digest) or
+                    !binding.eql(binding.PatchDescriptor, patch.patch_digest, patch_digest))
+                {
+                    return error.InvalidActionDescriptor;
+                }
+                break :blk .{
+                    .descriptor_ref = patch.intent_reference,
+                    .descriptor_digest = .{ .apply_patch = intent.intent_digest },
+                    .content_closure = .{ .patch_intent = patch },
+                };
+            },
+        };
+    }
+
+    fn requireResponseToolKey(
+        self: *Session,
+        response_value: core_image.Response,
+        expected: []const u8,
+    ) !void {
+        if (response_value.tool_key.length != expected.len or expected.len > model_contract.max_tool_key_size) {
+            return error.InvalidActionDescriptor;
+        }
+        var source = try self.viewContent(response_value.content_ref);
+        var key: [model_contract.max_tool_key_size]u8 = undefined;
+        const actual = try source.readWindow(response_value.tool_key.offset, key[0..expected.len]);
+        if (actual.len != expected.len or !std.mem.eql(u8, actual, expected)) {
+            return error.InvalidActionDescriptor;
+        }
+    }
+
+    fn readBoundedContent(self: *Session, reference: u64, out: []u8) ![]const u8 {
+        var content = try self.viewContent(reference);
+        if (content.length() == 0 or content.length() > out.len) return error.InvalidActionDescriptor;
+        const length: usize = @intCast(content.length());
+        var offset: usize = 0;
+        while (offset < length) {
+            const bytes = try content.readWindow(offset, out[offset..length]);
+            if (bytes.len == 0 or bytes.len > length - offset) return error.InvalidActionDescriptor;
+            if (bytes.ptr != out[offset..].ptr) @memcpy(out[offset..][0..bytes.len], bytes);
+            offset += bytes.len;
+        }
+        return out[0..length];
+    }
+
+    fn requireContentEqualsWindow(
+        self: *Session,
+        source_ref: u64,
+        window: core_image.ContentWindow,
+        target_ref: u64,
+    ) !void {
+        var source = try self.viewContent(source_ref);
+        var target = try self.viewContent(target_ref);
+        if (target.length() != window.length) return error.ModelCompletionContentMismatch;
+        var source_bytes: [4096]u8 = undefined;
+        var target_bytes: [4096]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < window.length) {
+            const wanted: usize = @intCast(@min(window.length - offset, source_bytes.len));
+            const left = try source.readWindow(window.offset + offset, source_bytes[0..wanted]);
+            const right = try target.readWindow(offset, target_bytes[0..wanted]);
+            if (left.len != wanted or right.len != wanted or !std.mem.eql(u8, left, right)) {
+                return error.ModelCompletionContentMismatch;
+            }
+            offset += wanted;
+        }
+    }
+
+    fn requireToolCallMatchesResponse(
+        self: *Session,
+        response_value: core_image.Response,
+        call_ref: u64,
+    ) !void {
+        var call = try self.viewContent(call_ref);
+        var header_bytes: [conversation.call_header_size]u8 = undefined;
+        const header_slice = try call.readWindow(0, &header_bytes);
+        if (header_slice.len != header_bytes.len) return error.ModelCompletionContentMismatch;
+        const header = conversation.decodeToolCallHeader(&header_bytes, call.length()) catch
+            return error.ModelCompletionContentMismatch;
+        if (header.key_length != response_value.tool_key.length or
+            header.arguments_length != response_value.arguments.length or
+            !binding.eql(
+                binding.StrictToolJsonV1,
+                header.arguments_digest,
+                response_value.arguments.digest,
+            ))
+        {
+            return error.ModelCompletionContentMismatch;
+        }
+        var source = try self.viewContent(response_value.content_ref);
+        var left: [4096]u8 = undefined;
+        var right: [4096]u8 = undefined;
+        const comparisons = [_]struct { source: core_image.ContentWindow, call_offset: u64 }{
+            .{ .source = response_value.tool_key, .call_offset = conversation.call_header_size },
+            .{
+                .source = response_value.arguments.contentWindow(),
+                .call_offset = conversation.call_header_size + header.key_length,
+            },
+        };
+        for (comparisons) |comparison| {
+            var offset: u64 = 0;
+            while (offset < comparison.source.length) {
+                const wanted: usize = @intCast(@min(comparison.source.length - offset, left.len));
+                const source_bytes = try source.readWindow(
+                    comparison.source.offset + offset,
+                    left[0..wanted],
+                );
+                const call_bytes = try call.readWindow(
+                    comparison.call_offset + offset,
+                    right[0..wanted],
+                );
+                if (source_bytes.len != wanted or call_bytes.len != wanted or
+                    !std.mem.eql(u8, source_bytes, call_bytes))
+                {
+                    return error.ModelCompletionContentMismatch;
+                }
+                offset += wanted;
+            }
+        }
+    }
+
+    fn commitDerived(
         self: *Session,
         facts: []const session_transition.Fact,
         encoded_core: ?[core_state.encoded_size]u8,
@@ -1497,6 +2048,16 @@ pub const Session = struct {
         return final_sequence;
     }
 
+    /// Direct Fact injection exists only for malformed-ledger and recovery
+    /// fixtures. Production semantics enter through the typed methods above.
+    pub fn commitFactsForTest(
+        self: *Session,
+        facts: []const session_transition.Fact,
+    ) !u64 {
+        if (!@import("builtin").is_test) @compileError("test-only Session Fact injection");
+        return self.commitDerived(facts, null, .facts_only);
+    }
+
     fn validatePreparedContentReferences(
         self: *Session,
         fact: session_transition.Fact,
@@ -1514,19 +2075,6 @@ pub const Session = struct {
         try self.ensureUsable();
         if (self.recovery != .ready) return error.SessionRecoveryIncomplete;
         return self.resident.semantic;
-    }
-
-    pub fn activateCore(self: *Session, slot: *core_image.ActivationSlot) !core_image.Core {
-        const view = try self.semanticView();
-        const encoded = view.last_core orelse return error.MissingLedgerCoreState;
-        const core = try core_image.Core.activate(slot, &encoded);
-        const identity = try core.identity();
-        if (identity.agent_id != self.agent_id or identity.generation != 1) {
-            var invalid = core;
-            invalid.abandon();
-            return error.CoreSessionIdentityMismatch;
-        }
-        return core;
     }
 
     pub fn recoverSemanticWindow(
@@ -2319,7 +2867,7 @@ fn admitTestModelSource(session: *Session, operation_id: u64) !void {
     const descriptor_bytes = "test model descriptor";
     const descriptor_ref = (@as(u64, 1) << 53) | operation_id;
     try session.storeContent(descriptor_ref, descriptor_bytes);
-    _ = try session.commitFacts(&.{session_transition.operationAdmitted(.{
+    _ = try session.commitFactsForTest(&.{session_transition.operationAdmitted(.{
         .agent = .{
             .agent_id = session.agent_id,
             .agent_generation = 1,
@@ -2542,7 +3090,7 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
                 descriptor_ref,
                 case.descriptor,
             );
-        _ = try created.commitFacts(&.{
+        _ = try created.commitFactsForTest(&.{
             session_transition.operationAdmitted(
                 operation,
                 if (case.kind == .model) null else .{ .operation_id = 99, .generation = 1 },
@@ -2652,7 +3200,7 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
         try created.storeContent(descriptor_ref, "descriptor");
         try created.storeContent(result_ref, "wrong-kind result");
         try admitTestModelSource(&created, 299);
-        _ = try created.commitFacts(&.{
+        _ = try created.commitFactsForTest(&.{
             session_transition.operationAdmitted(
                 operation,
                 .{ .operation_id = 299, .generation = 1 },
@@ -2679,7 +3227,7 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
             .result_digest = testResultDigest("wrong-kind result"),
         }));
         const correct_inbox_id = try layout.storage.completionHead(session_id);
-        _ = try created.commitFacts(&.{session_transition.result(.{
+        _ = try created.commitFactsForTest(&.{session_transition.result(.{
             .operation = operation,
             .result_ref = result_ref,
             .result_digest = testResultDigest("wrong-kind result"),
@@ -2758,7 +3306,7 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
         try created.storeContent(descriptor_ref, "descriptor");
         try created.storeContent(result_ref, "lost wrong-kind result");
         try admitTestModelSource(&created, 399);
-        _ = try created.commitFacts(&.{
+        _ = try created.commitFactsForTest(&.{
             session_transition.operationAdmitted(
                 operation,
                 .{ .operation_id = 399, .generation = 1 },
@@ -2784,7 +3332,7 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
             .result_ref = result_ref,
             .result_digest = testResultDigest("lost wrong-kind result"),
         }));
-        _ = try created.commitFacts(&.{session_transition.result(.{
+        _ = try created.commitFactsForTest(&.{session_transition.result(.{
             .operation = operation,
             .result_ref = result_ref,
             .result_digest = testResultDigest("lost wrong-kind result"),
@@ -2846,7 +3394,7 @@ test "late evidence audits against the first terminal Result sequence" {
     const descriptor = testDescriptor("terminal sequence descriptor");
     try created.storeContent(201, "descriptor");
     try created.storeContent(202, "winning result");
-    _ = try created.commitFacts(&.{
+    _ = try created.commitFactsForTest(&.{
         session_transition.operationAdmitted(operation, null, 201, descriptor),
         session_transition.modelAttemptAdmitted(operation, 211, 201, descriptor, 0),
         session_transition.modelAttemptAdmitted(operation, 212, 201, descriptor, 1),
@@ -2864,14 +3412,14 @@ test "late evidence audits against the first terminal Result sequence" {
         .result_digest = testResultDigest("winning result"),
     }));
     try created.storeContent(203, "later outcome");
-    const terminal_sequence = try created.commitFacts(&.{session_transition.result(.{
+    const terminal_sequence = try created.commitFactsForTest(&.{session_transition.result(.{
         .operation = operation,
         .result_ref = 202,
         .result_digest = testResultDigest("winning result"),
         .class = .ordinary,
         .evidence = .{ .durable = .{ .model = 212 } },
     })});
-    _ = try created.commitFacts(&.{session_transition.outcome(
+    _ = try created.commitFactsForTest(&.{session_transition.outcome(
         operation.agent,
         301,
         203,
@@ -2981,7 +3529,7 @@ test "late evidence for a prior Operation audits through durable history" {
             case.descriptor_a,
             @intCast(index),
         );
-        _ = try created.commitFacts(&admission);
+        _ = try created.commitFactsForTest(&admission);
         try created.publishCompletionEvidence(completion_inbox.bind(.{
             .kind = case.kind,
             .session_id = created.session_id,
@@ -2995,7 +3543,7 @@ test "late evidence for a prior Operation audits through durable history" {
             .result_digest = testResultDigest("winning result"),
         }));
         const winner_inbox_id = try layout.storage.completionHead(session_id);
-        const terminal_sequence = try created.commitFacts(&.{session_transition.result(.{
+        const terminal_sequence = try created.commitFactsForTest(&.{session_transition.result(.{
             .operation = operation_a,
             .result_ref = winner_result_ref,
             .result_digest = testResultDigest("winning result"),
@@ -3003,7 +3551,7 @@ test "late evidence for a prior Operation audits through durable history" {
             .evidence = .{ .durable = testDurableEvidence(case.kind, winner_attempt) },
         })});
         try created.storeContent(descriptor_b_ref, "current descriptor");
-        _ = try created.commitFacts(&.{
+        _ = try created.commitFactsForTest(&.{
             session_transition.operationAdmitted(
                 operation_b,
                 if (case.kind == .model) null else .{ .operation_id = 499, .generation = 1 },
@@ -3225,7 +3773,7 @@ test "recovery advances only within the configured Session Ledger quantum" {
     var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 80));
     for (0..5) |index| {
         try created.storeContent(index + 1, "ledger fixture");
-        _ = try created.commitFacts(&.{session_transition.taskAdmitted(.{
+        _ = try created.commitFactsForTest(&.{session_transition.taskAdmitted(.{
             .agent_id = created.agent_id,
             .agent_generation = 1,
             .ownership_epoch = created.ownership_epoch,
@@ -3261,7 +3809,7 @@ test "semantic commits reject missing immutable content references before advanc
     var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 81));
     defer created.close();
 
-    try std.testing.expectError(error.MissingContentReference, created.commitFacts(
+    try std.testing.expectError(error.MissingContentReference, created.commitFactsForTest(
         &.{session_transition.operationAdmitted(.{
             .agent = .{
                 .agent_id = created.agent_id,
@@ -3276,7 +3824,7 @@ test "semantic commits reject missing immutable content references before advanc
     try std.testing.expectEqual(@as(u64, 1), try layout.storage.sessionHead(created.session_id));
 }
 
-test "Core-bearing commits reject a reducer from another Session" {
+test "typed final completion compiles one exact atomic semantic transaction" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
@@ -3290,23 +3838,74 @@ test "Core-bearing commits reject a reducer from another Session" {
     defer created.close();
 
     var slot: core_image.ActivationSlot = undefined;
-    var foreign = try core_image.Core.initialize(&slot, .{
-        .agent_id = created.agent_id + 1,
-        .generation = 1,
+    _ = try created.startTask(&slot);
+    try created.storeContent(900, "request");
+    const request_digest = binding.hash(binding.ModelDescriptor, "request");
+    const operation = try created.admitModelAttempt(&slot, .{
+        .operation_id = 100,
+        .sequence = 1,
+        .attempt_id = 101,
+        .request_ref = 900,
+        .request_digest = request_digest,
     });
-    defer foreign.abandon();
+
+    var response_bytes: [model_protocol.max_response_size]u8 = undefined;
+    const response = try model_protocol.encodeText(&response_bytes, "done");
+    try created.storeContent(901, response);
+    try created.storeContent(902, "done");
+    try created.storeContent(903, "substituted");
+    const response_digest = binding.hash(binding.Result, response);
+    try created.publishCompletionEvidence(completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = created.session_id,
+        .ownership_epoch = created.ownership_epoch,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = 101,
+        .result_ref = 901,
+        .result_digest = response_digest,
+    }));
+    var validation: model_protocol.ValidationScratch = undefined;
     try std.testing.expectError(
-        error.CoreSessionIdentityMismatch,
-        created.commitCoreFacts(&foreign, &.{session_transition.cancellation(.{
-            .agent_id = created.agent_id,
-            .agent_generation = 1,
-            .ownership_epoch = created.ownership_epoch,
-        })}),
+        error.ModelCompletionContentMismatch,
+        created.admitModelCompletion(&slot, .{
+            .operation_id = operation.id,
+            .operation_generation = operation.generation,
+            .attempt_id = 101,
+            .evidence_epoch = created.ownership_epoch,
+            .response_ref = 901,
+            .response_digest = response_digest,
+            .admission = model_protocol.admit(&validation, response).admission,
+            .consequence = .{ .final_answer = .{ .content_ref = 903 } },
+        }),
     );
-    try std.testing.expectEqual(@as(u64, 1), try layout.storage.sessionHead(created.session_id));
+    try std.testing.expectEqual(@as(u64, 3), try layout.storage.sessionHead(created.session_id));
+    try std.testing.expectEqual(@as(?ConversationEntry, null), created.pending_conversation);
+    _ = try created.admitModelCompletion(&slot, .{
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = 101,
+        .evidence_epoch = created.ownership_epoch,
+        .response_ref = 901,
+        .response_digest = response_digest,
+        .admission = model_protocol.admit(&validation, response).admission,
+        .consequence = .{ .final_answer = .{ .content_ref = 902 } },
+    });
+
+    var stored: host_store.StoredTransition = undefined;
+    try layout.storage.readTransition(created.session_id, 4, &stored);
+    const committed = stored.transaction;
+    try std.testing.expectEqual(@as(u8, 4), committed.fact_count);
+    try std.testing.expectEqual(session_transition.Kind.result, committed.facts[0].kind());
+    try std.testing.expectEqual(session_transition.Kind.result_applied, committed.facts[1].kind());
+    try std.testing.expectEqual(session_transition.Kind.conversation_advanced, committed.facts[2].kind());
+    try std.testing.expectEqual(session_transition.Kind.outcome, committed.facts[3].kind());
+    try std.testing.expect(committed.core != null);
 }
 
-test "Core-bearing commits reject facts unrelated to the reducer change" {
+test "typed tool completion derives the Action and binds the exact Result" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
     defer layout.deinit(io);
@@ -3320,29 +3919,155 @@ test "Core-bearing commits reject facts unrelated to the reducer change" {
     defer created.close();
 
     var slot: core_image.ActivationSlot = undefined;
-    var core = try core_image.Core.initialize(&slot, .{
-        .agent_id = created.agent_id,
-        .generation = 1,
+    _ = try created.startTask(&slot);
+    try created.storeContent(910, "request");
+    const request_digest = binding.hash(binding.ModelDescriptor, "request");
+    const model_operation = try created.admitModelAttempt(&slot, .{
+        .operation_id = 110,
+        .sequence = 1,
+        .attempt_id = 111,
+        .request_ref = 910,
+        .request_digest = request_digest,
     });
-    defer core.abandon();
-    try core.startTask(created.activeLeafId());
-    try std.testing.expectError(
-        error.CoreCommitFactsMismatch,
-        created.commitCoreFacts(&core, &.{session_transition.taskAdmitted(.{
-            .agent_id = created.agent_id,
-            .agent_generation = 1,
-            .ownership_epoch = created.ownership_epoch,
-        }, created.task_id + 1, created.task_id)}),
+
+    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+    const arguments = try model_contract.encodeJson(&arguments_buffer, .{
+        .command = "true",
+        .timeout_ms = 1_000,
+    });
+    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    const response = try model_protocol.encodeTool(
+        &response_buffer,
+        model_contract.bash_key,
+        arguments,
     );
+    const response_digest = binding.hash(binding.Result, response);
+    try created.storeContent(911, response);
+    try created.publishCompletionEvidence(completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = created.session_id,
+        .ownership_epoch = created.ownership_epoch,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = model_operation.id,
+        .operation_generation = model_operation.generation,
+        .attempt_id = 111,
+        .result_ref = 911,
+        .result_digest = response_digest,
+    }));
+
+    var json_scratch: model_contract.StrictToolJsonScratch = .{};
+    const admitted_arguments = try model_contract.validateStrictToolJson(&json_scratch, arguments);
+    var call_buffer: [
+        conversation.call_header_size + model_contract.max_tool_key_size +
+            model_contract.max_tool_arguments_envelope_size
+    ]u8 = undefined;
+    const call = try conversation.encodeToolCall(&call_buffer, .{
+        .key = model_contract.bash_key,
+        .arguments = admitted_arguments,
+    });
+    try created.storeContent(912, call);
+
+    const action_id = try actionOperationId(911);
+    var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
+    const wrong_descriptor = try bash_tool.encodeDescriptor(&descriptor_buffer, .{
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .workspace_path = created.workspacePath(),
+        .working_directory = created.workspacePath(),
+        .call = .{ .command = "false", .timeout_ms = 1_000 },
+    });
+    try created.storeContent(913, wrong_descriptor);
+    var validation: model_protocol.ValidationScratch = undefined;
     try std.testing.expectError(
-        error.CoreCommitFactsMismatch,
-        created.commitCoreFacts(&core, &.{session_transition.cancellation(.{
-            .agent_id = created.agent_id,
-            .agent_generation = 1,
-            .ownership_epoch = created.ownership_epoch,
-        })}),
+        error.InvalidActionDescriptor,
+        created.admitModelCompletion(&slot, .{
+            .operation_id = model_operation.id,
+            .operation_generation = model_operation.generation,
+            .attempt_id = 111,
+            .evidence_epoch = created.ownership_epoch,
+            .response_ref = 911,
+            .response_digest = response_digest,
+            .admission = model_protocol.admit(&validation, response).admission,
+            .consequence = .{ .tool_call = .{
+                .content_ref = 912,
+                .action = .{ .bash = .{
+                    .descriptor_ref = 913,
+                    .call = try BashCallMaterial.init(.{
+                        .command = "true",
+                        .timeout_ms = 1_000,
+                    }),
+                } },
+            } },
+        }),
     );
-    try std.testing.expectEqual(@as(u64, 1), try layout.storage.sessionHead(created.session_id));
+    try std.testing.expectEqual(@as(?ConversationEntry, null), created.pending_conversation);
+
+    const descriptor = try bash_tool.encodeDescriptor(&descriptor_buffer, .{
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .workspace_path = created.workspacePath(),
+        .working_directory = created.workspacePath(),
+        .call = .{ .command = "true", .timeout_ms = 1_000 },
+    });
+    try created.storeContent(914, descriptor);
+    _ = try created.admitModelCompletion(&slot, .{
+        .operation_id = model_operation.id,
+        .operation_generation = model_operation.generation,
+        .attempt_id = 111,
+        .evidence_epoch = created.ownership_epoch,
+        .response_ref = 911,
+        .response_digest = response_digest,
+        .admission = model_protocol.admit(&validation, response).admission,
+        .consequence = .{ .tool_call = .{
+            .content_ref = 912,
+            .action = .{ .bash = .{
+                .descriptor_ref = 914,
+                .call = try BashCallMaterial.init(.{
+                    .command = "true",
+                    .timeout_ms = 1_000,
+                }),
+            } },
+        } },
+    });
+
+    try created.storeContent(915, "action result");
+    const result_digest = binding.hash(binding.Result, "action result");
+    _ = try created.admitActionResult(.{
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .result_ref = 915,
+        .result_digest = result_digest,
+        .class = .ordinary,
+        .evidence = .immediate,
+    });
+    var visible_buffer: [conversation.result_header_size + "success".len]u8 = undefined;
+    const visible = try conversation.encodeToolResult(&visible_buffer, .{
+        .parent_id = 2,
+        .is_error = false,
+        .content = "success",
+    });
+    try created.storeContent(916, visible);
+    try std.testing.expectError(
+        error.ResultApplicationMismatch,
+        created.admitToolResult(&slot, .{
+            .operation_id = action_id,
+            .operation_generation = 1,
+            .attempt_id = 0,
+            .result_ref = 915,
+            .result_digest = binding.hash(binding.Result, "substituted"),
+            .visible_ref = 916,
+        }),
+    );
+    try std.testing.expectEqual(@as(?ConversationEntry, null), created.pending_conversation);
+    try created.admitToolResult(&slot, .{
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .attempt_id = 0,
+        .result_ref = 915,
+        .result_digest = result_digest,
+        .visible_ref = 916,
+    });
 }
 
 test "Semantic View validates Action source and opaque Operation identity" {
@@ -3675,13 +4400,13 @@ test "conversation advances only after its Ledger fact commits" {
     var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 20));
     defer created.close();
     try created.storeContent(900, "The test is fixed.");
-    const assistant = try created.appendConversation(.assistant_text, 900, null);
+    const assistant = try created.appendConversationForTest(.assistant_text, 900, null);
 
     try std.testing.expectEqual(@as(u64, 2), assistant.entry_id);
     try std.testing.expectEqual(@as(u64, 1), assistant.parent_id);
     try std.testing.expectEqual(@as(u64, 1), created.activeLeafId());
     try std.testing.expectError(error.InvalidEntrySequence, created.readEntry(2));
-    _ = try created.commitFacts(&.{session_transition.conversationAdvanced(.{
+    _ = try created.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
         .agent = .{
             .agent_id = created.agent_id,
             .agent_generation = 1,
@@ -3710,11 +4435,11 @@ test "prepared Conversation content is validated at commit" {
     var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 35));
     defer created.close();
     try created.storeContent(900, &.{ 0xff, 0xfe });
-    const assistant = try created.appendConversation(.assistant_text, 900, null);
+    const assistant = try created.appendConversationForTest(.assistant_text, 900, null);
 
     try std.testing.expectError(
         error.InvalidConversationContent,
-        created.commitFacts(&.{session_transition.conversationAdvanced(.{
+        created.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
             .agent = .{
                 .agent_id = created.agent_id,
                 .agent_generation = 1,
@@ -3849,7 +4574,7 @@ test "resume leaves an uncommitted conversation record invisible" {
     try created.storeContent(901, "uncommitted assistant text");
     try std.testing.expectError(
         error.InjectedCrash,
-        created.appendConversation(.assistant_text, 901, .{
+        created.appendConversationForTest(.assistant_text, 901, .{
             .context = &marker,
             .reached = AppendCrash.reached,
         }),
@@ -4002,7 +4727,7 @@ test "pending content cap accepts the three-value patch admission closure" {
         error.PendingContentCapacityExceeded,
         created.beginContent(100 + max_pending_content),
     );
-    _ = try created.commitFacts(&facts);
+    _ = try created.commitFactsForTest(&facts);
     try std.testing.expectEqual(@as(u64, 0), try created.transientScratchOccupancy());
     for (transientScratchState(created.scratch).pending) |pending| try std.testing.expect(pending == null);
 }
@@ -4036,7 +4761,7 @@ test "committing one pending maximum value reuses only its scratch slot" {
     try std.testing.expectError(error.PendingContentCapacityExceeded, created.beginContent(203));
 
     const first = [_]session_transition.Fact{session_transition.outcome(agent, 1, 200)};
-    _ = try created.commitFacts(&first);
+    _ = try created.commitFactsForTest(&first);
 
     var writer = try created.beginContent(203);
     try std.testing.expectEqual(@as(u64, 0), writer.start_offset);
@@ -4052,7 +4777,7 @@ test "committing one pending maximum value reuses only its scratch slot" {
         session_transition.outcome(agent, 3, 202),
         session_transition.outcome(agent, 4, 203),
     };
-    _ = try created.commitFacts(&rest);
+    _ = try created.commitFactsForTest(&rest);
     try std.testing.expectEqual(@as(u64, 0), try created.transientScratchOccupancy());
 }
 
