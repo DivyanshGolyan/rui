@@ -212,10 +212,12 @@ stdout. `-Dmeasurement-scenario=dormant -Dmeasurement-count=N` measures durable 
 historical Harness churn. `-Dmeasurement-scenario=completion -Dmeasurement-count=N` measures complete
 deterministic Session lifecycles rather than provider/parser throughput in isolation.
 `zig build measure-runtime-sweep` runs the required dormant points in independent processes plus the
-end-to-end completion point and writes raw JSONL under `.zig-cache`; use
-`-Dmeasurement-repetitions=N` to control repetitions. Report the median and complete observed range,
-the exact commit, build mode, machine, and cold/warm conditions. Numeric performance results are release
-evidence, not a noise-sensitive normal-`check` assertion.
+end-to-end completion point. It writes raw JSONL and a deterministic JSON summary under `.zig-cache`.
+Use an odd `-Dmeasurement-repetitions=N` so integer counter medians remain exact. The summary rejects
+mixed metadata, incomplete points, and regressing cumulative counters, and records whether tracked
+source was dirty. Report the median and complete observed range, the exact commit, build mode, machine,
+and cold/warm conditions. Numeric performance results are release evidence, not a noise-sensitive
+normal-`check` assertion.
 
 The capacity-one fixture is the measurement foundation, not the final density proof. Issue #3 must reuse
 the same schema after runtime-sized Active Capacity exists; issue #34 must add its production-shaped
