@@ -86,7 +86,7 @@ The Run interface demonstrates durable workflow and Session identity, keyed reat
 
 ## Product guarantees
 
-- Every Activation Slot contains only bounded Core State and scratch used by production activation, carries no sizing filler or speculative reserve, and comes from a startup-reserved pool. Its actual compile-time size must not exceed 32 KiB in V1.
+- Every Activation Slot contains only decoded bounded Core State, carries no sizing filler, transient scratch, or speculative reserve, and comes from a startup-reserved pool. Its actual compile-time size must not exceed 32 KiB in V1.
 - One startup-fixed `active_capacity` bounds transferable Active Credits. Each credit is owned by exactly one live Harness, admitted external Attempt, or closure handoff; it never counts the same Session twice and capacity never grows after startup.
 - Model adapters stream bounded Captured Model Output and release transport resources without retaining semantic-validation scratch. One shared V1 admission workspace validates each capture once and commits its Result meaning through the existing Session Ledger owner path; later readers trust that admitted authority and exact identities rather than reparsing for canonical formatting.
 - Tool Calls retain exact bounded strict JSON arguments under a versioned Validation Profile and the Operation's Tool Catalog. Semantic-equivalent JSON need not share bytes. Bash and patch derive durable typed descriptors before external execution, so an effect never depends on first-time JSON interpretation after Attempt admission.

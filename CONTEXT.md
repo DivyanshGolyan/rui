@@ -237,7 +237,7 @@ A temporary period in which an agent occupies an Activation Slot and advances it
 _Avoid_: Agent, session, process, checkpoint
 
 **Activation Slot**:
-One reusable, fixed-capacity resident workspace containing decoded Core State and transient scratch for an Activation.
+One reusable, fixed-capacity resident workspace containing only decoded Core State for a bounded pure reduction.
 _Avoid_: Agent, Core State, execution page, checkpoint
 
 **Active Capacity**:
@@ -255,6 +255,10 @@ _Avoid_: provider parsing, blob publication, Completion notification, Conversati
 **Semantic View**:
 The immutable bounded Session value derived from committed transactions for direct lifecycle observation: current Operations, relevant Attempts, control state, indeterminate Result, ledger head, and committed Core State.
 _Avoid_: ledger replay callback, Run Snapshot, secondary index, durable authority
+
+**Semantic Transaction Compiler**:
+The Session responsibility that invokes a command-specific pure reducer and derives the exact ledger facts, content closure, Conversation relationships, and canonical candidate Core State for one atomic commit.
+_Avoid_: mutable Core, fact validator, lifecycle commit, command bus
 
 **Semantic Validation Capacity**:
 The fixed number of Captured Model Outputs the Host may semantically admit at once.

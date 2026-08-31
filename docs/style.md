@@ -45,11 +45,14 @@ deferred explicitly.
 - Derive semantic kind and recovery behavior from the authoritative typed descriptor and evidence. Do
   not repeat that meaning in a parallel classifier or encode it into opaque identity bits. Express
   parentage as an explicit relationship.
-- Let Session own canonical Core serialization and publish one immutable bounded Semantic View. Do not
-  let callers pair facts with independently encoded Core bytes or rebuild Session meaning through
-  caller-supplied ledger callbacks.
-- Bind every Core-bearing commit to the reducer's exact typed pending change and mechanically validate
-  the corresponding fact values before commit. Use a facts-only commit when no Core transition occurred.
+- Let Session own semantic transaction compilation, canonical Core serialization, and one immutable
+  bounded Semantic View. Production callers supply typed semantic input and immutable external material,
+  never facts, Conversation entries, provenance, or encoded Core bytes; they do not rebuild Session
+  meaning through caller-supplied ledger callbacks.
+- Keep Core a private pure continuation reducer. A command-specific reducer accepts committed state and
+  semantic input and returns candidate state by value; Session alone derives every durable consequence
+  and commits it atomically. Do not add a universal command bus, pending-change proof object, mutable Core
+  lifecycle, or a second validator that attempts to reconcile caller-supplied facts with reducer state.
 - Let an admitted Operation's typed descriptor be the only effect-kind authority. Attempts must repeat
   its exact descriptor binding; child authorization, approval, and Completion facts must not add a
   parallel classifier. Persist parentage with the complete parent identity, including generation.
