@@ -273,3 +273,41 @@ test "Host Runtime validates and exposes startup-fixed active capacity" {
     );
     try runtime.close();
 }
+
+test "activation residency probe holds and releases the complete production pool" {
+    const Observation = struct {
+        runtime: *HostRuntime,
+        expected_bytes: usize,
+        observed: bool = false,
+
+        fn sample(context: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try std.testing.expectEqual(
+                self.expected_bytes,
+                self.runtime.occupiedActivationBytes(),
+            );
+            self.observed = true;
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const capacity = 4;
+    const runtime = try HostRuntime.open(std.testing.io, std.testing.allocator, path, .{
+        .active_capacity = capacity,
+    });
+    var observation: Observation = .{
+        .runtime = runtime,
+        .expected_bytes = capacity * @sizeOf(core_image.ActivationSlot),
+    };
+    try runtime.withAllActivationSlotsDirty(&observation, Observation.sample);
+    try std.testing.expect(observation.observed);
+    try std.testing.expectEqual(@as(usize, 0), runtime.occupiedActivationBytes());
+    try std.testing.expectEqual(
+        observation.expected_bytes,
+        runtime.occupiedActivationHighWaterBytes(),
+    );
+    try runtime.close();
+}

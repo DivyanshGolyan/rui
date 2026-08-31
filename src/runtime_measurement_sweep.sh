@@ -87,9 +87,9 @@ while test "$repetition" -le "$repetitions"; do
   done
   # This is the complete Harness -> SQLite -> provider -> semantic closure
   # path, intentionally not a parser or transport microbenchmark.
-  # These sequential points measure the exact startup reservation slope. Their
-  # reported occupied high-water remains one Slot; true concurrent occupancy is
-  # a separate async-execution gate and must not be inferred from this sweep.
+  # Each point first holds and dirties the complete production Slot pool, then
+  # releases it before the sequential lifecycle workload. This proves physical
+  # reservation without claiming concurrent agent execution.
   for capacity in 1 10 100; do
     run_point completion 100 "$repetition" "$capacity"
   done
