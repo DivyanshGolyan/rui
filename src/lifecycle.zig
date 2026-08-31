@@ -78,8 +78,6 @@ pub const SemanticValidationResourceLedger = struct {
     occupied_high_water_bytes: usize,
     acquisition_count: u64,
     busy_count: u64,
-    queue_depth: usize,
-    wait_time_ns: u64,
 };
 
 pub const PatchWorkspaceResourceLedger = struct {
@@ -94,8 +92,6 @@ pub const PatchWorkspaceResourceLedger = struct {
     occupied_high_water_bytes: usize,
     acquisition_count: u64,
     busy_count: u64,
-    queue_depth: usize,
-    wait_time_ns: u64,
 };
 
 pub const HostResourceLedger = struct {
@@ -131,30 +127,43 @@ const SemanticValidationWorkspaceLease = struct {
 };
 
 const SemanticValidationWorkspacePool = struct {
+    const state_mask: u64 = 0b11;
+    const state_free: u64 = 0;
+    const state_occupied: u64 = 1;
+    const state_releasing: u64 = 2;
+    const generation_step: u64 = 4;
+
     workspace: SemanticValidationWorkspace = .{},
-    occupied: bool = false,
-    generation: u64 = 0,
-    busy_count: u64 = 0,
+    state: std.atomic.Value(u64) = .init(0),
+    acquisition_count: std.atomic.Value(u64) = .init(0),
+    busy_count: std.atomic.Value(u64) = .init(0),
 
     fn borrow(self: *SemanticValidationWorkspacePool) !SemanticValidationWorkspaceLease {
-        if (self.occupied or self.generation == std.math.maxInt(u64)) {
-            incrementBounded(&self.busy_count);
-            return error.SemanticValidationWorkspaceBusy;
+        var state = self.state.load(.acquire);
+        while (state & state_mask == state_free and state <= std.math.maxInt(u64) - generation_step) {
+            const occupied_state = state + state_occupied;
+            if (self.state.cmpxchgWeak(state, occupied_state, .acq_rel, .acquire)) |actual| {
+                state = actual;
+                continue;
+            }
+            self.workspace.scrub();
+            incrementBoundedAtomic(&self.acquisition_count);
+            return .{
+                .workspace = &self.workspace,
+                .context = self,
+                .generation = occupied_state,
+                .release_fn = releaseLease,
+            };
         }
-        self.occupied = true;
-        self.generation += 1;
-        self.workspace.scrub();
-        return .{
-            .workspace = &self.workspace,
-            .context = self,
-            .generation = self.generation,
-            .release_fn = releaseLease,
-        };
+        incrementBoundedAtomic(&self.busy_count);
+        return error.SemanticValidationWorkspaceBusy;
     }
 
     fn measurements(self: *const SemanticValidationWorkspacePool) SemanticValidationResourceLedger {
-        const occupied_count: usize = @intFromBool(self.occupied);
-        const high_water_count: usize = @intFromBool(self.generation != 0);
+        const state = self.state.load(.acquire);
+        const occupied_count: usize = @intFromBool(state & state_mask != state_free);
+        const acquisition_count = self.acquisition_count.load(.acquire);
+        const high_water_count: usize = @intFromBool(acquisition_count != 0);
         return .{
             .multiplier = 1,
             .response_bytes = @sizeOf(@TypeOf(self.workspace.response)),
@@ -167,11 +176,13 @@ const SemanticValidationWorkspacePool = struct {
             .occupied_bytes = occupied_count * @sizeOf(SemanticValidationWorkspace),
             .occupied_high_water_count = high_water_count,
             .occupied_high_water_bytes = high_water_count * @sizeOf(SemanticValidationWorkspace),
-            .acquisition_count = self.generation,
-            .busy_count = self.busy_count,
-            .queue_depth = 0,
-            .wait_time_ns = 0,
+            .acquisition_count = acquisition_count,
+            .busy_count = self.busy_count.load(.acquire),
         };
+    }
+
+    fn isOccupied(self: *const SemanticValidationWorkspacePool) bool {
+        return self.state.load(.acquire) & state_mask != state_free;
     }
 
     fn releaseLease(
@@ -180,11 +191,18 @@ const SemanticValidationWorkspacePool = struct {
         workspace: *SemanticValidationWorkspace,
     ) error{StaleSemanticValidationLease}!void {
         const self: *SemanticValidationWorkspacePool = @ptrCast(@alignCast(context));
-        if (!self.occupied or self.generation != generation or workspace != &self.workspace) {
+        if (workspace != &self.workspace or generation & state_mask != state_occupied or
+            self.state.cmpxchgStrong(
+                generation,
+                generation + state_releasing - state_occupied,
+                .acq_rel,
+                .acquire,
+            ) != null)
+        {
             return error.StaleSemanticValidationLease;
         }
         workspace.scrub();
-        self.occupied = false;
+        self.state.store(generation + generation_step - state_occupied, .release);
     }
 };
 
@@ -207,41 +225,48 @@ const PatchWorkspaceLease = struct {
 
     fn release(self: *PatchWorkspaceLease) !void {
         if (!self.borrowed) return;
-        if (!self.owner.occupied or self.owner.generation != self.generation or
-            self.workspace != &self.owner.workspace)
-        {
-            return error.StalePatchWorkspaceLease;
-        }
-        self.workspace.scrub();
-        self.owner.occupied = false;
+        try self.owner.releaseLease(self.generation, self.workspace);
         self.borrowed = false;
     }
 };
 
 const PatchWorkspacePool = struct {
+    const state_mask: u64 = 0b11;
+    const state_free: u64 = 0;
+    const state_occupied: u64 = 1;
+    const state_releasing: u64 = 2;
+    const generation_step: u64 = 4;
+
     workspace: PatchWorkspace = .{},
-    occupied: bool = false,
-    generation: u64 = 0,
-    busy_count: u64 = 0,
+    state: std.atomic.Value(u64) = .init(0),
+    acquisition_count: std.atomic.Value(u64) = .init(0),
+    busy_count: std.atomic.Value(u64) = .init(0),
 
     fn borrow(self: *PatchWorkspacePool) !PatchWorkspaceLease {
-        if (self.occupied or self.generation == std.math.maxInt(u64)) {
-            incrementBounded(&self.busy_count);
-            return error.PatchWorkspaceBusy;
+        var state = self.state.load(.acquire);
+        while (state & state_mask == state_free and state <= std.math.maxInt(u64) - generation_step) {
+            const occupied_state = state + state_occupied;
+            if (self.state.cmpxchgWeak(state, occupied_state, .acq_rel, .acquire)) |actual| {
+                state = actual;
+                continue;
+            }
+            self.workspace.scrub();
+            incrementBoundedAtomic(&self.acquisition_count);
+            return .{
+                .workspace = &self.workspace,
+                .owner = self,
+                .generation = occupied_state,
+            };
         }
-        self.occupied = true;
-        self.generation += 1;
-        self.workspace.scrub();
-        return .{
-            .workspace = &self.workspace,
-            .owner = self,
-            .generation = self.generation,
-        };
+        incrementBoundedAtomic(&self.busy_count);
+        return error.PatchWorkspaceBusy;
     }
 
     fn measurements(self: *const PatchWorkspacePool) PatchWorkspaceResourceLedger {
-        const occupied_count: usize = @intFromBool(self.occupied);
-        const high_water_count: usize = @intFromBool(self.generation != 0);
+        const state = self.state.load(.acquire);
+        const occupied_count: usize = @intFromBool(state & state_mask != state_free);
+        const acquisition_count = self.acquisition_count.load(.acquire);
+        const high_water_count: usize = @intFromBool(acquisition_count != 0);
         return .{
             .multiplier = 1,
             .patch_bytes = @sizeOf(@TypeOf(self.workspace.patch)),
@@ -252,16 +277,40 @@ const PatchWorkspacePool = struct {
             .occupied_bytes = occupied_count * @sizeOf(PatchWorkspace),
             .occupied_high_water_count = high_water_count,
             .occupied_high_water_bytes = high_water_count * @sizeOf(PatchWorkspace),
-            .acquisition_count = self.generation,
-            .busy_count = self.busy_count,
-            .queue_depth = 0,
-            .wait_time_ns = 0,
+            .acquisition_count = acquisition_count,
+            .busy_count = self.busy_count.load(.acquire),
         };
+    }
+
+    fn isOccupied(self: *const PatchWorkspacePool) bool {
+        return self.state.load(.acquire) & state_mask != state_free;
+    }
+
+    fn releaseLease(
+        self: *PatchWorkspacePool,
+        generation: u64,
+        workspace: *PatchWorkspace,
+    ) error{StalePatchWorkspaceLease}!void {
+        if (workspace != &self.workspace or generation & state_mask != state_occupied or
+            self.state.cmpxchgStrong(
+                generation,
+                generation + state_releasing - state_occupied,
+                .acq_rel,
+                .acquire,
+            ) != null)
+        {
+            return error.StalePatchWorkspaceLease;
+        }
+        workspace.scrub();
+        self.state.store(generation + generation_step - state_occupied, .release);
     }
 };
 
-fn incrementBounded(value: *u64) void {
-    if (value.* != std.math.maxInt(u64)) value.* += 1;
+fn incrementBoundedAtomic(value: *std.atomic.Value(u64)) void {
+    var current = value.load(.acquire);
+    while (current != std.math.maxInt(u64)) {
+        current = value.cmpxchgWeak(current, current + 1, .acq_rel, .acquire) orelse return;
+    }
 }
 
 comptime {
@@ -361,6 +410,7 @@ const ControlSearch = struct {
 };
 
 pub const FaultBoundary = enum {
+    after_semantic_workspace_borrow,
     after_model_dispatch,
     after_completion_inbox,
     after_completion_persist,
@@ -714,7 +764,7 @@ fn prepareToolAdmission(
             var workspace = try host.patch_workspace.borrow();
             defer workspace.release() catch unreachable;
             const patch_bytes = try readAdmittedPatch(session, patch, &workspace.workspace.patch);
-            std.debug.assert(!host.semantic_validation.occupied);
+            std.debug.assert(!host.semantic_validation.isOccupied());
             const tool_operation_id = (@as(u64, 3) << 62) | completion.operation_id;
             const intent_ref = (@as(u64, 1) << 58) | @as(u32, @truncate(completion.result));
             const intent = try patch_tool.prepare(session.io, workspace_path, patch_bytes, .{
@@ -1389,6 +1439,7 @@ fn reconcileRestored(
             const admission = blk: {
                 var scratch = try host.semantic_validation.borrow();
                 defer scratch.release() catch unreachable;
+                try reach(config.fault, .after_semantic_workspace_borrow);
                 var slot: ModelSlot = .{
                     .session = session,
                     .scratch = scratch.workspace,
@@ -3584,15 +3635,11 @@ test "Host resource ledger measures each fixed scratch stage" {
     try std.testing.expectEqual(@as(usize, 0), initial.semantic_validation.occupied_high_water_count);
     try std.testing.expectEqual(@as(u64, 0), initial.semantic_validation.acquisition_count);
     try std.testing.expectEqual(@as(u64, 0), initial.semantic_validation.busy_count);
-    try std.testing.expectEqual(@as(usize, 0), initial.semantic_validation.queue_depth);
-    try std.testing.expectEqual(@as(u64, 0), initial.semantic_validation.wait_time_ns);
     try std.testing.expectEqual(@as(usize, 1), initial.patch_workspace.multiplier);
     try std.testing.expectEqual(@as(usize, patch_tool.max_patch_size), initial.patch_workspace.patch_bytes);
     try std.testing.expectEqual(@as(usize, 16_384), initial.patch_workspace.workspace_bytes);
     try std.testing.expectEqual(@as(usize, 24), initial.patch_workspace.pool_overhead_bytes);
     try std.testing.expectEqual(@as(usize, 16_408), initial.patch_workspace.reservation_bytes);
-    try std.testing.expectEqual(@as(usize, 0), initial.patch_workspace.queue_depth);
-    try std.testing.expectEqual(@as(u64, 0), initial.patch_workspace.wait_time_ns);
 
     var semantic = try host.semantic_validation.borrow();
     try std.testing.expectError(error.SemanticValidationWorkspaceBusy, host.semantic_validation.borrow());
@@ -3624,17 +3671,105 @@ test "Host resource ledger measures each fixed scratch stage" {
     try std.testing.expectEqual(@as(usize, 0), released.patch_workspace.occupied_bytes);
     try std.testing.expectEqual(@as(usize, 1), released.patch_workspace.occupied_high_water_count);
 
-    host.semantic_validation.busy_count = std.math.maxInt(u64);
+    host.semantic_validation.busy_count.store(std.math.maxInt(u64), .release);
     var held = try host.semantic_validation.borrow();
     defer held.release() catch unreachable;
     try std.testing.expectError(error.SemanticValidationWorkspaceBusy, host.semantic_validation.borrow());
     try std.testing.expectEqual(std.math.maxInt(u64), host.resourceLedger().semantic_validation.busy_count);
 
-    host.patch_workspace.generation = std.math.maxInt(u64);
+    host.patch_workspace.state.store(std.math.maxInt(u64) - 3, .release);
+    host.patch_workspace.acquisition_count.store(std.math.maxInt(u64), .release);
     try std.testing.expectError(error.PatchWorkspaceBusy, host.patch_workspace.borrow());
     const bounded = host.resourceLedger().patch_workspace;
     try std.testing.expectEqual(std.math.maxInt(u64), bounded.acquisition_count);
     try std.testing.expectEqual(@as(u64, 2), bounded.busy_count);
+}
+
+fn expectSingleConcurrentWorkspaceOwner(
+    comptime Pool: type,
+    pool: *Pool,
+    comptime busy_error: anyerror,
+) !void {
+    const Worker = struct {
+        fn run(
+            worker_pool: *Pool,
+            start: *const std.atomic.Value(bool),
+            release: *const std.atomic.Value(bool),
+            winners: *std.atomic.Value(usize),
+            busy: *std.atomic.Value(usize),
+            failed: *std.atomic.Value(bool),
+        ) void {
+            while (!start.load(.acquire)) std.atomic.spinLoopHint();
+            if (worker_pool.borrow()) |lease_value| {
+                var lease = lease_value;
+                _ = winners.fetchAdd(1, .acq_rel);
+                while (!release.load(.acquire)) std.atomic.spinLoopHint();
+                lease.release() catch failed.store(true, .release);
+            } else |err| {
+                if (err == busy_error) {
+                    _ = busy.fetchAdd(1, .acq_rel);
+                } else {
+                    failed.store(true, .release);
+                }
+            }
+        }
+    };
+
+    var start: std.atomic.Value(bool) = .init(false);
+    var release: std.atomic.Value(bool) = .init(false);
+    var winners: std.atomic.Value(usize) = .init(0);
+    var busy: std.atomic.Value(usize) = .init(0);
+    var failed: std.atomic.Value(bool) = .init(false);
+    var workers: [8]std.Thread = undefined;
+    for (&workers) |*worker| {
+        worker.* = try std.Thread.spawn(.{}, Worker.run, .{
+            pool,
+            &start,
+            &release,
+            &winners,
+            &busy,
+            &failed,
+        });
+    }
+    start.store(true, .release);
+    while (winners.load(.acquire) + busy.load(.acquire) != workers.len and
+        !failed.load(.acquire))
+    {
+        std.atomic.spinLoopHint();
+    }
+    const one_winner = winners.load(.acquire) == 1;
+    const all_others_busy = busy.load(.acquire) == workers.len - 1;
+    const occupied = pool.measurements().occupied_count == 1;
+    release.store(true, .release);
+    for (workers) |worker| worker.join();
+
+    try std.testing.expect(one_winner);
+    try std.testing.expect(all_others_busy);
+    try std.testing.expect(occupied);
+    try std.testing.expect(!failed.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), pool.measurements().occupied_count);
+    var reused = try pool.borrow();
+    try reused.release();
+}
+
+test "semantic validation workspace admits one concurrent owner" {
+    var host = try Host.init(std.testing.allocator, 8);
+    defer host.deinit();
+    try expectSingleConcurrentWorkspaceOwner(
+        SemanticValidationWorkspacePool,
+        &host.semantic_validation,
+        error.SemanticValidationWorkspaceBusy,
+    );
+}
+
+test "patch workspace admits one concurrent owner" {
+    var host = try Host.init(std.testing.allocator, 8);
+    defer host.deinit();
+    try expectSingleConcurrentWorkspaceOwner(
+        PatchWorkspacePool,
+        &host.patch_workspace,
+        error.PatchWorkspaceBusy,
+    );
 }
 
 test "shared patch workspace contends fail-fast without retaining semantic validation" {
@@ -3645,7 +3780,7 @@ test "shared patch workspace contends fail-fast without retaining semantic valid
     patch.workspace.patch[0] = 0xa5;
 
     var validation = try host.semantic_validation.borrow();
-    try std.testing.expect(host.patch_workspace.occupied);
+    try std.testing.expect(host.patch_workspace.isOccupied());
     try validation.release();
     try std.testing.expectEqual(@as(u8, 0xa5), patch.workspace.patch[0]);
     try std.testing.expectError(
@@ -3654,8 +3789,6 @@ test "shared patch workspace contends fail-fast without retaining semantic valid
     );
     const contention = host.resourceLedger().patch_workspace;
     try std.testing.expectEqual(@as(u64, 1), contention.busy_count);
-    try std.testing.expectEqual(@as(usize, 0), contention.queue_depth);
-    try std.testing.expectEqual(@as(u64, 0), contention.wait_time_ns);
 }
 
 test "stale copied semantic validation lease cannot scrub a new borrower" {

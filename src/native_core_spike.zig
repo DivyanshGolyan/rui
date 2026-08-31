@@ -120,9 +120,7 @@ pub fn main(init: std.process.Init) !void {
             "semantic validation allocator-observed bytes not applicable\n" ++
             "semantic validation occupancy {d} ({d} B)\n" ++
             "semantic validation occupied high-water {d} ({d} B)\n" ++
-            "semantic validation acquisitions={d} busy={d}\n" ++
-            "semantic validation queue depth {d} (no V1 queue)\n" ++
-            "semantic validation measured wait time {d} ns (fail-fast)\n",
+            "semantic validation acquisitions={d} busy={d}\n",
         .{
             resources.semantic_validation.multiplier,
             resources.semantic_validation.response_bytes,
@@ -137,8 +135,6 @@ pub fn main(init: std.process.Init) !void {
             resources.semantic_validation.occupied_high_water_bytes,
             resources.semantic_validation.acquisition_count,
             resources.semantic_validation.busy_count,
-            resources.semantic_validation.queue_depth,
-            resources.semantic_validation.wait_time_ns,
         },
     );
     std.debug.print(
@@ -151,9 +147,7 @@ pub fn main(init: std.process.Init) !void {
             "shared patch workspace allocator-observed bytes not applicable\n" ++
             "shared patch workspace occupancy {d} ({d} B)\n" ++
             "shared patch workspace occupied high-water {d} ({d} B)\n" ++
-            "shared patch workspace acquisitions={d} busy={d}\n" ++
-            "shared patch workspace queue depth {d} (no V1 queue)\n" ++
-            "shared patch workspace measured wait time {d} ns (fail-fast)\n",
+            "shared patch workspace acquisitions={d} busy={d}\n",
         .{
             resources.patch_workspace.multiplier,
             resources.patch_workspace.patch_bytes,
@@ -166,8 +160,6 @@ pub fn main(init: std.process.Init) !void {
             resources.patch_workspace.occupied_high_water_bytes,
             resources.patch_workspace.acquisition_count,
             resources.patch_workspace.busy_count,
-            resources.patch_workspace.queue_depth,
-            resources.patch_workspace.wait_time_ns,
         },
     );
     std.debug.print(

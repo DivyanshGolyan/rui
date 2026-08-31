@@ -555,7 +555,7 @@ pub const BlobWriter = struct {
 };
 
 pub const BlobReader = struct {
-    session: *Session,
+    io: std.Io,
     blobs: std.Io.Dir,
     reader: blob_store.Reader,
     open: bool = true,
@@ -570,14 +570,13 @@ pub const BlobReader = struct {
 
     pub fn readWindow(self: *BlobReader, offset: u64, out: []u8) ![]const u8 {
         if (!self.open) return error.BlobReaderClosed;
-        try self.session.ensureUsable();
-        return self.reader.readWindow(self.session.io, offset, out);
+        return self.reader.readWindow(self.io, offset, out);
     }
 
     pub fn close(self: *BlobReader) void {
         if (!self.open) return;
-        self.reader.close(self.session.io);
-        self.blobs.close(self.session.io);
+        self.reader.close(self.io);
+        self.blobs.close(self.io);
         self.open = false;
     }
 };
@@ -1085,7 +1084,7 @@ pub const Session = struct {
         var blobs = try self.dir.openDir(self.io, blobs_path, .{});
         errdefer blobs.close(self.io);
         const reader = try blob_store.Reader.openIn(blobs, self.io, reference);
-        return .{ .session = self, .blobs = blobs, .reader = reader };
+        return .{ .io = self.io, .blobs = blobs, .reader = reader };
     }
 
     pub fn commitSemantic(
