@@ -35,7 +35,8 @@ pub fn main(init: std.process.Init) !void {
     try layout.openRuntime(init.io, active_capacity);
     const runtime_open = try process_metrics.sample();
     const runtime = layout.runtime.?;
-    const sqlite_pager_before = try runtime.sqlitePagerAccounting(true);
+    _ = try runtime.sqlitePagerAccounting(true);
+    const sqlite_pager_before = try runtime.sqlitePagerAccounting(false);
     const sqlite_memory_before = try runtime.sqliteMemoryAccounting(false);
     // SQLite heap high-water is process-wide. Reset it after runtime startup so
     // the reported high-water is the workload interval, not a workload delta.

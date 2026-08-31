@@ -436,6 +436,10 @@ test "storage accounting attributes SQLite page work without changing policy" {
     try std.testing.expect(after.cache_pages_written > before.cache_pages_written);
     try std.testing.expect(after.cache_spill_events >= before.cache_spill_events);
     try std.testing.expect(after.page_count >= before.page_count);
+    _ = try owner.sqlitePagerAccounting(true);
+    const reset = try owner.sqlitePagerAccounting(false);
+    try std.testing.expectEqual(@as(u64, 0), reset.cache_pages_written);
+    try std.testing.expectEqual(@as(u64, 0), reset.cache_spill_events);
 }
 
 test "memory accounting resets only the SQLite high-water boundary" {
