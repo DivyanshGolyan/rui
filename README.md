@@ -244,12 +244,16 @@ Source audits that informed the architecture:
 - [`docs/research/codex-cli-session-lessons.md`](docs/research/codex-cli-session-lessons.md)
 - [`docs/research/cursor-origin-wal-lessons.md`](docs/research/cursor-origin-wal-lessons.md)
 - [`docs/research/opencode-sqlite-v2-lessons.md`](docs/research/opencode-sqlite-v2-lessons.md)
+- [`docs/research/opencode-v2-server-api-interface.md`](docs/research/opencode-v2-server-api-interface.md)
 - [`docs/research/sqlite-host-store-practices.md`](docs/research/sqlite-host-store-practices.md)
+- [`docs/research/write-ahead-logs-and-related-storage.md`](docs/research/write-ahead-logs-and-related-storage.md)
 - [`docs/research/linting-typechecking-setup.md`](docs/research/linting-typechecking-setup.md)
 - [`docs/research/future-architecture-options.md`](docs/research/future-architecture-options.md)
 - [`docs/research/claude-code-dynamic-workflows.md`](docs/research/claude-code-dynamic-workflows.md)
 - [`docs/research/model-transport-memory-budget.md`](docs/research/model-transport-memory-budget.md)
 - [`docs/research/quickjs-workflow-runtime-consultation.md`](docs/research/quickjs-workflow-runtime-consultation.md)
+- [`docs/research/developer-tool-configuration-practices.md`](docs/research/developer-tool-configuration-practices.md)
+- [`docs/research/agentic-kernels-production-lessons.md`](docs/research/agentic-kernels-production-lessons.md)
 
 Historical design records:
 
@@ -277,3 +281,5 @@ Architectural decisions:
 - [`docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md`](docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md)
 - [`docs/adr/0015-expose-a-protocol-independent-run-service.md`](docs/adr/0015-expose-a-protocol-independent-run-service.md)
 - [`docs/adr/0016-separate-captured-output-from-semantic-admission.md`](docs/adr/0016-separate-captured-output-from-semantic-admission.md)
+- [`docs/adr/0017-bound-v1-configuration-and-trust.md`](docs/adr/0017-bound-v1-configuration-and-trust.md)
+- [`docs/adr/0018-use-sqlite-as-the-sole-durable-content-store.md`](docs/adr/0018-use-sqlite-as-the-sole-durable-content-store.md)
