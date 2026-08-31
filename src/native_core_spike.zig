@@ -27,7 +27,8 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 1) return error.InvalidArguments;
 
     const baseline_rss = try residentBytes();
-    var host: lifecycle.Host = .{};
+    var host = try lifecycle.Host.init(allocator, 1);
+    defer host.deinit();
     const pool = &host.slots;
     var random_name: [8]u8 = undefined;
     init.io.random(&random_name);
