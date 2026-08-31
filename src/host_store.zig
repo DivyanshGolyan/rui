@@ -3091,8 +3091,6 @@ test "patch content requires its first-referenced Intent in the same commit" {
     var target_path: patch_tool.TargetPath = .{ .length = 8, .bytes = @splat(0) };
     @memcpy(target_path.bytes[0..8], "file.txt");
     var intent: patch_tool.Intent = .{
-        .operation_id = operation.operation_id,
-        .operation_generation = operation.generation,
         .patch_ref = 626,
         .workspace_path = "/tmp/workspace",
         .target_path = target_path,

@@ -1,15 +1,15 @@
 const std = @import("std");
 const binding = @import("binding.zig");
-const core_state = @import("core_state.zig");
 
 pub const payload_version: u16 = 9;
 pub const max_facts: usize = 8;
 pub const max_transitions: u32 = 32_768;
 pub const max_operation_attempts: usize = 8;
+pub const continuation_size: usize = 176;
 
 const header_size: usize = 4;
 const fact_size: usize = 104;
-pub const max_payload_size: usize = header_size + max_facts * fact_size + core_state.encoded_size;
+pub const max_payload_size: usize = header_size + max_facts * fact_size + continuation_size;
 const result_digest_kind: u8 = 4;
 
 pub const Kind = enum(u8) {
@@ -327,7 +327,7 @@ pub const Transaction = struct {
     sequence: u64,
     facts: [max_facts]Fact = undefined,
     fact_count: u8,
-    core: ?[core_state.encoded_size]u8 = null,
+    core: ?[continuation_size]u8 = null,
 
     pub fn factSlice(self: *const Transaction) []const Fact {
         return self.facts[0..self.fact_count];
@@ -365,7 +365,7 @@ pub fn encode(
     {
         return error.InvalidTransaction;
     }
-    const core_length: usize = if (transaction.core != null) core_state.encoded_size else 0;
+    const core_length: usize = if (transaction.core != null) continuation_size else 0;
     const encoded_length = header_size + transaction.fact_count * fact_size + core_length;
     @memset(out, 0);
     write(u16, out, 0, payload_version);
@@ -377,8 +377,7 @@ pub fn encode(
         cursor += fact_size;
     }
     if (transaction.core) |state| {
-        _ = try core_state.decode(&state);
-        @memcpy(out[cursor..][0..core_state.encoded_size], &state);
+        @memcpy(out[cursor..][0..continuation_size], &state);
     }
     return out[0..encoded_length];
 }
@@ -395,7 +394,7 @@ pub fn decode(sequence: u64, payload: []const u8) !Transaction {
         else => return error.InvalidCorePresence,
     };
     const expected_length = header_size + @as(usize, fact_count) * fact_size +
-        (if (core_present) core_state.encoded_size else 0);
+        (if (core_present) @as(usize, continuation_size) else 0);
     if (payload.len != expected_length) return error.InvalidTransitionPayloadLength;
     var transaction: Transaction = .{
         .sequence = sequence,
@@ -407,9 +406,8 @@ pub fn decode(sequence: u64, payload: []const u8) !Transaction {
         cursor += fact_size;
     }
     if (core_present) {
-        var state: [core_state.encoded_size]u8 = undefined;
-        @memcpy(&state, payload[cursor..][0..core_state.encoded_size]);
-        _ = try core_state.decode(&state);
+        var state: [continuation_size]u8 = undefined;
+        @memcpy(&state, payload[cursor..][0..continuation_size]);
         transaction.core = state;
     }
     return transaction;

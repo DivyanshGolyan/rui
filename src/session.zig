@@ -5,11 +5,593 @@ const conversation = @import("conversation.zig");
 const model_contract = @import("model_contract.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const core_image = @import("core_image.zig");
-const core_state = @import("core_state.zig");
 const host_store = @import("host_store.zig");
 const model_protocol = @import("model_protocol.zig");
 const patch_tool = @import("patch_tool.zig");
 const session_transition = @import("session_transition.zig");
+
+const continuation = struct {
+    const schema_version: u16 = 6;
+    const encoded_size = session_transition.continuation_size;
+    const magic = "ONECORE\x00";
+    const checksum_offset = encoded_size - @sizeOf(u32);
+
+    const OperationPhase = enum(u8) {
+        idle = 0,
+        accepted = 1,
+        completed = 2,
+    };
+
+    const TaskPhase = enum(u8) {
+        idle = 0,
+        ready = 1,
+        awaiting_model = 2,
+        awaiting_tool = 3,
+        finished = 4,
+        failed = 5,
+    };
+
+    const ContentWindow = extern struct {
+        offset: u32 = 0,
+        length: u32 = 0,
+    };
+
+    const State = extern struct {
+        agent_id: u64,
+        agent_generation: u32,
+        operation_id: u64 = 0,
+        operation_generation: u32 = 0,
+        operation_phase: continuation.OperationPhase = .idle,
+        operation_result: u64 = 0,
+        operation_sequence: u64 = 0,
+        active_leaf_id: u64 = 0,
+        final_entry_id: u64 = 0,
+        response_ref: u64 = 0,
+        task_phase: continuation.TaskPhase = .idle,
+        response_disposition: model_protocol.Disposition = .failure,
+        response_failure: model_protocol.Failure = .none,
+        context: continuation.ContentWindow = .{},
+        response_text: continuation.ContentWindow = .{},
+        response_tool_key: continuation.ContentWindow = .{},
+        response_arguments: continuation.ContentWindow = .{},
+        response_arguments_digest: binding.StrictToolJsonV1 = .{ .bytes = @splat(0) },
+    };
+
+    const Identity = struct {
+        agent_id: u64,
+        generation: u32,
+    };
+
+    const OperationIdentity = struct {
+        id: u64,
+        generation: u32,
+    };
+
+    const Operation = struct {
+        id: u64,
+        generation: u32,
+        phase: continuation.OperationPhase,
+        result_ref: u64,
+        sequence: u64,
+    };
+
+    const ModelContext = struct {
+        first_entry: u32,
+        entry_count: u32,
+    };
+
+    const StrictToolJsonWindow = struct {
+        offset: u32,
+        length: u32,
+        digest: binding.StrictToolJsonV1,
+
+        fn contentWindow(self: @This()) continuation.ContentWindow {
+            return .{ .offset = self.offset, .length = self.length };
+        }
+    };
+
+    const Response = struct {
+        content_ref: u64,
+        disposition: model_protocol.Disposition,
+        failure: model_protocol.Failure,
+        text: continuation.ContentWindow,
+        tool_key: continuation.ContentWindow,
+        arguments: continuation.StrictToolJsonWindow,
+    };
+
+    const Task = struct {
+        phase: continuation.TaskPhase,
+        active_leaf_id: u64,
+        final_entry_id: u64,
+    };
+
+    const CompletionConsequence = union(enum) {
+        final_answer: u64,
+        tool_call,
+        terminal,
+    };
+
+    const ModelAttemptReduction = struct {
+        state: State,
+        operation: continuation.Operation,
+        context: continuation.ModelContext,
+    };
+
+    const ModelCompletionReduction = struct {
+        state: State,
+        response: continuation.Response,
+    };
+
+    fn initialize(identity_value: Identity) !State {
+        if (identity_value.agent_id == 0) return error.InvalidAgentIdentity;
+        if (identity_value.generation == 0) return error.InvalidAgentGeneration;
+        return .{
+            .agent_id = identity_value.agent_id,
+            .agent_generation = identity_value.generation,
+        };
+    }
+
+    fn identity(state: State) Identity {
+        return .{ .agent_id = state.agent_id, .generation = state.agent_generation };
+    }
+
+    fn operation(state: State) continuation.Operation {
+        return .{
+            .id = state.operation_id,
+            .generation = state.operation_generation,
+            .phase = state.operation_phase,
+            .result_ref = state.operation_result,
+            .sequence = state.operation_sequence,
+        };
+    }
+
+    fn task(state: State) continuation.Task {
+        return .{
+            .phase = state.task_phase,
+            .active_leaf_id = state.active_leaf_id,
+            .final_entry_id = state.final_entry_id,
+        };
+    }
+
+    fn response(state: State) continuation.Response {
+        return .{
+            .content_ref = state.response_ref,
+            .disposition = state.response_disposition,
+            .failure = state.response_failure,
+            .text = state.response_text,
+            .tool_key = state.response_tool_key,
+            .arguments = .{
+                .offset = state.response_arguments.offset,
+                .length = state.response_arguments.length,
+                .digest = state.response_arguments_digest,
+            },
+        };
+    }
+
+    fn modelContext(state: State) continuation.ModelContext {
+        return .{ .first_entry = state.context.offset, .entry_count = state.context.length };
+    }
+
+    fn startTask(committed: State, active_leaf_id: u64) !State {
+        if (active_leaf_id == 0) return error.InvalidConversationEntry;
+        if (committed.task_phase != .idle or committed.operation_phase != .idle) {
+            return error.IllegalTaskTransition;
+        }
+        var candidate = committed;
+        candidate.active_leaf_id = active_leaf_id;
+        candidate.task_phase = .ready;
+        return candidate;
+    }
+
+    fn admitModelAttempt(
+        committed: State,
+        operation_id: u64,
+        sequence: u64,
+    ) !ModelAttemptReduction {
+        if (operation_id == 0 or sequence == 0) return error.InvalidOperationIdentity;
+        if (committed.task_phase != .ready or committed.active_leaf_id >= std.math.maxInt(u32)) {
+            return error.IllegalModelTransition;
+        }
+        if (committed.operation_phase != .idle and committed.operation_phase != .completed) {
+            return error.OperationAlreadyActive;
+        }
+        if (committed.operation_generation == std.math.maxInt(u32)) {
+            return error.OperationGenerationExhausted;
+        }
+        var candidate = committed;
+        candidate.operation_id = operation_id;
+        candidate.operation_generation += 1;
+        candidate.operation_phase = .accepted;
+        candidate.operation_result = 0;
+        candidate.operation_sequence = sequence;
+        candidate.context = .{ .offset = 1, .length = @intCast(committed.active_leaf_id) };
+        candidate.response_ref = 0;
+        candidate.response_disposition = .failure;
+        candidate.response_failure = .none;
+        candidate.response_text = .{};
+        candidate.response_tool_key = .{};
+        candidate.response_arguments = .{};
+        candidate.response_arguments_digest = .{ .bytes = @splat(0) };
+        candidate.task_phase = .awaiting_model;
+        return .{
+            .state = candidate,
+            .operation = operation(candidate),
+            .context = modelContext(candidate),
+        };
+    }
+
+    fn admitModelCompletion(
+        committed: State,
+        identity_value: OperationIdentity,
+        admission: model_protocol.Admission,
+        response_ref: u64,
+        result_digest: binding.Result,
+        consequence: CompletionConsequence,
+    ) !ModelCompletionReduction {
+        try requireOperation(committed, identity_value, .accepted);
+        if (response_ref == 0) return error.InvalidResultReference;
+        if (admission.byte_length > model_protocol.max_response_size) return error.ResponseCapacityExceeded;
+        if (committed.task_phase != .awaiting_model) return error.IllegalModelResponseTransition;
+        const parsed = try admission.verify(result_digest);
+        if (admission.byte_length == 0 and
+            !(parsed.disposition == .failure and parsed.failure == .empty))
+        {
+            return error.EmptyModelResponse;
+        }
+        switch (consequence) {
+            .final_answer => |entry_id| {
+                if (parsed.disposition != .final_answer) return error.InvalidCompletionConsequence;
+                if (entry_id == 0 or committed.active_leaf_id == std.math.maxInt(u64) or
+                    entry_id != committed.active_leaf_id + 1)
+                {
+                    return error.IllegalFinalAnswerTransition;
+                }
+            },
+            .tool_call => if (parsed.disposition != .tool_call) return error.InvalidCompletionConsequence,
+            .terminal => if (parsed.disposition == .final_answer or parsed.disposition == .tool_call) {
+                return error.InvalidCompletionConsequence;
+            },
+        }
+        var candidate = committed;
+        candidate.operation_result = response_ref;
+        candidate.operation_phase = .completed;
+        candidate.response_ref = response_ref;
+        candidate.response_disposition = parsed.disposition;
+        candidate.response_failure = parsed.failure;
+        candidate.response_text = if (parsed.disposition == .final_answer) .{
+            .offset = parsed.text_offset,
+            .length = parsed.text_length,
+        } else .{};
+        candidate.response_tool_key = .{
+            .offset = parsed.tool_key_offset,
+            .length = parsed.tool_key_length,
+        };
+        candidate.response_arguments = .{
+            .offset = parsed.arguments_offset,
+            .length = parsed.arguments_length,
+        };
+        candidate.response_arguments_digest = parsed.arguments_digest;
+        candidate.task_phase = switch (consequence) {
+            .final_answer => |entry_id| blk: {
+                candidate.active_leaf_id = entry_id;
+                candidate.final_entry_id = entry_id;
+                break :blk .finished;
+            },
+            .tool_call => .awaiting_tool,
+            .terminal => .failed,
+        };
+        return .{ .state = candidate, .response = response(candidate) };
+    }
+
+    fn admitToolResult(committed: State, call_entry_id: u64, result_entry_id: u64) !State {
+        if (call_entry_id == 0 or result_entry_id == 0 or
+            committed.active_leaf_id == std.math.maxInt(u64) or
+            call_entry_id == std.math.maxInt(u64))
+        {
+            return error.InvalidConversationEntry;
+        }
+        if (committed.task_phase != .awaiting_tool or
+            call_entry_id != committed.active_leaf_id + 1 or
+            result_entry_id != call_entry_id + 1)
+        {
+            return error.IllegalToolResultTransition;
+        }
+        var candidate = committed;
+        candidate.active_leaf_id = result_entry_id;
+        candidate.task_phase = .ready;
+        return candidate;
+    }
+
+    fn encode(out: []u8, state: State) !void {
+        if (out.len != encoded_size) return error.InvalidCoreStateOutputLength;
+        try validate(state);
+        @memset(out, 0);
+        @memcpy(out[0..magic.len], magic);
+        write(u16, out, 8, schema_version);
+        write(u16, out, 10, encoded_size);
+        write(u64, out, 16, state.agent_id);
+        write(u32, out, 24, state.agent_generation);
+        write(u64, out, 48, state.operation_id);
+        write(u32, out, 56, state.operation_generation);
+        out[60] = @intFromEnum(state.operation_phase);
+        out[61] = @intFromEnum(state.task_phase);
+        out[62] = @intFromEnum(state.response_disposition);
+        out[63] = @intFromEnum(state.response_failure);
+        write(u64, out, 68, state.operation_result);
+        write(u64, out, 76, state.operation_sequence);
+        write(u64, out, 84, state.active_leaf_id);
+        write(u64, out, 92, state.final_entry_id);
+        write(u64, out, 100, state.response_ref);
+        writeWindow(out, 108, state.context);
+        writeWindow(out, 116, state.response_text);
+        writeWindow(out, 124, state.response_arguments);
+        writeWindow(out, 132, state.response_tool_key);
+        @memcpy(out[140..172], &state.response_arguments_digest.bytes);
+        rewriteChecksum(out);
+    }
+
+    fn decode(input: []const u8) !State {
+        if (input.len != encoded_size) return error.TruncatedCoreState;
+        if (!std.mem.eql(u8, input[0..magic.len], magic)) return error.InvalidCoreStateMagic;
+        if (read(u16, input, 8) != schema_version) return error.UnsupportedSchema;
+        if (read(u16, input, 10) != encoded_size) return error.InvalidCoreStateLength;
+        if (read(u32, input, 12) != 0) return error.UnsupportedCoreStateFlags;
+        for (input[28..48]) |byte| if (byte != 0) return error.NonzeroCoreStateReservedByte;
+        for (input[64..68]) |byte| if (byte != 0) return error.NonzeroCoreStateReservedByte;
+        if (read(u32, input, checksum_offset) != std.hash.Crc32.hash(input[0..checksum_offset])) {
+            return error.CoreStateChecksumMismatch;
+        }
+        const state: State = .{
+            .agent_id = read(u64, input, 16),
+            .agent_generation = read(u32, input, 24),
+            .operation_id = read(u64, input, 48),
+            .operation_generation = read(u32, input, 56),
+            .operation_phase = try operationPhase(input[60]),
+            .task_phase = try taskPhase(input[61]),
+            .response_disposition = try responseDisposition(input[62]),
+            .response_failure = try responseFailure(input[63]),
+            .operation_result = read(u64, input, 68),
+            .operation_sequence = read(u64, input, 76),
+            .active_leaf_id = read(u64, input, 84),
+            .final_entry_id = read(u64, input, 92),
+            .response_ref = read(u64, input, 100),
+            .context = readWindow(input, 108),
+            .response_text = readWindow(input, 116),
+            .response_arguments = readWindow(input, 124),
+            .response_tool_key = readWindow(input, 132),
+            .response_arguments_digest = .{ .bytes = input[140..172].* },
+        };
+        try validate(state);
+        return state;
+    }
+
+    fn validate(state: State) !void {
+        if (state.agent_id == 0) return error.InvalidAgentIdentity;
+        if (state.agent_generation == 0) return error.InvalidAgentGeneration;
+        try validateOperation(state);
+        try validateWindow(state.context, null);
+        try validateWindow(state.response_text, model_protocol.max_response_size);
+        try validateWindow(state.response_tool_key, model_protocol.max_response_size);
+        try validateWindow(state.response_arguments, model_protocol.max_response_size);
+        try validateTask(state);
+        try validateResponse(state);
+    }
+
+    fn validateOperation(state: State) !void {
+        switch (state.operation_phase) {
+            .idle => {
+                if (state.operation_id != 0) return error.InvalidOperationIdentity;
+                if (state.operation_generation != 0 or state.operation_sequence != 0) {
+                    return error.InvalidOperationGeneration;
+                }
+                if (state.operation_result != 0) return error.InvalidOperationResult;
+            },
+            .accepted => {
+                if (state.operation_id == 0) return error.InvalidOperationIdentity;
+                if (state.operation_generation == 0 or state.operation_sequence == 0) {
+                    return error.InvalidOperationGeneration;
+                }
+                if (state.operation_result != 0) return error.InvalidOperationResult;
+            },
+            .completed => {
+                if (state.operation_id == 0) return error.InvalidOperationIdentity;
+                if (state.operation_generation == 0 or state.operation_sequence == 0) {
+                    return error.InvalidOperationGeneration;
+                }
+                if (state.operation_result == 0) return error.InvalidOperationResult;
+            },
+        }
+    }
+
+    fn validateTask(state: State) !void {
+        switch (state.task_phase) {
+            .idle => if (state.active_leaf_id != 0 or state.final_entry_id != 0) {
+                return error.InvalidTaskState;
+            },
+            .ready => if (state.active_leaf_id == 0 or state.final_entry_id != 0) {
+                return error.InvalidTaskState;
+            },
+            .awaiting_model => {
+                if (state.active_leaf_id == 0 or state.final_entry_id != 0 or
+                    state.operation_phase == .idle)
+                {
+                    return error.InvalidTaskState;
+                }
+                if (state.active_leaf_id >= std.math.maxInt(u32) or
+                    state.context.offset != 1 or state.context.length != state.active_leaf_id)
+                {
+                    return error.InvalidModelContext;
+                }
+            },
+            .awaiting_tool, .failed => if (state.active_leaf_id == 0 or
+                state.final_entry_id != 0 or state.operation_phase != .completed)
+            {
+                return error.InvalidTaskState;
+            },
+            .finished => if (state.active_leaf_id == 0 or
+                state.final_entry_id != state.active_leaf_id or
+                state.operation_phase != .completed)
+            {
+                return error.InvalidTaskState;
+            },
+        }
+    }
+
+    fn validateResponse(state: State) !void {
+        if (state.response_ref == 0) {
+            if (state.response_disposition != .failure or
+                state.response_failure != .none or state.response_text.length != 0 or
+                state.response_tool_key.length != 0 or state.response_arguments.length != 0)
+            {
+                return error.InvalidResponseState;
+            }
+            switch (state.task_phase) {
+                .idle, .ready, .awaiting_model => {},
+                .awaiting_tool, .finished, .failed => return error.InvalidResponseState,
+            }
+            return;
+        }
+        if (state.operation_phase != .completed or state.operation_result != state.response_ref) {
+            return error.InvalidResponseState;
+        }
+        switch (state.task_phase) {
+            .finished => if (state.response_disposition != .final_answer or
+                state.response_failure != .none or state.response_text.length == 0 or
+                state.response_tool_key.length != 0 or state.response_arguments.length != 0)
+            {
+                return error.InvalidResponseState;
+            },
+            .awaiting_tool, .ready => if (state.response_disposition != .tool_call or
+                state.response_failure != .none or state.response_tool_key.length == 0 or
+                state.response_arguments.length == 0 or state.response_text.length != 0)
+            {
+                return error.InvalidResponseState;
+            },
+            .failed => switch (state.response_disposition) {
+                .input_request => if (state.response_failure != .none or
+                    state.response_tool_key.length != 0 or state.response_text.length != 0 or
+                    state.response_arguments.length != 0)
+                {
+                    return error.InvalidResponseState;
+                },
+                .failure => if (state.response_failure == .none or
+                    state.response_tool_key.length != 0 or state.response_text.length != 0 or
+                    state.response_arguments.length != 0)
+                {
+                    return error.InvalidResponseState;
+                },
+                else => return error.InvalidResponseState,
+            },
+            .idle, .awaiting_model => return error.InvalidResponseState,
+        }
+    }
+
+    fn validateWindow(window: continuation.ContentWindow, limit: ?usize) !void {
+        if ((window.offset == 0) != (window.length == 0)) return error.InvalidContentWindow;
+        const end = std.math.add(u32, window.offset, window.length) catch
+            return error.ContentWindowOverflow;
+        if (limit) |maximum| if (end > maximum) return error.ContentWindowOutOfRange;
+    }
+
+    fn requireOperation(state: State, value: OperationIdentity, phase: continuation.OperationPhase) !void {
+        if (value.id == 0 or value.generation == 0) return error.InvalidOperationIdentity;
+        if (state.operation_id != value.id or state.operation_generation != value.generation) {
+            return error.StaleOperation;
+        }
+        if (state.operation_phase != phase) return error.IllegalOperationTransition;
+    }
+
+    fn operationPhase(value: u8) !continuation.OperationPhase {
+        return switch (value) {
+            0 => .idle,
+            1 => .accepted,
+            2 => .completed,
+            else => error.UnknownOperationPhase,
+        };
+    }
+
+    fn taskPhase(value: u8) !continuation.TaskPhase {
+        return switch (value) {
+            0 => .idle,
+            1 => .ready,
+            2 => .awaiting_model,
+            3 => .awaiting_tool,
+            4 => .finished,
+            5 => .failed,
+            else => error.UnknownTaskPhase,
+        };
+    }
+
+    fn responseDisposition(value: u8) !model_protocol.Disposition {
+        return switch (value) {
+            1 => .final_answer,
+            2 => .tool_call,
+            3 => .input_request,
+            4 => .failure,
+            else => error.UnknownResponseDisposition,
+        };
+    }
+
+    fn responseFailure(value: u8) !model_protocol.Failure {
+        return switch (value) {
+            0 => .none,
+            1 => .truncated,
+            2 => .aborted,
+            3 => .provider_error,
+            4 => .malformed,
+            5 => .empty,
+            6 => .multiple_outputs,
+            7 => .oversized,
+            8 => .unknown_tool,
+            9 => .missing_authentication,
+            10 => .authentication_expired,
+            11 => .model_unavailable,
+            12 => .timeout,
+            13 => .transport_not_started,
+            14 => .transport_may_have_started,
+            15 => .unsupported_provider_output,
+            else => error.UnknownResponseFailure,
+        };
+    }
+
+    fn writeWindow(out: []u8, offset: usize, window: continuation.ContentWindow) void {
+        write(u32, out, offset, window.offset);
+        write(u32, out, offset + 4, window.length);
+    }
+
+    fn readWindow(input: []const u8, offset: usize) continuation.ContentWindow {
+        return .{ .offset = read(u32, input, offset), .length = read(u32, input, offset + 4) };
+    }
+
+    fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
+        std.mem.writeInt(T, out[offset..][0..@sizeOf(T)], value, .little);
+    }
+
+    fn read(comptime T: type, input: []const u8, offset: usize) T {
+        return std.mem.readInt(T, input[offset..][0..@sizeOf(T)], .little);
+    }
+
+    fn rewriteChecksum(out: []u8) void {
+        write(u32, out, checksum_offset, std.hash.Crc32.hash(out[0..checksum_offset]));
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(State) <= core_image.slot_size);
+        for (std.meta.fields(State)) |field| {
+            switch (@typeInfo(field.type)) {
+                .pointer => @compileError("Continuation State cannot contain pointers"),
+                .int => if (field.type == usize or field.type == isize) {
+                    @compileError("Continuation State cannot contain target-width integers");
+                },
+                else => {},
+            }
+        }
+    }
+};
+
+fn slotState(slot: *core_image.ActivationSlot) *continuation.State {
+    return @ptrCast(@alignCast(&slot.storage));
+}
 
 pub const workspace_path_capacity = 1024;
 pub const model_name_capacity = host_store.max_model_bytes;
@@ -116,13 +698,6 @@ comptime {
 
 pub const Control = enum { cancel, shutdown };
 
-pub const ApprovalMaterial = struct {
-    operation_id: u64,
-    operation_generation: u32,
-    binding_ref: u64,
-    descriptor_ref: u64,
-};
-
 pub const AuthorizationMaterial = struct {
     operation_id: u64,
     operation_generation: u32,
@@ -165,18 +740,47 @@ pub const ConversationEntry = struct {
     sequence: u64,
 };
 
+pub const OperationPhase = continuation.OperationPhase;
+pub const TaskPhase = continuation.TaskPhase;
+pub const ContentWindow = continuation.ContentWindow;
+pub const StrictToolJsonWindow = continuation.StrictToolJsonWindow;
+pub const Operation = continuation.Operation;
+pub const ModelContext = continuation.ModelContext;
+pub const Response = continuation.Response;
+pub const Task = continuation.Task;
+
 pub const ContinuationView = struct {
-    operation: core_image.Operation,
-    task: core_image.Task,
-    response: core_image.Response,
+    operation: Operation,
+    task: Task,
+    response: Response,
 };
 
-pub fn actionOperationId(response_ref: u64) !u64 {
-    if (response_ref == 0 or response_ref > std.math.maxInt(u32)) {
-        return error.InvalidModelResponseReference;
-    }
-    return (@as(u64, 1) << 61) | response_ref;
-}
+pub const ActionIdentity = struct {
+    operation_id: u64,
+    operation_generation: u32,
+};
+
+pub const ModelCompletionAdmission = struct {
+    response: Response,
+    action: ?ActionIdentity,
+};
+
+pub const ApprovalRequest = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    descriptor_digest: binding.Descriptor,
+    descriptor_ref: u64,
+};
+
+const ApprovalRefs = struct {
+    binding: u64,
+    descriptor: u64,
+};
+
+pub const FailureObservation = struct {
+    response_ref: u64,
+    failure: model_protocol.Failure,
+};
 
 pub const OperationView = struct {
     const max_attempts = session_transition.max_operation_attempts;
@@ -243,7 +847,8 @@ pub const OperationView = struct {
 
 pub const SemanticView = struct {
     last_sequence: u64 = 0,
-    last_core: ?[core_state.encoded_size]u8 = null,
+    last_core: ?[session_transition.continuation_size]u8 = null,
+    maximum_operation_id: u64 = 0,
     model: OperationView = .{},
     consequential: OperationView = .{},
     control: ?session_transition.Fact = null,
@@ -254,6 +859,9 @@ pub const SemanticView = struct {
         for (transaction.factSlice()) |fact| {
             switch (fact) {
                 .operation_admitted => |record| {
+                    if (record.operation.operation_id <= self.maximum_operation_id) {
+                        return error.OperationIdentityCollision;
+                    }
                     const descriptor_kind = std.meta.activeTag(record.descriptor_digest);
                     switch (descriptor_kind) {
                         .model => {
@@ -288,6 +896,7 @@ pub const SemanticView = struct {
                         history.descriptor,
                         record,
                     );
+                    self.maximum_operation_id = record.operation.operation_id;
                 },
                 .attempt_admitted => |record| {
                     const history = self.operationMut(record.operation) orelse
@@ -382,7 +991,10 @@ pub const SemanticView = struct {
                 .task_admitted, .conversation_advanced, .outcome => {},
             }
         }
-        if (transaction.core) |state| self.last_core = state;
+        if (transaction.core) |state| {
+            _ = try continuation.decode(&state);
+            self.last_core = state;
+        }
         self.last_sequence = transaction.sequence;
     }
 
@@ -1126,6 +1738,16 @@ pub const Session = struct {
         return self.resident.conversation_head_id;
     }
 
+    pub fn nextModelOperationId(self: *Session) !u64 {
+        _ = try self.semanticView();
+        return self.nextOperationId();
+    }
+
+    fn nextOperationId(self: *const Session) !u64 {
+        return std.math.add(u64, self.resident.semantic.maximum_operation_id, 1) catch
+            error.OperationIdentityExhausted;
+    }
+
     fn authorize(self: *Session, token: OwnerToken) !void {
         if (!self.open) return error.SessionClosed;
         if (self.failed) return error.SessionUnavailable;
@@ -1396,8 +2018,8 @@ pub const Session = struct {
 
     pub fn startTask(self: *Session, slot: *core_image.ActivationSlot) !u64 {
         defer core_image.scrub(slot);
-        const committed = try core_image.initialize(.{ .agent_id = self.agent_id, .generation = 1 });
-        const candidate = try core_image.startTask(committed, self.activeLeafId());
+        const committed = try continuation.initialize(.{ .agent_id = self.agent_id, .generation = 1 });
+        const candidate = try continuation.startTask(committed, self.activeLeafId());
         const facts = [_]session_transition.Fact{session_transition.taskAdmitted(
             self.agentContext(),
             self.task_id,
@@ -1411,20 +2033,28 @@ pub const Session = struct {
         slot: *core_image.ActivationSlot,
         operation_id: u64,
         sequence: u64,
-    ) !core_image.ModelContext {
+    ) !ModelContext {
         defer core_image.scrub(slot);
+        if (operation_id == 0 or operation_id <= self.resident.semantic.maximum_operation_id) {
+            return error.InvalidOperationIdentity;
+        }
         const committed = try self.loadContinuation(slot);
-        return (try core_image.admitModelAttempt(committed, operation_id, sequence)).context;
+        return (try continuation.admitModelAttempt(committed, operation_id, sequence)).context;
     }
 
     pub fn admitModelAttempt(
         self: *Session,
         slot: *core_image.ActivationSlot,
         material: ModelAttemptMaterial,
-    ) !core_image.Operation {
+    ) !Operation {
         defer core_image.scrub(slot);
+        if (material.operation_id == 0 or
+            material.operation_id <= self.resident.semantic.maximum_operation_id)
+        {
+            return error.InvalidOperationIdentity;
+        }
         const committed = try self.loadContinuation(slot);
-        const reduced = try core_image.admitModelAttempt(
+        const reduced = try continuation.admitModelAttempt(
             committed,
             material.operation_id,
             material.sequence,
@@ -1480,7 +2110,7 @@ pub const Session = struct {
         self: *Session,
         slot: *core_image.ActivationSlot,
         material: ModelCompletionMaterial,
-    ) !core_image.Response {
+    ) !ModelCompletionAdmission {
         defer core_image.scrub(slot);
         const committed = try self.loadContinuation(slot);
         const model_history = self.resident.semantic.model;
@@ -1492,6 +2122,11 @@ pub const Session = struct {
         {
             return error.InvalidAttemptHistory;
         }
+        _ = try self.requirePendingCompletion(.model, attempt.operation, material.attempt_id, .{
+            .ownership_epoch = material.evidence_epoch,
+            .result_ref = material.response_ref,
+            .result_digest = material.response_digest,
+        });
 
         var facts: [4]session_transition.Fact = undefined;
         const operation = self.operationContext(material.operation_id, material.operation_generation);
@@ -1513,14 +2148,15 @@ pub const Session = struct {
 
         var fact_count: usize = 2;
         var closure: ContentClosure = .facts_only;
+        var action_identity: ?ActionIdentity = null;
         const next_entry_id = std.math.add(u64, self.activeLeafId(), 1) catch
             return error.EntryIdentityExhausted;
-        const consequence: core_image.CompletionConsequence = switch (material.consequence) {
+        const consequence: continuation.CompletionConsequence = switch (material.consequence) {
             .final_answer => .{ .final_answer = next_entry_id },
             .tool_call => .tool_call,
             .terminal => .terminal,
         };
-        const reduced = try core_image.admitModelCompletion(
+        const reduced = try continuation.admitModelCompletion(
             committed,
             .{ .id = material.operation_id, .generation = material.operation_generation },
             material.admission,
@@ -1544,13 +2180,13 @@ pub const Session = struct {
             },
             .tool_call => |tool| {
                 const action = if (tool.action) |action|
-                    try self.compileAction(reduced.response, material.response_ref, action)
+                    try self.compileAction(reduced.response, action)
                 else
                     null;
                 const entry = try self.appendAuthorized(.tool_call, tool.content_ref, null);
                 std.debug.assert(entry.entry_id == next_entry_id);
                 if (action) |compiled| {
-                    const action_id = try actionOperationId(material.response_ref);
+                    const action_id = try self.nextOperationId();
                     facts[fact_count] = session_transition.operationAdmitted(
                         self.operationContext(action_id, 1),
                         .{
@@ -1562,6 +2198,10 @@ pub const Session = struct {
                     );
                     fact_count += 1;
                     closure = compiled.content_closure;
+                    action_identity = .{
+                        .operation_id = action_id,
+                        .operation_generation = 1,
+                    };
                 }
                 facts[fact_count] = self.conversationFact(entry);
                 fact_count += 1;
@@ -1569,7 +2209,7 @@ pub const Session = struct {
             .terminal => {},
         }
         _ = try self.commitContinuation(slot, reduced.state, facts[0..fact_count], closure);
-        return reduced.response;
+        return .{ .response = reduced.response, .action = action_identity };
     }
 
     pub fn admitToolResult(
@@ -1603,7 +2243,7 @@ pub const Session = struct {
         const call_entry = try self.readEntry(self.activeLeafId());
         const next_entry_id = std.math.add(u64, call_entry.entry_id, 1) catch
             return error.EntryIdentityExhausted;
-        const candidate = try core_image.admitToolResult(
+        const candidate = try continuation.admitToolResult(
             committed,
             call_entry.entry_id,
             next_entry_id,
@@ -1629,10 +2269,17 @@ pub const Session = struct {
         defer core_image.scrub(slot);
         const state = try self.loadContinuation(slot);
         return .{
-            .operation = core_image.operation(state),
-            .task = core_image.task(state),
-            .response = core_image.response(state),
+            .operation = continuation.operation(state),
+            .task = continuation.task(state),
+            .response = continuation.response(state),
         };
+    }
+
+    pub fn failureObservation(self: *Session) !FailureObservation {
+        const view = try self.semanticView();
+        const encoded = view.last_core orelse return error.MissingLedgerCoreState;
+        const state = try continuation.decode(&encoded);
+        return .{ .response_ref = state.response_ref, .failure = state.response_failure };
     }
 
     pub fn commitControl(self: *Session, control: Control) !u64 {
@@ -1643,20 +2290,54 @@ pub const Session = struct {
         return self.commitDerived(&.{fact}, null, .facts_only);
     }
 
-    pub fn requestApproval(self: *Session, material: ApprovalMaterial) !u64 {
+    pub fn requestApproval(
+        self: *Session,
+        operation_id: u64,
+        operation_generation: u32,
+    ) !ApprovalRequest {
         const operation = try self.requireActionOperation(
-            material.operation_id,
-            material.operation_generation,
+            operation_id,
+            operation_generation,
         );
         const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
-        if (material.binding_ref != 0 and material.binding_ref != descriptor.descriptor_ref) {
-            return error.InvalidApprovalBinding;
-        }
-        return self.commitDerived(&.{session_transition.approvalRequired(.{
-            .operation = self.operationContext(material.operation_id, material.operation_generation),
-            .binding_ref = material.binding_ref,
-            .descriptor_ref = material.descriptor_ref,
-        })}, null, .facts_only);
+        const refs: ApprovalRefs = switch (descriptor.descriptor_digest) {
+            .model => return error.InvalidActionDescriptor,
+            .bash => |digest| blk: {
+                var bytes: [bash_tool.max_descriptor_size]u8 = undefined;
+                const content = try self.readBoundedContent(descriptor.descriptor_ref, &bytes);
+                _ = try bash_tool.decodeDescriptor(content);
+                if (!binding.eql(binding.BashDescriptor, bash_tool.descriptorDigest(content), digest)) {
+                    return error.InvalidApprovalBinding;
+                }
+                break :blk .{ .binding = @as(u64, 0), .descriptor = descriptor.descriptor_ref };
+            },
+            .apply_patch => |digest| blk: {
+                var intent_bytes: [patch_tool.max_intent_size]u8 = undefined;
+                const bytes = try self.readBoundedContent(descriptor.descriptor_ref, &intent_bytes);
+                const intent = try patch_tool.decodeIntent(bytes);
+                if (!binding.eql(binding.PatchIntent, intent.intent_digest, digest)) {
+                    return error.InvalidApprovalBinding;
+                }
+                var patch_bytes: [patch_tool.max_patch_size]u8 = undefined;
+                const patch = try self.readBoundedContent(intent.patch_ref, &patch_bytes);
+                if (!binding.eql(binding.PatchDescriptor, patch_tool.patchDigest(patch), intent.patch_digest)) {
+                    return error.InvalidApprovalBinding;
+                }
+                break :blk .{ .binding = descriptor.descriptor_ref, .descriptor = intent.patch_ref };
+            },
+        };
+        const record: session_transition.ApprovalRequiredRecord = .{
+            .operation = self.operationContext(operation_id, operation_generation),
+            .binding_ref = refs.binding,
+            .descriptor_ref = refs.descriptor,
+        };
+        _ = try self.commitDerived(&.{session_transition.approvalRequired(record)}, null, .facts_only);
+        return .{
+            .operation_id = operation_id,
+            .operation_generation = operation_generation,
+            .descriptor_digest = descriptor.descriptor_digest,
+            .descriptor_ref = refs.descriptor,
+        };
     }
 
     pub fn authorizeAction(self: *Session, material: AuthorizationMaterial) !u64 {
@@ -1712,6 +2393,11 @@ pub const Session = struct {
                 {
                     return error.InvalidAttemptHistory;
                 }
+                _ = try self.requirePendingCompletion(kind, attempt.operation, durable.attempt_id, .{
+                    .ownership_epoch = durable.ownership_epoch,
+                    .result_ref = material.result_ref,
+                    .result_digest = material.result_digest,
+                });
                 evidence_operation.agent.ownership_epoch = durable.ownership_epoch;
                 break :blk .{ .durable = switch (kind) {
                     .bash => .{ .bash = durable.attempt_id },
@@ -1741,30 +2427,30 @@ pub const Session = struct {
         return operation;
     }
 
-    fn loadContinuation(self: *Session, slot: *core_image.ActivationSlot) !core_state.State {
+    fn loadContinuation(self: *Session, slot: *core_image.ActivationSlot) !continuation.State {
         const view = try self.semanticView();
         const encoded = view.last_core orelse return error.MissingLedgerCoreState;
-        const state = try core_state.decode(&encoded);
+        const state = try continuation.decode(&encoded);
         if (state.agent_id != self.agent_id or state.agent_generation != 1) {
             return error.CoreSessionIdentityMismatch;
         }
-        slot.state = state;
+        slotState(slot).* = state;
         return state;
     }
 
     fn commitContinuation(
         self: *Session,
         slot: *core_image.ActivationSlot,
-        candidate: core_state.State,
+        candidate: continuation.State,
         facts: []const session_transition.Fact,
         closure: ContentClosure,
     ) !u64 {
         if (candidate.agent_id != self.agent_id or candidate.agent_generation != 1) {
             return error.CoreSessionIdentityMismatch;
         }
-        slot.state = candidate;
-        var encoded: [core_state.encoded_size]u8 = undefined;
-        try core_state.encode(&encoded, slot.state);
+        slotState(slot).* = candidate;
+        var encoded: [continuation.encoded_size]u8 = undefined;
+        try continuation.encode(&encoded, slotState(slot).*);
         return self.commitDerived(facts, encoded, closure);
     }
 
@@ -1803,7 +2489,7 @@ pub const Session = struct {
 
     fn validateCompletionContent(
         self: *Session,
-        response_value: core_image.Response,
+        response_value: Response,
         consequence: ModelCompletionConsequence,
     ) !void {
         switch (consequence) {
@@ -1821,19 +2507,16 @@ pub const Session = struct {
 
     fn compileAction(
         self: *Session,
-        response_value: core_image.Response,
-        response_ref: u64,
+        response_value: Response,
         material: ActionMaterial,
     ) !CompiledAction {
-        const operation_id = try actionOperationId(response_ref);
         return switch (material) {
             .bash => |bash| blk: {
                 try self.requireResponseToolKey(response_value, model_contract.bash_key);
                 var descriptor_bytes: [bash_tool.max_descriptor_size]u8 = undefined;
                 const bytes = try self.readBoundedContent(bash.descriptor_ref, &descriptor_bytes);
                 const descriptor = try bash_tool.decodeDescriptor(bytes);
-                if (descriptor.operation_id != operation_id or descriptor.operation_generation != 1 or
-                    !std.mem.eql(u8, descriptor.workspace_path, self.workspacePath()) or
+                if (!std.mem.eql(u8, descriptor.workspace_path, self.workspacePath()) or
                     !std.mem.eql(u8, descriptor.working_directory, self.workspacePath()) or
                     descriptor.call.timeout_ms != bash.call.timeout_ms or
                     !std.mem.eql(u8, descriptor.call.command, bash.call.commandSlice()))
@@ -1857,8 +2540,7 @@ pub const Session = struct {
                 var patch_bytes: [patch_tool.max_patch_size]u8 = undefined;
                 const patch_content = try self.readBoundedContent(patch.patch_reference, &patch_bytes);
                 const patch_digest = patch_tool.patchDigest(patch_content);
-                if (intent.operation_id != operation_id or intent.operation_generation != 1 or
-                    intent.patch_ref != patch.patch_reference or
+                if (intent.patch_ref != patch.patch_reference or
                     !std.mem.eql(u8, intent.workspace_path, self.workspacePath()) or
                     !binding.eql(binding.PatchDescriptor, intent.patch_digest, patch.patch_digest) or
                     !binding.eql(binding.PatchDescriptor, patch.patch_digest, patch_digest))
@@ -1876,7 +2558,7 @@ pub const Session = struct {
 
     fn requireResponseToolKey(
         self: *Session,
-        response_value: core_image.Response,
+        response_value: Response,
         expected: []const u8,
     ) !void {
         if (response_value.tool_key.length != expected.len or expected.len > model_contract.max_tool_key_size) {
@@ -1907,7 +2589,7 @@ pub const Session = struct {
     fn requireContentEqualsWindow(
         self: *Session,
         source_ref: u64,
-        window: core_image.ContentWindow,
+        window: ContentWindow,
         target_ref: u64,
     ) !void {
         var source = try self.viewContent(source_ref);
@@ -1929,7 +2611,7 @@ pub const Session = struct {
 
     fn requireToolCallMatchesResponse(
         self: *Session,
-        response_value: core_image.Response,
+        response_value: Response,
         call_ref: u64,
     ) !void {
         var call = try self.viewContent(call_ref);
@@ -1951,7 +2633,7 @@ pub const Session = struct {
         var source = try self.viewContent(response_value.content_ref);
         var left: [4096]u8 = undefined;
         var right: [4096]u8 = undefined;
-        const comparisons = [_]struct { source: core_image.ContentWindow, call_offset: u64 }{
+        const comparisons = [_]struct { source: ContentWindow, call_offset: u64 }{
             .{ .source = response_value.tool_key, .call_offset = conversation.call_header_size },
             .{
                 .source = response_value.arguments.contentWindow(),
@@ -1983,7 +2665,7 @@ pub const Session = struct {
     fn commitDerived(
         self: *Session,
         facts: []const session_transition.Fact,
-        encoded_core: ?[core_state.encoded_size]u8,
+        encoded_core: ?[continuation.encoded_size]u8,
         content_closure: ContentClosure,
     ) !u64 {
         try self.ensureUsable();
@@ -2385,6 +3067,35 @@ pub const Session = struct {
         return match;
     }
 
+    const ExpectedCompletion = struct {
+        ownership_epoch: u64,
+        result_ref: u64,
+        result_digest: binding.Result,
+    };
+
+    fn requirePendingCompletion(
+        self: *Session,
+        kind: binding.DescriptorKind,
+        operation: session_transition.OperationContext,
+        attempt_id: u64,
+        expected: ExpectedCompletion,
+    ) !completion_inbox.Envelope {
+        const envelope = (try self.pendingCompletion(operation, attempt_id)) orelse
+            return error.MissingCompletionEvidence;
+        if (envelope.kind != kind or envelope.session_id != self.session_id or
+            envelope.agent_id != self.agent_id or envelope.agent_generation != 1 or
+            envelope.operation_id != operation.operation_id or
+            envelope.operation_generation != operation.generation or
+            envelope.attempt_id != attempt_id or
+            envelope.ownership_epoch != expected.ownership_epoch or
+            envelope.result_ref != expected.result_ref or
+            !binding.eql(binding.Result, envelope.result_digest, expected.result_digest))
+        {
+            return error.CompletionEvidenceMismatch;
+        }
+        return envelope;
+    }
+
     /// Diagnostic count of the bounded, already validated pending Inbox.
     pub fn pendingCompletionCount(self: *Session) !u32 {
         try self.ensureUsable();
@@ -2696,6 +3407,28 @@ fn initTestGitWorktree(dir: std.Io.Dir, io: std.Io) !void {
     try head.writePositionalAll(io, "ref: refs/heads/main\n", 0);
 }
 
+fn addTestGitPath(io: std.Io, workspace_path: []const u8, path: []const u8) !void {
+    var environment = std.process.Environ.Map.init(std.heap.page_allocator);
+    defer environment.deinit();
+    try environment.put("PATH", "/usr/bin:/bin");
+    try environment.put("LC_ALL", "C");
+    try environment.put("GIT_CONFIG_NOSYSTEM", "1");
+    try environment.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/usr/bin/git", "add", "--", path },
+        .cwd = .{ .path = workspace_path },
+        .environ_map = &environment,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| if (code != 0) return error.TestGitFailed,
+        else => return error.TestGitFailed,
+    }
+}
+
 test "Session creation rejects a non-UTF-8 model identity" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
@@ -2882,6 +3615,250 @@ fn admitTestModelSource(session: *Session, operation_id: u64) !void {
 
 fn testResultDigest(label: []const u8) binding.Result {
     return binding.hash(binding.Result, label);
+}
+
+fn expectCanonicalContinuation(state: continuation.State) !void {
+    var encoded: [continuation.encoded_size]u8 = undefined;
+    try continuation.encode(&encoded, state);
+    try std.testing.expectEqualDeep(state, try continuation.decode(&encoded));
+
+    var slot: core_image.ActivationSlot = undefined;
+    @memset(std.mem.asBytes(&slot), 0xa5);
+    slotState(&slot).* = try continuation.decode(&encoded);
+    try std.testing.expectEqualDeep(state, slotState(&slot).*);
+    core_image.scrub(&slot);
+    for (std.mem.asBytes(&slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
+
+fn expectContinuationUnchanged(state: continuation.State, before: [continuation.encoded_size]u8) !void {
+    var after: [continuation.encoded_size]u8 = undefined;
+    try continuation.encode(&after, state);
+    try std.testing.expectEqualSlices(u8, &before, &after);
+}
+
+test "private continuation reducers cover deterministic accepted and rejected production traces" {
+    var prng = std.Random.DefaultPrng.init(0x50_ba_5e);
+    const random = prng.random();
+
+    for (0..32) |trace| {
+        const agent_id = random.intRangeAtMost(u64, 1, std.math.maxInt(u32));
+        const initialized = try continuation.initialize(.{
+            .agent_id = agent_id,
+            .generation = 1,
+        });
+        const ready_a = try continuation.startTask(initialized, 1);
+        const ready_b = try continuation.startTask(initialized, 1);
+        try std.testing.expectEqualDeep(ready_a, ready_b);
+        try std.testing.expectEqual(agent_id, ready_a.agent_id);
+        try std.testing.expectEqual(@as(u64, 1), ready_a.active_leaf_id);
+        try expectCanonicalContinuation(ready_a);
+
+        const first_operation = random.intRangeAtMost(u64, 1, std.math.maxInt(u32));
+        const attempt_a = try continuation.admitModelAttempt(ready_a, first_operation, 1);
+        const attempt_b = try continuation.admitModelAttempt(ready_a, first_operation, 1);
+        try std.testing.expectEqualDeep(attempt_a, attempt_b);
+        try std.testing.expectEqual(agent_id, attempt_a.state.agent_id);
+        try std.testing.expectEqual(@as(u64, 1), attempt_a.state.active_leaf_id);
+        try expectCanonicalContinuation(attempt_a.state);
+
+        switch (trace % 3) {
+            0 => {
+                var bytes: [model_protocol.max_response_size]u8 = undefined;
+                const response = try model_protocol.encodeText(&bytes, "done");
+                const digest = binding.hash(binding.Result, response);
+                var scratch_a: model_protocol.ValidationScratch = undefined;
+                var scratch_b: model_protocol.ValidationScratch = undefined;
+                const completed_a = try continuation.admitModelCompletion(
+                    attempt_a.state,
+                    .{ .id = first_operation, .generation = 1 },
+                    model_protocol.admit(&scratch_a, response).admission,
+                    100 + trace,
+                    digest,
+                    .{ .final_answer = 2 },
+                );
+                const completed_b = try continuation.admitModelCompletion(
+                    attempt_a.state,
+                    .{ .id = first_operation, .generation = 1 },
+                    model_protocol.admit(&scratch_b, response).admission,
+                    100 + trace,
+                    digest,
+                    .{ .final_answer = 2 },
+                );
+                try std.testing.expectEqualDeep(completed_a, completed_b);
+                try std.testing.expectEqual(agent_id, completed_a.state.agent_id);
+                try std.testing.expectEqual(@as(u64, 2), completed_a.state.final_entry_id);
+                try expectCanonicalContinuation(completed_a.state);
+            },
+            1 => {
+                var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+                const arguments = try model_contract.encodeJson(&arguments_buffer, .{
+                    .command = "true",
+                    .timeout_ms = 1_000,
+                });
+                var bytes: [model_protocol.max_response_size]u8 = undefined;
+                const response = try model_protocol.encodeTool(
+                    &bytes,
+                    model_contract.bash_key,
+                    arguments,
+                );
+                const digest = binding.hash(binding.Result, response);
+                var scratch_a: model_protocol.ValidationScratch = undefined;
+                var scratch_b: model_protocol.ValidationScratch = undefined;
+                const completed_a = try continuation.admitModelCompletion(
+                    attempt_a.state,
+                    .{ .id = first_operation, .generation = 1 },
+                    model_protocol.admit(&scratch_a, response).admission,
+                    200 + trace,
+                    digest,
+                    .tool_call,
+                );
+                const completed_b = try continuation.admitModelCompletion(
+                    attempt_a.state,
+                    .{ .id = first_operation, .generation = 1 },
+                    model_protocol.admit(&scratch_b, response).admission,
+                    200 + trace,
+                    digest,
+                    .tool_call,
+                );
+                try std.testing.expectEqualDeep(completed_a, completed_b);
+                try expectCanonicalContinuation(completed_a.state);
+
+                const resumed_a = try continuation.admitToolResult(completed_a.state, 2, 3);
+                const resumed_b = try continuation.admitToolResult(completed_a.state, 2, 3);
+                try std.testing.expectEqualDeep(resumed_a, resumed_b);
+                try std.testing.expectEqual(agent_id, resumed_a.agent_id);
+                try expectCanonicalContinuation(resumed_a);
+
+                const second_operation = first_operation + std.math.maxInt(u32) + 1;
+                const second_attempt = try continuation.admitModelAttempt(
+                    resumed_a,
+                    second_operation,
+                    2,
+                );
+                try expectCanonicalContinuation(second_attempt.state);
+                var final_bytes: [model_protocol.max_response_size]u8 = undefined;
+                const final_response = try model_protocol.encodeText(&final_bytes, "finished");
+                const final_digest = binding.hash(binding.Result, final_response);
+                var final_scratch: model_protocol.ValidationScratch = undefined;
+                const final = try continuation.admitModelCompletion(
+                    second_attempt.state,
+                    .{ .id = second_operation, .generation = 2 },
+                    model_protocol.admit(&final_scratch, final_response).admission,
+                    300 + trace,
+                    final_digest,
+                    .{ .final_answer = 4 },
+                );
+                try expectCanonicalContinuation(final.state);
+            },
+            else => {
+                var bytes: [model_protocol.max_response_size]u8 = undefined;
+                const response = try model_protocol.encodeFailure(&bytes, .provider_error);
+                const digest = binding.hash(binding.Result, response);
+                var scratch: model_protocol.ValidationScratch = undefined;
+                const failed = try continuation.admitModelCompletion(
+                    attempt_a.state,
+                    .{ .id = first_operation, .generation = 1 },
+                    model_protocol.admit(&scratch, response).admission,
+                    400 + trace,
+                    digest,
+                    .terminal,
+                );
+                try std.testing.expectEqual(continuation.TaskPhase.failed, failed.state.task_phase);
+                try expectCanonicalContinuation(failed.state);
+            },
+        }
+    }
+
+    const initialized = try continuation.initialize(.{ .agent_id = 1, .generation = 1 });
+    var before: [continuation.encoded_size]u8 = undefined;
+    try continuation.encode(&before, initialized);
+    try std.testing.expectError(error.InvalidConversationEntry, continuation.startTask(initialized, 0));
+    try expectContinuationUnchanged(initialized, before);
+    try std.testing.expectError(error.IllegalModelTransition, continuation.admitModelAttempt(initialized, 1, 1));
+    try expectContinuationUnchanged(initialized, before);
+
+    const ready = try continuation.startTask(initialized, 1);
+    const attempt = try continuation.admitModelAttempt(ready, 7, 1);
+    try continuation.encode(&before, attempt.state);
+    var final_bytes: [model_protocol.max_response_size]u8 = undefined;
+    const final_response = try model_protocol.encodeText(&final_bytes, "done");
+    const final_digest = binding.hash(binding.Result, final_response);
+    var scratch: model_protocol.ValidationScratch = undefined;
+    const admission = model_protocol.admit(&scratch, final_response).admission;
+    try std.testing.expectError(
+        error.StaleOperation,
+        continuation.admitModelCompletion(
+            attempt.state,
+            .{ .id = 8, .generation = 1 },
+            admission,
+            9,
+            final_digest,
+            .{ .final_answer = 2 },
+        ),
+    );
+    try expectContinuationUnchanged(attempt.state, before);
+    try std.testing.expectError(
+        error.InvalidModelResponseEvidence,
+        continuation.admitModelCompletion(
+            attempt.state,
+            .{ .id = 7, .generation = 1 },
+            admission,
+            9,
+            binding.hash(binding.Result, "substituted"),
+            .{ .final_answer = 2 },
+        ),
+    );
+    try expectContinuationUnchanged(attempt.state, before);
+    try std.testing.expectError(
+        error.InvalidCompletionConsequence,
+        continuation.admitModelCompletion(
+            attempt.state,
+            .{ .id = 7, .generation = 1 },
+            admission,
+            9,
+            final_digest,
+            .tool_call,
+        ),
+    );
+    try expectContinuationUnchanged(attempt.state, before);
+
+    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+    const arguments = try model_contract.encodeJson(&arguments_buffer, .{
+        .command = "true",
+        .timeout_ms = 1_000,
+    });
+    var tool_bytes: [model_protocol.max_response_size]u8 = undefined;
+    const tool_response = try model_protocol.encodeTool(
+        &tool_bytes,
+        model_contract.bash_key,
+        arguments,
+    );
+    var tool_scratch: model_protocol.ValidationScratch = undefined;
+    const tool_completed = try continuation.admitModelCompletion(
+        attempt.state,
+        .{ .id = 7, .generation = 1 },
+        model_protocol.admit(&tool_scratch, tool_response).admission,
+        12,
+        binding.hash(binding.Result, tool_response),
+        .tool_call,
+    );
+    var exhausted = try continuation.admitToolResult(tool_completed.state, 2, 3);
+    exhausted.operation_generation = std.math.maxInt(u32);
+    try continuation.encode(&before, exhausted);
+    try std.testing.expectError(
+        error.OperationGenerationExhausted,
+        continuation.admitModelAttempt(exhausted, 10, 2),
+    );
+    try expectContinuationUnchanged(exhausted, before);
+
+    var out_of_range = ready;
+    out_of_range.active_leaf_id = std.math.maxInt(u32);
+    try continuation.encode(&before, out_of_range);
+    try std.testing.expectError(
+        error.IllegalModelTransition,
+        continuation.admitModelAttempt(out_of_range, 11, 2),
+    );
+    try expectContinuationUnchanged(out_of_range, before);
 }
 
 fn testReboundEnvelope(envelope: completion_inbox.Envelope) completion_inbox.Envelope {
@@ -3868,6 +4845,39 @@ test "typed final completion compiles one exact atomic semantic transaction" {
         .result_digest = response_digest,
     }));
     var validation: model_protocol.ValidationScratch = undefined;
+    var substituted = ModelCompletionMaterial{
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = 101,
+        .evidence_epoch = created.ownership_epoch,
+        .response_ref = 901,
+        .response_digest = response_digest,
+        .admission = model_protocol.admit(&validation, response).admission,
+        .consequence = .{ .final_answer = .{ .content_ref = 902 } },
+    };
+    substituted.evidence_epoch += 1;
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.admitModelCompletion(&slot, substituted),
+    );
+    substituted.evidence_epoch = created.ownership_epoch;
+    substituted.response_ref = 903;
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.admitModelCompletion(&slot, substituted),
+    );
+    substituted.response_ref = 901;
+    substituted.response_digest = binding.hash(binding.Result, "substituted");
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.admitModelCompletion(&slot, substituted),
+    );
+    substituted.response_digest = response_digest;
+    substituted.attempt_id = 102;
+    try std.testing.expectError(
+        error.InvalidAttemptHistory,
+        created.admitModelCompletion(&slot, substituted),
+    );
     try std.testing.expectError(
         error.ModelCompletionContentMismatch,
         created.admitModelCompletion(&slot, .{
@@ -3968,11 +4978,8 @@ test "typed tool completion derives the Action and binds the exact Result" {
     });
     try created.storeContent(912, call);
 
-    const action_id = try actionOperationId(911);
     var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
     const wrong_descriptor = try bash_tool.encodeDescriptor(&descriptor_buffer, .{
-        .operation_id = action_id,
-        .operation_generation = 1,
         .workspace_path = created.workspacePath(),
         .working_directory = created.workspacePath(),
         .call = .{ .command = "false", .timeout_ms = 1_000 },
@@ -4004,14 +5011,12 @@ test "typed tool completion derives the Action and binds the exact Result" {
     try std.testing.expectEqual(@as(?ConversationEntry, null), created.pending_conversation);
 
     const descriptor = try bash_tool.encodeDescriptor(&descriptor_buffer, .{
-        .operation_id = action_id,
-        .operation_generation = 1,
         .workspace_path = created.workspacePath(),
         .working_directory = created.workspacePath(),
         .call = .{ .command = "true", .timeout_ms = 1_000 },
     });
     try created.storeContent(914, descriptor);
-    _ = try created.admitModelCompletion(&slot, .{
+    const completion = try created.admitModelCompletion(&slot, .{
         .operation_id = model_operation.id,
         .operation_generation = model_operation.generation,
         .attempt_id = 111,
@@ -4030,16 +5035,72 @@ test "typed tool completion derives the Action and binds the exact Result" {
             } },
         } },
     });
+    const action_id = completion.action.?.operation_id;
 
     try created.storeContent(915, "action result");
     const result_digest = binding.hash(binding.Result, "action result");
+    _ = try created.admitActionAttempt(.{
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .attempt_id = 121,
+    });
+    try created.publishCompletionEvidence(completion_inbox.bind(.{
+        .kind = .bash,
+        .session_id = created.session_id,
+        .ownership_epoch = created.ownership_epoch,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .attempt_id = 121,
+        .result_ref = 915,
+        .result_digest = result_digest,
+    }));
+    var action_result = ActionResultMaterial{
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .result_ref = 915,
+        .result_digest = result_digest,
+        .class = .ordinary,
+        .evidence = .{ .durable = .{
+            .attempt_id = 121,
+            .ownership_epoch = created.ownership_epoch,
+        } },
+    };
+    action_result.evidence.durable.ownership_epoch += 1;
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.admitActionResult(action_result),
+    );
+    action_result.evidence.durable.ownership_epoch = created.ownership_epoch;
+    action_result.result_ref = 916;
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.admitActionResult(action_result),
+    );
+    action_result.result_ref = 915;
+    action_result.result_digest = binding.hash(binding.Result, "substituted");
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.admitActionResult(action_result),
+    );
+    action_result.result_digest = result_digest;
+    action_result.evidence.durable.attempt_id = 122;
+    try std.testing.expectError(
+        error.InvalidAttemptHistory,
+        created.admitActionResult(action_result),
+    );
+    action_result.evidence.durable.attempt_id = 121;
     _ = try created.admitActionResult(.{
         .operation_id = action_id,
         .operation_generation = 1,
         .result_ref = 915,
         .result_digest = result_digest,
         .class = .ordinary,
-        .evidence = .immediate,
+        .evidence = .{ .durable = .{
+            .attempt_id = 121,
+            .ownership_epoch = created.ownership_epoch,
+        } },
     });
     var visible_buffer: [conversation.result_header_size + "success".len]u8 = undefined;
     const visible = try conversation.encodeToolResult(&visible_buffer, .{
@@ -4053,7 +5114,7 @@ test "typed tool completion derives the Action and binds the exact Result" {
         created.admitToolResult(&slot, .{
             .operation_id = action_id,
             .operation_generation = 1,
-            .attempt_id = 0,
+            .attempt_id = 121,
             .result_ref = 915,
             .result_digest = binding.hash(binding.Result, "substituted"),
             .visible_ref = 916,
@@ -4063,11 +5124,109 @@ test "typed tool completion derives the Action and binds the exact Result" {
     try created.admitToolResult(&slot, .{
         .operation_id = action_id,
         .operation_generation = 1,
-        .attempt_id = 0,
+        .attempt_id = 121,
         .result_ref = 915,
         .result_digest = result_digest,
         .visible_ref = 916,
     });
+}
+
+const PatchApprovalCase = enum {
+    exact,
+    substituted_intent_digest,
+    substituted_patch,
+};
+
+fn runPatchApprovalCase(
+    layout: *TestLayout,
+    session_id: u64,
+    prepared: patch_tool.Intent,
+    patch: []const u8,
+    case: PatchApprovalCase,
+) !void {
+    var created = try Session.createExact(
+        layout.sessions,
+        layout.scratch,
+        &layout.storage,
+        std.testing.io,
+        testConfig(layout.workspacePath(), session_id),
+    );
+    defer created.close();
+
+    try admitTestModelSource(&created, 1);
+    const patch_ref = 700 + session_id;
+    const intent_ref = 800 + session_id;
+    var intent = prepared;
+    intent.patch_ref = patch_ref;
+    intent.patch_digest = patch_tool.patchDigest(patch);
+    const stored_patch = switch (case) {
+        .exact, .substituted_intent_digest => patch,
+        .substituted_patch => "different patch bytes",
+    };
+    intent.intent_digest = patch_tool.intentDigest(intent);
+    var intent_buffer: [patch_tool.max_intent_size]u8 = undefined;
+    const intent_bytes = try patch_tool.encodeIntent(&intent_buffer, intent);
+    try created.storeContent(patch_ref, stored_patch);
+    try created.storeContent(intent_ref, intent_bytes);
+
+    const descriptor_digest: binding.Descriptor = .{ .apply_patch = switch (case) {
+        .substituted_intent_digest => binding.hash(binding.PatchIntent, "substituted"),
+        .exact, .substituted_patch => intent.intent_digest,
+    } };
+    _ = try created.commitFactsForTest(&.{session_transition.operationAdmitted(
+        created.operationContext(2, 1),
+        .{ .operation_id = 1, .generation = 1 },
+        intent_ref,
+        descriptor_digest,
+    )});
+
+    switch (case) {
+        .exact => {
+            const request = try created.requestApproval(2, 1);
+            try std.testing.expectEqual(patch_ref, request.descriptor_ref);
+            try std.testing.expect(binding.descriptorEql(descriptor_digest, request.descriptor_digest));
+            const view = try created.semanticView();
+            try std.testing.expectEqual(intent_ref, view.consequential.approval_required.?.binding_ref);
+            try std.testing.expectEqual(patch_ref, view.consequential.approval_required.?.descriptor_ref);
+        },
+        .substituted_intent_digest, .substituted_patch => try std.testing.expectError(
+            error.InvalidApprovalBinding,
+            created.requestApproval(2, 1),
+        ),
+    }
+}
+
+test "Session derives patch approval from the exact admitted Intent and patch" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var file = try layout.workspace.createFile(io, "note.txt", .{});
+    try file.writeStreamingAll(io, "old\n");
+    file.close(io);
+    try addTestGitPath(io, layout.workspacePath(), "note.txt");
+    const patch =
+        "diff --git a/note.txt b/note.txt\n" ++
+        "index 3367afd..3e75765 100644\n" ++
+        "--- a/note.txt\n" ++
+        "+++ b/note.txt\n" ++
+        "@@ -1 +1 @@\n" ++
+        "-old\n" ++
+        "+new\n";
+    var canonical_workspace: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const canonical_length = try std.Io.Dir.cwd().realPathFile(
+        io,
+        layout.workspacePath(),
+        &canonical_workspace,
+    );
+    const prepared = try patch_tool.prepare(
+        io,
+        canonical_workspace[0..canonical_length],
+        patch,
+        .{ .patch_ref = 1 },
+    );
+    try runPatchApprovalCase(&layout, 820, prepared, patch, .substituted_intent_digest);
+    try runPatchApprovalCase(&layout, 830, prepared, patch, .substituted_patch);
+    try runPatchApprovalCase(&layout, 840, prepared, patch, .exact);
 }
 
 test "Semantic View validates Action source and opaque Operation identity" {
@@ -4147,15 +5306,7 @@ test "Semantic View validates Action source and opaque Operation identity" {
         testDescriptor("model"),
     );
     var replaced = view;
-    try replaced.apply(reused_model);
-    action_admission.sequence = 3;
-    action_admission.facts[0] = session_transition.operationAdmitted(
-        action,
-        .{ .operation_id = model.operation_id, .generation = model.generation },
-        79,
-        action_descriptor,
-    );
-    try std.testing.expectError(error.InvalidSourceOperation, replaced.apply(action_admission));
+    try std.testing.expectError(error.OperationIdentityCollision, replaced.apply(reused_model));
 
     action_admission.sequence = 2;
     action_admission.facts[0] = session_transition.operationAdmitted(

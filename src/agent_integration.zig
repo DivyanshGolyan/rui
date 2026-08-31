@@ -284,9 +284,7 @@ fn restoredBashApprovalDispatchesExactDescriptor(
         &canonical_workspace,
     );
     const expected_workspace = canonical_workspace[0..canonical_workspace_length];
-    if (descriptor.operation_id != approval.operation_id or
-        descriptor.operation_generation != approval.operation_generation or
-        !std.mem.eql(u8, descriptor.workspace_path, expected_workspace) or
+    if (!std.mem.eql(u8, descriptor.workspace_path, expected_workspace) or
         !std.mem.eql(u8, descriptor.working_directory, expected_workspace) or
         !std.mem.eql(u8, descriptor.call.command, "printf bound > approved.txt") or
         descriptor.call.timeout_ms != 5000)

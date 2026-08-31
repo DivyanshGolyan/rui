@@ -393,7 +393,6 @@ fn addTestGraph(
 ) void {
     const plain_test_roots = [_][]const u8{
         "src/binding.zig",
-        "src/core_state.zig",
         "src/core_image.zig",
         "src/codex_provider.zig",
         "src/codex_harness_test.zig",

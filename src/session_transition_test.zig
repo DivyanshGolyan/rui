@@ -1,7 +1,6 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const completion_inbox = @import("completion_inbox.zig");
-const core_state = @import("core_state.zig");
 const transition = @import("session_transition.zig");
 
 test "pre-release fact kinds use one contiguous current numbering" {
@@ -167,12 +166,8 @@ test "Approval Required and Authorization have distinct canonical payloads" {
     );
 }
 
-test "a kind-specific transition carries canonical Core State without native layout" {
-    var state: [core_state.encoded_size]u8 = undefined;
-    try core_state.encode(&state, .{
-        .agent_id = 7,
-        .agent_generation = 1,
-    });
+test "a kind-specific transition carries opaque continuation bytes" {
+    const state: [transition.continuation_size]u8 = @splat(0xa5);
     const fact = transition.taskAdmitted(.{
         .agent_id = 7,
         .agent_generation = 1,

@@ -4,7 +4,6 @@ const bash_tool = @import("bash_tool.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const conversation = @import("conversation.zig");
 const core_image = @import("core_image.zig");
-const core_state = @import("core_state.zig");
 const host_store = @import("host_store.zig");
 const model_operation = @import("model_operation.zig");
 const model_contract = @import("model_contract.zig");
@@ -464,7 +463,7 @@ pub const FaultHook = struct {
 };
 
 const OperationIds = struct {
-    operation_id: u32,
+    operation_id: u64,
     attempt_id: u64,
     request_ref: u64,
     response_ref: u32,
@@ -496,7 +495,6 @@ const ModelCompletion = struct {
 const ExecutableTool = enum { bash, apply_patch };
 
 const AdmittedPatch = struct {
-    operation_id: u64,
     patch_ref: u64,
     patch_digest: binding.PatchDescriptor,
     patch_length: u32,
@@ -668,11 +666,8 @@ const ModelSlot = struct {
         const arguments = executable orelse return .generic;
         return switch (arguments) {
             .bash => |bash| blk: {
-                const tool_operation_id = try session_store.actionOperationId(completion.result);
                 const descriptor_ref = (@as(u64, 1) << 62) | @as(u32, @truncate(completion.result));
                 const descriptor: bash_tool.Descriptor = .{
-                    .operation_id = tool_operation_id,
-                    .operation_generation = 1,
                     .workspace_path = self.workspace_path,
                     .working_directory = self.workspace_path,
                     .call = .{ .command = bash.command, .timeout_ms = bash.timeout_ms },
@@ -689,7 +684,6 @@ const ModelSlot = struct {
                 const patch_ref = (@as(u64, 1) << 60) | @as(u32, @truncate(completion.result));
                 try self.session.storeContent(patch_ref, patch);
                 break :blk .{ .apply_patch = .{
-                    .operation_id = try session_store.actionOperationId(completion.result),
                     .patch_ref = patch_ref,
                     .patch_digest = patch_tool.patchDigest(patch),
                     .patch_length = @intCast(patch.len),
@@ -726,11 +720,8 @@ fn prepareToolAdmission(
             defer workspace.release() catch unreachable;
             const patch_bytes = try readAdmittedPatch(session, patch, &workspace.workspace.patch);
             std.debug.assert(!host.semantic_validation.isOccupied());
-            const tool_operation_id = patch.operation_id;
             const intent_ref = (@as(u64, 1) << 58) | @as(u32, @truncate(completion.result));
             const intent = try patch_tool.prepare(session.io, workspace_path, patch_bytes, .{
-                .operation_id = tool_operation_id,
-                .operation_generation = 1,
                 .patch_ref = patch.patch_ref,
             });
             try storePatchIntent(session, intent_ref, intent);
@@ -1040,26 +1031,19 @@ fn executeBashCall(
         else => return error.InvalidBashDescriptor,
     };
     if (!binding.eql(binding.BashDescriptor, bash_tool.descriptorDigest(descriptor_bytes), digest) or
-        admitted_descriptor.operation_id != tool_operation_id or
-        admitted_descriptor.operation_generation != 1 or
         !std.mem.eql(u8, admitted_descriptor.workspace_path, workspace_path))
     {
         return error.InvalidBashDescriptor;
     }
     const result_ref = (@as(u64, 1) << 61) | ids.response_ref;
     if (permission_mode == .ask) {
-        _ = try session.requestApproval(.{
-            .operation_id = tool_operation_id,
-            .operation_generation = 1,
-            .binding_ref = 0,
-            .descriptor_ref = descriptor_ref,
-        });
+        const request = try session.requestApproval(tool_operation_id, 1);
         if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .bash,
-            .operation_id = tool_operation_id,
-            .operation_generation = 1,
-            .descriptor_digest = .{ .bash = digest },
-            .descriptor_ref = descriptor_ref,
+            .operation_id = request.operation_id,
+            .operation_generation = request.operation_generation,
+            .descriptor_digest = request.descriptor_digest,
+            .descriptor_ref = request.descriptor_ref,
         });
         return error.PermissionInputRequired;
     }
@@ -1115,30 +1099,14 @@ fn requestPatchPermission(
     const tool_operation_id = history.operation_id;
     const admitted = history.descriptor orelse return error.MissingActionDescriptor;
     const intent_ref = admitted.descriptor_ref;
-    var intent_buffer: [patch_tool.max_intent_size]u8 = undefined;
-    const intent = try readPatchIntent(session, intent_ref, &intent_buffer);
-    const digest = switch (admitted.descriptor_digest) {
-        .apply_patch => |value| value,
-        else => return error.InvalidPatchIntent,
-    };
-    if (intent.operation_id != tool_operation_id or intent.operation_generation != 1 or
-        !binding.eql(binding.PatchIntent, intent.intent_digest, digest))
-    {
-        return error.InvalidPatchIntent;
-    }
     if (permission_mode == .ask) {
-        _ = try session.requestApproval(.{
-            .operation_id = tool_operation_id,
-            .operation_generation = 1,
-            .binding_ref = intent_ref,
-            .descriptor_ref = intent.patch_ref,
-        });
+        const request = try session.requestApproval(tool_operation_id, 1);
         if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .apply_patch,
-            .operation_id = tool_operation_id,
-            .operation_generation = 1,
-            .descriptor_digest = .{ .apply_patch = intent.intent_digest },
-            .descriptor_ref = intent.patch_ref,
+            .operation_id = request.operation_id,
+            .operation_generation = request.operation_generation,
+            .descriptor_digest = request.descriptor_digest,
+            .descriptor_ref = request.descriptor_ref,
         });
         return error.PermissionInputRequired;
     }
@@ -1450,9 +1418,7 @@ pub fn resolvePermission(
                 .bash => |value| value,
                 else => return error.StalePermissionDecision,
             };
-            if (bash_descriptor.operation_id != expected_operation_id or
-                bash_descriptor.operation_generation != 1 or
-                !std.mem.eql(u8, bash_descriptor.workspace_path, session.workspacePath()) or
+            if (!std.mem.eql(u8, bash_descriptor.workspace_path, session.workspacePath()) or
                 !binding.eql(
                     binding.BashDescriptor,
                     bash_tool.descriptorDigest(descriptor_bytes),
@@ -1535,21 +1501,6 @@ pub fn resolvePermission(
             );
         },
         .apply_patch => {
-            var intent_bytes: [patch_tool.max_intent_size]u8 = undefined;
-            const intent_slice = try readBoundedContent(session, pending.binding_ref, &intent_bytes);
-            const intent = try patch_tool.decodeIntent(intent_slice);
-            const patch_descriptor = switch (descriptor.descriptor_digest) {
-                .apply_patch => |value| value,
-                else => return error.StalePermissionDecision,
-            };
-            if (descriptor.descriptor_ref != pending.binding_ref or
-                intent.operation_id != expected_operation_id or
-                intent.operation_generation != 1 or
-                intent.patch_ref != pending.descriptor_ref or
-                !binding.eql(binding.PatchIntent, intent.intent_digest, patch_descriptor))
-            {
-                return error.StalePermissionDecision;
-            }
             _ = try session.authorizeAction(.{
                 .operation_id = expected_operation_id,
                 .operation_generation = 1,
@@ -1846,8 +1797,7 @@ fn reconcilePatch(
     };
     var intent_bytes: [patch_tool.max_intent_size]u8 = undefined;
     const intent = try readPatchIntent(session, validated.descriptor_ref, &intent_bytes);
-    if (intent.operation_id != operation_id or intent.operation_generation != 1 or
-        !binding.eql(binding.PatchIntent, intent.intent_digest, patch_descriptor) or
+    if (!binding.eql(binding.PatchIntent, intent.intent_digest, patch_descriptor) or
         !std.mem.eql(u8, intent.workspace_path, workspace_path))
     {
         return error.InvalidPatchHistory;
@@ -2267,7 +2217,7 @@ fn patchStatusName(status: patch_tool.ResultStatus) []const u8 {
 
 fn durableCompletion(
     session: *session_store.Session,
-    operation: core_image.Operation,
+    operation: session_store.Operation,
 ) !ModelCompletion {
     const operation_id = operation.id;
     const operation_generation = operation.generation;
@@ -2503,10 +2453,12 @@ fn contentDigest(
     return hasher.final();
 }
 
-fn allocateOperationIds(io: std.Io, session: *const session_store.Session) !OperationIds {
+fn allocateOperationIds(io: std.Io, session: *session_store.Session) !OperationIds {
+    const operation_id = try session.nextModelOperationId();
     for (0..8) |_| {
         var ids: OperationIds = undefined;
         io.random(std.mem.asBytes(&ids));
+        ids.operation_id = operation_id;
         ids.final_ref = finalReference(ids.response_ref);
         if (ids.operation_id == 0 or ids.attempt_id == 0 or ids.request_ref == 0 or
             ids.response_ref == 0)
@@ -2710,7 +2662,7 @@ test "Host owns one semantic validation workspace independent of Activation Slot
     try std.testing.expectEqual(@as(usize, 256_224), @sizeOf(SemanticValidationWorkspacePool));
     try std.testing.expectEqual(@as(usize, 16_384), @sizeOf(PatchWorkspace));
     try std.testing.expectEqual(@as(usize, 16_408), @sizeOf(PatchWorkspacePool));
-    try std.testing.expectEqual(@sizeOf(core_state.State), @sizeOf(core_image.ActivationSlot));
+    try std.testing.expectEqual(core_image.slot_size, @sizeOf(core_image.ActivationSlot));
     try std.testing.expectEqual(
         @sizeOf(SemanticValidationWorkspacePool),
         @sizeOf(@TypeOf(host.semantic_validation)),

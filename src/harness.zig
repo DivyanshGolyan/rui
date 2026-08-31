@@ -1,7 +1,7 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
-const core_state = @import("core_state.zig");
+const core_image = @import("core_image.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const conversation = @import("conversation.zig");
 const deterministic_provider = @import("deterministic_provider.zig");
@@ -754,11 +754,9 @@ const HarnessState = struct {
         const session = &self.session.?;
         var response_ref: u64 = 0;
         const failure = failure: {
-            const ledger = session.semanticView() catch break :failure .none;
-            const encoded = ledger.last_core orelse break :failure .none;
-            const state = core_state.decode(&encoded) catch break :failure .none;
-            response_ref = state.response_ref;
-            break :failure state.response_failure;
+            const observation = session.failureObservation() catch break :failure .none;
+            response_ref = observation.response_ref;
+            break :failure observation.failure;
         };
         var projection: Projection = .{
             .kind = .failure,
@@ -895,6 +893,11 @@ fn harnessState(harness: *Harness) *HarnessState {
     return @ptrCast(@alignCast(harness));
 }
 
+fn testContinuation(session: *session_store.Session) !session_store.ContinuationView {
+    var slot: core_image.ActivationSlot = undefined;
+    return session.continuationView(&slot);
+}
+
 fn openTestRuntime(tmp: *const std.testing.TmpDir) !*HostRuntime {
     return openTestRuntimeConfigured(tmp, .{});
 }
@@ -918,7 +921,7 @@ fn openTestRuntimeConfigured(
 }
 
 test "Harness owner retains only live lifecycle state" {
-    try std.testing.expectEqual(@as(usize, 7_944), Harness.residentOwnerBytes());
+    try std.testing.expectEqual(@as(usize, 7_952), Harness.residentOwnerBytes());
 }
 
 test "Harness close releases opaque transient scratch before retirement" {
@@ -1782,9 +1785,8 @@ test "typed durable model failures share one failed Harness projection" {
         try std.testing.expectEqual(case.expected, failed.projections[0].failure);
         try std.testing.expectEqual(@as(u8, 1), provider.calls);
 
-        const ledger = try harnessState(owner).session.?.semanticView();
-        const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
-        try std.testing.expectEqual(case.expected, state.response_failure);
+        const state = try testContinuation(&harnessState(owner).session.?);
+        try std.testing.expectEqual(case.expected, state.response.failure);
         owner.close();
     }
 }
@@ -1878,9 +1880,8 @@ test "built-in argument rejection becomes one durable terminal failure" {
         _ = try owner.drive();
         const failed = try owner.drive();
         try std.testing.expectEqual(State.failed, failed.state);
-        const ledger = try harnessState(owner).session.?.semanticView();
-        const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
-        try std.testing.expectEqual(model_protocol.Failure.malformed, state.response_failure);
+        const state = try testContinuation(&harnessState(owner).session.?);
+        try std.testing.expectEqual(model_protocol.Failure.malformed, state.response.failure);
         try std.testing.expectEqual(@as(u64, 1), harnessState(owner).session.?.entryCount());
         owner.close();
 
@@ -1943,17 +1944,16 @@ test "input request fails terminally until the durable interaction layer exists"
     const failed = try owner.drive();
     try std.testing.expectEqual(State.failed, failed.state);
     try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
-    const ledger = try owner_state.session.?.semanticView();
-    const durable_core = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
-    try std.testing.expectEqual(core_state.TaskPhase.failed, durable_core.task_phase);
-    try std.testing.expectEqual(model_protocol.Disposition.input_request, durable_core.response_disposition);
-    try std.testing.expect(durable_core.response_ref != 0);
-    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_text);
-    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_tool_key);
-    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_arguments);
+    const durable_core = try testContinuation(&owner_state.session.?);
+    try std.testing.expectEqual(session_store.TaskPhase.failed, durable_core.task.phase);
+    try std.testing.expectEqual(model_protocol.Disposition.input_request, durable_core.response.disposition);
+    try std.testing.expect(durable_core.response.content_ref != 0);
+    try std.testing.expectEqual(session_store.ContentWindow{}, durable_core.response.text);
+    try std.testing.expectEqual(session_store.ContentWindow{}, durable_core.response.tool_key);
+    try std.testing.expectEqual(@as(u32, 0), durable_core.response.arguments.length);
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     const response_bytes = try owner_state.session.?.readContent(
-        durable_core.response_ref,
+        durable_core.response.content_ref,
         0,
         &response_buffer,
     );
