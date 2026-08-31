@@ -139,6 +139,34 @@ pub const ApprovalRequiredRecord = struct {
     descriptor_digest: binding.Descriptor,
 };
 
+pub const ContentReferenceRole = enum {
+    direct,
+    patch_intent,
+};
+
+pub const ContentReference = struct {
+    reference: u64,
+    role: ContentReferenceRole,
+};
+
+pub const max_content_references_per_fact: usize = 2;
+
+pub const ContentReferences = struct {
+    values: [max_content_references_per_fact]ContentReference = undefined,
+    count: u2 = 0,
+
+    pub fn slice(self: *const ContentReferences) []const ContentReference {
+        return self.values[0..self.count];
+    }
+
+    fn append(self: *ContentReferences, reference: u64, role: ContentReferenceRole) void {
+        if (reference == 0) return;
+        std.debug.assert(self.count < self.values.len);
+        self.values[self.count] = .{ .reference = reference, .role = role };
+        self.count += 1;
+    }
+};
+
 pub const Fact = union(Kind) {
     task_admitted: TaskRecord,
     operation_submitted: OperationRecord,
@@ -170,6 +198,35 @@ pub const Fact = union(Kind) {
             .result_applied => |value| value.operation.agent,
             .approval_required => |value| value.operation.agent,
         };
+    }
+
+    /// Returns every durable content reference carried by this Fact. This is
+    /// the sole Fact-to-content relationship definition; validation and
+    /// persistence may apply different policies to the same bounded mapping.
+    pub fn contentReferences(self: Fact) ContentReferences {
+        var references: ContentReferences = .{};
+        switch (self) {
+            .task_admitted => |value| references.append(value.content_ref, .direct),
+            .operation_submitted, .operation_accepted => |value| references.append(
+                value.descriptor_ref,
+                if (std.meta.activeTag(value.descriptor_digest) == .apply_patch)
+                    .patch_intent
+                else
+                    .direct,
+            ),
+            .attempt_admitted => |value| references.append(value.descriptor_ref, .direct),
+            .authorization => |value| references.append(value.permission_ref, .direct),
+            .result => |value| references.append(value.result_ref, .direct),
+            .conversation_advanced => |value| references.append(value.content_ref, .direct),
+            .outcome => |value| references.append(value.content_ref, .direct),
+            .result_applied => |value| references.append(value.result_ref, .direct),
+            .approval_required => |value| {
+                references.append(value.binding_ref, .direct);
+                references.append(value.descriptor_ref, .direct);
+            },
+            .cancellation, .shutdown => {},
+        }
+        return references;
     }
 };
 
@@ -296,6 +353,28 @@ pub const Transaction = struct {
 
     pub fn factSlice(self: *const Transaction) []const Fact {
         return self.facts[0..self.fact_count];
+    }
+
+    pub fn referencesContent(self: *const Transaction, reference: u64) bool {
+        for (self.factSlice()) |fact| {
+            const references = fact.contentReferences();
+            for (references.slice()) |candidate| {
+                if (candidate.reference == reference) return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn referencesPatchIntent(self: *const Transaction, reference: u64) bool {
+        for (self.factSlice()) |fact| {
+            const references = fact.contentReferences();
+            for (references.slice()) |candidate| {
+                if (candidate.reference == reference and candidate.role == .patch_intent) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 };
 

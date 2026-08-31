@@ -33,28 +33,41 @@ pub const Lease = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     execution: *lifecycle.Host,
+    credit: lifecycle.Host.ActiveCredit,
     active: bool = true,
 
     pub fn acquire(runtime: *HostRuntime) !Lease {
-        try retainHarness(runtime);
         const value = state(runtime);
+        var credit = try value.execution.reserveActiveCredit();
+        errdefer credit.release();
+        try retainHarness(runtime);
         return .{
             .runtime = runtime,
             .io = value.io,
             .allocator = value.allocator,
             .execution = &value.execution,
+            .credit = credit,
         };
     }
 
-    pub fn createSession(self: Lease, config: session_store.Config) !session_store.Session {
+    pub fn createSession(
+        self: Lease,
+        scratch: *session_store.TransientScratch,
+        config: session_store.Config,
+    ) !session_store.Session {
         const value = state(self.runtime);
-        return session_store.Session.create(value.state_root, &value.storage, self.io, config);
+        return session_store.Session.create(value.state_root, scratch, &value.storage, self.io, config);
     }
 
-    pub fn restoreSession(self: Lease, session_id: u64) !session_store.Restored {
+    pub fn restoreSession(
+        self: Lease,
+        scratch: *session_store.TransientScratch,
+        session_id: u64,
+    ) !session_store.Session {
         const value = state(self.runtime);
         return session_store.Session.openExisting(
             value.state_root,
+            scratch,
             &value.storage,
             self.io,
             session_id,
@@ -71,6 +84,10 @@ pub const Lease = struct {
 
     pub fn release(self: *Lease) void {
         if (!self.active) return;
+        // Return the admission token before dropping the retained runtime
+        // owner: HostRuntime.close may destroy the Host as soon as that owner
+        // count reaches zero.
+        self.credit.release();
         releaseHarness(self.runtime);
         self.active = false;
     }

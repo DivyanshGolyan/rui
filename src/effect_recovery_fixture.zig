@@ -5,6 +5,7 @@ const completion_inbox = @import("completion_inbox.zig");
 const deterministic_provider = @import("deterministic_provider.zig");
 const harness = @import("harness.zig");
 const host_runtime = @import("host_runtime.zig");
+const host_store = @import("host_store.zig");
 const model_operation = @import("model_operation.zig");
 const model_protocol = @import("model_protocol.zig");
 const session_store = @import("session.zig");
@@ -14,21 +15,29 @@ const task = "Recover one deterministic external effect.";
 const answer = "Recovered with a new model Attempt.";
 const crash_exit_status: u8 = 86;
 const completion_crash_exit_status: u8 = 87;
+const transaction_crash_exit_status: u8 = 88;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len != 4) return error.InvalidArguments;
     const mode = args[1];
-    const runtime = try harness.HostRuntime.open(init.io, allocator, args[2], .{});
+    var transaction_crash: TransactionProcessCrash = .{ .io = init.io };
+    var runtime_config: harness.HostRuntimeConfig = .{};
+    if (std.mem.eql(u8, mode, "crash-transaction-model")) {
+        runtime_config.storage.fault = transaction_crash.storageHook();
+    }
+    const runtime = try harness.HostRuntime.open(init.io, allocator, args[2], runtime_config);
     defer runtime.close() catch unreachable;
 
     if (std.mem.eql(u8, mode, "start-model")) {
         try startModel(init.io, runtime, args[3]);
-    } else if (std.mem.eql(u8, mode, "crash-sealed-model")) {
-        try crashSealedModel(init.io, runtime, args[3]);
-    } else if (std.mem.eql(u8, mode, "recover-sealed-model")) {
-        try recoverSealedModel(init.io, runtime, try parseCrashIdentity(args[3]));
+    } else if (std.mem.eql(u8, mode, "crash-prepublication-model")) {
+        try crashPrepublicationModel(init.io, runtime, args[3]);
+    } else if (std.mem.eql(u8, mode, "crash-transaction-model")) {
+        try crashTransactionModel(runtime, args[3], &transaction_crash);
+    } else if (std.mem.eql(u8, mode, "recover-prepublication-model")) {
+        try recoverPrepublicationModel(init.io, runtime, try parseCrashIdentity(args[3]));
     } else if (std.mem.eql(u8, mode, "crash-published-model")) {
         try crashPublishedModel(init.io, runtime, args[3]);
     } else if (std.mem.eql(u8, mode, "recover-published-model")) {
@@ -48,8 +57,12 @@ pub fn main(init: std.process.Init) !void {
     } else return error.InvalidMode;
 }
 
-fn crashSealedModel(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !void {
-    const SealedOrphanProvider = struct {
+fn crashTransactionModel(
+    runtime: *harness.HostRuntime,
+    workspace: []const u8,
+    crash: *TransactionProcessCrash,
+) !void {
+    const TransactionProvider = struct {
         response_ref: u64 = 0,
 
         fn provider(self: *@This()) model_operation.Provider {
@@ -64,17 +77,56 @@ fn crashSealedModel(io: std.Io, runtime: *harness.HostRuntime, workspace: []cons
             const self: *@This() = @ptrCast(@alignCast(context));
             const provider_io: *model_operation.ProviderIo = @ptrCast(@alignCast(response.context));
             self.response_ref = provider_io.response_ref;
-            try model_protocol.writeText(response, "sealed orphan answer");
+            try model_protocol.writeText(response, "transaction candidate");
             return .candidate;
         }
     };
-    var provider: SealedOrphanProvider = .{};
+    var provider: TransactionProvider = .{};
+    crash.response_ref = &provider.response_ref;
+    var owner = try harness.Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .create = .{
+            .workspace_path = workspace,
+            .model_binding = .{ .model = "fixture:prepublication", .provider = provider.provider() },
+            .task = task,
+            .fault = crash.lifecycleHook(),
+        } },
+    });
+    defer owner.close();
+    const identity = try owner.drive();
+    crash.session_id = try sessionProjection(&identity);
+    if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
+    for (0..48) |_| _ = try owner.drive();
+    return error.CrashBoundaryNotReached;
+}
+
+fn crashPrepublicationModel(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !void {
+    const PrepublicationProvider = struct {
+        response_ref: u64 = 0,
+
+        fn provider(self: *@This()) model_operation.Provider {
+            return .{ .context = self, .dispatch = dispatch };
+        }
+
+        fn dispatch(
+            context: *anyopaque,
+            _: model_operation.RequestCursor,
+            response: model_operation.CandidateWriter,
+        ) anyerror!model_operation.DispatchOutcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const provider_io: *model_operation.ProviderIo = @ptrCast(@alignCast(response.context));
+            self.response_ref = provider_io.response_ref;
+            try model_protocol.writeText(response, "pre-publication candidate");
+            return .candidate;
+        }
+    };
+    var provider: PrepublicationProvider = .{};
     var crash: ProcessCrash = .{ .io = io, .response_ref = &provider.response_ref };
     var owner = try harness.Harness.open(.{
         .runtime = runtime,
         .mode = .{ .create = .{
             .workspace_path = workspace,
-            .model_binding = .{ .model = "fixture:sealed-orphan", .provider = provider.provider() },
+            .model_binding = .{ .model = "fixture:prepublication", .provider = provider.provider() },
             .task = task,
             .fault = crash.hook(),
         } },
@@ -87,29 +139,28 @@ fn crashSealedModel(io: std.Io, runtime: *harness.HostRuntime, workspace: []cons
     return error.CrashBoundaryNotReached;
 }
 
-fn recoverSealedModel(io: std.Io, runtime: *harness.HostRuntime, identity: CrashIdentity) !void {
+fn recoverPrepublicationModel(io: std.Io, runtime: *harness.HostRuntime, identity: CrashIdentity) !void {
     const session_id = identity.session_id;
     {
         var lease = try host_runtime.Lease.acquire(runtime);
         defer lease.release();
-        var restored = try lease.restoreSession(session_id);
-        defer restored.session.close();
-        while ((try lease.recoverSemanticWindow(&restored.session, 32)).more) {}
+        const scratch = try session_store.allocateTransientScratch(lease.allocator);
+        defer session_store.destroyTransientScratch(lease.allocator, lease.io, scratch);
+        var restored = try lease.restoreSession(scratch, session_id);
+        defer restored.close();
+        while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
 
         var audit: ModelAttemptAudit = .{};
-        const ledger = try restored.session.inspectSemantic(&audit, ModelAttemptAudit.apply);
+        const ledger = try restored.inspectSemantic(&audit, ModelAttemptAudit.apply);
         if (audit.count != 1) return error.ModelAttemptCountMismatch;
-        if (try restored.session.scanCompletionEvidence(undefined, ignoreCompletion) != 0) {
-            return error.SealedOrphanGainedCompletionAuthority;
+        if (try restored.scanCompletionEvidence(undefined, ignoreCompletion) != 0) {
+            return error.PrepublicationCrashGainedCompletionAuthority;
         }
         _ = ledger.last_core orelse return error.MissingLedgerCoreState;
-        var bytes: [model_protocol.max_response_size]u8 = undefined;
-        var expected_bytes: [model_protocol.max_response_size]u8 = undefined;
-        if (!std.mem.eql(
-            u8,
-            try restored.session.readBlob(identity.response_ref, 0, &bytes),
-            try model_protocol.encodeText(&expected_bytes, "sealed orphan answer"),
-        )) return error.SealedOrphanBytesChanged;
+        var bytes: [1]u8 = undefined;
+        if (restored.readContent(identity.response_ref, 0, &bytes)) |_| {
+            return error.TransientCandidateBecameDurable;
+        } else |err| if (err != error.FileNotFound) return err;
     }
 
     var fixture: deterministic_provider.Fixture = .{ .expected_task = task, .final_answer = answer };
@@ -117,7 +168,7 @@ fn recoverSealedModel(io: std.Io, runtime: *harness.HostRuntime, identity: Crash
         .runtime = runtime,
         .mode = .{ .restore = .{
             .session_id = session_id,
-            .model_binding = .{ .model = "fixture:sealed-orphan", .provider = fixture.provider() },
+            .model_binding = .{ .model = "fixture:prepublication", .provider = fixture.provider() },
         } },
     });
     defer owner.close();
@@ -186,11 +237,13 @@ fn recoverPublishedModel(io: std.Io, runtime: *harness.HostRuntime, session_id: 
         };
         var lease = try host_runtime.Lease.acquire(runtime);
         defer lease.release();
-        var restored = try lease.restoreSession(session_id);
-        defer restored.session.close();
-        while ((try lease.recoverSemanticWindow(&restored.session, 32)).more) {}
+        const scratch = try session_store.allocateTransientScratch(lease.allocator);
+        defer session_store.destroyTransientScratch(lease.allocator, lease.io, scratch);
+        var restored = try lease.restoreSession(scratch, session_id);
+        defer restored.close();
+        while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
         var capture: CapturedCompletion = .{};
-        if (try restored.session.scanCompletionEvidence(&capture, CapturedCompletion.apply) != 1) {
+        if (try restored.scanCompletionEvidence(&capture, CapturedCompletion.apply) != 1) {
             return error.CommittedCompletionMissing;
         }
         const envelope = capture.envelope orelse return error.CommittedCompletionMissing;
@@ -198,7 +251,7 @@ fn recoverPublishedModel(io: std.Io, runtime: *harness.HostRuntime, session_id: 
         var expected_bytes: [model_protocol.max_response_size]u8 = undefined;
         if (!std.mem.eql(
             u8,
-            try restored.session.readBlob(envelope.result_ref, 0, &bytes),
+            try restored.readContent(envelope.result_ref, 0, &bytes),
             try model_protocol.encodeText(&expected_bytes, "published exact answer"),
         )) return error.PublishedCaptureChanged;
     }
@@ -224,7 +277,6 @@ fn recoverPublishedModel(io: std.Io, runtime: *harness.HostRuntime, session_id: 
             var reader = try owner.openProjectionContent(projection);
             var bytes: [64]u8 = undefined;
             const content = try reader.readWindow(0, &bytes);
-            reader.close();
             if (!std.mem.eql(
                 u8,
                 content,
@@ -303,35 +355,40 @@ fn finishModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void
 }
 
 fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
-    var lease = try host_runtime.Lease.acquire(runtime);
-    var restored = try lease.restoreSession(session_id);
-    while ((try lease.recoverSemanticWindow(&restored.session, 32)).more) {}
-    var audit: ModelAttemptAudit = .{};
-    const before = try restored.session.inspectSemantic(&audit, ModelAttemptAudit.apply);
-    if (audit.count != 2) return error.ModelAttemptCountMismatch;
+    const before, const audit, const envelope = initial: {
+        var lease = try host_runtime.Lease.acquire(runtime);
+        defer lease.release();
+        const scratch = try session_store.allocateTransientScratch(lease.allocator);
+        defer session_store.destroyTransientScratch(lease.allocator, lease.io, scratch);
+        var restored = try lease.restoreSession(scratch, session_id);
+        defer restored.close();
+        while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
+        var audit: ModelAttemptAudit = .{};
+        const before = try restored.inspectSemantic(&audit, ModelAttemptAudit.apply);
+        if (audit.count != 2) return error.ModelAttemptCountMismatch;
 
-    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
-    const response = try model_protocol.encodeText(&response_buffer, "late original response");
-    const result_ref = (@as(u64, 1) << 54) | (audit.ids[0] & ((@as(u64, 1) << 54) - 1));
-    try restored.session.storeBlob(result_ref, response);
-    const envelope = completion_inbox.bind(.{
-        .kind = .model,
-        .session_id = session_id,
-        .ownership_epoch = audit.ownership_epoch,
-        .agent_id = restored.session.agent_id,
-        .agent_generation = 1,
-        .operation_id = audit.operation_id,
-        .operation_generation = audit.operation_generation,
-        .attempt_id = audit.ids[0],
-        .result_ref = result_ref,
-        .result_digest = binding.hash(binding.Result, response),
-    });
-    try restored.session.publishCompletionEvidence(envelope);
-    if (try restored.session.scanCompletionEvidence(undefined, rejectPendingCompletion) != 0) {
-        return error.LateEvidenceRemainedPending;
-    }
-    restored.session.close();
-    lease.release();
+        var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+        const response = try model_protocol.encodeText(&response_buffer, "late original response");
+        const result_ref = (@as(u64, 1) << 54) | (audit.ids[0] & ((@as(u64, 1) << 54) - 1));
+        try restored.storeContent(result_ref, response);
+        const envelope = completion_inbox.bind(.{
+            .kind = .model,
+            .session_id = session_id,
+            .ownership_epoch = audit.ownership_epoch,
+            .agent_id = restored.agent_id,
+            .agent_generation = 1,
+            .operation_id = audit.operation_id,
+            .operation_generation = audit.operation_generation,
+            .attempt_id = audit.ids[0],
+            .result_ref = result_ref,
+            .result_digest = binding.hash(binding.Result, response),
+        });
+        try restored.publishCompletionEvidence(envelope);
+        if (try restored.scanCompletionEvidence(undefined, rejectPendingCompletion) != 0) {
+            return error.LateEvidenceRemainedPending;
+        }
+        break :initial .{ before, audit, envelope };
+    };
 
     var owner = try harness.Harness.open(.{
         .runtime = runtime,
@@ -349,11 +406,13 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
 
         var verification_lease = try host_runtime.Lease.acquire(runtime);
         defer verification_lease.release();
-        var verified = try verification_lease.restoreSession(session_id);
-        defer verified.session.close();
-        while ((try verification_lease.recoverSemanticWindow(&verified.session, 32)).more) {}
+        const verification_scratch = try session_store.allocateTransientScratch(verification_lease.allocator);
+        defer session_store.destroyTransientScratch(verification_lease.allocator, verification_lease.io, verification_scratch);
+        var verified = try verification_lease.restoreSession(verification_scratch, session_id);
+        defer verified.close();
+        while ((try verification_lease.recoverSemanticWindow(&verified, 32)).more) {}
         var after_audit: ModelAttemptAudit = .{};
-        const after = try verified.session.inspectSemantic(&after_audit, ModelAttemptAudit.apply);
+        const after = try verified.inspectSemantic(&after_audit, ModelAttemptAudit.apply);
         if (after.last_sequence != before.last_sequence or after_audit.count != audit.count) {
             return error.LateEvidenceAdvancedSession;
         }
@@ -489,11 +548,13 @@ fn parseCrashIdentity(text: []const u8) !CrashIdentity {
 fn expectModelAttempts(runtime: *harness.HostRuntime, session_id: u64, expected: u8) !void {
     var lease = try host_runtime.Lease.acquire(runtime);
     defer lease.release();
-    var restored = try lease.restoreSession(session_id);
-    defer restored.session.close();
-    while ((try lease.recoverSemanticWindow(&restored.session, 32)).more) {}
+    const scratch = try session_store.allocateTransientScratch(lease.allocator);
+    defer session_store.destroyTransientScratch(lease.allocator, lease.io, scratch);
+    var restored = try lease.restoreSession(scratch, session_id);
+    defer restored.close();
+    while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
     var audit: ModelAttemptAudit = .{};
-    _ = try restored.session.inspectSemantic(&audit, ModelAttemptAudit.apply);
+    _ = try restored.inspectSemantic(&audit, ModelAttemptAudit.apply);
     if (audit.count != expected) return error.ModelAttemptCountMismatch;
 }
 
@@ -578,5 +639,37 @@ const CompletionProcessCrash = struct {
 
     fn hook(self: *CompletionProcessCrash) harness.FaultHook {
         return .{ .context = self, .reached = reached };
+    }
+};
+
+const TransactionProcessCrash = struct {
+    io: std.Io,
+    session_id: u64 = 0,
+    response_ref: ?*const u64 = null,
+    armed: bool = false,
+
+    fn lifecycleReached(context: *anyopaque, boundary: harness.FaultBoundary) anyerror!void {
+        if (boundary != .after_model_dispatch) return;
+        const self: *TransactionProcessCrash = @ptrCast(@alignCast(context));
+        self.armed = true;
+    }
+
+    fn storageReached(context: *anyopaque, boundary: host_store.FaultBoundary) anyerror!void {
+        const self: *TransactionProcessCrash = @ptrCast(@alignCast(context));
+        if (!self.armed or boundary != .before_commit) return;
+        const response_ref = self.response_ref orelse std.process.exit(transaction_crash_exit_status + 1);
+        writeCrashIdentity(self.io, .{
+            .session_id = self.session_id,
+            .response_ref = response_ref.*,
+        }) catch std.process.exit(transaction_crash_exit_status + 1);
+        std.process.exit(transaction_crash_exit_status);
+    }
+
+    fn lifecycleHook(self: *TransactionProcessCrash) harness.FaultHook {
+        return .{ .context = self, .reached = lifecycleReached };
+    }
+
+    fn storageHook(self: *TransactionProcessCrash) host_store.FaultHook {
+        return .{ .context = self, .reached = storageReached };
     }
 };

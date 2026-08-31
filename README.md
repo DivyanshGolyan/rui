@@ -75,7 +75,7 @@ mechanics separately. `Harness.open` returns an opaque pointer-stable owner back
 destroys that owner; the runtime does not retain complete closed handles. Projections are data-only and
 reopen content through their live Harness rather than retaining internal pointers. Each Session retains exact create and resume identity, durable ownership
 epochs, one replayable resident value reduced from its ordered semantic ledger, and a linear V1 conversation. Dormant Sessions
-retain rows and blob references rather than SQLite connections or resident object graphs.
+retain only SQLite rows rather than connections, per-Session directories, locks, or resident object graphs.
 
 The memory contract applies to OnePage-owned orchestration resources. Model-requested Bash processes
 may intentionally use arbitrary workload memory; that usage is reported separately rather than constrained
@@ -187,10 +187,10 @@ multi-fact transactions now live behind the same serialized Storage Owner. Sessi
 typed transaction; storage canonically encodes it and derives every relational write. SQLite assigns
 Completion Inbox identity, and the transaction that publishes a terminal Result associates its
 immutable evidence. Only pending relevant evidence consumes the enforced 4,096-row per-Session Inbox bound; consumed evidence is excluded from recovery. Per-Session WAL,
-Inbox, Conversation, checkpoint, and manifest files are no longer production storage paths.
+Inbox, Conversation, checkpoint, manifest, and blob-tree files are no longer production storage paths.
 
 Implemented authoritative descriptor, Patch Intent, preimage, expected-postimage,
-Result, Completion, immutable-blob, and ledger-record bytes use distinct versioned SHA-256 binding
+Result, Completion, immutable-content, and ledger-record bytes use distinct versioned SHA-256 binding
 types. Bash persists one descriptor binding its canonical Workspace and working directory, fixed
 environment authority, timeout, command, Operation identity, and generation. Patch preparation uses Git
 in a private scratch copy to prepare the expected postimage without mutating the Workspace, then stores

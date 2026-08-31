@@ -201,7 +201,7 @@ same design can retain bounded input-request fields. None of this scratch is rea
 authoritative.
 
 After validation the existing encoder already knows every length needed by the header, so it writes
-the canonical header and replays the selected buffer into the existing append-only candidate draft.
+the canonical header and replays the selected buffer into the append-only provisional capture.
 SSE framing and JSON parsing remain inside the Codex adapter; the shared Provider seam and canonical
 format do not change.
 

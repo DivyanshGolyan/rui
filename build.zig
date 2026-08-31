@@ -319,6 +319,22 @@ pub fn build(b: *std.Build) void {
     const check_codex_live_script = b.addSystemCommand(&.{ "sh", "-n" });
     check_codex_live_script.addFileArg(b.path("src/codex_live_repair.sh"));
     check_step.dependOn(&check_codex_live_script.step);
+
+    const host_store_density = addNativeExecutable(
+        b,
+        "onepage-host-store-density",
+        "src/host_store_density.zig",
+        native_target,
+        .ReleaseSafe,
+    );
+    const host_store_density_step = b.step(
+        "host-store-density",
+        "Measure SQLite content density at 100, 1,000, and 10,000 Dormant Sessions",
+    );
+    host_store_density_step.dependOn(&b.addRunArtifact(host_store_density).step);
+    // Keep the machine-sensitive population sweep opt-in while check still
+    // verifies that the fixture compiles with the production Host Store.
+    check_step.dependOn(&host_store_density.step);
 }
 
 fn addTestGraph(
@@ -617,6 +633,7 @@ fn usesHostStore(root: []const u8) bool {
         "src/effect_recovery_fixture.zig",
         "src/harness.zig",
         "src/host_runtime_lock_fixture.zig",
+        "src/host_store_density.zig",
         "src/host_store_test.zig",
         "src/model_operation.zig",
         "src/patch_recovery_fixture.zig",

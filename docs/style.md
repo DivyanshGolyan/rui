@@ -25,7 +25,7 @@ deferred explicitly.
 | --- | --- |
 | Core | No I/O, general-purpose allocation, recursion, or reentrant activation. Use one compile-time-bounded Activation Slot and bounded work. |
 | Harness | After `open`, use Host-owned bounded storage for owner-loop state. Only `drive` advances Core; `offer` remains nonblocking and allocation-free. |
-| Host Store | Route all access through the Storage Owner. Treat every durable value as hostile input; use bounded canonical payloads, indexed SQL, fixed-width identities, and prepare-commit-publish ordering. |
+| Host Store | Route every OnePage-owned durable byte through the Storage Owner and its one SQLite connection. Treat every durable value as hostile input; use bounded canonical payloads, indexed SQL, fixed-width identities, and prepare-commit-publish ordering. |
 | Run Service | Keep queries pure, updates acknowledged and safely retriable under their operation-specific contracts, advancement fenced, content immutable, and Run Snapshots derived from committed facts. Implement both checked-in JSON schemas exactly, keep caller-defined Unicode Job Keys separate from shell-safe system IDs, and represent truncation only through a Content Reference preview. Never expose Harness generations or storage mechanics. |
 | Adapters | Allocation is permitted only when bounded and fallible. External effects begin only after durable Attempt admission. Treat provider-owned envelopes as open and OnePage semantic conversions as closed. |
 | CLI | Allocation is permitted only when bounded and fallible. Compose Run Service operations, derive Markdown only from normative JSON, sanitize hostile output, and own no Run or Session policy. |
@@ -171,6 +171,20 @@ deferred explicitly.
   Runtime owns SQLite's process-global hard heap allowance. Treat page cache, lookaside, and statement
   memory as overlapping diagnostics within that total, and request envelopes and results as separate
   host reservations.
+- SQLite is the sole recoverable OnePage-owned store. Commit immutable content and its first durable
+  Session, Conversation, Completion, or Run reference in the same transaction. Do not add durable
+  sidecars, per-Session directories or locks, orphan scans, cross-store publication, or backup closure
+  protocols.
+- A prepared semantic commit must identify the first-reference relationship for every imported content
+  value. Reject duplicate imports, values outside the transaction's exact reference closure, and an
+  indirect Patch value without its directly imported typed Patch Intent.
+- A provider may stream into bounded unlinked transient scratch only when a SQLite transaction cannot
+  span the external wait. Scratch has no durable identity, is never recovery evidence, disappears on
+  close or process exit, and becomes durable only through a short Storage Owner import transaction.
+- Copy large content into SQLite through one fixed window. Trust the local SQLite store and committed
+  length/digest metadata on ordinary reads; rehash only where a semantic boundary independently needs
+  a typed digest. Do not add deduplication, compression, or a custom VFS before measurement creates a
+  current requirement.
 
 ### Validate according to ownership and consequence
 
