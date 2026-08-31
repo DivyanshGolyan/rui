@@ -48,6 +48,11 @@ deferred explicitly.
 - Let Session own canonical Core serialization and publish one immutable bounded Semantic View. Do not
   let callers pair facts with independently encoded Core bytes or rebuild Session meaning through
   caller-supplied ledger callbacks.
+- Bind every Core-bearing commit to the reducer's exact typed pending change and mechanically validate
+  the corresponding fact values before commit. Use a facts-only commit when no Core transition occurred.
+- Let an admitted Operation's typed descriptor be the only effect-kind authority. Attempts must repeat
+  its exact descriptor binding; child authorization, approval, and Completion facts must not add a
+  parallel classifier. Persist parentage with the complete parent identity, including generation.
 - Add the narrowest complete vertical behavior through existing deep modules. Provider-neutral model
   data must not encode the current concrete tool inventory, but do not turn that data contract into a
   runtime registry, plugin surface, generic effect executor, scheduler, terminal framework, or

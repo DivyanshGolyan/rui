@@ -277,7 +277,7 @@ One policy-valid request by the agent for external work. Harness may map an allo
 _Avoid_: Tool call, command, Final Answer, event
 
 **Operation**:
-A uniquely identified instance of model or external work. One durable admission binds its opaque identity and exact typed descriptor; an Action Operation also names the model Operation that proposed it. It may require more than one Attempt, and a model Operation fixes its complete semantic request contract for every Attempt.
+A uniquely identified instance of model or external work. One durable admission binds its opaque identity and exact typed descriptor; an Action Operation also names the complete `(ID, generation)` identity of the model Operation that proposed it. It may require more than one Attempt, and a model Operation fixes its complete semantic request contract for every Attempt.
 _Avoid_: Action, job, request
 
 **Attempt**:
