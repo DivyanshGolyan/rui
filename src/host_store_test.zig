@@ -419,3 +419,38 @@ test "host memory remains bounded across cache profiles and Session populations"
         }
     }
 }
+
+test "storage accounting attributes SQLite page work without changing policy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    var owner = try host_store.StorageOwner.open(
+        std.testing.io,
+        try pathFor(&tmp, &path_buffer),
+        .{},
+    );
+    defer owner.close();
+    const before = try owner.sqlitePagerAccounting(false);
+    try create(&owner, 4);
+    const after = try owner.sqlitePagerAccounting(false);
+    try std.testing.expect(after.cache_pages_written > before.cache_pages_written);
+    try std.testing.expect(after.cache_spill_events >= before.cache_spill_events);
+    try std.testing.expect(after.page_count >= before.page_count);
+}
+
+test "memory accounting resets only the SQLite high-water boundary" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    var owner = try host_store.StorageOwner.open(
+        std.testing.io,
+        try pathFor(&tmp, &path_buffer),
+        .{},
+    );
+    defer owner.close();
+    _ = try owner.memoryAccounting(true);
+    try create(&owner, 4);
+    const after = try owner.memoryAccounting(false);
+    try std.testing.expect(after.heap_highwater_bytes >= after.heap_current_bytes);
+    try std.testing.expect(after.page_cache_current_bytes > 0);
+}

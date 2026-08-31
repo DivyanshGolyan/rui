@@ -181,6 +181,20 @@ pub const HostRuntime = opaque {
         const owners = state(self).harness_owners.load(.acquire);
         return if (owners == std.math.maxInt(usize)) 0 else owners;
     }
+
+    pub fn sqlitePagerAccounting(
+        self: *HostRuntime,
+        reset_counters: bool,
+    ) !host_store.SqlitePagerAccounting {
+        return state(self).storage.sqlitePagerAccounting(reset_counters);
+    }
+
+    pub fn sqliteMemoryAccounting(
+        self: *HostRuntime,
+        reset_highwater: bool,
+    ) !host_store.MemoryAccounting {
+        return state(self).storage.memoryAccounting(reset_highwater);
+    }
 };
 
 fn retainHarness(runtime: *HostRuntime) !void {

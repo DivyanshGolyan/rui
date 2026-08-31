@@ -339,12 +339,15 @@ pub const MemoryAccounting = struct {
     statements_current_bytes: u64,
 };
 
-pub const PhysicalAccounting = struct {
+/// SQLite-maintained storage work and pager counters. Production fixes the
+/// journal mode during database initialization; this reports only values with
+/// a current measurement consumer.
+pub const SqlitePagerAccounting = struct {
     page_size_bytes: u64,
     page_count: u64,
-    free_page_count: u64,
-    cache_page_writes: u64,
-    cache_spills: u64,
+    freelist_pages: u64,
+    cache_pages_written: u64,
+    cache_spill_events: u64,
 };
 
 pub const FaultBoundary = enum {
@@ -576,21 +579,21 @@ pub const StorageOwner = struct {
         };
     }
 
-    pub fn physicalAccounting(
+    pub fn sqlitePagerAccounting(
         self: *StorageOwner,
-        reset_page_writes: bool,
-    ) !PhysicalAccounting {
+        reset_counters: bool,
+    ) !SqlitePagerAccounting {
         self.request_lock.lockUncancelable(self.io);
         defer self.request_lock.unlock(self.io);
         try self.ensureOpen();
-        const writes = try self.databaseStatus(c.SQLITE_DBSTATUS_CACHE_WRITE, reset_page_writes);
-        const spills = try self.databaseStatus(c.SQLITE_DBSTATUS_CACHE_SPILL, reset_page_writes);
+        const writes = try self.databaseStatus(c.SQLITE_DBSTATUS_CACHE_WRITE, reset_counters);
+        const spills = try self.databaseStatus(c.SQLITE_DBSTATUS_CACHE_SPILL, reset_counters);
         return .{
             .page_size_bytes = try self.pragmaU64("PRAGMA page_size"),
             .page_count = try self.pragmaU64("PRAGMA page_count"),
-            .free_page_count = try self.pragmaU64("PRAGMA freelist_count"),
-            .cache_page_writes = writes.current,
-            .cache_spills = spills.current,
+            .freelist_pages = try self.pragmaU64("PRAGMA freelist_count"),
+            .cache_pages_written = writes.current,
+            .cache_spill_events = spills.current,
         };
     }
 

@@ -3,22 +3,21 @@ const builtin = @import("builtin");
 const core_image = @import("core_image.zig");
 const deterministic_provider = @import("deterministic_provider.zig");
 const harness = @import("harness.zig");
+const host_store = @import("host_store.zig");
 const process_metrics = @import("process_metrics.zig");
+const schema = @import("runtime_measurement_schema.zig");
+const summary = @import("runtime_measurement_summary.zig");
 
-const schema_version = 1;
+const c = @cImport({
+    @cInclude("sys/stat.h");
+});
+
 const fixture_task = "Measure one durable agent lifecycle.";
 const fixture_answer = "Measurement complete.";
 
 const Scenario = enum {
     dormant,
     completion,
-};
-
-const Observation = struct {
-    baseline: process_metrics.Sample,
-    runtime_open: process_metrics.Sample,
-    workload_complete: process_metrics.Sample,
-    runtime_closed: process_metrics.Sample,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -35,6 +34,12 @@ pub fn main(init: std.process.Init) !void {
     const baseline = try process_metrics.sample();
     try layout.openRuntime(init.io, active_capacity);
     const runtime_open = try process_metrics.sample();
+    const runtime = layout.runtime.?;
+    const sqlite_pager_before = try runtime.sqlitePagerAccounting(true);
+    const sqlite_memory_before = try runtime.sqliteMemoryAccounting(false);
+    // SQLite heap high-water is process-wide. Reset it after runtime startup so
+    // the reported high-water is the workload interval, not a workload delta.
+    _ = try runtime.sqliteMemoryAccounting(true);
     const wall_start = try monotonicNanoseconds();
     const cpu_start = try processCpuNanoseconds();
 
@@ -45,9 +50,9 @@ pub fn main(init: std.process.Init) !void {
 
     const wall_end = try monotonicNanoseconds();
     const cpu_end = try processCpuNanoseconds();
+    const sqlite_after = try postWorkloadSqliteAccounting(runtime);
     const workload_complete = try process_metrics.sample();
-    const durable_bytes = try layout.durableBytes(init.io);
-    const runtime = layout.runtime.?;
+    const storage = try layout.storageFootprint(init.io);
     const activation: ActivationObservation = .{
         .active_capacity = runtime.activeCapacity(),
         .slot_bytes = @sizeOf(core_image.ActivationSlot),
@@ -56,36 +61,49 @@ pub fn main(init: std.process.Init) !void {
         .occupied_high_water_bytes = runtime.occupiedActivationHighWaterBytes(),
     };
     const resources = runtime.resourceLedger();
-    const runtime_resources: RuntimeResourceObservation = .{
-        .harness_owner_bytes = harness.Harness.residentOwnerBytes(),
-        .live_harnesses_after_workload = runtime.liveHarnessCount(),
-        .active_credit_reservation_bytes = resources.active_credits.reservation_bytes,
-        .active_credit_occupied_high_water = resources.active_credits.occupied_high_water,
-        .semantic_validation_reservation_bytes = resources.semantic_validation.reservation_bytes,
-        .semantic_validation_occupied_high_water_bytes = resources.semantic_validation.occupied_high_water_bytes,
-        .patch_workspace_reservation_bytes = resources.patch_workspace.reservation_bytes,
-        .patch_workspace_occupied_high_water_bytes = resources.patch_workspace.occupied_high_water_bytes,
+    const runtime_resources: schema.RuntimeResources = .{
+        .harness_owner_bytes = try wireU64(harness.Harness.residentOwnerBytes()),
+        .live_harnesses_after_workload = try wireU64(runtime.liveHarnessCount()),
+        .active_credit_reservation_bytes = try wireU64(resources.active_credits.reservation_bytes),
+        .active_credit_occupied_high_water = try wireU64(resources.active_credits.occupied_high_water),
+        .semantic_validation_reservation_bytes = try wireU64(resources.semantic_validation.reservation_bytes),
+        .semantic_validation_occupied_high_water_bytes = try wireU64(resources.semantic_validation.occupied_high_water_bytes),
+        .patch_workspace_reservation_bytes = try wireU64(resources.patch_workspace.reservation_bytes),
+        .patch_workspace_occupied_high_water_bytes = try wireU64(resources.patch_workspace.occupied_high_water_bytes),
     };
     layout.closeRuntime();
     const runtime_closed = try process_metrics.sample();
-    const observations: Observation = .{
-        .baseline = baseline,
-        .runtime_open = runtime_open,
-        .workload_complete = workload_complete,
-        .runtime_closed = runtime_closed,
-    };
     var report_buffer: [16 * 1024]u8 = undefined;
-    const report = try formatReport(
-        &report_buffer,
-        scenario,
-        count,
-        observations,
-        @intCast(wall_end - wall_start),
-        @intCast(cpu_end - cpu_start),
-        durable_bytes,
-        activation,
-        runtime_resources,
-    );
+    const report = try formatReport(&report_buffer, .{
+        .schema = schema.record_schema,
+        .scenario = @tagName(scenario),
+        .build_mode = @tagName(builtin.mode),
+        .count = try wireU64(count),
+        .active_capacity = try wireU64(activation.active_capacity),
+        .activation_slot_bytes = try wireU64(activation.slot_bytes),
+        .activation_reservation_bytes = try wireU64(activation.reserved_bytes),
+        .activation_pool_overhead_bytes = try wireU64(activation.pool_overhead_bytes),
+        .activation_occupied_high_water_bytes = try wireU64(activation.occupied_high_water_bytes),
+        .runtime_resources = runtime_resources,
+        .measurement_scope = "whole OnePage process; workload subprocesses excluded",
+        .timing = .{
+            .wall_ns = @intCast(wall_end - wall_start),
+            .cpu_ns = @intCast(cpu_end - cpu_start),
+            .operations_per_second = operationsPerSecond(count, wall_end - wall_start),
+        },
+        .durable_storage = storage,
+        .sqlite_pager = .{
+            .before = wireSqlitePagerAccounting(sqlite_pager_before),
+            .after = wireSqlitePagerAccounting(sqlite_after.pager),
+        },
+        .sqlite_memory = sqliteMemoryObservation(sqlite_memory_before, sqlite_after.memory),
+        .observations = .{
+            .baseline = wireProcessSample(baseline),
+            .runtime_open = wireProcessSample(runtime_open),
+            .workload_complete = wireProcessSample(workload_complete),
+            .runtime_closed = wireProcessSample(runtime_closed),
+        },
+    });
     try std.Io.File.stdout().writeStreamingAll(init.io, report);
 }
 
@@ -198,10 +216,10 @@ const Layout = struct {
         self.runtime = null;
     }
 
-    fn durableBytes(self: *const Layout, io: std.Io) !u64 {
+    fn storageFootprint(self: *const Layout, io: std.Io) !StorageFootprint {
         var state = try std.Io.Dir.cwd().openDir(io, self.state_path, .{ .iterate = true });
         defer state.close(io);
-        return directoryBytes(io, state);
+        return measureStorage(io, state);
     }
 
     fn deinit(self: *Layout, io: std.Io) void {
@@ -213,23 +231,71 @@ const Layout = struct {
     }
 };
 
-fn directoryBytes(io: std.Io, directory: std.Io.Dir) !u64 {
-    var total: u64 = 0;
+const ByteFootprint = schema.ByteFootprint;
+const StorageFootprint = schema.DurableStorage;
+
+fn addFootprint(total: *ByteFootprint, addition: ByteFootprint) void {
+    total.logical_file_bytes += addition.logical_file_bytes;
+    total.allocated_file_bytes += addition.allocated_file_bytes;
+}
+
+fn measureStorage(io: std.Io, directory: std.Io.Dir) !StorageFootprint {
+    var result: StorageFootprint = .{};
     var iterator = directory.iterate();
     while (try iterator.next(io)) |entry| switch (entry.kind) {
         .file => {
-            const file = try directory.openFile(io, entry.name, .{});
-            defer file.close(io);
-            total += (try file.stat(io)).size;
+            const footprint = try measureFile(io, directory, entry.name);
+            if (std.mem.eql(u8, entry.name, "host.sqlite3") or
+                std.mem.startsWith(u8, entry.name, "host.sqlite3-"))
+            {
+                addFootprint(&result.sqlite, footprint);
+            } else {
+                addFootprint(&result.other, footprint);
+            }
         },
         .directory => {
             var child = try directory.openDir(io, entry.name, .{ .iterate = true });
             defer child.close(io);
-            total += try directoryBytes(io, child);
+            const footprint = try directoryFootprint(io, child);
+            if (std.mem.eql(u8, entry.name, "sessions")) {
+                addFootprint(&result.sessions, footprint);
+            } else {
+                addFootprint(&result.other, footprint);
+            }
+        },
+        else => {},
+    };
+    return result;
+}
+
+fn directoryFootprint(io: std.Io, directory: std.Io.Dir) !ByteFootprint {
+    var total: ByteFootprint = .{};
+    var iterator = directory.iterate();
+    while (try iterator.next(io)) |entry| switch (entry.kind) {
+        .file => addFootprint(&total, try measureFile(io, directory, entry.name)),
+        .directory => {
+            var child = try directory.openDir(io, entry.name, .{ .iterate = true });
+            defer child.close(io);
+            addFootprint(&total, try directoryFootprint(io, child));
         },
         else => {},
     };
     return total;
+}
+
+fn measureFile(io: std.Io, directory: std.Io.Dir, name: []const u8) !ByteFootprint {
+    const file = try directory.openFile(io, name, .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    var native_stat: c.struct_stat = undefined;
+    if (c.fstat(file.handle, &native_stat) != 0 or native_stat.st_blocks < 0) {
+        return error.FileAllocationUnavailable;
+    }
+    return .{
+        .logical_file_bytes = stat.size,
+        // POSIX defines st_blocks in 512-byte units, independent of st_blksize.
+        .allocated_file_bytes = @as(u64, @intCast(native_stat.st_blocks)) * 512,
+    };
 }
 
 fn monotonicNanoseconds() !u64 {
@@ -246,20 +312,10 @@ fn processCpuNanoseconds() !u64 {
     return @intCast(@as(i128, time.sec) * std.time.ns_per_s + time.nsec);
 }
 
-fn formatReport(
-    buffer: []u8,
-    scenario: Scenario,
-    count: usize,
-    observations: Observation,
-    wall_time_ns: u64,
-    cpu_time_ns: u64,
-    durable_bytes: u64,
-    activation: ActivationObservation,
-    runtime_resources: RuntimeResourceObservation,
-) ![]const u8 {
+pub fn formatReport(buffer: []u8, record: schema.Record) ![]const u8 {
     return std.fmt.bufPrint(buffer,
         \\{{
-        \\  "schema": "onepage.runtime-measurement.v{d}",
+        \\  "schema": "{s}",
         \\  "scenario": "{s}",
         \\  "build_mode": "{s}",
         \\  "count": {d},
@@ -269,9 +325,11 @@ fn formatReport(
         \\  "activation_pool_overhead_bytes": {d},
         \\  "activation_occupied_high_water_bytes": {d},
         \\  "runtime_resources": {f},
-        \\  "measurement_scope": "whole OnePage process; workload subprocesses excluded",
+        \\  "measurement_scope": "{s}",
         \\  "timing": {{"wall_ns": {d}, "cpu_ns": {d}, "operations_per_second": {d:.3}}},
-        \\  "durable_bytes": {d},
+        \\  "durable_storage": {f},
+        \\  "sqlite_pager": {f},
+        \\  "sqlite_memory": {f},
         \\  "observations": {{
         \\    "baseline": {f},
         \\    "runtime_open": {f},
@@ -281,24 +339,27 @@ fn formatReport(
         \\}}
         \\
     , .{
-        schema_version,
-        @tagName(scenario),
-        @tagName(builtin.mode),
-        count,
-        activation.active_capacity,
-        activation.slot_bytes,
-        activation.reserved_bytes,
-        activation.pool_overhead_bytes,
-        activation.occupied_high_water_bytes,
-        std.json.fmt(runtime_resources, .{}),
-        wall_time_ns,
-        cpu_time_ns,
-        operationsPerSecond(count, wall_time_ns),
-        durable_bytes,
-        std.json.fmt(observations.baseline, .{}),
-        std.json.fmt(observations.runtime_open, .{}),
-        std.json.fmt(observations.workload_complete, .{}),
-        std.json.fmt(observations.runtime_closed, .{}),
+        record.schema,
+        record.scenario,
+        record.build_mode,
+        record.count,
+        record.active_capacity,
+        record.activation_slot_bytes,
+        record.activation_reservation_bytes,
+        record.activation_pool_overhead_bytes,
+        record.activation_occupied_high_water_bytes,
+        std.json.fmt(record.runtime_resources, .{}),
+        record.measurement_scope,
+        record.timing.wall_ns,
+        record.timing.cpu_ns,
+        record.timing.operations_per_second,
+        std.json.fmt(record.durable_storage, .{}),
+        std.json.fmt(record.sqlite_pager, .{}),
+        std.json.fmt(record.sqlite_memory, .{}),
+        std.json.fmt(record.observations.baseline, .{}),
+        std.json.fmt(record.observations.runtime_open, .{}),
+        std.json.fmt(record.observations.workload_complete, .{}),
+        std.json.fmt(record.observations.runtime_closed, .{}),
     });
 }
 
@@ -310,17 +371,79 @@ const ActivationObservation = struct {
     occupied_high_water_bytes: usize,
 };
 
-const RuntimeResourceObservation = struct {
-    harness_owner_bytes: usize,
-    live_harnesses_after_workload: usize,
-    active_credit_reservation_bytes: usize,
-    active_credit_occupied_high_water: usize,
-    semantic_validation_reservation_bytes: usize,
-    semantic_validation_occupied_high_water_bytes: usize,
-    patch_workspace_reservation_bytes: usize,
-    patch_workspace_occupied_high_water_bytes: usize,
+/// Runtime sizes remain native-width, but every persisted measurement value is
+/// explicitly represented as u64.
+fn wireU64(value: usize) !u64 {
+    return std.math.cast(u64, value) orelse error.MeasurementValueTooLarge;
+}
+
+fn sqliteMemoryObservation(
+    before: host_store.MemoryAccounting,
+    after: host_store.MemoryAccounting,
+) schema.SqliteMemoryObservation {
+    return .{
+        .before = .{
+            .heap_bytes = before.heap_current_bytes,
+            .page_cache_bytes = before.page_cache_current_bytes,
+            .lookaside_slots = before.lookaside_current_slots,
+            .statements_bytes = before.statements_current_bytes,
+        },
+        .after = .{
+            .heap_bytes = after.heap_current_bytes,
+            .page_cache_bytes = after.page_cache_current_bytes,
+            .lookaside_slots = after.lookaside_current_slots,
+            .statements_bytes = after.statements_current_bytes,
+        },
+        .workload_highwater = .{
+            .heap_bytes = after.heap_highwater_bytes,
+            .lookaside_slots = after.lookaside_highwater_slots,
+        },
+    };
+}
+
+fn wireSqlitePagerAccounting(
+    accounting: host_store.SqlitePagerAccounting,
+) schema.SqlitePagerAccounting {
+    return .{
+        .page_count = accounting.page_count,
+        .freelist_pages = accounting.freelist_pages,
+        .cache_pages_written = accounting.cache_pages_written,
+        .cache_spill_events = accounting.cache_spill_events,
+    };
+}
+
+const PostWorkloadSqliteAccounting = struct {
+    memory: host_store.MemoryAccounting,
+    pager: host_store.SqlitePagerAccounting,
 };
 
+/// The heap high-water is sampled before pager diagnostics, whose PRAGMA reads
+/// may allocate SQLite bookkeeping memory of their own.
+fn postWorkloadSqliteAccounting(runtime: *harness.HostRuntime) !PostWorkloadSqliteAccounting {
+    const memory = try runtime.sqliteMemoryAccounting(false);
+    const pager = try runtime.sqlitePagerAccounting(false);
+    return .{ .memory = memory, .pager = pager };
+}
+
+fn wireProcessSample(sample: process_metrics.Sample) schema.ProcessSample {
+    return .{
+        .resident_bytes = sample.resident_bytes,
+        .physical_footprint_bytes = sample.physical_footprint_bytes,
+        .lifetime_peak_physical_footprint_bytes = sample.lifetime_peak_physical_footprint_bytes,
+        .virtual_bytes = sample.virtual_bytes,
+        .thread_count = sample.thread_count,
+        .running_thread_count = sample.running_thread_count,
+        .user_cpu_ns = sample.user_cpu_ns,
+        .system_cpu_ns = sample.system_cpu_ns,
+        .package_idle_wakeups = sample.package_idle_wakeups,
+        .interrupt_wakeups = sample.interrupt_wakeups,
+        .pageins = sample.pageins,
+        .disk_read_bytes = sample.disk_read_bytes,
+        .disk_written_bytes = sample.disk_written_bytes,
+        .instructions = sample.instructions,
+        .cycles = sample.cycles,
+    };
+}
 fn operationsPerSecond(count: usize, wall_time_ns: u64) f64 {
     if (wall_time_ns == 0) return 0;
     return @as(f64, @floatFromInt(count)) * @as(f64, std.time.ns_per_s) /
@@ -331,18 +454,123 @@ test "zero work has zero throughput" {
     try std.testing.expectEqual(@as(f64, 0), operationsPerSecond(0, 1));
 }
 
-test "measurement durable bytes exclude fixture Workspace" {
+test "measurement wire sizes convert from native widths" {
+    try std.testing.expectEqual(@as(u64, 1), try wireU64(1));
+    if (@bitSizeOf(usize) > @bitSizeOf(u64)) {
+        try std.testing.expectError(error.MeasurementValueTooLarge, wireU64(std.math.maxInt(usize)));
+    }
+}
+
+test "producer v2 JSON round-trips through the summary" {
+    const empty_sample: schema.ProcessSample = .{
+        .resident_bytes = 0,
+        .physical_footprint_bytes = 0,
+        .lifetime_peak_physical_footprint_bytes = 0,
+        .virtual_bytes = 0,
+        .thread_count = 1,
+        .running_thread_count = 1,
+        .user_cpu_ns = 0,
+        .system_cpu_ns = 0,
+        .package_idle_wakeups = 0,
+        .interrupt_wakeups = 0,
+        .pageins = 0,
+        .disk_read_bytes = 0,
+        .disk_written_bytes = 0,
+        .instructions = 0,
+        .cycles = 0,
+    };
+    const record: schema.Record = .{
+        .schema = schema.record_schema,
+        .scenario = "dormant",
+        .build_mode = "ReleaseSafe",
+        .count = 1,
+        .active_capacity = 1,
+        .activation_slot_bytes = 168,
+        .activation_reservation_bytes = 168,
+        .activation_pool_overhead_bytes = 40,
+        .activation_occupied_high_water_bytes = 0,
+        .runtime_resources = .{
+            .harness_owner_bytes = 8_112,
+            .live_harnesses_after_workload = 0,
+            .active_credit_reservation_bytes = 1,
+            .active_credit_occupied_high_water = 1,
+            .semantic_validation_reservation_bytes = 256_248,
+            .semantic_validation_occupied_high_water_bytes = 256_224,
+            .patch_workspace_reservation_bytes = 16_408,
+            .patch_workspace_occupied_high_water_bytes = 0,
+        },
+        .measurement_scope = "test",
+        .timing = .{ .wall_ns = 1, .cpu_ns = 1, .operations_per_second = 1 },
+        .durable_storage = .{},
+        .sqlite_pager = .{
+            .before = .{ .page_count = 1, .freelist_pages = 0, .cache_pages_written = 0, .cache_spill_events = 0 },
+            .after = .{ .page_count = 1, .freelist_pages = 0, .cache_pages_written = 0, .cache_spill_events = 0 },
+        },
+        .sqlite_memory = .{
+            .before = .{ .heap_bytes = 1, .page_cache_bytes = 0, .lookaside_slots = 0, .statements_bytes = 0 },
+            .after = .{ .heap_bytes = 1, .page_cache_bytes = 0, .lookaside_slots = 0, .statements_bytes = 0 },
+            .workload_highwater = .{ .heap_bytes = 1, .lookaside_slots = 0 },
+        },
+        .observations = .{
+            .baseline = empty_sample,
+            .runtime_open = empty_sample,
+            .workload_complete = empty_sample,
+            .runtime_closed = empty_sample,
+        },
+    };
+    var report_storage: [16 * 1024]u8 = undefined;
+    const report = try formatReport(&report_storage, record);
+    var input_storage: [32 * 1024]u8 = undefined;
+    var input = std.Io.Writer.fixed(&input_storage);
+    try input.writeAll("{\"schema\":\"onepage.runtime-measurement-sweep.v2\",\"source_commit\":\"abc\",\"platform\":\"test\",\"repetitions\":1,\"source_provenance\":\"clean-published\"}\n");
+    for (report) |byte| if (byte != '\n') try input.writeByte(byte);
+    try input.writeByte('\n');
+    var summary_storage: [16 * 1024]u8 = undefined;
+    const output = try summary.summarize(std.testing.allocator, input.buffered(), &summary_storage);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"sqlite_page_count\"") != null);
+}
+
+test "measurement durable storage excludes fixture Workspace" {
     var layout = try Layout.init(std.testing.io, std.testing.allocator);
     defer layout.deinit(std.testing.io);
     try layout.openRuntime(std.testing.io, 1);
-    const before = try layout.durableBytes(std.testing.io);
+    const before = try layout.storageFootprint(std.testing.io);
     var workspace = try std.Io.Dir.cwd().openDir(std.testing.io, layout.workspace_path, .{});
     defer workspace.close(std.testing.io);
     try workspace.writeFile(std.testing.io, .{
         .sub_path = "measurement-noise",
         .data = "this fixture byte is not Host state",
     });
-    try std.testing.expectEqual(before, try layout.durableBytes(std.testing.io));
+    try std.testing.expectEqualDeep(before, try layout.storageFootprint(std.testing.io));
+}
+
+test "measurement storage buckets retain every Host-state category" {
+    var layout = try Layout.init(std.testing.io, std.testing.allocator);
+    defer layout.deinit(std.testing.io);
+    try layout.openRuntime(std.testing.io, 1);
+    const before = try layout.storageFootprint(std.testing.io);
+    var state = try std.Io.Dir.cwd().openDir(std.testing.io, layout.state_path, .{});
+    defer state.close(std.testing.io);
+    try state.writeFile(std.testing.io, .{
+        .sub_path = "measurement-other",
+        .data = "other",
+    });
+    const after = try layout.storageFootprint(std.testing.io);
+    try std.testing.expectEqualDeep(before.sqlite, after.sqlite);
+    try std.testing.expectEqualDeep(before.sessions, after.sessions);
+    try std.testing.expectEqual(before.other.logical_file_bytes + 5, after.other.logical_file_bytes);
+}
+
+test "workload SQLite heap snapshot precedes pager diagnostics" {
+    var layout = try Layout.init(std.testing.io, std.testing.allocator);
+    defer layout.deinit(std.testing.io);
+    try layout.openRuntime(std.testing.io, 1);
+    const runtime = layout.runtime.?;
+    _ = try runtime.sqliteMemoryAccounting(true);
+    try createDormantSessions(&layout, 1);
+    const after = try postWorkloadSqliteAccounting(runtime);
+    try std.testing.expect(after.memory.heap_highwater_bytes >= after.memory.heap_current_bytes);
+    try std.testing.expect(after.pager.page_count > 0);
 }
 
 test "measurement failure releases the Harness Runtime lease" {
