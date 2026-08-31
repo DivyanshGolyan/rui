@@ -5,10 +5,10 @@ pub const max_patch_size = 16 * 1024;
 pub const max_file_size: u64 = 1024 * 1024;
 pub const max_path_size = 1024;
 pub const max_workspace_path_size = 1024;
-pub const intent_header_size = 176;
+pub const intent_header_size = 164;
 pub const max_intent_size = intent_header_size + max_workspace_path_size + max_path_size;
 pub const result_size = 64;
-pub const version: u16 = 5;
+pub const version: u16 = 6;
 
 const intent_magic = "ONEPINT\x00";
 const result_magic = "ONEPRES\x00";
@@ -99,13 +99,13 @@ pub fn encodeIntent(out: []u8, intent: Intent) ![]const u8 {
     write(u16, out, 10, @intCast(total));
     write(u16, out, 12, @intCast(intent.workspace_path.len));
     write(u16, out, 14, intent.target_path.length);
-    write(u32, out, 28, intent.file_mode);
-    write(u64, out, 32, intent.patch_ref);
-    write(u64, out, 40, @intCast(intent.preimage_inode));
-    @memcpy(out[48..80], &intent.patch_digest.bytes);
-    @memcpy(out[80..112], &intent.preimage_digest.bytes);
-    @memcpy(out[112..144], &intent.postimage_digest.bytes);
-    @memcpy(out[144..176], &intent.intent_digest.bytes);
+    write(u32, out, 16, intent.file_mode);
+    write(u64, out, 20, intent.patch_ref);
+    write(u64, out, 28, @intCast(intent.preimage_inode));
+    @memcpy(out[36..68], &intent.patch_digest.bytes);
+    @memcpy(out[68..100], &intent.preimage_digest.bytes);
+    @memcpy(out[100..132], &intent.postimage_digest.bytes);
+    @memcpy(out[132..164], &intent.intent_digest.bytes);
     @memcpy(out[intent_header_size..][0..intent.workspace_path.len], intent.workspace_path);
     @memcpy(out[intent_header_size + intent.workspace_path.len .. total], intent.target_path.slice());
     const canonical_digest = intentDigest(intent);
@@ -118,8 +118,7 @@ pub fn encodeIntent(out: []u8, intent: Intent) ![]const u8 {
 pub fn decodeIntent(bytes: []const u8) !Intent {
     if (bytes.len < intent_header_size or bytes.len > max_intent_size or
         !std.mem.eql(u8, bytes[0..intent_magic.len], intent_magic) or
-        read(u16, bytes, 8) != version or read(u16, bytes, 10) != bytes.len or
-        !std.mem.allEqual(u8, bytes[16..28], 0))
+        read(u16, bytes, 8) != version or read(u16, bytes, 10) != bytes.len)
     {
         return error.InvalidPatchIntent;
     }
@@ -132,13 +131,13 @@ pub fn decodeIntent(bytes: []const u8) !Intent {
         return error.InvalidPatchIntent;
     }
     const intent: Intent = .{
-        .file_mode = read(u32, bytes, 28),
-        .patch_ref = read(u64, bytes, 32),
-        .preimage_inode = @intCast(read(u64, bytes, 40)),
-        .patch_digest = .{ .bytes = bytes[48..80].* },
-        .preimage_digest = .{ .bytes = bytes[80..112].* },
-        .postimage_digest = .{ .bytes = bytes[112..144].* },
-        .intent_digest = .{ .bytes = bytes[144..176].* },
+        .file_mode = read(u32, bytes, 16),
+        .patch_ref = read(u64, bytes, 20),
+        .preimage_inode = @intCast(read(u64, bytes, 28)),
+        .patch_digest = .{ .bytes = bytes[36..68].* },
+        .preimage_digest = .{ .bytes = bytes[68..100].* },
+        .postimage_digest = .{ .bytes = bytes[100..132].* },
+        .intent_digest = .{ .bytes = bytes[132..164].* },
         .workspace_path = bytes[intent_header_size..][0..workspace_length],
         .target_path = try TargetPath.init(bytes[intent_header_size + workspace_length ..]),
     };

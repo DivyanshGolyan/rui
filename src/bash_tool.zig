@@ -4,8 +4,8 @@ const model_contract = @import("model_contract.zig");
 
 pub const version: u16 = 1;
 pub const call_header_size = 16;
-pub const descriptor_version: u16 = 2;
-pub const descriptor_header_size = 32;
+pub const descriptor_version: u16 = 3;
+pub const descriptor_header_size = 20;
 pub const result_header_size = 32;
 pub const max_command_size = model_contract.max_bash_command_bytes;
 pub const max_workspace_path_size = 1024;
@@ -118,9 +118,9 @@ pub fn encodeDescriptor(out: []u8, descriptor: Descriptor) ![]const u8 {
     @memcpy(out[0..descriptor_magic.len], descriptor_magic);
     write(u16, out, 8, descriptor_version);
     write(u16, out, 10, descriptor_header_size);
-    write(u32, out, 24, descriptor.call.timeout_ms);
-    write(u16, out, 28, @intCast(descriptor.workspace_path.len));
-    write(u16, out, 30, @intCast(descriptor.working_directory.len));
+    write(u32, out, 12, descriptor.call.timeout_ms);
+    write(u16, out, 16, @intCast(descriptor.workspace_path.len));
+    write(u16, out, 18, @intCast(descriptor.working_directory.len));
     var cursor: usize = descriptor_header_size;
     @memcpy(out[cursor..][0..descriptor.workspace_path.len], descriptor.workspace_path);
     cursor += descriptor.workspace_path.len;
@@ -137,13 +137,12 @@ pub fn decodeDescriptor(bytes: []const u8) !Descriptor {
         bytes.len > max_descriptor_size or
         !std.mem.eql(u8, bytes[0..descriptor_magic.len], descriptor_magic) or
         read(u16, bytes, 8) != descriptor_version or
-        read(u16, bytes, 10) != descriptor_header_size or
-        !std.mem.allEqual(u8, bytes[12..24], 0))
+        read(u16, bytes, 10) != descriptor_header_size)
     {
         return error.InvalidBashDescriptor;
     }
-    const workspace_length: usize = read(u16, bytes, 28);
-    const working_directory_length: usize = read(u16, bytes, 30);
+    const workspace_length: usize = read(u16, bytes, 16);
+    const working_directory_length: usize = read(u16, bytes, 18);
     const authority_offset = descriptor_header_size + workspace_length + working_directory_length;
     const command_offset = authority_offset + environment_authority.len;
     if (workspace_length == 0 or workspace_length > max_workspace_path_size or
@@ -157,7 +156,7 @@ pub fn decodeDescriptor(bytes: []const u8) !Descriptor {
         .workspace_path = bytes[descriptor_header_size..][0..workspace_length],
         .working_directory = bytes[descriptor_header_size + workspace_length .. authority_offset],
         .call = .{
-            .timeout_ms = read(u32, bytes, 24),
+            .timeout_ms = read(u32, bytes, 12),
             .command = bytes[command_offset..],
         },
     };
