@@ -73,7 +73,7 @@ const RequestSource = struct {
     }
 };
 
-pub const EntryKind = enum { user_text, assistant_text, tool_call, tool_result, context_checkpoint };
+pub const EntryKind = enum { user_text, assistant_text, tool_call, tool_result };
 
 pub const ContentView = struct {
     source: RequestSource,
@@ -193,7 +193,6 @@ pub const RequestEntry = union(EntryKind) {
     assistant_text: TextEntry,
     tool_call: ToolCallEntry,
     tool_result: ToolResultEntry,
-    context_checkpoint: TextEntry,
 };
 
 /// One validated, streaming view of the provider-neutral semantic request.
@@ -253,7 +252,6 @@ pub const RequestCursor = struct {
             2 => .assistant_text,
             3 => .tool_call,
             4 => .tool_result,
-            5 => .context_checkpoint,
             else => return error.MalformedModelRequest,
         };
         const entry_id = read(u64, &header, 8);
@@ -282,14 +280,13 @@ pub const RequestCursor = struct {
             .length_value = encoded_length,
         };
         const entry = switch (kind) {
-            .user_text, .assistant_text, .context_checkpoint => blk: {
+            .user_text, .assistant_text => blk: {
                 if (encoded_length > conversation.max_result_content_size) return error.ModelRequestContentTooLarge;
                 try validateUtf8(encoded);
                 const text: TextEntry = .{ .entry_id = entry_id, .parent_id = parent_id, .content = encoded };
                 break :blk switch (kind) {
                     .user_text => RequestEntry{ .user_text = text },
                     .assistant_text => RequestEntry{ .assistant_text = text },
-                    .context_checkpoint => RequestEntry{ .context_checkpoint = text },
                     else => unreachable,
                 };
             },

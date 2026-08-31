@@ -1753,7 +1753,7 @@ const WireSession = struct {
 };
 
 fn commitConversation(session: *session_store.Session, entry: session_store.ConversationEntry) !void {
-    _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
+    _ = try session.commitFacts(&.{session_transition.conversationAdvanced(.{
         .agent = .{
             .agent_id = session.agent_id,
             .agent_generation = 1,
@@ -1763,7 +1763,7 @@ fn commitConversation(session: *session_store.Session, entry: session_store.Conv
         .parent_id = entry.parent_id,
         .kind = entry.kind,
         .content_ref = entry.content_ref,
-    })}, null);
+    })});
 }
 
 const WireFixture = struct {

@@ -274,20 +274,6 @@ pub fn build(b: *std.Build) void {
     fixture_repair_step.dependOn(&run_fixture_repair.step);
     check_step.dependOn(&run_fixture_repair.step);
 
-    const native_core_spike = addNativeExecutable(
-        b,
-        "onepage-native-core-spike",
-        "src/native_core_spike.zig",
-        native_target,
-        optimize,
-    );
-    const run_native_core_spike = b.addRunArtifact(native_core_spike);
-    const native_core_step = b.step(
-        "native-core",
-        "Measure and exercise the native one-page Core",
-    );
-    native_core_step.dependOn(&run_native_core_spike.step);
-
     const runtime_measurement = addNativeExecutable(
         b,
         "onepage-runtime-measurement",
@@ -352,14 +338,6 @@ pub fn build(b: *std.Build) void {
     );
     runtime_measurement_sweep_step.dependOn(&run_runtime_measurement_sweep.step);
 
-    const release_safe_native_core = addNativeExecutable(
-        b,
-        "onepage-native-core-check",
-        "src/native_core_spike.zig",
-        native_target,
-        .ReleaseSafe,
-    );
-    check_step.dependOn(&b.addRunArtifact(release_safe_native_core).step);
     const check_runtime_measurement_script = b.addSystemCommand(&.{ "sh", "-n" });
     check_runtime_measurement_script.addFileArg(b.path("src/runtime_measurement_sweep.sh"));
     check_step.dependOn(&check_runtime_measurement_script.step);

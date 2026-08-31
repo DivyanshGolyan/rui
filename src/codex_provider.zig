@@ -1912,20 +1912,18 @@ pub const RequestReader = struct {
                 return .{ .raw = switch (entry) {
                     .user_text => "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":",
                     .assistant_text => "{\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":",
-                    .context_checkpoint => "{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":",
                     .tool_call => "{\"type\":\"function_call\",\"name\":",
                     .tool_result => "{\"type\":\"function_call_output\",\"call_id\":",
                 } };
             },
             .first_value => {
                 self.entry_phase = switch (entry) {
-                    .user_text, .assistant_text, .context_checkpoint => .suffix,
+                    .user_text, .assistant_text => .suffix,
                     .tool_call, .tool_result => .middle,
                 };
                 return switch (entry) {
                     .user_text => |value| .{ .json_content = value.content },
                     .assistant_text => |value| .{ .json_content = value.content },
-                    .context_checkpoint => |value| .{ .json_content = value.content },
                     .tool_call => |value| .{ .json_slice = self.mapping.nameForKey(value.key()) orelse return error.UnknownRequestTool },
                     .tool_result => |value| try self.callIdToken(value.call_entry_id),
                 };
@@ -1964,7 +1962,7 @@ pub const RequestReader = struct {
             .suffix => {
                 self.entry_phase = .done;
                 return .{ .raw = switch (entry) {
-                    .user_text, .assistant_text, .context_checkpoint => "}]}",
+                    .user_text, .assistant_text => "}]}",
                     .tool_call, .tool_result => "}",
                 } };
             },

@@ -277,7 +277,7 @@ fn measureTransientCapture(
         .kind = .assistant_text,
         .content_ref = response_ref,
     });
-    _ = try session.commitSemantic(&.{transaction.facts[0]}, null);
+    _ = try session.commitFacts(&.{transaction.facts[0]});
     const memory = try owner.memoryAccounting(false);
     const physical = try owner.sqlitePagerAccounting(false);
     var line: [512]u8 = undefined;
@@ -361,7 +361,7 @@ fn measureMaximumSessionScratch(
 
     _ = try owner.memoryAccounting(true);
     _ = try owner.sqlitePagerAccounting(true);
-    _ = try session.commitSemantic(&facts, null);
+    _ = try session.commitFacts(&facts);
     const memory = try owner.memoryAccounting(false);
     const physical = try owner.sqlitePagerAccounting(false);
     var line: [768]u8 = undefined;

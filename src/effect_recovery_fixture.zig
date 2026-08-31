@@ -150,8 +150,8 @@ fn recoverPrepublicationModel(io: std.Io, runtime: *harness.HostRuntime, identit
         defer restored.close();
         while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
 
-        var audit: ModelAttemptAudit = .{};
-        const ledger = try restored.inspectSemantic(&audit, ModelAttemptAudit.apply);
+        const ledger = try restored.semanticView();
+        const audit = try ModelAttemptAudit.from(ledger.model);
         if (audit.count != 1) return error.ModelAttemptCountMismatch;
         if (try restored.scanCompletionEvidence(undefined, ignoreCompletion) != 0) {
             return error.PrepublicationCrashGainedCompletionAuthority;
@@ -366,8 +366,8 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
         var restored = try lease.restoreSession(scratch, session_id);
         defer restored.close();
         while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
-        var audit: ModelAttemptAudit = .{};
-        const before = try restored.inspectSemantic(&audit, ModelAttemptAudit.apply);
+        const before = try restored.semanticView();
+        const audit = try ModelAttemptAudit.from(before.model);
         if (audit.count != 2) return error.ModelAttemptCountMismatch;
 
         var response_buffer: [model_protocol.max_response_size]u8 = undefined;
@@ -420,8 +420,8 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
     var verified = try verification_lease.restoreSession(verification_scratch, session_id);
     defer verified.close();
     while ((try verification_lease.recoverSemanticWindow(&verified, 32)).more) {}
-    var after_audit: ModelAttemptAudit = .{};
-    const after = try verified.inspectSemantic(&after_audit, ModelAttemptAudit.apply);
+    const after = try verified.semanticView();
+    const after_audit = try ModelAttemptAudit.from(after.model);
     if (after.last_sequence != before.last_sequence or after_audit.count != audit.count) {
         return error.LateEvidenceAdvancedSession;
     }
@@ -562,8 +562,8 @@ fn expectModelAttempts(runtime: *harness.HostRuntime, session_id: u64, expected:
     var restored = try lease.restoreSession(scratch, session_id);
     defer restored.close();
     while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
-    var audit: ModelAttemptAudit = .{};
-    _ = try restored.inspectSemantic(&audit, ModelAttemptAudit.apply);
+    const view = try restored.semanticView();
+    const audit = try ModelAttemptAudit.from(view.model);
     if (audit.count != expected) return error.ModelAttemptCountMismatch;
 }
 
@@ -574,31 +574,33 @@ const ModelAttemptAudit = struct {
     operation_generation: u32 = 0,
     ownership_epoch: u64 = 0,
 
-    fn apply(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
-        const self: *ModelAttemptAudit = @ptrCast(@alignCast(context));
-        const attempt = switch (fact) {
-            .attempt_admitted => |value| value,
-            else => return,
-        };
-        if (attempt.recovery_class != .model) return;
-        if (self.count == self.ids.len) return error.ModelAttemptCapacityExceeded;
-        if (attempt.possible_duplicate_attempts != self.count) {
-            return error.ModelDuplicateExposureMismatch;
+    fn from(history: session_store.OperationView) !ModelAttemptAudit {
+        var self: ModelAttemptAudit = .{};
+        for (history.attemptSlice()) |maybe_attempt| {
+            const attempt = maybe_attempt.?;
+            if (std.meta.activeTag(attempt.descriptor_digest) != .model) {
+                return error.InvalidModelAttemptKind;
+            }
+            if (self.count == self.ids.len) return error.ModelAttemptCapacityExceeded;
+            if (attempt.possible_duplicate_attempts != self.count) {
+                return error.ModelDuplicateExposureMismatch;
+            }
+            if (self.count == 0) {
+                self.operation_id = attempt.operation.operation_id;
+                self.operation_generation = attempt.operation.generation;
+                self.ownership_epoch = attempt.operation.agent.ownership_epoch;
+            } else if (attempt.operation.operation_id != self.operation_id or
+                attempt.operation.generation != self.operation_generation)
+            {
+                return error.ModelOperationChangedAcrossRetry;
+            }
+            for (self.ids[0..self.count]) |id| {
+                if (id == attempt.attempt_id) return error.ModelAttemptReused;
+            }
+            self.ids[self.count] = attempt.attempt_id;
+            self.count += 1;
         }
-        if (self.count == 0) {
-            self.operation_id = attempt.operation.operation_id;
-            self.operation_generation = attempt.operation.generation;
-            self.ownership_epoch = attempt.operation.agent.ownership_epoch;
-        } else if (attempt.operation.operation_id != self.operation_id or
-            attempt.operation.generation != self.operation_generation)
-        {
-            return error.ModelOperationChangedAcrossRetry;
-        }
-        for (self.ids[0..self.count]) |id| {
-            if (id == attempt.attempt_id) return error.ModelAttemptReused;
-        }
-        self.ids[self.count] = attempt.attempt_id;
-        self.count += 1;
+        return self;
     }
 };
 

@@ -792,3 +792,398 @@ test "maximum context window is rejected before operation mutation" {
     try std.testing.expectError(error.IllegalModelTransition, core.beginModelOperation(1, 1));
     try std.testing.expectEqualDeep(before, try core.operation());
 }
+const TraceView = struct {
+    identity: Identity,
+    operation: Operation,
+    task: Task,
+    response: Response,
+    context: ModelContext,
+};
+
+const trace_count = 32;
+
+fn randomizedStateMachineTraces(slot: *ActivationSlot) !void {
+    var random = std.Random.DefaultPrng.init(0x5354_4154_454d_4143);
+    for (0..trace_count) |trace_index| {
+        const poison: u8 = @intCast(trace_index + 1);
+        const agent_id: u64 = trace_index + 1;
+        var expected: core_state.State = .{
+            .agent_id = agent_id,
+            .agent_generation = 1,
+            .accumulator = agent_id,
+        };
+        var core = try Core.initialize(
+            slot,
+            .{ .agent_id = agent_id, .generation = 1 },
+        );
+        try expectStateAndRestore(&core, expected, poison);
+
+        const delivery_count = random.random().uintLessThan(u8, 5);
+        for (0..delivery_count) |_| {
+            const event = random.random().int(u32);
+            try core.deliver(event);
+            expected.event_count +%= 1;
+            expected.last_event = event;
+            expected.accumulator = (expected.accumulator *% 16_777_619) ^ event;
+            try expectStateAndRestore(&core, expected, poison);
+        }
+
+        var before = try canonicalState(&core);
+        try expectRejectedPreserves(
+            &core,
+            before,
+            expected,
+            error.InvalidConversationEntry,
+            core.startTask(0),
+            poison,
+        );
+        const active_leaf_id: u64 = random.random().intRangeAtMost(u32, 1, 100);
+        try core.startTask(active_leaf_id);
+        expected.active_leaf_id = active_leaf_id;
+        expected.task_phase = .ready;
+        try expectStateAndRestore(&core, expected, poison);
+
+        before = try canonicalState(&core);
+        try expectRejectedPreserves(
+            &core,
+            before,
+            expected,
+            error.InvalidOperationIdentity,
+            discardOperation(core.beginModelOperation(0, 1)),
+            poison,
+        );
+
+        const operation_id: u64 = 1000 + trace_index;
+        const operation = try core.beginModelOperation(operation_id, 1);
+        expected.operation_id = operation_id;
+        expected.operation_generation = 1;
+        expected.operation_phase = .submitted;
+        expected.operation_sequence = 1;
+        expected.context = .{ .offset = 1, .length = @intCast(active_leaf_id) };
+        expected.task_phase = .awaiting_model;
+        try expectOperation(operation, expected);
+        try expectStateAndRestore(&core, expected, poison);
+
+        before = try canonicalState(&core);
+        try expectRejectedPreserves(
+            &core,
+            before,
+            expected,
+            error.StaleOperation,
+            core.acceptOperation(.{
+                .id = operation.id,
+                .generation = operation.generation + 1,
+            }),
+            poison,
+        );
+        if (random.random().boolean()) {
+            before = try canonicalState(&core);
+            try expectRejectedPreserves(
+                &core,
+                before,
+                expected,
+                error.IllegalOperationTransition,
+                discardResponse(core.applyModelResponse(.{
+                    .id = operation.id,
+                    .generation = operation.generation,
+                }, undefined, 9, undefined)),
+                poison,
+            );
+        }
+        try core.acceptOperation(.{ .id = operation.id, .generation = operation.generation });
+        expected.operation_phase = .accepted;
+        try expectStateAndRestore(&core, expected, poison);
+
+        before = try canonicalState(&core);
+        try expectRejectedPreserves(
+            &core,
+            before,
+            expected,
+            error.IllegalOperationTransition,
+            core.acceptOperation(.{ .id = operation.id, .generation = operation.generation }),
+            poison,
+        );
+        before = try canonicalState(&core);
+        try expectRejectedPreserves(
+            &core,
+            before,
+            expected,
+            error.InvalidResultReference,
+            discardResponse(core.applyModelResponse(.{
+                .id = operation.id,
+                .generation = operation.generation,
+            }, undefined, 0, undefined)),
+            poison,
+        );
+
+        const response_ref: u64 = 2000 + trace_index;
+        var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+        var validation: model_protocol.ValidationScratch = undefined;
+        if (trace_index % 2 == 0) {
+            const arguments = "{\"command\":\"true\",\"timeout_ms\":1000}";
+            const response = try model_protocol.encodeTool(
+                &response_buffer,
+                model_contract.bash_key,
+                arguments,
+            );
+            const response_digest = binding.hash(binding.Result, response);
+            const admission = model_protocol.admit(&validation, response).admission;
+            before = try canonicalState(&core);
+            try expectRejectedPreserves(
+                &core,
+                before,
+                expected,
+                error.StaleOperation,
+                discardResponse(core.applyModelResponse(.{
+                    .id = operation.id,
+                    .generation = operation.generation + 1,
+                }, admission, response_ref + 1, response_digest)),
+                poison,
+            );
+            const interpreted = try core.applyModelResponse(.{
+                .id = operation.id,
+                .generation = operation.generation,
+            }, admission, response_ref, response_digest);
+            expected.operation_result = response_ref;
+            expected.operation_phase = .completed;
+            expected.response_ref = response_ref;
+            expected.response_disposition = .tool_call;
+            expected.response_tool_key = .{
+                .offset = model_protocol.header_size,
+                .length = model_contract.bash_key.len,
+            };
+            expected.response_arguments = .{
+                .offset = model_protocol.header_size + model_contract.bash_key.len,
+                .length = arguments.len,
+            };
+            expected.response_arguments_digest = model_contract.strictToolJsonDigest(arguments);
+            expected.task_phase = .awaiting_tool;
+            try expectResponse(interpreted, expected);
+            try expectStateAndRestore(&core, expected, poison);
+            try core.commitToolResult(active_leaf_id + 1, active_leaf_id + 2);
+            expected.active_leaf_id = active_leaf_id + 2;
+            expected.task_phase = .ready;
+            try expectStateAndRestore(&core, expected, poison);
+
+            const second = try core.beginModelOperation(operation_id + 1000, 2);
+            expected.operation_id = operation_id + 1000;
+            expected.operation_generation = 2;
+            expected.operation_phase = .submitted;
+            expected.operation_result = 0;
+            expected.operation_sequence = 2;
+            expected.context = .{ .offset = 1, .length = @intCast(active_leaf_id + 2) };
+            expected.response_ref = 0;
+            expected.response_disposition = .failure;
+            expected.response_failure = .none;
+            expected.response_text = .{};
+            expected.response_tool_key = .{};
+            expected.response_arguments = .{};
+            expected.response_arguments_digest = .{ .bytes = @splat(0) };
+            expected.task_phase = .awaiting_model;
+            try expectOperation(second, expected);
+            try expectStateAndRestore(&core, expected, poison);
+            try core.acceptOperation(.{ .id = second.id, .generation = second.generation });
+            expected.operation_phase = .accepted;
+            try expectStateAndRestore(&core, expected, poison);
+            const final = try model_protocol.encodeText(&response_buffer, "ok");
+            const final_digest = binding.hash(binding.Result, final);
+            const interpreted_final = try core.applyModelResponse(
+                .{ .id = second.id, .generation = second.generation },
+                model_protocol.admit(&validation, final).admission,
+                response_ref + 1000,
+                final_digest,
+            );
+            expected.operation_result = response_ref + 1000;
+            expected.operation_phase = .completed;
+            expected.response_ref = response_ref + 1000;
+            expected.response_disposition = .final_answer;
+            expected.response_text = .{
+                .offset = model_protocol.header_size,
+                .length = 2,
+            };
+            expected.task_phase = .final_candidate;
+            try expectResponse(interpreted_final, expected);
+            try expectStateAndRestore(&core, expected, poison);
+            try core.commitFinalAnswer(active_leaf_id + 3);
+            expected.active_leaf_id = active_leaf_id + 3;
+            expected.final_entry_id = active_leaf_id + 3;
+            expected.task_phase = .finished;
+        } else {
+            const final = try model_protocol.encodeText(&response_buffer, "ok");
+            const final_digest = binding.hash(binding.Result, final);
+            const admission = model_protocol.admit(&validation, final).admission;
+            before = try canonicalState(&core);
+            try expectRejectedPreserves(
+                &core,
+                before,
+                expected,
+                error.StaleOperation,
+                discardResponse(core.applyModelResponse(.{
+                    .id = operation.id,
+                    .generation = operation.generation + 1,
+                }, admission, response_ref + 1, final_digest)),
+                poison,
+            );
+            const interpreted = try core.applyModelResponse(.{
+                .id = operation.id,
+                .generation = operation.generation,
+            }, admission, response_ref, final_digest);
+            expected.operation_result = response_ref;
+            expected.operation_phase = .completed;
+            expected.response_ref = response_ref;
+            expected.response_disposition = .final_answer;
+            expected.response_text = .{
+                .offset = model_protocol.header_size,
+                .length = 2,
+            };
+            expected.task_phase = .final_candidate;
+            try expectResponse(interpreted, expected);
+            try expectStateAndRestore(&core, expected, poison);
+            before = try canonicalState(&core);
+            try expectRejectedPreserves(
+                &core,
+                before,
+                expected,
+                error.IllegalFinalAnswerTransition,
+                core.commitFinalAnswer(active_leaf_id + 2),
+                poison,
+            );
+            try core.commitFinalAnswer(active_leaf_id + 1);
+            expected.active_leaf_id = active_leaf_id + 1;
+            expected.final_entry_id = active_leaf_id + 1;
+            expected.task_phase = .finished;
+        }
+        try expectStateAndRestore(&core, expected, poison);
+        core.abandon();
+    }
+}
+
+fn expectRejectedPreserves(
+    core: *Core,
+    before: [core_state.encoded_size]u8,
+    expected_state: core_state.State,
+    expected_error: anyerror,
+    result: anyerror!void,
+    poison: u8,
+) !void {
+    result catch |actual| {
+        if (actual != expected_error) return error.UnexpectedNativeRejection;
+        const after = try canonicalState(core);
+        if (!std.mem.eql(u8, &before, &after)) return error.RejectionMutatedCoreState;
+        try expectStateAndRestore(core, expected_state, poison);
+        return;
+    };
+    return error.NativeTransitionUnexpectedlyAccepted;
+}
+
+fn expectStateAndRestore(
+    core: *Core,
+    expected: core_state.State,
+    poison: u8,
+) !void {
+    const expected_view = semanticView(expected);
+    if (!std.meta.eql(expected_view, try observe(core))) return error.UnexpectedNativeTraceView;
+
+    const first = try canonicalState(core);
+    var expected_encoding: [core_state.encoded_size]u8 = undefined;
+    try core_state.encode(&expected_encoding, expected);
+    if (!std.mem.eql(u8, &expected_encoding, &first)) return error.UnexpectedNativeCoreState;
+
+    const decoded = try core_state.decode(&first);
+    var second: [core_state.encoded_size]u8 = undefined;
+    try core_state.encode(&second, decoded);
+    if (!std.mem.eql(u8, &first, &second)) return error.NondeterministicCoreState;
+
+    var restored_slot: ActivationSlot = undefined;
+    @memset(std.mem.asBytes(&restored_slot), poison);
+    var restored = try Core.activate(&restored_slot, &first);
+    const restored_view = try observe(&restored);
+    if (!std.meta.eql(expected_view, restored_view)) return error.RestoredTraceViewMismatch;
+    try restored.suspendInto(&second);
+    if (!std.mem.eql(u8, &first, &second)) return error.RestoredCoreStateMismatch;
+    for (std.mem.asBytes(&restored_slot)) |byte| {
+        if (byte != 0) return error.RestoredSlotNotScrubbed;
+    }
+}
+
+fn expectOperation(actual: Operation, expected: core_state.State) !void {
+    if (!std.meta.eql(actual, operationView(expected))) return error.UnexpectedNativeOperation;
+}
+
+fn expectResponse(actual: Response, expected: core_state.State) !void {
+    if (!std.meta.eql(actual, responseView(expected))) return error.UnexpectedNativeResponse;
+}
+
+fn semanticView(state: core_state.State) TraceView {
+    return .{
+        .identity = .{
+            .agent_id = state.agent_id,
+            .generation = state.agent_generation,
+        },
+        .operation = operationView(state),
+        .task = .{
+            .phase = state.task_phase,
+            .active_leaf_id = state.active_leaf_id,
+            .final_entry_id = state.final_entry_id,
+        },
+        .response = responseView(state),
+        .context = .{
+            .first_entry = state.context.offset,
+            .entry_count = state.context.length,
+        },
+    };
+}
+
+fn operationView(state: core_state.State) Operation {
+    return .{
+        .id = state.operation_id,
+        .generation = state.operation_generation,
+        .phase = state.operation_phase,
+        .result_ref = state.operation_result,
+        .sequence = state.operation_sequence,
+    };
+}
+
+fn responseView(state: core_state.State) Response {
+    return .{
+        .content_ref = state.response_ref,
+        .disposition = state.response_disposition,
+        .failure = state.response_failure,
+        .text = state.response_text,
+        .tool_key = state.response_tool_key,
+        .arguments = .{
+            .offset = state.response_arguments.offset,
+            .length = state.response_arguments.length,
+            .digest = state.response_arguments_digest,
+        },
+    };
+}
+
+fn canonicalState(core: *const Core) ![core_state.encoded_size]u8 {
+    var encoded: [core_state.encoded_size]u8 = undefined;
+    try core_state.encode(&encoded, core.state.*);
+    return encoded;
+}
+
+fn observe(core: *const Core) !TraceView {
+    return .{
+        .identity = try core.identity(),
+        .operation = try core.operation(),
+        .task = try core.task(),
+        .response = try core.response(),
+        .context = try core.modelContext(),
+    };
+}
+
+fn discardResponse(result: anyerror!Response) !void {
+    _ = try result;
+}
+
+fn discardOperation(result: anyerror!Operation) !void {
+    _ = try result;
+}
+
+test "production Core passes 32 randomized poison and rejection traces" {
+    var slot: ActivationSlot = undefined;
+    try randomizedStateMachineTraces(&slot);
+}

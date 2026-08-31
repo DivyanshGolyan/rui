@@ -75,7 +75,7 @@ const conversation_schema =
     \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
     \\    entry_id BLOB NOT NULL CHECK (length(entry_id) = 8),
     \\    parent_id BLOB CHECK (parent_id IS NULL OR length(parent_id) = 8),
-    \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 1 AND 5),
+    \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 1 AND 4),
     \\    content_ref BLOB NOT NULL CHECK (length(content_ref) = 8),
     \\    committed_by_sequence INTEGER NOT NULL,
     \\    PRIMARY KEY (session_id, entry_id),
@@ -1022,8 +1022,7 @@ pub const StorageOwner = struct {
                 ),
             },
             .task_admitted,
-            .operation_submitted,
-            .operation_accepted,
+            .operation_admitted,
             .attempt_admitted,
             .authorization,
             .outcome,
@@ -1193,7 +1192,7 @@ pub const StorageOwner = struct {
         else
             try readIdentityColumn(statement, 0);
         const kind = c.sqlite3_column_int64(statement, 1);
-        if (kind < 1 or kind > 5) return error.CorruptHostStore;
+        if (kind < 1 or kind > 4) return error.CorruptHostStore;
         if (c.sqlite3_column_type(statement, 3) != c.SQLITE_INTEGER) return error.CorruptHostStore;
         const committed_value = c.sqlite3_column_int64(statement, 3);
         if (committed_value <= 0) return error.CorruptHostStore;
@@ -1742,8 +1741,7 @@ fn validateCommitIdentity(
 
 fn isAdmission(transaction: session_transition.Transaction) bool {
     for (transaction.factSlice()) |fact| switch (fact) {
-        .task_admitted, .operation_submitted, .attempt_admitted => return true,
-        .operation_accepted,
+        .task_admitted, .operation_admitted, .attempt_admitted => return true,
         .authorization,
         .result,
         .conversation_advanced,
@@ -2199,7 +2197,7 @@ test "installed schema retains the exact V1 keys constraints and completion inde
     try owner.expectSchemaSql("index", "completion_inbox_by_session", completion_index_schema);
 }
 
-test "Host Store round trips context checkpoints and rejects hostile kinds" {
+test "Host Store round trips Conversation kinds and rejects hostile kinds" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [256]u8 = undefined;
@@ -2217,33 +2215,33 @@ test "Host Store round trips context checkpoints and rejects hostile kinds" {
         .task_id = 83,
     };
     try owner.createSession(identity);
-    var checkpoint: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    checkpoint.facts[0] = session_transition.conversationAdvanced(.{
+    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    transaction.facts[0] = session_transition.conversationAdvanced(.{
         .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
         .entry_id = 2,
         .parent_id = 1,
-        .kind = .context_checkpoint,
+        .kind = .assistant_text,
         .content_ref = 85,
     });
     _ = try owner.commitPrepared(
         .{ .session_id = identity.session_id, .epoch = 1 },
-        .{ .transaction = checkpoint, .content = &.{directContent(testContent(85))} },
+        .{ .transaction = transaction, .content = &.{directContent(testContent(85))} },
     );
 
     const stored = try owner.readConversationEntry(identity.session_id, 2);
-    try std.testing.expectEqual(@intFromEnum(session_transition.ConversationKind.context_checkpoint), stored.kind);
+    try std.testing.expectEqual(@intFromEnum(session_transition.ConversationKind.assistant_text), stored.kind);
     try std.testing.expectEqual(@as(u64, 1), stored.parent_id);
     try std.testing.expectEqual(@as(u64, 85), stored.content_ref);
 
     try owner.execute("PRAGMA ignore_check_constraints=ON");
-    try owner.execute("UPDATE conversation_entry SET kind=6");
+    try owner.execute("UPDATE conversation_entry SET kind=5");
     try std.testing.expectError(
         error.CorruptHostStore,
         owner.readConversationEntry(identity.session_id, 2),
     );
 }
 
-test "pre-release Host Store rejects the preceding schema epoch without migration" {
+test "pre-release Host Store rejects the preceding schema epoch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [256]u8 = undefined;
@@ -3097,11 +3095,11 @@ test "patch content requires its first-referenced Intent in the same commit" {
     };
     const descriptor: binding.Descriptor = .{ .apply_patch = intent.intent_digest };
     var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    transaction.facts[0] = session_transition.operationSubmitted(
+    transaction.facts[0] = session_transition.operationAdmitted(
         operation,
+        624,
         625,
         descriptor,
-        .consequential,
     );
     const patch: TransactionContentImport = .{ .patch_intent = .{
         .intent = intent_content,
