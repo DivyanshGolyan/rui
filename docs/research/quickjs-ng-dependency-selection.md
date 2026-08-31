@@ -47,9 +47,10 @@ treats timeout, distinct input/output overflow, and observed CPU-limit terminati
 other signal, stop, unknown termination, or nonzero exit becomes one closed abnormal-child failure;
 the parent neither trusts child bytes nor infers that every `SIGKILL` was a resource limit.
 
-The parent supplies an empty environment and only pipe-backed standard input, output, and error. The
-trusted child bootstrap closes every inherited descriptor above standard error before reading the
-request, then applies kernel core-dump, CPU, and address-space limits before allocating protocol
+The parent supplies an empty environment and only pipe-backed standard input, output, and error.
+Ordinary Host handles rely on close-on-exec process construction. The evaluator exposes no
+descriptor-using JavaScript capability, and the trusted local machine is not an adversarial native-code
+boundary. The child applies kernel core-dump, CPU, and address-space limits before allocating protocol
 buffers or evaluating source. A supported kernel-limit failure stops the child rather than running
 without the promised bound. There is no evaluator cache, retained runner, spool, growable response
 buffer, or per-Job native allocation that survives the generation. These limits restrict model-written
