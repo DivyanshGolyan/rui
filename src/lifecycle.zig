@@ -451,6 +451,7 @@ pub const FaultBoundary = enum {
     after_completion_persist,
     after_final_content,
     after_assistant_entry,
+    after_bash_authorization,
     after_bash_execution,
     after_patch_authorization,
     after_patch_attempt,
@@ -820,6 +821,7 @@ pub fn advanceCreated(
     const io = session.io;
     const token = session.ownerToken();
     var lease = try host.slots.borrow();
+    defer lease.release() catch unreachable;
     _ = try session.startTask(lease.slot);
     try lease.release();
     _ = try performModelTurn(
@@ -848,6 +850,7 @@ fn performModelTurn(
     const next_provider = provider orelse return error.SessionOperationPending;
     const ids = try allocateOperationIds(io, session);
     var preview_lease = try host.slots.borrow();
+    defer preview_lease.release() catch unreachable;
     const context = try session.previewModelContext(
         preview_lease.slot,
         ids.operation_id,
@@ -862,6 +865,7 @@ fn performModelTurn(
     );
     try model_operation.verifyRequestDigest(session, ids.request_ref, request_digest);
     var admission_lease = try host.slots.borrow();
+    defer admission_lease.release() catch unreachable;
     const operation = try session.admitModelAttempt(admission_lease.slot, .{
         .operation_id = ids.operation_id,
         .sequence = model_sequence,
@@ -891,6 +895,7 @@ fn retryModelAttempt(
     fault: ?FaultHook,
 ) !void {
     var view_lease = try host.slots.borrow();
+    defer view_lease.release() catch unreachable;
     const continuation = try session.continuationView(view_lease.slot);
     try view_lease.release();
     const operation = continuation.operation;
@@ -1012,7 +1017,7 @@ fn executeBashCall(
     }
     const history = try consequentialHistoryForModel(session, ids.operation_id, .bash);
     const tool_operation_id = history.operation_id;
-    if (permission_mode == .ask) {
+    if (permission_mode == .ask and history.authorization == null) {
         const request = try session.requestApproval(tool_operation_id, 1);
         if (approval_required_hook) |hook| try hook.required(hook.context, .{
             .kind = .bash,
@@ -1038,11 +1043,18 @@ fn executeBashCall(
         return error.InvalidBashDescriptor;
     }
     const result_ref = (@as(u64, 1) << 61) | ids.response_ref;
-    _ = try session.authorizeAction(.{
-        .operation_id = tool_operation_id,
-        .operation_generation = 1,
-        .allowed = true,
-    });
+    if (history.authorization) |authorization| {
+        if (!authorization.allowed or authorization.permission_ref != 0) {
+            return error.InvalidBashAuthorization;
+        }
+    } else {
+        _ = try session.authorizeAction(.{
+            .operation_id = tool_operation_id,
+            .operation_generation = 1,
+            .allowed = true,
+        });
+    }
+    try reach(fault, .after_bash_authorization);
 
     var attempt_id: u64 = 0;
     while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
@@ -1281,6 +1293,7 @@ fn reconcileRestored(
                 else => .terminal,
             };
             var admission_lease = try host.slots.borrow();
+            defer admission_lease.release() catch unreachable;
             _ = try session.admitModelCompletion(admission_lease.slot, .{
                 .operation_id = completion.operation_id,
                 .operation_generation = completion.operation_generation,
@@ -1991,6 +2004,7 @@ fn reconcileToolResult(
         return error.ToolConversationMismatch;
     }
     var lease = try host.slots.borrow();
+    defer lease.release() catch unreachable;
     try session.admitToolResult(lease.slot, .{
         .operation_id = result.operation_id,
         .operation_generation = result.operation_generation,
@@ -2509,6 +2523,21 @@ test "model dispatch releases continuation slot and keeps request content immuta
         ),
     );
     try std.testing.expect(probe.observed_released_slot);
+    try std.testing.expectEqual(@as(usize, 0), host.resourceLedger().activation.occupied_bytes);
+    try std.testing.expectError(
+        error.IllegalModelTransition,
+        performModelTurn(
+            &host,
+            io,
+            &session,
+            session.ownerToken(),
+            probe.provider(),
+            2,
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), host.resourceLedger().activation.occupied_bytes);
 
     _ = try model_operation.buildRequest(&session, 1001, 1, 1);
     var request_blob = try session.viewContent(1001);

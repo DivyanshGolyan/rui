@@ -52,8 +52,12 @@ pub fn main(init: std.process.Init) !void {
         try exhaustModel(init.io, runtime, try parseSessionId(args[3]));
     } else if (std.mem.eql(u8, mode, "start-bash")) {
         try startBash(init.io, runtime, args[3]);
+    } else if (std.mem.eql(u8, mode, "start-authorized-bash")) {
+        try startAuthorizedBash(init.io, runtime, args[3]);
     } else if (std.mem.eql(u8, mode, "resume-bash")) {
         try resumeBash(init.io, runtime, try parseSessionId(args[3]));
+    } else if (std.mem.eql(u8, mode, "resume-authorized-bash")) {
+        try resumeAuthorizedBash(init.io, runtime, try parseSessionId(args[3]));
     } else return error.InvalidMode;
 }
 
@@ -443,6 +447,19 @@ fn exhaustModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !voi
 }
 
 fn startBash(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !void {
+    return startBashAt(io, runtime, workspace, .after_bash_execution);
+}
+
+fn startAuthorizedBash(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !void {
+    return startBashAt(io, runtime, workspace, .after_bash_authorization);
+}
+
+fn startBashAt(
+    io: std.Io,
+    runtime: *harness.HostRuntime,
+    workspace: []const u8,
+    boundary: harness.FaultBoundary,
+) !void {
     var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
     const call = try bash_tool.encodeCall(&call_buffer, .{
         .command = "printf x >> uncertain.txt",
@@ -453,7 +470,7 @@ fn startBash(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !
         .tool_arguments = call,
         .final_answer = "must not be reached",
     };
-    var crash: Crash = .{ .target = .after_bash_execution };
+    var crash: Crash = .{ .target = boundary };
     var owner = try harness.Harness.open(.{
         .runtime = runtime,
         .permission_mode = .bypass,
@@ -470,6 +487,36 @@ fn startBash(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
     try driveUntilCrash(owner);
     try writeSessionId(io, session_id);
+}
+
+fn resumeAuthorizedBash(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
+    var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
+    const call = try bash_tool.encodeCall(&call_buffer, .{
+        .command = "printf x >> uncertain.txt",
+        .timeout_ms = 5000,
+    });
+    var fixture: deterministic_provider.ToolFixture = .{
+        .expected_task = task,
+        .tool_arguments = call,
+        .final_answer = "Authorized Bash resumed exactly once.",
+        .calls = 1,
+    };
+    var owner = try harness.Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .model_binding = .{ .model = "fixture:bash-recovery", .provider = fixture.provider() },
+        } },
+    });
+    defer owner.close();
+    for (0..48) |_| {
+        const progress = try owner.drive();
+        if (progress.state != .finished) continue;
+        if (fixture.calls != 2) return error.UnexpectedFixtureCallCount;
+        try std.Io.File.stdout().writeStreamingAll(io, "finished\n");
+        return;
+    }
+    return error.AuthorizedBashDidNotFinish;
 }
 
 fn resumeBash(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
