@@ -995,7 +995,7 @@ test "authorization HTTP primitive deadlines and joins every OAuth call class" {
     }
 }
 
-test "authorization rejects compressed response bytes before JSON decoding" {
+test "authorization request rejects compressed response bytes before JSON decoding" {
     const io = std.testing.io;
     var fixture = try WireFixture.init(io, .ok, "not actually compressed", .complete);
     fixture.response_encoding = "gzip";
@@ -1007,18 +1007,23 @@ test "authorization rejects compressed response bytes before JSON decoding" {
     }
     var endpoint_buffer: [128]u8 = undefined;
     const endpoint = try fixture.endpoint(&endpoint_buffer);
-    const path_start = std.mem.indexOf(u8, endpoint, "/backend-api/") orelse unreachable;
     var http: NativeHttp = .{
         .io = io,
         .allocator = std.testing.allocator,
-        // This fixture verifies response classification, not deadline behavior.
-        // Leave enough time for the in-process server task under parallel CI load.
-        .timeout = std.Io.Duration.fromSeconds(10),
-        .authorization_origin_override = endpoint[0..path_start],
     };
+    var response_bytes: [codex_auth.max_response_size]u8 = undefined;
+    var request_control: RequestControl = .{};
+    var completed_response: ?codex_auth.HttpResponse = null;
     try std.testing.expectError(
-        error.AuthorizationTransportFailed,
-        codex_auth.requestDeviceCode(http.capability()),
+        error.UnexpectedContentEncoding,
+        http.postRequest(
+            endpoint,
+            "application/json",
+            "{}",
+            &response_bytes,
+            &request_control,
+            &completed_response,
+        ),
     );
     try server_future.await(io);
     try std.testing.expect(fixture.accept_encoding_identity);
@@ -1040,9 +1045,7 @@ test "authorization classifies compressed refresh rejection from status" {
     var http: NativeHttp = .{
         .io = io,
         .allocator = std.testing.allocator,
-        // This fixture verifies response classification, not deadline behavior.
-        // Leave enough time for the in-process server task under parallel CI load.
-        .timeout = std.Io.Duration.fromSeconds(10),
+        .timeout = std.Io.Duration.fromSeconds(1),
         .authorization_origin_override = endpoint[0..path_start],
     };
     var tokens: codex_auth.Tokens = .{ .refresh_length = "refresh".len };
