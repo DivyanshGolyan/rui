@@ -10,8 +10,8 @@ on:
     paths:
       - build.zig
       - build.zig.zon
-      - src/quickjs_c.zig
-      - src/workflow_*.zig
+      - src/quickjs_*
+      - src/workflow_*
       - .github/workflows/workflow-check.yml
   push:
     branches:
@@ -19,8 +19,8 @@ on:
     paths:
       - build.zig
       - build.zig.zon
-      - src/quickjs_c.zig
-      - src/workflow_*.zig
+      - src/quickjs_*
+      - src/workflow_*
       - .github/workflows/workflow-check.yml
   workflow_dispatch:
 
