@@ -402,7 +402,8 @@ fn addTestGraph(
     unit_tests.root_module.linkFramework("CoreFoundation", .{});
     configureCurl(unit_tests);
     configureSqlite(b, unit_tests);
-    parent.dependOn(&b.addRunArtifact(unit_tests).step);
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    parent.dependOn(&run_unit_tests.step);
 
     const workflow_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -429,6 +430,7 @@ fn addTestGraph(
         optimize,
     );
     const run_workflow_integration = b.addRunArtifact(workflow_parent_fixture);
+    run_workflow_integration.step.dependOn(&run_unit_tests.step);
     run_workflow_integration.addArtifactArg(workflow_evaluator);
     run_workflow_integration.addArtifactArg(workflow_abnormal_fixture);
     parent.dependOn(&run_workflow_integration.step);
@@ -441,6 +443,7 @@ fn addTestGraph(
         optimize,
     );
     const run_agent_integration = b.addRunArtifact(agent_integration);
+    run_agent_integration.step.dependOn(&run_unit_tests.step);
     parent.dependOn(&run_agent_integration.step);
 
     const cli_resume_fixture = addNativeExecutable(
@@ -451,6 +454,7 @@ fn addTestGraph(
         optimize,
     );
     const run_cli_resume = b.addSystemCommand(&.{"sh"});
+    run_cli_resume.step.dependOn(&run_unit_tests.step);
     run_cli_resume.addFileArg(b.path("src/cli_resume_integration.sh"));
     run_cli_resume.addArtifactArg(cli_resume_fixture);
     run_cli_resume.addArtifactArg(cli);
@@ -464,6 +468,7 @@ fn addTestGraph(
         optimize,
     );
     const run_host_lock = b.addSystemCommand(&.{"sh"});
+    run_host_lock.step.dependOn(&run_unit_tests.step);
     run_host_lock.addFileArg(b.path("src/host_runtime_lock_integration.sh"));
     run_host_lock.addArtifactArg(host_lock_fixture);
     parent.dependOn(&run_host_lock.step);
@@ -476,6 +481,7 @@ fn addTestGraph(
         optimize,
     );
     const run_patch_recovery = b.addSystemCommand(&.{"sh"});
+    run_patch_recovery.step.dependOn(&run_unit_tests.step);
     run_patch_recovery.addFileArg(b.path("src/patch_recovery_integration.sh"));
     run_patch_recovery.addArtifactArg(patch_recovery_fixture);
     parent.dependOn(&run_patch_recovery.step);
@@ -488,6 +494,7 @@ fn addTestGraph(
         optimize,
     );
     const run_patch_git_environment = b.addSystemCommand(&.{"sh"});
+    run_patch_git_environment.step.dependOn(&run_unit_tests.step);
     run_patch_git_environment.addFileArg(b.path("src/patch_git_environment_integration.sh"));
     run_patch_git_environment.addArtifactArg(patch_git_environment_fixture);
     parent.dependOn(&run_patch_git_environment.step);
@@ -500,6 +507,7 @@ fn addTestGraph(
         optimize,
     );
     const run_effect_recovery = b.addSystemCommand(&.{"sh"});
+    run_effect_recovery.step.dependOn(&run_unit_tests.step);
     run_effect_recovery.addFileArg(b.path("src/effect_recovery_integration.sh"));
     run_effect_recovery.addArtifactArg(effect_recovery_fixture);
     parent.dependOn(&run_effect_recovery.step);
