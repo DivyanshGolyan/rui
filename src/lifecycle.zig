@@ -420,8 +420,6 @@ pub const CompletionHook = struct {
 pub const Control = enum { cancel, shutdown };
 
 pub fn commitControl(session: *session_store.Session, control: Control) !void {
-    const state = try session.semanticView();
-    if (state.openOperation() != null) return error.AcceptedOperationUnsettled;
     _ = try session.commitControl(if (control == .cancel) .cancel else .shutdown);
 }
 

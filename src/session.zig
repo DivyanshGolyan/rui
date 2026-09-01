@@ -1099,7 +1099,12 @@ pub const SemanticView = struct {
                         return error.ResultApplicationMismatch;
                     }
                 },
-                .cancellation, .shutdown => self.control = fact,
+                .cancellation, .shutdown => {
+                    if (self.openOperation() != null) {
+                        return error.AcceptedOperationUnsettled;
+                    }
+                    self.control = fact;
+                },
                 .task_admitted, .conversation_advanced, .outcome => {},
             }
         }
@@ -6300,6 +6305,43 @@ test "Model Attempt cannot follow a terminal Result" {
     var stale_retry: session_transition.Transaction = .{ .sequence = 3, .fact_count = 1 };
     stale_retry.facts[0] = session_transition.modelAttemptAdmitted(operation, 15, 11, descriptor, 1);
     try std.testing.expectError(error.ModelAlreadySettled, semantic.apply(stale_retry));
+}
+
+test "control cannot strand an open Operation" {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 1,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    const operation: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 10,
+        .generation = 1,
+    };
+    const descriptor = testDescriptor("model descriptor");
+    var semantic: SemanticView = .{};
+    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    admission.facts[0] = session_transition.operationAdmitted(operation, null, 11, descriptor);
+    admission.facts[1] = session_transition.modelAttemptAdmitted(operation, 13, 11, descriptor, 0);
+    try semantic.apply(admission);
+
+    var cancellation: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    cancellation.facts[0] = session_transition.cancellation(agent);
+    try std.testing.expectError(error.AcceptedOperationUnsettled, semantic.apply(cancellation));
+
+    var settlement: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    settlement.facts[0] = session_transition.result(.{
+        .operation = operation,
+        .result_ref = 14,
+        .result_digest = testResultDigest("model result"),
+        .class = .ordinary,
+        .evidence = .{ .durable = .{ .model = 13 } },
+    });
+    try semantic.apply(settlement);
+
+    cancellation.sequence = 3;
+    try semantic.apply(cancellation);
+    try std.testing.expect(semantic.control != null);
 }
 
 test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
