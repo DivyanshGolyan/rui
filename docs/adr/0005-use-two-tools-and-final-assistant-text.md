@@ -15,8 +15,9 @@ exact bounded JSON arguments admitted under the bound Validation Profile. Harnes
 key to one of these two Actions. This does not
 create runtime discovery, a plugin system, or generic execution authority; see ADR-0012.
 
-A valid tool call, including one whose external effect is indeterminate, returns its Result to the
-next model turn, while a complete non-empty assistant response with no tool call is the Final Answer.
+A valid model response may contain multiple ordered Tool Calls. Each call becomes one child Action
+Operation and returns its Result to the next model Operation after every child settles. A complete
+non-empty assistant response with no Tool Call is the Final Answer.
 The only other V1 model disposition is a bounded non-effecting `input_request`; it creates an immutable
 Interaction Request and no executable Action.
 Dedicated search, read, verification, finish, and stop actions would duplicate shell or
