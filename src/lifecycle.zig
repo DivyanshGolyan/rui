@@ -505,7 +505,8 @@ fn admittedExecutableTool(
     const view = try session.semanticView();
     const model = view.model;
     if (model.operation_id > std.math.maxInt(u32)) return error.InvalidModelOperationIdentity;
-    const descriptor = view.consequential.descriptor orelse return null;
+    const action = (try session.currentAction()) orelse return null;
+    const descriptor = action.operation;
     const source = descriptor.source_operation orelse return null;
     if (source.operation_id != model.operation_id or source.generation != model.generation) return null;
     return switch (descriptor.descriptor_digest) {
@@ -554,22 +555,12 @@ fn operationHistory(
     return operation;
 }
 
-fn consequentialHistoryForModel(
+fn consequentialActionForModel(
     session: *session_store.Session,
     model_operation_id: u64,
     expected_kind: binding.DescriptorKind,
-) !session_store.OperationView {
-    const view = try session.semanticView();
-    const operation = view.consequential;
-    const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
-    const source = descriptor.source_operation orelse return error.MissingSourceOperation;
-    const model = view.model;
-    if (source.operation_id != model_operation_id or source.operation_id != model.operation_id or
-        source.generation != model.generation or operation.kind() != expected_kind)
-    {
-        return error.InvalidOperationHistory;
-    }
-    return operation;
+) !session_store.ActionView {
+    return session.actionForModel(model_operation_id, expected_kind);
 }
 
 const ModelSlot = struct {
@@ -1015,20 +1006,31 @@ fn executeBashCall(
     if (tool != .bash) {
         return error.UnsupportedTool;
     }
-    const history = try consequentialHistoryForModel(session, ids.operation_id, .bash);
-    const tool_operation_id = history.operation_id;
-    if (permission_mode == .ask and history.authorization == null) {
-        const request = try session.requestApproval(tool_operation_id, 1);
-        if (approval_required_hook) |hook| try hook.required(hook.context, .{
-            .kind = .bash,
-            .operation_id = request.operation_id,
-            .operation_generation = request.operation_generation,
-            .descriptor_digest = request.descriptor_digest,
-            .descriptor_ref = request.descriptor_ref,
-        });
-        return error.PermissionInputRequired;
+    const action = try consequentialActionForModel(session, ids.operation_id, .bash);
+    const identity = action.identity();
+    if (permission_mode == .ask) switch (action.disposition) {
+        .proposed, .approval_required => {
+            const request = try session.requireApproval(
+                identity.operation_id,
+                identity.operation_generation,
+            );
+            if (approval_required_hook) |hook| try hook.required(hook.context, .{
+                .kind = .bash,
+                .operation_id = request.operation_id,
+                .operation_generation = request.operation_generation,
+                .descriptor_digest = request.descriptor_digest,
+                .descriptor_ref = request.descriptor_ref,
+            });
+            return error.PermissionInputRequired;
+        },
+        .authorized => {},
+        else => return error.InvalidBashAuthorization,
+    } else switch (action.disposition) {
+        .proposed => _ = try session.authorizeBypass(identity),
+        .authorized => {},
+        else => return error.InvalidBashAuthorization,
     }
-    const admitted = history.descriptor orelse return error.MissingActionDescriptor;
+    const admitted = action.operation;
     const descriptor_ref = admitted.descriptor_ref;
     var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
     const descriptor_bytes = try readBoundedContent(session, descriptor_ref, &descriptor_buffer);
@@ -1043,26 +1045,9 @@ fn executeBashCall(
         return error.InvalidBashDescriptor;
     }
     const result_ref = (@as(u64, 1) << 61) | ids.response_ref;
-    if (history.authorization) |authorization| {
-        if (!authorization.allowed or authorization.permission_ref != 0) {
-            return error.InvalidBashAuthorization;
-        }
-    } else {
-        _ = try session.authorizeAction(.{
-            .operation_id = tool_operation_id,
-            .operation_generation = 1,
-            .allowed = true,
-        });
-    }
     try reach(fault, .after_bash_authorization);
 
-    var attempt_id: u64 = 0;
-    while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
-    _ = try session.admitActionAttempt(.{
-        .operation_id = tool_operation_id,
-        .operation_generation = 1,
-        .attempt_id = attempt_id,
-    });
+    const grant = try session.beginAuthorizedAction(identity);
     var execution = try bash_tool.executeDescriptor(
         allocator,
         io,
@@ -1079,9 +1064,9 @@ fn executeBashCall(
         .ownership_epoch = token.epoch,
         .agent_id = session.agent_id,
         .agent_generation = agent_generation,
-        .operation_id = tool_operation_id,
-        .operation_generation = 1,
-        .attempt_id = attempt_id,
+        .operation_id = grant.operation.operation_id,
+        .operation_generation = grant.operation.generation,
+        .attempt_id = grant.attempt_id,
         .result_ref = result_ref,
         .result_digest = result_digest,
     });
@@ -1097,24 +1082,30 @@ fn requestPatchPermission(
     approval_required_hook: ?ApprovalRequiredHook,
     fault: ?FaultHook,
 ) !void {
-    const history = try consequentialHistoryForModel(session, ids.operation_id, .apply_patch);
-    const tool_operation_id = history.operation_id;
-    if (permission_mode == .ask) {
-        const request = try session.requestApproval(tool_operation_id, 1);
-        if (approval_required_hook) |hook| try hook.required(hook.context, .{
-            .kind = .apply_patch,
-            .operation_id = request.operation_id,
-            .operation_generation = request.operation_generation,
-            .descriptor_digest = request.descriptor_digest,
-            .descriptor_ref = request.descriptor_ref,
-        });
-        return error.PermissionInputRequired;
+    const action = try consequentialActionForModel(session, ids.operation_id, .apply_patch);
+    const identity = action.identity();
+    if (permission_mode == .ask) switch (action.disposition) {
+        .proposed, .approval_required => {
+            const request = try session.requireApproval(
+                identity.operation_id,
+                identity.operation_generation,
+            );
+            if (approval_required_hook) |hook| try hook.required(hook.context, .{
+                .kind = .apply_patch,
+                .operation_id = request.operation_id,
+                .operation_generation = request.operation_generation,
+                .descriptor_digest = request.descriptor_digest,
+                .descriptor_ref = request.descriptor_ref,
+            });
+            return error.PermissionInputRequired;
+        },
+        .authorized => {},
+        else => return error.InvalidPatchAuthorization,
+    } else switch (action.disposition) {
+        .proposed => _ = try session.authorizeBypass(identity),
+        .authorized => {},
+        else => return error.InvalidPatchAuthorization,
     }
-    _ = try session.authorizeAction(.{
-        .operation_id = tool_operation_id,
-        .operation_generation = 1,
-        .allowed = true,
-    });
     try reach(fault, .after_patch_authorization);
 }
 
@@ -1387,23 +1378,16 @@ pub fn resolvePermission(
         .bash => .bash,
         .apply_patch => .apply_patch,
     };
-    const history = try consequentialHistoryForModel(session, observation.id, expected_kind);
-    const expected_operation_id = history.operation_id;
-    if (decision.operation_id != expected_operation_id or
-        decision.operation_generation != 1)
-    {
-        return error.StalePermissionDecision;
-    }
-    const descriptor = history.descriptor orelse return error.MissingActionDescriptor;
-    if (!binding.descriptorEql(descriptor.descriptor_digest, decision.descriptor_digest)) {
-        return error.StalePermissionDecision;
-    }
-    if (history.result != null or history.latestAttempt() != null) return error.PermissionNoLongerRequired;
-    const pending = history.approval_required orelse return error.ApprovalNotCommitted;
-    if (pending.descriptor_ref != decision.descriptor_ref) return error.StalePermissionDecision;
-    if (history.authorization != null) {
-        return error.PermissionNoLongerRequired;
-    }
+    const action = try consequentialActionForModel(session, observation.id, expected_kind);
+    const resolved = try session.resolveApproval(.{
+        .operation_id = decision.operation_id,
+        .operation_generation = decision.operation_generation,
+        .descriptor_digest = decision.descriptor_digest,
+        .descriptor_ref = decision.descriptor_ref,
+        .allowed = allow,
+    });
+    const identity = action.identity();
+    const descriptor = resolved.operation;
 
     switch (tool) {
         .bash => {
@@ -1427,21 +1411,11 @@ pub fn resolvePermission(
             {
                 return error.StalePermissionDecision;
             }
-            _ = try session.authorizeAction(.{
-                .operation_id = expected_operation_id,
-                .operation_generation = 1,
-                .allowed = allow,
-            });
             const result_ref = (@as(u64, 1) << 61) | @as(u32, @truncate(observation.result_ref));
-            var attempt_id: u64 = 0;
+            var grant: ?session_store.ExecutionGrant = null;
             var execution: bash_tool.Execution = undefined;
             if (allow) {
-                while (attempt_id == 0) io.random(std.mem.asBytes(&attempt_id));
-                _ = try session.admitActionAttempt(.{
-                    .operation_id = expected_operation_id,
-                    .operation_generation = 1,
-                    .attempt_id = attempt_id,
-                });
+                grant = try session.beginAuthorizedAction(identity);
                 execution = try bash_tool.executeDescriptor(
                     allocator,
                     io,
@@ -1460,15 +1434,16 @@ pub fn resolvePermission(
             try storeBashResult(session, result_ref, execution);
             const result_digest = try contentDigest(session, result_ref);
             if (allow) {
+                const admitted = grant.?;
                 const evidence = completion_inbox.bind(.{
                     .kind = .bash,
                     .session_id = session.session_id,
                     .ownership_epoch = token.epoch,
                     .agent_id = session.agent_id,
                     .agent_generation = agent_generation,
-                    .operation_id = expected_operation_id,
-                    .operation_generation = 1,
-                    .attempt_id = attempt_id,
+                    .operation_id = admitted.operation.operation_id,
+                    .operation_generation = admitted.operation.generation,
+                    .attempt_id = admitted.attempt_id,
                     .result_ref = result_ref,
                     .result_digest = result_digest,
                 });
@@ -1476,19 +1451,15 @@ pub fn resolvePermission(
                 if (completion_hook) |hook| try hook.offered(hook.context, evidence);
                 return error.CompletionOffered;
             }
-            _ = try session.admitActionResult(.{
-                .operation_id = expected_operation_id,
-                .operation_generation = 1,
+            _ = try session.settleNoEffect(identity, .{
                 .result_ref = result_ref,
                 .result_digest = result_digest,
-                .class = if (execution.status == .indeterminate) .indeterminate else .ordinary,
-                .evidence = .immediate,
             });
             const result = ToolResult{
                 .agent_id = session.agent_id,
                 .agent_generation = agent_generation,
-                .operation_id = expected_operation_id,
-                .operation_generation = 1,
+                .operation_id = identity.operation_id,
+                .operation_generation = identity.operation_generation,
                 .attempt_id = 0,
                 .ownership_epoch = token.epoch,
                 .result = result_ref,
@@ -1499,13 +1470,7 @@ pub fn resolvePermission(
                 result,
             );
         },
-        .apply_patch => {
-            _ = try session.authorizeAction(.{
-                .operation_id = expected_operation_id,
-                .operation_generation = 1,
-                .allowed = allow,
-            });
-        },
+        .apply_patch => {},
     }
     const next_provider = provider orelse return error.SessionNeedsModel;
     return advanceRestored(
@@ -1575,64 +1540,54 @@ fn reconcileBash(
     session: *session_store.Session,
 ) !ToolRecovery {
     const model_observation = (try continuationView(host, session)).operation;
-    const view = try session.semanticView();
-    if (view.consequential.descriptor == null) return .none;
-    const history = try consequentialHistoryForModel(session, model_observation.id, .bash);
-    const operation_id = history.operation_id;
-    _ = history.descriptor orelse return .none;
-    if (history.result) |result| {
-        try reconcileBashResult(
-            host,
-            session,
-            toolResultFromRecord(result),
-        );
-        if (result.class == .indeterminate) return .indeterminate;
-        return switch (result.evidence) {
-            .immediate => .ready_local,
-            .durable => .ready_completion,
-        };
-    }
-    const attempt = history.latestAttempt() orelse {
-        if (history.authorization == null and history.approval_required != null) {
-            return .approval_required;
-        }
-        const authorization = history.authorization orelse return .none;
-        if (authorization.allowed) return .none;
-        const response_ref: u32 = @truncate(model_observation.result_ref);
-        const result_ref = (@as(u64, 1) << 61) | response_ref;
-        var empty: [0]u8 = .{};
-        const execution: bash_tool.Execution = .{
-            .allocator = undefined,
-            .status = .denied,
-            .stdout = &empty,
-            .stderr = &empty,
-        };
-        var encoded: [bash_tool.result_header_size]u8 = undefined;
-        _ = try bash_tool.encodeResult(&encoded, execution);
-        try storeOrExpectContent(session, result_ref, &encoded);
-        const denied_digest = try contentDigest(session, result_ref);
-        _ = try session.admitActionResult(.{
-            .operation_id = operation_id,
-            .operation_generation = 1,
-            .result_ref = result_ref,
-            .result_digest = denied_digest,
-            .class = .ordinary,
-            .evidence = .immediate,
-        });
-        try reconcileBashResult(
-            host,
-            session,
-            .{
-                .agent_id = session.agent_id,
-                .agent_generation = agent_generation,
-                .operation_id = operation_id,
-                .operation_generation = 1,
-                .attempt_id = 0,
-                .ownership_epoch = session.ownership_epoch,
-                .result = result_ref,
-            },
-        );
-        return .ready_local;
+    if ((try session.currentAction()) == null) return .none;
+    const action = try consequentialActionForModel(session, model_observation.id, .bash);
+    const identity = action.identity();
+    const attempt = switch (action.disposition) {
+        .proposed, .authorized => return .none,
+        .approval_required => return .approval_required,
+        .settled => |result| {
+            try reconcileBashResult(host, session, toolResultFromRecord(result));
+            if (result.class == .indeterminate) return .indeterminate;
+            return switch (result.evidence) {
+                .immediate => .ready_local,
+                .durable => .ready_completion,
+            };
+        },
+        .denied => {
+            const response_ref: u32 = @truncate(model_observation.result_ref);
+            const result_ref = (@as(u64, 1) << 61) | response_ref;
+            var empty: [0]u8 = .{};
+            const execution: bash_tool.Execution = .{
+                .allocator = undefined,
+                .status = .denied,
+                .stdout = &empty,
+                .stderr = &empty,
+            };
+            var encoded: [bash_tool.result_header_size]u8 = undefined;
+            _ = try bash_tool.encodeResult(&encoded, execution);
+            try storeOrExpectContent(session, result_ref, &encoded);
+            const denied_digest = try contentDigest(session, result_ref);
+            _ = try session.settleNoEffect(identity, .{
+                .result_ref = result_ref,
+                .result_digest = denied_digest,
+            });
+            try reconcileBashResult(
+                host,
+                session,
+                .{
+                    .agent_id = session.agent_id,
+                    .agent_generation = agent_generation,
+                    .operation_id = identity.operation_id,
+                    .operation_generation = identity.operation_generation,
+                    .attempt_id = 0,
+                    .ownership_epoch = session.ownership_epoch,
+                    .result = result_ref,
+                },
+            );
+            return .ready_local;
+        },
+        .attempted => |observed| observed,
     };
     var evidence_agent = attempt.operation.agent;
     var result_ref: u64 = undefined;
@@ -1671,23 +1626,18 @@ fn reconcileBash(
             .ownership_epoch = attempt.operation.agent.ownership_epoch,
             .agent_id = session.agent_id,
             .agent_generation = agent_generation,
-            .operation_id = operation_id,
-            .operation_generation = 1,
+            .operation_id = identity.operation_id,
+            .operation_generation = identity.operation_generation,
             .attempt_id = attempt.attempt_id,
             .result_ref = result_ref,
             .result_digest = result_digest,
         }));
     }
-    _ = try session.admitActionResult(.{
-        .operation_id = operation_id,
-        .operation_generation = 1,
+    _ = try session.settleAttempt(attempt, .{
         .result_ref = result_ref,
         .result_digest = result_digest,
         .class = if (status == .indeterminate) .indeterminate else .ordinary,
-        .evidence = .{ .durable = .{
-            .attempt_id = attempt.attempt_id,
-            .ownership_epoch = evidence_agent.ownership_epoch,
-        } },
+        .ownership_epoch = evidence_agent.ownership_epoch,
     });
     try reconcileBashResult(
         host,
@@ -1695,8 +1645,8 @@ fn reconcileBash(
         .{
             .agent_id = session.agent_id,
             .agent_generation = agent_generation,
-            .operation_id = operation_id,
-            .operation_generation = 1,
+            .operation_id = identity.operation_id,
+            .operation_generation = identity.operation_generation,
             .attempt_id = attempt.attempt_id,
             .ownership_epoch = evidence_agent.ownership_epoch,
             .result = result_ref,
@@ -1746,11 +1696,10 @@ fn reconcilePatch(
     const model_operation_id = operation_observation.id;
     const response_ref: u32 = @truncate(operation_observation.result_ref);
     const result_ref = (@as(u64, 1) << 57) | response_ref;
-    const view = try session.semanticView();
-    if (view.consequential.descriptor == null) return .none;
-    const history = try consequentialHistoryForModel(session, model_operation_id, .apply_patch);
-    const operation_id = history.operation_id;
-    const validated = history.descriptor orelse return .none;
+    if ((try session.currentAction()) == null) return .none;
+    const action = try consequentialActionForModel(session, model_operation_id, .apply_patch);
+    const identity = action.identity();
+    const validated = action.operation;
     const patch_descriptor = switch (validated.descriptor_digest) {
         .apply_patch => |value| value,
         else => return error.InvalidPatchHistory,
@@ -1763,64 +1712,48 @@ fn reconcilePatch(
         return error.InvalidPatchHistory;
     }
     const patch_ref = intent.patch_ref;
-    if (history.result) |settled| {
-        if (settled.result_ref != result_ref) {
-            return error.InvalidPatchHistory;
-        }
-        try reconcileToolResult(
-            host,
-            session,
-            (@as(u64, 1) << 59) | response_ref,
-            .apply_patch,
-            toolResultFromRecord(settled),
-        );
-        return switch (settled.evidence) {
-            .immediate => .ready_local,
-            .durable => .ready_completion,
-        };
-    }
-    if (history.authorization == null and history.approval_required != null) {
-        return .approval_required;
-    }
-    const authorization = history.authorization orelse return .none;
-    if (authorization.permission_ref != validated.descriptor_ref) {
-        return error.InvalidPatchHistory;
-    }
-    var attempt = history.latestAttempt();
-    var immediate_status: ?patch_tool.ResultStatus = if (authorization.allowed) null else .denied;
-    if (!authorization.allowed and attempt != null) return error.InvalidPatchHistory;
-    if (authorization.allowed and attempt == null) {
-        const ready = blk: {
-            var workspace = try host.patch_workspace.borrow();
-            defer workspace.release() catch unreachable;
-            const patch = try readBoundedContent(session, patch_ref, &workspace.workspace.patch);
-            break :blk try patch_tool.readyForAttempt(session.io, intent, patch);
-        };
-        if (!ready) {
-            immediate_status = .stale;
-        } else {
-            // The first lease ended before this durable transition. Reconciliation
-            // reopens the immutable patch under a new lease only if it needs bytes.
-            var attempt_id: u64 = 0;
-            while (attempt_id == 0) session.io.random(std.mem.asBytes(&attempt_id));
-            _ = try session.admitActionAttempt(.{
-                .operation_id = operation_id,
-                .operation_generation = 1,
-                .attempt_id = attempt_id,
-            });
-            attempt = (try consequentialHistoryForModel(
+    var attempt: ?session_store.AttemptObservation = null;
+    var immediate_status: ?patch_tool.ResultStatus = null;
+    switch (action.disposition) {
+        .proposed => return .none,
+        .approval_required => return .approval_required,
+        .settled => |settled| {
+            if (settled.result_ref != result_ref) return error.InvalidPatchHistory;
+            try reconcileToolResult(
+                host,
                 session,
-                model_operation_id,
+                (@as(u64, 1) << 59) | response_ref,
                 .apply_patch,
-            )).latestAttempt();
-            try reach(fault, .after_patch_attempt);
-        }
+                toolResultFromRecord(settled),
+            );
+            return switch (settled.evidence) {
+                .immediate => .ready_local,
+                .durable => .ready_completion,
+            };
+        },
+        .denied => immediate_status = .denied,
+        .attempted => |observed| attempt = observed,
+        .authorized => {
+            const ready = blk: {
+                var workspace = try host.patch_workspace.borrow();
+                defer workspace.release() catch unreachable;
+                const patch = try readBoundedContent(session, patch_ref, &workspace.workspace.patch);
+                break :blk try patch_tool.readyForAttempt(session.io, intent, patch);
+            };
+            if (!ready) {
+                immediate_status = .stale;
+            } else {
+                // The first lease ended before this durable transition. Reconciliation
+                // reopens the immutable patch under a new lease only if it needs bytes.
+                attempt = (try session.beginAuthorizedAction(identity)).observation();
+                try reach(fault, .after_patch_attempt);
+            }
+        },
     }
 
     var result_digest: binding.Result = undefined;
     var result_status: patch_tool.ResultStatus = undefined;
     var evidence_agent = if (attempt) |admitted| admitted.operation.agent else agentContext(session);
-    var result_evidence: session_transition.ResultEvidence = .{ .immediate = {} };
     if (immediate_status) |status| {
         result_status = status;
         var result_bytes: [patch_tool.result_size]u8 = undefined;
@@ -1833,12 +1766,11 @@ fn reconcilePatch(
         result_digest = try contentDigest(session, result_ref);
     } else {
         const admitted = attempt orelse return error.InvalidPatchHistory;
-        if (admitted.descriptor_ref != validated.descriptor_ref or
-            !binding.descriptorEql(admitted.descriptor_digest, validated.descriptor_digest))
+        if (admitted.binding.descriptor_ref != validated.descriptor_ref or
+            !binding.descriptorEql(admitted.binding.descriptor_digest, validated.descriptor_digest))
         {
             return error.InvalidPatchHistory;
         }
-        result_evidence = .{ .durable = .{ .apply_patch = admitted.attempt_id } };
         if (try session.pendingCompletionEvidence(admitted.operation, admitted.attempt_id)) |envelope| {
             if (envelope.result_ref != result_ref or !binding.eql(
                 binding.Result,
@@ -1876,8 +1808,8 @@ fn reconcilePatch(
                 .ownership_epoch = admitted.operation.agent.ownership_epoch,
                 .agent_id = session.agent_id,
                 .agent_generation = agent_generation,
-                .operation_id = operation_id,
-                .operation_generation = 1,
+                .operation_id = identity.operation_id,
+                .operation_generation = identity.operation_generation,
                 .attempt_id = admitted.attempt_id,
                 .result_ref = result_ref,
                 .result_digest = result_digest,
@@ -1889,22 +1821,19 @@ fn reconcilePatch(
             }
         }
     }
-    _ = try session.admitActionResult(.{
-        .operation_id = operation_id,
-        .operation_generation = 1,
-        .result_ref = result_ref,
-        .result_digest = result_digest,
-        .class = if (result_status == .indeterminate) .indeterminate else .ordinary,
-        .evidence = switch (result_evidence) {
-            .immediate => .immediate,
-            .durable => |durable| .{ .durable = .{
-                .attempt_id = switch (durable) {
-                    inline else => |attempt_id| attempt_id,
-                },
-                .ownership_epoch = evidence_agent.ownership_epoch,
-            } },
-        },
-    });
+    if (attempt) |admitted| {
+        _ = try session.settleAttempt(admitted, .{
+            .result_ref = result_ref,
+            .result_digest = result_digest,
+            .class = if (result_status == .indeterminate) .indeterminate else .ordinary,
+            .ownership_epoch = evidence_agent.ownership_epoch,
+        });
+    } else {
+        _ = try session.settleNoEffect(identity, .{
+            .result_ref = result_ref,
+            .result_digest = result_digest,
+        });
+    }
     try reconcileToolResult(
         host,
         session,
@@ -1913,22 +1842,14 @@ fn reconcilePatch(
         .{
             .agent_id = session.agent_id,
             .agent_generation = agent_generation,
-            .operation_id = operation_id,
-            .operation_generation = 1,
-            .attempt_id = switch (result_evidence) {
-                .immediate => 0,
-                .durable => |durable| switch (durable) {
-                    inline else => |attempt_id| attempt_id,
-                },
-            },
+            .operation_id = identity.operation_id,
+            .operation_generation = identity.operation_generation,
+            .attempt_id = if (attempt) |admitted| admitted.attempt_id else 0,
             .ownership_epoch = evidence_agent.ownership_epoch,
             .result = result_ref,
         },
     );
-    return switch (result_evidence) {
-        .immediate => .ready_local,
-        .durable => .ready_completion,
-    };
+    return if (attempt == null) .ready_local else .ready_completion;
 }
 
 const ToolResult = struct {
@@ -2228,20 +2149,21 @@ fn durableCompletion(
 }
 
 pub fn pendingApprovalRequired(session: *session_store.Session) !?ApprovalRequired {
-    const view = try session.semanticView();
-    const action = view.consequential;
-    const pending = action.approval_required orelse return null;
-    if (action.authorization != null or action.latestAttempt() != null or action.result != null) return null;
-    const kind: ApprovalRequiredKind = switch (action.kind() orelse return error.MissingActionDescriptor) {
+    const action = (try session.currentAction()) orelse return null;
+    const pending = switch (action.disposition) {
+        .approval_required => |request| request,
+        else => return null,
+    };
+    const kind: ApprovalRequiredKind = switch (std.meta.activeTag(action.operation.descriptor_digest)) {
         .bash => .bash,
         .apply_patch => .apply_patch,
         .model => return error.InvalidActionDescriptor,
     };
     return .{
         .kind = kind,
-        .operation_id = pending.operation.operation_id,
-        .operation_generation = pending.operation.generation,
-        .descriptor_digest = action.descriptor.?.descriptor_digest,
+        .operation_id = pending.operation_id,
+        .operation_generation = pending.operation_generation,
+        .descriptor_digest = pending.descriptor_digest,
         .descriptor_ref = pending.descriptor_ref,
     };
 }

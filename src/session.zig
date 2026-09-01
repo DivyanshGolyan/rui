@@ -697,33 +697,12 @@ comptime {
 
 pub const Control = enum { cancel, shutdown };
 
-pub const AuthorizationMaterial = struct {
+pub const ApprovalDecision = struct {
     operation_id: u64,
     operation_generation: u32,
+    descriptor_digest: binding.Descriptor,
+    descriptor_ref: u64,
     allowed: bool,
-};
-
-pub const ActionAttemptMaterial = struct {
-    operation_id: u64,
-    operation_generation: u32,
-    attempt_id: u64,
-};
-
-pub const ActionResultEvidence = union(enum) {
-    immediate,
-    durable: struct {
-        attempt_id: u64,
-        ownership_epoch: u64,
-    },
-};
-
-pub const ActionResultMaterial = struct {
-    operation_id: u64,
-    operation_generation: u32,
-    result_ref: u64,
-    result_digest: binding.Result,
-    class: session_transition.ResultClass,
-    evidence: ActionResultEvidence,
 };
 
 pub const EntryKind = session_transition.ConversationKind;
@@ -768,6 +747,74 @@ pub const ApprovalRequest = struct {
     operation_generation: u32,
     descriptor_digest: binding.Descriptor,
     descriptor_ref: u64,
+};
+
+pub const ActionBinding = struct {
+    descriptor_ref: u64,
+    descriptor_digest: binding.Descriptor,
+};
+
+pub const AttemptObservation = struct {
+    operation: session_transition.OperationContext,
+    attempt_id: u64,
+    binding: ActionBinding,
+};
+
+/// Returned only by the invocation that durably admits the first consequential
+/// Attempt. Recovery reconstructs AttemptObservation instead, so it cannot
+/// accidentally redispatch an effect whose physical start is uncertain.
+pub const ExecutionGrant = struct {
+    operation: session_transition.OperationContext,
+    attempt_id: u64,
+    binding: ActionBinding,
+
+    pub fn observation(self: ExecutionGrant) AttemptObservation {
+        return .{
+            .operation = self.operation,
+            .attempt_id = self.attempt_id,
+            .binding = self.binding,
+        };
+    }
+};
+
+pub const ActionDisposition = union(enum) {
+    proposed,
+    approval_required: ApprovalRequest,
+    authorized,
+    denied,
+    attempted: AttemptObservation,
+    settled: session_transition.ResultRecord,
+};
+
+pub const ActionView = struct {
+    operation: session_transition.OperationRecord,
+    disposition: ActionDisposition,
+
+    pub fn identity(self: ActionView) ActionIdentity {
+        return .{
+            .operation_id = self.operation.operation.operation_id,
+            .operation_generation = self.operation.operation.generation,
+        };
+    }
+
+    pub fn binding(self: ActionView) ActionBinding {
+        return .{
+            .descriptor_ref = self.operation.descriptor_ref,
+            .descriptor_digest = self.operation.descriptor_digest,
+        };
+    }
+};
+
+pub const ImmediateActionResult = struct {
+    result_ref: u64,
+    result_digest: binding.Result,
+};
+
+pub const AttemptActionResult = struct {
+    result_ref: u64,
+    result_digest: binding.Result,
+    class: session_transition.ResultClass,
+    ownership_epoch: u64,
 };
 
 const ApprovalRefs = struct {
@@ -911,6 +958,13 @@ pub const SemanticView = struct {
                     {
                         return error.AttemptDescriptorMismatch;
                     }
+                    if (std.meta.activeTag(descriptor.descriptor_digest) != .model) {
+                        const authorization = history.authorization orelse
+                            return error.ActionNotAuthorized;
+                        if (!authorization.allowed) return error.ActionNotAuthorized;
+                        if (history.result != null) return error.ActionAlreadySettled;
+                        if (history.attempt_count != 0) return error.ActionAttemptAlreadyAdmitted;
+                    }
                     try history.appendAttempt(record);
                 },
                 .approval_required => |record| {
@@ -928,6 +982,11 @@ pub const SemanticView = struct {
                         .apply_patch => if (record.binding_ref != descriptor.descriptor_ref) {
                             return error.ApprovalDescriptorMismatch;
                         },
+                    }
+                    if (history.authorization != null or history.attempt_count != 0 or
+                        history.result != null)
+                    {
+                        return error.ApprovalNoLongerRequired;
                     }
                     history.approval_required = try uniqueValue(
                         session_transition.ApprovalRequiredRecord,
@@ -949,7 +1008,28 @@ pub const SemanticView = struct {
                             return error.AuthorizationDescriptorMismatch;
                         },
                     }
-                    history.authorization = record;
+                    if (history.attempt_count != 0 or history.result != null) {
+                        return error.AuthorizationNoLongerRequired;
+                    }
+                    if (!record.allowed and history.approval_required == null) {
+                        return error.ApprovalNotCommitted;
+                    }
+                    if (history.approval_required) |approval| switch (descriptor.descriptor_digest) {
+                        .model => unreachable,
+                        .bash => if (approval.binding_ref != 0 or
+                            approval.descriptor_ref != descriptor.descriptor_ref)
+                        {
+                            return error.InvalidAuthorizationBinding;
+                        },
+                        .apply_patch => if (approval.binding_ref != descriptor.descriptor_ref) {
+                            return error.InvalidAuthorizationBinding;
+                        },
+                    };
+                    history.authorization = try uniqueValue(
+                        session_transition.AuthorizationRecord,
+                        history.authorization,
+                        record,
+                    );
                 },
                 .result => |record| {
                     const history = self.operationMut(record.operation) orelse
@@ -963,6 +1043,32 @@ pub const SemanticView = struct {
                         },
                     }
                     if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    if (descriptor_kind != .model) {
+                        if (history.result != null) return error.ActionAlreadySettled;
+                        const authorization = history.authorization orelse
+                            return error.ActionNotAuthorized;
+                        switch (record.evidence) {
+                            .immediate => {
+                                if (history.attempt_count != 0) {
+                                    return error.InvalidActionResultState;
+                                }
+                                if (authorization.allowed and descriptor_kind != .apply_patch) {
+                                    return error.InvalidActionResultState;
+                                }
+                            },
+                            .durable => |evidence| {
+                                if (!authorization.allowed or history.attempt_count != 1) {
+                                    return error.InvalidActionResultState;
+                                }
+                                const attempt_id: u64 = switch (evidence) {
+                                    inline else => |value| value,
+                                };
+                                if (!history.containsAttempt(attempt_id)) {
+                                    return error.InvalidAttemptHistory;
+                                }
+                            },
+                        }
+                    }
                     const first_terminal = history.result == null;
                     history.result = try uniqueValue(
                         session_transition.ResultRecord,
@@ -1037,6 +1143,36 @@ fn resultAttemptId(result: session_transition.ResultRecord) u64 {
             inline else => |attempt_id| attempt_id,
         },
     };
+}
+
+fn actionView(history: OperationView) !ActionView {
+    const operation = history.descriptor orelse return error.MissingActionDescriptor;
+    if (std.meta.activeTag(operation.descriptor_digest) == .model) {
+        return error.InvalidActionDescriptor;
+    }
+    const disposition: ActionDisposition = if (history.result) |result|
+        .{ .settled = result }
+    else if (history.latestAttempt()) |attempt|
+        .{ .attempted = .{
+            .operation = attempt.operation,
+            .attempt_id = attempt.attempt_id,
+            .binding = .{
+                .descriptor_ref = attempt.descriptor_ref,
+                .descriptor_digest = attempt.descriptor_digest,
+            },
+        } }
+    else if (history.authorization) |authorization|
+        if (authorization.allowed) .authorized else .denied
+    else if (history.approval_required) |approval|
+        .{ .approval_required = .{
+            .operation_id = operation.operation.operation_id,
+            .operation_generation = operation.operation.generation,
+            .descriptor_digest = operation.descriptor_digest,
+            .descriptor_ref = approval.descriptor_ref,
+        } }
+    else
+        .proposed;
+    return .{ .operation = operation, .disposition = disposition };
 }
 
 fn uniqueValue(comptime T: type, existing: ?T, candidate: T) !T {
@@ -2294,7 +2430,7 @@ pub const Session = struct {
         return self.commitDerived(&.{fact}, null, .facts_only);
     }
 
-    pub fn requestApproval(
+    pub fn requireApproval(
         self: *Session,
         operation_id: u64,
         operation_generation: u32,
@@ -2303,6 +2439,12 @@ pub const Session = struct {
             operation_id,
             operation_generation,
         );
+        const current = try actionView(operation);
+        switch (current.disposition) {
+            .proposed => {},
+            .approval_required => |request| return request,
+            else => return error.ApprovalNoLongerRequired,
+        }
         const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
         const refs: ApprovalRefs = switch (descriptor.descriptor_digest) {
             .model => return error.InvalidActionDescriptor,
@@ -2344,100 +2486,221 @@ pub const Session = struct {
         };
     }
 
-    pub fn authorizeAction(self: *Session, material: AuthorizationMaterial) !u64 {
+    pub fn authorizeBypass(self: *Session, identity: ActionIdentity) !ActionView {
         const operation = try self.requireActionOperation(
-            material.operation_id,
-            material.operation_generation,
+            identity.operation_id,
+            identity.operation_generation,
+        );
+        const current = try actionView(operation);
+        switch (current.disposition) {
+            .proposed => return self.commitActionAuthorization(operation, true),
+            .authorized => return current,
+            else => return error.AuthorizationNoLongerRequired,
+        }
+    }
+
+    pub fn resolveApproval(self: *Session, decision: ApprovalDecision) !ActionView {
+        const operation = try self.requireActionOperation(
+            decision.operation_id,
+            decision.operation_generation,
         );
         const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
-        if (operation.authorization != null or operation.result != null or
-            operation.latestAttempt() != null)
+        const approval = operation.approval_required orelse return error.ApprovalNotCommitted;
+        if (!binding.descriptorEql(descriptor.descriptor_digest, decision.descriptor_digest) or
+            approval.descriptor_ref != decision.descriptor_ref)
         {
-            return error.AuthorizationNoLongerRequired;
+            return error.StalePermissionDecision;
         }
+        const current = try actionView(operation);
+        switch (current.disposition) {
+            .approval_required => return self.commitActionAuthorization(
+                operation,
+                decision.allowed,
+            ),
+            .authorized => if (decision.allowed) return current,
+            .denied => if (!decision.allowed) return current,
+            else => {},
+        }
+        return error.PermissionNoLongerRequired;
+    }
+
+    pub fn beginAuthorizedAction(
+        self: *Session,
+        identity: ActionIdentity,
+    ) !ExecutionGrant {
+        const operation = try self.requireActionOperation(
+            identity.operation_id,
+            identity.operation_generation,
+        );
+        const current = try actionView(operation);
+        switch (current.disposition) {
+            .authorized => {},
+            else => return error.ActionNotAuthorized,
+        }
+        const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
+        var attempt_id: u64 = 0;
+        while (attempt_id == 0) self.io.random(std.mem.asBytes(&attempt_id));
+        _ = try self.commitDerived(&.{session_transition.consequentialAttemptAdmitted(
+            self.operationContext(identity.operation_id, identity.operation_generation),
+            attempt_id,
+            descriptor.descriptor_ref,
+            descriptor.descriptor_digest,
+        )}, null, .facts_only);
+        return .{
+            .operation = self.operationContext(
+                identity.operation_id,
+                identity.operation_generation,
+            ),
+            .attempt_id = attempt_id,
+            .binding = .{
+                .descriptor_ref = descriptor.descriptor_ref,
+                .descriptor_digest = descriptor.descriptor_digest,
+            },
+        };
+    }
+
+    pub fn settleNoEffect(
+        self: *Session,
+        identity: ActionIdentity,
+        result: ImmediateActionResult,
+    ) !ActionView {
+        const operation = try self.requireActionOperation(
+            identity.operation_id,
+            identity.operation_generation,
+        );
+        const current = try actionView(operation);
+        const kind = operation.kind() orelse return error.MissingActionDescriptor;
+        switch (current.disposition) {
+            .denied => {},
+            .authorized => if (kind != .apply_patch) return error.InvalidActionResultState,
+            .settled => |settled| {
+                const immediate = switch (settled.evidence) {
+                    .immediate => true,
+                    .durable => false,
+                };
+                if (immediate and settled.class == .ordinary and
+                    settled.result_ref == result.result_ref and
+                    binding.eql(binding.Result, settled.result_digest, result.result_digest))
+                {
+                    return current;
+                }
+                return error.ActionAlreadySettled;
+            },
+            else => return error.InvalidActionResultState,
+        }
+        _ = try self.commitDerived(&.{session_transition.result(.{
+            .operation = self.operationContext(identity.operation_id, identity.operation_generation),
+            .result_ref = result.result_ref,
+            .result_digest = result.result_digest,
+            .class = .ordinary,
+            .evidence = .{ .immediate = {} },
+        })}, null, .facts_only);
+        return actionView(try self.requireActionOperation(
+            identity.operation_id,
+            identity.operation_generation,
+        ));
+    }
+
+    pub fn settleAttempt(
+        self: *Session,
+        attempt: AttemptObservation,
+        result: AttemptActionResult,
+    ) !ActionView {
+        const operation = try self.requireActionOperation(
+            attempt.operation.operation_id,
+            attempt.operation.generation,
+        );
+        const current = try actionView(operation);
+        const observed = switch (current.disposition) {
+            .attempted => |value| value,
+            .settled => |settled| {
+                if (settled.result_ref == result.result_ref and
+                    binding.eql(binding.Result, settled.result_digest, result.result_digest) and
+                    settled.class == result.class and
+                    resultAttemptId(settled) == attempt.attempt_id)
+                {
+                    return current;
+                }
+                return error.ActionAlreadySettled;
+            },
+            else => return error.InvalidActionResultState,
+        };
+        if (!std.meta.eql(observed, attempt)) return error.InvalidAttemptHistory;
+        const kind = operation.kind() orelse return error.MissingActionDescriptor;
+        _ = try self.requirePendingCompletion(kind, observed.operation, observed.attempt_id, .{
+            .ownership_epoch = result.ownership_epoch,
+            .result_ref = result.result_ref,
+            .result_digest = result.result_digest,
+        });
+        var evidence_operation = observed.operation;
+        evidence_operation.agent.ownership_epoch = result.ownership_epoch;
+        _ = try self.commitDerived(&.{session_transition.result(.{
+            .operation = evidence_operation,
+            .result_ref = result.result_ref,
+            .result_digest = result.result_digest,
+            .class = result.class,
+            .evidence = .{ .durable = switch (kind) {
+                .bash => .{ .bash = observed.attempt_id },
+                .apply_patch => .{ .apply_patch = observed.attempt_id },
+                .model => unreachable,
+            } },
+        })}, null, .facts_only);
+        return actionView(try self.requireActionOperation(
+            attempt.operation.operation_id,
+            attempt.operation.generation,
+        ));
+    }
+
+    pub fn actionForModel(
+        self: *Session,
+        model_operation_id: u64,
+        expected_kind: binding.DescriptorKind,
+    ) !ActionView {
+        const history = self.resident.semantic.consequential;
+        const descriptor = history.descriptor orelse return error.MissingActionDescriptor;
+        const source = descriptor.source_operation orelse return error.MissingSourceOperation;
+        const model = self.resident.semantic.model;
+        if (source.operation_id != model_operation_id or
+            source.operation_id != model.operation_id or
+            source.generation != model.generation or
+            history.kind() != expected_kind)
+        {
+            return error.InvalidOperationHistory;
+        }
+        return try actionView(history);
+    }
+
+    pub fn currentAction(self: *Session) !?ActionView {
+        const history = self.resident.semantic.consequential;
+        if (history.descriptor == null) return null;
+        const descriptor = history.descriptor.?;
+        _ = descriptor.source_operation orelse return error.MissingSourceOperation;
+        return @as(?ActionView, try actionView(history));
+    }
+
+    fn commitActionAuthorization(
+        self: *Session,
+        operation: OperationView,
+        allowed: bool,
+    ) !ActionView {
+        const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
         const permission_ref: u64 = switch (descriptor.descriptor_digest) {
             .model => return error.InvalidActionDescriptor,
             .bash => 0,
             .apply_patch => descriptor.descriptor_ref,
         };
-        if (!material.allowed and operation.approval_required == null) {
-            return error.ApprovalNotCommitted;
-        }
-        if (operation.approval_required) |approval| switch (descriptor.descriptor_digest) {
-            .model => unreachable,
-            .bash => if (approval.binding_ref != 0 or
-                approval.descriptor_ref != descriptor.descriptor_ref)
-            {
-                return error.InvalidAuthorizationBinding;
-            },
-            .apply_patch => if (approval.binding_ref != descriptor.descriptor_ref) {
-                return error.InvalidAuthorizationBinding;
-            },
-        };
-        return self.commitDerived(&.{session_transition.authorization(.{
-            .operation = self.operationContext(material.operation_id, material.operation_generation),
+        _ = try self.commitDerived(&.{session_transition.authorization(.{
+            .operation = self.operationContext(
+                descriptor.operation.operation_id,
+                descriptor.operation.generation,
+            ),
             .permission_ref = permission_ref,
-            .allowed = material.allowed,
+            .allowed = allowed,
         })}, null, .facts_only);
-    }
-
-    pub fn admitActionAttempt(self: *Session, material: ActionAttemptMaterial) !u64 {
-        const operation = try self.requireActionOperation(
-            material.operation_id,
-            material.operation_generation,
-        );
-        const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
-        return self.commitDerived(&.{session_transition.consequentialAttemptAdmitted(
-            self.operationContext(material.operation_id, material.operation_generation),
-            material.attempt_id,
-            descriptor.descriptor_ref,
-            descriptor.descriptor_digest,
-        )}, null, .facts_only);
-    }
-
-    pub fn admitActionResult(self: *Session, material: ActionResultMaterial) !u64 {
-        const operation = try self.requireActionOperation(
-            material.operation_id,
-            material.operation_generation,
-        );
-        const kind = operation.kind() orelse return error.MissingActionDescriptor;
-        if (kind == .model) return error.InvalidActionDescriptor;
-        var evidence_operation = self.operationContext(
-            material.operation_id,
-            material.operation_generation,
-        );
-        const evidence: session_transition.ResultEvidence = switch (material.evidence) {
-            .immediate => .{ .immediate = {} },
-            .durable => |durable| blk: {
-                const attempt = operation.findAttempt(durable.attempt_id) orelse
-                    return error.InvalidAttemptHistory;
-                if (attempt.operation.operation_id != evidence_operation.operation_id or
-                    attempt.operation.generation != evidence_operation.generation or
-                    attempt.operation.agent.agent_id != evidence_operation.agent.agent_id or
-                    attempt.operation.agent.agent_generation != evidence_operation.agent.agent_generation)
-                {
-                    return error.InvalidAttemptHistory;
-                }
-                _ = try self.requirePendingCompletion(kind, attempt.operation, durable.attempt_id, .{
-                    .ownership_epoch = durable.ownership_epoch,
-                    .result_ref = material.result_ref,
-                    .result_digest = material.result_digest,
-                });
-                evidence_operation.agent.ownership_epoch = durable.ownership_epoch;
-                break :blk .{ .durable = switch (kind) {
-                    .bash => .{ .bash = durable.attempt_id },
-                    .apply_patch => .{ .apply_patch = durable.attempt_id },
-                    .model => unreachable,
-                } };
-            },
-        };
-        return self.commitDerived(&.{session_transition.result(.{
-            .operation = evidence_operation,
-            .result_ref = material.result_ref,
-            .result_digest = material.result_digest,
-            .class = material.class,
-            .evidence = evidence,
-        })}, null, .facts_only);
+        return actionView(try self.requireActionOperation(
+            descriptor.operation.operation_id,
+            descriptor.operation.generation,
+        ));
     }
 
     fn requireActionOperation(
@@ -4249,6 +4512,22 @@ fn testDurableEvidence(
     };
 }
 
+fn testAllowedAction(
+    operation: session_transition.OperationContext,
+    descriptor_ref: u64,
+    descriptor: binding.Descriptor,
+) session_transition.Fact {
+    return session_transition.authorization(.{
+        .operation = operation,
+        .permission_ref = switch (descriptor) {
+            .bash => 0,
+            .apply_patch => descriptor_ref,
+            .model => unreachable,
+        },
+        .allowed = true,
+    });
+}
+
 test "create and exact resume preserve distinct identities and one owner" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
@@ -4404,15 +4683,21 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
                 descriptor_ref,
                 case.descriptor,
             );
-        _ = try created.commitFactsForTest(&.{
-            session_transition.operationAdmitted(
-                operation,
-                if (case.kind == .model) null else .{ .operation_id = 99, .generation = 1 },
-                descriptor_ref,
-                case.descriptor,
-            ),
-            admitted,
-        });
+        const operation_admitted = session_transition.operationAdmitted(
+            operation,
+            if (case.kind == .model) null else .{ .operation_id = 99, .generation = 1 },
+            descriptor_ref,
+            case.descriptor,
+        );
+        if (case.kind == .model) {
+            _ = try created.commitFactsForTest(&.{ operation_admitted, admitted });
+        } else {
+            _ = try created.commitFactsForTest(&.{
+                operation_admitted,
+                testAllowedAction(operation, descriptor_ref, case.descriptor),
+                admitted,
+            });
+        }
         const first = completion_inbox.bind(.{
             .kind = case.kind,
             .session_id = created.session_id,
@@ -4521,6 +4806,7 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
                 descriptor_ref,
                 case.descriptor,
             ),
+            testAllowedAction(operation, descriptor_ref, case.descriptor),
             session_transition.consequentialAttemptAdmitted(
                 operation,
                 attempt_id,
@@ -4627,6 +4913,7 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
                 descriptor_ref,
                 case.descriptor,
             ),
+            testAllowedAction(operation, descriptor_ref, case.descriptor),
             session_transition.consequentialAttemptAdmitted(
                 operation,
                 attempt_id,
@@ -4771,12 +5058,6 @@ test "late evidence for a prior Operation audits through durable history" {
             .descriptor_a = .{ .model = binding.hash(binding.ModelDescriptor, "prior-model-a") },
             .descriptor_b = .{ .model = binding.hash(binding.ModelDescriptor, "current-model-b") },
             .wrong_kind = .bash,
-        },
-        .{
-            .kind = .bash,
-            .descriptor_a = .{ .bash = binding.hash(binding.BashDescriptor, "prior-bash-a") },
-            .descriptor_b = .{ .bash = binding.hash(binding.BashDescriptor, "current-bash-b") },
-            .wrong_kind = .apply_patch,
         },
     };
 
@@ -5435,33 +5716,50 @@ test "typed tool completion derives the Action and binds the exact Result" {
         } },
     });
     const action_id = completion.action.?.operation_id;
-    const approval = try created.requestApproval(action_id, 1);
+    const approval = try created.requireApproval(action_id, 1);
     try std.testing.expectEqual(@as(u64, 914), approval.descriptor_ref);
-    _ = try created.authorizeAction(.{
+    const authorized = try created.resolveApproval(.{
         .operation_id = action_id,
         .operation_generation = 1,
+        .descriptor_digest = approval.descriptor_digest,
+        .descriptor_ref = approval.descriptor_ref,
         .allowed = true,
     });
+    try std.testing.expect(authorized.disposition == .authorized);
     try std.testing.expectEqual(
         @as(u64, 0),
         (try created.semanticView()).consequential.authorization.?.permission_ref,
     );
-    try std.testing.expectError(
-        error.AuthorizationNoLongerRequired,
-        created.authorizeAction(.{
-            .operation_id = action_id,
-            .operation_generation = 1,
-            .allowed = true,
-        }),
-    );
+    const replayed_authorization = try created.resolveApproval(.{
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .descriptor_digest = approval.descriptor_digest,
+        .descriptor_ref = approval.descriptor_ref,
+        .allowed = true,
+    });
+    try std.testing.expect(replayed_authorization.disposition == .authorized);
 
     try created.storeContent(915, "action result");
     const result_digest = binding.hash(binding.Result, "action result");
-    _ = try created.admitActionAttempt(.{
+    const grant = try created.beginAuthorizedAction(.{
         .operation_id = action_id,
         .operation_generation = 1,
-        .attempt_id = 121,
     });
+    const attempted = (try created.currentAction()).?;
+    try std.testing.expectEqualDeep(
+        grant.observation(),
+        switch (attempted.disposition) {
+            .attempted => |value| value,
+            else => return error.ExpectedAttemptedAction,
+        },
+    );
+    try std.testing.expectError(
+        error.ActionNotAuthorized,
+        created.beginAuthorizedAction(.{
+            .operation_id = action_id,
+            .operation_generation = 1,
+        }),
+    );
     try created.publishCompletionEvidence(completion_inbox.bind(.{
         .kind = .bash,
         .session_id = created.session_id,
@@ -5470,55 +5768,45 @@ test "typed tool completion derives the Action and binds the exact Result" {
         .agent_generation = 1,
         .operation_id = action_id,
         .operation_generation = 1,
-        .attempt_id = 121,
+        .attempt_id = grant.attempt_id,
         .result_ref = 915,
         .result_digest = result_digest,
     }));
-    var action_result = ActionResultMaterial{
-        .operation_id = action_id,
-        .operation_generation = 1,
+    var action_result = AttemptActionResult{
         .result_ref = 915,
         .result_digest = result_digest,
         .class = .ordinary,
-        .evidence = .{ .durable = .{
-            .attempt_id = 121,
-            .ownership_epoch = created.ownership_epoch,
-        } },
+        .ownership_epoch = created.ownership_epoch,
     };
-    action_result.evidence.durable.ownership_epoch += 1;
+    action_result.ownership_epoch += 1;
     try std.testing.expectError(
         error.CompletionEvidenceMismatch,
-        created.admitActionResult(action_result),
+        created.settleAttempt(grant.observation(), action_result),
     );
-    action_result.evidence.durable.ownership_epoch = created.ownership_epoch;
+    action_result.ownership_epoch = created.ownership_epoch;
     action_result.result_ref = 916;
     try std.testing.expectError(
         error.CompletionEvidenceMismatch,
-        created.admitActionResult(action_result),
+        created.settleAttempt(grant.observation(), action_result),
     );
     action_result.result_ref = 915;
     action_result.result_digest = binding.hash(binding.Result, "substituted");
     try std.testing.expectError(
         error.CompletionEvidenceMismatch,
-        created.admitActionResult(action_result),
+        created.settleAttempt(grant.observation(), action_result),
     );
     action_result.result_digest = result_digest;
-    action_result.evidence.durable.attempt_id = 122;
+    var substituted_attempt = grant.observation();
+    substituted_attempt.attempt_id +%= 1;
     try std.testing.expectError(
         error.InvalidAttemptHistory,
-        created.admitActionResult(action_result),
+        created.settleAttempt(substituted_attempt, action_result),
     );
-    action_result.evidence.durable.attempt_id = 121;
-    _ = try created.admitActionResult(.{
-        .operation_id = action_id,
-        .operation_generation = 1,
+    _ = try created.settleAttempt(grant.observation(), .{
         .result_ref = 915,
         .result_digest = result_digest,
         .class = .ordinary,
-        .evidence = .{ .durable = .{
-            .attempt_id = 121,
-            .ownership_epoch = created.ownership_epoch,
-        } },
+        .ownership_epoch = created.ownership_epoch,
     });
     var visible_buffer: [conversation.result_header_size + "success".len]u8 = undefined;
     const visible = try conversation.encodeToolResult(&visible_buffer, .{
@@ -5532,7 +5820,7 @@ test "typed tool completion derives the Action and binds the exact Result" {
         created.admitToolResult(&slot, .{
             .operation_id = action_id,
             .operation_generation = 1,
-            .attempt_id = 121,
+            .attempt_id = grant.attempt_id,
             .result_ref = 915,
             .result_digest = binding.hash(binding.Result, "substituted"),
             .visible_ref = 916,
@@ -5542,7 +5830,7 @@ test "typed tool completion derives the Action and binds the exact Result" {
     try created.admitToolResult(&slot, .{
         .operation_id = action_id,
         .operation_generation = 1,
-        .attempt_id = 121,
+        .attempt_id = grant.attempt_id,
         .result_ref = 915,
         .result_digest = result_digest,
         .visible_ref = 916,
@@ -5600,17 +5888,20 @@ fn runPatchApprovalCase(
 
     switch (case) {
         .exact => {
-            const request = try created.requestApproval(2, 1);
+            const request = try created.requireApproval(2, 1);
             try std.testing.expectEqual(patch_ref, request.descriptor_ref);
             try std.testing.expect(binding.descriptorEql(descriptor_digest, request.descriptor_digest));
             const view = try created.semanticView();
             try std.testing.expectEqual(intent_ref, view.consequential.approval_required.?.binding_ref);
             try std.testing.expectEqual(patch_ref, view.consequential.approval_required.?.descriptor_ref);
-            _ = try created.authorizeAction(.{
+            const denied = try created.resolveApproval(.{
                 .operation_id = 2,
                 .operation_generation = 1,
+                .descriptor_digest = request.descriptor_digest,
+                .descriptor_ref = request.descriptor_ref,
                 .allowed = false,
             });
+            try std.testing.expect(denied.disposition == .denied);
             try std.testing.expectEqual(
                 intent_ref,
                 (try created.semanticView()).consequential.authorization.?.permission_ref,
@@ -5618,7 +5909,7 @@ fn runPatchApprovalCase(
         },
         .substituted_intent_digest, .substituted_patch => try std.testing.expectError(
             error.InvalidApprovalBinding,
-            created.requestApproval(2, 1),
+            created.requireApproval(2, 1),
         ),
     }
 }
@@ -5793,6 +6084,94 @@ test "child facts cannot reclassify an admitted Action descriptor" {
     try std.testing.expectError(
         error.AuthorizationDescriptorMismatch,
         view.apply(mismatched_authorization),
+    );
+}
+
+test "Action Attempt requires one allowed Authorization" {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 10,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    const model: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 71,
+        .generation = 1,
+    };
+    const action: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 72,
+        .generation = 1,
+    };
+    const descriptor: binding.Descriptor = .{
+        .bash = binding.hash(binding.BashDescriptor, "bash"),
+    };
+    var admitted: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    admitted.facts[0] = session_transition.operationAdmitted(
+        model,
+        null,
+        73,
+        testDescriptor("model"),
+    );
+    admitted.facts[1] = session_transition.operationAdmitted(
+        action,
+        .{ .operation_id = model.operation_id, .generation = model.generation },
+        74,
+        descriptor,
+    );
+
+    var attempt: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    attempt.facts[0] = session_transition.consequentialAttemptAdmitted(
+        action,
+        75,
+        74,
+        descriptor,
+    );
+    var proposed: SemanticView = .{};
+    try proposed.apply(admitted);
+    try std.testing.expectError(error.ActionNotAuthorized, proposed.apply(attempt));
+
+    var denied = SemanticView{};
+    try denied.apply(admitted);
+    var approval: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    approval.facts[0] = session_transition.approvalRequired(.{
+        .operation = action,
+        .binding_ref = 0,
+        .descriptor_ref = 74,
+    });
+    try denied.apply(approval);
+    var denial: session_transition.Transaction = .{ .sequence = 3, .fact_count = 1 };
+    denial.facts[0] = session_transition.authorization(.{
+        .operation = action,
+        .permission_ref = 0,
+        .allowed = false,
+    });
+    try denied.apply(denial);
+    attempt.sequence = 4;
+    try std.testing.expectError(error.ActionNotAuthorized, denied.apply(attempt));
+
+    var allowed = SemanticView{};
+    try allowed.apply(admitted);
+    var authorization: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    authorization.facts[0] = session_transition.authorization(.{
+        .operation = action,
+        .permission_ref = 0,
+        .allowed = true,
+    });
+    try allowed.apply(authorization);
+    attempt.sequence = 3;
+    try allowed.apply(attempt);
+    var second_attempt = attempt;
+    second_attempt.sequence = 4;
+    second_attempt.facts[0] = session_transition.consequentialAttemptAdmitted(
+        action,
+        76,
+        74,
+        descriptor,
+    );
+    try std.testing.expectError(
+        error.ActionAttemptAlreadyAdmitted,
+        allowed.apply(second_attempt),
     );
 }
 

@@ -62,6 +62,10 @@ deferred explicitly.
   derive Approval Required from the admitted descriptor and bind
   model or durable Action Result admission to the exact pending Completion envelope; callers cannot
   supply either relationship as proof.
+- Let Session own the complete Action transition law. Lifecycle may execute an external effect only from
+  the `ExecutionGrant` returned by the call that durably admits that Action's first and only Attempt.
+  Recovery exposes an `AttemptObservation` for reconciliation, never a reusable execution capability.
+  Do not reconstruct executable authority from nullable approval, Authorization, Attempt, or Result facts.
 - Add the narrowest complete vertical behavior through existing deep modules. Provider-neutral model
   data must not encode the current concrete tool inventory, but do not turn that data contract into a
   runtime registry, plugin surface, generic effect executor, scheduler, terminal framework, or

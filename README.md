@@ -138,8 +138,10 @@ uses `/usr/bin/git` with a replacement environment containing only fixed locale,
 configuration authority. Git parses and applies the patch in a bounded private copy; `patch_tool`
 writes that exact postimage through the authorized file handle and observes preimage, postimage,
 divergence, or invalid target.
-Lifecycle commits Authorization and Attempt before `patch_tool` may mutate, publishes adapter evidence through
-the Completion Inbox, and advances Conversation from the first terminal Result.
+Session commits Authorization and mints an ephemeral execution grant only after the Action's first and only
+Attempt is durable. Lifecycle needs that grant before `patch_tool` may mutate; recovery receives only a
+non-executable Attempt observation. Adapter evidence then flows through the Completion Inbox, and Conversation
+advances from the first terminal Result.
 
 Fresh-process fixtures terminate after Attempt admission and after Git mutation. Recovery applies an
 authorized exact preimage, accepts the exact expected postimage without reapplication, and publishes

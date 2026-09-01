@@ -243,7 +243,7 @@ Publish assigns the already-prepared `ResidentState`, clears explicitly volatile
 
 ## Operations, Attempts, and recovery
 
-An Action becomes one stable Operation. One Operation-admission fact binds its opaque identity, exact typed descriptor, and source model Operation; a later Attempt-admission fact establishes the external dispatch boundary. Each Attempt has exactly one current disposition:
+An Action becomes one stable Operation. One Operation-admission fact binds its opaque identity, exact typed descriptor, and source model Operation; a later Attempt-admission fact establishes the external dispatch boundary. Session owns the closed Action transition law across proposal, Approval Required, Authorization, Attempt, and Result. Only the fresh Session call that durably admits an Action's first and only Attempt returns an ephemeral `ExecutionGrant`; recovery reconstructs an `AttemptObservation` that permits reconciliation but never dispatch. Lifecycle therefore cannot recreate executable authority by combining nullable facts. Each Attempt has exactly one current disposition:
 
 - `definitely_unsent` — the adapter did not observe the Attempt;
 - `possibly_executed` — the external effect may have occurred without a durable terminal Result;
@@ -251,7 +251,7 @@ An Action becomes one stable Operation. One Operation-admission fact binds its o
 
 Attempt admission is the conservative dispatch boundary. Once its Host Store transaction commits, recovery treats an unterminated Attempt as `possibly_executed` unless durable adapter evidence proves a terminal Result. `definitely_unsent` applies only when no Attempt admission committed or when a committed terminal adapter Result proves that external dispatch did not occur. OnePage does not infer non-execution merely because the Completion Inbox is empty.
 
-The first durable terminal Result completes an Operation. Later evidence from a different admitted Attempt is associated with that terminal sequence for audit and cannot advance Core, Conversation, Projection, or Outcome again. Different evidence for the winning Attempt is a conflict.
+The first durable terminal Result completes an Operation. Model Operations may admit replacement Attempts under their fixed semantic request contract; later model evidence from a different admitted Attempt is associated with the terminal sequence for audit and cannot advance Core, Conversation, Projection, or Outcome again. An Action admits at most one Attempt and uses effect-specific reconciliation instead of redispatch. Different evidence for the winning Attempt is a conflict.
 
 Recovery is effect-specific:
 
