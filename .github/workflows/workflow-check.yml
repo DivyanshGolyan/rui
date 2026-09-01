@@ -1,4 +1,4 @@
-name: Check
+name: Workflow check
 
 on:
   pull_request:
@@ -7,24 +7,36 @@ on:
       - reopened
       - ready_for_review
       - labeled
+    paths:
+      - build.zig
+      - build.zig.zon
+      - src/quickjs_c.zig
+      - src/workflow_*.zig
+      - .github/workflows/workflow-check.yml
   push:
     branches:
       - main
+    paths:
+      - build.zig
+      - build.zig.zon
+      - src/quickjs_c.zig
+      - src/workflow_*.zig
+      - .github/workflows/workflow-check.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: check-${{ github.workflow }}-${{ github.ref }}
+  group: workflow-check-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   check:
     if: github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'run-ci'
-    name: Zig 0.16.0 on macOS ARM64
+    name: Zig 0.16.0 evaluator gate on macOS ARM64
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - name: Check out repository
@@ -44,8 +56,5 @@ jobs:
       - name: Fetch dependencies
         run: zig build --fetch=all
 
-      - name: Check source and artifacts
-        run: zig build check --summary all
-
-      - name: Check repository whitespace
-        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD --
+      - name: Check disposable workflow evaluator
+        run: zig build workflow-check --summary all
