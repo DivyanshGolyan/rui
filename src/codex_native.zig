@@ -1001,12 +1001,17 @@ test "authorization rejects compressed response bytes before JSON decoding" {
     fixture.response_encoding = "gzip";
     defer fixture.deinit(io);
     var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    defer {
+        const server_result = server_future.cancel(io);
+        server_result catch |err| std.debug.assert(err == error.Canceled);
+    }
     var endpoint_buffer: [128]u8 = undefined;
     const endpoint = try fixture.endpoint(&endpoint_buffer);
     const path_start = std.mem.indexOf(u8, endpoint, "/backend-api/") orelse unreachable;
     var http: NativeHttp = .{
         .io = io,
         .allocator = std.testing.allocator,
+        .timeout = std.Io.Duration.fromSeconds(1),
         .authorization_origin_override = endpoint[0..path_start],
     };
     try std.testing.expectError(
@@ -1023,12 +1028,17 @@ test "authorization classifies compressed refresh rejection from status" {
     fixture.response_encoding = "gzip";
     defer fixture.deinit(io);
     var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    defer {
+        const server_result = server_future.cancel(io);
+        server_result catch |err| std.debug.assert(err == error.Canceled);
+    }
     var endpoint_buffer: [128]u8 = undefined;
     const endpoint = try fixture.endpoint(&endpoint_buffer);
     const path_start = std.mem.indexOf(u8, endpoint, "/backend-api/") orelse unreachable;
     var http: NativeHttp = .{
         .io = io,
         .allocator = std.testing.allocator,
+        .timeout = std.Io.Duration.fromSeconds(1),
         .authorization_origin_override = endpoint[0..path_start],
     };
     var tokens: codex_auth.Tokens = .{ .refresh_length = "refresh".len };
