@@ -1011,7 +1011,9 @@ test "authorization rejects compressed response bytes before JSON decoding" {
     var http: NativeHttp = .{
         .io = io,
         .allocator = std.testing.allocator,
-        .timeout = std.Io.Duration.fromSeconds(1),
+        // This fixture verifies response classification, not deadline behavior.
+        // Leave enough time for the in-process server task under parallel CI load.
+        .timeout = std.Io.Duration.fromSeconds(10),
         .authorization_origin_override = endpoint[0..path_start],
     };
     try std.testing.expectError(
@@ -1038,7 +1040,9 @@ test "authorization classifies compressed refresh rejection from status" {
     var http: NativeHttp = .{
         .io = io,
         .allocator = std.testing.allocator,
-        .timeout = std.Io.Duration.fromSeconds(1),
+        // This fixture verifies response classification, not deadline behavior.
+        // Leave enough time for the in-process server task under parallel CI load.
+        .timeout = std.Io.Duration.fromSeconds(10),
         .authorization_origin_override = endpoint[0..path_start],
     };
     var tokens: codex_auth.Tokens = .{ .refresh_length = "refresh".len };
