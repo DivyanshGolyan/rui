@@ -391,34 +391,18 @@ fn addTestGraph(
     optimize: std.builtin.OptimizeMode,
     quickjs: *std.Build.Step.Compile,
 ) void {
-    const plain_test_roots = [_][]const u8{
-        "src/binding.zig",
-        "src/core_image.zig",
-        "src/codex_provider.zig",
-        "src/codex_harness_test.zig",
-        "src/deterministic_provider.zig",
-        "src/harness.zig",
-        "src/session.zig",
-        "src/session_transition_test.zig",
-        "src/model_operation.zig",
-    };
-    for (plain_test_roots) |root| {
-        addTestRun(b, parent, root, native_target, optimize, false);
-    }
-
-    const libc_test_roots = [_][]const u8{
-        "src/bash_tool.zig",
-        "src/codex_auth.zig",
-        "src/codex_native.zig",
-        "src/host_store_test.zig",
-        "src/patch_tool.zig",
-        "src/runtime_measurement.zig",
-        "src/runtime_measurement_summary.zig",
-        "src/cli.zig",
-    };
-    for (libc_test_roots) |root| {
-        addTestRun(b, parent, root, native_target, optimize, true);
-    }
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/unit_tests.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    unit_tests.root_module.linkFramework("Security", .{});
+    unit_tests.root_module.linkFramework("CoreFoundation", .{});
+    configureCurl(unit_tests);
+    configureSqlite(b, unit_tests);
+    parent.dependOn(&b.addRunArtifact(unit_tests).step);
 
     const workflow_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -519,33 +503,6 @@ fn addTestGraph(
     run_effect_recovery.addFileArg(b.path("src/effect_recovery_integration.sh"));
     run_effect_recovery.addArtifactArg(effect_recovery_fixture);
     parent.dependOn(&run_effect_recovery.step);
-}
-
-fn addTestRun(
-    b: *std.Build,
-    parent: *std.Build.Step,
-    root: []const u8,
-    native_target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    link_libc: bool,
-) void {
-    const tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path(root),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    tests.root_module.link_libc = link_libc;
-    if (std.mem.eql(u8, root, "src/codex_native.zig") or
-        std.mem.eql(u8, root, "src/cli.zig"))
-    {
-        tests.root_module.linkFramework("Security", .{});
-        tests.root_module.linkFramework("CoreFoundation", .{});
-        configureCurl(tests);
-    }
-    if (usesHostStore(root)) configureSqlite(b, tests);
-    parent.dependOn(&b.addRunArtifact(tests).step);
 }
 
 fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
