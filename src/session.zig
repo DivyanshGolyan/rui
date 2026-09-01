@@ -1,11 +1,597 @@
 const std = @import("std");
+const bash_tool = @import("bash_tool.zig");
 const binding = @import("binding.zig");
 const conversation = @import("conversation.zig");
 const model_contract = @import("model_contract.zig");
 const completion_inbox = @import("completion_inbox.zig");
-const core_state = @import("core_state.zig");
+const core_image = @import("core_image.zig");
 const host_store = @import("host_store.zig");
+const model_protocol = @import("model_protocol.zig");
+const patch_tool = @import("patch_tool.zig");
 const session_transition = @import("session_transition.zig");
+
+const continuation = struct {
+    const schema_version: u16 = 6;
+    const encoded_size = session_transition.continuation_size;
+    const magic = "ONECORE\x00";
+    const checksum_offset = encoded_size - @sizeOf(u32);
+
+    const OperationPhase = enum(u8) {
+        idle = 0,
+        accepted = 1,
+        completed = 2,
+    };
+
+    const TaskPhase = enum(u8) {
+        idle = 0,
+        ready = 1,
+        awaiting_model = 2,
+        awaiting_tool = 3,
+        finished = 4,
+        failed = 5,
+    };
+
+    const ContentWindow = extern struct {
+        offset: u32 = 0,
+        length: u32 = 0,
+    };
+
+    const State = extern struct {
+        agent_id: u64,
+        agent_generation: u32,
+        operation_id: u64 = 0,
+        operation_generation: u32 = 0,
+        operation_phase: continuation.OperationPhase = .idle,
+        operation_result: u64 = 0,
+        operation_sequence: u64 = 0,
+        active_leaf_id: u64 = 0,
+        final_entry_id: u64 = 0,
+        response_ref: u64 = 0,
+        task_phase: continuation.TaskPhase = .idle,
+        response_disposition: model_protocol.Disposition = .failure,
+        response_failure: model_protocol.Failure = .none,
+        context: continuation.ContentWindow = .{},
+        response_text: continuation.ContentWindow = .{},
+        response_tool_key: continuation.ContentWindow = .{},
+        response_arguments: continuation.ContentWindow = .{},
+        response_arguments_digest: binding.StrictToolJsonV1 = .{ .bytes = @splat(0) },
+    };
+
+    const Identity = struct {
+        agent_id: u64,
+        generation: u32,
+    };
+
+    const OperationIdentity = struct {
+        id: u64,
+        generation: u32,
+    };
+
+    const Operation = struct {
+        id: u64,
+        generation: u32,
+        phase: continuation.OperationPhase,
+        result_ref: u64,
+        sequence: u64,
+    };
+
+    const ModelContext = struct {
+        first_entry: u32,
+        entry_count: u32,
+    };
+
+    const StrictToolJsonWindow = struct {
+        offset: u32,
+        length: u32,
+        digest: binding.StrictToolJsonV1,
+
+        fn contentWindow(self: @This()) continuation.ContentWindow {
+            return .{ .offset = self.offset, .length = self.length };
+        }
+    };
+
+    const Response = struct {
+        content_ref: u64,
+        disposition: model_protocol.Disposition,
+        failure: model_protocol.Failure,
+        text: continuation.ContentWindow,
+        tool_key: continuation.ContentWindow,
+        arguments: continuation.StrictToolJsonWindow,
+    };
+
+    const Task = struct {
+        phase: continuation.TaskPhase,
+        active_leaf_id: u64,
+        final_entry_id: u64,
+    };
+
+    const CompletionConsequence = union(enum) {
+        final_answer: u64,
+        tool_call,
+        terminal,
+    };
+
+    const ModelAttemptReduction = struct {
+        state: State,
+        operation: continuation.Operation,
+        context: continuation.ModelContext,
+    };
+
+    const ModelCompletionReduction = struct {
+        state: State,
+        response: continuation.Response,
+    };
+
+    fn initialize(identity_value: Identity) !State {
+        if (identity_value.agent_id == 0) return error.InvalidAgentIdentity;
+        if (identity_value.generation == 0) return error.InvalidAgentGeneration;
+        return .{
+            .agent_id = identity_value.agent_id,
+            .agent_generation = identity_value.generation,
+        };
+    }
+
+    fn identity(state: State) Identity {
+        return .{ .agent_id = state.agent_id, .generation = state.agent_generation };
+    }
+
+    fn operation(state: State) continuation.Operation {
+        return .{
+            .id = state.operation_id,
+            .generation = state.operation_generation,
+            .phase = state.operation_phase,
+            .result_ref = state.operation_result,
+            .sequence = state.operation_sequence,
+        };
+    }
+
+    fn task(state: State) continuation.Task {
+        return .{
+            .phase = state.task_phase,
+            .active_leaf_id = state.active_leaf_id,
+            .final_entry_id = state.final_entry_id,
+        };
+    }
+
+    fn response(state: State) continuation.Response {
+        return .{
+            .content_ref = state.response_ref,
+            .disposition = state.response_disposition,
+            .failure = state.response_failure,
+            .text = state.response_text,
+            .tool_key = state.response_tool_key,
+            .arguments = .{
+                .offset = state.response_arguments.offset,
+                .length = state.response_arguments.length,
+                .digest = state.response_arguments_digest,
+            },
+        };
+    }
+
+    fn modelContext(state: State) continuation.ModelContext {
+        return .{ .first_entry = state.context.offset, .entry_count = state.context.length };
+    }
+
+    fn startTask(committed: State, active_leaf_id: u64) !State {
+        if (active_leaf_id == 0) return error.InvalidConversationEntry;
+        if (committed.task_phase != .idle or committed.operation_phase != .idle) {
+            return error.IllegalTaskTransition;
+        }
+        var candidate = committed;
+        candidate.active_leaf_id = active_leaf_id;
+        candidate.task_phase = .ready;
+        return candidate;
+    }
+
+    fn admitModelAttempt(
+        committed: State,
+        operation_id: u64,
+        sequence: u64,
+    ) !ModelAttemptReduction {
+        if (operation_id == 0 or sequence == 0) return error.InvalidOperationIdentity;
+        if (committed.task_phase != .ready or committed.active_leaf_id >= std.math.maxInt(u32)) {
+            return error.IllegalModelTransition;
+        }
+        if (committed.operation_phase != .idle and committed.operation_phase != .completed) {
+            return error.OperationAlreadyActive;
+        }
+        if (committed.operation_generation == std.math.maxInt(u32)) {
+            return error.OperationGenerationExhausted;
+        }
+        var candidate = committed;
+        candidate.operation_id = operation_id;
+        candidate.operation_generation += 1;
+        candidate.operation_phase = .accepted;
+        candidate.operation_result = 0;
+        candidate.operation_sequence = sequence;
+        candidate.context = .{ .offset = 1, .length = @intCast(committed.active_leaf_id) };
+        candidate.response_ref = 0;
+        candidate.response_disposition = .failure;
+        candidate.response_failure = .none;
+        candidate.response_text = .{};
+        candidate.response_tool_key = .{};
+        candidate.response_arguments = .{};
+        candidate.response_arguments_digest = .{ .bytes = @splat(0) };
+        candidate.task_phase = .awaiting_model;
+        return .{
+            .state = candidate,
+            .operation = operation(candidate),
+            .context = modelContext(candidate),
+        };
+    }
+
+    fn admitModelCompletion(
+        committed: State,
+        identity_value: OperationIdentity,
+        admission: model_protocol.Admission,
+        response_ref: u64,
+        result_digest: binding.Result,
+        consequence: CompletionConsequence,
+    ) !ModelCompletionReduction {
+        try requireOperation(committed, identity_value, .accepted);
+        if (response_ref == 0) return error.InvalidResultReference;
+        if (admission.byte_length > model_protocol.max_response_size) return error.ResponseCapacityExceeded;
+        if (committed.task_phase != .awaiting_model) return error.IllegalModelResponseTransition;
+        const parsed = try admission.verify(result_digest);
+        if (admission.byte_length == 0 and
+            !(parsed.disposition == .failure and parsed.failure == .empty))
+        {
+            return error.EmptyModelResponse;
+        }
+        switch (consequence) {
+            .final_answer => |entry_id| {
+                if (parsed.disposition != .final_answer) return error.InvalidCompletionConsequence;
+                if (entry_id == 0 or committed.active_leaf_id == std.math.maxInt(u64) or
+                    entry_id != committed.active_leaf_id + 1)
+                {
+                    return error.IllegalFinalAnswerTransition;
+                }
+            },
+            .tool_call => if (parsed.disposition != .tool_call) return error.InvalidCompletionConsequence,
+            .terminal => if (parsed.disposition == .final_answer or parsed.disposition == .tool_call) {
+                return error.InvalidCompletionConsequence;
+            },
+        }
+        var candidate = committed;
+        candidate.operation_result = response_ref;
+        candidate.operation_phase = .completed;
+        candidate.response_ref = response_ref;
+        candidate.response_disposition = parsed.disposition;
+        candidate.response_failure = parsed.failure;
+        candidate.response_text = if (parsed.disposition == .final_answer) .{
+            .offset = parsed.text_offset,
+            .length = parsed.text_length,
+        } else .{};
+        candidate.response_tool_key = .{
+            .offset = parsed.tool_key_offset,
+            .length = parsed.tool_key_length,
+        };
+        candidate.response_arguments = .{
+            .offset = parsed.arguments_offset,
+            .length = parsed.arguments_length,
+        };
+        candidate.response_arguments_digest = parsed.arguments_digest;
+        candidate.task_phase = switch (consequence) {
+            .final_answer => |entry_id| blk: {
+                candidate.active_leaf_id = entry_id;
+                candidate.final_entry_id = entry_id;
+                break :blk .finished;
+            },
+            .tool_call => .awaiting_tool,
+            .terminal => .failed,
+        };
+        return .{ .state = candidate, .response = response(candidate) };
+    }
+
+    fn admitToolResult(committed: State, call_entry_id: u64, result_entry_id: u64) !State {
+        if (call_entry_id == 0 or result_entry_id == 0 or
+            committed.active_leaf_id == std.math.maxInt(u64) or
+            call_entry_id == std.math.maxInt(u64))
+        {
+            return error.InvalidConversationEntry;
+        }
+        if (committed.task_phase != .awaiting_tool or
+            call_entry_id != committed.active_leaf_id + 1 or
+            result_entry_id != call_entry_id + 1)
+        {
+            return error.IllegalToolResultTransition;
+        }
+        var candidate = committed;
+        candidate.active_leaf_id = result_entry_id;
+        candidate.task_phase = .ready;
+        return candidate;
+    }
+
+    fn encode(out: []u8, state: State) !void {
+        if (out.len != encoded_size) return error.InvalidCoreStateOutputLength;
+        try validate(state);
+        @memset(out, 0);
+        @memcpy(out[0..magic.len], magic);
+        write(u16, out, 8, schema_version);
+        write(u16, out, 10, encoded_size);
+        write(u64, out, 16, state.agent_id);
+        write(u32, out, 24, state.agent_generation);
+        write(u64, out, 48, state.operation_id);
+        write(u32, out, 56, state.operation_generation);
+        out[60] = @intFromEnum(state.operation_phase);
+        out[61] = @intFromEnum(state.task_phase);
+        out[62] = @intFromEnum(state.response_disposition);
+        out[63] = @intFromEnum(state.response_failure);
+        write(u64, out, 68, state.operation_result);
+        write(u64, out, 76, state.operation_sequence);
+        write(u64, out, 84, state.active_leaf_id);
+        write(u64, out, 92, state.final_entry_id);
+        write(u64, out, 100, state.response_ref);
+        writeWindow(out, 108, state.context);
+        writeWindow(out, 116, state.response_text);
+        writeWindow(out, 124, state.response_arguments);
+        writeWindow(out, 132, state.response_tool_key);
+        @memcpy(out[140..172], &state.response_arguments_digest.bytes);
+        rewriteChecksum(out);
+    }
+
+    fn decode(input: []const u8) !State {
+        if (input.len != encoded_size) return error.TruncatedCoreState;
+        if (!std.mem.eql(u8, input[0..magic.len], magic)) return error.InvalidCoreStateMagic;
+        if (read(u16, input, 8) != schema_version) return error.UnsupportedSchema;
+        if (read(u16, input, 10) != encoded_size) return error.InvalidCoreStateLength;
+        if (read(u32, input, 12) != 0) return error.UnsupportedCoreStateFlags;
+        for (input[28..48]) |byte| if (byte != 0) return error.NonzeroCoreStateReservedByte;
+        for (input[64..68]) |byte| if (byte != 0) return error.NonzeroCoreStateReservedByte;
+        if (read(u32, input, checksum_offset) != std.hash.Crc32.hash(input[0..checksum_offset])) {
+            return error.CoreStateChecksumMismatch;
+        }
+        const state: State = .{
+            .agent_id = read(u64, input, 16),
+            .agent_generation = read(u32, input, 24),
+            .operation_id = read(u64, input, 48),
+            .operation_generation = read(u32, input, 56),
+            .operation_phase = try operationPhase(input[60]),
+            .task_phase = try taskPhase(input[61]),
+            .response_disposition = try responseDisposition(input[62]),
+            .response_failure = try responseFailure(input[63]),
+            .operation_result = read(u64, input, 68),
+            .operation_sequence = read(u64, input, 76),
+            .active_leaf_id = read(u64, input, 84),
+            .final_entry_id = read(u64, input, 92),
+            .response_ref = read(u64, input, 100),
+            .context = readWindow(input, 108),
+            .response_text = readWindow(input, 116),
+            .response_arguments = readWindow(input, 124),
+            .response_tool_key = readWindow(input, 132),
+            .response_arguments_digest = .{ .bytes = input[140..172].* },
+        };
+        try validate(state);
+        return state;
+    }
+
+    fn validate(state: State) !void {
+        if (state.agent_id == 0) return error.InvalidAgentIdentity;
+        if (state.agent_generation == 0) return error.InvalidAgentGeneration;
+        try validateOperation(state);
+        try validateWindow(state.context, null);
+        try validateWindow(state.response_text, model_protocol.max_response_size);
+        try validateWindow(state.response_tool_key, model_protocol.max_response_size);
+        try validateWindow(state.response_arguments, model_protocol.max_response_size);
+        try validateTask(state);
+        try validateResponse(state);
+    }
+
+    fn validateOperation(state: State) !void {
+        switch (state.operation_phase) {
+            .idle => {
+                if (state.operation_id != 0) return error.InvalidOperationIdentity;
+                if (state.operation_generation != 0 or state.operation_sequence != 0) {
+                    return error.InvalidOperationGeneration;
+                }
+                if (state.operation_result != 0) return error.InvalidOperationResult;
+            },
+            .accepted => {
+                if (state.operation_id == 0) return error.InvalidOperationIdentity;
+                if (state.operation_generation == 0 or state.operation_sequence == 0) {
+                    return error.InvalidOperationGeneration;
+                }
+                if (state.operation_result != 0) return error.InvalidOperationResult;
+            },
+            .completed => {
+                if (state.operation_id == 0) return error.InvalidOperationIdentity;
+                if (state.operation_generation == 0 or state.operation_sequence == 0) {
+                    return error.InvalidOperationGeneration;
+                }
+                if (state.operation_result == 0) return error.InvalidOperationResult;
+            },
+        }
+    }
+
+    fn validateTask(state: State) !void {
+        switch (state.task_phase) {
+            .idle => if (state.active_leaf_id != 0 or state.final_entry_id != 0) {
+                return error.InvalidTaskState;
+            },
+            .ready => if (state.active_leaf_id == 0 or state.final_entry_id != 0) {
+                return error.InvalidTaskState;
+            },
+            .awaiting_model => {
+                if (state.active_leaf_id == 0 or state.final_entry_id != 0 or
+                    state.operation_phase == .idle)
+                {
+                    return error.InvalidTaskState;
+                }
+                if (state.active_leaf_id >= std.math.maxInt(u32) or
+                    state.context.offset != 1 or state.context.length != state.active_leaf_id)
+                {
+                    return error.InvalidModelContext;
+                }
+            },
+            .awaiting_tool, .failed => if (state.active_leaf_id == 0 or
+                state.final_entry_id != 0 or state.operation_phase != .completed)
+            {
+                return error.InvalidTaskState;
+            },
+            .finished => if (state.active_leaf_id == 0 or
+                state.final_entry_id != state.active_leaf_id or
+                state.operation_phase != .completed)
+            {
+                return error.InvalidTaskState;
+            },
+        }
+    }
+
+    fn validateResponse(state: State) !void {
+        if (state.response_ref == 0) {
+            if (state.response_disposition != .failure or
+                state.response_failure != .none or state.response_text.length != 0 or
+                state.response_tool_key.length != 0 or state.response_arguments.length != 0)
+            {
+                return error.InvalidResponseState;
+            }
+            switch (state.task_phase) {
+                .idle, .ready, .awaiting_model => {},
+                .awaiting_tool, .finished, .failed => return error.InvalidResponseState,
+            }
+            return;
+        }
+        if (state.operation_phase != .completed or state.operation_result != state.response_ref) {
+            return error.InvalidResponseState;
+        }
+        switch (state.task_phase) {
+            .finished => if (state.response_disposition != .final_answer or
+                state.response_failure != .none or state.response_text.length == 0 or
+                state.response_tool_key.length != 0 or state.response_arguments.length != 0)
+            {
+                return error.InvalidResponseState;
+            },
+            .awaiting_tool, .ready => if (state.response_disposition != .tool_call or
+                state.response_failure != .none or state.response_tool_key.length == 0 or
+                state.response_arguments.length == 0 or state.response_text.length != 0)
+            {
+                return error.InvalidResponseState;
+            },
+            .failed => switch (state.response_disposition) {
+                .input_request => if (state.response_failure != .none or
+                    state.response_tool_key.length != 0 or state.response_text.length != 0 or
+                    state.response_arguments.length != 0)
+                {
+                    return error.InvalidResponseState;
+                },
+                .failure => if (state.response_failure == .none or
+                    state.response_tool_key.length != 0 or state.response_text.length != 0 or
+                    state.response_arguments.length != 0)
+                {
+                    return error.InvalidResponseState;
+                },
+                else => return error.InvalidResponseState,
+            },
+            .idle, .awaiting_model => return error.InvalidResponseState,
+        }
+    }
+
+    fn validateWindow(window: continuation.ContentWindow, limit: ?usize) !void {
+        if ((window.offset == 0) != (window.length == 0)) return error.InvalidContentWindow;
+        const end = std.math.add(u32, window.offset, window.length) catch
+            return error.ContentWindowOverflow;
+        if (limit) |maximum| if (end > maximum) return error.ContentWindowOutOfRange;
+    }
+
+    fn requireOperation(state: State, value: OperationIdentity, phase: continuation.OperationPhase) !void {
+        if (value.id == 0 or value.generation == 0) return error.InvalidOperationIdentity;
+        if (state.operation_id != value.id or state.operation_generation != value.generation) {
+            return error.StaleOperation;
+        }
+        if (state.operation_phase != phase) return error.IllegalOperationTransition;
+    }
+
+    fn operationPhase(value: u8) !continuation.OperationPhase {
+        return switch (value) {
+            0 => .idle,
+            1 => .accepted,
+            2 => .completed,
+            else => error.UnknownOperationPhase,
+        };
+    }
+
+    fn taskPhase(value: u8) !continuation.TaskPhase {
+        return switch (value) {
+            0 => .idle,
+            1 => .ready,
+            2 => .awaiting_model,
+            3 => .awaiting_tool,
+            4 => .finished,
+            5 => .failed,
+            else => error.UnknownTaskPhase,
+        };
+    }
+
+    fn responseDisposition(value: u8) !model_protocol.Disposition {
+        return switch (value) {
+            1 => .final_answer,
+            2 => .tool_call,
+            3 => .input_request,
+            4 => .failure,
+            else => error.UnknownResponseDisposition,
+        };
+    }
+
+    fn responseFailure(value: u8) !model_protocol.Failure {
+        return switch (value) {
+            0 => .none,
+            1 => .truncated,
+            2 => .aborted,
+            3 => .provider_error,
+            4 => .malformed,
+            5 => .empty,
+            6 => .multiple_outputs,
+            7 => .oversized,
+            8 => .unknown_tool,
+            9 => .missing_authentication,
+            10 => .authentication_expired,
+            11 => .model_unavailable,
+            12 => .timeout,
+            13 => .transport_not_started,
+            14 => .transport_may_have_started,
+            15 => .unsupported_provider_output,
+            else => error.UnknownResponseFailure,
+        };
+    }
+
+    fn writeWindow(out: []u8, offset: usize, window: continuation.ContentWindow) void {
+        write(u32, out, offset, window.offset);
+        write(u32, out, offset + 4, window.length);
+    }
+
+    fn readWindow(input: []const u8, offset: usize) continuation.ContentWindow {
+        return .{ .offset = read(u32, input, offset), .length = read(u32, input, offset + 4) };
+    }
+
+    fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
+        std.mem.writeInt(T, out[offset..][0..@sizeOf(T)], value, .little);
+    }
+
+    fn read(comptime T: type, input: []const u8, offset: usize) T {
+        return std.mem.readInt(T, input[offset..][0..@sizeOf(T)], .little);
+    }
+
+    fn rewriteChecksum(out: []u8) void {
+        write(u32, out, checksum_offset, std.hash.Crc32.hash(out[0..checksum_offset]));
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(State) <= core_image.slot_size);
+        for (std.meta.fields(State)) |field| {
+            switch (@typeInfo(field.type)) {
+                .pointer => @compileError("Continuation State cannot contain pointers"),
+                .int => if (field.type == usize or field.type == isize) {
+                    @compileError("Continuation State cannot contain target-width integers");
+                },
+                else => {},
+            }
+        }
+    }
+};
+
+fn slotState(slot: *core_image.ActivationSlot) *continuation.State {
+    return @ptrCast(@alignCast(&slot.storage));
+}
 
 pub const workspace_path_capacity = 1024;
 pub const model_name_capacity = host_store.max_model_bytes;
@@ -37,6 +623,88 @@ pub const PatchContent = struct {
     patch_reference: u64,
 };
 
+pub const ModelAttemptMaterial = struct {
+    operation_id: u64,
+    sequence: u64,
+    attempt_id: u64,
+    request_ref: u64,
+    request_digest: binding.ModelDescriptor,
+    possible_duplicate_attempts: u8 = 0,
+};
+
+pub const BashCallMaterial = struct {
+    command: [bash_tool.max_command_size]u8 = @splat(0),
+    command_length: u16,
+    timeout_ms: u32,
+
+    pub fn init(call: bash_tool.Call) !BashCallMaterial {
+        if (call.command.len == 0 or call.command.len > bash_tool.max_command_size) {
+            return error.InvalidBashCall;
+        }
+        var result: BashCallMaterial = .{
+            .command_length = @intCast(call.command.len),
+            .timeout_ms = call.timeout_ms,
+        };
+        @memcpy(result.command[0..call.command.len], call.command);
+        return result;
+    }
+
+    pub fn commandSlice(self: *const BashCallMaterial) []const u8 {
+        return self.command[0..self.command_length];
+    }
+};
+
+pub const ActionMaterial = union(enum) {
+    bash: struct {
+        descriptor_ref: u64,
+        call: BashCallMaterial,
+    },
+    apply_patch: PatchContent,
+};
+
+pub const ModelCompletionConsequence = union(enum) {
+    final_answer: struct { content_ref: u64 },
+    tool_call: struct {
+        content_ref: u64,
+        action: ?ActionMaterial = null,
+    },
+    terminal,
+};
+
+pub const ModelCompletionMaterial = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    attempt_id: u64,
+    evidence_epoch: u64,
+    response_ref: u64,
+    response_digest: binding.Result,
+    admission: model_protocol.Admission,
+    consequence: ModelCompletionConsequence,
+};
+
+pub const ToolResultMaterial = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    attempt_id: u64,
+    result_ref: u64,
+    result_digest: binding.Result,
+    visible_ref: u64,
+};
+
+comptime {
+    std.debug.assert(4 <= session_transition.max_facts);
+}
+
+pub const Control = enum { cancel, shutdown };
+
+pub const ApprovalDecision = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    descriptor_digest: binding.Descriptor,
+    descriptor_ref: u64,
+    allowed: bool,
+};
+
 pub const EntryKind = session_transition.ConversationKind;
 
 pub const ConversationEntry = struct {
@@ -49,25 +717,128 @@ pub const ConversationEntry = struct {
     sequence: u64,
 };
 
-pub const LedgerView = struct {
-    last_sequence: u64 = 0,
-    last_core: ?[core_state.encoded_size]u8 = null,
-    facts: [session_transition.max_facts]session_transition.Fact = undefined,
-    fact_count: u8 = 0,
+pub const OperationPhase = continuation.OperationPhase;
+pub const TaskPhase = continuation.TaskPhase;
+pub const ContentWindow = continuation.ContentWindow;
+pub const StrictToolJsonWindow = continuation.StrictToolJsonWindow;
+pub const Operation = continuation.Operation;
+pub const ModelContext = continuation.ModelContext;
+pub const Response = continuation.Response;
+pub const Task = continuation.Task;
 
-    pub fn factSlice(self: *const LedgerView) []const session_transition.Fact {
-        return self.facts[0..self.fact_count];
+pub const ContinuationView = struct {
+    operation: Operation,
+    task: Task,
+    response: Response,
+};
+
+pub const ActionIdentity = struct {
+    operation_id: u64,
+    operation_generation: u32,
+};
+
+pub const ModelCompletionAdmission = struct {
+    response: Response,
+    action: ?ActionIdentity,
+};
+
+pub const ApprovalRequest = struct {
+    operation_id: u64,
+    operation_generation: u32,
+    descriptor_digest: binding.Descriptor,
+    descriptor_ref: u64,
+};
+
+pub const ActionBinding = struct {
+    descriptor_ref: u64,
+    descriptor_digest: binding.Descriptor,
+};
+
+pub const AttemptObservation = struct {
+    operation: session_transition.OperationContext,
+    attempt_id: u64,
+    binding: ActionBinding,
+};
+
+/// Returned only by the invocation that durably admits the first consequential
+/// Attempt. Recovery reconstructs AttemptObservation instead, so it cannot
+/// accidentally redispatch an effect whose physical start is uncertain.
+pub const ExecutionGrant = struct {
+    operation: session_transition.OperationContext,
+    attempt_id: u64,
+    binding: ActionBinding,
+
+    pub fn observation(self: ExecutionGrant) AttemptObservation {
+        return .{
+            .operation = self.operation,
+            .attempt_id = self.attempt_id,
+            .binding = self.binding,
+        };
     }
 };
 
-const OperationHistory = struct {
+pub const ActionDisposition = union(enum) {
+    proposed,
+    approval_required: ApprovalRequest,
+    authorized,
+    denied,
+    attempted: AttemptObservation,
+    settled: session_transition.ResultRecord,
+};
+
+pub const ActionView = struct {
+    operation: session_transition.OperationRecord,
+    disposition: ActionDisposition,
+
+    pub fn identity(self: ActionView) ActionIdentity {
+        return .{
+            .operation_id = self.operation.operation.operation_id,
+            .operation_generation = self.operation.operation.generation,
+        };
+    }
+
+    pub fn binding(self: ActionView) ActionBinding {
+        return .{
+            .descriptor_ref = self.operation.descriptor_ref,
+            .descriptor_digest = self.operation.descriptor_digest,
+        };
+    }
+};
+
+pub const ImmediateActionResult = struct {
+    result_ref: u64,
+    result_digest: binding.Result,
+};
+
+pub const AttemptActionResult = struct {
+    result_ref: u64,
+    result_digest: binding.Result,
+    class: session_transition.ResultClass,
+    ownership_epoch: u64,
+};
+
+const ApprovalRefs = struct {
+    binding: u64,
+    descriptor: u64,
+};
+
+pub const FailureObservation = struct {
+    response_ref: u64,
+    failure: model_protocol.Failure,
+};
+
+pub const CompletionEvidence = struct {
+    ownership_epoch: u64,
+    result_ref: u64,
+    result_digest: binding.Result,
+};
+
+pub const OperationView = struct {
     const max_attempts = session_transition.max_operation_attempts;
 
     operation_id: u64 = 0,
     generation: u32 = 0,
-    recovery_class: session_transition.RecoveryClass = .none,
     descriptor: ?session_transition.OperationRecord = null,
-    attempt: ?session_transition.AttemptRecord = null,
     attempts: [max_attempts]?session_transition.AttemptRecord = @splat(null),
     attempt_count: u8 = 0,
     approval_required: ?session_transition.ApprovalRequiredRecord = null,
@@ -75,74 +846,149 @@ const OperationHistory = struct {
     result: ?session_transition.ResultRecord = null,
     terminal_result_sequence: ?u64 = null,
 
-    fn accepts(self: OperationHistory, operation: session_transition.OperationContext) bool {
+    fn accepts(self: OperationView, operation: session_transition.OperationContext) bool {
         return self.operation_id == operation.operation_id and self.generation == operation.generation;
     }
 
-    fn appendAttempt(self: *OperationHistory, attempt: session_transition.AttemptRecord) !void {
+    fn appendAttempt(self: *OperationView, attempt: session_transition.AttemptRecord) !void {
         for (self.attempts[0..self.attempt_count]) |maybe_existing| {
             const existing = maybe_existing.?;
             if (existing.attempt_id != attempt.attempt_id) continue;
             if (!std.meta.eql(existing, attempt)) return error.ConflictingLedgerFacts;
-            self.attempt = existing;
             return;
         }
-        if ((attempt.recovery_class == .model and
+        const descriptor_kind = std.meta.activeTag(attempt.descriptor_digest);
+        if ((descriptor_kind == .model and
             attempt.possible_duplicate_attempts != self.attempt_count) or
-            (attempt.recovery_class != .model and attempt.possible_duplicate_attempts != 0))
+            (descriptor_kind != .model and attempt.possible_duplicate_attempts != 0))
         {
             return error.InvalidAttemptDuplicateAccounting;
         }
         if (self.attempt_count == max_attempts) return error.AttemptCapacityExceeded;
         self.attempts[self.attempt_count] = attempt;
         self.attempt_count += 1;
-        self.attempt = attempt;
     }
 
-    fn findAttempt(self: OperationHistory, attempt_id: u64) ?session_transition.AttemptRecord {
+    pub fn findAttempt(self: OperationView, attempt_id: u64) ?session_transition.AttemptRecord {
         for (self.attempts[0..self.attempt_count]) |maybe_attempt| {
             const attempt = maybe_attempt.?;
             if (attempt.attempt_id == attempt_id) return attempt;
         }
         return null;
     }
+
+    pub fn attemptSlice(self: *const OperationView) []const ?session_transition.AttemptRecord {
+        return self.attempts[0..self.attempt_count];
+    }
+
+    pub fn latestAttempt(self: *const OperationView) ?session_transition.AttemptRecord {
+        if (self.attempt_count == 0) return null;
+        return self.attempts[self.attempt_count - 1];
+    }
+
+    pub fn containsAttempt(self: *const OperationView, attempt_id: u64) bool {
+        return self.findAttempt(attempt_id) != null;
+    }
+
+    pub fn kind(self: *const OperationView) ?binding.DescriptorKind {
+        const descriptor = self.descriptor orelse return null;
+        return std.meta.activeTag(descriptor.descriptor_digest);
+    }
 };
 
-const SemanticIndex = struct {
+pub const SemanticView = struct {
     last_sequence: u64 = 0,
-    last_core: ?[core_state.encoded_size]u8 = null,
-    model: OperationHistory = .{},
-    consequential: OperationHistory = .{},
-    open_operation: ?session_transition.OperationRecord = null,
+    last_core: ?[session_transition.continuation_size]u8 = null,
+    maximum_operation_id: u64 = 0,
+    model: OperationView = .{},
+    consequential: OperationView = .{},
     control: ?session_transition.Fact = null,
-    indeterminate: ?session_transition.ResultRecord = null,
 
-    fn apply(self: *SemanticIndex, transaction: session_transition.Transaction) !void {
+    fn apply(self: *SemanticView, transaction: session_transition.Transaction) !void {
         if (transaction.sequence != self.last_sequence + 1) return error.NonmonotonicSequence;
         for (transaction.factSlice()) |fact| {
             switch (fact) {
-                .operation_submitted => |record| {
-                    const history = historyFor(self, record.operation, record.recovery_class);
+                .operation_admitted => |record| {
+                    if (record.operation.operation_id <= self.maximum_operation_id) {
+                        return error.OperationIdentityCollision;
+                    }
+                    const descriptor_kind = std.meta.activeTag(record.descriptor_digest);
+                    switch (descriptor_kind) {
+                        .model => {
+                            if (record.source_operation != null) return error.InvalidSourceOperation;
+                            if (self.consequential.descriptor != null and
+                                self.consequential.accepts(record.operation))
+                            {
+                                return error.OperationIdentityCollision;
+                            }
+                        },
+                        .bash, .apply_patch => {
+                            const source = record.source_operation orelse
+                                return error.InvalidSourceOperation;
+                            if (self.model.descriptor == null or
+                                self.model.operation_id != source.operation_id or
+                                self.model.generation != source.generation)
+                            {
+                                return error.InvalidSourceOperation;
+                            }
+                            if (self.model.accepts(record.operation)) {
+                                return error.OperationIdentityCollision;
+                            }
+                        },
+                    }
+                    const history = historyForDescriptor(self, record.descriptor_digest);
                     if (!history.accepts(record.operation)) history.* = .{
                         .operation_id = record.operation.operation_id,
                         .generation = record.operation.generation,
-                        .recovery_class = record.recovery_class,
                     };
                     history.descriptor = try uniqueValue(
                         session_transition.OperationRecord,
                         history.descriptor,
                         record,
                     );
+                    self.maximum_operation_id = record.operation.operation_id;
                 },
-                .operation_accepted => |record| self.open_operation = record,
                 .attempt_admitted => |record| {
-                    const history = historyFor(self, record.operation, record.recovery_class);
-                    if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    const history = self.operationMut(record.operation) orelse
+                        return error.InvalidOperationHistory;
+                    const descriptor = history.descriptor orelse return error.InvalidOperationHistory;
+                    if (record.descriptor_ref != descriptor.descriptor_ref or
+                        !binding.descriptorEql(record.descriptor_digest, descriptor.descriptor_digest))
+                    {
+                        return error.AttemptDescriptorMismatch;
+                    }
+                    if (std.meta.activeTag(descriptor.descriptor_digest) == .model) {
+                        if (history.result != null) return error.ModelAlreadySettled;
+                    } else {
+                        const authorization = history.authorization orelse
+                            return error.ActionNotAuthorized;
+                        if (!authorization.allowed) return error.ActionNotAuthorized;
+                        if (history.result != null) return error.ActionAlreadySettled;
+                        if (history.attempt_count != 0) return error.ActionAttemptAlreadyAdmitted;
+                    }
                     try history.appendAttempt(record);
                 },
                 .approval_required => |record| {
-                    const history = historyFor(self, record.operation, .none);
+                    const history = self.operationMut(record.operation) orelse
+                        return error.InvalidOperationHistory;
                     if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    const descriptor = history.descriptor orelse return error.InvalidOperationHistory;
+                    switch (descriptor.descriptor_digest) {
+                        .model => return error.InvalidApprovalDescriptor,
+                        .bash => if (record.binding_ref != 0 or
+                            record.descriptor_ref != descriptor.descriptor_ref)
+                        {
+                            return error.ApprovalDescriptorMismatch;
+                        },
+                        .apply_patch => if (record.binding_ref != descriptor.descriptor_ref) {
+                            return error.ApprovalDescriptorMismatch;
+                        },
+                    }
+                    if (history.authorization != null or history.attempt_count != 0 or
+                        history.result != null)
+                    {
+                        return error.ApprovalNoLongerRequired;
+                    }
                     history.approval_required = try uniqueValue(
                         session_transition.ApprovalRequiredRecord,
                         history.approval_required,
@@ -150,13 +996,80 @@ const SemanticIndex = struct {
                     );
                 },
                 .authorization => |record| {
-                    const history = historyFor(self, record.operation, .none);
+                    const history = self.operationMut(record.operation) orelse
+                        return error.InvalidOperationHistory;
                     if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
-                    history.authorization = record;
+                    const descriptor = history.descriptor orelse return error.InvalidOperationHistory;
+                    switch (descriptor.descriptor_digest) {
+                        .model => return error.InvalidAuthorizationDescriptor,
+                        .bash => if (record.permission_ref != 0) {
+                            return error.AuthorizationDescriptorMismatch;
+                        },
+                        .apply_patch => if (record.permission_ref != descriptor.descriptor_ref) {
+                            return error.AuthorizationDescriptorMismatch;
+                        },
+                    }
+                    if (history.attempt_count != 0 or history.result != null) {
+                        return error.AuthorizationNoLongerRequired;
+                    }
+                    if (!record.allowed and history.approval_required == null) {
+                        return error.ApprovalNotCommitted;
+                    }
+                    if (history.approval_required) |approval| switch (descriptor.descriptor_digest) {
+                        .model => unreachable,
+                        .bash => if (approval.binding_ref != 0 or
+                            approval.descriptor_ref != descriptor.descriptor_ref)
+                        {
+                            return error.InvalidAuthorizationBinding;
+                        },
+                        .apply_patch => if (approval.binding_ref != descriptor.descriptor_ref) {
+                            return error.InvalidAuthorizationBinding;
+                        },
+                    };
+                    history.authorization = try uniqueValue(
+                        session_transition.AuthorizationRecord,
+                        history.authorization,
+                        record,
+                    );
                 },
                 .result => |record| {
-                    const history = historyFor(self, record.operation, resultRecoveryClass(record));
+                    const history = self.operationMut(record.operation) orelse
+                        return error.InvalidOperationHistory;
+                    const descriptor = history.descriptor orelse return error.InvalidOperationHistory;
+                    const descriptor_kind = std.meta.activeTag(descriptor.descriptor_digest);
+                    switch (record.evidence) {
+                        .immediate => {},
+                        .durable => |evidence| if (std.meta.activeTag(evidence) != descriptor_kind) {
+                            return error.InvalidOperationResultKind;
+                        },
+                    }
                     if (!history.accepts(record.operation)) return error.InvalidOperationHistory;
+                    if (descriptor_kind != .model) {
+                        if (history.result != null) return error.ActionAlreadySettled;
+                        const authorization = history.authorization orelse
+                            return error.ActionNotAuthorized;
+                        switch (record.evidence) {
+                            .immediate => {
+                                if (history.attempt_count != 0) {
+                                    return error.InvalidActionResultState;
+                                }
+                                if (authorization.allowed and descriptor_kind != .apply_patch) {
+                                    return error.InvalidActionResultState;
+                                }
+                            },
+                            .durable => |evidence| {
+                                if (!authorization.allowed or history.attempt_count != 1) {
+                                    return error.InvalidActionResultState;
+                                }
+                                const attempt_id: u64 = switch (evidence) {
+                                    inline else => |value| value,
+                                };
+                                if (!history.containsAttempt(attempt_id)) {
+                                    return error.InvalidAttemptHistory;
+                                }
+                            },
+                        }
+                    }
                     const first_terminal = history.result == null;
                     history.result = try uniqueValue(
                         session_transition.ResultRecord,
@@ -168,68 +1081,99 @@ const SemanticIndex = struct {
                     } else if (history.terminal_result_sequence == null) {
                         return error.MissingTerminalResultSequence;
                     }
-                    if (self.open_operation) |open_fact| {
-                        if (open_fact.operation.operation_id == record.operation.operation_id and
-                            open_fact.operation.generation == record.operation.generation)
-                        {
-                            self.open_operation = null;
-                        }
-                    }
-                    if (resultRecoveryClass(record) == .consequential and
-                        record.class == .indeterminate)
+                },
+                .result_applied => |record| {
+                    const history = self.operationMut(record.operation) orelse
+                        return error.InvalidOperationHistory;
+                    const result = history.result orelse return error.InvalidOperationHistory;
+                    if (result.result_ref != record.result_ref or
+                        !binding.eql(binding.Result, result.result_digest, record.result_digest) or
+                        resultAttemptId(result) != record.attempt_id)
                     {
-                        self.indeterminate = record;
+                        return error.ResultApplicationMismatch;
                     }
                 },
-                .cancellation, .shutdown => self.control = fact,
-                .task_admitted, .conversation_advanced, .outcome, .result_applied => {},
+                .cancellation, .shutdown => {
+                    if (self.openOperation() != null) {
+                        return error.AcceptedOperationUnsettled;
+                    }
+                    self.control = fact;
+                },
+                .task_admitted, .conversation_advanced, .outcome => {},
             }
         }
-        if (transaction.core) |state| self.last_core = state;
+        if (transaction.core) |state| {
+            _ = try continuation.decode(&state);
+            self.last_core = state;
+        }
         self.last_sequence = transaction.sequence;
     }
 
-    fn emitFacts(
-        self: *const SemanticIndex,
-        context: *anyopaque,
-        apply_fn: *const fn (*anyopaque, session_transition.Fact) anyerror!void,
-    ) !void {
-        const histories = [_]OperationHistory{ self.model, self.consequential };
-        for (histories) |history| {
-            if (history.descriptor) |record| try apply_fn(context, .{ .operation_submitted = record });
-            if (history.approval_required) |record| try apply_fn(context, .{ .approval_required = record });
-            if (history.authorization) |record| try apply_fn(context, .{ .authorization = record });
-            for (history.attempts[0..history.attempt_count]) |maybe_attempt| {
-                try apply_fn(context, .{ .attempt_admitted = maybe_attempt.? });
-            }
-            if (history.result) |record| try apply_fn(context, .{ .result = record });
+    pub fn operation(self: *const SemanticView, operation_context: session_transition.OperationContext) ?OperationView {
+        if (self.model.accepts(operation_context)) return self.model;
+        if (self.consequential.accepts(operation_context)) return self.consequential;
+        return null;
+    }
+
+    fn operationMut(self: *SemanticView, operation_context: session_transition.OperationContext) ?*OperationView {
+        if (self.model.accepts(operation_context)) return &self.model;
+        if (self.consequential.accepts(operation_context)) return &self.consequential;
+        return null;
+    }
+
+    pub fn openOperation(self: *const SemanticView) ?OperationView {
+        if (self.consequential.descriptor != null and self.consequential.result == null) {
+            return self.consequential;
         }
-        if (self.open_operation) |record| try apply_fn(context, .{ .operation_accepted = record });
-        if (self.indeterminate) |record| try apply_fn(context, .{ .result = record });
-        if (self.control) |fact| try apply_fn(context, fact);
+        if (self.model.descriptor != null and self.model.result == null) return self.model;
+        return null;
     }
 };
 
-fn historyFor(
-    index: *SemanticIndex,
-    operation: session_transition.OperationContext,
-    recovery_class: session_transition.RecoveryClass,
-) *OperationHistory {
-    return switch (recovery_class) {
+fn historyForDescriptor(index: *SemanticView, descriptor: binding.Descriptor) *OperationView {
+    return switch (descriptor) {
         .model => &index.model,
-        .consequential => &index.consequential,
-        .none => if (operation.operation_id >> 63 == 0) &index.model else &index.consequential,
+        .bash, .apply_patch => &index.consequential,
     };
 }
 
-fn resultRecoveryClass(result: session_transition.ResultRecord) session_transition.RecoveryClass {
+fn resultAttemptId(result: session_transition.ResultRecord) u64 {
     return switch (result.evidence) {
-        .immediate => |recovery_class| recovery_class,
+        .immediate => 0,
         .durable => |evidence| switch (evidence) {
-            .model => .model,
-            .bash, .apply_patch => .consequential,
+            inline else => |attempt_id| attempt_id,
         },
     };
+}
+
+fn actionView(history: OperationView) !ActionView {
+    const operation = history.descriptor orelse return error.MissingActionDescriptor;
+    if (std.meta.activeTag(operation.descriptor_digest) == .model) {
+        return error.InvalidActionDescriptor;
+    }
+    const disposition: ActionDisposition = if (history.result) |result|
+        .{ .settled = result }
+    else if (history.latestAttempt()) |attempt|
+        .{ .attempted = .{
+            .operation = attempt.operation,
+            .attempt_id = attempt.attempt_id,
+            .binding = .{
+                .descriptor_ref = attempt.descriptor_ref,
+                .descriptor_digest = attempt.descriptor_digest,
+            },
+        } }
+    else if (history.authorization) |authorization|
+        if (authorization.allowed) .authorized else .denied
+    else if (history.approval_required) |approval|
+        .{ .approval_required = .{
+            .operation_id = operation.operation.operation_id,
+            .operation_generation = operation.operation.generation,
+            .descriptor_digest = operation.descriptor_digest,
+            .descriptor_ref = approval.descriptor_ref,
+        } }
+    else
+        .proposed;
+    return .{ .operation = operation, .disposition = disposition };
 }
 
 fn uniqueValue(comptime T: type, existing: ?T, candidate: T) !T {
@@ -246,7 +1190,7 @@ pub const RecoveryProgress = struct {
 };
 
 const InboxIndex = struct {
-    const capacity = OperationHistory.max_attempts * 2;
+    const capacity = OperationView.max_attempts * 2;
     entries: [capacity]?completion_inbox.Envelope = @splat(null),
     ambiguous: [capacity]?AttemptKey = @splat(null),
 
@@ -281,7 +1225,7 @@ const InboxIndex = struct {
 
     fn apply(
         self: *InboxIndex,
-        semantic: *const SemanticIndex,
+        semantic: *const SemanticView,
         envelope: completion_inbox.Envelope,
         session_id: u64,
         agent_id: u64,
@@ -292,7 +1236,11 @@ const InboxIndex = struct {
         {
             return .irrelevant;
         }
-        const history = historyForEnvelope(semantic, envelope);
+        const history = historyForIdentity(
+            semantic,
+            envelope.operation_id,
+            envelope.operation_generation,
+        ) orelse return .irrelevant;
         if (history.operation_id != envelope.operation_id or
             history.generation != envelope.operation_generation)
         {
@@ -302,7 +1250,7 @@ const InboxIndex = struct {
         if (envelope.ownership_epoch != attempt.operation.agent.ownership_epoch) {
             return error.CompletionAttemptEpochMismatch;
         }
-        if (envelope.kind != std.meta.activeTag(attempt.descriptor_digest)) {
+        if (envelope.kind != (history.kind() orelse return error.MissingOperationDescriptor)) {
             return error.CompletionEvidenceKindMismatch;
         }
         if (history.result != null) return .{
@@ -327,11 +1275,15 @@ const InboxIndex = struct {
                 if (available == null) available = slot;
                 continue;
             };
-            const existing_history = historyForEnvelope(semantic, existing);
-            if (existing_history.operation_id != existing.operation_id or
-                existing_history.generation != existing.operation_generation or
-                !attemptMatchesKind(existing_history, existing.attempt_id, existing.kind))
-            {
+            const existing_history = historyForIdentity(
+                semantic,
+                existing.operation_id,
+                existing.operation_generation,
+            ) orelse {
+                if (available == null) available = slot;
+                continue;
+            };
+            if (!attemptMatchesKind(existing_history, existing.attempt_id, existing.kind)) {
                 if (available == null) available = slot;
                 continue;
             }
@@ -352,7 +1304,7 @@ const InboxIndex = struct {
         return .persist;
     }
 
-    fn prune(self: *InboxIndex, semantic: *const SemanticIndex) void {
+    fn prune(self: *InboxIndex, semantic: *const SemanticView) void {
         for (&self.entries) |*slot| {
             const envelope = slot.* orelse continue;
             if (!envelopeIsPending(semantic, envelope)) slot.* = null;
@@ -363,55 +1315,59 @@ const InboxIndex = struct {
         }
     }
 
-    fn historyForEnvelope(
-        semantic: *const SemanticIndex,
-        envelope: completion_inbox.Envelope,
-    ) OperationHistory {
-        return switch (envelope.kind) {
-            .model => semantic.model,
-            .bash, .apply_patch => semantic.consequential,
-        };
+    fn historyForIdentity(
+        semantic: *const SemanticView,
+        operation_id: u64,
+        operation_generation: u32,
+    ) ?OperationView {
+        if (semantic.model.operation_id == operation_id and
+            semantic.model.generation == operation_generation) return semantic.model;
+        if (semantic.consequential.operation_id == operation_id and
+            semantic.consequential.generation == operation_generation) return semantic.consequential;
+        return null;
     }
 
-    fn keyIsRelevant(semantic: *const SemanticIndex, key: AttemptKey) bool {
-        const history = switch (key.kind) {
-            .model => semantic.model,
-            .bash, .apply_patch => semantic.consequential,
-        };
-        return history.operation_id == key.operation_id and
-            history.generation == key.operation_generation and
-            attemptMatchesKind(history, key.attempt_id, key.kind);
+    fn keyIsRelevant(semantic: *const SemanticView, key: AttemptKey) bool {
+        const history = historyForIdentity(
+            semantic,
+            key.operation_id,
+            key.operation_generation,
+        ) orelse return false;
+        return attemptMatchesKind(history, key.attempt_id, key.kind);
     }
 
-    fn envelopeIsPending(semantic: *const SemanticIndex, envelope: completion_inbox.Envelope) bool {
-        const history = historyForEnvelope(semantic, envelope);
-        return history.result == null and history.operation_id == envelope.operation_id and
-            history.generation == envelope.operation_generation and
+    fn envelopeIsPending(semantic: *const SemanticView, envelope: completion_inbox.Envelope) bool {
+        const history = historyForIdentity(
+            semantic,
+            envelope.operation_id,
+            envelope.operation_generation,
+        ) orelse return false;
+        return history.result == null and
             attemptMatchesKind(history, envelope.attempt_id, envelope.kind);
     }
 
-    fn keyIsPending(semantic: *const SemanticIndex, key: AttemptKey) bool {
-        const history = switch (key.kind) {
-            .model => semantic.model,
-            .bash, .apply_patch => semantic.consequential,
-        };
-        return history.result == null and history.operation_id == key.operation_id and
-            history.generation == key.operation_generation and
+    fn keyIsPending(semantic: *const SemanticView, key: AttemptKey) bool {
+        const history = historyForIdentity(
+            semantic,
+            key.operation_id,
+            key.operation_generation,
+        ) orelse return false;
+        return history.result == null and
             attemptMatchesKind(history, key.attempt_id, key.kind);
     }
 
     fn attemptMatchesKind(
-        history: OperationHistory,
+        history: OperationView,
         attempt_id: u64,
         kind: completion_inbox.EvidenceKind,
     ) bool {
-        const attempt = history.findAttempt(attempt_id) orelse return false;
-        return std.meta.activeTag(attempt.descriptor_digest) == kind;
+        if (!history.containsAttempt(attempt_id)) return false;
+        return history.kind() == kind;
     }
 };
 
 const ResidentState = struct {
-    semantic: SemanticIndex = .{},
+    semantic: SemanticView = .{},
     inbox: InboxIndex = .{},
     conversation_head_id: u64 = 0,
     conversation_head_kind: ?EntryKind = null,
@@ -457,8 +1413,7 @@ const ResidentState = struct {
                 next.conversation_head_kind = advanced.kind;
             },
             .task_admitted,
-            .operation_submitted,
-            .operation_accepted,
+            .operation_admitted,
             .attempt_admitted,
             .authorization,
             .result,
@@ -924,6 +1879,16 @@ pub const Session = struct {
         return self.resident.conversation_head_id;
     }
 
+    pub fn nextModelOperationId(self: *Session) !u64 {
+        _ = try self.semanticView();
+        return self.nextOperationId();
+    }
+
+    fn nextOperationId(self: *const Session) !u64 {
+        return std.math.add(u64, self.resident.semantic.maximum_operation_id, 1) catch
+            error.OperationIdentityExhausted;
+    }
+
     fn authorize(self: *Session, token: OwnerToken) !void {
         if (!self.open) return error.SessionClosed;
         if (self.failed) return error.SessionUnavailable;
@@ -937,12 +1902,13 @@ pub const Session = struct {
         try ensureTransientScratchBound(self.scratch);
     }
 
-    pub fn appendConversation(
+    pub fn appendConversationForTest(
         self: *Session,
         kind: EntryKind,
         content_ref: u64,
         fault: ?FaultHook,
     ) !ConversationEntry {
+        if (!@import("builtin").is_test) @compileError("test-only Conversation preparation");
         if (content_ref == 0) return error.InvalidContentReference;
         try self.ensureUsable();
         return self.appendAuthorized(kind, content_ref, fault) catch |err| {
@@ -1023,7 +1989,7 @@ pub const Session = struct {
             .tool_call => conversation.call_header_size + model_contract.max_tool_key_size +
                 model_contract.max_tool_arguments_envelope_size,
             .tool_result => conversation.result_header_size + conversation.max_result_content_size,
-            .user_text, .assistant_text, .context_checkpoint => conversation.max_result_content_size,
+            .user_text, .assistant_text => conversation.max_result_content_size,
         };
         if (reader.length() == 0 or reader.length() > maximum) return error.InvalidConversationContent;
         switch (kind) {
@@ -1070,7 +2036,7 @@ pub const Session = struct {
                     result.content_length,
                 );
             },
-            .user_text, .assistant_text, .context_checkpoint => try validateUtf8ConversationWindows(&reader, 0, reader.length()),
+            .user_text, .assistant_text => try validateUtf8ConversationWindows(&reader, 0, reader.length()),
         }
     }
 
@@ -1180,34 +2146,824 @@ pub const Session = struct {
         };
     }
 
-    pub fn commitSemantic(
-        self: *Session,
-        facts: []const session_transition.Fact,
-        encoded_core: ?[]const u8,
-    ) !u64 {
-        return self.commitSemanticPrepared(facts, encoded_core, .facts_only);
-    }
-
-    /// Commits the closed Patch Intent content relationship: the transaction
-    /// first references the Intent, and that Intent first references the patch.
-    pub fn commitSemanticWithPatchContent(
-        self: *Session,
-        facts: []const session_transition.Fact,
-        encoded_core: ?[]const u8,
-        patch: PatchContent,
-    ) !u64 {
-        return self.commitSemanticPrepared(facts, encoded_core, .{ .patch_intent = patch });
-    }
-
     const ContentClosure = union(enum) {
         facts_only,
         patch_intent: PatchContent,
     };
 
-    fn commitSemanticPrepared(
+    const CompiledAction = struct {
+        descriptor_ref: u64,
+        descriptor_digest: binding.Descriptor,
+        content_closure: ContentClosure,
+    };
+
+    pub fn startTask(self: *Session, slot: *core_image.ActivationSlot) !u64 {
+        defer core_image.scrub(slot);
+        const committed = try continuation.initialize(.{ .agent_id = self.agent_id, .generation = 1 });
+        const candidate = try continuation.startTask(committed, self.activeLeafId());
+        const facts = [_]session_transition.Fact{session_transition.taskAdmitted(
+            self.agentContext(),
+            self.task_id,
+            self.task_id,
+        )};
+        return self.commitContinuation(slot, candidate, &facts, .facts_only);
+    }
+
+    pub fn previewModelContext(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+        operation_id: u64,
+        sequence: u64,
+    ) !ModelContext {
+        defer core_image.scrub(slot);
+        if (operation_id == 0 or operation_id <= self.resident.semantic.maximum_operation_id) {
+            return error.InvalidOperationIdentity;
+        }
+        const committed = try self.loadContinuation(slot);
+        return (try continuation.admitModelAttempt(committed, operation_id, sequence)).context;
+    }
+
+    pub fn admitModelAttempt(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+        material: ModelAttemptMaterial,
+    ) !Operation {
+        defer core_image.scrub(slot);
+        if (material.operation_id == 0 or
+            material.operation_id <= self.resident.semantic.maximum_operation_id)
+        {
+            return error.InvalidOperationIdentity;
+        }
+        const committed = try self.loadContinuation(slot);
+        const reduced = try continuation.admitModelAttempt(
+            committed,
+            material.operation_id,
+            material.sequence,
+        );
+        const operation_context = self.operationContext(
+            reduced.operation.id,
+            reduced.operation.generation,
+        );
+        const descriptor: binding.Descriptor = .{ .model = material.request_digest };
+        const facts = [_]session_transition.Fact{
+            session_transition.operationAdmitted(
+                operation_context,
+                null,
+                material.request_ref,
+                descriptor,
+            ),
+            session_transition.modelAttemptAdmitted(
+                operation_context,
+                material.attempt_id,
+                material.request_ref,
+                descriptor,
+                material.possible_duplicate_attempts,
+            ),
+        };
+        _ = try self.commitContinuation(slot, reduced.state, &facts, .facts_only);
+        return reduced.operation;
+    }
+
+    pub fn admitModelRetry(self: *Session, material: ModelAttemptMaterial) !u64 {
+        const model = self.resident.semantic.model;
+        const descriptor = model.descriptor orelse return error.MissingModelDescriptor;
+        if (model.operation_id != material.operation_id or
+            descriptor.descriptor_ref != material.request_ref or
+            descriptor.descriptor_digest != .model or
+            !binding.eql(
+                binding.ModelDescriptor,
+                descriptor.descriptor_digest.model,
+                material.request_digest,
+            ) or model.attempt_count != material.possible_duplicate_attempts)
+        {
+            return error.InvalidModelAttempt;
+        }
+        return self.commitDerived(&.{session_transition.modelAttemptAdmitted(
+            self.operationContext(material.operation_id, model.generation),
+            material.attempt_id,
+            material.request_ref,
+            .{ .model = material.request_digest },
+            material.possible_duplicate_attempts,
+        )}, null, .facts_only);
+    }
+
+    pub fn admitModelCompletion(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+        material: ModelCompletionMaterial,
+    ) !ModelCompletionAdmission {
+        defer core_image.scrub(slot);
+        const committed = try self.loadContinuation(slot);
+        const model_history = self.resident.semantic.model;
+        const attempt = model_history.findAttempt(material.attempt_id) orelse
+            return error.InvalidAttemptHistory;
+        if (attempt.operation.operation_id != material.operation_id or
+            attempt.operation.generation != material.operation_generation or
+            attempt.descriptor_ref == 0)
+        {
+            return error.InvalidAttemptHistory;
+        }
+        _ = try self.requirePendingCompletion(.model, attempt.operation, material.attempt_id, .{
+            .ownership_epoch = material.evidence_epoch,
+            .result_ref = material.response_ref,
+            .result_digest = material.response_digest,
+        });
+
+        var facts: [4]session_transition.Fact = undefined;
+        const operation = self.operationContext(material.operation_id, material.operation_generation);
+        var evidence_operation = operation;
+        evidence_operation.agent.ownership_epoch = material.evidence_epoch;
+        facts[0] = session_transition.result(.{
+            .operation = evidence_operation,
+            .result_ref = material.response_ref,
+            .result_digest = material.response_digest,
+            .class = .ordinary,
+            .evidence = .{ .durable = .{ .model = material.attempt_id } },
+        });
+        facts[1] = session_transition.resultApplied(.{
+            .operation = operation,
+            .attempt_id = material.attempt_id,
+            .result_ref = material.response_ref,
+            .result_digest = material.response_digest,
+        });
+
+        var fact_count: usize = 2;
+        var closure: ContentClosure = .facts_only;
+        var action_identity: ?ActionIdentity = null;
+        const next_entry_id = std.math.add(u64, self.activeLeafId(), 1) catch
+            return error.EntryIdentityExhausted;
+        const consequence: continuation.CompletionConsequence = switch (material.consequence) {
+            .final_answer => .{ .final_answer = next_entry_id },
+            .tool_call => .tool_call,
+            .terminal => .terminal,
+        };
+        const reduced = try continuation.admitModelCompletion(
+            committed,
+            .{ .id = material.operation_id, .generation = material.operation_generation },
+            material.admission,
+            material.response_ref,
+            material.response_digest,
+            consequence,
+        );
+        try self.validateCompletionContent(reduced.response, material.consequence);
+        switch (material.consequence) {
+            .final_answer => |final| {
+                const entry = try self.appendAuthorized(.assistant_text, final.content_ref, null);
+                std.debug.assert(entry.entry_id == next_entry_id);
+                facts[fact_count] = self.conversationFact(entry);
+                fact_count += 1;
+                facts[fact_count] = session_transition.outcome(
+                    self.agentContext(),
+                    self.task_id,
+                    final.content_ref,
+                );
+                fact_count += 1;
+            },
+            .tool_call => |tool| {
+                const action = if (tool.action) |action|
+                    try self.compileAction(reduced.response, action)
+                else
+                    null;
+                const entry = try self.appendAuthorized(.tool_call, tool.content_ref, null);
+                std.debug.assert(entry.entry_id == next_entry_id);
+                if (action) |compiled| {
+                    const action_id = try self.nextOperationId();
+                    facts[fact_count] = session_transition.operationAdmitted(
+                        self.operationContext(action_id, 1),
+                        .{
+                            .operation_id = material.operation_id,
+                            .generation = material.operation_generation,
+                        },
+                        compiled.descriptor_ref,
+                        compiled.descriptor_digest,
+                    );
+                    fact_count += 1;
+                    closure = compiled.content_closure;
+                    action_identity = .{
+                        .operation_id = action_id,
+                        .operation_generation = 1,
+                    };
+                }
+                facts[fact_count] = self.conversationFact(entry);
+                fact_count += 1;
+            },
+            .terminal => {},
+        }
+        _ = try self.commitContinuation(slot, reduced.state, facts[0..fact_count], closure);
+        return .{ .response = reduced.response, .action = action_identity };
+    }
+
+    pub fn admitToolResult(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+        material: ToolResultMaterial,
+    ) !void {
+        defer core_image.scrub(slot);
+        const committed = try self.loadContinuation(slot);
+        const model_operation = continuation.operation(committed);
+        const operation = self.operationContext(material.operation_id, material.operation_generation);
+        const history = try self.requireActionOperation(
+            operation.operation_id,
+            operation.generation,
+        );
+        const descriptor = history.descriptor orelse return error.MissingActionDescriptor;
+        const source = descriptor.source_operation orelse return error.MissingSourceOperation;
+        if (source.operation_id != model_operation.id or
+            source.generation != model_operation.generation)
+        {
+            return error.InvalidSourceOperation;
+        }
+        const result = history.result orelse return error.InvalidOperationHistory;
+        if (result.result_ref != material.result_ref or
+            !binding.eql(binding.Result, result.result_digest, material.result_digest) or
+            resultAttemptId(result) != material.attempt_id)
+        {
+            return error.ResultApplicationMismatch;
+        }
+        if (material.attempt_id != 0) {
+            const attempt = history.findAttempt(material.attempt_id) orelse
+                return error.InvalidAttemptHistory;
+            if (attempt.operation.operation_id != operation.operation_id or
+                attempt.operation.generation != operation.generation or
+                attempt.operation.agent.agent_id != operation.agent.agent_id or
+                attempt.operation.agent.agent_generation != operation.agent.agent_generation)
+            {
+                return error.InvalidAttemptHistory;
+            }
+        }
+        const call_entry = try self.readEntry(self.activeLeafId());
+        const next_entry_id = std.math.add(u64, call_entry.entry_id, 1) catch
+            return error.EntryIdentityExhausted;
+        const candidate = try continuation.admitToolResult(
+            committed,
+            call_entry.entry_id,
+            next_entry_id,
+        );
+        const entry = try self.appendAuthorized(.tool_result, material.visible_ref, null);
+        std.debug.assert(entry.entry_id == next_entry_id);
+        const facts = [_]session_transition.Fact{
+            session_transition.resultApplied(.{
+                .operation = operation,
+                .attempt_id = material.attempt_id,
+                .result_ref = material.result_ref,
+                .result_digest = material.result_digest,
+            }),
+            self.conversationFact(entry),
+        };
+        _ = try self.commitContinuation(slot, candidate, &facts, .facts_only);
+    }
+
+    pub fn continuationView(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+    ) !ContinuationView {
+        defer core_image.scrub(slot);
+        const state = try self.loadContinuation(slot);
+        return .{
+            .operation = continuation.operation(state),
+            .task = continuation.task(state),
+            .response = continuation.response(state),
+        };
+    }
+
+    pub fn failureObservation(self: *Session) !FailureObservation {
+        const view = try self.semanticView();
+        const encoded = view.last_core orelse return error.MissingLedgerCoreState;
+        const state = try continuation.decode(&encoded);
+        return .{ .response_ref = state.response_ref, .failure = state.response_failure };
+    }
+
+    pub fn commitControl(self: *Session, control: Control) !u64 {
+        const fact = switch (control) {
+            .cancel => session_transition.cancellation(self.agentContext()),
+            .shutdown => session_transition.shutdown(self.agentContext()),
+        };
+        return self.commitDerived(&.{fact}, null, .facts_only);
+    }
+
+    pub fn requireApproval(
+        self: *Session,
+        operation_id: u64,
+        operation_generation: u32,
+    ) !ApprovalRequest {
+        const operation = try self.requireActionOperation(
+            operation_id,
+            operation_generation,
+        );
+        const current = try actionView(operation);
+        switch (current.disposition) {
+            .proposed => {},
+            .approval_required => |request| return request,
+            else => return error.ApprovalNoLongerRequired,
+        }
+        const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
+        const refs: ApprovalRefs = switch (descriptor.descriptor_digest) {
+            .model => return error.InvalidActionDescriptor,
+            .bash => |digest| blk: {
+                var bytes: [bash_tool.max_descriptor_size]u8 = undefined;
+                const content = try self.readBoundedContent(descriptor.descriptor_ref, &bytes);
+                _ = try bash_tool.decodeDescriptor(content);
+                if (!binding.eql(binding.BashDescriptor, bash_tool.descriptorDigest(content), digest)) {
+                    return error.InvalidApprovalBinding;
+                }
+                break :blk .{ .binding = @as(u64, 0), .descriptor = descriptor.descriptor_ref };
+            },
+            .apply_patch => |digest| blk: {
+                var intent_bytes: [patch_tool.max_intent_size]u8 = undefined;
+                const bytes = try self.readBoundedContent(descriptor.descriptor_ref, &intent_bytes);
+                const intent = try patch_tool.decodeIntent(bytes);
+                if (!binding.eql(binding.PatchIntent, intent.intent_digest, digest)) {
+                    return error.InvalidApprovalBinding;
+                }
+                var patch_bytes: [patch_tool.max_patch_size]u8 = undefined;
+                const patch = try self.readBoundedContent(intent.patch_ref, &patch_bytes);
+                if (!binding.eql(binding.PatchDescriptor, patch_tool.patchDigest(patch), intent.patch_digest)) {
+                    return error.InvalidApprovalBinding;
+                }
+                break :blk .{ .binding = descriptor.descriptor_ref, .descriptor = intent.patch_ref };
+            },
+        };
+        const record: session_transition.ApprovalRequiredRecord = .{
+            .operation = self.operationContext(operation_id, operation_generation),
+            .binding_ref = refs.binding,
+            .descriptor_ref = refs.descriptor,
+        };
+        _ = try self.commitDerived(&.{session_transition.approvalRequired(record)}, null, .facts_only);
+        return .{
+            .operation_id = operation_id,
+            .operation_generation = operation_generation,
+            .descriptor_digest = descriptor.descriptor_digest,
+            .descriptor_ref = refs.descriptor,
+        };
+    }
+
+    pub fn authorizeBypass(self: *Session, identity: ActionIdentity) !ActionView {
+        const operation = try self.requireActionOperation(
+            identity.operation_id,
+            identity.operation_generation,
+        );
+        const current = try actionView(operation);
+        switch (current.disposition) {
+            .proposed => return self.commitActionAuthorization(operation, true),
+            .authorized => return current,
+            else => return error.AuthorizationNoLongerRequired,
+        }
+    }
+
+    pub fn resolveApproval(self: *Session, decision: ApprovalDecision) !ActionView {
+        const operation = try self.requireActionOperation(
+            decision.operation_id,
+            decision.operation_generation,
+        );
+        const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
+        const approval = operation.approval_required orelse return error.ApprovalNotCommitted;
+        if (!binding.descriptorEql(descriptor.descriptor_digest, decision.descriptor_digest) or
+            approval.descriptor_ref != decision.descriptor_ref)
+        {
+            return error.StalePermissionDecision;
+        }
+        const current = try actionView(operation);
+        switch (current.disposition) {
+            .approval_required => return self.commitActionAuthorization(
+                operation,
+                decision.allowed,
+            ),
+            .authorized => if (decision.allowed) return current,
+            .denied => if (!decision.allowed) return current,
+            else => {},
+        }
+        return error.PermissionNoLongerRequired;
+    }
+
+    pub fn beginAuthorizedAction(
+        self: *Session,
+        identity: ActionIdentity,
+    ) !ExecutionGrant {
+        const operation = try self.requireActionOperation(
+            identity.operation_id,
+            identity.operation_generation,
+        );
+        const current = try actionView(operation);
+        switch (current.disposition) {
+            .authorized => {},
+            else => return error.ActionNotAuthorized,
+        }
+        const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
+        var attempt_id: u64 = 0;
+        while (attempt_id == 0) self.io.random(std.mem.asBytes(&attempt_id));
+        _ = try self.commitDerived(&.{session_transition.consequentialAttemptAdmitted(
+            self.operationContext(identity.operation_id, identity.operation_generation),
+            attempt_id,
+            descriptor.descriptor_ref,
+            descriptor.descriptor_digest,
+        )}, null, .facts_only);
+        return .{
+            .operation = self.operationContext(
+                identity.operation_id,
+                identity.operation_generation,
+            ),
+            .attempt_id = attempt_id,
+            .binding = .{
+                .descriptor_ref = descriptor.descriptor_ref,
+                .descriptor_digest = descriptor.descriptor_digest,
+            },
+        };
+    }
+
+    pub fn settleNoEffect(
+        self: *Session,
+        identity: ActionIdentity,
+        result: ImmediateActionResult,
+    ) !ActionView {
+        const operation = try self.requireActionOperation(
+            identity.operation_id,
+            identity.operation_generation,
+        );
+        const current = try actionView(operation);
+        const kind = operation.kind() orelse return error.MissingActionDescriptor;
+        switch (current.disposition) {
+            .denied => {},
+            .authorized => if (kind != .apply_patch) return error.InvalidActionResultState,
+            .settled => |settled| {
+                const immediate = switch (settled.evidence) {
+                    .immediate => true,
+                    .durable => false,
+                };
+                if (immediate and settled.class == .ordinary and
+                    settled.result_ref == result.result_ref and
+                    binding.eql(binding.Result, settled.result_digest, result.result_digest))
+                {
+                    return current;
+                }
+                return error.ActionAlreadySettled;
+            },
+            else => return error.InvalidActionResultState,
+        }
+        _ = try self.commitDerived(&.{session_transition.result(.{
+            .operation = self.operationContext(identity.operation_id, identity.operation_generation),
+            .result_ref = result.result_ref,
+            .result_digest = result.result_digest,
+            .class = .ordinary,
+            .evidence = .{ .immediate = {} },
+        })}, null, .facts_only);
+        return actionView(try self.requireActionOperation(
+            identity.operation_id,
+            identity.operation_generation,
+        ));
+    }
+
+    pub fn settleAttempt(
+        self: *Session,
+        attempt: AttemptObservation,
+        result: AttemptActionResult,
+    ) !ActionView {
+        const operation = try self.requireActionOperation(
+            attempt.operation.operation_id,
+            attempt.operation.generation,
+        );
+        const current = try actionView(operation);
+        const observed = switch (current.disposition) {
+            .attempted => |value| value,
+            .settled => |settled| {
+                if (settled.result_ref == result.result_ref and
+                    binding.eql(binding.Result, settled.result_digest, result.result_digest) and
+                    settled.class == result.class and
+                    resultAttemptId(settled) == attempt.attempt_id)
+                {
+                    return current;
+                }
+                return error.ActionAlreadySettled;
+            },
+            else => return error.InvalidActionResultState,
+        };
+        if (!std.meta.eql(observed, attempt)) return error.InvalidAttemptHistory;
+        const kind = operation.kind() orelse return error.MissingActionDescriptor;
+        _ = try self.requirePendingCompletion(kind, observed.operation, observed.attempt_id, .{
+            .ownership_epoch = result.ownership_epoch,
+            .result_ref = result.result_ref,
+            .result_digest = result.result_digest,
+        });
+        var evidence_operation = observed.operation;
+        evidence_operation.agent.ownership_epoch = result.ownership_epoch;
+        _ = try self.commitDerived(&.{session_transition.result(.{
+            .operation = evidence_operation,
+            .result_ref = result.result_ref,
+            .result_digest = result.result_digest,
+            .class = result.class,
+            .evidence = .{ .durable = switch (kind) {
+                .bash => .{ .bash = observed.attempt_id },
+                .apply_patch => .{ .apply_patch = observed.attempt_id },
+                .model => unreachable,
+            } },
+        })}, null, .facts_only);
+        return actionView(try self.requireActionOperation(
+            attempt.operation.operation_id,
+            attempt.operation.generation,
+        ));
+    }
+
+    pub fn actionForModel(
+        self: *Session,
+        model_operation_id: u64,
+        expected_kind: binding.DescriptorKind,
+    ) !ActionView {
+        const history = self.resident.semantic.consequential;
+        const descriptor = history.descriptor orelse return error.MissingActionDescriptor;
+        const source = descriptor.source_operation orelse return error.MissingSourceOperation;
+        const model = self.resident.semantic.model;
+        if (source.operation_id != model_operation_id or
+            source.operation_id != model.operation_id or
+            source.generation != model.generation or
+            history.kind() != expected_kind)
+        {
+            return error.InvalidOperationHistory;
+        }
+        return try actionView(history);
+    }
+
+    pub fn currentAction(self: *Session) !?ActionView {
+        const history = self.resident.semantic.consequential;
+        if (history.descriptor == null) return null;
+        const descriptor = history.descriptor.?;
+        _ = descriptor.source_operation orelse return error.MissingSourceOperation;
+        return @as(?ActionView, try actionView(history));
+    }
+
+    fn commitActionAuthorization(
+        self: *Session,
+        operation: OperationView,
+        allowed: bool,
+    ) !ActionView {
+        const descriptor = operation.descriptor orelse return error.MissingActionDescriptor;
+        const permission_ref: u64 = switch (descriptor.descriptor_digest) {
+            .model => return error.InvalidActionDescriptor,
+            .bash => 0,
+            .apply_patch => descriptor.descriptor_ref,
+        };
+        _ = try self.commitDerived(&.{session_transition.authorization(.{
+            .operation = self.operationContext(
+                descriptor.operation.operation_id,
+                descriptor.operation.generation,
+            ),
+            .permission_ref = permission_ref,
+            .allowed = allowed,
+        })}, null, .facts_only);
+        return actionView(try self.requireActionOperation(
+            descriptor.operation.operation_id,
+            descriptor.operation.generation,
+        ));
+    }
+
+    fn requireActionOperation(
+        self: *Session,
+        operation_id: u64,
+        generation: u32,
+    ) !OperationView {
+        const operation = self.resident.semantic.operation(
+            self.operationContext(operation_id, generation),
+        ) orelse return error.InvalidOperationHistory;
+        if (operation.kind() == .model) return error.InvalidActionDescriptor;
+        return operation;
+    }
+
+    fn loadContinuation(self: *Session, slot: *core_image.ActivationSlot) !continuation.State {
+        const view = try self.semanticView();
+        const encoded = view.last_core orelse return error.MissingLedgerCoreState;
+        const state = try continuation.decode(&encoded);
+        if (state.agent_id != self.agent_id or state.agent_generation != 1) {
+            return error.CoreSessionIdentityMismatch;
+        }
+        slotState(slot).* = state;
+        return state;
+    }
+
+    fn commitContinuation(
+        self: *Session,
+        slot: *core_image.ActivationSlot,
+        candidate: continuation.State,
+        facts: []const session_transition.Fact,
+        closure: ContentClosure,
+    ) !u64 {
+        if (candidate.agent_id != self.agent_id or candidate.agent_generation != 1) {
+            return error.CoreSessionIdentityMismatch;
+        }
+        slotState(slot).* = candidate;
+        var encoded: [continuation.encoded_size]u8 = undefined;
+        try continuation.encode(&encoded, slotState(slot).*);
+        return self.commitDerived(facts, encoded, closure);
+    }
+
+    fn agentContext(self: *const Session) session_transition.AgentContext {
+        return .{
+            .agent_id = self.agent_id,
+            .agent_generation = 1,
+            .ownership_epoch = self.ownership_epoch,
+        };
+    }
+
+    fn operationContext(
+        self: *const Session,
+        operation_id: u64,
+        generation: u32,
+    ) session_transition.OperationContext {
+        return .{
+            .agent = self.agentContext(),
+            .operation_id = operation_id,
+            .generation = generation,
+        };
+    }
+
+    fn conversationFact(
+        self: *const Session,
+        entry: ConversationEntry,
+    ) session_transition.Fact {
+        return session_transition.conversationAdvanced(.{
+            .agent = self.agentContext(),
+            .entry_id = entry.entry_id,
+            .parent_id = entry.parent_id,
+            .kind = entry.kind,
+            .content_ref = entry.content_ref,
+        });
+    }
+
+    fn validateCompletionContent(
+        self: *Session,
+        response_value: Response,
+        consequence: ModelCompletionConsequence,
+    ) !void {
+        switch (consequence) {
+            .final_answer => |final| try self.requireContentEqualsWindow(
+                response_value.content_ref,
+                response_value.text,
+                final.content_ref,
+            ),
+            .tool_call => |tool| {
+                try self.requireToolCallMatchesResponse(response_value, tool.content_ref);
+            },
+            .terminal => {},
+        }
+    }
+
+    fn compileAction(
+        self: *Session,
+        response_value: Response,
+        material: ActionMaterial,
+    ) !CompiledAction {
+        return switch (material) {
+            .bash => |bash| blk: {
+                try self.requireResponseToolKey(response_value, model_contract.bash_key);
+                var descriptor_bytes: [bash_tool.max_descriptor_size]u8 = undefined;
+                const bytes = try self.readBoundedContent(bash.descriptor_ref, &descriptor_bytes);
+                const descriptor = try bash_tool.decodeDescriptor(bytes);
+                if (!std.mem.eql(u8, descriptor.workspace_path, self.workspacePath()) or
+                    !std.mem.eql(u8, descriptor.working_directory, self.workspacePath()) or
+                    descriptor.call.timeout_ms != bash.call.timeout_ms or
+                    !std.mem.eql(u8, descriptor.call.command, bash.call.commandSlice()))
+                {
+                    return error.InvalidActionDescriptor;
+                }
+                break :blk .{
+                    .descriptor_ref = bash.descriptor_ref,
+                    .descriptor_digest = .{ .bash = bash_tool.descriptorDigest(bytes) },
+                    .content_closure = .facts_only,
+                };
+            },
+            .apply_patch => |patch| blk: {
+                try self.requireResponseToolKey(response_value, model_contract.apply_patch_key);
+                if (patch.intent_reference == 0 or patch.patch_reference == 0) {
+                    return error.InvalidActionContentClosure;
+                }
+                var intent_bytes: [patch_tool.max_intent_size]u8 = undefined;
+                const bytes = try self.readBoundedContent(patch.intent_reference, &intent_bytes);
+                const intent = try patch_tool.decodeIntent(bytes);
+                var patch_bytes: [patch_tool.max_patch_size]u8 = undefined;
+                const patch_content = try self.readBoundedContent(patch.patch_reference, &patch_bytes);
+                const patch_digest = patch_tool.patchDigest(patch_content);
+                if (intent.patch_ref != patch.patch_reference or
+                    !std.mem.eql(u8, intent.workspace_path, self.workspacePath()) or
+                    !binding.eql(binding.PatchDescriptor, intent.patch_digest, patch_digest))
+                {
+                    return error.InvalidActionDescriptor;
+                }
+                break :blk .{
+                    .descriptor_ref = patch.intent_reference,
+                    .descriptor_digest = .{ .apply_patch = intent.intent_digest },
+                    .content_closure = .{ .patch_intent = patch },
+                };
+            },
+        };
+    }
+
+    fn requireResponseToolKey(
+        self: *Session,
+        response_value: Response,
+        expected: []const u8,
+    ) !void {
+        if (response_value.tool_key.length != expected.len or expected.len > model_contract.max_tool_key_size) {
+            return error.InvalidActionDescriptor;
+        }
+        var source = try self.viewContent(response_value.content_ref);
+        var key: [model_contract.max_tool_key_size]u8 = undefined;
+        const actual = try source.readWindow(response_value.tool_key.offset, key[0..expected.len]);
+        if (actual.len != expected.len or !std.mem.eql(u8, actual, expected)) {
+            return error.InvalidActionDescriptor;
+        }
+    }
+
+    fn readBoundedContent(self: *Session, reference: u64, out: []u8) ![]const u8 {
+        var content = try self.viewContent(reference);
+        if (content.length() == 0 or content.length() > out.len) return error.InvalidActionDescriptor;
+        const length: usize = @intCast(content.length());
+        var offset: usize = 0;
+        while (offset < length) {
+            const bytes = try content.readWindow(offset, out[offset..length]);
+            if (bytes.len == 0 or bytes.len > length - offset) return error.InvalidActionDescriptor;
+            if (bytes.ptr != out[offset..].ptr) @memcpy(out[offset..][0..bytes.len], bytes);
+            offset += bytes.len;
+        }
+        return out[0..length];
+    }
+
+    fn requireContentEqualsWindow(
+        self: *Session,
+        source_ref: u64,
+        window: ContentWindow,
+        target_ref: u64,
+    ) !void {
+        var source = try self.viewContent(source_ref);
+        var target = try self.viewContent(target_ref);
+        if (target.length() != window.length) return error.ModelCompletionContentMismatch;
+        var source_bytes: [4096]u8 = undefined;
+        var target_bytes: [4096]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < window.length) {
+            const wanted: usize = @intCast(@min(window.length - offset, source_bytes.len));
+            const left = try source.readWindow(window.offset + offset, source_bytes[0..wanted]);
+            const right = try target.readWindow(offset, target_bytes[0..wanted]);
+            if (left.len != wanted or right.len != wanted or !std.mem.eql(u8, left, right)) {
+                return error.ModelCompletionContentMismatch;
+            }
+            offset += wanted;
+        }
+    }
+
+    fn requireToolCallMatchesResponse(
+        self: *Session,
+        response_value: Response,
+        call_ref: u64,
+    ) !void {
+        var call = try self.viewContent(call_ref);
+        var header_bytes: [conversation.call_header_size]u8 = undefined;
+        const header_slice = try call.readWindow(0, &header_bytes);
+        if (header_slice.len != header_bytes.len) return error.ModelCompletionContentMismatch;
+        const header = conversation.decodeToolCallHeader(&header_bytes, call.length()) catch
+            return error.ModelCompletionContentMismatch;
+        if (header.key_length != response_value.tool_key.length or
+            header.arguments_length != response_value.arguments.length or
+            !binding.eql(
+                binding.StrictToolJsonV1,
+                header.arguments_digest,
+                response_value.arguments.digest,
+            ))
+        {
+            return error.ModelCompletionContentMismatch;
+        }
+        var source = try self.viewContent(response_value.content_ref);
+        var left: [4096]u8 = undefined;
+        var right: [4096]u8 = undefined;
+        const comparisons = [_]struct { source: ContentWindow, call_offset: u64 }{
+            .{ .source = response_value.tool_key, .call_offset = conversation.call_header_size },
+            .{
+                .source = response_value.arguments.contentWindow(),
+                .call_offset = conversation.call_header_size + header.key_length,
+            },
+        };
+        for (comparisons) |comparison| {
+            var offset: u64 = 0;
+            while (offset < comparison.source.length) {
+                const wanted: usize = @intCast(@min(comparison.source.length - offset, left.len));
+                const source_bytes = try source.readWindow(
+                    comparison.source.offset + offset,
+                    left[0..wanted],
+                );
+                const call_bytes = try call.readWindow(
+                    comparison.call_offset + offset,
+                    right[0..wanted],
+                );
+                if (source_bytes.len != wanted or call_bytes.len != wanted or
+                    !std.mem.eql(u8, source_bytes, call_bytes))
+                {
+                    return error.ModelCompletionContentMismatch;
+                }
+                offset += wanted;
+            }
+        }
+    }
+
+    fn commitDerived(
         self: *Session,
         facts: []const session_transition.Fact,
-        encoded_core: ?[]const u8,
+        encoded_core: ?[continuation.encoded_size]u8,
         content_closure: ContentClosure,
     ) !u64 {
         try self.ensureUsable();
@@ -1217,10 +2973,6 @@ pub const Session = struct {
         }
         if (self.resident.semantic.last_sequence == std.math.maxInt(u64)) {
             return error.SessionSequenceExhausted;
-        }
-        if (encoded_core) |bytes| {
-            if (bytes.len != core_state.encoded_size) return error.InvalidCoreStateLength;
-            _ = try core_state.decode(bytes);
         }
         for (facts) |fact| {
             if (fact.kind() == .conversation_advanced) {
@@ -1232,7 +2984,7 @@ pub const Session = struct {
         var transaction: session_transition.Transaction = .{
             .sequence = self.resident.semantic.last_sequence + 1,
             .fact_count = @intCast(facts.len),
-            .core = if (encoded_core) |bytes| bytes[0..core_state.encoded_size].* else null,
+            .core = encoded_core,
         };
         @memcpy(transaction.facts[0..facts.len], facts);
         const next = try self.resident.applyingLedger(
@@ -1262,8 +3014,7 @@ pub const Session = struct {
         for (facts) |fact| switch (fact) {
             .conversation_advanced => self.pending_conversation = null,
             .task_admitted,
-            .operation_submitted,
-            .operation_accepted,
+            .operation_admitted,
             .attempt_admitted,
             .authorization,
             .result,
@@ -1275,6 +3026,16 @@ pub const Session = struct {
             => {},
         };
         return final_sequence;
+    }
+
+    /// Direct Fact injection exists only for malformed-ledger and recovery
+    /// fixtures. Production semantics enter through the typed methods above.
+    pub fn commitFactsForTest(
+        self: *Session,
+        facts: []const session_transition.Fact,
+    ) !u64 {
+        if (!@import("builtin").is_test) @compileError("test-only Session Fact injection");
+        return self.commitDerived(facts, null, .facts_only);
     }
 
     fn validatePreparedContentReferences(
@@ -1290,19 +3051,10 @@ pub const Session = struct {
         }
     }
 
-    pub fn inspectSemantic(
-        self: *Session,
-        context: *anyopaque,
-        apply: *const fn (*anyopaque, session_transition.Fact) anyerror!void,
-    ) !LedgerView {
+    pub fn semanticView(self: *Session) !SemanticView {
         try self.ensureUsable();
         if (self.recovery != .ready) return error.SessionRecoveryIncomplete;
-        try self.resident.semantic.emitFacts(context, apply);
-        const view: LedgerView = .{
-            .last_sequence = self.resident.semantic.last_sequence,
-            .last_core = self.resident.semantic.last_core,
-        };
-        return view;
+        return self.resident.semantic;
     }
 
     pub fn recoverSemanticWindow(
@@ -1344,8 +3096,7 @@ pub const Session = struct {
                     for (transaction.factSlice()) |fact| switch (fact) {
                         .conversation_advanced => |advanced| try self.verifyConversationEntry(advanced),
                         .task_admitted,
-                        .operation_submitted,
-                        .operation_accepted,
+                        .operation_admitted,
                         .attempt_admitted,
                         .authorization,
                         .result,
@@ -1549,6 +3300,7 @@ pub const Session = struct {
     ) !u64 {
         _ = self;
         const attempt = completed.attempt;
+        const operation = completed.operation;
         if (attempt.operation.agent.agent_id != envelope.agent_id or
             attempt.operation.agent.agent_generation != envelope.agent_generation)
         {
@@ -1557,23 +3309,179 @@ pub const Session = struct {
         if (attempt.operation.agent.ownership_epoch != envelope.ownership_epoch) {
             return error.CompletionAttemptEpochMismatch;
         }
-        if (std.meta.activeTag(attempt.descriptor_digest) != envelope.kind) {
+        if (!std.meta.eql(operation.operation, attempt.operation) or
+            operation.descriptor_ref != attempt.descriptor_ref or
+            !binding.descriptorEql(operation.descriptor_digest, attempt.descriptor_digest))
+        {
+            return error.AttemptDescriptorMismatch;
+        }
+        if (std.meta.activeTag(operation.descriptor_digest) != envelope.kind) {
             return error.CompletionEvidenceKindMismatch;
         }
         return completed.terminal_result_sequence;
     }
 
-    pub fn scanCompletionEvidence(
+    fn pendingCompletionEnvelope(
         self: *Session,
-        context: *anyopaque,
-        apply: *const fn (*anyopaque, completion_inbox.Envelope) anyerror!void,
-    ) !u32 {
+        operation: session_transition.OperationContext,
+        attempt_id: u64,
+    ) !?completion_inbox.Envelope {
+        try self.ensureUsable();
+        if (self.recovery != .ready) return error.SessionRecoveryIncomplete;
+        const history = self.resident.semantic.operation(operation) orelse
+            return error.InvalidOperationHistory;
+        const attempt = history.findAttempt(attempt_id) orelse return error.InvalidAttemptHistory;
+        const descriptor = history.descriptor orelse return error.MissingOperationDescriptor;
+        if (attempt.descriptor_ref != descriptor.descriptor_ref or
+            !binding.descriptorEql(attempt.descriptor_digest, descriptor.descriptor_digest))
+        {
+            return error.AttemptDescriptorMismatch;
+        }
+        for (self.resident.inbox.ambiguous) |maybe_key| {
+            const key = maybe_key orelse continue;
+            if (key.operation_id == operation.operation_id and
+                key.operation_generation == operation.generation and
+                key.attempt_id == attempt_id)
+            {
+                return error.ConflictingCompletionEvidence;
+            }
+        }
+        var match: ?completion_inbox.Envelope = null;
+        for (self.resident.inbox.entries) |maybe_envelope| {
+            const envelope = maybe_envelope orelse continue;
+            if (envelope.operation_id != operation.operation_id or
+                envelope.operation_generation != operation.generation or
+                envelope.attempt_id != attempt_id)
+            {
+                continue;
+            }
+            if (match) |existing| {
+                if (!std.meta.eql(existing, envelope)) return error.ConflictingCompletionEvidence;
+            } else match = envelope;
+        }
+        return match;
+    }
+
+    /// Returns only the external material from one semantically validated
+    /// pending Completion. Operation, Attempt, and kind remain Session-owned.
+    pub fn pendingCompletionEvidence(
+        self: *Session,
+        operation: session_transition.OperationContext,
+        attempt_id: u64,
+    ) !?CompletionEvidence {
+        const envelope = (try self.pendingCompletionEnvelope(operation, attempt_id)) orelse
+            return null;
+        return .{
+            .ownership_epoch = envelope.ownership_epoch,
+            .result_ref = envelope.result_ref,
+            .result_digest = envelope.result_digest,
+        };
+    }
+
+    /// Validates an offered Completion against committed semantic authority.
+    /// Live pending evidence is already resident and needs no storage query;
+    /// settled or historical evidence is checked against its durable Inbox row.
+    pub fn validateCompletionOffer(
+        self: *Session,
+        offered: completion_inbox.Envelope,
+    ) !void {
+        try self.ensureUsable();
+        if (self.recovery != .ready) return error.SessionRecoveryIncomplete;
+        try completion_inbox.validate(offered);
+        if (offered.session_id != self.session_id or offered.agent_id != self.agent_id or
+            offered.agent_generation != 1)
+        {
+            return error.StaleCompletion;
+        }
+        if (self.resident.semantic.operation(
+            self.operationContext(offered.operation_id, offered.operation_generation),
+        )) |operation| {
+            const attempt = operation.findAttempt(offered.attempt_id) orelse
+                return error.StaleCompletion;
+            const descriptor = operation.descriptor orelse return error.MissingOperationDescriptor;
+            if (attempt.descriptor_ref != descriptor.descriptor_ref or
+                !binding.descriptorEql(attempt.descriptor_digest, descriptor.descriptor_digest))
+            {
+                return error.AttemptDescriptorMismatch;
+            }
+            if (offered.ownership_epoch != attempt.operation.agent.ownership_epoch) {
+                return error.CompletionAttemptEpochMismatch;
+            }
+            if (offered.kind != std.meta.activeTag(descriptor.descriptor_digest)) {
+                return error.CompletionEvidenceKindMismatch;
+            }
+            const result = operation.result orelse {
+                const pending = (try self.pendingCompletionEnvelope(
+                    attempt.operation,
+                    attempt.attempt_id,
+                )) orelse return error.CompletionEvidenceMissing;
+                if (!std.meta.eql(pending, offered)) return error.ConflictingCompletionEvidence;
+                return;
+            };
+            const stored = (try self.storage.matchCompletion(offered)) orelse
+                return error.CompletionEvidenceMissing;
+            const consumed_sequence = switch (stored) {
+                .pending => return error.InvalidCompletionDisposition,
+                .consumed => |sequence| sequence,
+            };
+            if (consumed_sequence != operation.terminal_result_sequence.?) {
+                return error.InvalidCompletionDisposition;
+            }
+            if (resultAttemptId(result) == offered.attempt_id and
+                (result.result_ref != offered.result_ref or
+                    !binding.eql(binding.Result, result.result_digest, offered.result_digest)))
+            {
+                return error.ConflictingCompletionEvidence;
+            }
+            return;
+        }
+        const stored = (try self.storage.matchCompletion(offered)) orelse
+            return error.CompletionEvidenceMissing;
+        const terminal_sequence = try self.historicalAuditSequence(offered) orelse
+            return error.StaleCompletion;
+        switch (stored) {
+            .pending => return error.InvalidCompletionDisposition,
+            .consumed => |sequence| if (sequence != terminal_sequence)
+                return error.InvalidCompletionDisposition,
+        }
+    }
+
+    const ExpectedCompletion = struct {
+        ownership_epoch: u64,
+        result_ref: u64,
+        result_digest: binding.Result,
+    };
+
+    fn requirePendingCompletion(
+        self: *Session,
+        kind: binding.DescriptorKind,
+        operation: session_transition.OperationContext,
+        attempt_id: u64,
+        expected: ExpectedCompletion,
+    ) !completion_inbox.Envelope {
+        const envelope = (try self.pendingCompletionEnvelope(operation, attempt_id)) orelse
+            return error.MissingCompletionEvidence;
+        if (envelope.kind != kind or envelope.session_id != self.session_id or
+            envelope.agent_id != self.agent_id or envelope.agent_generation != 1 or
+            envelope.operation_id != operation.operation_id or
+            envelope.operation_generation != operation.generation or
+            envelope.attempt_id != attempt_id or
+            envelope.ownership_epoch != expected.ownership_epoch or
+            envelope.result_ref != expected.result_ref or
+            !binding.eql(binding.Result, envelope.result_digest, expected.result_digest))
+        {
+            return error.CompletionEvidenceMismatch;
+        }
+        return envelope;
+    }
+
+    /// Diagnostic count of the bounded, already validated pending Inbox.
+    pub fn pendingCompletionCount(self: *Session) !u32 {
         try self.ensureUsable();
         if (self.recovery != .ready) return error.SessionRecoveryIncomplete;
         var count: u32 = 0;
-        for (self.resident.inbox.entries) |maybe_envelope| {
-            if (maybe_envelope) |envelope| try apply(context, envelope);
-            if (maybe_envelope != null) count += 1;
+        for (self.resident.inbox.entries) |entry| {
+            if (entry != null) count += 1;
         }
         return count;
     }
@@ -1878,6 +3786,28 @@ fn initTestGitWorktree(dir: std.Io.Dir, io: std.Io) !void {
     try head.writePositionalAll(io, "ref: refs/heads/main\n", 0);
 }
 
+fn addTestGitPath(io: std.Io, workspace_path: []const u8, path: []const u8) !void {
+    var environment = std.process.Environ.Map.init(std.heap.page_allocator);
+    defer environment.deinit();
+    try environment.put("PATH", "/usr/bin:/bin");
+    try environment.put("LC_ALL", "C");
+    try environment.put("GIT_CONFIG_NOSYSTEM", "1");
+    try environment.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/usr/bin/git", "add", "--", path },
+        .cwd = .{ .path = workspace_path },
+        .environ_map = &environment,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| if (code != 0) return error.TestGitFailed,
+        else => return error.TestGitFailed,
+    }
+}
+
 test "Session creation rejects a non-UTF-8 model identity" {
     const io = std.testing.io;
     var layout = try TestLayout.init(io);
@@ -1945,13 +3875,9 @@ test "transient content disappears unless its reference commits" {
     var staged = try created.beginContent(90);
     try staged.append("staged before ledger admission");
     try staged.finish();
-    const Ignore = struct {
-        fn apply(_: *anyopaque, _: completion_inbox.Envelope) !void {}
-    };
-    var context: u8 = 0;
     try std.testing.expectEqual(
         @as(u32, 0),
-        try created.scanCompletionEvidence(&context, Ignore.apply),
+        try created.pendingCompletionCount(),
     );
 
     var interrupted = try created.beginContent(91);
@@ -2049,8 +3975,501 @@ fn testDescriptor(label: []const u8) binding.Descriptor {
     return .{ .model = binding.hash(binding.ModelDescriptor, label) };
 }
 
+fn admitTestModelSource(session: *Session, operation_id: u64) !void {
+    const descriptor_bytes = "test model descriptor";
+    const descriptor_ref = (@as(u64, 1) << 53) | operation_id;
+    try session.storeContent(descriptor_ref, descriptor_bytes);
+    _ = try session.commitFactsForTest(&.{session_transition.operationAdmitted(.{
+        .agent = .{
+            .agent_id = session.agent_id,
+            .agent_generation = 1,
+            .ownership_epoch = session.ownership_epoch,
+        },
+        .operation_id = operation_id,
+        .generation = 1,
+    }, null, descriptor_ref, .{
+        .model = binding.hash(binding.ModelDescriptor, descriptor_bytes),
+    })});
+}
+
 fn testResultDigest(label: []const u8) binding.Result {
     return binding.hash(binding.Result, label);
+}
+
+fn expectCanonicalContinuation(state: continuation.State, poison_seed: u64) !void {
+    var encoded: [continuation.encoded_size]u8 = undefined;
+    try continuation.encode(&encoded, state);
+    try std.testing.expectEqualDeep(state, try continuation.decode(&encoded));
+
+    var slot: core_image.ActivationSlot = undefined;
+    var poison = std.Random.DefaultPrng.init(poison_seed);
+    poison.random().bytes(std.mem.asBytes(&slot));
+    slotState(&slot).* = try continuation.decode(&encoded);
+    try std.testing.expectEqualDeep(state, slotState(&slot).*);
+    var restored: [continuation.encoded_size]u8 = undefined;
+    try continuation.encode(&restored, slotState(&slot).*);
+    try std.testing.expectEqualSlices(u8, &encoded, &restored);
+    core_image.scrub(&slot);
+    for (std.mem.asBytes(&slot)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
+
+fn expectContinuationUnchanged(state: continuation.State, before: [continuation.encoded_size]u8) !void {
+    var after: [continuation.encoded_size]u8 = undefined;
+    try continuation.encode(&after, state);
+    try std.testing.expectEqualSlices(u8, &before, &after);
+}
+
+const RejectedContinuationCommand = union(enum) {
+    start_task: u64,
+    model_attempt: struct { operation_id: u64, sequence: u64 },
+    model_completion: struct {
+        operation: continuation.OperationIdentity,
+        admission: model_protocol.Admission,
+        response_ref: u64,
+        digest: binding.Result,
+        consequence: continuation.CompletionConsequence,
+    },
+    tool_result: struct { call_entry_id: u64, result_entry_id: u64 },
+};
+
+fn expectRejectedContinuation(
+    expected: anyerror,
+    state: continuation.State,
+    command: RejectedContinuationCommand,
+) !void {
+    var before: [continuation.encoded_size]u8 = undefined;
+    try continuation.encode(&before, state);
+    switch (command) {
+        .start_task => |entry_id| try std.testing.expectError(
+            expected,
+            continuation.startTask(state, entry_id),
+        ),
+        .model_attempt => |value| try std.testing.expectError(
+            expected,
+            continuation.admitModelAttempt(state, value.operation_id, value.sequence),
+        ),
+        .model_completion => |value| try std.testing.expectError(
+            expected,
+            continuation.admitModelCompletion(
+                state,
+                value.operation,
+                value.admission,
+                value.response_ref,
+                value.digest,
+                value.consequence,
+            ),
+        ),
+        .tool_result => |value| try std.testing.expectError(
+            expected,
+            continuation.admitToolResult(state, value.call_entry_id, value.result_entry_id),
+        ),
+    }
+    try expectContinuationUnchanged(state, before);
+}
+
+const PropertyTerminal = enum { final_answer, failure, input_request };
+
+const PropertyTrace = struct {
+    tool_rounds: u8,
+    terminal: PropertyTerminal,
+};
+
+test "private continuation reducers cover deterministic accepted and rejected production traces" {
+    var prng = std.Random.DefaultPrng.init(0x50_ba_5e);
+    const random = prng.random();
+
+    var traces: [32]PropertyTrace = undefined;
+    for (&traces, 0..) |*trace, index| trace.* = .{
+        .tool_rounds = @intCast(index % 3),
+        .terminal = @enumFromInt((index / 3) % 3),
+    };
+    random.shuffle(PropertyTrace, &traces);
+
+    for (traces) |trace| {
+        const agent_id = switch (random.uintLessThan(u8, 4)) {
+            0 => 1,
+            1 => std.math.maxInt(u32),
+            2 => std.math.maxInt(u64),
+            else => random.intRangeAtMost(u64, 1, std.math.maxInt(u64)),
+        };
+        const agent_generation = switch (random.uintLessThan(u8, 3)) {
+            0 => 1,
+            1 => std.math.maxInt(u32),
+            else => random.intRangeAtMost(u32, 1, std.math.maxInt(u32)),
+        };
+        if (random.boolean()) {
+            try std.testing.expectError(
+                error.InvalidAgentIdentity,
+                continuation.initialize(.{ .agent_id = 0, .generation = agent_generation }),
+            );
+        } else {
+            try std.testing.expectError(
+                error.InvalidAgentGeneration,
+                continuation.initialize(.{ .agent_id = agent_id, .generation = 0 }),
+            );
+        }
+        const initialized = try continuation.initialize(.{
+            .agent_id = agent_id,
+            .generation = agent_generation,
+        });
+        try std.testing.expectEqualDeep(
+            initialized,
+            try continuation.initialize(.{
+                .agent_id = agent_id,
+                .generation = agent_generation,
+            }),
+        );
+        try expectCanonicalContinuation(initialized, random.int(u64));
+
+        var idle_rejections = [_]enum { zero_entry, premature_attempt }{
+            .zero_entry,
+            .premature_attempt,
+        };
+        random.shuffle(@TypeOf(idle_rejections[0]), &idle_rejections);
+        for (idle_rejections) |rejection| switch (rejection) {
+            .zero_entry => try expectRejectedContinuation(
+                error.InvalidConversationEntry,
+                initialized,
+                .{ .start_task = 0 },
+            ),
+            .premature_attempt => try expectRejectedContinuation(
+                error.IllegalModelTransition,
+                initialized,
+                .{ .model_attempt = .{ .operation_id = 1, .sequence = 1 } },
+            ),
+        };
+
+        const first_entry: u64 = if (trace.tool_rounds == 0 and random.boolean())
+            std.math.maxInt(u32) - 1
+        else
+            random.intRangeAtMost(u64, 1, 1_000);
+        const ready_a = try continuation.startTask(initialized, first_entry);
+        const ready_b = try continuation.startTask(initialized, first_entry);
+        try std.testing.expectEqualDeep(ready_a, ready_b);
+        try std.testing.expectEqual(agent_id, ready_a.agent_id);
+        try std.testing.expectEqual(first_entry, ready_a.active_leaf_id);
+        try expectCanonicalContinuation(ready_a, random.int(u64));
+
+        var ready_rejections = [_]enum { duplicate_start, premature_tool, zero_operation, zero_sequence }{
+            .duplicate_start,
+            .premature_tool,
+            .zero_operation,
+            .zero_sequence,
+        };
+        random.shuffle(@TypeOf(ready_rejections[0]), &ready_rejections);
+        for (ready_rejections) |rejection| switch (rejection) {
+            .duplicate_start => try expectRejectedContinuation(
+                error.IllegalTaskTransition,
+                ready_a,
+                .{ .start_task = first_entry + 1 },
+            ),
+            .premature_tool => try expectRejectedContinuation(
+                error.IllegalToolResultTransition,
+                ready_a,
+                .{ .tool_result = .{ .call_entry_id = first_entry + 1, .result_entry_id = first_entry + 2 } },
+            ),
+            .zero_operation => try expectRejectedContinuation(
+                error.InvalidOperationIdentity,
+                ready_a,
+                .{ .model_attempt = .{ .operation_id = 0, .sequence = 1 } },
+            ),
+            .zero_sequence => try expectRejectedContinuation(
+                error.InvalidOperationIdentity,
+                ready_a,
+                .{ .model_attempt = .{ .operation_id = 1, .sequence = 0 } },
+            ),
+        };
+
+        var range_exhausted = ready_a;
+        range_exhausted.active_leaf_id = std.math.maxInt(u32);
+        try expectRejectedContinuation(
+            error.IllegalModelTransition,
+            range_exhausted,
+            .{ .model_attempt = .{ .operation_id = 1, .sequence = 1 } },
+        );
+
+        var state = ready_a;
+        var next_operation = random.intRangeAtMost(u64, 1, std.math.maxInt(u64));
+        var next_sequence = random.intRangeAtMost(u64, 1, std.math.maxInt(u64));
+        var round: u8 = 0;
+        while (true) : (round += 1) {
+            const attempt_a = try continuation.admitModelAttempt(state, next_operation, next_sequence);
+            const attempt_b = try continuation.admitModelAttempt(state, next_operation, next_sequence);
+            try std.testing.expectEqualDeep(attempt_a, attempt_b);
+            try std.testing.expectEqual(agent_id, attempt_a.state.agent_id);
+            try expectCanonicalContinuation(attempt_a.state, random.int(u64));
+
+            var context_bytes: [continuation.encoded_size]u8 = undefined;
+            try continuation.encode(&context_bytes, attempt_a.state);
+            continuation.write(
+                u32,
+                &context_bytes,
+                112,
+                if (attempt_a.state.context.length == 1) 2 else attempt_a.state.context.length - 1,
+            );
+            continuation.rewriteChecksum(&context_bytes);
+            try std.testing.expectError(
+                error.InvalidModelContext,
+                continuation.decode(&context_bytes),
+            );
+            var overflow_bytes: [continuation.encoded_size]u8 = undefined;
+            try continuation.encode(&overflow_bytes, attempt_a.state);
+            continuation.write(u32, &overflow_bytes, 108, std.math.maxInt(u32));
+            continuation.write(u32, &overflow_bytes, 112, 1);
+            continuation.rewriteChecksum(&overflow_bytes);
+            try std.testing.expectError(
+                error.ContentWindowOverflow,
+                continuation.decode(&overflow_bytes),
+            );
+
+            var response_bytes: [model_protocol.max_response_size]u8 = undefined;
+            const response = if (round < trace.tool_rounds) blk: {
+                var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+                const command = switch (random.uintLessThan(u8, 3)) {
+                    0 => "true",
+                    1 => "printf property",
+                    else => "pwd",
+                };
+                const arguments = try model_contract.encodeJson(&arguments_buffer, .{
+                    .command = command,
+                    .timeout_ms = random.intRangeAtMost(u32, 1, 60_000),
+                });
+                break :blk try model_protocol.encodeTool(
+                    &response_bytes,
+                    model_contract.bash_key,
+                    arguments,
+                );
+            } else switch (trace.terminal) {
+                .final_answer => try model_protocol.encodeText(
+                    &response_bytes,
+                    switch (random.uintLessThan(u8, 3)) {
+                        0 => "done",
+                        1 => "property trace complete",
+                        else => "ok",
+                    },
+                ),
+                .failure => try model_protocol.encodeFailure(
+                    &response_bytes,
+                    switch (random.uintLessThan(u8, 4)) {
+                        0 => .provider_error,
+                        1 => .timeout,
+                        2 => .malformed,
+                        else => .transport_may_have_started,
+                    },
+                ),
+                .input_request => try model_protocol.encodeInputText(
+                    &response_bytes,
+                    "Which bounded option should continue?",
+                ),
+            };
+            const response_digest = binding.hash(binding.Result, response);
+            var response_scratch: model_protocol.ValidationScratch = undefined;
+            const admission = model_protocol.admit(&response_scratch, response).admission;
+            const response_ref = random.intRangeAtMost(u64, 1, std.math.maxInt(u64));
+            const operation = continuation.OperationIdentity{
+                .id = next_operation,
+                .generation = attempt_a.operation.generation,
+            };
+            const consequence: continuation.CompletionConsequence = if (round < trace.tool_rounds)
+                .tool_call
+            else switch (trace.terminal) {
+                .final_answer => .{ .final_answer = state.active_leaf_id + 1 },
+                .failure, .input_request => .terminal,
+            };
+
+            var completion_rejections = [_]enum {
+                active_attempt,
+                stale_operation,
+                stale_generation,
+                zero_result,
+                substituted_digest,
+                wrong_consequence,
+                premature_tool,
+            }{
+                .active_attempt,
+                .stale_operation,
+                .stale_generation,
+                .zero_result,
+                .substituted_digest,
+                .wrong_consequence,
+                .premature_tool,
+            };
+            random.shuffle(@TypeOf(completion_rejections[0]), &completion_rejections);
+            for (completion_rejections) |rejection| switch (rejection) {
+                .active_attempt => try expectRejectedContinuation(
+                    error.IllegalModelTransition,
+                    attempt_a.state,
+                    .{ .model_attempt = .{ .operation_id = next_operation, .sequence = next_sequence } },
+                ),
+                .stale_operation => try expectRejectedContinuation(
+                    error.StaleOperation,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = .{
+                            .id = if (next_operation == std.math.maxInt(u64)) next_operation - 1 else next_operation + 1,
+                            .generation = operation.generation,
+                        },
+                        .admission = admission,
+                        .response_ref = response_ref,
+                        .digest = response_digest,
+                        .consequence = consequence,
+                    } },
+                ),
+                .stale_generation => try expectRejectedContinuation(
+                    error.StaleOperation,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = .{
+                            .id = operation.id,
+                            .generation = if (operation.generation == std.math.maxInt(u32))
+                                operation.generation - 1
+                            else
+                                operation.generation + 1,
+                        },
+                        .admission = admission,
+                        .response_ref = response_ref,
+                        .digest = response_digest,
+                        .consequence = consequence,
+                    } },
+                ),
+                .zero_result => try expectRejectedContinuation(
+                    error.InvalidResultReference,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = operation,
+                        .admission = admission,
+                        .response_ref = 0,
+                        .digest = response_digest,
+                        .consequence = consequence,
+                    } },
+                ),
+                .substituted_digest => try expectRejectedContinuation(
+                    error.InvalidModelResponseEvidence,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = operation,
+                        .admission = admission,
+                        .response_ref = response_ref,
+                        .digest = binding.hash(binding.Result, "substituted property evidence"),
+                        .consequence = consequence,
+                    } },
+                ),
+                .wrong_consequence => try expectRejectedContinuation(
+                    error.InvalidCompletionConsequence,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = operation,
+                        .admission = admission,
+                        .response_ref = response_ref,
+                        .digest = response_digest,
+                        .consequence = switch (admission.parsed_value.disposition) {
+                            .final_answer, .failure, .input_request => .tool_call,
+                            .tool_call => .terminal,
+                        },
+                    } },
+                ),
+                .premature_tool => try expectRejectedContinuation(
+                    error.IllegalToolResultTransition,
+                    attempt_a.state,
+                    .{ .tool_result = .{
+                        .call_entry_id = state.active_leaf_id + 1,
+                        .result_entry_id = state.active_leaf_id + 2,
+                    } },
+                ),
+            };
+            if (admission.parsed_value.disposition == .final_answer) {
+                try expectRejectedContinuation(
+                    error.IllegalFinalAnswerTransition,
+                    attempt_a.state,
+                    .{ .model_completion = .{
+                        .operation = operation,
+                        .admission = admission,
+                        .response_ref = response_ref,
+                        .digest = response_digest,
+                        .consequence = .{ .final_answer = state.active_leaf_id + 2 },
+                    } },
+                );
+            }
+
+            const completed_a = try continuation.admitModelCompletion(
+                attempt_a.state,
+                operation,
+                admission,
+                response_ref,
+                response_digest,
+                consequence,
+            );
+            const completed_b = try continuation.admitModelCompletion(
+                attempt_a.state,
+                operation,
+                admission,
+                response_ref,
+                response_digest,
+                consequence,
+            );
+            try std.testing.expectEqualDeep(completed_a, completed_b);
+            try expectCanonicalContinuation(completed_a.state, random.int(u64));
+
+            if (round == trace.tool_rounds) break;
+
+            var overflow_state = completed_a.state;
+            overflow_state.active_leaf_id = std.math.maxInt(u64);
+            try expectRejectedContinuation(
+                error.InvalidConversationEntry,
+                overflow_state,
+                .{ .tool_result = .{
+                    .call_entry_id = std.math.maxInt(u64),
+                    .result_entry_id = std.math.maxInt(u64),
+                } },
+            );
+
+            const call_entry_id = state.active_leaf_id + 1;
+            const result_entry_id = call_entry_id + 1;
+            try expectRejectedContinuation(
+                error.IllegalToolResultTransition,
+                completed_a.state,
+                .{ .tool_result = .{
+                    .call_entry_id = call_entry_id,
+                    .result_entry_id = result_entry_id + 1,
+                } },
+            );
+            const resumed_a = try continuation.admitToolResult(
+                completed_a.state,
+                call_entry_id,
+                result_entry_id,
+            );
+            const resumed_b = try continuation.admitToolResult(
+                completed_a.state,
+                call_entry_id,
+                result_entry_id,
+            );
+            try std.testing.expectEqualDeep(resumed_a, resumed_b);
+            try expectCanonicalContinuation(resumed_a, random.int(u64));
+            try expectRejectedContinuation(
+                error.IllegalToolResultTransition,
+                resumed_a,
+                .{ .tool_result = .{
+                    .call_entry_id = call_entry_id,
+                    .result_entry_id = result_entry_id,
+                } },
+            );
+
+            var generation_exhausted = resumed_a;
+            generation_exhausted.operation_generation = std.math.maxInt(u32);
+            try expectRejectedContinuation(
+                error.OperationGenerationExhausted,
+                generation_exhausted,
+                .{ .model_attempt = .{
+                    .operation_id = if (next_operation == std.math.maxInt(u64)) 1 else next_operation + 1,
+                    .sequence = if (next_sequence == std.math.maxInt(u64)) 1 else next_sequence + 1,
+                } },
+            );
+
+            state = resumed_a;
+            next_operation = if (next_operation == std.math.maxInt(u64)) 1 else next_operation + 1;
+            next_sequence = if (next_sequence == std.math.maxInt(u64)) 1 else next_sequence + 1;
+        }
+    }
 }
 
 fn testReboundEnvelope(envelope: completion_inbox.Envelope) completion_inbox.Envelope {
@@ -2104,19 +4523,21 @@ fn testDurableEvidence(
     };
 }
 
-const TestCurrentOperation = struct {
-    operation_id: u64 = 0,
-    attempt_id: u64 = 0,
-
-    fn apply(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
-        const self: *TestCurrentOperation = @ptrCast(@alignCast(context));
-        switch (fact) {
-            .operation_submitted => |record| self.operation_id = record.operation.operation_id,
-            .attempt_admitted => |record| self.attempt_id = record.attempt_id,
-            else => {},
-        }
-    }
-};
+fn testAllowedAction(
+    operation: session_transition.OperationContext,
+    descriptor_ref: u64,
+    descriptor: binding.Descriptor,
+) session_transition.Fact {
+    return session_transition.authorization(.{
+        .operation = operation,
+        .permission_ref = switch (descriptor) {
+            .bash => 0,
+            .apply_patch => descriptor_ref,
+            .model => unreachable,
+        },
+        .allowed = true,
+    });
+}
 
 test "create and exact resume preserve distinct identities and one owner" {
     const io = std.testing.io;
@@ -2215,25 +4636,21 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
         kind: completion_inbox.EvidenceKind,
         operation_id: u64,
         descriptor: binding.Descriptor,
-        recovery_class: session_transition.RecoveryClass,
     }{
         .{
             .kind = .model,
             .operation_id = 100,
             .descriptor = .{ .model = binding.hash(binding.ModelDescriptor, "epoch-model") },
-            .recovery_class = .model,
         },
         .{
             .kind = .bash,
-            .operation_id = (@as(u64, 1) << 63) | 101,
+            .operation_id = 101,
             .descriptor = .{ .bash = binding.hash(binding.BashDescriptor, "epoch-bash") },
-            .recovery_class = .consequential,
         },
         .{
             .kind = .apply_patch,
-            .operation_id = (@as(u64, 1) << 63) | 102,
+            .operation_id = 102,
             .descriptor = .{ .apply_patch = binding.hash(binding.PatchIntent, "epoch-patch") },
-            .recovery_class = .consequential,
         },
     };
 
@@ -2261,7 +4678,8 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
         const first_result_ref = 220 + index;
         try created.storeContent(descriptor_ref, "epoch descriptor");
         try created.storeContent(first_result_ref, "first evidence");
-        const admitted = if (case.recovery_class == .model)
+        if (case.kind != .model) try admitTestModelSource(&created, 99);
+        const admitted = if (case.kind == .model)
             session_transition.modelAttemptAdmitted(
                 operation,
                 attempt_id,
@@ -2276,15 +4694,21 @@ test "Completion evidence must match the admitted Attempt ownership epoch for ev
                 descriptor_ref,
                 case.descriptor,
             );
-        _ = try created.commitSemantic(&.{
-            session_transition.operationSubmitted(
-                operation,
-                descriptor_ref,
-                case.descriptor,
-                .none,
-            ),
-            admitted,
-        }, null);
+        const operation_admitted = session_transition.operationAdmitted(
+            operation,
+            if (case.kind == .model) null else .{ .operation_id = 99, .generation = 1 },
+            descriptor_ref,
+            case.descriptor,
+        );
+        if (case.kind == .model) {
+            _ = try created.commitFactsForTest(&.{ operation_admitted, admitted });
+        } else {
+            _ = try created.commitFactsForTest(&.{
+                operation_admitted,
+                testAllowedAction(operation, descriptor_ref, case.descriptor),
+                admitted,
+            });
+        }
         const first = completion_inbox.bind(.{
             .kind = case.kind,
             .session_id = created.session_id,
@@ -2377,7 +4801,7 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
                 .agent_generation = 1,
                 .ownership_epoch = created.ownership_epoch,
             },
-            .operation_id = (@as(u64, 1) << 63) | 300 + index,
+            .operation_id = 300 + index,
             .generation = 1,
         };
         const descriptor_ref = 310 + index;
@@ -2385,20 +4809,22 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
         const result_ref = 330 + index;
         try created.storeContent(descriptor_ref, "descriptor");
         try created.storeContent(result_ref, "wrong-kind result");
-        _ = try created.commitSemantic(&.{
-            session_transition.operationSubmitted(
+        try admitTestModelSource(&created, 299);
+        _ = try created.commitFactsForTest(&.{
+            session_transition.operationAdmitted(
                 operation,
+                .{ .operation_id = 299, .generation = 1 },
                 descriptor_ref,
                 case.descriptor,
-                .none,
             ),
+            testAllowedAction(operation, descriptor_ref, case.descriptor),
             session_transition.consequentialAttemptAdmitted(
                 operation,
                 attempt_id,
                 descriptor_ref,
                 case.descriptor,
             ),
-        }, null);
+        });
         try created.publishCompletionEvidence(completion_inbox.bind(.{
             .kind = case.correct_kind,
             .session_id = created.session_id,
@@ -2412,13 +4838,13 @@ test "live Completion publication rejects Bash and Patch evidence kind swaps" {
             .result_digest = testResultDigest("wrong-kind result"),
         }));
         const correct_inbox_id = try layout.storage.completionHead(session_id);
-        _ = try created.commitSemantic(&.{session_transition.result(.{
+        _ = try created.commitFactsForTest(&.{session_transition.result(.{
             .operation = operation,
             .result_ref = result_ref,
             .result_digest = testResultDigest("wrong-kind result"),
             .class = .ordinary,
             .evidence = .{ .durable = case.result_evidence },
-        })}, null);
+        })});
         const wrong = completion_inbox.bind(.{
             .kind = case.wrong_kind,
             .session_id = created.session_id,
@@ -2482,7 +4908,7 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
                 .agent_generation = 1,
                 .ownership_epoch = created.ownership_epoch,
             },
-            .operation_id = (@as(u64, 1) << 63) | 400 + index,
+            .operation_id = 400 + index,
             .generation = 1,
         };
         const descriptor_ref = 410 + index;
@@ -2490,20 +4916,22 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
         const result_ref = 430 + index;
         try created.storeContent(descriptor_ref, "descriptor");
         try created.storeContent(result_ref, "lost wrong-kind result");
-        _ = try created.commitSemantic(&.{
-            session_transition.operationSubmitted(
+        try admitTestModelSource(&created, 399);
+        _ = try created.commitFactsForTest(&.{
+            session_transition.operationAdmitted(
                 operation,
+                .{ .operation_id = 399, .generation = 1 },
                 descriptor_ref,
                 case.descriptor,
-                .none,
             ),
+            testAllowedAction(operation, descriptor_ref, case.descriptor),
             session_transition.consequentialAttemptAdmitted(
                 operation,
                 attempt_id,
                 descriptor_ref,
                 case.descriptor,
             ),
-        }, null);
+        });
         try created.publishCompletionEvidence(completion_inbox.bind(.{
             .kind = case.correct_kind,
             .session_id = created.session_id,
@@ -2516,13 +4944,13 @@ test "lost Completion notification recovery rejects Bash and Patch evidence kind
             .result_ref = result_ref,
             .result_digest = testResultDigest("lost wrong-kind result"),
         }));
-        _ = try created.commitSemantic(&.{session_transition.result(.{
+        _ = try created.commitFactsForTest(&.{session_transition.result(.{
             .operation = operation,
             .result_ref = result_ref,
             .result_digest = testResultDigest("lost wrong-kind result"),
             .class = .ordinary,
             .evidence = .{ .durable = case.result_evidence },
-        })}, null);
+        })});
         const wrong = completion_inbox.bind(.{
             .kind = case.wrong_kind,
             .session_id = created.session_id,
@@ -2578,11 +5006,11 @@ test "late evidence audits against the first terminal Result sequence" {
     const descriptor = testDescriptor("terminal sequence descriptor");
     try created.storeContent(201, "descriptor");
     try created.storeContent(202, "winning result");
-    _ = try created.commitSemantic(&.{
-        session_transition.operationSubmitted(operation, 201, descriptor, .none),
+    _ = try created.commitFactsForTest(&.{
+        session_transition.operationAdmitted(operation, null, 201, descriptor),
         session_transition.modelAttemptAdmitted(operation, 211, 201, descriptor, 0),
         session_transition.modelAttemptAdmitted(operation, 212, 201, descriptor, 1),
-    }, null);
+    });
     try created.publishCompletionEvidence(completion_inbox.bind(.{
         .kind = .model,
         .session_id = created.session_id,
@@ -2596,18 +5024,18 @@ test "late evidence audits against the first terminal Result sequence" {
         .result_digest = testResultDigest("winning result"),
     }));
     try created.storeContent(203, "later outcome");
-    const terminal_sequence = try created.commitSemantic(&.{session_transition.result(.{
+    const terminal_sequence = try created.commitFactsForTest(&.{session_transition.result(.{
         .operation = operation,
         .result_ref = 202,
         .result_digest = testResultDigest("winning result"),
         .class = .ordinary,
         .evidence = .{ .durable = .{ .model = 212 } },
-    })}, null);
-    _ = try created.commitSemantic(&.{session_transition.outcome(
+    })});
+    _ = try created.commitFactsForTest(&.{session_transition.outcome(
         operation.agent,
         301,
         203,
-    )}, null);
+    )});
 
     try created.storeContent(204, "late result");
     try created.publishCompletionEvidence(completion_inbox.bind(.{
@@ -2632,24 +5060,15 @@ test "late evidence for a prior Operation audits through durable history" {
     defer layout.deinit(io);
     const cases = [_]struct {
         kind: binding.DescriptorKind,
-        recovery_class: session_transition.RecoveryClass,
         descriptor_a: binding.Descriptor,
         descriptor_b: binding.Descriptor,
         wrong_kind: binding.DescriptorKind,
     }{
         .{
             .kind = .model,
-            .recovery_class = .model,
             .descriptor_a = .{ .model = binding.hash(binding.ModelDescriptor, "prior-model-a") },
             .descriptor_b = .{ .model = binding.hash(binding.ModelDescriptor, "current-model-b") },
             .wrong_kind = .bash,
-        },
-        .{
-            .kind = .bash,
-            .recovery_class = .consequential,
-            .descriptor_a = .{ .bash = binding.hash(binding.BashDescriptor, "prior-bash-a") },
-            .descriptor_b = .{ .bash = binding.hash(binding.BashDescriptor, "current-bash-b") },
-            .wrong_kind = .apply_patch,
         },
     };
 
@@ -2663,7 +5082,7 @@ test "late evidence for a prior Operation audits through durable history" {
             testConfig(layout.workspacePath(), session_id),
         );
         errdefer created.close();
-        const operation_base: u64 = if (case.kind == .model) 500 else (@as(u64, 1) << 63) | 500;
+        const operation_base: u64 = 500;
         const operation_a: session_transition.OperationContext = .{
             .agent = .{
                 .agent_id = created.agent_id,
@@ -2692,13 +5111,14 @@ test "late evidence for a prior Operation audits through durable history" {
         const conflict_result_ref = descriptor_a_ref + 11;
         try created.storeContent(descriptor_a_ref, "prior descriptor");
         try created.storeContent(winner_result_ref, "winning result");
+        if (case.kind != .model) try admitTestModelSource(&created, 499);
 
         var admission: [6]session_transition.Fact = undefined;
-        admission[0] = session_transition.operationSubmitted(
+        admission[0] = session_transition.operationAdmitted(
             operation_a,
+            if (case.kind == .model) null else .{ .operation_id = 499, .generation = 1 },
             descriptor_a_ref,
             case.descriptor_a,
-            case.recovery_class,
         );
         const attempt_ids = [_]u64{
             winner_attempt,
@@ -2715,7 +5135,7 @@ test "late evidence for a prior Operation audits through durable history" {
             case.descriptor_a,
             @intCast(index),
         );
-        _ = try created.commitSemantic(&admission, null);
+        _ = try created.commitFactsForTest(&admission);
         try created.publishCompletionEvidence(completion_inbox.bind(.{
             .kind = case.kind,
             .session_id = created.session_id,
@@ -2729,20 +5149,20 @@ test "late evidence for a prior Operation audits through durable history" {
             .result_digest = testResultDigest("winning result"),
         }));
         const winner_inbox_id = try layout.storage.completionHead(session_id);
-        const terminal_sequence = try created.commitSemantic(&.{session_transition.result(.{
+        const terminal_sequence = try created.commitFactsForTest(&.{session_transition.result(.{
             .operation = operation_a,
             .result_ref = winner_result_ref,
             .result_digest = testResultDigest("winning result"),
             .class = .ordinary,
             .evidence = .{ .durable = testDurableEvidence(case.kind, winner_attempt) },
-        })}, null);
+        })});
         try created.storeContent(descriptor_b_ref, "current descriptor");
-        _ = try created.commitSemantic(&.{
-            session_transition.operationSubmitted(
+        _ = try created.commitFactsForTest(&.{
+            session_transition.operationAdmitted(
                 operation_b,
+                if (case.kind == .model) null else .{ .operation_id = 499, .generation = 1 },
                 descriptor_b_ref,
                 case.descriptor_b,
-                case.recovery_class,
             ),
             testEffectAttempt(
                 case.kind,
@@ -2752,7 +5172,7 @@ test "late evidence for a prior Operation audits through durable history" {
                 case.descriptor_b,
                 0,
             ),
-        }, null);
+        });
         const sequence_before_late = try layout.storage.sessionHead(session_id);
         const resident_before_late = created.resident;
 
@@ -2770,6 +5190,7 @@ test "late evidence for a prior Operation audits through durable history" {
         });
         try created.storeContent(live_result_ref, "live late result");
         try created.publishCompletionEvidence(live_late);
+        try created.validateCompletionOffer(live_late);
         const live_audit = try layout.storage.readCompletion(session_id, winner_inbox_id + 1);
         try std.testing.expectEqual(terminal_sequence, live_audit.consumed_by_sequence.?);
         try std.testing.expectEqualDeep(live_late, live_audit.envelope);
@@ -2807,12 +5228,16 @@ test "late evidence for a prior Operation audits through durable history" {
             error.ConflictingCompletionEvidence,
             created.publishCompletionEvidence(conflicting),
         );
+        try std.testing.expectError(
+            error.ConflictingCompletionEvidence,
+            created.validateCompletionOffer(conflicting),
+        );
         try std.testing.expectEqual(sequence_before_late, try layout.storage.sessionHead(session_id));
         try std.testing.expectEqualDeep(resident_before_late, created.resident);
-        var current: TestCurrentOperation = .{};
-        _ = try created.inspectSemantic(&current, TestCurrentOperation.apply);
-        try std.testing.expectEqual(operation_b.operation_id, current.operation_id);
-        try std.testing.expectEqual(current_attempt, current.attempt_id);
+        const current = try created.semanticView();
+        const current_operation = if (case.kind == .model) current.model else current.consequential;
+        try std.testing.expectEqual(operation_b.operation_id, current_operation.operation_id);
+        try std.testing.expectEqual(current_attempt, current_operation.latestAttempt().?.attempt_id);
 
         const recovered_late = completion_inbox.bind(.{
             .kind = case.kind,
@@ -2883,10 +5308,10 @@ test "late evidence for a prior Operation audits through durable history" {
             restored.publishCompletionEvidence(wrong_epoch),
         );
         try std.testing.expectEqual(@as(u64, 0), try layout.storage.completionHead(session_id));
-        var restored_current: TestCurrentOperation = .{};
-        _ = try restored.inspectSemantic(&restored_current, TestCurrentOperation.apply);
-        try std.testing.expectEqual(operation_b.operation_id, restored_current.operation_id);
-        try std.testing.expectEqual(current_attempt, restored_current.attempt_id);
+        const restored_current = try restored.semanticView();
+        const restored_operation = if (case.kind == .model) restored_current.model else restored_current.consequential;
+        try std.testing.expectEqual(operation_b.operation_id, restored_operation.operation_id);
+        try std.testing.expectEqual(current_attempt, restored_operation.latestAttempt().?.attempt_id);
     }
 }
 
@@ -2909,7 +5334,7 @@ test "fallible Inbox publication is prepared before durable Completion commit" {
         .generation = 1,
     };
     var semantic: session_transition.Transaction = .{ .sequence = 2, .fact_count = 3 };
-    semantic.facts[0] = session_transition.operationSubmitted(operation, 101, testDescriptor("102"), .model);
+    semantic.facts[0] = session_transition.operationAdmitted(operation, null, 101, testDescriptor("102"));
     semantic.facts[1] = session_transition.modelAttemptAdmitted(operation, 103, 101, testDescriptor("102"), 0);
     semantic.facts[2] = session_transition.modelAttemptAdmitted(operation, 108, 101, testDescriptor("102"), 1);
     try created.resident.semantic.apply(semantic);
@@ -2959,11 +5384,11 @@ test "recovery advances only within the configured Session Ledger quantum" {
     var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 80));
     for (0..5) |index| {
         try created.storeContent(index + 1, "ledger fixture");
-        _ = try created.commitSemantic(&.{session_transition.taskAdmitted(.{
+        _ = try created.commitFactsForTest(&.{session_transition.taskAdmitted(.{
             .agent_id = created.agent_id,
             .agent_generation = 1,
             .ownership_epoch = created.ownership_epoch,
-        }, index + 1, index + 1)}, null);
+        }, index + 1, index + 1)});
     }
     created.close();
 
@@ -2995,8 +5420,8 @@ test "semantic commits reject missing immutable content references before advanc
     var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 81));
     defer created.close();
 
-    try std.testing.expectError(error.MissingContentReference, created.commitSemantic(
-        &.{session_transition.operationSubmitted(.{
+    try std.testing.expectError(error.MissingContentReference, created.commitFactsForTest(
+        &.{session_transition.operationAdmitted(.{
             .agent = .{
                 .agent_id = created.agent_id,
                 .agent_generation = 1,
@@ -3004,11 +5429,773 @@ test "semantic commits reject missing immutable content references before advanc
             },
             .operation_id = 100,
             .generation = 1,
-        }, 999, testDescriptor("123"), .none)},
-        null,
+        }, null, 999, testDescriptor("123"))},
     ));
     try std.testing.expectEqual(@as(u64, 1), created.resident.semantic.last_sequence);
     try std.testing.expectEqual(@as(u64, 1), try layout.storage.sessionHead(created.session_id));
+}
+
+test "typed final completion compiles one exact atomic semantic transaction" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(
+        layout.sessions,
+        layout.scratch,
+        &layout.storage,
+        io,
+        testConfig(layout.workspacePath(), 811),
+    );
+    defer created.close();
+
+    var slot: core_image.ActivationSlot = undefined;
+    _ = try created.startTask(&slot);
+    try created.storeContent(900, "request");
+    const request_digest = binding.hash(binding.ModelDescriptor, "request");
+    const operation = try created.admitModelAttempt(&slot, .{
+        .operation_id = 100,
+        .sequence = 1,
+        .attempt_id = 101,
+        .request_ref = 900,
+        .request_digest = request_digest,
+    });
+
+    var response_bytes: [model_protocol.max_response_size]u8 = undefined;
+    const response = try model_protocol.encodeText(&response_bytes, "done");
+    try created.storeContent(901, response);
+    try created.storeContent(902, "done");
+    try created.storeContent(903, "substituted");
+    const response_digest = binding.hash(binding.Result, response);
+    const exact_evidence = completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = created.session_id,
+        .ownership_epoch = created.ownership_epoch,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = 101,
+        .result_ref = 901,
+        .result_digest = response_digest,
+    });
+    try created.publishCompletionEvidence(exact_evidence);
+    try created.validateCompletionOffer(exact_evidence);
+    var conflicting_offer = exact_evidence;
+    conflicting_offer.result_ref = 903;
+    conflicting_offer.result_digest = binding.hash(binding.Result, "substituted");
+    conflicting_offer = testReboundEnvelope(conflicting_offer);
+    try std.testing.expectError(
+        error.ConflictingCompletionEvidence,
+        created.validateCompletionOffer(conflicting_offer),
+    );
+    var validation: model_protocol.ValidationScratch = undefined;
+    var substituted = ModelCompletionMaterial{
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = 101,
+        .evidence_epoch = created.ownership_epoch,
+        .response_ref = 901,
+        .response_digest = response_digest,
+        .admission = model_protocol.admit(&validation, response).admission,
+        .consequence = .{ .final_answer = .{ .content_ref = 902 } },
+    };
+    substituted.evidence_epoch += 1;
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.admitModelCompletion(&slot, substituted),
+    );
+    substituted.evidence_epoch = created.ownership_epoch;
+    substituted.response_ref = 903;
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.admitModelCompletion(&slot, substituted),
+    );
+    substituted.response_ref = 901;
+    substituted.response_digest = binding.hash(binding.Result, "substituted");
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.admitModelCompletion(&slot, substituted),
+    );
+    substituted.response_digest = response_digest;
+    substituted.attempt_id = 102;
+    try std.testing.expectError(
+        error.InvalidAttemptHistory,
+        created.admitModelCompletion(&slot, substituted),
+    );
+    try std.testing.expectError(
+        error.ModelCompletionContentMismatch,
+        created.admitModelCompletion(&slot, .{
+            .operation_id = operation.id,
+            .operation_generation = operation.generation,
+            .attempt_id = 101,
+            .evidence_epoch = created.ownership_epoch,
+            .response_ref = 901,
+            .response_digest = response_digest,
+            .admission = model_protocol.admit(&validation, response).admission,
+            .consequence = .{ .final_answer = .{ .content_ref = 903 } },
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 3), try layout.storage.sessionHead(created.session_id));
+    try std.testing.expectEqual(@as(?ConversationEntry, null), created.pending_conversation);
+    _ = try created.admitModelCompletion(&slot, .{
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = 101,
+        .evidence_epoch = created.ownership_epoch,
+        .response_ref = 901,
+        .response_digest = response_digest,
+        .admission = model_protocol.admit(&validation, response).admission,
+        .consequence = .{ .final_answer = .{ .content_ref = 902 } },
+    });
+    try created.validateCompletionOffer(exact_evidence);
+    try std.testing.expectError(
+        error.ConflictingCompletionEvidence,
+        created.validateCompletionOffer(conflicting_offer),
+    );
+
+    var stored: host_store.StoredTransition = undefined;
+    try layout.storage.readTransition(created.session_id, 4, &stored);
+    const committed = stored.transaction;
+    try std.testing.expectEqual(@as(u8, 4), committed.fact_count);
+    try std.testing.expectEqual(session_transition.Kind.result, committed.facts[0].kind());
+    try std.testing.expectEqual(session_transition.Kind.result_applied, committed.facts[1].kind());
+    try std.testing.expectEqual(session_transition.Kind.conversation_advanced, committed.facts[2].kind());
+    try std.testing.expectEqual(session_transition.Kind.outcome, committed.facts[3].kind());
+    try std.testing.expect(committed.core != null);
+}
+
+test "pending Completion offer validation needs no durable history query" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(
+        layout.sessions,
+        layout.scratch,
+        &layout.storage,
+        io,
+        testConfig(layout.workspacePath(), 812),
+    );
+    defer created.close();
+
+    var slot: core_image.ActivationSlot = undefined;
+    _ = try created.startTask(&slot);
+    try created.storeContent(920, "request");
+    const operation = try created.admitModelAttempt(&slot, .{
+        .operation_id = 100,
+        .sequence = 1,
+        .attempt_id = 101,
+        .request_ref = 920,
+        .request_digest = binding.hash(binding.ModelDescriptor, "request"),
+    });
+    try created.storeContent(921, "response");
+    const exact = completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = created.session_id,
+        .ownership_epoch = created.ownership_epoch,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = 101,
+        .result_ref = 921,
+        .result_digest = binding.hash(binding.Result, "response"),
+    });
+    try created.publishCompletionEvidence(exact);
+
+    layout.storage.close();
+    try created.validateCompletionOffer(exact);
+}
+
+test "typed tool completion derives the Action and binds the exact Result" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var created = try Session.createExact(
+        layout.sessions,
+        layout.scratch,
+        &layout.storage,
+        io,
+        testConfig(layout.workspacePath(), 812),
+    );
+    defer created.close();
+
+    var slot: core_image.ActivationSlot = undefined;
+    _ = try created.startTask(&slot);
+    try created.storeContent(910, "request");
+    const request_digest = binding.hash(binding.ModelDescriptor, "request");
+    const model_operation = try created.admitModelAttempt(&slot, .{
+        .operation_id = 110,
+        .sequence = 1,
+        .attempt_id = 111,
+        .request_ref = 910,
+        .request_digest = request_digest,
+    });
+
+    var arguments_buffer: [model_contract.max_tool_arguments_envelope_size]u8 = undefined;
+    const arguments = try model_contract.encodeJson(&arguments_buffer, .{
+        .command = "true",
+        .timeout_ms = 1_000,
+    });
+    var response_buffer: [model_protocol.max_response_size]u8 = undefined;
+    const response = try model_protocol.encodeTool(
+        &response_buffer,
+        model_contract.bash_key,
+        arguments,
+    );
+    const response_digest = binding.hash(binding.Result, response);
+    try created.storeContent(911, response);
+    try created.publishCompletionEvidence(completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = created.session_id,
+        .ownership_epoch = created.ownership_epoch,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = model_operation.id,
+        .operation_generation = model_operation.generation,
+        .attempt_id = 111,
+        .result_ref = 911,
+        .result_digest = response_digest,
+    }));
+
+    var json_scratch: model_contract.StrictToolJsonScratch = .{};
+    const admitted_arguments = try model_contract.validateStrictToolJson(&json_scratch, arguments);
+    var call_buffer: [
+        conversation.call_header_size + model_contract.max_tool_key_size +
+            model_contract.max_tool_arguments_envelope_size
+    ]u8 = undefined;
+    const call = try conversation.encodeToolCall(&call_buffer, .{
+        .key = model_contract.bash_key,
+        .arguments = admitted_arguments,
+    });
+    try created.storeContent(912, call);
+
+    var descriptor_buffer: [bash_tool.max_descriptor_size]u8 = undefined;
+    const wrong_descriptor = try bash_tool.encodeDescriptor(&descriptor_buffer, .{
+        .workspace_path = created.workspacePath(),
+        .working_directory = created.workspacePath(),
+        .call = .{ .command = "false", .timeout_ms = 1_000 },
+    });
+    try created.storeContent(913, wrong_descriptor);
+    var validation: model_protocol.ValidationScratch = undefined;
+    try std.testing.expectError(
+        error.InvalidActionDescriptor,
+        created.admitModelCompletion(&slot, .{
+            .operation_id = model_operation.id,
+            .operation_generation = model_operation.generation,
+            .attempt_id = 111,
+            .evidence_epoch = created.ownership_epoch,
+            .response_ref = 911,
+            .response_digest = response_digest,
+            .admission = model_protocol.admit(&validation, response).admission,
+            .consequence = .{ .tool_call = .{
+                .content_ref = 912,
+                .action = .{ .bash = .{
+                    .descriptor_ref = 913,
+                    .call = try BashCallMaterial.init(.{
+                        .command = "true",
+                        .timeout_ms = 1_000,
+                    }),
+                } },
+            } },
+        }),
+    );
+    try std.testing.expectEqual(@as(?ConversationEntry, null), created.pending_conversation);
+
+    const descriptor = try bash_tool.encodeDescriptor(&descriptor_buffer, .{
+        .workspace_path = created.workspacePath(),
+        .working_directory = created.workspacePath(),
+        .call = .{ .command = "true", .timeout_ms = 1_000 },
+    });
+    try created.storeContent(914, descriptor);
+    const completion = try created.admitModelCompletion(&slot, .{
+        .operation_id = model_operation.id,
+        .operation_generation = model_operation.generation,
+        .attempt_id = 111,
+        .evidence_epoch = created.ownership_epoch,
+        .response_ref = 911,
+        .response_digest = response_digest,
+        .admission = model_protocol.admit(&validation, response).admission,
+        .consequence = .{ .tool_call = .{
+            .content_ref = 912,
+            .action = .{ .bash = .{
+                .descriptor_ref = 914,
+                .call = try BashCallMaterial.init(.{
+                    .command = "true",
+                    .timeout_ms = 1_000,
+                }),
+            } },
+        } },
+    });
+    const action_id = completion.action.?.operation_id;
+    const approval = try created.requireApproval(action_id, 1);
+    try std.testing.expectEqual(@as(u64, 914), approval.descriptor_ref);
+    const authorized = try created.resolveApproval(.{
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .descriptor_digest = approval.descriptor_digest,
+        .descriptor_ref = approval.descriptor_ref,
+        .allowed = true,
+    });
+    try std.testing.expect(authorized.disposition == .authorized);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        (try created.semanticView()).consequential.authorization.?.permission_ref,
+    );
+    const replayed_authorization = try created.resolveApproval(.{
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .descriptor_digest = approval.descriptor_digest,
+        .descriptor_ref = approval.descriptor_ref,
+        .allowed = true,
+    });
+    try std.testing.expect(replayed_authorization.disposition == .authorized);
+
+    try created.storeContent(915, "action result");
+    const result_digest = binding.hash(binding.Result, "action result");
+    const grant = try created.beginAuthorizedAction(.{
+        .operation_id = action_id,
+        .operation_generation = 1,
+    });
+    const attempted = (try created.currentAction()).?;
+    try std.testing.expectEqualDeep(
+        grant.observation(),
+        switch (attempted.disposition) {
+            .attempted => |value| value,
+            else => return error.ExpectedAttemptedAction,
+        },
+    );
+    try std.testing.expectError(
+        error.ActionNotAuthorized,
+        created.beginAuthorizedAction(.{
+            .operation_id = action_id,
+            .operation_generation = 1,
+        }),
+    );
+    try created.publishCompletionEvidence(completion_inbox.bind(.{
+        .kind = .bash,
+        .session_id = created.session_id,
+        .ownership_epoch = created.ownership_epoch,
+        .agent_id = created.agent_id,
+        .agent_generation = 1,
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .attempt_id = grant.attempt_id,
+        .result_ref = 915,
+        .result_digest = result_digest,
+    }));
+    var action_result = AttemptActionResult{
+        .result_ref = 915,
+        .result_digest = result_digest,
+        .class = .ordinary,
+        .ownership_epoch = created.ownership_epoch,
+    };
+    action_result.ownership_epoch += 1;
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.settleAttempt(grant.observation(), action_result),
+    );
+    action_result.ownership_epoch = created.ownership_epoch;
+    action_result.result_ref = 916;
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.settleAttempt(grant.observation(), action_result),
+    );
+    action_result.result_ref = 915;
+    action_result.result_digest = binding.hash(binding.Result, "substituted");
+    try std.testing.expectError(
+        error.CompletionEvidenceMismatch,
+        created.settleAttempt(grant.observation(), action_result),
+    );
+    action_result.result_digest = result_digest;
+    var substituted_attempt = grant.observation();
+    substituted_attempt.attempt_id +%= 1;
+    try std.testing.expectError(
+        error.InvalidAttemptHistory,
+        created.settleAttempt(substituted_attempt, action_result),
+    );
+    _ = try created.settleAttempt(grant.observation(), .{
+        .result_ref = 915,
+        .result_digest = result_digest,
+        .class = .ordinary,
+        .ownership_epoch = created.ownership_epoch,
+    });
+    var visible_buffer: [conversation.result_header_size + "success".len]u8 = undefined;
+    const visible = try conversation.encodeToolResult(&visible_buffer, .{
+        .parent_id = 2,
+        .is_error = false,
+        .content = "success",
+    });
+    try created.storeContent(916, visible);
+    try std.testing.expectError(
+        error.InvalidActionDescriptor,
+        created.admitToolResult(&slot, .{
+            .operation_id = model_operation.id,
+            .operation_generation = model_operation.generation,
+            .attempt_id = 111,
+            .result_ref = 911,
+            .result_digest = response_digest,
+            .visible_ref = 916,
+        }),
+    );
+    try std.testing.expectEqual(@as(?ConversationEntry, null), created.pending_conversation);
+    try std.testing.expectError(
+        error.ResultApplicationMismatch,
+        created.admitToolResult(&slot, .{
+            .operation_id = action_id,
+            .operation_generation = 1,
+            .attempt_id = grant.attempt_id,
+            .result_ref = 915,
+            .result_digest = binding.hash(binding.Result, "substituted"),
+            .visible_ref = 916,
+        }),
+    );
+    try std.testing.expectEqual(@as(?ConversationEntry, null), created.pending_conversation);
+    try created.admitToolResult(&slot, .{
+        .operation_id = action_id,
+        .operation_generation = 1,
+        .attempt_id = grant.attempt_id,
+        .result_ref = 915,
+        .result_digest = result_digest,
+        .visible_ref = 916,
+    });
+}
+
+const PatchApprovalCase = enum {
+    exact,
+    substituted_intent_digest,
+    substituted_patch,
+};
+
+fn runPatchApprovalCase(
+    layout: *TestLayout,
+    session_id: u64,
+    prepared: patch_tool.Intent,
+    patch: []const u8,
+    case: PatchApprovalCase,
+) !void {
+    var created = try Session.createExact(
+        layout.sessions,
+        layout.scratch,
+        &layout.storage,
+        std.testing.io,
+        testConfig(layout.workspacePath(), session_id),
+    );
+    defer created.close();
+
+    try admitTestModelSource(&created, 1);
+    const patch_ref = 700 + session_id;
+    const intent_ref = 800 + session_id;
+    var intent = prepared;
+    intent.patch_ref = patch_ref;
+    intent.patch_digest = patch_tool.patchDigest(patch);
+    const stored_patch = switch (case) {
+        .exact, .substituted_intent_digest => patch,
+        .substituted_patch => "different patch bytes",
+    };
+    intent.intent_digest = patch_tool.intentDigest(intent);
+    var intent_buffer: [patch_tool.max_intent_size]u8 = undefined;
+    const intent_bytes = try patch_tool.encodeIntent(&intent_buffer, intent);
+    try created.storeContent(patch_ref, stored_patch);
+    try created.storeContent(intent_ref, intent_bytes);
+
+    const descriptor_digest: binding.Descriptor = .{ .apply_patch = switch (case) {
+        .substituted_intent_digest => binding.hash(binding.PatchIntent, "substituted"),
+        .exact, .substituted_patch => intent.intent_digest,
+    } };
+    _ = try created.commitFactsForTest(&.{session_transition.operationAdmitted(
+        created.operationContext(2, 1),
+        .{ .operation_id = 1, .generation = 1 },
+        intent_ref,
+        descriptor_digest,
+    )});
+
+    switch (case) {
+        .exact => {
+            const request = try created.requireApproval(2, 1);
+            try std.testing.expectEqual(patch_ref, request.descriptor_ref);
+            try std.testing.expect(binding.descriptorEql(descriptor_digest, request.descriptor_digest));
+            const view = try created.semanticView();
+            try std.testing.expectEqual(intent_ref, view.consequential.approval_required.?.binding_ref);
+            try std.testing.expectEqual(patch_ref, view.consequential.approval_required.?.descriptor_ref);
+            const denied = try created.resolveApproval(.{
+                .operation_id = 2,
+                .operation_generation = 1,
+                .descriptor_digest = request.descriptor_digest,
+                .descriptor_ref = request.descriptor_ref,
+                .allowed = false,
+            });
+            try std.testing.expect(denied.disposition == .denied);
+            try std.testing.expectEqual(
+                intent_ref,
+                (try created.semanticView()).consequential.authorization.?.permission_ref,
+            );
+        },
+        .substituted_intent_digest, .substituted_patch => try std.testing.expectError(
+            error.InvalidApprovalBinding,
+            created.requireApproval(2, 1),
+        ),
+    }
+}
+
+test "Session derives patch approval from the exact admitted Intent and patch" {
+    const io = std.testing.io;
+    var layout = try TestLayout.init(io);
+    defer layout.deinit(io);
+    var file = try layout.workspace.createFile(io, "note.txt", .{});
+    try file.writeStreamingAll(io, "old\n");
+    file.close(io);
+    try addTestGitPath(io, layout.workspacePath(), "note.txt");
+    const patch =
+        "diff --git a/note.txt b/note.txt\n" ++
+        "index 3367afd..3e75765 100644\n" ++
+        "--- a/note.txt\n" ++
+        "+++ b/note.txt\n" ++
+        "@@ -1 +1 @@\n" ++
+        "-old\n" ++
+        "+new\n";
+    var canonical_workspace: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const canonical_length = try std.Io.Dir.cwd().realPathFile(
+        io,
+        layout.workspacePath(),
+        &canonical_workspace,
+    );
+    const prepared = try patch_tool.prepare(
+        io,
+        canonical_workspace[0..canonical_length],
+        patch,
+        .{ .patch_ref = 1 },
+    );
+    try runPatchApprovalCase(&layout, 820, prepared, patch, .substituted_intent_digest);
+    try runPatchApprovalCase(&layout, 830, prepared, patch, .substituted_patch);
+    try runPatchApprovalCase(&layout, 840, prepared, patch, .exact);
+}
+
+test "Semantic View validates Action source and opaque Operation identity" {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 7,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    const model: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 41,
+        .generation = 1,
+    };
+    var view: SemanticView = .{};
+    var model_admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
+    model_admission.facts[0] = session_transition.operationAdmitted(
+        model,
+        .{ .operation_id = model.operation_id, .generation = model.generation },
+        43,
+        testDescriptor("model"),
+    );
+    try std.testing.expectError(error.InvalidSourceOperation, view.apply(model_admission));
+    model_admission.facts[0] = session_transition.operationAdmitted(
+        model,
+        null,
+        43,
+        testDescriptor("model"),
+    );
+    try view.apply(model_admission);
+
+    const action: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 77,
+        .generation = 1,
+    };
+    const action_descriptor: binding.Descriptor = .{
+        .bash = binding.hash(binding.BashDescriptor, "bash descriptor"),
+    };
+    var action_admission: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    action_admission.facts[0] = session_transition.operationAdmitted(
+        action,
+        .{ .operation_id = model.operation_id, .generation = model.generation },
+        79,
+        action_descriptor,
+    );
+    var admitted = view;
+    try admitted.apply(action_admission);
+    try std.testing.expectEqual(binding.DescriptorKind.bash, admitted.consequential.kind().?);
+    try std.testing.expectEqual(
+        session_transition.OperationIdentity{ .operation_id = model.operation_id, .generation = model.generation },
+        admitted.consequential.descriptor.?.source_operation.?,
+    );
+    try std.testing.expectEqual(action.operation_id, admitted.consequential.operation_id);
+
+    action_admission.facts[0] = session_transition.operationAdmitted(
+        action,
+        .{ .operation_id = model.operation_id + 1, .generation = model.generation },
+        79,
+        action_descriptor,
+    );
+    try std.testing.expectError(error.InvalidSourceOperation, view.apply(action_admission));
+
+    action_admission.facts[0] = session_transition.operationAdmitted(
+        action,
+        .{ .operation_id = model.operation_id, .generation = model.generation + 1 },
+        79,
+        action_descriptor,
+    );
+    try std.testing.expectError(error.InvalidSourceOperation, view.apply(action_admission));
+
+    var reused_model = model_admission;
+    reused_model.sequence = 2;
+    reused_model.facts[0] = session_transition.operationAdmitted(
+        .{ .agent = agent, .operation_id = model.operation_id, .generation = model.generation + 1 },
+        null,
+        43,
+        testDescriptor("model"),
+    );
+    var replaced = view;
+    try std.testing.expectError(error.OperationIdentityCollision, replaced.apply(reused_model));
+
+    action_admission.sequence = 2;
+    action_admission.facts[0] = session_transition.operationAdmitted(
+        model,
+        .{ .operation_id = model.operation_id, .generation = model.generation },
+        79,
+        action_descriptor,
+    );
+    try std.testing.expectError(error.OperationIdentityCollision, view.apply(action_admission));
+}
+
+test "child facts cannot reclassify an admitted Action descriptor" {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 9,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    const model: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 51,
+        .generation = 2,
+    };
+    const action: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 52,
+        .generation = 1,
+    };
+    const bash_descriptor: binding.Descriptor = .{
+        .bash = binding.hash(binding.BashDescriptor, "bash"),
+    };
+    var view: SemanticView = .{};
+    var admitted: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    admitted.facts[0] = session_transition.operationAdmitted(model, null, 61, testDescriptor("model"));
+    admitted.facts[1] = session_transition.operationAdmitted(
+        action,
+        .{ .operation_id = model.operation_id, .generation = model.generation },
+        62,
+        bash_descriptor,
+    );
+    try view.apply(admitted);
+
+    var mismatched_attempt: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    mismatched_attempt.facts[0] = session_transition.consequentialAttemptAdmitted(
+        action,
+        63,
+        62,
+        .{ .apply_patch = binding.hash(binding.PatchIntent, "patch") },
+    );
+    try std.testing.expectError(error.AttemptDescriptorMismatch, view.apply(mismatched_attempt));
+
+    var mismatched_authorization: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    mismatched_authorization.facts[0] = session_transition.authorization(.{
+        .operation = action,
+        .permission_ref = 62,
+        .allowed = true,
+    });
+    try std.testing.expectError(
+        error.AuthorizationDescriptorMismatch,
+        view.apply(mismatched_authorization),
+    );
+}
+
+test "Action Attempt requires one allowed Authorization" {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 10,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    const model: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 71,
+        .generation = 1,
+    };
+    const action: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 72,
+        .generation = 1,
+    };
+    const descriptor: binding.Descriptor = .{
+        .bash = binding.hash(binding.BashDescriptor, "bash"),
+    };
+    var admitted: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    admitted.facts[0] = session_transition.operationAdmitted(
+        model,
+        null,
+        73,
+        testDescriptor("model"),
+    );
+    admitted.facts[1] = session_transition.operationAdmitted(
+        action,
+        .{ .operation_id = model.operation_id, .generation = model.generation },
+        74,
+        descriptor,
+    );
+
+    var attempt: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    attempt.facts[0] = session_transition.consequentialAttemptAdmitted(
+        action,
+        75,
+        74,
+        descriptor,
+    );
+    var proposed: SemanticView = .{};
+    try proposed.apply(admitted);
+    try std.testing.expectError(error.ActionNotAuthorized, proposed.apply(attempt));
+
+    var denied = SemanticView{};
+    try denied.apply(admitted);
+    var approval: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    approval.facts[0] = session_transition.approvalRequired(.{
+        .operation = action,
+        .binding_ref = 0,
+        .descriptor_ref = 74,
+    });
+    try denied.apply(approval);
+    var denial: session_transition.Transaction = .{ .sequence = 3, .fact_count = 1 };
+    denial.facts[0] = session_transition.authorization(.{
+        .operation = action,
+        .permission_ref = 0,
+        .allowed = false,
+    });
+    try denied.apply(denial);
+    attempt.sequence = 4;
+    try std.testing.expectError(error.ActionNotAuthorized, denied.apply(attempt));
+
+    var allowed = SemanticView{};
+    try allowed.apply(admitted);
+    var authorization: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    authorization.facts[0] = session_transition.authorization(.{
+        .operation = action,
+        .permission_ref = 0,
+        .allowed = true,
+    });
+    try allowed.apply(authorization);
+    attempt.sequence = 3;
+    try allowed.apply(attempt);
+    var second_attempt = attempt;
+    second_attempt.sequence = 4;
+    second_attempt.facts[0] = session_transition.consequentialAttemptAdmitted(
+        action,
+        76,
+        74,
+        descriptor,
+    );
+    try std.testing.expectError(
+        error.ActionAttemptAlreadyAdmitted,
+        allowed.apply(second_attempt),
+    );
 }
 
 test "irrelevant inbox records cannot displace admitted Attempt evidence" {
@@ -3022,9 +6209,9 @@ test "irrelevant inbox records cannot displace admitted Attempt evidence" {
         .operation_id = 10,
         .generation = 1,
     };
-    var semantic: SemanticIndex = .{};
+    var semantic: SemanticView = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    admission.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
+    admission.facts[0] = session_transition.operationAdmitted(operation, null, 11, testDescriptor("12"));
     admission.facts[1] = session_transition.modelAttemptAdmitted(
         operation,
         13,
@@ -3076,9 +6263,9 @@ test "late evidence for an earlier model Attempt survives a later admission" {
         .operation_id = 10,
         .generation = 1,
     };
-    var semantic: SemanticIndex = .{};
+    var semantic: SemanticView = .{};
     var first: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    first.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
+    first.facts[0] = session_transition.operationAdmitted(operation, null, 11, testDescriptor("12"));
     first.facts[1] = session_transition.modelAttemptAdmitted(operation, 13, 11, testDescriptor("12"), 0);
     try semantic.apply(first);
     var retry: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
@@ -3103,6 +6290,76 @@ test "late evidence for an earlier model Attempt survives a later admission" {
     try std.testing.expectEqualDeep(late, inbox.entries[0].?);
 }
 
+test "Model Attempt cannot follow a terminal Result" {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 1,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    const operation: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 10,
+        .generation = 1,
+    };
+    const descriptor = testDescriptor("model descriptor");
+    var semantic: SemanticView = .{};
+    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    admission.facts[0] = session_transition.operationAdmitted(operation, null, 11, descriptor);
+    admission.facts[1] = session_transition.modelAttemptAdmitted(operation, 13, 11, descriptor, 0);
+    try semantic.apply(admission);
+
+    var settlement: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    settlement.facts[0] = session_transition.result(.{
+        .operation = operation,
+        .result_ref = 14,
+        .result_digest = testResultDigest("model result"),
+        .class = .ordinary,
+        .evidence = .{ .durable = .{ .model = 13 } },
+    });
+    try semantic.apply(settlement);
+
+    var stale_retry: session_transition.Transaction = .{ .sequence = 3, .fact_count = 1 };
+    stale_retry.facts[0] = session_transition.modelAttemptAdmitted(operation, 15, 11, descriptor, 1);
+    try std.testing.expectError(error.ModelAlreadySettled, semantic.apply(stale_retry));
+}
+
+test "control cannot strand an open Operation" {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 1,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    const operation: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 10,
+        .generation = 1,
+    };
+    const descriptor = testDescriptor("model descriptor");
+    var semantic: SemanticView = .{};
+    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    admission.facts[0] = session_transition.operationAdmitted(operation, null, 11, descriptor);
+    admission.facts[1] = session_transition.modelAttemptAdmitted(operation, 13, 11, descriptor, 0);
+    try semantic.apply(admission);
+
+    var cancellation: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    cancellation.facts[0] = session_transition.cancellation(agent);
+    try std.testing.expectError(error.AcceptedOperationUnsettled, semantic.apply(cancellation));
+
+    var settlement: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    settlement.facts[0] = session_transition.result(.{
+        .operation = operation,
+        .result_ref = 14,
+        .result_digest = testResultDigest("model result"),
+        .class = .ordinary,
+        .evidence = .{ .durable = .{ .model = 13 } },
+    });
+    try semantic.apply(settlement);
+
+    cancellation.sequence = 3;
+    try semantic.apply(cancellation);
+    try std.testing.expect(semantic.control != null);
+}
+
 test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
     const agent: session_transition.AgentContext = .{
         .agent_id = 1,
@@ -3114,9 +6371,9 @@ test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
         .operation_id = 10,
         .generation = 1,
     };
-    var semantic: SemanticIndex = .{};
+    var semantic: SemanticView = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
-    admission.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
+    admission.facts[0] = session_transition.operationAdmitted(operation, null, 11, testDescriptor("12"));
     admission.facts[1] = session_transition.modelAttemptAdmitted(
         operation,
         13,
@@ -3158,16 +6415,15 @@ test "failed recovered frame leaves the published semantic index unchanged" {
         .operation_id = 10,
         .generation = 1,
     };
-    var index: SemanticIndex = .{};
+    var index: SemanticView = .{};
     var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
-    admission.facts[0] = session_transition.operationSubmitted(operation, 11, testDescriptor("12"), .none);
+    admission.facts[0] = session_transition.operationAdmitted(operation, null, 11, testDescriptor("12"));
     try index.apply(admission);
 
     var invalid: session_transition.Transaction = .{ .sequence = 2, .fact_count = 2 };
     invalid.facts[0] = session_transition.authorization(.{
         .operation = operation,
         .permission_ref = 11,
-        .descriptor_digest = testDescriptor("12"),
         .allowed = true,
     });
     invalid.facts[1] = session_transition.modelAttemptAdmitted(
@@ -3182,7 +6438,7 @@ test "failed recovered frame leaves the published semantic index unchanged" {
         0,
     );
     var prepared = index;
-    try std.testing.expectError(error.InvalidOperationHistory, prepared.apply(invalid));
+    try std.testing.expectError(error.InvalidAuthorizationDescriptor, prepared.apply(invalid));
     try std.testing.expectEqual(@as(u64, 1), index.last_sequence);
     try std.testing.expect(index.model.authorization == null);
 }
@@ -3194,13 +6450,13 @@ test "conversation advances only after its Ledger fact commits" {
     var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 20));
     defer created.close();
     try created.storeContent(900, "The test is fixed.");
-    const assistant = try created.appendConversation(.assistant_text, 900, null);
+    const assistant = try created.appendConversationForTest(.assistant_text, 900, null);
 
     try std.testing.expectEqual(@as(u64, 2), assistant.entry_id);
     try std.testing.expectEqual(@as(u64, 1), assistant.parent_id);
     try std.testing.expectEqual(@as(u64, 1), created.activeLeafId());
     try std.testing.expectError(error.InvalidEntrySequence, created.readEntry(2));
-    _ = try created.commitSemantic(&.{session_transition.conversationAdvanced(.{
+    _ = try created.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
         .agent = .{
             .agent_id = created.agent_id,
             .agent_generation = 1,
@@ -3210,7 +6466,7 @@ test "conversation advances only after its Ledger fact commits" {
         .parent_id = assistant.parent_id,
         .kind = assistant.kind,
         .content_ref = assistant.content_ref,
-    })}, null);
+    })});
     try std.testing.expectEqual(@as(u64, 2), created.activeLeafId());
     const stored = try created.readEntry(2);
     try std.testing.expectEqualDeep(assistant, stored);
@@ -3229,11 +6485,11 @@ test "prepared Conversation content is validated at commit" {
     var created = try Session.createExact(layout.sessions, layout.scratch, &layout.storage, io, testConfig(layout.workspacePath(), 35));
     defer created.close();
     try created.storeContent(900, &.{ 0xff, 0xfe });
-    const assistant = try created.appendConversation(.assistant_text, 900, null);
+    const assistant = try created.appendConversationForTest(.assistant_text, 900, null);
 
     try std.testing.expectError(
         error.InvalidConversationContent,
-        created.commitSemantic(&.{session_transition.conversationAdvanced(.{
+        created.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
             .agent = .{
                 .agent_id = created.agent_id,
                 .agent_generation = 1,
@@ -3243,7 +6499,7 @@ test "prepared Conversation content is validated at commit" {
             .parent_id = assistant.parent_id,
             .kind = assistant.kind,
             .content_ref = assistant.content_ref,
-        })}, null),
+        })}),
     );
     try std.testing.expectEqual(@as(u64, 1), created.activeLeafId());
 }
@@ -3368,7 +6624,7 @@ test "resume leaves an uncommitted conversation record invisible" {
     try created.storeContent(901, "uncommitted assistant text");
     try std.testing.expectError(
         error.InjectedCrash,
-        created.appendConversation(.assistant_text, 901, .{
+        created.appendConversationForTest(.assistant_text, 901, .{
             .context = &marker,
             .reached = AppendCrash.reached,
         }),
@@ -3521,7 +6777,7 @@ test "pending content cap accepts the three-value patch admission closure" {
         error.PendingContentCapacityExceeded,
         created.beginContent(100 + max_pending_content),
     );
-    _ = try created.commitSemantic(&facts, null);
+    _ = try created.commitFactsForTest(&facts);
     try std.testing.expectEqual(@as(u64, 0), try created.transientScratchOccupancy());
     for (transientScratchState(created.scratch).pending) |pending| try std.testing.expect(pending == null);
 }
@@ -3555,7 +6811,7 @@ test "committing one pending maximum value reuses only its scratch slot" {
     try std.testing.expectError(error.PendingContentCapacityExceeded, created.beginContent(203));
 
     const first = [_]session_transition.Fact{session_transition.outcome(agent, 1, 200)};
-    _ = try created.commitSemantic(&first, null);
+    _ = try created.commitFactsForTest(&first);
 
     var writer = try created.beginContent(203);
     try std.testing.expectEqual(@as(u64, 0), writer.start_offset);
@@ -3571,7 +6827,7 @@ test "committing one pending maximum value reuses only its scratch slot" {
         session_transition.outcome(agent, 3, 202),
         session_transition.outcome(agent, 4, 203),
     };
-    _ = try created.commitSemantic(&rest, null);
+    _ = try created.commitFactsForTest(&rest);
     try std.testing.expectEqual(@as(u64, 0), try created.transientScratchOccupancy());
 }
 

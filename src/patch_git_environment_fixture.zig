@@ -14,8 +14,6 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len != 2) return error.InvalidArguments;
     _ = patch_tool.prepare(init.io, args[1], patch, .{
-        .operation_id = 1,
-        .operation_generation = 1,
         .patch_ref = 1,
     }) catch |err| {
         if (err == error.NotTrackedRepositoryFile) return;

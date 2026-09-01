@@ -75,7 +75,7 @@ const conversation_schema =
     \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
     \\    entry_id BLOB NOT NULL CHECK (length(entry_id) = 8),
     \\    parent_id BLOB CHECK (parent_id IS NULL OR length(parent_id) = 8),
-    \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 1 AND 5),
+    \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 1 AND 4),
     \\    content_ref BLOB NOT NULL CHECK (length(content_ref) = 8),
     \\    committed_by_sequence INTEGER NOT NULL,
     \\    PRIMARY KEY (session_id, entry_id),
@@ -214,16 +214,20 @@ pub const StoredCompletion = struct {
     consumed_by_sequence: ?u64,
 };
 
+pub const CompletionMatch = union(enum) { pending, consumed: u64 };
+
 /// The exact admitted Attempt and the first terminal Result transaction for
 /// its Operation. This is reconstructed from the authoritative bounded ledger
 /// rather than retained as an unbounded resident history.
 pub const CompletedAttempt = struct {
+    operation: session_transition.OperationRecord,
     attempt: session_transition.AttemptRecord,
     terminal_result_sequence: u64,
 };
 
 pub const CompletedAttemptScan = struct {
     next_sequence: u64 = 1,
+    operation: ?session_transition.OperationRecord = null,
     attempt: ?session_transition.AttemptRecord = null,
     terminal_before_attempt: bool = false,
     completed: ?CompletedAttempt = null,
@@ -817,6 +821,56 @@ pub const StorageOwner = struct {
         return @intCast(inbox_id);
     }
 
+    /// Matches one complete evidence envelope against the immutable Inbox row
+    /// selected by its semantic identity. The caller receives no row fields to
+    /// reinterpret or use as a second source of authority.
+    pub fn matchCompletion(
+        self: *StorageOwner,
+        envelope: completion_inbox.Envelope,
+    ) !?CompletionMatch {
+        self.request_lock.lockUncancelable(self.io);
+        defer self.request_lock.unlock(self.io);
+        try self.ensureOpen();
+        try completion_inbox.validate(envelope);
+
+        const statement = try self.prepare(find_completion_sql);
+        defer finalize(statement);
+        var identities: [4][8]u8 = undefined;
+        try bindIdentity(statement, 1, envelope.session_id, &identities[0]);
+        try bindIdentity(statement, 2, envelope.agent_id, &identities[1]);
+        try bindU64(statement, 3, envelope.agent_generation);
+        try bindIdentity(statement, 4, envelope.operation_id, &identities[2]);
+        try bindU64(statement, 5, envelope.operation_generation);
+        try bindIdentity(statement, 6, envelope.attempt_id, &identities[3]);
+        try bindU64(statement, 7, @intFromEnum(envelope.kind));
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return null;
+        if (result != c.SQLITE_ROW) return mapSqliteError(result);
+        const inbox_id = c.sqlite3_column_int64(statement, 0);
+        if (inbox_id <= 0) return error.CorruptHostStore;
+        const result_ref = try readIdentityColumn(statement, 1);
+        const result_digest = try readBindingColumn(binding.Result, statement, 2);
+        const completion_digest = try readBindingColumn(binding.Completion, statement, 3);
+        const ownership_epoch = try readIdentityColumn(statement, 4);
+        if (ownership_epoch != envelope.ownership_epoch or result_ref != envelope.result_ref or
+            !binding.eql(binding.Result, result_digest, envelope.result_digest) or
+            !binding.eql(binding.Completion, completion_digest, envelope.completion_digest))
+        {
+            return error.ConflictingCompletionEvidence;
+        }
+        const disposition: CompletionMatch = switch (c.sqlite3_column_type(statement, 5)) {
+            c.SQLITE_NULL => .pending,
+            c.SQLITE_INTEGER => consumed: {
+                const sequence = c.sqlite3_column_int64(statement, 5);
+                if (sequence <= 0) return error.CorruptHostStore;
+                break :consumed .{ .consumed = @intCast(sequence) };
+            },
+            else => return error.CorruptHostStore,
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return disposition;
+    }
+
     pub fn readCompletion(
         self: *StorageOwner,
         session_id: u64,
@@ -1022,8 +1076,7 @@ pub const StorageOwner = struct {
                 ),
             },
             .task_admitted,
-            .operation_submitted,
-            .operation_accepted,
+            .operation_admitted,
             .attempt_admitted,
             .authorization,
             .outcome,
@@ -1193,7 +1246,7 @@ pub const StorageOwner = struct {
         else
             try readIdentityColumn(statement, 0);
         const kind = c.sqlite3_column_int64(statement, 1);
-        if (kind < 1 or kind > 5) return error.CorruptHostStore;
+        if (kind < 1 or kind > 4) return error.CorruptHostStore;
         if (c.sqlite3_column_type(statement, 3) != c.SQLITE_INTEGER) return error.CorruptHostStore;
         const committed_value = c.sqlite3_column_int64(statement, 3);
         if (committed_value <= 0) return error.CorruptHostStore;
@@ -1742,8 +1795,7 @@ fn validateCommitIdentity(
 
 fn isAdmission(transaction: session_transition.Transaction) bool {
     for (transaction.factSlice()) |fact| switch (fact) {
-        .task_admitted, .operation_submitted, .attempt_admitted => return true,
-        .operation_accepted,
+        .task_admitted, .operation_admitted, .attempt_admitted => return true,
         .authorization,
         .result,
         .conversation_advanced,
@@ -1982,6 +2034,17 @@ fn applyCompletedAttemptFacts(
     attempt_id: u64,
 ) !void {
     for (transaction.factSlice()) |fact| switch (fact) {
+        .operation_admitted => |operation| {
+            if (operation.operation.operation_id != operation_id or
+                operation.operation.generation != operation_generation)
+            {
+                continue;
+            }
+            if (scan.terminal_before_attempt) return error.InvalidHistoricalCompletionOrdering;
+            if (scan.operation) |existing| {
+                if (!std.meta.eql(existing, operation)) return error.ConflictingLedgerFacts;
+            } else scan.operation = operation;
+        },
         .attempt_admitted => |attempt| {
             if (attempt.operation.operation_id != operation_id or
                 attempt.operation.generation != operation_generation or
@@ -1990,6 +2053,13 @@ fn applyCompletedAttemptFacts(
                 continue;
             }
             if (scan.terminal_before_attempt) return error.InvalidHistoricalCompletionOrdering;
+            const operation = scan.operation orelse return error.InvalidHistoricalCompletionOrdering;
+            if (!std.meta.eql(operation.operation, attempt.operation) or
+                operation.descriptor_ref != attempt.descriptor_ref or
+                !binding.descriptorEql(operation.descriptor_digest, attempt.descriptor_digest))
+            {
+                return error.InvalidHistoricalCompletionRelationship;
+            }
             if (scan.attempt) |existing| {
                 if (!std.meta.eql(existing, attempt)) return error.ConflictingLedgerFacts;
             } else scan.attempt = attempt;
@@ -2002,10 +2072,15 @@ fn applyCompletedAttemptFacts(
                 continue;
             }
             if (scan.attempt) |attempt| {
+                const operation = scan.operation orelse {
+                    scan.terminal_before_attempt = true;
+                    continue;
+                };
                 if (!std.meta.eql(attempt.operation, result.operation)) {
                     return error.InvalidHistoricalCompletionRelationship;
                 }
                 scan.completed = .{
+                    .operation = operation,
                     .attempt = attempt,
                     .terminal_result_sequence = transaction.sequence,
                 };
@@ -2199,7 +2274,7 @@ test "installed schema retains the exact V1 keys constraints and completion inde
     try owner.expectSchemaSql("index", "completion_inbox_by_session", completion_index_schema);
 }
 
-test "Host Store round trips context checkpoints and rejects hostile kinds" {
+test "Host Store round trips Conversation kinds and rejects hostile kinds" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [256]u8 = undefined;
@@ -2217,33 +2292,33 @@ test "Host Store round trips context checkpoints and rejects hostile kinds" {
         .task_id = 83,
     };
     try owner.createSession(identity);
-    var checkpoint: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    checkpoint.facts[0] = session_transition.conversationAdvanced(.{
+    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    transaction.facts[0] = session_transition.conversationAdvanced(.{
         .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
         .entry_id = 2,
         .parent_id = 1,
-        .kind = .context_checkpoint,
+        .kind = .assistant_text,
         .content_ref = 85,
     });
     _ = try owner.commitPrepared(
         .{ .session_id = identity.session_id, .epoch = 1 },
-        .{ .transaction = checkpoint, .content = &.{directContent(testContent(85))} },
+        .{ .transaction = transaction, .content = &.{directContent(testContent(85))} },
     );
 
     const stored = try owner.readConversationEntry(identity.session_id, 2);
-    try std.testing.expectEqual(@intFromEnum(session_transition.ConversationKind.context_checkpoint), stored.kind);
+    try std.testing.expectEqual(@intFromEnum(session_transition.ConversationKind.assistant_text), stored.kind);
     try std.testing.expectEqual(@as(u64, 1), stored.parent_id);
     try std.testing.expectEqual(@as(u64, 85), stored.content_ref);
 
     try owner.execute("PRAGMA ignore_check_constraints=ON");
-    try owner.execute("UPDATE conversation_entry SET kind=6");
+    try owner.execute("UPDATE conversation_entry SET kind=5");
     try std.testing.expectError(
         error.CorruptHostStore,
         owner.readConversationEntry(identity.session_id, 2),
     );
 }
 
-test "pre-release Host Store rejects the preceding schema epoch without migration" {
+test "pre-release Host Store rejects the preceding schema epoch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [256]u8 = undefined;
@@ -3000,9 +3075,6 @@ test "three first imports succeed while existing references do not consume the c
     }
 
     var existing: session_transition.Transaction = .{ .sequence = 7, .fact_count = 3 };
-    const descriptor_digest: binding.Descriptor = .{
-        .bash = binding.hash(binding.BashDescriptor, "existing-reference-test"),
-    };
     for (0..2) |index| existing.facts[index] = session_transition.approvalRequired(.{
         .operation = .{
             .agent = agent,
@@ -3011,7 +3083,6 @@ test "three first imports succeed while existing references do not consume the c
         },
         .binding_ref = existing_references[index * 2],
         .descriptor_ref = existing_references[index * 2 + 1],
-        .descriptor_digest = descriptor_digest,
     });
     existing.facts[2] = session_transition.outcome(agent, 10, existing_references[4]);
     _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
@@ -3023,7 +3094,6 @@ test "three first imports succeed while existing references do not consume the c
         .operation = .{ .agent = agent, .operation_id = 900, .generation = 1 },
         .binding_ref = 900,
         .descriptor_ref = 901,
-        .descriptor_digest = descriptor_digest,
     });
     exact.facts[1] = session_transition.outcome(agent, 11, 902);
     var exact_imports: [max_first_content_imports]TransactionContentImport = undefined;
@@ -3040,7 +3110,6 @@ test "three first imports succeed while existing references do not consume the c
         .operation = .{ .agent = agent, .operation_id = 910 + index, .generation = 1 },
         .binding_ref = 910 + index * 2,
         .descriptor_ref = 911 + index * 2,
-        .descriptor_digest = descriptor_digest,
     });
     var imports: [max_first_content_imports + 1]TransactionContentImport = undefined;
     for (&imports, 0..) |*content, index| content.* = directContent(testContent(910 + index));
@@ -3074,8 +3143,6 @@ test "patch content requires its first-referenced Intent in the same commit" {
     var target_path: patch_tool.TargetPath = .{ .length = 8, .bytes = @splat(0) };
     @memcpy(target_path.bytes[0..8], "file.txt");
     var intent: patch_tool.Intent = .{
-        .operation_id = operation.operation_id,
-        .operation_generation = operation.generation,
         .patch_ref = 626,
         .workspace_path = "/tmp/workspace",
         .target_path = target_path,
@@ -3097,11 +3164,11 @@ test "patch content requires its first-referenced Intent in the same commit" {
     };
     const descriptor: binding.Descriptor = .{ .apply_patch = intent.intent_digest };
     var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    transaction.facts[0] = session_transition.operationSubmitted(
+    transaction.facts[0] = session_transition.operationAdmitted(
         operation,
+        .{ .operation_id = 624, .generation = 1 },
         625,
         descriptor,
-        .consequential,
     );
     const patch: TransactionContentImport = .{ .patch_intent = .{
         .intent = intent_content,

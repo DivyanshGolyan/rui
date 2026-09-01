@@ -1,36 +1,29 @@
 const std = @import("std");
 const binding = @import("binding.zig");
-const core_state = @import("core_state.zig");
 
-pub const payload_version: u16 = 7;
+pub const payload_version: u16 = 9;
 pub const max_facts: usize = 8;
 pub const max_transitions: u32 = 32_768;
 pub const max_operation_attempts: usize = 8;
+pub const continuation_size: usize = 176;
 
 const header_size: usize = 4;
 const fact_size: usize = 104;
-pub const max_payload_size: usize = header_size + max_facts * fact_size + core_state.encoded_size;
+pub const max_payload_size: usize = header_size + max_facts * fact_size + continuation_size;
 const result_digest_kind: u8 = 4;
 
 pub const Kind = enum(u8) {
     task_admitted = 1,
-    operation_submitted = 2,
-    operation_accepted = 3,
-    attempt_admitted = 4,
-    authorization = 5,
-    result = 6,
-    conversation_advanced = 7,
-    outcome = 8,
-    cancellation = 9,
-    shutdown = 10,
-    result_applied = 11,
-    approval_required = 12,
-};
-
-pub const RecoveryClass = enum(u8) {
-    none = 0,
-    model = 1,
-    consequential = 2,
+    operation_admitted = 2,
+    attempt_admitted = 3,
+    authorization = 4,
+    result = 5,
+    conversation_advanced = 6,
+    outcome = 7,
+    cancellation = 8,
+    shutdown = 9,
+    result_applied = 10,
+    approval_required = 11,
 };
 
 pub const EvidenceKind = binding.DescriptorKind;
@@ -45,7 +38,6 @@ pub const ConversationKind = enum(u8) {
     assistant_text = 2,
     tool_call = 3,
     tool_result = 4,
-    context_checkpoint = 5,
 };
 
 pub const DurableResultEvidence = union(binding.DescriptorKind) {
@@ -55,7 +47,7 @@ pub const DurableResultEvidence = union(binding.DescriptorKind) {
 };
 
 pub const ResultEvidence = union(enum) {
-    immediate: RecoveryClass,
+    immediate: void,
     durable: DurableResultEvidence,
 };
 
@@ -71,11 +63,19 @@ pub const OperationContext = struct {
     generation: u32 = 0,
 };
 
+pub const OperationIdentity = struct {
+    operation_id: u64,
+    generation: u32,
+};
+
 pub const OperationRecord = struct {
     operation: OperationContext,
+    /// The model Operation that proposed this Action. Null for model
+    /// Operations. This relationship is explicit; Operation identity carries
+    /// no kind or parent encoding.
+    source_operation: ?OperationIdentity,
     descriptor_ref: u64,
     descriptor_digest: binding.Descriptor,
-    recovery_class: RecoveryClass,
 };
 
 pub const TaskRecord = struct {
@@ -89,7 +89,6 @@ pub const AttemptRecord = struct {
     attempt_id: u64,
     descriptor_ref: u64,
     descriptor_digest: binding.Descriptor,
-    recovery_class: RecoveryClass,
     /// Number of earlier model Attempts that may also have reached the
     /// provider. Non-model Attempts are always zero.
     possible_duplicate_attempts: u8,
@@ -98,7 +97,6 @@ pub const AttemptRecord = struct {
 pub const AuthorizationRecord = struct {
     operation: OperationContext,
     permission_ref: u64,
-    descriptor_digest: binding.Descriptor,
     allowed: bool,
 };
 
@@ -129,14 +127,12 @@ pub const ResultAppliedRecord = struct {
     attempt_id: u64,
     result_ref: u64,
     result_digest: binding.Result,
-    recovery_class: RecoveryClass,
 };
 
 pub const ApprovalRequiredRecord = struct {
     operation: OperationContext,
     binding_ref: u64,
     descriptor_ref: u64,
-    descriptor_digest: binding.Descriptor,
 };
 
 pub const ContentReferenceRole = enum {
@@ -169,8 +165,7 @@ pub const ContentReferences = struct {
 
 pub const Fact = union(Kind) {
     task_admitted: TaskRecord,
-    operation_submitted: OperationRecord,
-    operation_accepted: OperationRecord,
+    operation_admitted: OperationRecord,
     attempt_admitted: AttemptRecord,
     authorization: AuthorizationRecord,
     result: ResultRecord,
@@ -188,7 +183,7 @@ pub const Fact = union(Kind) {
     pub fn agent(self: Fact) AgentContext {
         return switch (self) {
             .task_admitted => |value| value.agent,
-            .operation_submitted, .operation_accepted => |value| value.operation.agent,
+            .operation_admitted => |value| value.operation.agent,
             .attempt_admitted => |value| value.operation.agent,
             .authorization => |value| value.operation.agent,
             .result => |value| value.operation.agent,
@@ -207,7 +202,7 @@ pub const Fact = union(Kind) {
         var references: ContentReferences = .{};
         switch (self) {
             .task_admitted => |value| references.append(value.content_ref, .direct),
-            .operation_submitted, .operation_accepted => |value| references.append(
+            .operation_admitted => |value| references.append(
                 value.descriptor_ref,
                 if (std.meta.activeTag(value.descriptor_digest) == .apply_patch)
                     .patch_intent
@@ -232,7 +227,7 @@ pub const Fact = union(Kind) {
 
 const RawFact = struct {
     kind: Kind,
-    recovery_class: RecoveryClass,
+    evidence_kind: u8,
     flags: u8,
     agent_id: u64,
     operation_id: u64,
@@ -245,38 +240,23 @@ const RawFact = struct {
     ownership_epoch: u64,
     generation: u32,
     agent_generation: u32,
-    evidence_kind: u8,
 };
 
 pub fn taskAdmitted(agent: AgentContext, task_id: u64, content_ref: u64) Fact {
     return .{ .task_admitted = .{ .agent = agent, .task_id = task_id, .content_ref = content_ref } };
 }
 
-pub fn operationSubmitted(
+pub fn operationAdmitted(
     operation: OperationContext,
+    source_operation: ?OperationIdentity,
     descriptor_ref: u64,
     descriptor_digest: binding.Descriptor,
-    recovery_class: RecoveryClass,
 ) Fact {
-    return .{ .operation_submitted = .{
+    return .{ .operation_admitted = .{
         .operation = operation,
+        .source_operation = source_operation,
         .descriptor_ref = descriptor_ref,
         .descriptor_digest = descriptor_digest,
-        .recovery_class = recovery_class,
-    } };
-}
-
-pub fn operationAccepted(
-    operation: OperationContext,
-    descriptor_ref: u64,
-    descriptor_digest: binding.Descriptor,
-    recovery_class: RecoveryClass,
-) Fact {
-    return .{ .operation_accepted = .{
-        .operation = operation,
-        .descriptor_ref = descriptor_ref,
-        .descriptor_digest = descriptor_digest,
-        .recovery_class = recovery_class,
     } };
 }
 
@@ -291,7 +271,6 @@ pub fn consequentialAttemptAdmitted(
         .attempt_id = attempt_id,
         .descriptor_ref = descriptor_ref,
         .descriptor_digest = descriptor_digest,
-        .recovery_class = .consequential,
         .possible_duplicate_attempts = 0,
     } };
 }
@@ -308,7 +287,6 @@ pub fn modelAttemptAdmitted(
         .attempt_id = attempt_id,
         .descriptor_ref = descriptor_ref,
         .descriptor_digest = descriptor_digest,
-        .recovery_class = .model,
         .possible_duplicate_attempts = possible_duplicate_attempts,
     } };
 }
@@ -349,7 +327,7 @@ pub const Transaction = struct {
     sequence: u64,
     facts: [max_facts]Fact = undefined,
     fact_count: u8,
-    core: ?[core_state.encoded_size]u8 = null,
+    core: ?[continuation_size]u8 = null,
 
     pub fn factSlice(self: *const Transaction) []const Fact {
         return self.facts[0..self.fact_count];
@@ -387,7 +365,7 @@ pub fn encode(
     {
         return error.InvalidTransaction;
     }
-    const core_length: usize = if (transaction.core != null) core_state.encoded_size else 0;
+    const core_length: usize = if (transaction.core != null) continuation_size else 0;
     const encoded_length = header_size + transaction.fact_count * fact_size + core_length;
     @memset(out, 0);
     write(u16, out, 0, payload_version);
@@ -399,8 +377,7 @@ pub fn encode(
         cursor += fact_size;
     }
     if (transaction.core) |state| {
-        _ = try core_state.decode(&state);
-        @memcpy(out[cursor..][0..core_state.encoded_size], &state);
+        @memcpy(out[cursor..][0..continuation_size], &state);
     }
     return out[0..encoded_length];
 }
@@ -417,7 +394,7 @@ pub fn decode(sequence: u64, payload: []const u8) !Transaction {
         else => return error.InvalidCorePresence,
     };
     const expected_length = header_size + @as(usize, fact_count) * fact_size +
-        (if (core_present) core_state.encoded_size else 0);
+        (if (core_present) @as(usize, continuation_size) else 0);
     if (payload.len != expected_length) return error.InvalidTransitionPayloadLength;
     var transaction: Transaction = .{
         .sequence = sequence,
@@ -429,9 +406,8 @@ pub fn decode(sequence: u64, payload: []const u8) !Transaction {
         cursor += fact_size;
     }
     if (core_present) {
-        var state: [core_state.encoded_size]u8 = undefined;
-        @memcpy(&state, payload[cursor..][0..core_state.encoded_size]);
-        _ = try core_state.decode(&state);
+        var state: [continuation_size]u8 = undefined;
+        @memcpy(&state, payload[cursor..][0..continuation_size]);
         transaction.core = state;
     }
     return transaction;
@@ -445,8 +421,7 @@ fn validateRawFact(fact: RawFact) !void {
         return error.NoncanonicalAbsentBinding;
     }
     const operation_kind = switch (fact.kind) {
-        .operation_submitted,
-        .operation_accepted,
+        .operation_admitted,
         .attempt_admitted,
         .authorization,
         .result,
@@ -462,14 +437,14 @@ fn validateRawFact(fact: RawFact) !void {
         .task_admitted, .outcome => {
             if (fact.subject == 0 or fact.reference == 0 or fact.operation_id != 0 or
                 fact.attempt_id != 0 or fact.auxiliary != 0 or fact.digest_kind != 0 or
-                fact.recovery_class != .none or fact.flags != 0 or fact.evidence_kind != 0)
+                fact.flags != 0 or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .conversation_advanced => {
             if (fact.subject == 0 or fact.reference == 0 or fact.operation_id != 0 or
-                fact.attempt_id != 0 or fact.recovery_class != .none or fact.evidence_kind != 0 or
+                fact.attempt_id != 0 or fact.evidence_kind != 0 or
                 std.enums.fromInt(ConversationKind, fact.flags) == null or
                 fact.digest_kind != 0 or (fact.subject == 1) != (fact.auxiliary == 0))
             {
@@ -479,15 +454,20 @@ fn validateRawFact(fact: RawFact) !void {
         .cancellation, .shutdown => {
             if (fact.operation_id != 0 or fact.attempt_id != 0 or fact.subject != 0 or
                 fact.reference != 0 or fact.auxiliary != 0 or fact.digest_kind != 0 or fact.flags != 0 or
-                fact.recovery_class != .none or fact.evidence_kind != 0)
+                fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
-        .operation_submitted, .operation_accepted => {
-            if (fact.attempt_id != 0 or fact.subject != 0 or fact.reference == 0 or
-                fact.auxiliary != 0 or !validDescriptorKind(fact.digest_kind) or
-                fact.flags != 0 or fact.evidence_kind != 0)
+        .operation_admitted => {
+            if (fact.attempt_id != 0 or fact.reference == 0 or
+                !validDescriptorKind(fact.digest_kind) or fact.flags != 0 or
+                fact.evidence_kind != 0 or
+                (fact.digest_kind == @intFromEnum(binding.DescriptorKind.model) and
+                    (fact.subject != 0 or fact.auxiliary != 0)) or
+                (fact.digest_kind != @intFromEnum(binding.DescriptorKind.model) and
+                    (fact.subject == 0 or fact.auxiliary == 0 or
+                        fact.auxiliary > std.math.maxInt(u32))))
             {
                 return error.InvalidKindSpecificPayload;
             }
@@ -495,26 +475,25 @@ fn validateRawFact(fact: RawFact) !void {
         .attempt_admitted => {
             if (fact.attempt_id == 0 or fact.subject != 0 or fact.auxiliary != 0 or
                 !validDescriptorKind(fact.digest_kind) or
-                (fact.recovery_class != .model and fact.flags != 0) or
+                (fact.digest_kind != @intFromEnum(binding.DescriptorKind.model) and fact.flags != 0) or
                 fact.flags >= max_operation_attempts or
-                !descriptorMatchesRecovery(fact.digest_kind, fact.recovery_class) or
                 fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .approval_required => {
-            if (fact.reference == 0 or fact.auxiliary != 0 or
-                !validDescriptorKind(fact.digest_kind) or fact.flags != 0 or
-                fact.attempt_id != 0 or fact.recovery_class != .none or fact.evidence_kind != 0)
+            if (fact.reference == 0 or fact.auxiliary != 0 or fact.digest_kind != 0 or
+                fact.flags != 0 or
+                fact.attempt_id != 0 or fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
             }
         },
         .authorization => {
-            if (fact.auxiliary != 0 or !validDescriptorKind(fact.digest_kind) or
+            if (fact.auxiliary != 0 or fact.digest_kind != 0 or
                 (fact.flags != 1 and fact.flags != 2) or
-                fact.attempt_id != 0 or fact.subject != 0 or fact.recovery_class != .none or
+                fact.attempt_id != 0 or fact.subject != 0 or
                 fact.evidence_kind != 0)
             {
                 return error.InvalidKindSpecificPayload;
@@ -523,15 +502,9 @@ fn validateRawFact(fact: RawFact) !void {
         .result => {
             if (fact.reference == 0 or fact.auxiliary != 0 or
                 fact.digest_kind != result_digest_kind or fact.subject != 0 or
-                fact.recovery_class == .none or
                 fact.flags > @intFromEnum(ResultClass.indeterminate) or
-                (fact.attempt_id == 0) != (fact.evidence_kind == 0) or
-                fact.evidence_kind > @intFromEnum(EvidenceKind.apply_patch) or
-                (fact.attempt_id != 0 and
-                    ((fact.evidence_kind == @intFromEnum(EvidenceKind.model) and
-                        fact.recovery_class != .model) or
-                        (fact.evidence_kind != @intFromEnum(EvidenceKind.model) and
-                            fact.recovery_class != .consequential))))
+                (fact.attempt_id == 0 and fact.evidence_kind != 0) or
+                (fact.attempt_id != 0 and !validDescriptorKind(fact.evidence_kind)))
             {
                 return error.InvalidKindSpecificPayload;
             }
@@ -552,7 +525,7 @@ fn encodeFact(out: []u8, fact: Fact) !void {
     try validateRawFact(raw);
     @memset(out, 0);
     out[0] = @intFromEnum(raw.kind);
-    out[1] = @intFromEnum(raw.recovery_class);
+    out[1] = raw.evidence_kind;
     out[2] = raw.digest_kind;
     out[3] = raw.flags;
     write(u32, out, 4, raw.generation);
@@ -564,18 +537,16 @@ fn encodeFact(out: []u8, fact: Fact) !void {
     write(u64, out, 44, raw.reference);
     write(u64, out, 52, raw.auxiliary);
     write(u64, out, 60, raw.ownership_epoch);
-    out[68] = raw.evidence_kind;
     @memcpy(out[72..104], &raw.digest);
 }
 
 fn decodeFact(input: []const u8) !Fact {
-    if (input[69] != 0 or input[70] != 0 or input[71] != 0) {
+    if (input[68] != 0 or input[69] != 0 or input[70] != 0 or input[71] != 0) {
         return error.NonzeroReservedByte;
     }
     const raw: RawFact = .{
         .kind = std.enums.fromInt(Kind, input[0]) orelse return error.UnsupportedTransitionKind,
-        .recovery_class = std.enums.fromInt(RecoveryClass, input[1]) orelse
-            return error.InvalidRecoveryClass,
+        .evidence_kind = input[1],
         .flags = input[3],
         .generation = read(u32, input, 4),
         .agent_generation = read(u32, input, 8),
@@ -588,7 +559,6 @@ fn decodeFact(input: []const u8) !Fact {
         .digest = input[72..104].*,
         .digest_kind = input[2],
         .ownership_epoch = read(u64, input, 60),
-        .evidence_kind = input[68],
     };
     try validateRawFact(raw);
     return factFromRaw(raw);
@@ -601,24 +571,25 @@ fn rawFact(fact: Fact) RawFact {
             raw.subject = value.task_id;
             raw.reference = value.content_ref;
         },
-        .operation_submitted, .operation_accepted => |value| {
+        .operation_admitted => |value| {
             setOperation(&raw, value.operation);
+            if (value.source_operation) |source| {
+                raw.subject = source.operation_id;
+                raw.auxiliary = source.generation;
+            }
             raw.reference = value.descriptor_ref;
             setDescriptor(&raw, value.descriptor_digest);
-            raw.recovery_class = value.recovery_class;
         },
         .attempt_admitted => |value| {
             setOperation(&raw, value.operation);
             raw.attempt_id = value.attempt_id;
             raw.reference = value.descriptor_ref;
             setDescriptor(&raw, value.descriptor_digest);
-            raw.recovery_class = value.recovery_class;
             raw.flags = value.possible_duplicate_attempts;
         },
         .authorization => |value| {
             setOperation(&raw, value.operation);
             raw.reference = value.permission_ref;
-            setDescriptor(&raw, value.descriptor_digest);
             raw.flags = if (value.allowed) 1 else 2;
         },
         .result => |value| {
@@ -628,15 +599,11 @@ fn rawFact(fact: Fact) RawFact {
             raw.digest_kind = result_digest_kind;
             raw.flags = @intFromEnum(value.class);
             switch (value.evidence) {
-                .immediate => |recovery_class| raw.recovery_class = recovery_class,
+                .immediate => {},
                 .durable => |evidence| {
                     raw.evidence_kind = @intFromEnum(std.meta.activeTag(evidence));
                     raw.attempt_id = switch (evidence) {
                         inline else => |attempt_id| attempt_id,
-                    };
-                    raw.recovery_class = switch (evidence) {
-                        .model => .model,
-                        .bash, .apply_patch => .consequential,
                     };
                 },
             }
@@ -658,13 +625,11 @@ fn rawFact(fact: Fact) RawFact {
             raw.reference = value.result_ref;
             raw.digest = value.result_digest.bytes;
             raw.digest_kind = result_digest_kind;
-            raw.recovery_class = value.recovery_class;
         },
         .approval_required => |value| {
             setOperation(&raw, value.operation);
             raw.subject = value.binding_ref;
             raw.reference = value.descriptor_ref;
-            setDescriptor(&raw, value.descriptor_digest);
         },
     }
     return raw;
@@ -673,7 +638,7 @@ fn rawFact(fact: Fact) RawFact {
 fn emptyRaw(kind: Kind, agent: AgentContext) RawFact {
     return .{
         .kind = kind,
-        .recovery_class = .none,
+        .evidence_kind = 0,
         .flags = 0,
         .agent_id = agent.agent_id,
         .operation_id = 0,
@@ -686,7 +651,6 @@ fn emptyRaw(kind: Kind, agent: AgentContext) RawFact {
         .ownership_epoch = agent.ownership_epoch,
         .generation = 0,
         .agent_generation = agent.agent_generation,
-        .evidence_kind = 0,
     };
 }
 
@@ -702,14 +666,6 @@ fn setDescriptor(raw: *RawFact, descriptor: binding.Descriptor) void {
 
 fn validDescriptorKind(value: u8) bool {
     return std.enums.fromInt(binding.DescriptorKind, value) != null;
-}
-
-fn descriptorMatchesRecovery(value: u8, recovery: RecoveryClass) bool {
-    const kind = std.enums.fromInt(binding.DescriptorKind, value) orelse return false;
-    return switch (kind) {
-        .model => recovery == .model,
-        .bash, .apply_patch => recovery == .consequential,
-    };
 }
 
 fn descriptorFromRaw(raw: RawFact) binding.Descriptor {
@@ -736,30 +692,25 @@ fn factFromRaw(raw: RawFact) Fact {
             .task_id = raw.subject,
             .content_ref = raw.reference,
         } },
-        .operation_submitted => .{ .operation_submitted = .{
+        .operation_admitted => .{ .operation_admitted = .{
             .operation = operation,
+            .source_operation = if (raw.subject == 0) null else .{
+                .operation_id = raw.subject,
+                .generation = @intCast(raw.auxiliary),
+            },
             .descriptor_ref = raw.reference,
             .descriptor_digest = descriptorFromRaw(raw),
-            .recovery_class = raw.recovery_class,
-        } },
-        .operation_accepted => .{ .operation_accepted = .{
-            .operation = operation,
-            .descriptor_ref = raw.reference,
-            .descriptor_digest = descriptorFromRaw(raw),
-            .recovery_class = raw.recovery_class,
         } },
         .attempt_admitted => .{ .attempt_admitted = .{
             .operation = operation,
             .attempt_id = raw.attempt_id,
             .descriptor_ref = raw.reference,
             .descriptor_digest = descriptorFromRaw(raw),
-            .recovery_class = raw.recovery_class,
             .possible_duplicate_attempts = raw.flags,
         } },
         .authorization => .{ .authorization = .{
             .operation = operation,
             .permission_ref = raw.reference,
-            .descriptor_digest = descriptorFromRaw(raw),
             .allowed = raw.flags == 1,
         } },
         .result => .{ .result = .{
@@ -768,7 +719,7 @@ fn factFromRaw(raw: RawFact) Fact {
             .result_digest = .{ .bytes = raw.digest },
             .class = std.enums.fromInt(ResultClass, raw.flags) orelse unreachable,
             .evidence = if (raw.attempt_id == 0)
-                .{ .immediate = raw.recovery_class }
+                .{ .immediate = {} }
             else
                 .{ .durable = switch (std.enums.fromInt(EvidenceKind, raw.evidence_kind) orelse unreachable) {
                     .model => .{ .model = raw.attempt_id },
@@ -795,13 +746,11 @@ fn factFromRaw(raw: RawFact) Fact {
             .attempt_id = raw.attempt_id,
             .result_ref = raw.reference,
             .result_digest = .{ .bytes = raw.digest },
-            .recovery_class = raw.recovery_class,
         } },
         .approval_required => .{ .approval_required = .{
             .operation = operation,
             .binding_ref = raw.subject,
             .descriptor_ref = raw.reference,
-            .descriptor_digest = descriptorFromRaw(raw),
         } },
     };
 }

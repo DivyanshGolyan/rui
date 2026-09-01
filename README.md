@@ -30,10 +30,10 @@ decision, and no evaluator remains resident while a Workflow Run is Blocked on J
 Workflow code cannot observe physical Job completion order: V1 supports deterministic joins through
 `Promise.all` and `Promise.allSettled` and does not expose `Promise.race` or `Promise.any`.
 The target architecture separates compact, canonically encoded Core State from stage-specific
-transient scratch. Core State's encoded size is derived from `core_state.encoded_size` and is
-currently 176 bytes; authoritative semantic transactions
-carry it directly. Activation decodes that state into one Host-owned slot containing only decoded
-Core State; V1 removes sizing filler and enforces a 32 KiB ceiling. Suspension scrubs the
+transient scratch. Session privately owns the reducer, state type, and 176-byte canonical encoding;
+authoritative semantic transactions carry that encoding directly. Activation restores it into one
+opaque 184-byte Host-owned slot containing only decoded Core State; V1 removes sizing filler and
+enforces a 32 KiB ceiling. Suspension scrubs the
 complete slot. A fixed Host-owned pool returns closed capacity instead of allocating a
 fallback slot. Native invariant traces check typed outcomes, rejection-state preservation, semantic
 observations, and canonical restoration rather than slot bytes. Complete Session semantics reconstruct
@@ -138,8 +138,10 @@ uses `/usr/bin/git` with a replacement environment containing only fixed locale,
 configuration authority. Git parses and applies the patch in a bounded private copy; `patch_tool`
 writes that exact postimage through the authorized file handle and observes preimage, postimage,
 divergence, or invalid target.
-Lifecycle commits Authorization and Attempt before `patch_tool` may mutate, publishes adapter evidence through
-the Completion Inbox, and advances Conversation from the first terminal Result.
+Session commits Authorization and mints an ephemeral execution grant only after the Action's first and only
+Attempt is durable. Lifecycle needs that grant before `patch_tool` may mutate; recovery receives only a
+non-executable Attempt observation. Adapter evidence then flows through the Completion Inbox, and Conversation
+advances from the first terminal Result.
 
 Fresh-process fixtures terminate after Attempt admission and after Git mutation. Recovery applies an
 authorized exact preimage, accepts the exact expected postimage without reapplication, and publishes
@@ -155,8 +157,8 @@ Authority covers its exact operation and descriptor binding. An explicit invocat
 mode admits validated calls without creating the request; it does not bypass validation, durability,
 patch preimage checks, or recovery rules.
 
-The model-facing representation is provider-neutral. Conversation records generic text,
-tool-call, tool-result, and checkpoint entries; each model Operation binds an immutable bounded Tool
+The model-facing representation is provider-neutral. Conversation records generic user text,
+assistant text, tool-call, and tool-result entries; each model Operation binds an immutable bounded Tool
 Catalog and stable Tool Keys. Provider adapters translate that house request at the edge. Harness then
 maps only the two admitted V1 keys to concrete Actions, so adding a provider does not change durable
 history and generic model data does not become a runtime plugin or permission system.
@@ -192,7 +194,8 @@ Inbox, Conversation, checkpoint, manifest, and blob-tree files are no longer pro
 Implemented authoritative descriptor, Patch Intent, preimage, expected-postimage,
 Result, Completion, immutable-content, and ledger-record bytes use distinct versioned SHA-256 binding
 types. Bash persists one descriptor binding its canonical Workspace and working directory, fixed
-environment authority, timeout, command, Operation identity, and generation. Patch preparation uses Git
+environment authority, timeout, and command. Session separately allocates the opaque Action Operation
+identity and records complete model parentage. Patch preparation uses Git
 in a private scratch copy to prepare the expected postimage without mutating the Workspace, then stores
 the complete Intent before Authorization. Preparation, observation, and application each admit at most
 1 MiB of target or expected-postimage work. The all-zero value remains valid data; absence is represented
@@ -212,15 +215,14 @@ rewritable storage tamper-proof.
 ```sh
 zig build check
 zig build test -Doptimize=ReleaseSafe
-zig build native-core -Doptimize=ReleaseSafe
 ```
 
 Changes to the disposable Workflow Evaluator or its QuickJS dependency must also run
 `zig build workflow-check`.
 
-`native-core` reports the current exact slot, the two fixed Host scratch-stage resource ledgers, compact Dormant
-Session state bytes, process RSS, and 32 randomized native invariant traces through canonical suspend and
-poisoned-slot restore.
+The canonical Core tests exercise 32 randomized invariant traces through the production interface,
+including canonical suspension, rejected-transition preservation, and poisoned-slot restore. Runtime
+memory and speed measurements use `zig build measure-runtime-sweep`.
 
 See the spike notes for architecture, measurements, caveats, and next questions:
 

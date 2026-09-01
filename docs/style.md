@@ -42,6 +42,30 @@ deferred explicitly.
   need OnePage policy. Do not wrap a dependency with a generalized framework for one implementation.
 - Keep one owner and one representation for each responsibility. Delete or consolidate duplicated
   protocol state before adding another synchronization path.
+- Derive semantic kind and recovery behavior from the authoritative typed descriptor and evidence. Do
+  not repeat that meaning in a parallel classifier or encode it into opaque identity bits. Express
+  parentage as an explicit relationship.
+- Let Session own semantic transaction compilation, canonical Core serialization, and one immutable
+  bounded Semantic View. Production callers supply typed semantic input and immutable external material,
+  never facts, Conversation entries, provenance, or encoded Core bytes; they do not rebuild Session
+  meaning through caller-supplied ledger callbacks.
+- Keep Core a private pure continuation reducer. A command-specific reducer accepts committed state and
+  semantic input and returns candidate state by value; Session alone derives every durable consequence
+  and commits it atomically. Do not add a universal command bus, pending-change proof object, mutable Core
+  lifecycle, or a second validator that attempts to reconcile caller-supplied facts with reducer state.
+- Let an admitted Operation's typed descriptor be the only effect-kind authority. Attempts must repeat
+  its exact descriptor binding; child authorization, approval, and Completion facts must not add a
+  parallel classifier. Persist parentage with the complete parent identity, including generation.
+  Allocate opaque Action identities inside Session. A monotonic allocator is allowed, but consumers must
+  never derive kind, parentage, recovery behavior, or authoritative order from numeric identity values;
+  ledger sequence and explicit relationships remain the only order and parentage authority. Session must
+  derive Approval Required from the admitted descriptor and bind
+  model or durable Action Result admission to the exact pending Completion envelope; callers cannot
+  supply either relationship as proof.
+- Let Session own the complete Action transition law. Lifecycle may execute an external effect only from
+  the `ExecutionGrant` returned by the call that durably admits that Action's first and only Attempt.
+  Recovery exposes an `AttemptObservation` for reconciliation, never a reusable execution capability.
+  Do not reconstruct executable authority from nullable approval, Authorization, Attempt, or Result facts.
 - Add the narrowest complete vertical behavior through existing deep modules. Provider-neutral model
   data must not encode the current concrete tool inventory, but do not turn that data contract into a
   runtime registry, plugin surface, generic effect executor, scheduler, terminal framework, or

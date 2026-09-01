@@ -1,8 +1,10 @@
 const std = @import("std");
+const binding = @import("binding.zig");
+const completion_inbox = @import("completion_inbox.zig");
+const core_image = @import("core_image.zig");
 const host_store = @import("host_store.zig");
 const model_protocol = @import("model_protocol.zig");
 const session_store = @import("session.zig");
-const session_transition = @import("session_transition.zig");
 const c = @cImport({
     @cInclude("libproc.h");
     @cInclude("sys/resource.h");
@@ -231,9 +233,23 @@ fn measureTransientCapture(
     });
     defer session.close();
 
+    var slot: core_image.ActivationSlot = undefined;
+    _ = try session.startTask(&slot);
+    const request_ref: u64 = std.math.maxInt(u32) + 2;
+    const request = "density request";
+    try session.storeContent(request_ref, request);
+    const operation = try session.admitModelAttempt(&slot, .{
+        .operation_id = 1001,
+        .sequence = 1,
+        .attempt_id = 1002,
+        .request_ref = request_ref,
+        .request_digest = binding.hash(binding.ModelDescriptor, request),
+    });
+
     const response_ref: u64 = std.math.maxInt(u32) + 1;
     var writer = try session.beginContent(response_ref);
     errdefer writer.abort();
+    var response_hasher = binding.Hasher(binding.Result).init();
     const response_bytes: usize = switch (sample) {
         .ordinary => ordinary: {
             var encoded_buffer: [256]u8 = undefined;
@@ -242,6 +258,7 @@ fn measureTransientCapture(
                 "The failing test is fixed.",
             );
             try writer.append(encoded);
+            response_hasher.update(encoded);
             break :ordinary encoded.len;
         },
         .maximum_model_response => maximum: {
@@ -250,6 +267,7 @@ fn measureTransientCapture(
             while (remaining != 0) {
                 const count = @min(remaining, window.len);
                 try writer.append(window[0..count]);
+                response_hasher.update(window[0..count]);
                 remaining -= count;
             }
             break :maximum model_protocol.max_response_size;
@@ -264,20 +282,18 @@ fn measureTransientCapture(
 
     _ = try owner.memoryAccounting(true);
     _ = try owner.sqlitePagerAccounting(true);
-    _ = try session.appendConversation(.assistant_text, response_ref, null);
-    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    transaction.facts[0] = session_transition.conversationAdvanced(.{
-        .agent = .{
-            .agent_id = session.agent_id,
-            .agent_generation = 1,
-            .ownership_epoch = session.ownership_epoch,
-        },
-        .entry_id = 2,
-        .parent_id = 1,
-        .kind = .assistant_text,
-        .content_ref = response_ref,
-    });
-    _ = try session.commitSemantic(&.{transaction.facts[0]}, null);
+    try session.publishCompletionEvidence(completion_inbox.bind(.{
+        .kind = .model,
+        .session_id = session.session_id,
+        .ownership_epoch = session.ownership_epoch,
+        .agent_id = session.agent_id,
+        .agent_generation = 1,
+        .operation_id = operation.id,
+        .operation_generation = operation.generation,
+        .attempt_id = 1002,
+        .result_ref = response_ref,
+        .result_digest = response_hasher.final(),
+    }));
     const memory = try owner.memoryAccounting(false);
     const physical = try owner.sqlitePagerAccounting(false);
     var line: [512]u8 = undefined;
@@ -335,12 +351,6 @@ fn measureMaximumSessionScratch(
     defer session.close();
 
     var window: [host_store.content_window_bytes]u8 = @splat('x');
-    var facts: [session_store.max_pending_content]session_transition.Fact = undefined;
-    const agent: session_transition.AgentContext = .{
-        .agent_id = session.agent_id,
-        .agent_generation = 1,
-        .ownership_epoch = session.ownership_epoch,
-    };
     for (0..session_store.max_pending_content) |index| {
         const reference = @as(u64, std.math.maxInt(u32)) + 100 + index;
         var writer = try session.beginContent(reference);
@@ -352,22 +362,16 @@ fn measureMaximumSessionScratch(
             remaining -= count;
         }
         try writer.finish();
-        facts[index] = session_transition.outcome(agent, index + 1, reference);
     }
     const spool_occupancy = try session.transientScratchOccupancy();
     if (spool_occupancy != session_store.max_transient_scratch_bytes) {
         return error.TransientScratchMeasurementMismatch;
     }
 
-    _ = try owner.memoryAccounting(true);
-    _ = try owner.sqlitePagerAccounting(true);
-    _ = try session.commitSemantic(&facts, null);
-    const memory = try owner.memoryAccounting(false);
-    const physical = try owner.sqlitePagerAccounting(false);
     var line: [768]u8 = undefined;
     const encoded = try std.fmt.bufPrint(
         &line,
-        "{{\"sample\":\"maximum_live_session_spool_transient\",\"pending_values\":{d},\"bytes_per_value\":{d},\"disk_backed_spool_occupancy_bytes\":{d},\"content_import_window_resident_bytes\":{d},\"transient_scratch_metadata_allocation_bytes\":{d},\"transient_scratch_metadata_at_active_capacity_100_bytes\":{d},\"sqlite_page_writes\":{d},\"sqlite_cache_spills\":{d},\"sqlite_heap_highwater_bytes\":{d}}}\n",
+        "{{\"sample\":\"maximum_live_session_spool_transient\",\"pending_values\":{d},\"bytes_per_value\":{d},\"disk_backed_spool_occupancy_bytes\":{d},\"content_import_window_resident_bytes\":{d},\"transient_scratch_metadata_allocation_bytes\":{d},\"transient_scratch_metadata_at_active_capacity_100_bytes\":{d}}}\n",
         .{
             session_store.max_pending_content,
             host_store.max_content_bytes,
@@ -375,9 +379,6 @@ fn measureMaximumSessionScratch(
             host_store.content_window_bytes,
             session_store.transient_scratch_allocation_bytes,
             session_store.transient_scratch_allocation_bytes * 100,
-            physical.cache_pages_written,
-            physical.cache_spill_events,
-            memory.heap_highwater_bytes,
         },
     );
     try std.Io.File.stdout().writeStreamingAll(io, encoded);

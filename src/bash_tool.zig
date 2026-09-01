@@ -4,8 +4,8 @@ const model_contract = @import("model_contract.zig");
 
 pub const version: u16 = 1;
 pub const call_header_size = 16;
-pub const descriptor_version: u16 = 1;
-pub const descriptor_header_size = 32;
+pub const descriptor_version: u16 = 3;
+pub const descriptor_header_size = 20;
 pub const result_header_size = 32;
 pub const max_command_size = model_contract.max_bash_command_bytes;
 pub const max_workspace_path_size = 1024;
@@ -30,8 +30,6 @@ pub const Call = struct {
 };
 
 pub const Descriptor = struct {
-    operation_id: u64,
-    operation_generation: u32,
     workspace_path: []const u8,
     working_directory: []const u8,
     call: Call,
@@ -120,11 +118,9 @@ pub fn encodeDescriptor(out: []u8, descriptor: Descriptor) ![]const u8 {
     @memcpy(out[0..descriptor_magic.len], descriptor_magic);
     write(u16, out, 8, descriptor_version);
     write(u16, out, 10, descriptor_header_size);
-    write(u64, out, 12, descriptor.operation_id);
-    write(u32, out, 20, descriptor.operation_generation);
-    write(u32, out, 24, descriptor.call.timeout_ms);
-    write(u16, out, 28, @intCast(descriptor.workspace_path.len));
-    write(u16, out, 30, @intCast(descriptor.working_directory.len));
+    write(u32, out, 12, descriptor.call.timeout_ms);
+    write(u16, out, 16, @intCast(descriptor.workspace_path.len));
+    write(u16, out, 18, @intCast(descriptor.working_directory.len));
     var cursor: usize = descriptor_header_size;
     @memcpy(out[cursor..][0..descriptor.workspace_path.len], descriptor.workspace_path);
     cursor += descriptor.workspace_path.len;
@@ -145,8 +141,8 @@ pub fn decodeDescriptor(bytes: []const u8) !Descriptor {
     {
         return error.InvalidBashDescriptor;
     }
-    const workspace_length: usize = read(u16, bytes, 28);
-    const working_directory_length: usize = read(u16, bytes, 30);
+    const workspace_length: usize = read(u16, bytes, 16);
+    const working_directory_length: usize = read(u16, bytes, 18);
     const authority_offset = descriptor_header_size + workspace_length + working_directory_length;
     const command_offset = authority_offset + environment_authority.len;
     if (workspace_length == 0 or workspace_length > max_workspace_path_size or
@@ -157,12 +153,10 @@ pub fn decodeDescriptor(bytes: []const u8) !Descriptor {
         return error.InvalidBashDescriptor;
     }
     const descriptor: Descriptor = .{
-        .operation_id = read(u64, bytes, 12),
-        .operation_generation = read(u32, bytes, 20),
         .workspace_path = bytes[descriptor_header_size..][0..workspace_length],
         .working_directory = bytes[descriptor_header_size + workspace_length .. authority_offset],
         .call = .{
-            .timeout_ms = read(u32, bytes, 24),
+            .timeout_ms = read(u32, bytes, 12),
             .command = bytes[command_offset..],
         },
     };
@@ -471,8 +465,7 @@ fn validate(call: Call) !void {
 
 fn validateDescriptor(descriptor: Descriptor) !void {
     try validate(descriptor.call);
-    if (descriptor.operation_id == 0 or descriptor.operation_generation == 0 or
-        descriptor.workspace_path.len == 0 or
+    if (descriptor.workspace_path.len == 0 or
         descriptor.workspace_path.len > max_workspace_path_size or
         descriptor.working_directory.len == 0 or
         descriptor.working_directory.len > max_workspace_path_size or
@@ -505,8 +498,6 @@ test "bash call is canonical, bounded, and digest bound" {
 
 test "Bash descriptor binds complete execution authority canonically" {
     const expected: Descriptor = .{
-        .operation_id = 17,
-        .operation_generation = 3,
         .workspace_path = "/work/onepage",
         .working_directory = "/work/onepage",
         .call = .{ .command = "git status --short", .timeout_ms = 5000 },
@@ -523,11 +514,9 @@ test "Bash descriptor binds complete execution authority canonically" {
     bytes[environment_offset] ^= 1;
 
     const mismatches = [_]Descriptor{
-        .{ .operation_id = 19, .operation_generation = 3, .workspace_path = "/work/onepage", .working_directory = "/work/onepage", .call = expected.call },
-        .{ .operation_id = 17, .operation_generation = 4, .workspace_path = "/work/onepage", .working_directory = "/work/onepage", .call = expected.call },
-        .{ .operation_id = 17, .operation_generation = 3, .workspace_path = "/work/other", .working_directory = "/work/other", .call = expected.call },
-        .{ .operation_id = 17, .operation_generation = 3, .workspace_path = "/work/onepage", .working_directory = "/work/onepage", .call = .{ .command = expected.call.command, .timeout_ms = 6000 } },
-        .{ .operation_id = 17, .operation_generation = 3, .workspace_path = "/work/onepage", .working_directory = "/work/onepage", .call = .{ .command = "git diff", .timeout_ms = 5000 } },
+        .{ .workspace_path = "/work/other", .working_directory = "/work/other", .call = expected.call },
+        .{ .workspace_path = "/work/onepage", .working_directory = "/work/onepage", .call = .{ .command = expected.call.command, .timeout_ms = 6000 } },
+        .{ .workspace_path = "/work/onepage", .working_directory = "/work/onepage", .call = .{ .command = "git diff", .timeout_ms = 5000 } },
     };
     for (mismatches) |mismatch| {
         const mismatch_bytes = try encodeDescriptor(&bytes, mismatch);

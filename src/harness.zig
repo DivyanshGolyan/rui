@@ -1,7 +1,7 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const bash_tool = @import("bash_tool.zig");
-const core_state = @import("core_state.zig");
+const core_image = @import("core_image.zig");
 const completion_inbox = @import("completion_inbox.zig");
 const conversation = @import("conversation.zig");
 const deterministic_provider = @import("deterministic_provider.zig");
@@ -752,19 +752,11 @@ const HarnessState = struct {
 
     fn failureProjection(self: *HarnessState) Projection {
         const session = &self.session.?;
-        var ignored: u8 = 0;
         var response_ref: u64 = 0;
         const failure = failure: {
-            const ledger = session.inspectSemantic(
-                &ignored,
-                struct {
-                    fn ignore(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
-                }.ignore,
-            ) catch break :failure .none;
-            const encoded = ledger.last_core orelse break :failure .none;
-            const state = core_state.decode(&encoded) catch break :failure .none;
-            response_ref = state.response_ref;
-            break :failure state.response_failure;
+            const observation = session.failureObservation() catch break :failure .none;
+            response_ref = observation.response_ref;
+            break :failure observation.failure;
         };
         var projection: Projection = .{
             .kind = .failure,
@@ -901,6 +893,11 @@ fn harnessState(harness: *Harness) *HarnessState {
     return @ptrCast(@alignCast(harness));
 }
 
+fn testContinuation(session: *session_store.Session) !session_store.ContinuationView {
+    var slot: core_image.ActivationSlot = undefined;
+    return session.continuationView(&slot);
+}
+
 fn openTestRuntime(tmp: *const std.testing.TmpDir) !*HostRuntime {
     return openTestRuntimeConfigured(tmp, .{});
 }
@@ -924,7 +921,7 @@ fn openTestRuntimeConfigured(
 }
 
 test "Harness owner retains only live lifecycle state" {
-    try std.testing.expectEqual(@as(usize, 8_112), Harness.residentOwnerBytes());
+    try std.testing.expectEqual(@as(usize, 7_832), Harness.residentOwnerBytes());
 }
 
 test "Harness close releases opaque transient scratch before retirement" {
@@ -1200,11 +1197,11 @@ test "restore withholds projections until the configured recovery quantum reache
     const session_id = session.session_id;
     for (0..5) |index| {
         try session.storeContent(index + 1, "ledger fixture");
-        _ = try session.commitSemantic(&.{session_transition.taskAdmitted(.{
+        _ = try session.commitFactsForTest(&.{session_transition.taskAdmitted(.{
             .agent_id = session.agent_id,
             .agent_generation = 1,
             .ownership_epoch = session.ownership_epoch,
-        }, index + 1, index + 1)}, null);
+        }, index + 1, index + 1)});
     }
     created.close();
 
@@ -1234,10 +1231,6 @@ test "restore withholds projections until the configured recovery quantum reache
 }
 
 test "restore publishes Session identity before reconciling Completion evidence" {
-    const IgnoreReplay = struct {
-        fn apply(_: *anyopaque, _: session_transition.Fact) !void {}
-    };
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
@@ -1258,12 +1251,8 @@ test "restore publishes Session identity before reconciling Completion evidence"
     try std.testing.expectEqual(OfferResult.accepted, created.offer(.task));
     const waiting = try created.drive();
     try std.testing.expectEqual(State.waiting, waiting.state);
-    var ignored: u8 = 0;
     const created_state = harnessState(created);
-    const before = try created_state.session.?.inspectSemantic(
-        &ignored,
-        IgnoreReplay.apply,
-    );
+    const before = try created_state.session.?.semanticView();
     const session_id = created_state.session.?.session_id;
     created.close();
 
@@ -1277,18 +1266,12 @@ test "restore publishes Session identity before reconciling Completion evidence"
     try std.testing.expectEqual(@as(u8, 1), identified.projection_count);
     try std.testing.expectEqual(ProjectionKind.session, identified.projections[0].kind);
     const restored_state = harnessState(restored);
-    const before_reconcile = try restored_state.session.?.inspectSemantic(
-        &ignored,
-        IgnoreReplay.apply,
-    );
+    const before_reconcile = try restored_state.session.?.semanticView();
     try std.testing.expectEqual(before.last_sequence, before_reconcile.last_sequence);
 
     const reconciled = try restored.drive();
     try std.testing.expectEqual(State.finished, reconciled.state);
-    const after_reconcile = try restored_state.session.?.inspectSemantic(
-        &ignored,
-        IgnoreReplay.apply,
-    );
+    const after_reconcile = try restored_state.session.?.semanticView();
     try std.testing.expect(after_reconcile.last_sequence > before_reconcile.last_sequence);
 }
 
@@ -1326,7 +1309,7 @@ test "failed Host Store recovery makes the live Harness unavailable" {
     });
     const session = &harnessState(created).session.?;
     const session_id = session.session_id;
-    const descriptor = session_transition.operationSubmitted(.{
+    const descriptor = session_transition.operationAdmitted(.{
         .agent = .{
             .agent_id = session.agent_id,
             .agent_generation = 1,
@@ -1334,12 +1317,12 @@ test "failed Host Store recovery makes the live Harness unavailable" {
         },
         .operation_id = 10,
         .generation = 1,
-    }, 11, .{ .model = binding.hash(binding.ModelDescriptor, "descriptor-12") }, .none);
+    }, null, 11, .{ .model = binding.hash(binding.ModelDescriptor, "descriptor-12") });
     try session.storeContent(
-        descriptor.operation_submitted.descriptor_ref,
+        descriptor.operation_admitted.descriptor_ref,
         "operation descriptor",
     );
-    _ = try session.commitSemantic(&.{descriptor}, null);
+    _ = try session.commitFactsForTest(&.{descriptor});
     created.close();
     read_fault.armed = true;
 
@@ -1353,20 +1336,6 @@ test "failed Host Store recovery makes the live Harness unavailable" {
 }
 
 test "shutdown denies Approval Required before closing" {
-    const PermissionFacts = struct {
-        approval_required: u8 = 0,
-        undecided_authorization: u8 = 0,
-
-        fn apply(context: *anyopaque, fact: session_transition.Fact) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            switch (fact.kind()) {
-                .approval_required => self.approval_required += 1,
-                .authorization => {},
-                else => {},
-            }
-        }
-    };
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
@@ -1399,14 +1368,10 @@ test "shutdown denies Approval Required before closing" {
         const waiting = try owner.drive();
         try std.testing.expectEqual(State.waiting, waiting.state);
         try std.testing.expectEqual(ProjectionKind.approval_required, waiting.projections[0].kind);
-        var facts: PermissionFacts = .{};
         const owner_state = harnessState(owner);
-        _ = try owner_state.session.?.inspectSemantic(
-            &facts,
-            PermissionFacts.apply,
-        );
-        try std.testing.expectEqual(@as(u8, 1), facts.approval_required);
-        try std.testing.expectEqual(@as(u8, 0), facts.undecided_authorization);
+        const facts = try owner_state.session.?.semanticView();
+        try std.testing.expect(facts.consequential.approval_required != null);
+        try std.testing.expect(facts.consequential.authorization == null);
         break :initial owner_state.session.?.session_id;
     };
 
@@ -1503,25 +1468,6 @@ test "known provider failure is one durable terminal Result" {
             return .{ .failure = .{ .failure = .provider_error } };
         }
     };
-    const ResultFacts = struct {
-        count: u8 = 0,
-
-        fn apply(context: *anyopaque, fact: session_transition.Fact) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            switch (fact) {
-                .result => |result| switch (result.evidence) {
-                    .immediate => |recovery_class| if (recovery_class == .model) {
-                        self.count += 1;
-                    },
-                    .durable => |evidence| if (evidence == .model) {
-                        self.count += 1;
-                    },
-                },
-                else => {},
-            }
-        }
-    };
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const runtime = try openTestRuntime(&tmp);
@@ -1544,12 +1490,8 @@ test "known provider failure is one durable terminal Result" {
     const failed = try owner.drive();
     try std.testing.expectEqual(State.failed, failed.state);
     try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
-    var facts: ResultFacts = .{};
-    _ = try owner_state.session.?.inspectSemantic(
-        &facts,
-        ResultFacts.apply,
-    );
-    try std.testing.expectEqual(@as(u8, 1), facts.count);
+    const facts = try owner_state.session.?.semanticView();
+    try std.testing.expect(facts.model.result != null);
     owner.close();
 
     var restored = try Harness.open(.{
@@ -1697,13 +1639,9 @@ test "candidate seal validation failure publishes no Completion" {
     const rejected = try owner.drive();
     try std.testing.expectEqual(State.unavailable, rejected.state);
     try std.testing.expectEqual(@as(u8, 1), provider.calls);
-    const Ignore = struct {
-        fn apply(_: *anyopaque, _: completion_inbox.Envelope) !void {}
-    };
-    var context: u8 = 0;
     try std.testing.expectEqual(
         @as(u32, 0),
-        try harnessState(owner).session.?.scanCompletionEvidence(&context, Ignore.apply),
+        try harnessState(owner).session.?.pendingCompletionCount(),
     );
 }
 
@@ -1767,14 +1705,10 @@ test "failure replacement seal storage error remains a Host failure" {
     try std.testing.expectEqual(@as(u8, 1), unavailable.projection_count);
     try std.testing.expectEqual(ProjectionKind.failure, unavailable.projections[0].kind);
     try std.testing.expectEqual(model_protocol.Failure.none, unavailable.projections[0].failure);
-    const Ignore = struct {
-        fn apply(_: *anyopaque, _: completion_inbox.Envelope) !void {}
-    };
-    var context: u8 = 0;
     const session = provider.session.?;
     try std.testing.expectEqual(
         @as(u32, 0),
-        try session.scanCompletionEvidence(&context, Ignore.apply),
+        try session.pendingCompletionCount(),
     );
     var bytes: [1]u8 = undefined;
     try std.testing.expectError(error.FileNotFound, session.readContent(provider.response_ref, 0, &bytes));
@@ -1851,15 +1785,8 @@ test "typed durable model failures share one failed Harness projection" {
         try std.testing.expectEqual(case.expected, failed.projections[0].failure);
         try std.testing.expectEqual(@as(u8, 1), provider.calls);
 
-        var ignored: u8 = 0;
-        const ledger = try harnessState(owner).session.?.inspectSemantic(
-            &ignored,
-            struct {
-                fn ignore(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
-            }.ignore,
-        );
-        const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
-        try std.testing.expectEqual(case.expected, state.response_failure);
+        const state = try testContinuation(&harnessState(owner).session.?);
+        try std.testing.expectEqual(case.expected, state.response.failure);
         owner.close();
     }
 }
@@ -1953,15 +1880,8 @@ test "built-in argument rejection becomes one durable terminal failure" {
         _ = try owner.drive();
         const failed = try owner.drive();
         try std.testing.expectEqual(State.failed, failed.state);
-        var ignored: u8 = 0;
-        const ledger = try harnessState(owner).session.?.inspectSemantic(
-            &ignored,
-            struct {
-                fn apply(_: *anyopaque, _: session_transition.Fact) anyerror!void {}
-            }.apply,
-        );
-        const state = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
-        try std.testing.expectEqual(model_protocol.Failure.malformed, state.response_failure);
+        const state = try testContinuation(&harnessState(owner).session.?);
+        try std.testing.expectEqual(model_protocol.Failure.malformed, state.response.failure);
         try std.testing.expectEqual(@as(u64, 1), harnessState(owner).session.?.entryCount());
         owner.close();
 
@@ -1981,9 +1901,6 @@ test "built-in argument rejection becomes one durable terminal failure" {
 }
 
 test "input request fails terminally until the durable interaction layer exists" {
-    const IgnoreFacts = struct {
-        fn apply(_: *anyopaque, _: session_transition.Fact) !void {}
-    };
     const InputProvider = struct {
         calls: u8 = 0,
 
@@ -2027,18 +1944,16 @@ test "input request fails terminally until the durable interaction layer exists"
     const failed = try owner.drive();
     try std.testing.expectEqual(State.failed, failed.state);
     try std.testing.expectEqual(ProjectionKind.failure, failed.projections[0].kind);
-    var ignored: u8 = 0;
-    const ledger = try owner_state.session.?.inspectSemantic(&ignored, IgnoreFacts.apply);
-    const durable_core = try core_state.decode(&(ledger.last_core orelse return error.MissingLedgerCoreState));
-    try std.testing.expectEqual(core_state.TaskPhase.failed, durable_core.task_phase);
-    try std.testing.expectEqual(model_protocol.Disposition.input_request, durable_core.response_disposition);
-    try std.testing.expect(durable_core.response_ref != 0);
-    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_text);
-    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_tool_key);
-    try std.testing.expectEqual(core_state.ContentWindow{}, durable_core.response_arguments);
+    const durable_core = try testContinuation(&owner_state.session.?);
+    try std.testing.expectEqual(session_store.TaskPhase.failed, durable_core.task.phase);
+    try std.testing.expectEqual(model_protocol.Disposition.input_request, durable_core.response.disposition);
+    try std.testing.expect(durable_core.response.content_ref != 0);
+    try std.testing.expectEqual(session_store.ContentWindow{}, durable_core.response.text);
+    try std.testing.expectEqual(session_store.ContentWindow{}, durable_core.response.tool_key);
+    try std.testing.expectEqual(@as(u32, 0), durable_core.response.arguments.length);
     var response_buffer: [model_protocol.max_response_size]u8 = undefined;
     const response_bytes = try owner_state.session.?.readContent(
-        durable_core.response_ref,
+        durable_core.response.content_ref,
         0,
         &response_buffer,
     );

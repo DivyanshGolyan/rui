@@ -1,8 +1,26 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const completion_inbox = @import("completion_inbox.zig");
-const core_state = @import("core_state.zig");
 const transition = @import("session_transition.zig");
+
+test "pre-release fact kinds use one contiguous current numbering" {
+    const kinds = [_]transition.Kind{
+        .task_admitted,
+        .operation_admitted,
+        .attempt_admitted,
+        .authorization,
+        .result,
+        .conversation_advanced,
+        .outcome,
+        .cancellation,
+        .shutdown,
+        .result_applied,
+        .approval_required,
+    };
+    for (kinds, 1..) |kind, expected| {
+        try std.testing.expectEqual(@as(u8, @intCast(expected)), @intFromEnum(kind));
+    }
+}
 
 test "descriptor kind is the stable tag for descriptors Completions and durable evidence" {
     try std.testing.expectEqual(@as(u8, 1), @intFromEnum(binding.DescriptorKind.model));
@@ -33,7 +51,7 @@ test "descriptor kind is the stable tag for descriptors Completions and durable 
     try std.testing.expectEqual(descriptor_kind, completion_kind);
 }
 
-test "Attempt constructors fix recovery class by effect category" {
+test "Attempt constructors derive effect category from the descriptor tag" {
     const operation: transition.OperationContext = .{
         .agent = .{ .agent_id = 7, .agent_generation = 1, .ownership_epoch = 2 },
         .operation_id = 11,
@@ -45,7 +63,7 @@ test "Attempt constructors fix recovery class by effect category" {
         17,
         .{ .bash = binding.hash(binding.BashDescriptor, "command") },
     ).attempt_admitted;
-    try std.testing.expectEqual(transition.RecoveryClass.consequential, consequential.recovery_class);
+    try std.testing.expectEqual(binding.DescriptorKind.bash, std.meta.activeTag(consequential.descriptor_digest));
     try std.testing.expectEqual(@as(u8, 0), consequential.possible_duplicate_attempts);
 
     const model = transition.modelAttemptAdmitted(
@@ -55,8 +73,57 @@ test "Attempt constructors fix recovery class by effect category" {
         .{ .model = binding.hash(binding.ModelDescriptor, "request") },
         1,
     ).attempt_admitted;
-    try std.testing.expectEqual(transition.RecoveryClass.model, model.recovery_class);
+    try std.testing.expectEqual(binding.DescriptorKind.model, std.meta.activeTag(model.descriptor_digest));
     try std.testing.expectEqual(@as(u8, 1), model.possible_duplicate_attempts);
+}
+
+test "Operation admission requires explicit source identity only for Actions" {
+    const operation: transition.OperationContext = .{
+        .agent = .{ .agent_id = 7, .agent_generation = 1, .ownership_epoch = 2 },
+        .operation_id = 13,
+        .generation = 3,
+    };
+    const model = transition.operationAdmitted(
+        operation,
+        null,
+        17,
+        .{ .model = binding.hash(binding.ModelDescriptor, "model") },
+    );
+    const action = transition.operationAdmitted(
+        operation,
+        .{ .operation_id = 19, .generation = 2 },
+        23,
+        .{ .bash = binding.hash(binding.BashDescriptor, "action") },
+    );
+    var buffer: [transition.max_payload_size]u8 = undefined;
+    var transaction: transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    transaction.facts[0] = model;
+    transaction.facts[1] = action;
+    const decoded = try transition.decode(1, try transition.encode(&buffer, transaction));
+    try std.testing.expectEqual(model, decoded.facts[0]);
+    try std.testing.expectEqual(action, decoded.facts[1]);
+
+    transaction.fact_count = 1;
+    transaction.facts[0] = transition.operationAdmitted(
+        operation,
+        null,
+        29,
+        .{ .bash = binding.hash(binding.BashDescriptor, "missing source") },
+    );
+    try std.testing.expectError(
+        error.InvalidKindSpecificPayload,
+        transition.encode(&buffer, transaction),
+    );
+    transaction.facts[0] = transition.operationAdmitted(
+        operation,
+        .{ .operation_id = 31, .generation = 4 },
+        37,
+        .{ .model = binding.hash(binding.ModelDescriptor, "unexpected source") },
+    );
+    try std.testing.expectError(
+        error.InvalidKindSpecificPayload,
+        transition.encode(&buffer, transaction),
+    );
 }
 
 test "Approval Required and Authorization have distinct canonical payloads" {
@@ -74,12 +141,10 @@ test "Approval Required and Authorization have distinct canonical payloads" {
         .operation = operation,
         .binding_ref = 13,
         .descriptor_ref = 17,
-        .descriptor_digest = .{ .bash = binding.hash(binding.BashDescriptor, "descriptor-19") },
     });
     const authorization = transition.authorization(.{
         .operation = operation,
         .permission_ref = 23,
-        .descriptor_digest = .{ .bash = binding.hash(binding.BashDescriptor, "descriptor-19") },
         .allowed = true,
     });
     var approval_buffer: [transition.max_payload_size]u8 = undefined;
@@ -101,13 +166,8 @@ test "Approval Required and Authorization have distinct canonical payloads" {
     );
 }
 
-test "a kind-specific transition carries canonical Core State without native layout" {
-    var state: [core_state.encoded_size]u8 = undefined;
-    try core_state.encode(&state, .{
-        .agent_id = 7,
-        .agent_generation = 1,
-        .accumulator = 29,
-    });
+test "a kind-specific transition carries opaque continuation bytes" {
+    const state: [transition.continuation_size]u8 = @splat(0xa5);
     const fact = transition.taskAdmitted(.{
         .agent_id = 7,
         .agent_generation = 1,
@@ -143,7 +203,7 @@ test "a malformed flat wire record never becomes a typed fact" {
     );
 }
 
-test "superseded transition payload versions are rejected instead of migrated" {
+test "superseded transition payload versions are rejected" {
     const fact = transition.taskAdmitted(.{
         .agent_id = 7,
         .agent_generation = 1,
@@ -198,7 +258,7 @@ test "Result evidence round trips as immediate or durable typed choices" {
             .result_ref = 13,
             .result_digest = binding.hash(binding.Result, "result-17"),
             .class = .ordinary,
-            .evidence = .{ .immediate = .consequential },
+            .evidence = .{ .immediate = {} },
         }),
         transition.result(.{
             .operation = operation,
@@ -257,7 +317,7 @@ test "an all-zero authoritative binding is not decoded as absence" {
         .result_ref = 13,
         .result_digest = zero,
         .class = .ordinary,
-        .evidence = .{ .immediate = .consequential },
+        .evidence = .{ .immediate = {} },
     });
     var buffer: [transition.max_payload_size]u8 = undefined;
     const decoded = try transition.decode(1, try transition.encode(&buffer, transaction));

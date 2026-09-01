@@ -1,4 +1,4 @@
-name: Check
+name: Workflow check
 
 on:
   pull_request:
@@ -7,22 +7,34 @@ on:
       - reopened
       - ready_for_review
       - labeled
+    paths:
+      - build.zig
+      - build.zig.zon
+      - src/quickjs_*
+      - src/workflow_*
+      - .github/workflows/workflow-check.yml
   push:
     branches:
       - main
+    paths:
+      - build.zig
+      - build.zig.zon
+      - src/quickjs_*
+      - src/workflow_*
+      - .github/workflows/workflow-check.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: check-${{ github.workflow }}-${{ github.ref }}
+  group: workflow-check-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   check:
     if: github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'run-ci'
-    name: Zig 0.16.0 on macOS ARM64
+    name: Zig 0.16.0 evaluator gate on macOS ARM64
     runs-on: macos-15
     timeout-minutes: 15
 
@@ -44,8 +56,13 @@ jobs:
       - name: Fetch dependencies
         run: zig build --fetch=all
 
-      - name: Check source and artifacts
-        run: zig build check --summary all
+      # Keep the heavyweight gates sequential. Besides limiting peak compiler
+      # pressure, separate steps make the expensive stage visible in Actions.
+      - name: Check evaluator under C sanitizers
+        run: zig build workflow-sanitize --summary all
 
-      - name: Check repository whitespace
-        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD --
+      - name: Check evaluator mutation targets
+        run: zig build workflow-fuzz --summary all
+
+      - name: Check evaluator teardown for leaks
+        run: zig build workflow-leaks --summary all

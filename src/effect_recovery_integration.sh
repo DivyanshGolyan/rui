@@ -55,3 +55,10 @@ test "$(cat "$root/bash/repo/uncertain.txt")" = x
 test "$($fixture resume-bash "$root/bash/state" "$bash_session")" = indeterminate
 test "$($fixture resume-bash "$root/bash/state" "$bash_session")" = indeterminate
 test "$(cat "$root/bash/repo/uncertain.txt")" = x
+
+mkdir -p "$root/authorized-bash/state" "$root/authorized-bash/repo"
+git -C "$root/authorized-bash/repo" init -q
+authorized_bash_session=$($fixture start-authorized-bash "$root/authorized-bash/state" "$root/authorized-bash/repo")
+test ! -e "$root/authorized-bash/repo/uncertain.txt"
+test "$($fixture resume-authorized-bash "$root/authorized-bash/state" "$authorized_bash_session")" = finished
+test "$(cat "$root/authorized-bash/repo/uncertain.txt")" = x

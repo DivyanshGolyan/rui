@@ -274,20 +274,6 @@ pub fn build(b: *std.Build) void {
     fixture_repair_step.dependOn(&run_fixture_repair.step);
     check_step.dependOn(&run_fixture_repair.step);
 
-    const native_core_spike = addNativeExecutable(
-        b,
-        "onepage-native-core-spike",
-        "src/native_core_spike.zig",
-        native_target,
-        optimize,
-    );
-    const run_native_core_spike = b.addRunArtifact(native_core_spike);
-    const native_core_step = b.step(
-        "native-core",
-        "Measure and exercise the native one-page Core",
-    );
-    native_core_step.dependOn(&run_native_core_spike.step);
-
     const runtime_measurement = addNativeExecutable(
         b,
         "onepage-runtime-measurement",
@@ -352,14 +338,6 @@ pub fn build(b: *std.Build) void {
     );
     runtime_measurement_sweep_step.dependOn(&run_runtime_measurement_sweep.step);
 
-    const release_safe_native_core = addNativeExecutable(
-        b,
-        "onepage-native-core-check",
-        "src/native_core_spike.zig",
-        native_target,
-        .ReleaseSafe,
-    );
-    check_step.dependOn(&b.addRunArtifact(release_safe_native_core).step);
     const check_runtime_measurement_script = b.addSystemCommand(&.{ "sh", "-n" });
     check_runtime_measurement_script.addFileArg(b.path("src/runtime_measurement_sweep.sh"));
     check_step.dependOn(&check_runtime_measurement_script.step);
@@ -413,35 +391,19 @@ fn addTestGraph(
     optimize: std.builtin.OptimizeMode,
     quickjs: *std.Build.Step.Compile,
 ) void {
-    const plain_test_roots = [_][]const u8{
-        "src/binding.zig",
-        "src/core_state.zig",
-        "src/core_image.zig",
-        "src/codex_provider.zig",
-        "src/codex_harness_test.zig",
-        "src/deterministic_provider.zig",
-        "src/harness.zig",
-        "src/session.zig",
-        "src/session_transition_test.zig",
-        "src/model_operation.zig",
-    };
-    for (plain_test_roots) |root| {
-        addTestRun(b, parent, root, native_target, optimize, false);
-    }
-
-    const libc_test_roots = [_][]const u8{
-        "src/bash_tool.zig",
-        "src/codex_auth.zig",
-        "src/codex_native.zig",
-        "src/host_store_test.zig",
-        "src/patch_tool.zig",
-        "src/runtime_measurement.zig",
-        "src/runtime_measurement_summary.zig",
-        "src/cli.zig",
-    };
-    for (libc_test_roots) |root| {
-        addTestRun(b, parent, root, native_target, optimize, true);
-    }
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/unit_tests.zig"),
+            .target = native_target,
+            .optimize = optimize,
+        }),
+    });
+    unit_tests.root_module.linkFramework("Security", .{});
+    unit_tests.root_module.linkFramework("CoreFoundation", .{});
+    configureCurl(unit_tests);
+    configureSqlite(b, unit_tests);
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    parent.dependOn(&run_unit_tests.step);
 
     const workflow_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -468,6 +430,7 @@ fn addTestGraph(
         optimize,
     );
     const run_workflow_integration = b.addRunArtifact(workflow_parent_fixture);
+    run_workflow_integration.step.dependOn(&run_unit_tests.step);
     run_workflow_integration.addArtifactArg(workflow_evaluator);
     run_workflow_integration.addArtifactArg(workflow_abnormal_fixture);
     parent.dependOn(&run_workflow_integration.step);
@@ -480,6 +443,7 @@ fn addTestGraph(
         optimize,
     );
     const run_agent_integration = b.addRunArtifact(agent_integration);
+    run_agent_integration.step.dependOn(&run_unit_tests.step);
     parent.dependOn(&run_agent_integration.step);
 
     const cli_resume_fixture = addNativeExecutable(
@@ -490,6 +454,7 @@ fn addTestGraph(
         optimize,
     );
     const run_cli_resume = b.addSystemCommand(&.{"sh"});
+    run_cli_resume.step.dependOn(&run_unit_tests.step);
     run_cli_resume.addFileArg(b.path("src/cli_resume_integration.sh"));
     run_cli_resume.addArtifactArg(cli_resume_fixture);
     run_cli_resume.addArtifactArg(cli);
@@ -503,6 +468,7 @@ fn addTestGraph(
         optimize,
     );
     const run_host_lock = b.addSystemCommand(&.{"sh"});
+    run_host_lock.step.dependOn(&run_unit_tests.step);
     run_host_lock.addFileArg(b.path("src/host_runtime_lock_integration.sh"));
     run_host_lock.addArtifactArg(host_lock_fixture);
     parent.dependOn(&run_host_lock.step);
@@ -515,6 +481,7 @@ fn addTestGraph(
         optimize,
     );
     const run_patch_recovery = b.addSystemCommand(&.{"sh"});
+    run_patch_recovery.step.dependOn(&run_unit_tests.step);
     run_patch_recovery.addFileArg(b.path("src/patch_recovery_integration.sh"));
     run_patch_recovery.addArtifactArg(patch_recovery_fixture);
     parent.dependOn(&run_patch_recovery.step);
@@ -527,6 +494,7 @@ fn addTestGraph(
         optimize,
     );
     const run_patch_git_environment = b.addSystemCommand(&.{"sh"});
+    run_patch_git_environment.step.dependOn(&run_unit_tests.step);
     run_patch_git_environment.addFileArg(b.path("src/patch_git_environment_integration.sh"));
     run_patch_git_environment.addArtifactArg(patch_git_environment_fixture);
     parent.dependOn(&run_patch_git_environment.step);
@@ -539,36 +507,10 @@ fn addTestGraph(
         optimize,
     );
     const run_effect_recovery = b.addSystemCommand(&.{"sh"});
+    run_effect_recovery.step.dependOn(&run_unit_tests.step);
     run_effect_recovery.addFileArg(b.path("src/effect_recovery_integration.sh"));
     run_effect_recovery.addArtifactArg(effect_recovery_fixture);
     parent.dependOn(&run_effect_recovery.step);
-}
-
-fn addTestRun(
-    b: *std.Build,
-    parent: *std.Build.Step,
-    root: []const u8,
-    native_target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    link_libc: bool,
-) void {
-    const tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path(root),
-            .target = native_target,
-            .optimize = optimize,
-        }),
-    });
-    tests.root_module.link_libc = link_libc;
-    if (std.mem.eql(u8, root, "src/codex_native.zig") or
-        std.mem.eql(u8, root, "src/cli.zig"))
-    {
-        tests.root_module.linkFramework("Security", .{});
-        tests.root_module.linkFramework("CoreFoundation", .{});
-        configureCurl(tests);
-    }
-    if (usesHostStore(root)) configureSqlite(b, tests);
-    parent.dependOn(&b.addRunArtifact(tests).step);
 }
 
 fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {

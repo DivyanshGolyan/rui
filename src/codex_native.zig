@@ -995,23 +995,35 @@ test "authorization HTTP primitive deadlines and joins every OAuth call class" {
     }
 }
 
-test "authorization rejects compressed response bytes before JSON decoding" {
+test "authorization request rejects compressed response bytes before JSON decoding" {
     const io = std.testing.io;
     var fixture = try WireFixture.init(io, .ok, "not actually compressed", .complete);
     fixture.response_encoding = "gzip";
     defer fixture.deinit(io);
     var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    defer {
+        const server_result = server_future.cancel(io);
+        server_result catch |err| std.debug.assert(err == error.Canceled);
+    }
     var endpoint_buffer: [128]u8 = undefined;
     const endpoint = try fixture.endpoint(&endpoint_buffer);
-    const path_start = std.mem.indexOf(u8, endpoint, "/backend-api/") orelse unreachable;
     var http: NativeHttp = .{
         .io = io,
         .allocator = std.testing.allocator,
-        .authorization_origin_override = endpoint[0..path_start],
     };
+    var response_bytes: [codex_auth.max_response_size]u8 = undefined;
+    var request_control: RequestControl = .{};
+    var completed_response: ?codex_auth.HttpResponse = null;
     try std.testing.expectError(
-        error.AuthorizationTransportFailed,
-        codex_auth.requestDeviceCode(http.capability()),
+        error.UnexpectedContentEncoding,
+        http.postRequest(
+            endpoint,
+            "application/json",
+            "{}",
+            &response_bytes,
+            &request_control,
+            &completed_response,
+        ),
     );
     try server_future.await(io);
     try std.testing.expect(fixture.accept_encoding_identity);
@@ -1023,12 +1035,17 @@ test "authorization classifies compressed refresh rejection from status" {
     fixture.response_encoding = "gzip";
     defer fixture.deinit(io);
     var server_future = io.async(WireFixture.serve, .{ &fixture, io });
+    defer {
+        const server_result = server_future.cancel(io);
+        server_result catch |err| std.debug.assert(err == error.Canceled);
+    }
     var endpoint_buffer: [128]u8 = undefined;
     const endpoint = try fixture.endpoint(&endpoint_buffer);
     const path_start = std.mem.indexOf(u8, endpoint, "/backend-api/") orelse unreachable;
     var http: NativeHttp = .{
         .io = io,
         .allocator = std.testing.allocator,
+        .timeout = std.Io.Duration.fromSeconds(1),
         .authorization_origin_override = endpoint[0..path_start],
     };
     var tokens: codex_auth.Tokens = .{ .refresh_length = "refresh".len };
@@ -1396,7 +1413,7 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
         .arguments = try modelContractJson("{\"command\":\"true\",\"timeout_ms\":1000}"),
     });
     try wire.session.storeContent(1100, call_bytes);
-    const call = try wire.session.appendConversation(.tool_call, 1100, null);
+    const call = try wire.session.appendConversationForTest(.tool_call, 1100, null);
     try commitConversation(&wire.session, call);
     var result_buffer: [256]u8 = undefined;
     const result_bytes = try conversation.encodeToolResult(&result_buffer, .{
@@ -1405,7 +1422,7 @@ test "NativeTransport lowers a two-turn tool result on the production wire" {
         .content = "exit_code=0",
     });
     try wire.session.storeContent(1101, result_bytes);
-    const result = try wire.session.appendConversation(.tool_result, 1101, null);
+    const result = try wire.session.appendConversationForTest(.tool_result, 1101, null);
     try commitConversation(&wire.session, result);
     _ = try model_operation.buildRequest(&wire.session, 1102, 1, 3);
     var provider_io = try model_operation.ProviderIo.open(&wire.session, 1102, 1103);
@@ -1753,7 +1770,7 @@ const WireSession = struct {
 };
 
 fn commitConversation(session: *session_store.Session, entry: session_store.ConversationEntry) !void {
-    _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
+    _ = try session.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
         .agent = .{
             .agent_id = session.agent_id,
             .agent_generation = 1,
@@ -1763,7 +1780,7 @@ fn commitConversation(session: *session_store.Session, entry: session_store.Conv
         .parent_id = entry.parent_id,
         .kind = entry.kind,
         .content_ref = entry.content_ref,
-    })}, null);
+    })});
 }
 
 const WireFixture = struct {

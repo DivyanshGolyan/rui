@@ -52,8 +52,12 @@ pub fn main(init: std.process.Init) !void {
         try exhaustModel(init.io, runtime, try parseSessionId(args[3]));
     } else if (std.mem.eql(u8, mode, "start-bash")) {
         try startBash(init.io, runtime, args[3]);
+    } else if (std.mem.eql(u8, mode, "start-authorized-bash")) {
+        try startAuthorizedBash(init.io, runtime, args[3]);
     } else if (std.mem.eql(u8, mode, "resume-bash")) {
         try resumeBash(init.io, runtime, try parseSessionId(args[3]));
+    } else if (std.mem.eql(u8, mode, "resume-authorized-bash")) {
+        try resumeAuthorizedBash(init.io, runtime, try parseSessionId(args[3]));
     } else return error.InvalidMode;
 }
 
@@ -150,10 +154,10 @@ fn recoverPrepublicationModel(io: std.Io, runtime: *harness.HostRuntime, identit
         defer restored.close();
         while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
 
-        var audit: ModelAttemptAudit = .{};
-        const ledger = try restored.inspectSemantic(&audit, ModelAttemptAudit.apply);
+        const ledger = try restored.semanticView();
+        const audit = try ModelAttemptAudit.from(ledger.model);
         if (audit.count != 1) return error.ModelAttemptCountMismatch;
-        if (try restored.scanCompletionEvidence(undefined, ignoreCompletion) != 0) {
+        if (try restored.pendingCompletionCount() != 0) {
             return error.PrepublicationCrashGainedCompletionAuthority;
         }
         _ = ledger.last_core orelse return error.MissingLedgerCoreState;
@@ -229,15 +233,6 @@ fn recoverPublishedModel(io: std.Io, runtime: *harness.HostRuntime, session_id: 
         }
     };
     {
-        const CapturedCompletion = struct {
-            envelope: ?completion_inbox.Envelope = null,
-
-            fn apply(context: *anyopaque, envelope: completion_inbox.Envelope) !void {
-                const self: *@This() = @ptrCast(@alignCast(context));
-                if (self.envelope != null) return error.UnexpectedCompletionCount;
-                self.envelope = envelope;
-            }
-        };
         var lease = try host_runtime.Lease.acquire(runtime);
         defer lease.release();
         const scratch = try session_store.allocateTransientScratch(lease.allocator);
@@ -245,11 +240,11 @@ fn recoverPublishedModel(io: std.Io, runtime: *harness.HostRuntime, session_id: 
         var restored = try lease.restoreSession(scratch, session_id);
         defer restored.close();
         while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
-        var capture: CapturedCompletion = .{};
-        if (try restored.scanCompletionEvidence(&capture, CapturedCompletion.apply) != 1) {
+        const view = try restored.semanticView();
+        const attempt = view.model.latestAttempt() orelse return error.CommittedCompletionMissing;
+        const envelope = try restored.pendingCompletionEvidence(attempt.operation, attempt.attempt_id) orelse {
             return error.CommittedCompletionMissing;
-        }
-        const envelope = capture.envelope orelse return error.CommittedCompletionMissing;
+        };
         var bytes: [model_protocol.max_response_size]u8 = undefined;
         var expected_bytes: [model_protocol.max_response_size]u8 = undefined;
         if (!std.mem.eql(
@@ -366,8 +361,8 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
         var restored = try lease.restoreSession(scratch, session_id);
         defer restored.close();
         while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
-        var audit: ModelAttemptAudit = .{};
-        const before = try restored.inspectSemantic(&audit, ModelAttemptAudit.apply);
+        const before = try restored.semanticView();
+        const audit = try ModelAttemptAudit.from(before.model);
         if (audit.count != 2) return error.ModelAttemptCountMismatch;
 
         var response_buffer: [model_protocol.max_response_size]u8 = undefined;
@@ -387,7 +382,7 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
             .result_digest = binding.hash(binding.Result, response),
         });
         try restored.publishCompletionEvidence(envelope);
-        if (try restored.scanCompletionEvidence(undefined, rejectPendingCompletion) != 0) {
+        if (try restored.pendingCompletionCount() != 0) {
             return error.LateEvidenceRemainedPending;
         }
         break :initial .{ before, audit, envelope };
@@ -420,19 +415,13 @@ fn lateModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
     var verified = try verification_lease.restoreSession(verification_scratch, session_id);
     defer verified.close();
     while ((try verification_lease.recoverSemanticWindow(&verified, 32)).more) {}
-    var after_audit: ModelAttemptAudit = .{};
-    const after = try verified.inspectSemantic(&after_audit, ModelAttemptAudit.apply);
+    const after = try verified.semanticView();
+    const after_audit = try ModelAttemptAudit.from(after.model);
     if (after.last_sequence != before.last_sequence or after_audit.count != audit.count) {
         return error.LateEvidenceAdvancedSession;
     }
     try std.Io.File.stdout().writeStreamingAll(io, "audited\n");
 }
-
-fn rejectPendingCompletion(_: *anyopaque, _: completion_inbox.Envelope) anyerror!void {
-    return error.LateEvidenceRemainedPending;
-}
-
-fn ignoreCompletion(_: *anyopaque, _: completion_inbox.Envelope) anyerror!void {}
 
 fn exhaustModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
     var failed = false;
@@ -458,6 +447,19 @@ fn exhaustModel(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !voi
 }
 
 fn startBash(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !void {
+    return startBashAt(io, runtime, workspace, .after_bash_execution);
+}
+
+fn startAuthorizedBash(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !void {
+    return startBashAt(io, runtime, workspace, .after_bash_authorization);
+}
+
+fn startBashAt(
+    io: std.Io,
+    runtime: *harness.HostRuntime,
+    workspace: []const u8,
+    boundary: harness.FaultBoundary,
+) !void {
     var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
     const call = try bash_tool.encodeCall(&call_buffer, .{
         .command = "printf x >> uncertain.txt",
@@ -468,7 +470,7 @@ fn startBash(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !
         .tool_arguments = call,
         .final_answer = "must not be reached",
     };
-    var crash: Crash = .{ .target = .after_bash_execution };
+    var crash: Crash = .{ .target = boundary };
     var owner = try harness.Harness.open(.{
         .runtime = runtime,
         .permission_mode = .bypass,
@@ -485,6 +487,36 @@ fn startBash(io: std.Io, runtime: *harness.HostRuntime, workspace: []const u8) !
     if (owner.offer(.task) != .accepted) return error.TaskOfferRejected;
     try driveUntilCrash(owner);
     try writeSessionId(io, session_id);
+}
+
+fn resumeAuthorizedBash(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
+    var call_buffer: [bash_tool.call_header_size + bash_tool.max_command_size]u8 = undefined;
+    const call = try bash_tool.encodeCall(&call_buffer, .{
+        .command = "printf x >> uncertain.txt",
+        .timeout_ms = 5000,
+    });
+    var fixture: deterministic_provider.ToolFixture = .{
+        .expected_task = task,
+        .tool_arguments = call,
+        .final_answer = "Authorized Bash resumed exactly once.",
+        .calls = 1,
+    };
+    var owner = try harness.Harness.open(.{
+        .runtime = runtime,
+        .mode = .{ .restore = .{
+            .session_id = session_id,
+            .model_binding = .{ .model = "fixture:bash-recovery", .provider = fixture.provider() },
+        } },
+    });
+    defer owner.close();
+    for (0..48) |_| {
+        const progress = try owner.drive();
+        if (progress.state != .finished) continue;
+        if (fixture.calls != 2) return error.UnexpectedFixtureCallCount;
+        try std.Io.File.stdout().writeStreamingAll(io, "finished\n");
+        return;
+    }
+    return error.AuthorizedBashDidNotFinish;
 }
 
 fn resumeBash(io: std.Io, runtime: *harness.HostRuntime, session_id: u64) !void {
@@ -562,8 +594,8 @@ fn expectModelAttempts(runtime: *harness.HostRuntime, session_id: u64, expected:
     var restored = try lease.restoreSession(scratch, session_id);
     defer restored.close();
     while ((try lease.recoverSemanticWindow(&restored, 32)).more) {}
-    var audit: ModelAttemptAudit = .{};
-    _ = try restored.inspectSemantic(&audit, ModelAttemptAudit.apply);
+    const view = try restored.semanticView();
+    const audit = try ModelAttemptAudit.from(view.model);
     if (audit.count != expected) return error.ModelAttemptCountMismatch;
 }
 
@@ -574,31 +606,33 @@ const ModelAttemptAudit = struct {
     operation_generation: u32 = 0,
     ownership_epoch: u64 = 0,
 
-    fn apply(context: *anyopaque, fact: session_transition.Fact) anyerror!void {
-        const self: *ModelAttemptAudit = @ptrCast(@alignCast(context));
-        const attempt = switch (fact) {
-            .attempt_admitted => |value| value,
-            else => return,
-        };
-        if (attempt.recovery_class != .model) return;
-        if (self.count == self.ids.len) return error.ModelAttemptCapacityExceeded;
-        if (attempt.possible_duplicate_attempts != self.count) {
-            return error.ModelDuplicateExposureMismatch;
+    fn from(history: session_store.OperationView) !ModelAttemptAudit {
+        var self: ModelAttemptAudit = .{};
+        for (history.attemptSlice()) |maybe_attempt| {
+            const attempt = maybe_attempt.?;
+            if (std.meta.activeTag(attempt.descriptor_digest) != .model) {
+                return error.InvalidModelAttemptKind;
+            }
+            if (self.count == self.ids.len) return error.ModelAttemptCapacityExceeded;
+            if (attempt.possible_duplicate_attempts != self.count) {
+                return error.ModelDuplicateExposureMismatch;
+            }
+            if (self.count == 0) {
+                self.operation_id = attempt.operation.operation_id;
+                self.operation_generation = attempt.operation.generation;
+                self.ownership_epoch = attempt.operation.agent.ownership_epoch;
+            } else if (attempt.operation.operation_id != self.operation_id or
+                attempt.operation.generation != self.operation_generation)
+            {
+                return error.ModelOperationChangedAcrossRetry;
+            }
+            for (self.ids[0..self.count]) |id| {
+                if (id == attempt.attempt_id) return error.ModelAttemptReused;
+            }
+            self.ids[self.count] = attempt.attempt_id;
+            self.count += 1;
         }
-        if (self.count == 0) {
-            self.operation_id = attempt.operation.operation_id;
-            self.operation_generation = attempt.operation.generation;
-            self.ownership_epoch = attempt.operation.agent.ownership_epoch;
-        } else if (attempt.operation.operation_id != self.operation_id or
-            attempt.operation.generation != self.operation_generation)
-        {
-            return error.ModelOperationChangedAcrossRetry;
-        }
-        for (self.ids[0..self.count]) |id| {
-            if (id == attempt.attempt_id) return error.ModelAttemptReused;
-        }
-        self.ids[self.count] = attempt.attempt_id;
-        self.count += 1;
+        return self;
     }
 };
 

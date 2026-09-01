@@ -5,10 +5,10 @@ pub const max_patch_size = 16 * 1024;
 pub const max_file_size: u64 = 1024 * 1024;
 pub const max_path_size = 1024;
 pub const max_workspace_path_size = 1024;
-pub const intent_header_size = 176;
+pub const intent_header_size = 164;
 pub const max_intent_size = intent_header_size + max_workspace_path_size + max_path_size;
 pub const result_size = 64;
-pub const version: u16 = 4;
+pub const version: u16 = 6;
 
 const intent_magic = "ONEPINT\x00";
 const result_magic = "ONEPRES\x00";
@@ -30,8 +30,6 @@ pub const TargetPath = struct {
 };
 
 pub const Intent = struct {
-    operation_id: u64,
-    operation_generation: u32,
     patch_ref: u64,
     workspace_path: []const u8,
     target_path: TargetPath,
@@ -43,9 +41,7 @@ pub const Intent = struct {
     file_mode: u32,
 };
 
-pub const ActionContext = struct {
-    operation_id: u64,
-    operation_generation: u32,
+pub const Preparation = struct {
     patch_ref: u64,
 };
 
@@ -89,7 +85,7 @@ pub const Reconciliation = struct {
 };
 
 pub fn encodeIntent(out: []u8, intent: Intent) ![]const u8 {
-    if (intent.operation_id == 0 or intent.operation_generation == 0 or intent.patch_ref == 0 or
+    if (intent.patch_ref == 0 or
         intent.workspace_path.len == 0 or intent.workspace_path.len > max_workspace_path_size or
         intent.target_path.length == 0 or intent.target_path.length > max_path_size)
     {
@@ -103,15 +99,13 @@ pub fn encodeIntent(out: []u8, intent: Intent) ![]const u8 {
     write(u16, out, 10, @intCast(total));
     write(u16, out, 12, @intCast(intent.workspace_path.len));
     write(u16, out, 14, intent.target_path.length);
-    write(u64, out, 16, intent.operation_id);
-    write(u32, out, 24, intent.operation_generation);
-    write(u32, out, 28, intent.file_mode);
-    write(u64, out, 32, intent.patch_ref);
-    write(u64, out, 40, @intCast(intent.preimage_inode));
-    @memcpy(out[48..80], &intent.patch_digest.bytes);
-    @memcpy(out[80..112], &intent.preimage_digest.bytes);
-    @memcpy(out[112..144], &intent.postimage_digest.bytes);
-    @memcpy(out[144..176], &intent.intent_digest.bytes);
+    write(u32, out, 16, intent.file_mode);
+    write(u64, out, 20, intent.patch_ref);
+    write(u64, out, 28, @intCast(intent.preimage_inode));
+    @memcpy(out[36..68], &intent.patch_digest.bytes);
+    @memcpy(out[68..100], &intent.preimage_digest.bytes);
+    @memcpy(out[100..132], &intent.postimage_digest.bytes);
+    @memcpy(out[132..164], &intent.intent_digest.bytes);
     @memcpy(out[intent_header_size..][0..intent.workspace_path.len], intent.workspace_path);
     @memcpy(out[intent_header_size + intent.workspace_path.len .. total], intent.target_path.slice());
     const canonical_digest = intentDigest(intent);
@@ -137,15 +131,13 @@ pub fn decodeIntent(bytes: []const u8) !Intent {
         return error.InvalidPatchIntent;
     }
     const intent: Intent = .{
-        .operation_id = read(u64, bytes, 16),
-        .operation_generation = read(u32, bytes, 24),
-        .file_mode = read(u32, bytes, 28),
-        .patch_ref = read(u64, bytes, 32),
-        .preimage_inode = @intCast(read(u64, bytes, 40)),
-        .patch_digest = .{ .bytes = bytes[48..80].* },
-        .preimage_digest = .{ .bytes = bytes[80..112].* },
-        .postimage_digest = .{ .bytes = bytes[112..144].* },
-        .intent_digest = .{ .bytes = bytes[144..176].* },
+        .file_mode = read(u32, bytes, 16),
+        .patch_ref = read(u64, bytes, 20),
+        .preimage_inode = @intCast(read(u64, bytes, 28)),
+        .patch_digest = .{ .bytes = bytes[36..68].* },
+        .preimage_digest = .{ .bytes = bytes[68..100].* },
+        .postimage_digest = .{ .bytes = bytes[100..132].* },
+        .intent_digest = .{ .bytes = bytes[132..164].* },
         .workspace_path = bytes[intent_header_size..][0..workspace_length],
         .target_path = try TargetPath.init(bytes[intent_header_size + workspace_length ..]),
     };
@@ -199,19 +191,19 @@ pub fn prepare(
     io: std.Io,
     workspace_path: []const u8,
     patch: []const u8,
-    action: ActionContext,
+    preparation: Preparation,
 ) !Intent {
-    return prepareWithTestHook(io, workspace_path, patch, action, null);
+    return prepareWithTestHook(io, workspace_path, patch, preparation, null);
 }
 
 fn prepareWithTestHook(
     io: std.Io,
     workspace_path: []const u8,
     patch: []const u8,
-    action: ActionContext,
+    preparation: Preparation,
     test_hook: ?PreparationTestHook,
 ) !Intent {
-    if (action.operation_id == 0 or action.operation_generation == 0 or action.patch_ref == 0) {
+    if (preparation.patch_ref == 0) {
         return error.InvalidPatchIntent;
     }
     var canonical_workspace_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -257,9 +249,7 @@ fn prepareWithTestHook(
         return error.PreimageChangedDuringValidation;
     }
     var intent: Intent = .{
-        .operation_id = action.operation_id,
-        .operation_generation = action.operation_generation,
-        .patch_ref = action.patch_ref,
+        .patch_ref = preparation.patch_ref,
         .workspace_path = workspace_path,
         .target_path = try TargetPath.init(target_path),
         .patch_digest = patchDigest(patch),
@@ -711,12 +701,10 @@ pub fn reconcile(io: std.Io, intent: Intent, patch: []const u8) !Reconciliation 
 
 pub fn intentDigest(intent: Intent) binding_digest.PatchIntent {
     var hasher = binding_digest.Hasher(binding_digest.PatchIntent).init();
-    var integers: [32]u8 = @splat(0);
-    std.mem.writeInt(u64, integers[0..8], intent.operation_id, .little);
-    std.mem.writeInt(u32, integers[8..12], intent.operation_generation, .little);
-    std.mem.writeInt(u32, integers[12..16], intent.file_mode, .little);
-    std.mem.writeInt(u64, integers[16..24], intent.patch_ref, .little);
-    std.mem.writeInt(u64, integers[24..32], @intCast(intent.preimage_inode), .little);
+    var integers: [24]u8 = @splat(0);
+    std.mem.writeInt(u32, integers[0..4], intent.file_mode, .little);
+    std.mem.writeInt(u64, integers[8..16], intent.patch_ref, .little);
+    std.mem.writeInt(u64, integers[16..24], @intCast(intent.preimage_inode), .little);
     hasher.update(&integers);
     updateLengthPrefixed(binding_digest.PatchIntent, &hasher, intent.workspace_path);
     updateLengthPrefixed(binding_digest.PatchIntent, &hasher, intent.target_path.slice());
@@ -781,7 +769,7 @@ test "one exact tracked regular-file patch validates without mutation" {
         validated.postimage_digest,
     ));
     var changed_intent = validated;
-    changed_intent.operation_generation = 2;
+    changed_intent.patch_ref += 1;
     const changed_generation = intentDigest(changed_intent);
     try std.testing.expect(!binding_digest.eql(
         binding_digest.PatchIntent,
@@ -958,8 +946,6 @@ test "patch preparation rejects concurrent growth before git sees the snapshot" 
 
 test "one immutable Patch Intent and typed Result are canonical" {
     var expected: Intent = .{
-        .operation_id = 11,
-        .operation_generation = 2,
         .patch_ref = 4,
         .workspace_path = "/tmp/workspace",
         .target_path = try TargetPath.init("src/main.zig"),
@@ -974,7 +960,7 @@ test "one immutable Patch Intent and typed Result are canonical" {
     var intent_bytes: [max_intent_size]u8 = undefined;
     const encoded = try encodeIntent(&intent_bytes, expected);
     const decoded = try decodeIntent(encoded);
-    try std.testing.expectEqual(expected.operation_id, decoded.operation_id);
+    try std.testing.expectEqual(expected.patch_ref, decoded.patch_ref);
     try std.testing.expectEqualStrings(expected.workspace_path, decoded.workspace_path);
     try std.testing.expect(binding_digest.eql(
         binding_digest.Preimage,
@@ -1340,6 +1326,6 @@ fn canonicalTestPath(
     return out[0..length];
 }
 
-fn testAction() ActionContext {
-    return .{ .operation_id = 11, .operation_generation = 1, .patch_ref = 13 };
+fn testAction() Preparation {
+    return .{ .patch_ref = 13 };
 }

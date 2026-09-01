@@ -95,13 +95,13 @@ test "historical Completion scan rejects an Attempt admitted after its terminal 
     };
     _ = try owner.commitPrepared(.{ .session_id = 15, .epoch = 1 }, .{
         .transaction = transaction(2, &.{
-            transition.operationSubmitted(operation, 21, descriptor, .model),
+            transition.operationAdmitted(operation, null, 21, descriptor),
             transition.result(.{
                 .operation = operation,
                 .result_ref = 22,
                 .result_digest = binding.hash(binding.Result, "terminal-before-attempt"),
                 .class = .ordinary,
-                .evidence = .{ .immediate = .model },
+                .evidence = .{ .immediate = {} },
             }),
         }),
         .content = &.{ directContent(21), directContent(22) },
@@ -134,7 +134,7 @@ test "historical Completion scan requires the Result to share the Attempt contex
     };
     _ = try owner.commitPrepared(.{ .session_id = 25, .epoch = 1 }, .{
         .transaction = transaction(2, &.{
-            transition.operationSubmitted(admitted_operation, 31, descriptor, .model),
+            transition.operationAdmitted(admitted_operation, null, 31, descriptor),
             transition.modelAttemptAdmitted(admitted_operation, 32, 31, descriptor, 0),
         }),
         .content = &.{directContent(31)},
@@ -148,7 +148,7 @@ test "historical Completion scan requires the Result to share the Attempt contex
             .result_ref = 33,
             .result_digest = binding.hash(binding.Result, "mismatched-terminal-context"),
             .class = .ordinary,
-            .evidence = .{ .immediate = .model },
+            .evidence = .{ .immediate = {} },
         })}),
         .content = &.{directContent(33)},
     });

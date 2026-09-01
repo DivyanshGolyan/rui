@@ -246,7 +246,6 @@ fn expectText(entry: model_operation.RequestEntry, kind: model_operation.EntryKi
     const actual = switch (entry) {
         .user_text => |value| if (kind == .user_text) value.content else return error.UnexpectedRepairHistory,
         .assistant_text => |value| if (kind == .assistant_text) value.content else return error.UnexpectedRepairHistory,
-        .context_checkpoint => |value| if (kind == .context_checkpoint) value.content else return error.UnexpectedRepairHistory,
         else => return error.UnexpectedRepairHistory,
     };
     if (!try contentEquals(actual, content)) return error.UnexpectedRepairHistory;
@@ -386,11 +385,11 @@ test "deterministic Provider decodes the exact immutable request" {
         .agent_generation = 1,
         .ownership_epoch = session.ownership_epoch,
     };
-    _ = try session.commitSemantic(&.{
+    _ = try session.commitFactsForTest(&.{
         session_transition.outcome(agent, 1001, 1001),
         session_transition.outcome(agent, 1003, 1003),
         session_transition.outcome(agent, 1002, 1002),
-    }, null);
+    });
 
     var request = try session.viewContent(1001);
     var first: [model_operation.request_window_size]u8 = undefined;
@@ -399,7 +398,7 @@ test "deterministic Provider decodes the exact immutable request" {
     first[model_operation.request_header_size] ^= 1;
     try session.storeContent(1004, original);
     try std.testing.expectError(error.ModelRequestDigestMismatch, model_operation.verifyRequestDigest(&session, 1004, digest));
-    _ = try session.commitSemantic(&.{session_transition.outcome(agent, 1004, 1004)}, null);
+    _ = try session.commitFactsForTest(&.{session_transition.outcome(agent, 1004, 1004)});
 
     var call_buffer: [128]u8 = undefined;
     var json_scratch: model_contract.StrictToolJsonScratch = undefined;
@@ -408,8 +407,8 @@ test "deterministic Provider decodes the exact immutable request" {
         .arguments = try model_contract.validateStrictToolJson(&json_scratch, "{\"path\":\"README.md\"}"),
     });
     try session.storeContent(1100, call_bytes);
-    const call_entry = try session.appendConversation(.tool_call, 1100, null);
-    _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
+    const call_entry = try session.appendConversationForTest(.tool_call, 1100, null);
+    _ = try session.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
         .agent = .{
             .agent_id = session.agent_id,
             .agent_generation = 1,
@@ -419,7 +418,7 @@ test "deterministic Provider decodes the exact immutable request" {
         .parent_id = call_entry.parent_id,
         .kind = call_entry.kind,
         .content_ref = call_entry.content_ref,
-    })}, null);
+    })});
     try std.testing.expectError(error.ContextSplitsToolPair, model_operation.buildRequest(&session, 1101, 1, 2));
 
     var result_buffer: [128]u8 = undefined;
@@ -429,8 +428,8 @@ test "deterministic Provider decodes the exact immutable request" {
         .content = "status=observed",
     });
     try session.storeContent(1102, result_bytes);
-    const result_entry = try session.appendConversation(.tool_result, 1102, null);
-    _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
+    const result_entry = try session.appendConversationForTest(.tool_result, 1102, null);
+    _ = try session.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
         .agent = .{
             .agent_id = session.agent_id,
             .agent_generation = 1,
@@ -440,7 +439,7 @@ test "deterministic Provider decodes the exact immutable request" {
         .parent_id = result_entry.parent_id,
         .kind = result_entry.kind,
         .content_ref = result_entry.content_ref,
-    })}, null);
+    })});
     try std.testing.expectError(error.ContextSplitsToolPair, model_operation.buildRequest(&session, 1103, 3, 1));
 
     var large_content: [40 * 1024]u8 = @splat('x');
@@ -448,8 +447,8 @@ test "deterministic Provider decodes the exact immutable request" {
         const content_ref: u64 = 1200 + index;
         const content: []const u8 = if (index == 0) &large_content else "later context";
         try session.storeContent(content_ref, content);
-        const entry = try session.appendConversation(.assistant_text, content_ref, null);
-        _ = try session.commitSemantic(&.{session_transition.conversationAdvanced(.{
+        const entry = try session.appendConversationForTest(.assistant_text, content_ref, null);
+        _ = try session.commitFactsForTest(&.{session_transition.conversationAdvanced(.{
             .agent = .{
                 .agent_id = session.agent_id,
                 .agent_generation = 1,
@@ -459,7 +458,7 @@ test "deterministic Provider decodes the exact immutable request" {
             .parent_id = entry.parent_id,
             .kind = entry.kind,
             .content_ref = entry.content_ref,
-        })}, null);
+        })});
     }
     _ = try model_operation.buildRequest(&session, 1300, 4, 9);
     var large_io = try model_operation.ProviderIo.open(&session, 1300, 1301);
