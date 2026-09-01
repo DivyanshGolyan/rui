@@ -36,7 +36,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'run-ci'
     name: Zig 0.16.0 evaluator gate on macOS ARM64
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -56,5 +56,13 @@ jobs:
       - name: Fetch dependencies
         run: zig build --fetch=all
 
-      - name: Check disposable workflow evaluator
-        run: zig build workflow-check --summary all
+      # Keep the heavyweight gates sequential. Besides limiting peak compiler
+      # pressure, separate steps make the expensive stage visible in Actions.
+      - name: Check evaluator under C sanitizers
+        run: zig build workflow-sanitize --summary all
+
+      - name: Check evaluator mutation targets
+        run: zig build workflow-fuzz --summary all
+
+      - name: Check evaluator teardown for leaks
+        run: zig build workflow-leaks --summary all
