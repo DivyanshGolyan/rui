@@ -22,7 +22,6 @@ pub const Postimage = Semantic("postimage");
 pub const Result = Semantic("result");
 pub const Completion = Semantic("completion");
 pub const Blob = Semantic("blob");
-pub const LedgerRecord = Semantic("ledger-record");
 
 pub const DescriptorKind = enum(u8) {
     model = 1,
@@ -115,7 +114,6 @@ test "authoritative bindings use stable domain-separated SHA-256 vectors" {
         hash(Result, "echo onepage").bytes,
         hash(Completion, "echo onepage").bytes,
         hash(Blob, "echo onepage").bytes,
-        hash(LedgerRecord, "echo onepage").bytes,
     };
     const expected = [_][]const u8{
         "536b9053ad1cf7c790af671c779521e2e89b2c69848e61c0a0a3ed00091e919e",
@@ -130,7 +128,6 @@ test "authoritative bindings use stable domain-separated SHA-256 vectors" {
         "5dcca21a410451185e1161b6b2895b8624125c2c9b07e5ecbd759c888497bae4",
         "1686a06c9bd917f70796d91813334bac19b305b0a06494d5b7c4a27548cc9ded",
         "1a2d54cf840b9860714cd2b0fcbc4335d9e6310e0e0658e05b9f7e6f9930f243",
-        "9a5b3c4a62bb5b6477d3154c523a3215281a47d5ad22af5ca3b7b94963e8dd16",
     };
     for (values, expected) |value, expected_hex| {
         try std.testing.expectEqualStrings(expected_hex, &std.fmt.bytesToHex(value, .lower));
@@ -146,6 +143,6 @@ test "authoritative bindings use stable domain-separated SHA-256 vectors" {
         std.debug.assert(PatchDescriptor != PatchIntent);
         std.debug.assert(Preimage != Postimage);
         std.debug.assert(Result != Completion);
-        std.debug.assert(Blob != LedgerRecord);
+        std.debug.assert(Blob != Completion);
     }
 }

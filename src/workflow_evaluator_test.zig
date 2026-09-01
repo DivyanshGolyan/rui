@@ -175,7 +175,7 @@ test "root terminal states remain distinct" {
     try expectSimpleOutcome(
         "export default async function workflow() { await new Promise(() => {}); return null; }",
         .deadlocked,
-        "RootPendingWithoutJobs",
+        "RootPendingWithoutMicrotasks",
     );
     try expectSimpleOutcome(
         "export default async function workflow() { Promise.reject(new Error('detached')); return null; }",
@@ -184,7 +184,7 @@ test "root terminal states remain distinct" {
     );
 }
 
-test "unresolved jobs block even after detached root fulfillment" {
+test "unresolved Agent Calls block even after detached root fulfillment" {
     const sources = [_][]const u8{
         "export default async function workflow({ agent }) { return await agent({ key: 'a', task: 'work' }); }",
         "export default async function workflow({ agent }) { agent({ key: 'a', task: 'work' }); return 1; }",
@@ -204,7 +204,7 @@ test "unresolved jobs block even after detached root fulfillment" {
     }
 }
 
-test "visible job output settles agent" {
+test "visible Agent Call output settles agent" {
     var output_value_storage: [64]u8 = undefined;
     const output_value = try stringValue("done", &output_value_storage);
     var argument_storage: [1]u8 = undefined;
@@ -335,7 +335,7 @@ test "arguments are structurally validated before evaluation" {
     try cursor.finish();
 }
 
-test "visible Job Outputs share one aggregate byte budget" {
+test "visible Turn Outputs share one aggregate byte budget" {
     const payload_bytes = protocol.Limits.visible_output_bytes / 2 + 1;
     const text = try std.testing.allocator.alloc(u8, payload_bytes);
     defer std.testing.allocator.free(text);
@@ -418,7 +418,7 @@ test "valid surrogate pairs and negative zero cross canonically" {
     try cursor.finish();
 }
 
-test "object output and nested Job descriptor keys are canonical" {
+test "object output and nested Turn descriptor keys are canonical" {
     const bridge = try std.testing.allocator.alloc(u8, protocol.Limits.bridge_arena_bytes);
     defer std.testing.allocator.free(bridge);
     const output = try std.testing.allocator.alloc(u8, protocol.Limits.output_frame_bytes);
@@ -524,11 +524,11 @@ test "engine exceptions cannot forge host-observed resource outcomes" {
     );
 }
 
-test "host-observed pending-job bound is a resource outcome" {
+test "host-observed pending-Agent-Call bound is a resource outcome" {
     try expectSimpleOutcome(
         "export default async function workflow({ agent }) { for (let i = 0; i < 257; i++) agent({ key: String(i), task: 'work' }); await new Promise(() => {}); }",
         .resource_exceeded,
-        "PendingJobs",
+        "PendingAgentCalls",
     );
     try expectSimpleOutcome(
         "export default async function workflow() { while (true) {} }",
@@ -543,17 +543,17 @@ test "host-observed pending-job bound is a resource outcome" {
     try expectSimpleOutcome(
         "export default async function workflow({ agent }) { for (let i = 0; i < 257; i++) { try { agent({ key: String(i), task: 'work' }); } catch {} } return null; }",
         .resource_exceeded,
-        "PendingJobs",
+        "PendingAgentCalls",
     );
 }
 
-test "visible stable failures reject with one frozen JobError" {
+test "visible stable failures reject with one frozen TurnError" {
     var argument_storage: [1]u8 = undefined;
     var input_storage: [protocol.Limits.source_bytes + 256]u8 = undefined;
     const input = try request(
-        "export default async function workflow({ agent }) { const settled = await Promise.allSettled([agent({ key: 'a', task: 'work' })]); const error = settled[0].reason; return { status: settled[0].status, frozen: Object.isFrozen(error), code: error.code, key: error.job_key }; }",
+        "export default async function workflow({ agent }) { const settled = await Promise.allSettled([agent({ key: 'a', task: 'work' })]); const error = settled[0].reason; return { status: settled[0].status, frozen: Object.isFrozen(error), code: error.code, key: error.agent_call_key }; }",
         try nullValue(&argument_storage),
-        &.{.{ .key = "a", .tag = .failure, .payload = "JobFailed" }},
+        &.{.{ .key = "a", .tag = .failure, .payload = "TurnFailed" }},
         &input_storage,
     );
     const bridge = try std.testing.allocator.alloc(u8, protocol.Limits.bridge_arena_bytes);
@@ -570,22 +570,22 @@ test "agent bridge validates before publishing any request" {
     try expectSimpleOutcome(
         "export default async function workflow({ agent }) { const descriptor = Object.defineProperty({}, 'key', { get() { return 'a'; }, enumerable: true }); descriptor.task = 'work'; await agent(descriptor); return null; }",
         .failed,
-        "JobRequestInvalid",
+        "TurnRequestInvalid",
     );
     try expectSimpleOutcome(
         "export default async function workflow({ agent }) { agent({ key: 'a', task: 'one' }); agent({ key: 'a', task: 'two' }); return null; }",
         .failed,
-        "JobRequestInvalid",
+        "TurnRequestInvalid",
     );
     try expectSimpleOutcome(
         "export default async function workflow({ agent }) { await agent({ key: 'a', task: 'work', input: undefined }); return null; }",
         .failed,
-        "JobRequestInvalid",
+        "TurnRequestInvalid",
     );
     try expectSimpleOutcome(
-        "export default async function workflow({ agent }) { await agent({ key: 'a', task: 'work', agent_profile: undefined }); return null; }",
+        "export default async function workflow({ agent }) { await agent({ key: 'a', task: 'work', execution_profile: undefined }); return null; }",
         .failed,
-        "JobRequestInvalid",
+        "TurnRequestInvalid",
     );
     try expectSimpleOutcome(
         "export default async function workflow({ agent }) { await agent({ key: 'a', task: 'work', input: Array.from({ length: 2047 }, () => [null]) }); return null; }",

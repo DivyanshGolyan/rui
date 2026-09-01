@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
         "{{\n" ++
             "  \"capture_struct_bytes\": {d},\n" ++
             "  \"credential_struct_bytes\": {d},\n" ++
-            "  \"provider_io_struct_bytes\": {d},\n" ++
+            "  \"buffered_provider_seam_struct_bytes\": {d},\n" ++
             "  \"tool_mapping_struct_bytes\": {d},\n" ++
             "  \"request_reader_struct_bytes\": {d},\n" ++
             "  \"request_read_window_bytes\": {d},\n" ++
@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
         .{
             @sizeOf(codex_provider.Capture),
             @sizeOf(codex_provider.Credential),
-            @sizeOf(model_operation.ProviderIo),
+            @sizeOf(model_operation.BufferedRequest) + @sizeOf(model_operation.BufferedCandidate),
             @sizeOf(codex_provider.ToolMapping),
             @sizeOf(codex_provider.RequestReader),
             codex_provider.request_window_size,

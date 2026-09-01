@@ -220,7 +220,7 @@ source_commit=$(git -C "$script_directory/.." rev-parse HEAD)
 {
     printf '{\n'
     printf '  "schema_version": 1,\n'
-    printf '  "scope": "capacity_one_live_codex_harness",\n'
+    printf '  "scope": "capacity_one_live_codex_turn",\n'
     printf '  "measured_at": "%s",\n' "$measured_at"
     printf '  "source_commit": "%s",\n' "$source_commit"
     printf '  "platform": {"os": "macOS", "version": "%s", "architecture": "%s", "model": "%s"},\n' "$os_version" "$architecture" "$machine_model"

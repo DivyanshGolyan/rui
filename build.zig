@@ -72,7 +72,6 @@ pub fn build(b: *std.Build) void {
     addTestGraph(
         b,
         test_step,
-        cli,
         workflow_evaluator,
         native_target,
         optimize,
@@ -102,7 +101,6 @@ pub fn build(b: *std.Build) void {
     addTestGraph(
         b,
         check_step,
-        cli,
         release_safe_workflow_evaluator,
         native_target,
         .ReleaseSafe,
@@ -180,7 +178,7 @@ pub fn build(b: *std.Build) void {
     }{
         .{ .argument = "protocol_decoder", .step_name = "protocol-decoder", .description = "Mutate private evaluator protocol frames" },
         .{ .argument = "js_value_encoder", .step_name = "js-value-encoder", .description = "Generate strict and rejected JavaScript values" },
-        .{ .argument = "result_decoder", .step_name = "result-decoder", .description = "Mutate visible Job Result values" },
+        .{ .argument = "result_decoder", .step_name = "result-decoder", .description = "Mutate visible Turn Result values" },
         .{ .argument = "workflow_capability", .step_name = "workflow-capability", .description = "Generate workflow and agent capability sequences" },
     };
     for (fuzz_targets) |target| {
@@ -214,7 +212,7 @@ pub fn build(b: *std.Build) void {
         "--model",
         "fixture:answer",
         "--fixture-response",
-        "OnePage completed a durable model turn through one fixed Activation Slot.",
+        "OnePage completed a durable model Turn through normalized SQLite facts.",
         "Explain this repository in one sentence.",
     });
     fixture_answer_step.dependOn(&run_fixture_answer.step);
@@ -274,74 +272,6 @@ pub fn build(b: *std.Build) void {
     fixture_repair_step.dependOn(&run_fixture_repair.step);
     check_step.dependOn(&run_fixture_repair.step);
 
-    const runtime_measurement = addNativeExecutable(
-        b,
-        "onepage-runtime-measurement",
-        "src/runtime_measurement.zig",
-        native_target,
-        .ReleaseSafe,
-    );
-    const measurement_scenario = b.option(
-        []const u8,
-        "measurement-scenario",
-        "Runtime measurement scenario: dormant or completion",
-    ) orelse "dormant";
-    const measurement_count = b.option(
-        usize,
-        "measurement-count",
-        "Number of Sessions exercised by the runtime measurement",
-    ) orelse 100;
-    const measurement_active_capacity = b.option(
-        usize,
-        "measurement-active-capacity",
-        "Startup Active Capacity used by the runtime measurement",
-    ) orelse 1;
-    const run_runtime_measurement = b.addRunArtifact(runtime_measurement);
-    run_runtime_measurement.addArg(measurement_scenario);
-    run_runtime_measurement.addArg(b.fmt("{d}", .{measurement_count}));
-    run_runtime_measurement.addArg(b.fmt("{d}", .{measurement_active_capacity}));
-    const runtime_measurement_step = b.step(
-        "measure-runtime",
-        "Measure whole-process runtime memory and end-to-end lifecycle speed",
-    );
-    runtime_measurement_step.dependOn(&run_runtime_measurement.step);
-    const measurement_repetitions = b.option(
-        usize,
-        "measurement-repetitions",
-        "Independent processes per runtime measurement point",
-    ) orelse 3;
-    const measurement_dirty_validation = b.option(
-        bool,
-        "measurement-dirty-validation",
-        "Run a deliberately non-published runtime-measurement validation from dirty compiled source",
-    ) orelse false;
-    const runtime_measurement_summary = addNativeExecutable(
-        b,
-        "onepage-runtime-measurement-summary",
-        "src/runtime_measurement_summary.zig",
-        native_target,
-        .ReleaseSafe,
-    );
-    const run_runtime_measurement_sweep = b.addSystemCommand(&.{"sh"});
-    run_runtime_measurement_sweep.addFileArg(b.path("src/runtime_measurement_sweep.sh"));
-    run_runtime_measurement_sweep.addArtifactArg(runtime_measurement);
-    run_runtime_measurement_sweep.addArg(".zig-cache/onepage-runtime-measurements.jsonl");
-    run_runtime_measurement_sweep.addArtifactArg(runtime_measurement_summary);
-    run_runtime_measurement_sweep.addArg(".zig-cache/onepage-runtime-measurements-summary.json");
-    run_runtime_measurement_sweep.addArg(b.fmt("{d}", .{measurement_repetitions}));
-    if (measurement_dirty_validation) {
-        run_runtime_measurement_sweep.addArg("--dirty-validation");
-    }
-    const runtime_measurement_sweep_step = b.step(
-        "measure-runtime-sweep",
-        "Run repeated dormant-memory and completion-throughput measurements",
-    );
-    runtime_measurement_sweep_step.dependOn(&run_runtime_measurement_sweep.step);
-
-    const check_runtime_measurement_script = b.addSystemCommand(&.{ "sh", "-n" });
-    check_runtime_measurement_script.addFileArg(b.path("src/runtime_measurement_sweep.sh"));
-    check_step.dependOn(&check_runtime_measurement_script.step);
-
     const codex_live_step = b.step(
         "codex-live-repair",
         "Run and measure the opt-in controlled repair through the live Codex subscription Provider",
@@ -385,7 +315,6 @@ pub fn build(b: *std.Build) void {
 fn addTestGraph(
     b: *std.Build,
     parent: *std.Build.Step,
-    cli: *std.Build.Step.Compile,
     workflow_evaluator: *std.Build.Step.Compile,
     native_target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
@@ -435,57 +364,6 @@ fn addTestGraph(
     run_workflow_integration.addArtifactArg(workflow_abnormal_fixture);
     parent.dependOn(&run_workflow_integration.step);
 
-    const agent_integration = addNativeExecutable(
-        b,
-        "onepage-agent-integration",
-        "src/agent_integration.zig",
-        native_target,
-        optimize,
-    );
-    const run_agent_integration = b.addRunArtifact(agent_integration);
-    run_agent_integration.step.dependOn(&run_unit_tests.step);
-    parent.dependOn(&run_agent_integration.step);
-
-    const cli_resume_fixture = addNativeExecutable(
-        b,
-        "onepage-cli-resume-fixture",
-        "src/cli_resume_fixture.zig",
-        native_target,
-        optimize,
-    );
-    const run_cli_resume = b.addSystemCommand(&.{"sh"});
-    run_cli_resume.step.dependOn(&run_unit_tests.step);
-    run_cli_resume.addFileArg(b.path("src/cli_resume_integration.sh"));
-    run_cli_resume.addArtifactArg(cli_resume_fixture);
-    run_cli_resume.addArtifactArg(cli);
-    parent.dependOn(&run_cli_resume.step);
-
-    const host_lock_fixture = addNativeExecutable(
-        b,
-        "onepage-host-runtime-lock-fixture",
-        "src/host_runtime_lock_fixture.zig",
-        native_target,
-        optimize,
-    );
-    const run_host_lock = b.addSystemCommand(&.{"sh"});
-    run_host_lock.step.dependOn(&run_unit_tests.step);
-    run_host_lock.addFileArg(b.path("src/host_runtime_lock_integration.sh"));
-    run_host_lock.addArtifactArg(host_lock_fixture);
-    parent.dependOn(&run_host_lock.step);
-
-    const patch_recovery_fixture = addNativeExecutable(
-        b,
-        "onepage-patch-recovery-fixture",
-        "src/patch_recovery_fixture.zig",
-        native_target,
-        optimize,
-    );
-    const run_patch_recovery = b.addSystemCommand(&.{"sh"});
-    run_patch_recovery.step.dependOn(&run_unit_tests.step);
-    run_patch_recovery.addFileArg(b.path("src/patch_recovery_integration.sh"));
-    run_patch_recovery.addArtifactArg(patch_recovery_fixture);
-    parent.dependOn(&run_patch_recovery.step);
-
     const patch_git_environment_fixture = addNativeExecutable(
         b,
         "onepage-patch-git-environment-fixture",
@@ -499,18 +377,31 @@ fn addTestGraph(
     run_patch_git_environment.addArtifactArg(patch_git_environment_fixture);
     parent.dependOn(&run_patch_git_environment.step);
 
-    const effect_recovery_fixture = addNativeExecutable(
+    const relational_crash_fixture = addNativeExecutable(
         b,
-        "onepage-effect-recovery-fixture",
-        "src/effect_recovery_fixture.zig",
+        "onepage-relational-crash-fixture",
+        "src/relational_crash_fixture.zig",
         native_target,
         optimize,
     );
-    const run_effect_recovery = b.addSystemCommand(&.{"sh"});
-    run_effect_recovery.step.dependOn(&run_unit_tests.step);
-    run_effect_recovery.addFileArg(b.path("src/effect_recovery_integration.sh"));
-    run_effect_recovery.addArtifactArg(effect_recovery_fixture);
-    parent.dependOn(&run_effect_recovery.step);
+    const run_relational_crashes = b.addSystemCommand(&.{"sh"});
+    run_relational_crashes.step.dependOn(&run_unit_tests.step);
+    run_relational_crashes.addFileArg(b.path("src/relational_crash_integration.sh"));
+    run_relational_crashes.addArtifactArg(relational_crash_fixture);
+    parent.dependOn(&run_relational_crashes.step);
+
+    const relational_host_lock_fixture = addNativeExecutable(
+        b,
+        "onepage-relational-host-lock-fixture",
+        "src/relational_host_lock_fixture.zig",
+        native_target,
+        optimize,
+    );
+    const run_relational_host_lock = b.addSystemCommand(&.{"sh"});
+    run_relational_host_lock.step.dependOn(&run_unit_tests.step);
+    run_relational_host_lock.addFileArg(b.path("src/relational_host_lock_integration.sh"));
+    run_relational_host_lock.addArtifactArg(relational_host_lock_fixture);
+    parent.dependOn(&run_relational_host_lock.step);
 }
 
 fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
@@ -633,23 +524,10 @@ fn addNativeExecutable(
 
 fn usesHostStore(root: []const u8) bool {
     const roots = [_][]const u8{
-        "src/agent_integration.zig",
         "src/cli.zig",
-        "src/cli_resume_fixture.zig",
-        "src/codex_auth.zig",
-        "src/codex_native.zig",
-        "src/codex_provider.zig",
-        "src/codex_harness_test.zig",
-        "src/deterministic_provider.zig",
-        "src/effect_recovery_fixture.zig",
-        "src/harness.zig",
-        "src/host_runtime_lock_fixture.zig",
         "src/host_store_density.zig",
-        "src/host_store_test.zig",
-        "src/model_operation.zig",
-        "src/patch_recovery_fixture.zig",
-        "src/runtime_measurement.zig",
-        "src/session.zig",
+        "src/relational_crash_fixture.zig",
+        "src/relational_host_lock_fixture.zig",
     };
     for (roots) |candidate| {
         if (std.mem.eql(u8, root, candidate)) return true;

@@ -196,35 +196,35 @@ fn fuzzWorkflowCapability(harness: *Harness) !void {
         var used: usize = 0;
         used += (try std.fmt.bufPrint(
             source_storage[used..],
-            "export default async function workflow({{ agent }}, args) {{ const jobs = []; ",
+            "export default async function workflow({{ agent }}, args) {{ const calls = []; ",
             .{},
         )).len;
         if (iteration % 7 == 0) {
             const invalid = invalid_calls[random.random().uintLessThan(usize, invalid_calls.len)];
             used += (try std.fmt.bufPrint(source_storage[used..], "{s}; ", .{invalid})).len;
         } else {
-            const job_count = random.random().intRangeAtMost(u8, 1, 4);
-            for (0..job_count) |job_index| {
+            const call_count = random.random().intRangeAtMost(u8, 1, 4);
+            for (0..call_count) |call_index| {
                 const value = random.random().intRangeAtMost(i32, -1000, 1000);
                 if (random.random().boolean()) {
                     used += (try std.fmt.bufPrint(
                         source_storage[used..],
-                        "jobs.push(agent({{ key: 'job-{d}', task: 'work', input: {{ value: {d}, index: {d} }} }})); ",
-                        .{ job_index, value, job_index },
+                        "calls.push(agent({{ key: 'call-{d}', task: 'work', input: {{ value: {d}, index: {d} }} }})); ",
+                        .{ call_index, value, call_index },
                     )).len;
                 } else {
                     used += (try std.fmt.bufPrint(
                         source_storage[used..],
-                        "jobs.push(agent({{ task: 'work', key: 'job-{d}', input: {{ index: {d}, value: {d} }} }})); ",
-                        .{ job_index, job_index, value },
+                        "calls.push(agent({{ task: 'work', key: 'call-{d}', input: {{ index: {d}, value: {d} }} }})); ",
+                        .{ call_index, call_index, value },
                     )).len;
                 }
             }
         }
         const endings = [_][]const u8{
-            "return await Promise.all(jobs); }",
-            "return (await Promise.allSettled(jobs)).length; }",
-            "await Promise.all(jobs); return args; }",
+            "return await Promise.all(calls); }",
+            "return (await Promise.allSettled(calls)).length; }",
+            "await Promise.all(calls); return args; }",
             "return args; }",
         };
         const ending = endings[random.random().uintLessThan(usize, endings.len)];
@@ -311,7 +311,7 @@ fn validateOutcome(bytes: []const u8) !void {
         .completed => _ = try cursor.skipValue(protocol.Limits.workflow_output_bytes),
         .blocked => {
             const count = try cursor.readInt(u16);
-            if (count > protocol.Limits.pending_jobs) return error.ExcessiveBlockedJobs;
+            if (count > protocol.Limits.pending_agent_calls) return error.ExcessiveBlockedTurns;
             for (0..count) |_| {
                 const descriptor_bytes = try cursor.readLengthBytes(protocol.Limits.workflow_output_bytes);
                 var descriptor = protocol.Cursor.init(descriptor_bytes);

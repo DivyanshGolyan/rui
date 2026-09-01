@@ -3,36 +3,16 @@ const binding = @import("binding.zig");
 const conversation = @import("conversation.zig");
 const model_contract = @import("model_contract.zig");
 const model_protocol = @import("model_protocol.zig");
-const session_store = @import("session.zig");
-const session_transition = @import("session_transition.zig");
 
 pub const request_header_size = 92;
 pub const tool_header_size = 20;
 pub const entry_header_size = 32;
 pub const request_window_size = 4096;
+pub const max_model_name_size: usize = 256;
+pub const max_request_entries: u32 = 32_768;
 pub const version: u16 = 3;
 
 const request_magic = "ONEREQ3\x00";
-
-pub fn verifyRequestDigest(
-    session: *session_store.Session,
-    request_ref: u64,
-    expected: binding.ModelDescriptor,
-) !void {
-    var request = try session.viewContent(request_ref);
-    var hasher = binding.Hasher(binding.ModelDescriptor).init();
-    var window: [request_window_size]u8 = undefined;
-    var offset: u64 = 0;
-    while (offset < request.length()) {
-        const bytes = try request.readWindow(offset, &window);
-        if (bytes.len == 0) return error.TruncatedModelRequest;
-        hasher.update(bytes);
-        offset += bytes.len;
-    }
-    if (!binding.eql(binding.ModelDescriptor, hasher.final(), expected)) {
-        return error.ModelRequestDigestMismatch;
-    }
-}
 
 pub const Provider = struct {
     context: *anyopaque,
@@ -199,7 +179,7 @@ pub const RequestEntry = union(EntryKind) {
 /// Providers never receive the durable request wire or Conversation envelope.
 pub const RequestCursor = struct {
     source: RequestSource,
-    model_name: [session_store.model_name_capacity]u8 = undefined,
+    model_name: [max_model_name_size]u8 = undefined,
     model_name_length: u16,
     catalog_start: u64,
     tool_count: u16,
@@ -207,7 +187,9 @@ pub const RequestCursor = struct {
     total_entries: u32,
     remaining_entries: u32,
     previous_entry_id: u64 = 0,
-    previous_kind: ?EntryKind = null,
+    wave_call_ids: [model_contract.max_tool_count]u64 = @splat(0),
+    wave_call_count: u8 = 0,
+    wave_result_index: u8 = 0,
 
     pub fn modelName(self: *const RequestCursor) []const u8 {
         return self.model_name[0..self.model_name_length];
@@ -235,7 +217,7 @@ pub const RequestCursor = struct {
 
     pub fn next(self: *RequestCursor) !?RequestEntry {
         if (self.remaining_entries == 0) {
-            if (self.previous_kind == .tool_call) return error.ContextSplitsToolPair;
+            if (self.wave_call_count != 0) return error.ContextSplitsToolWave;
             if (self.cursor != self.source.length()) return error.MalformedModelRequest;
             return null;
         }
@@ -257,22 +239,17 @@ pub const RequestCursor = struct {
         const entry_id = read(u64, &header, 8);
         const parent_id = read(u64, &header, 16);
         const encoded_length = read(u64, &header, 24);
-        if (entry_id == 0 or parent_id == std.math.maxInt(u64) or parent_id + 1 != entry_id or
+        if (entry_id == 0 or parent_id == std.math.maxInt(u64) or
             encoded_length == 0 or
             encoded_length > self.source.length() - self.cursor - entry_header_size)
         {
             return error.MalformedModelRequest;
         }
         if (self.previous_entry_id != 0 and
-            (self.previous_entry_id == std.math.maxInt(u64) or
-                entry_id != self.previous_entry_id + 1 or parent_id != self.previous_entry_id))
+            (entry_id == self.previous_entry_id or parent_id != self.previous_entry_id))
         {
             return error.MalformedModelRequest;
         }
-        if (self.previous_entry_id == 0 and kind == .tool_result) return error.ContextSplitsToolPair;
-        if (self.previous_kind == .tool_call and kind != .tool_result) return error.InvalidToolAdjacency;
-        if (kind == .tool_result and self.previous_kind != .tool_call) return error.InvalidToolAdjacency;
-
         const encoded_start = self.cursor + entry_header_size;
         const encoded = ContentView{
             .source = self.source,
@@ -291,16 +268,46 @@ pub const RequestCursor = struct {
                 };
             },
             .tool_call => try decodeRequestToolCall(encoded, entry_id, parent_id),
-            .tool_result => try decodeRequestToolResult(encoded, entry_id, parent_id),
+            .tool_result => try decodeRequestToolResult(encoded, entry_id),
         };
+        try self.validateToolWave(entry);
         self.cursor = encoded_start + encoded_length;
         self.remaining_entries -= 1;
         self.previous_entry_id = entry_id;
-        self.previous_kind = kind;
         if (self.remaining_entries == 0 and self.cursor != self.source.length()) {
             return error.MalformedModelRequest;
         }
         return entry;
+    }
+
+    fn validateToolWave(self: *RequestCursor, entry: RequestEntry) !void {
+        switch (entry) {
+            .user_text, .assistant_text => if (self.wave_call_count != 0) {
+                return error.InvalidToolWave;
+            },
+            .tool_call => |call| {
+                if (self.wave_result_index != 0 or
+                    self.wave_call_count == self.wave_call_ids.len)
+                {
+                    return error.InvalidToolWave;
+                }
+                self.wave_call_ids[self.wave_call_count] = call.entry_id;
+                self.wave_call_count += 1;
+            },
+            .tool_result => |result| {
+                if (self.wave_call_count == 0 or
+                    self.wave_result_index >= self.wave_call_count or
+                    result.call_entry_id != self.wave_call_ids[self.wave_result_index])
+                {
+                    return error.InvalidToolWave;
+                }
+                self.wave_result_index += 1;
+                if (self.wave_result_index == self.wave_call_count) {
+                    self.wave_call_count = 0;
+                    self.wave_result_index = 0;
+                }
+            },
+        }
     }
 };
 
@@ -318,9 +325,9 @@ fn openRequest(source: RequestSource, selection: ?*CatalogSelection) !RequestCur
     const model_length = read(u16, &header, 18);
     const instructions_length = read(u32, &header, 20);
     const contract_length = read(u32, &header, 24);
-    if (entry_count == 0 or entry_count > session_transition.max_transitions or
+    if (entry_count == 0 or entry_count > max_request_entries or
         tool_count == 0 or tool_count > model_contract.max_tool_count or
-        model_length == 0 or model_length > session_store.model_name_capacity or
+        model_length == 0 or model_length > max_model_name_size or
         instructions_length != model_contract.default_instructions.len or
         contract_length != model_contract.model_contract_bytes.len)
     {
@@ -504,13 +511,11 @@ fn validateStrictToolJsonIdentity(
 fn decodeRequestToolResult(
     encoded: ContentView,
     entry_id: u64,
-    parent_id: u64,
 ) !RequestEntry {
     var header_bytes: [conversation.result_header_size]u8 = undefined;
     try readContentExact(encoded, 0, &header_bytes);
     const header = conversation.decodeToolResultHeader(&header_bytes, encoded.length()) catch
         return error.MalformedModelRequest;
-    if (header.parent_id != parent_id) return error.InvalidToolAdjacency;
     const content: ContentView = .{
         .source = encoded.source,
         .start = encoded.start + conversation.result_header_size,
@@ -519,7 +524,7 @@ fn decodeRequestToolResult(
     try validateUtf8(content);
     return .{ .tool_result = .{
         .entry_id = entry_id,
-        .call_entry_id = parent_id,
+        .call_entry_id = header.parent_id,
         .is_error = header.is_error,
         .content = content,
     } };
@@ -585,143 +590,63 @@ pub const CandidateWriter = struct {
     }
 };
 
-/// Owns the host-side resources behind the deliberately narrow provider
-/// capabilities. Providers can read one immutable request and append one
-/// predetermined response; they receive no Session or owner authority.
-pub const ProviderIo = struct {
-    request_blob: session_store.ContentView,
-    response: session_store.ContentWriter,
-    session: *session_store.Session,
-    response_ref: u64,
-    response_length: u32 = 0,
-    response_prefix: [model_protocol.header_size]u8 = @splat(0),
-    response_prefix_length: u8 = 0,
+/// Caller-owned provider request bytes. The cursor borrows this value, so the
+/// owner keeps it alive for the synchronous provider dispatch.
+pub const BufferedRequest = struct {
+    bytes: []const u8,
 
-    pub fn open(
-        session: *session_store.Session,
-        request_ref: u64,
-        response_ref: u64,
-    ) !ProviderIo {
-        const request_blob = try session.viewContent(request_ref);
-        const response = try session.beginContent(response_ref);
-        return .{
-            .request_blob = request_blob,
-            .response = response,
-            .session = session,
-            .response_ref = response_ref,
-        };
-    }
-
-    pub fn close(self: *ProviderIo) void {
-        self.response.abort();
-    }
-
-    pub fn request(self: *ProviderIo) !RequestCursor {
+    pub fn cursor(self: *BufferedRequest) !RequestCursor {
         return openRequest(.{
             .context = self,
-            .length_fn = requestLength,
-            .read_fn = requestRead,
+            .length_fn = bufferedRequestLength,
+            .read_fn = bufferedRequestRead,
         }, null);
     }
 
-    pub fn candidateCapability(self: *ProviderIo) CandidateWriter {
-        return .{ .context = self, .append_fn = responseAppend };
+    fn bufferedRequestLength(context: *anyopaque) u64 {
+        const self: *BufferedRequest = @ptrCast(@alignCast(context));
+        return self.bytes.len;
     }
 
-    /// The synchronous provider return is the only settlement point. Providers
-    /// can append candidate bytes, but cannot seal or replace Host-owned
-    /// captured evidence.
-    pub fn settle(self: *ProviderIo, outcome: DispatchOutcome) !void {
-        switch (outcome) {
-            .candidate => {
-                if (self.response_length == 0) return error.EmptyProviderCandidate;
-                try model_protocol.validateCandidateEnvelopePrefix(
-                    self.response_prefix[0..self.response_prefix_length],
-                    self.response_length,
-                );
-                try self.response.finish();
-            },
-            .failure => |failure| {
-                self.response.abort();
-                self.response = try self.session.beginContent(self.response_ref);
-                var bytes: [
-                    model_protocol.header_size + model_protocol.max_failure_diagnostic_code_size
-                ]u8 = undefined;
-                const diagnostic_code = failure.diagnosticCode();
-                const encoded = if (failure.diagnostic_source == .none and
-                    diagnostic_code.len == 0)
-                    try model_protocol.encodeFailure(&bytes, failure.failure)
-                else
-                    try model_protocol.encodeFailureDiagnostic(
-                        &bytes,
-                        failure.failure,
-                        failure.diagnostic_source,
-                        diagnostic_code,
-                    );
-                try self.response.append(encoded);
-                try self.response.finish();
-            },
-        }
-    }
-
-    fn requestLength(context: *anyopaque) u64 {
-        const self: *ProviderIo = @ptrCast(@alignCast(context));
-        return self.request_blob.length();
-    }
-
-    fn requestRead(context: *anyopaque, offset: u64, out: []u8) anyerror![]const u8 {
-        const self: *ProviderIo = @ptrCast(@alignCast(context));
-        return self.request_blob.readWindow(offset, out);
-    }
-
-    fn responseAppend(context: *anyopaque, bytes: []const u8) anyerror!void {
-        const self: *ProviderIo = @ptrCast(@alignCast(context));
-        const next_length = try capturedResponseLength(self.response_length, bytes.len);
-        try self.response.append(bytes);
-        const remaining_prefix = model_protocol.header_size - self.response_prefix_length;
-        const copy_length = @min(remaining_prefix, bytes.len);
-        if (copy_length != 0) {
-            @memcpy(
-                self.response_prefix[self.response_prefix_length..][0..copy_length],
-                bytes[0..copy_length],
-            );
-            self.response_prefix_length += @intCast(copy_length);
-        }
-        self.response_length = next_length;
+    fn bufferedRequestRead(
+        context: *anyopaque,
+        offset: u64,
+        out: []u8,
+    ) anyerror![]const u8 {
+        const self: *BufferedRequest = @ptrCast(@alignCast(context));
+        if (offset > self.bytes.len) return error.InvalidRequestContentOffset;
+        const start: usize = @intCast(offset);
+        const count = @min(out.len, self.bytes.len - start);
+        @memcpy(out[0..count], self.bytes[start..][0..count]);
+        return out[0..count];
     }
 };
 
-const CatalogContentSource = struct {
-    reader: *session_store.ContentView,
+/// Bounded caller-owned capture for a synchronous Provider dispatch.
+pub const BufferedCandidate = struct {
+    bytes: []u8,
+    length: u32 = 0,
 
-    fn length(context: *anyopaque) u64 {
-        const self: *CatalogContentSource = @ptrCast(@alignCast(context));
-        return self.reader.length();
+    pub fn writer(self: *BufferedCandidate) CandidateWriter {
+        return .{ .context = self, .append_fn = append };
     }
 
-    fn read(context: *anyopaque, offset: u64, out: []u8) anyerror![]const u8 {
-        const self: *CatalogContentSource = @ptrCast(@alignCast(context));
-        return self.reader.readWindow(offset, out);
+    pub fn slice(self: *const BufferedCandidate) []const u8 {
+        return self.bytes[0..self.length];
+    }
+
+    fn append(context: *anyopaque, bytes: []const u8) !void {
+        const self: *BufferedCandidate = @ptrCast(@alignCast(context));
+        const next = try capturedResponseLength(self.length, bytes.len);
+        if (next > self.bytes.len) return error.CapturedModelOutputTooLarge;
+        @memcpy(self.bytes[self.length..next], bytes);
+        self.length = next;
     }
 };
 
-pub fn readToolDefinition(
-    session: *session_store.Session,
-    request_ref: u64,
-    key: []const u8,
-    buffer: *ToolDefinitionBuffer,
-) !?model_contract.ToolDefinition {
-    var reader = try session.viewContent(request_ref);
-    var blob_source: CatalogContentSource = .{ .reader = &reader };
-    var selection: CatalogSelection = .{ .key = key, .definition = buffer };
-    _ = try openRequest(.{
-        .context = &blob_source,
-        .length_fn = CatalogContentSource.length,
-        .read_fn = CatalogContentSource.read,
-    }, &selection);
-    return if (selection.found) buffer.definition() else null;
-}
-
+/// Owns the host-side resources behind the deliberately narrow provider
+/// capabilities. Providers can read one immutable request and append one
+/// predetermined response; they receive no Session or owner authority.
 fn capturedResponseLength(current: u32, appended: usize) !u32 {
     if (current > model_protocol.max_response_size or
         appended > model_protocol.max_response_size - @as(usize, current))
@@ -729,124 +654,6 @@ fn capturedResponseLength(current: u32, appended: usize) !u32 {
         return error.CapturedModelOutputTooLarge;
     }
     return current + @as(u32, @intCast(appended));
-}
-
-pub fn publishFailureResult(
-    session: *session_store.Session,
-    identity: u64,
-) !u64 {
-    const failure_ref = (@as(u64, 1) << 56) | (identity & ((@as(u64, 1) << 56) - 1));
-    var buffer: [model_protocol.header_size]u8 = undefined;
-    const encoded = try model_protocol.encodeFailure(&buffer, .provider_error);
-    try session.storeContent(failure_ref, encoded);
-    return failure_ref;
-}
-
-pub fn buildRequest(
-    session: *session_store.Session,
-    request_ref: u64,
-    first_entry: u32,
-    entry_count: u32,
-) !binding.ModelDescriptor {
-    return buildRequestWithCatalog(
-        session,
-        request_ref,
-        first_entry,
-        entry_count,
-        &model_contract.default_catalog,
-    );
-}
-
-pub fn buildRequestWithCatalog(
-    session: *session_store.Session,
-    request_ref: u64,
-    first_entry: u32,
-    entry_count: u32,
-    catalog: []const model_contract.ToolDefinition,
-) !binding.ModelDescriptor {
-    if (request_ref == 0 or first_entry == 0 or entry_count == 0) {
-        return error.InvalidContextSelection;
-    }
-    try model_contract.validateCatalog(catalog);
-    const last = @as(u64, first_entry) + entry_count - 1;
-    if (last > session.entryCount()) return error.InvalidContextSelection;
-    const first = try session.readEntry(first_entry);
-    const last_entry = try session.readEntry(last);
-    if (first.kind == .tool_result or last_entry.kind == .tool_call) {
-        return error.ContextSplitsToolPair;
-    }
-
-    const contract_digest = binding.hash(binding.ModelContract, model_contract.model_contract_bytes);
-
-    var writer = try session.beginContent(request_ref);
-    errdefer writer.abort();
-    var hasher = binding.Hasher(binding.ModelDescriptor).init();
-    var request_header: [request_header_size]u8 = @splat(0);
-    @memcpy(request_header[0..request_magic.len], request_magic);
-    write(u16, &request_header, 8, version);
-    write(u16, &request_header, 10, request_header_size);
-    write(u32, &request_header, 12, entry_count);
-    write(u16, &request_header, 16, @intCast(catalog.len));
-    write(u16, &request_header, 18, @intCast(session.modelName().len));
-    write(u32, &request_header, 20, model_contract.default_instructions.len);
-    write(u32, &request_header, 24, model_contract.model_contract_bytes.len);
-    @memcpy(request_header[28..60], &model_contract.catalogDigest(catalog).bytes);
-    @memcpy(request_header[60..92], &contract_digest.bytes);
-    try appendHashed(&writer, &hasher, &request_header);
-    try appendHashed(&writer, &hasher, session.modelName());
-    try appendHashed(&writer, &hasher, model_contract.default_instructions);
-    try appendHashed(&writer, &hasher, model_contract.model_contract_bytes);
-    for (catalog) |definition| {
-        var tool_header: [tool_header_size]u8 = @splat(0);
-        write(u16, &tool_header, 0, @intCast(definition.key.len));
-        write(u16, &tool_header, 2, @intCast(definition.provider_tool_name.len));
-        write(u32, &tool_header, 4, @intCast(definition.description.len));
-        write(u32, &tool_header, 8, @intCast(definition.input_schema.len));
-        write(u32, &tool_header, 12, @intCast(definition.result_contract.len));
-        try appendHashed(&writer, &hasher, &tool_header);
-        try appendHashed(&writer, &hasher, definition.key);
-        try appendHashed(&writer, &hasher, definition.provider_tool_name);
-        try appendHashed(&writer, &hasher, definition.description);
-        try appendHashed(&writer, &hasher, definition.input_schema);
-        try appendHashed(&writer, &hasher, definition.result_contract);
-    }
-
-    var sequence: u64 = first_entry;
-    while (sequence <= last) : (sequence += 1) {
-        const entry = try session.readEntry(sequence);
-        var content = try session.viewContent(entry.content_ref);
-        var entry_header: [entry_header_size]u8 = @splat(0);
-        entry_header[0] = @intFromEnum(entry.kind);
-        write(u64, &entry_header, 8, entry.entry_id);
-        write(u64, &entry_header, 16, entry.parent_id);
-        write(u64, &entry_header, 24, content.length());
-        try appendHashed(&writer, &hasher, &entry_header);
-
-        var window: [request_window_size]u8 = undefined;
-        var offset: u64 = 0;
-        while (offset < content.length()) {
-            const bytes = try content.readWindow(offset, &window);
-            if (bytes.len == 0) return error.TruncatedContextContent;
-            try appendHashed(&writer, &hasher, bytes);
-            offset += bytes.len;
-        }
-    }
-    try writer.finish();
-
-    return hasher.final();
-}
-
-fn appendHashed(
-    writer: *session_store.ContentWriter,
-    hasher: *binding.Hasher(binding.ModelDescriptor),
-    bytes: []const u8,
-) !void {
-    try writer.append(bytes);
-    hasher.update(bytes);
-}
-
-fn write(comptime T: type, out: []u8, offset: usize, value: T) void {
-    std.mem.writeInt(T, out[offset..][0..@sizeOf(T)], value, .little);
 }
 
 fn read(comptime T: type, input: []const u8, offset: usize) T {

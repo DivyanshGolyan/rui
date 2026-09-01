@@ -18,16 +18,16 @@ const Evaluation = struct {
     allocator: std.mem.Allocator,
     source: [:0]const u8,
     arguments: []const u8,
-    visible: [protocol.Limits.pending_jobs]Visible = undefined,
+    visible: [protocol.Limits.pending_agent_calls]Visible = undefined,
     visible_count: usize = 0,
-    requests: [protocol.Limits.pending_jobs]Request = undefined,
+    requests: [protocol.Limits.pending_agent_calls]Request = undefined,
     request_count: usize = 0,
     descriptor_scratch: []u8,
     object_prototype: qjs.JSValue,
     array_prototype: qjs.JSValue,
     object_class: qjs.JSClassID = 0,
     array_class: qjs.JSClassID = 0,
-    job_request_invalid: bool = false,
+    turn_request_invalid: bool = false,
     import_attempted: bool = false,
     resource_code: ?[]const u8 = null,
     unhandled_rejections: usize = 0,
@@ -48,7 +48,7 @@ const Evaluation = struct {
 
         const arguments = try cursor.skipValueExact(protocol.Limits.arguments_bytes, key_storage);
         const visible_count = try cursor.readInt(u16);
-        if (visible_count > protocol.Limits.pending_jobs) return error.ExcessiveEntries;
+        if (visible_count > protocol.Limits.pending_agent_calls) return error.ExcessiveEntries;
 
         const state = try allocator.create(Evaluation);
         state.* = .{
@@ -85,7 +85,7 @@ const Evaluation = struct {
                 },
                 .failure => failure: {
                     const code = try cursor.readString(256);
-                    if (!isJobFailureCode(code)) return error.InvalidTag;
+                    if (!isTurnFailureCode(code)) return error.InvalidTag;
                     break :failure code;
                 },
             };
@@ -261,10 +261,10 @@ fn evaluateParsed(state: *Evaluation, builder: *protocol.Builder) []const u8 {
     }
     defer qjs.JS_FreeValue(context, root);
     if (!qjs.JS_IsPromise(root)) return writeSimpleOutcome(builder, .failed, "WorkflowDefaultMustReturnPromise");
-    if (!drainJobs(runtime, state)) return classifyFailure(state, builder, "WorkflowJobFailed");
+    if (!drainJobs(runtime, state)) return classifyFailure(state, builder, "WorkflowEvaluationFailed");
     if (state.resource_code) |code| return writeSimpleOutcome(builder, .resource_exceeded, code);
     if (state.import_attempted) return writeSimpleOutcome(builder, .protocol_failed, "ImportsDisabled");
-    if (state.job_request_invalid) return classifyFailure(state, builder, "WorkflowFailed");
+    if (state.turn_request_invalid) return classifyFailure(state, builder, "WorkflowFailed");
 
     if (qjs.JS_PromiseState(context, root) == qjs.JS_PROMISE_REJECTED) {
         qjs.JS_PromiseMarkAsHandled(context, root);
@@ -308,7 +308,7 @@ fn evaluateParsed(state: *Evaluation, builder: *protocol.Builder) []const u8 {
         qjs.JS_PROMISE_REJECTED => unreachable,
         qjs.JS_PROMISE_PENDING => {
             if (pending_requests != 0) return writeBlocked(builder, state);
-            return writeSimpleOutcome(builder, .deadlocked, "RootPendingWithoutJobs");
+            return writeSimpleOutcome(builder, .deadlocked, "RootPendingWithoutMicrotasks");
         },
         else => return writeSimpleOutcome(builder, .protocol_failed, "RootNotPromise"),
     }
@@ -316,7 +316,7 @@ fn evaluateParsed(state: *Evaluation, builder: *protocol.Builder) []const u8 {
 
 fn classifyFailure(state: *const Evaluation, builder: *protocol.Builder, fallback: []const u8) []const u8 {
     if (state.resource_code) |code| return writeSimpleOutcome(builder, .resource_exceeded, code);
-    if (state.job_request_invalid) return writeSimpleOutcome(builder, .failed, "JobRequestInvalid");
+    if (state.turn_request_invalid) return writeSimpleOutcome(builder, .failed, "TurnRequestInvalid");
     return writeSimpleOutcome(builder, .failed, fallback);
 }
 
@@ -487,13 +487,13 @@ fn agentCall(
 
     if (state.existingRequest(key)) |existing| {
         if (!std.mem.eql(u8, existing.descriptor, descriptor)) {
-            return failAgent(ctx, state, "job key has conflicting descriptor");
+            return failAgent(ctx, state, "Agent Call Key has conflicting descriptor");
         }
         return promiseForVisible(ctx, state, key, existing.pending);
     }
-    if (state.request_count == protocol.Limits.pending_jobs) {
-        state.resource_code = "PendingJobs";
-        return qjs.JS_ThrowRangeError(ctx, "pending job limit exceeded");
+    if (state.request_count == protocol.Limits.pending_agent_calls) {
+        state.resource_code = "PendingAgentCalls";
+        return qjs.JS_ThrowRangeError(ctx, "pending Agent Call limit exceeded");
     }
 
     const stored = state.allocator.dupe(u8, descriptor) catch {
@@ -546,7 +546,7 @@ fn promiseForVisible(context: *qjs.JSContext, state: *Evaluation, key: []const u
             break :output qjs.JS_NewSettledPromise(context, false, value);
         },
         .failure => failure: {
-            const value = makeJobError(context, key, visible.payload);
+            const value = makeTurnError(context, key, visible.payload);
             if (qjs.JS_IsException(value)) return value;
             defer qjs.JS_FreeValue(context, value);
             break :failure qjs.JS_NewSettledPromise(context, true, value);
@@ -554,12 +554,12 @@ fn promiseForVisible(context: *qjs.JSContext, state: *Evaluation, key: []const u
     };
 }
 
-fn makeJobError(context: *qjs.JSContext, key: []const u8, code: []const u8) qjs.JSValue {
+fn makeTurnError(context: *qjs.JSContext, key: []const u8, code: []const u8) qjs.JSValue {
     const value = qjs.JS_NewObject(context);
     if (qjs.JS_IsException(value)) return value;
     if (!setStringProperty(context, value, "code", code) or
-        !setStringProperty(context, value, "job_key", key) or
-        !setStringProperty(context, value, "message", "job did not complete successfully") or
+        !setStringProperty(context, value, "agent_call_key", key) or
+        !setStringProperty(context, value, "message", "Agent Call did not complete successfully") or
         qjs.JS_FreezeObject(context, value) < 0)
     {
         qjs.JS_FreeValue(context, value);
@@ -580,7 +580,7 @@ fn setStringProperty(
 }
 
 fn failAgent(context: *qjs.JSContext, state: *Evaluation, message: [*:0]const u8) qjs.JSValue {
-    state.job_request_invalid = true;
+    state.turn_request_invalid = true;
     return qjs.JS_ThrowTypeError(context, message);
 }
 
@@ -589,19 +589,16 @@ const AgentFields = struct {
     task: qjs.JSValue,
     input: qjs.JSValue,
     schema: qjs.JSValue,
-    agent_profile: qjs.JSValue,
     key_present: bool = false,
     task_present: bool = false,
     input_present: bool = false,
     schema_present: bool = false,
-    agent_profile_present: bool = false,
 
     fn deinit(self: *AgentFields, context: *qjs.JSContext) void {
         qjs.JS_FreeValue(context, self.key);
         qjs.JS_FreeValue(context, self.task);
         qjs.JS_FreeValue(context, self.input);
         qjs.JS_FreeValue(context, self.schema);
-        qjs.JS_FreeValue(context, self.agent_profile);
     }
 };
 
@@ -617,7 +614,6 @@ fn encodeAgentDescriptor(
         .task = qjs.onepage_quickjs_undefined(),
         .input = qjs.onepage_quickjs_undefined(),
         .schema = qjs.onepage_quickjs_undefined(),
-        .agent_profile = qjs.onepage_quickjs_undefined(),
     };
     defer fields.deinit(context);
 
@@ -631,7 +627,7 @@ fn encodeAgentDescriptor(
         qjs.JS_GPN_STRING_MASK | qjs.JS_GPN_SYMBOL_MASK,
     ) < 0) return error.EnumerationFailed;
     defer qjs.JS_FreePropertyEnum(context, table, count);
-    if (count > 5) return error.UnknownField;
+    if (count > 4) return error.UnknownField;
 
     for (table[0..count]) |entry| {
         const field = try atomField(context, entry.atom);
@@ -646,7 +642,6 @@ fn encodeAgentDescriptor(
             .task => .{ &fields.task, &fields.task_present },
             .input => .{ &fields.input, &fields.input_present },
             .schema => .{ &fields.schema, &fields.schema_present },
-            .agent_profile => .{ &fields.agent_profile, &fields.agent_profile_present },
         };
         if (present.*) return error.DuplicateField;
         present.* = true;
@@ -656,7 +651,7 @@ fn encodeAgentDescriptor(
         !qjs.JS_IsString(fields.key) or !qjs.JS_IsString(fields.task)) return error.MissingField;
 
     try builder.writeByte(@intFromEnum(protocol.DataTag.object));
-    var field_count: u32 = 3;
+    var field_count: u32 = 2;
     if (fields.input_present) field_count += 1;
     if (fields.schema_present) field_count += 1;
     var entry_budget = protocol.EntryBudget{};
@@ -685,26 +680,6 @@ fn encodeAgentDescriptor(
     if (fields.schema_present) {
         try builder.writeString("schema");
         try encodeData(context, state, builder, fields.schema, 0, &.{}, &entry_budget);
-    }
-    try builder.writeString("agent_profile");
-    if (!fields.agent_profile_present) {
-        try builder.writeByte(@intFromEnum(protocol.DataTag.string));
-        try builder.writeString("default");
-    } else {
-        if (!qjs.JS_IsString(fields.agent_profile)) return error.InvalidProfile;
-        const profile_start = builder.index;
-        try encodeData(
-            context,
-            state,
-            builder,
-            fields.agent_profile,
-            0,
-            &.{},
-            &entry_budget,
-        );
-        var profile_cursor = protocol.Cursor.init(builder.bytes[profile_start..builder.index]);
-        if (try profile_cursor.readByte() != @intFromEnum(protocol.DataTag.string) or
-            !std.mem.eql(u8, try profile_cursor.readString(64), "default")) return error.InvalidProfile;
     }
     return key;
 }
@@ -1031,7 +1006,7 @@ fn deepFreeze(context: *qjs.JSContext, value: qjs.JSValueConst, depth: usize) !v
     if (qjs.JS_FreezeObject(context, value) < 0) return error.FreezeFailed;
 }
 
-const AgentField = enum { key, task, input, schema, agent_profile };
+const AgentField = enum { key, task, input, schema };
 
 fn atomField(context: *qjs.JSContext, atom: qjs.JSAtom) !AgentField {
     const value = qjs.JS_AtomToValue(context, atom);
@@ -1046,7 +1021,6 @@ fn atomField(context: *qjs.JSContext, atom: qjs.JSAtom) !AgentField {
         .{ AgentField.task, "task" },
         .{ AgentField.input, "input" },
         .{ AgentField.schema, "schema" },
-        .{ AgentField.agent_profile, "agent_profile" },
     };
     inline for (names) |candidate| {
         if (length == candidate[1].len) {
@@ -1070,12 +1044,12 @@ fn scalarCount(bytes: []const u8) usize {
     return std.unicode.utf8CountCodepoints(bytes) catch std.math.maxInt(usize);
 }
 
-fn isJobFailureCode(code: []const u8) bool {
+fn isTurnFailureCode(code: []const u8) bool {
     const allowed = [_][]const u8{
-        "JobFailed",
-        "JobCancelled",
-        "JobIndeterminate",
-        "JobOutputInvalid",
+        "TurnFailed",
+        "TurnCancelled",
+        "TurnIndeterminate",
+        "TurnOutputInvalid",
         "WorkflowDefinitionConflict",
         "ResourceExceeded",
     };

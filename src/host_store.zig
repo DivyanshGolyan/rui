@@ -1,1607 +1,2315 @@
 const std = @import("std");
 const binding = @import("binding.zig");
-const completion_inbox = @import("completion_inbox.zig");
-const patch_tool = @import("patch_tool.zig");
-const persisted_format = @import("persisted_format.zig");
-const session_transition = @import("session_transition.zig");
+const conversation = @import("conversation.zig");
+const model_contract = @import("model_contract.zig");
+const model_protocol = @import("model_protocol.zig");
 
 const c = @cImport({
     @cInclude("sqlite3.h");
+    @cInclude("fcntl.h");
+    @cInclude("sys/file.h");
+    @cInclude("unistd.h");
 });
 
-pub const schema_version: u32 = persisted_format.epoch;
-pub const application_id: u32 = 0x4f4e5047; // "ONPG"
+pub const schema_version: u32 = 19;
+pub const application_id: u32 = 0x4f4e5047;
 pub const max_path_bytes: usize = 1024;
-pub const max_transition_payload: usize = session_transition.max_payload_size;
-pub const max_workspace_path_bytes: usize = 1024;
-pub const max_model_bytes: usize = 128;
-pub const max_content_bytes: usize = 1024 * 1024;
-pub const content_window_bytes: usize = 4096;
-/// The largest first-import closure shipped by V1 is one apply-patch admission:
-/// patch bytes, its canonical Patch Intent, and the Tool Call content. Existing
-/// content references do not consume this bound.
-pub const max_first_content_imports: usize = 3;
-// SQLITE_LIMIT_LENGTH covers the encoded row, not only its largest BLOB. The
-// content schema has bounded identity, digest, and record-header overhead.
-const sqlite_row_overhead_bytes: usize = 4096;
-const sqlite_max_length_bytes = max_content_bytes + sqlite_row_overhead_bytes;
+pub const max_text_bytes: usize = 1024 * 1024;
+pub const max_conversation_window: usize = 256;
 
-const install_schema_version = std.fmt.comptimePrint(
-    "PRAGMA user_version={d}",
-    .{schema_version},
-);
-
-comptime {
-    std.debug.assert(max_transition_payload == 1012);
-}
-
-const session_schema =
-    \\CREATE TABLE session (
-    \\    session_id BLOB PRIMARY KEY CHECK (length(session_id) = 8),
-    \\    agent_id BLOB NOT NULL CHECK (length(agent_id) = 8),
-    \\    task_id BLOB NOT NULL CHECK (length(task_id) = 8),
-    \\    workspace_path TEXT NOT NULL CHECK (length(workspace_path) BETWEEN 1 AND 1024),
-    \\    model TEXT NOT NULL CHECK (length(model) BETWEEN 1 AND 128),
-    \\    ownership_epoch INTEGER NOT NULL DEFAULT 1 CHECK (ownership_epoch > 0),
-    \\    head_sequence INTEGER NOT NULL DEFAULT 0 CHECK (head_sequence >= 0),
-    \\    UNIQUE (agent_id),
-    \\    UNIQUE (task_id)
-    \\) STRICT
-;
-const content_schema =
+const schema =
     \\CREATE TABLE content (
-    \\    content_id INTEGER PRIMARY KEY,
-    \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
-    \\    content_ref BLOB NOT NULL CHECK (length(content_ref) = 8),
+    \\    content_id INTEGER PRIMARY KEY CHECK (content_id > 0),
     \\    byte_length INTEGER NOT NULL CHECK (byte_length BETWEEN 1 AND 1048576),
     \\    digest BLOB NOT NULL CHECK (length(digest) = 32),
-    \\    payload BLOB NOT NULL CHECK (length(payload) = byte_length),
-    \\    UNIQUE (session_id, content_ref),
-    \\    FOREIGN KEY (session_id) REFERENCES session (session_id)
-    \\) STRICT
-;
-const transition_schema =
-    \\CREATE TABLE session_transition (
-    \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
-    \\    sequence INTEGER NOT NULL CHECK (sequence > 0),
-    \\    payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 1012),
-    \\    record_digest BLOB NOT NULL CHECK (length(record_digest) = 32),
-    \\    PRIMARY KEY (session_id, sequence),
-    \\    FOREIGN KEY (session_id) REFERENCES session (session_id)
-    \\) STRICT, WITHOUT ROWID
-;
-const conversation_schema =
-    \\CREATE TABLE conversation_entry (
-    \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
-    \\    entry_id BLOB NOT NULL CHECK (length(entry_id) = 8),
-    \\    parent_id BLOB CHECK (parent_id IS NULL OR length(parent_id) = 8),
-    \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 1 AND 4),
-    \\    content_ref BLOB NOT NULL CHECK (length(content_ref) = 8),
-    \\    committed_by_sequence INTEGER NOT NULL,
-    \\    PRIMARY KEY (session_id, entry_id),
+    \\    payload BLOB NOT NULL CHECK (length(payload) = byte_length)
+    \\) STRICT;
+    \\CREATE TABLE session (
+    \\    session_id INTEGER PRIMARY KEY CHECK (session_id > 0),
+    \\    workspace_path TEXT NOT NULL CHECK (length(workspace_path) BETWEEN 1 AND 1024),
+    \\    access_scope_digest BLOB NOT NULL CHECK (length(access_scope_digest) = 32)
+    \\) STRICT;
+    \\CREATE TABLE turn (
+    \\    turn_id INTEGER PRIMARY KEY CHECK (turn_id > 0),
+    \\    session_id INTEGER NOT NULL,
+    \\    turn_ordinal INTEGER NOT NULL CHECK (turn_ordinal > 0),
+    \\    admission_digest BLOB NOT NULL CHECK (length(admission_digest) = 32),
+    \\    initial_entry_id INTEGER NOT NULL CHECK (initial_entry_id > 0),
+    \\    outcome_kind INTEGER CHECK (outcome_kind IS NULL OR outcome_kind BETWEEN 1 AND 3),
+    \\    outcome_content_id INTEGER,
+    \\    failure_code INTEGER,
+    \\    UNIQUE (session_id, turn_ordinal),
+    \\    UNIQUE (session_id, turn_id),
     \\    FOREIGN KEY (session_id) REFERENCES session (session_id),
-    \\    FOREIGN KEY (session_id, content_ref)
-    \\        REFERENCES content (session_id, content_ref),
-    \\    FOREIGN KEY (session_id, committed_by_sequence)
-    \\        REFERENCES session_transition (session_id, sequence)
-    \\) STRICT
-;
-const completion_schema =
-    \\CREATE TABLE completion_inbox (
-    \\    inbox_id INTEGER PRIMARY KEY,
-    \\    session_id BLOB NOT NULL CHECK (length(session_id) = 8),
-    \\    ownership_epoch BLOB NOT NULL CHECK (length(ownership_epoch) = 8),
-    \\    agent_generation INTEGER NOT NULL CHECK (agent_generation > 0),
-    \\    operation_id BLOB NOT NULL CHECK (length(operation_id) = 8),
-    \\    operation_generation INTEGER NOT NULL CHECK (operation_generation > 0),
-    \\    attempt_id BLOB NOT NULL CHECK (length(attempt_id) = 8),
-    \\    evidence_kind INTEGER NOT NULL CHECK (evidence_kind > 0),
-    \\    result_reference BLOB NOT NULL CHECK (length(result_reference) = 8),
-    \\    result_digest BLOB NOT NULL CHECK (length(result_digest) = 32),
-    \\    completion_digest BLOB NOT NULL CHECK (length(completion_digest) = 32),
-    \\    consumed_by_sequence INTEGER,
-    \\    UNIQUE (
-    \\        session_id, agent_generation, operation_id,
-    \\        operation_generation, attempt_id, evidence_kind
+    \\    FOREIGN KEY (outcome_content_id) REFERENCES content (content_id),
+    \\    FOREIGN KEY (turn_id, initial_entry_id) REFERENCES conversation_entry (turn_id, entry_id)
+    \\        DEFERRABLE INITIALLY DEFERRED,
+    \\    CHECK ((outcome_kind IS NULL AND outcome_content_id IS NULL AND failure_code IS NULL) OR
+    \\           (outcome_kind = 1 AND outcome_content_id IS NOT NULL AND failure_code IS NULL) OR
+    \\           (outcome_kind = 2 AND outcome_content_id IS NOT NULL AND failure_code IS NOT NULL) OR
+    \\           (outcome_kind = 3 AND outcome_content_id IS NULL AND failure_code IS NULL))
+    \\) STRICT;
+    \\CREATE UNIQUE INDEX one_nonterminal_turn_per_session
+    \\ON turn (session_id) WHERE outcome_kind IS NULL;
+    \\CREATE TABLE operation (
+    \\    operation_id INTEGER PRIMARY KEY CHECK (operation_id > 0),
+    \\    session_id INTEGER NOT NULL,
+    \\    turn_id INTEGER NOT NULL,
+    \\    operation_ordinal INTEGER NOT NULL CHECK (operation_ordinal > 0),
+    \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 1 AND 3),
+    \\    descriptor_content_id INTEGER NOT NULL,
+    \\    descriptor_digest BLOB NOT NULL CHECK (length(descriptor_digest) = 32),
+    \\    caused_by_entry_id INTEGER,
+    \\    caused_by_entry_kind INTEGER GENERATED ALWAYS AS (
+    \\        CASE WHEN caused_by_entry_id IS NULL THEN NULL ELSE 3 END
+    \\    ) STORED,
+    \\    UNIQUE (turn_id, operation_ordinal),
+    \\    UNIQUE (turn_id, operation_id),
+    \\    UNIQUE (session_id, turn_id, operation_id),
+    \\    UNIQUE (operation_id, descriptor_content_id),
+    \\    UNIQUE (caused_by_entry_id),
+    \\    FOREIGN KEY (session_id, turn_id) REFERENCES turn (session_id, turn_id),
+    \\    FOREIGN KEY (descriptor_content_id) REFERENCES content (content_id),
+    \\    FOREIGN KEY (turn_id, caused_by_entry_id) REFERENCES conversation_entry (turn_id, entry_id),
+    \\    FOREIGN KEY (
+    \\        session_id, turn_id, caused_by_entry_id, caused_by_entry_kind
+    \\    ) REFERENCES conversation_entry (
+    \\        session_id, turn_id, entry_id, kind
     \\    ),
+    \\    CHECK ((kind = 1 AND caused_by_entry_id IS NULL) OR
+    \\           (kind IN (2, 3) AND caused_by_entry_id IS NOT NULL))
+    \\) STRICT;
+    \\CREATE TABLE conversation_entry (
+    \\    session_id INTEGER NOT NULL,
+    \\    revision INTEGER NOT NULL CHECK (revision > 0),
+    \\    entry_id INTEGER NOT NULL CHECK (entry_id > 0),
+    \\    turn_id INTEGER NOT NULL,
+    \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 1 AND 4),
+    \\    content_id INTEGER NOT NULL,
+    \\    source_operation_id INTEGER,
+    \\    call_ordinal INTEGER,
+    \\    PRIMARY KEY (session_id, revision),
+    \\    UNIQUE (entry_id),
+    \\    UNIQUE (session_id, entry_id),
+    \\    UNIQUE (turn_id, entry_id),
+    \\    UNIQUE (session_id, turn_id, entry_id, kind),
     \\    FOREIGN KEY (session_id) REFERENCES session (session_id),
-    \\    FOREIGN KEY (session_id, result_reference)
-    \\        REFERENCES content (session_id, content_ref),
-    \\    FOREIGN KEY (session_id, consumed_by_sequence)
-    \\        REFERENCES session_transition (session_id, sequence)
-    \\) STRICT
-;
-const completion_index_schema =
-    \\CREATE INDEX completion_inbox_by_session
-    \\ON completion_inbox (session_id, consumed_by_sequence, inbox_id)
-;
-
-const read_session_sql: [:0]const u8 =
-    \\SELECT agent_id, task_id, ownership_epoch, workspace_path, model
-    \\FROM session WHERE session_id = ?1
-;
-const session_head_sql: [:0]const u8 =
-    "SELECT head_sequence FROM session WHERE session_id = ?1";
-const claim_ownership_sql: [:0]const u8 =
-    \\UPDATE session SET ownership_epoch = ownership_epoch + 1
-    \\WHERE session_id = ?1 AND ownership_epoch < 9223372036854775807
-    \\RETURNING ownership_epoch
-;
-const completion_head_sql: [:0]const u8 =
-    "SELECT inbox_id FROM completion_inbox WHERE session_id = ?1 AND consumed_by_sequence IS NULL ORDER BY inbox_id DESC LIMIT 1";
-const pending_completion_count_sql: [:0]const u8 =
-    \\SELECT count(p.inbox_id)
-    \\FROM session AS s
-    \\LEFT JOIN (
-    \\    SELECT inbox_id, session_id FROM completion_inbox
-    \\    WHERE session_id = ?1 AND consumed_by_sequence IS NULL
-    \\    LIMIT 4096
-    \\) AS p ON p.session_id = s.session_id
-    \\WHERE s.session_id = ?1 AND s.agent_id = ?2
-    \\GROUP BY s.session_id
-;
-const find_completion_sql: [:0]const u8 =
-    \\SELECT c.inbox_id, c.result_reference, c.result_digest, c.completion_digest,
-    \\       c.ownership_epoch, c.consumed_by_sequence
-    \\FROM completion_inbox AS c
-    \\JOIN session AS s ON s.session_id = c.session_id
-    \\WHERE c.session_id = ?1 AND s.agent_id = ?2 AND c.agent_generation = ?3
-    \\  AND c.operation_id = ?4 AND c.operation_generation = ?5
-    \\  AND c.attempt_id = ?6 AND c.evidence_kind = ?7
-;
-const read_completion_sql: [:0]const u8 =
-    \\SELECT c.evidence_kind, c.ownership_epoch, s.agent_id, c.agent_generation,
-    \\       c.operation_id, c.operation_generation, c.attempt_id,
-    \\       c.result_reference, c.result_digest, c.completion_digest, c.consumed_by_sequence
-    \\FROM completion_inbox AS c
-    \\JOIN session AS s ON s.session_id = c.session_id
-    \\WHERE c.session_id = ?1 AND c.inbox_id = ?2
-;
-const read_completion_after_sql: [:0]const u8 =
-    \\SELECT c.inbox_id, c.evidence_kind, c.ownership_epoch, s.agent_id,
-    \\       c.agent_generation, c.operation_id, c.operation_generation,
-    \\       c.attempt_id, c.result_reference, c.result_digest,
-    \\       c.completion_digest, c.consumed_by_sequence
-    \\FROM completion_inbox AS c
-    \\JOIN session AS s ON s.session_id = c.session_id
-    \\WHERE c.session_id = ?1 AND c.consumed_by_sequence IS NULL
-    \\  AND c.inbox_id > ?2 AND c.inbox_id <= ?3
-    \\ORDER BY c.inbox_id
-    \\LIMIT 1
-;
-const advance_session_head_sql: [:0]const u8 =
-    \\UPDATE session SET head_sequence = ?2
-    \\WHERE session_id = ?1 AND ownership_epoch = ?3 AND head_sequence = ?4 AND agent_id = ?5
-;
-const associate_completion_sql: [:0]const u8 =
-    \\UPDATE completion_inbox SET consumed_by_sequence = ?2
-    \\WHERE session_id = ?1 AND consumed_by_sequence IS NULL
-    \\  AND ownership_epoch = ?3 AND agent_generation = ?4
-    \\  AND operation_id = ?5 AND operation_generation = ?6
-    \\  AND attempt_id = ?7 AND evidence_kind = ?8
-    \\  AND result_reference = ?9 AND result_digest = ?10
-    \\  AND session_id IN (SELECT session_id FROM session WHERE agent_id = ?11)
-;
-const read_transition_sql: [:0]const u8 =
-    \\SELECT sequence, payload, record_digest
-    \\FROM session_transition
-    \\WHERE session_id = ?1 AND sequence = ?2
-;
-const scan_completed_attempt_sql: [:0]const u8 =
-    \\SELECT sequence, payload, record_digest
-    \\FROM session_transition
-    \\WHERE session_id = ?1 AND sequence >= ?2 AND sequence <= ?3
-    \\ORDER BY sequence
-;
-const read_conversation_sql: [:0]const u8 =
-    \\SELECT parent_id, kind, content_ref, committed_by_sequence
-    \\FROM conversation_entry WHERE session_id = ?1 AND entry_id = ?2
-;
-const read_content_sql: [:0]const u8 =
-    \\SELECT content_id, byte_length, digest
-    \\FROM content WHERE session_id = ?1 AND content_ref = ?2
+    \\    FOREIGN KEY (session_id, turn_id) REFERENCES turn (session_id, turn_id),
+    \\    FOREIGN KEY (content_id) REFERENCES content (content_id),
+    \\    FOREIGN KEY (turn_id, source_operation_id) REFERENCES operation (turn_id, operation_id),
+    \\    CHECK ((kind = 1 AND source_operation_id IS NULL AND call_ordinal IS NULL) OR
+    \\           (kind = 2 AND source_operation_id IS NOT NULL AND call_ordinal IS NULL) OR
+    \\           (kind IN (3, 4) AND source_operation_id IS NOT NULL AND call_ordinal >= 0))
+    \\) STRICT, WITHOUT ROWID;
+    \\CREATE UNIQUE INDEX one_tool_result_per_action
+    \\ON conversation_entry (source_operation_id) WHERE kind = 4;
+    \\CREATE UNIQUE INDEX one_call_ordinal_per_model
+    \\ON conversation_entry (source_operation_id, call_ordinal) WHERE kind = 3;
+    \\CREATE TABLE attempt (
+    \\    attempt_id INTEGER PRIMARY KEY CHECK (attempt_id > 0),
+    \\    operation_id INTEGER NOT NULL,
+    \\    attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal > 0),
+    \\    dispatch_content_id INTEGER NOT NULL,
+    \\    dispatch_digest BLOB NOT NULL CHECK (length(dispatch_digest) = 32),
+    \\    parameters_content_id INTEGER NOT NULL,
+    \\    context_cutoff_revision INTEGER NOT NULL CHECK (context_cutoff_revision >= 0),
+    \\    workspace_digest BLOB NOT NULL CHECK (length(workspace_digest) = 32),
+    \\    external_idempotency_key TEXT,
+    \\    possible_duplicate INTEGER NOT NULL CHECK (possible_duplicate IN (0, 1)),
+    \\    UNIQUE (operation_id, attempt_ordinal),
+    \\    UNIQUE (operation_id, attempt_id),
+    \\    FOREIGN KEY (operation_id) REFERENCES operation (operation_id),
+    \\    FOREIGN KEY (operation_id, dispatch_content_id)
+    \\        REFERENCES operation (operation_id, descriptor_content_id),
+    \\    FOREIGN KEY (dispatch_content_id) REFERENCES content (content_id),
+    \\    FOREIGN KEY (parameters_content_id) REFERENCES content (content_id),
+    \\    CHECK (external_idempotency_key IS NULL OR length(external_idempotency_key) BETWEEN 1 AND 256)
+    \\) STRICT;
+    \\CREATE TABLE attempt_completion (
+    \\    completion_id INTEGER PRIMARY KEY CHECK (completion_id > 0),
+    \\    operation_id INTEGER NOT NULL,
+    \\    attempt_id INTEGER NOT NULL,
+    \\    completion_ordinal INTEGER NOT NULL CHECK (completion_ordinal > 0),
+    \\    evidence_kind INTEGER NOT NULL CHECK (evidence_kind BETWEEN 1 AND 3),
+    \\    evidence_content_id INTEGER NOT NULL,
+    \\    evidence_digest BLOB NOT NULL CHECK (length(evidence_digest) = 32),
+    \\    UNIQUE (attempt_id, completion_ordinal),
+    \\    UNIQUE (attempt_id, completion_id),
+    \\    UNIQUE (operation_id, completion_id),
+    \\    FOREIGN KEY (operation_id, attempt_id) REFERENCES attempt (operation_id, attempt_id),
+    \\    FOREIGN KEY (evidence_content_id) REFERENCES content (content_id)
+    \\) STRICT;
+    \\CREATE TABLE operation_resolution (
+    \\    operation_id INTEGER PRIMARY KEY,
+    \\    resolution_kind INTEGER NOT NULL CHECK (resolution_kind BETWEEN 1 AND 7),
+    \\    completion_id INTEGER,
+    \\    result_content_id INTEGER NOT NULL,
+    \\    result_digest BLOB NOT NULL CHECK (length(result_digest) = 32),
+    \\    FOREIGN KEY (operation_id) REFERENCES operation (operation_id),
+    \\    FOREIGN KEY (operation_id, completion_id)
+    \\        REFERENCES attempt_completion (operation_id, completion_id),
+    \\    FOREIGN KEY (result_content_id) REFERENCES content (content_id)
+    \\) STRICT;
 ;
 
-pub const StoredTransition = struct {
+pub const Digest = binding.Sha256;
+
+pub const SemanticDomain = enum {
+    access_scope,
+    turn,
+    operation,
+    dispatch,
+    workspace,
+    completion,
+    resolution,
+
+    fn name(self: SemanticDomain) []const u8 {
+        return switch (self) {
+            .access_scope => "access-scope",
+            .turn => "turn",
+            .operation => "operation",
+            .dispatch => "dispatch",
+            .workspace => "workspace",
+            .completion => "completion",
+            .resolution => "resolution",
+        };
+    }
+};
+
+pub const TurnOutcome = enum(u8) {
+    completed = 1,
+    failed = 2,
+    cancelled = 3,
+};
+
+pub const TurnCondition = enum {
+    runnable,
+    in_flight,
+    completed,
+    failed,
+    cancelled,
+};
+
+pub const AdmissionResult = enum { admitted, replay };
+
+pub const AdmitTurn = struct {
     session_id: u64,
-    sequence: u64,
-    transaction: session_transition.Transaction,
-};
-
-pub const StoredCompletion = struct {
-    inbox_id: u64,
-    envelope: completion_inbox.Envelope,
-    consumed_by_sequence: ?u64,
-};
-
-pub const CompletionMatch = union(enum) { pending, consumed: u64 };
-
-/// The exact admitted Attempt and the first terminal Result transaction for
-/// its Operation. This is reconstructed from the authoritative bounded ledger
-/// rather than retained as an unbounded resident history.
-pub const CompletedAttempt = struct {
-    operation: session_transition.OperationRecord,
-    attempt: session_transition.AttemptRecord,
-    terminal_result_sequence: u64,
-};
-
-pub const CompletedAttemptScan = struct {
-    next_sequence: u64 = 1,
-    operation: ?session_transition.OperationRecord = null,
-    attempt: ?session_transition.AttemptRecord = null,
-    terminal_before_attempt: bool = false,
-    completed: ?CompletedAttempt = null,
-    exhausted: bool = false,
-
-    pub fn result(self: CompletedAttemptScan) ?CompletedAttempt {
-        return self.completed;
-    }
-
-    pub fn done(self: CompletedAttemptScan) bool {
-        return self.completed != null or self.exhausted;
-    }
-};
-
-pub const StoredConversationEntry = struct {
+    turn_id: u64,
+    turn_ordinal: u32,
     entry_id: u64,
-    parent_id: u64,
-    kind: u8,
-    content_ref: u64,
-    committed_by_sequence: u64,
+    content_id: u64,
+    expected_conversation_revision: u64,
+    workspace_path: []const u8,
+    access_scope_digest: Digest,
+    admission_digest: Digest,
+    user_text: []const u8,
 };
 
-pub const ContentMetadata = struct {
-    length: u64,
-    digest: binding.Blob,
+pub const DecisionSnapshot = struct {
+    session_id: u64,
+    turn_id: u64,
+    conversation_revision: u64,
+    outcome: ?TurnOutcome,
+    unresolved_external_attempts: u16,
 };
 
-pub const ContentSource = union(enum) {
-    bytes: []const u8,
-    file: struct {
-        handle: *const std.Io.File,
-        offset: u64,
-    },
+pub fn classify(snapshot: DecisionSnapshot) TurnCondition {
+    if (snapshot.outcome) |outcome| return switch (outcome) {
+        .completed => .completed,
+        .failed => .failed,
+        .cancelled => .cancelled,
+    };
+    if (snapshot.unresolved_external_attempts != 0) return .in_flight;
+    return .runnable;
+}
+
+pub const ConversationKind = enum(u8) {
+    user_text = 1,
+    assistant_text = 2,
+    tool_call = 3,
+    tool_result = 4,
 };
 
-/// One already-bounded transient value to import inside the transaction that
-/// first references it. File sources are borrowed, position-independent, and
-/// remain owned by the caller until the transaction returns.
-pub const ContentImport = struct {
-    reference: u64,
-    length: u64,
-    digest: binding.Blob,
-    source: ContentSource,
+pub const ConversationEntry = struct {
+    revision: u64,
+    entry_id: u64,
+    turn_id: u64,
+    kind: ConversationKind,
+    content_id: u64,
+    source_operation_id: ?u64,
+    call_ordinal: ?u16,
 };
 
-pub const CompletionResult = union(enum) {
-    existing,
-    first_import: ContentImport,
+pub const OperationKind = enum(u8) {
+    model = 1,
+    bash = 2,
+    apply_patch = 3,
 };
 
-pub const CompletionPublication = union(enum) {
-    pending: struct {
-        envelope: completion_inbox.Envelope,
-        result: CompletionResult,
-    },
-    audited: struct {
-        envelope: completion_inbox.Envelope,
-        result: CompletionResult,
-        consumed_by_sequence: u64,
-    },
-
-    fn envelope(self: CompletionPublication) completion_inbox.Envelope {
-        return switch (self) {
-            .pending => |value| value.envelope,
-            .audited => |value| value.envelope,
-        };
-    }
-
-    fn result(self: CompletionPublication) CompletionResult {
-        return switch (self) {
-            .pending => |value| value.result,
-            .audited => |value| value.result,
-        };
-    }
-
-    fn auditSequence(self: CompletionPublication) ?u64 {
-        return switch (self) {
-            .pending => null,
-            .audited => |value| value.consumed_by_sequence,
-        };
-    }
+pub const EvidenceKind = enum(u8) {
+    success = 1,
+    failure = 2,
+    uncertain = 3,
 };
 
-/// A closed prepared relationship between content imported by one semantic
-/// transaction and the facts that first reference it.
-pub const TransactionContentImport = union(enum) {
-    transaction_fact: ContentImport,
-    patch_intent: struct {
-        intent: ContentImport,
-        patch: ContentImport,
-    },
+pub const ResolutionKind = enum(u8) {
+    success = 1,
+    failure = 2,
+    denied = 3,
+    indeterminate = 4,
+    cancelled = 5,
+    model_tool_calls = 6,
+    final_answer = 7,
 };
 
-pub const PreparedCommit = struct {
-    transaction: session_transition.Transaction,
-    content: []const TransactionContentImport = &.{},
+pub const AdmitOperation = struct {
+    turn_id: u64,
+    operation_id: u64,
+    operation_ordinal: u32,
+    kind: OperationKind,
+    descriptor_content_id: u64,
+    descriptor: []const u8,
+    descriptor_digest: Digest,
 };
 
-pub const Config = struct {
-    page_cache_kib: u16 = 64,
-    maximum_page_count: u32 = 262_144,
-    admission_reserve_pages: u16 = 16,
-    fault: ?FaultHook = null,
+pub const AdmitAttempt = struct {
+    operation_id: u64,
+    attempt_id: u64,
+    attempt_ordinal: u32,
+    dispatch_content_id: u64,
+    dispatch_request: []const u8,
+    dispatch_digest: Digest,
+    parameters_content_id: u64,
+    parameters: []const u8,
+    context_cutoff_revision: u64,
+    workspace_digest: Digest,
+    external_idempotency_key: ?[]const u8,
+    possible_duplicate: bool = false,
 };
 
-pub const MemoryAccounting = struct {
-    allowance_bytes: u64,
-    heap_current_bytes: u64,
-    heap_highwater_bytes: u64,
-    page_cache_current_bytes: u64,
-    lookaside_current_slots: u64,
-    lookaside_highwater_slots: u64,
-    statements_current_bytes: u64,
+pub const CompleteAndResolve = struct {
+    operation_id: u64,
+    attempt_id: u64,
+    completion_id: u64,
+    completion_ordinal: u32,
+    evidence_kind: EvidenceKind,
+    completion_content_id: u64,
+    completion_content: []const u8,
+    completion_digest: Digest,
+    resolution_kind: ResolutionKind,
+    result_content_id: u64,
+    result_content: []const u8,
+    resolution_digest: Digest,
 };
 
-/// SQLite-maintained storage work and pager counters. Production fixes the
-/// journal mode during database initialization; this reports only values with
-/// a current measurement consumer.
-pub const SqlitePagerAccounting = struct {
-    page_size_bytes: u64,
-    page_count: u64,
-    freelist_pages: u64,
-    cache_pages_written: u64,
-    cache_spill_events: u64,
+pub const RecordCompletion = struct {
+    operation_id: u64,
+    attempt_id: u64,
+    completion_id: u64,
+    completion_ordinal: u32,
+    evidence_kind: EvidenceKind,
+    content_id: u64,
+    content: []const u8,
+    completion_digest: Digest,
 };
 
-pub const FaultBoundary = enum {
-    before_transition_read,
-    after_transition_head_advance,
-    after_transition_insert,
-    before_commit,
+pub const CompletionRecord = struct {
+    operation_id: u64,
+    attempt_id: u64,
+    completion_id: u64,
+    completion_ordinal: u32,
+    evidence_kind: EvidenceKind,
+    content_id: u64,
+    digest: Digest,
+};
+
+pub const ResolveWithoutCompletion = struct {
+    operation_id: u64,
+    resolution_kind: ResolutionKind,
+    content_id: u64,
+    content: []const u8,
+    resolution_digest: Digest,
+};
+
+pub const SettleTurn = struct {
+    turn_id: u64,
+    outcome: TurnOutcome,
+    failure_content_id: ?u64 = null,
+    failure_message: ?[]const u8 = null,
+    failure_code: ?u16 = null,
+};
+
+pub const ToolCallCandidate = struct {
+    entry_id: u64,
+    content_id: u64,
+    content: []const u8,
+    action_operation_id: u64,
+    action_operation_ordinal: u32,
+    action_kind: OperationKind,
+    descriptor_content_id: u64,
+    descriptor: []const u8,
+    descriptor_digest: Digest,
+};
+
+pub const AdmitModelToolCalls = struct {
+    turn_id: u64,
+    model_operation_id: u64,
+    attempt_id: u64,
+    completion_id: u64,
+    completion_content_id: u64,
+    captured_output: []const u8,
+    completion_digest: Digest,
+    expected_conversation_revision: u64,
+    calls: []const ToolCallCandidate,
+};
+
+pub const ToolResultCandidate = struct {
+    action_operation_id: u64,
+    entry_id: u64,
+};
+
+pub const AppendToolResults = struct {
+    turn_id: u64,
+    parent_model_operation_id: u64,
+    expected_conversation_revision: u64,
+    results: []const ToolResultCandidate,
+};
+
+pub const CompleteTurn = struct {
+    turn_id: u64,
+    model_operation_id: u64,
+    attempt_id: u64,
+    completion_id: u64,
+    completion_content_id: u64,
+    final_entry_id: u64,
+    final_content_id: u64,
+    captured_output: []const u8,
+    final_answer: []const u8,
+    completion_digest: Digest,
+    expected_conversation_revision: u64,
+};
+
+pub const FailTurnFromCompletion = struct {
+    turn_id: u64,
+    completion: CompleteAndResolve,
+    failure_code: u16,
+};
+
+pub const FailTurnWithoutCompletion = struct {
+    turn_id: u64,
+    operation_id: u64,
+    result_content_id: u64,
+    message: []const u8,
+    failure_code: u16,
+};
+
+pub const OperationView = struct {
+    operation_id: u64,
+    operation_ordinal: u32,
+    kind: OperationKind,
+    caused_by_operation_id: ?u64,
+    call_ordinal: ?u16,
+};
+
+pub const PendingToolResult = struct {
+    parent_model_operation_id: u64,
+    action_operation_id: u64,
+    call_ordinal: u16,
+};
+
+pub const OperationRecord = struct {
+    session_id: u64,
+    turn_id: u64,
+    operation_id: u64,
+    operation_ordinal: u32,
+    kind: OperationKind,
+    descriptor_content_id: u64,
+    descriptor_digest: Digest,
+    caused_by_operation_id: ?u64,
+    caused_by_entry_id: ?u64,
+    call_ordinal: ?u16,
+};
+
+pub const SessionRecord = struct {
+    session_id: u64,
+    conversation_revision: u64,
+    active_turn_id: ?u64,
+    latest_turn_id: ?u64,
+};
+
+pub const TurnRecord = struct {
+    session_id: u64,
+    turn_id: u64,
+    turn_ordinal: u32,
+    outcome: ?TurnOutcome,
+    outcome_content_id: ?u64,
+    failure_code: ?u16,
+};
+
+pub const CrashPoint = enum {
+    after_turn_row,
+    before_turn_commit,
+    after_turn_commit,
+    before_operation_commit,
+    after_operation_commit,
+    before_attempt_commit,
+    after_attempt_commit,
+    after_completion_row,
+    after_completion_commit,
+    before_resolution_commit,
+    after_resolution_commit,
+    after_final_entry,
+    after_failure_resolution,
+    before_turn_settlement_commit,
+    after_turn_settlement_commit,
+    before_turn_outcome_commit,
+    after_turn_outcome_commit,
 };
 
 pub const FaultHook = struct {
     context: *anyopaque,
-    reached: *const fn (*anyopaque, FaultBoundary) anyerror!void,
-};
+    reach_fn: *const fn (*anyopaque, CrashPoint) anyerror!void,
 
-pub const SessionIdentity = struct {
-    session_id: u64,
-    agent_id: u64,
-    task_id: u64,
-
-    pub fn validate(self: SessionIdentity) !void {
-        const values = [_]u64{
-            self.session_id,
-            self.agent_id,
-            self.task_id,
-        };
-        for (values, 0..) |value, index| {
-            if (value == 0) return error.InvalidIdentity;
-            for (values[index + 1 ..]) |other| {
-                if (value == other) return error.InvalidIdentity;
-            }
-        }
+    fn reach(self: FaultHook, point: CrashPoint) !void {
+        try self.reach_fn(self.context, point);
     }
 };
 
-pub const SessionDescriptor = struct {
-    identities: SessionIdentity,
-    workspace_path: []const u8,
-    model: []const u8,
-};
+pub fn semanticDigest(domain: SemanticDomain, bytes: []const u8) Digest {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("onepage-relational-v1\x00");
+    hasher.update(domain.name());
+    hasher.update("\x00");
+    hasher.update(bytes);
+    var result: Digest = undefined;
+    hasher.final(&result);
+    return result;
+}
 
-pub const StoredSession = struct {
-    identities: SessionIdentity,
-    ownership_epoch: u64,
-    workspace_path: [max_workspace_path_bytes]u8,
-    workspace_path_length: u16,
-    model: [max_model_bytes]u8,
-    model_length: u8,
-
-    pub fn workspacePath(self: *const StoredSession) []const u8 {
-        return self.workspace_path[0..self.workspace_path_length];
-    }
-
-    pub fn modelName(self: *const StoredSession) []const u8 {
-        return self.model[0..self.model_length];
-    }
-};
-
-pub const OwnerToken = struct {
-    session_id: u64,
-    epoch: u64,
-};
-
-pub const StorageOwner = struct {
-    io: std.Io,
-    request_lock: std.Io.Mutex = .init,
-    lock_file: std.Io.File,
+pub const Store = struct {
     database: *c.sqlite3,
-    fault: ?FaultHook,
-    admission_reserve_pages: u16,
+    lock_fd: c_int,
     open_: bool = true,
-    failed_: bool = false,
+    fault_hook: ?FaultHook = null,
 
-    pub fn open(io: std.Io, path: []const u8, config: Config) !StorageOwner {
-        try validateConfig(path, config);
+    pub fn setFaultHook(self: *Store, hook: ?FaultHook) void {
+        self.fault_hook = hook;
+    }
 
-        var lock_path_buffer: [max_path_bytes + 5]u8 = undefined;
-        const lock_path = try std.fmt.bufPrint(&lock_path_buffer, "{s}.lock", .{path});
-        var lock_file = try openHostLock(io, lock_path);
-        errdefer {
-            lock_file.unlock(io);
-            lock_file.close(io);
-        }
-
-        var terminated_path: [max_path_bytes:0]u8 = undefined;
-        @memcpy(terminated_path[0..path.len], path);
-        terminated_path[path.len] = 0;
+    pub fn open(path: []const u8) !Store {
+        if (path.len == 0 or path.len > max_path_bytes) return error.InvalidHostStorePath;
+        const lock_fd = try acquireHostLock(path);
+        errdefer releaseHostLock(lock_fd);
+        var terminated: [max_path_bytes:0]u8 = undefined;
+        @memcpy(terminated[0..path.len], path);
+        terminated[path.len] = 0;
         var maybe_database: ?*c.sqlite3 = null;
         const flags = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE |
             c.SQLITE_OPEN_NOMUTEX | c.SQLITE_OPEN_PRIVATECACHE;
-        const open_result = c.sqlite3_open_v2(&terminated_path, &maybe_database, flags, null);
-        if (open_result != c.SQLITE_OK) {
-            if (maybe_database) |database| closeDatabase(database);
-            return mapSqliteError(open_result);
+        const result = c.sqlite3_open_v2(&terminated, &maybe_database, flags, null);
+        if (result != c.SQLITE_OK) {
+            if (maybe_database) |database| _ = c.sqlite3_close_v2(database);
+            return mapSqliteError(result);
         }
         const database = maybe_database orelse return error.HostStoreOpenFailed;
-        errdefer closeDatabase(database);
-
-        var owner: StorageOwner = .{
-            .io = io,
-            .lock_file = lock_file,
-            .database = database,
-            .fault = config.fault,
-            .admission_reserve_pages = config.admission_reserve_pages,
-        };
-        const stored_application_id = try owner.pragmaU64("PRAGMA application_id");
-        const stored_schema_version = try owner.pragmaU64("PRAGMA user_version");
-        const install = stored_application_id == 0 and stored_schema_version == 0 and
-            try owner.schemaIsEmpty();
-        if (!install) {
-            if (stored_application_id != application_id) return error.InvalidHostStoreIdentity;
-            if (stored_schema_version != schema_version) return error.UnsupportedHostStoreVersion;
+        errdefer std.debug.assert(c.sqlite3_close_v2(database) == c.SQLITE_OK);
+        var store: Store = .{ .database = database, .lock_fd = lock_fd };
+        try store.execute("PRAGMA foreign_keys=ON");
+        try store.execute("PRAGMA journal_mode=WAL");
+        try store.execute("PRAGMA synchronous=FULL");
+        try store.execute("PRAGMA busy_timeout=0");
+        const app_id = try store.pragmaU64("PRAGMA application_id");
+        const version = try store.pragmaU64("PRAGMA user_version");
+        const empty = app_id == 0 and version == 0 and try store.schemaIsEmpty();
+        if (empty) {
+            try store.execute("BEGIN IMMEDIATE");
+            errdefer store.rollback();
+            try store.execute(schema);
+            try store.execute("PRAGMA application_id=1330532423");
+            try store.execute("PRAGMA user_version=19");
+            try store.execute("COMMIT");
+        } else if (app_id != application_id or version != schema_version) {
+            return error.UnsupportedHostStoreVersion;
         }
-        try owner.harden(config);
-        if (install) try owner.installSchema();
-        try owner.verifySchemaIdentity();
-        try owner.validateSchemaShape();
-        return owner;
+        if (try store.pragmaU64("PRAGMA foreign_keys") != 1) return error.ForeignKeysDisabled;
+        if (try store.pragmaU64("PRAGMA synchronous") != 2) return error.InvalidSynchronousMode;
+        return store;
     }
 
-    pub fn close(self: *StorageOwner) void {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
+    pub fn close(self: *Store) void {
         if (!self.open_) return;
-        const close_result = c.sqlite3_close_v2(self.database);
-        std.debug.assert(close_result == c.SQLITE_OK);
-        self.lock_file.unlock(self.io);
-        self.lock_file.close(self.io);
+        std.debug.assert(c.sqlite3_close_v2(self.database) == c.SQLITE_OK);
+        releaseHostLock(self.lock_fd);
         self.open_ = false;
     }
 
-    pub fn createSession(self: *StorageOwner, identity: SessionIdentity) !void {
-        const task = "fixture task";
-        return self.createSessionWithContent(.{
-            .identities = identity,
-            .workspace_path = ".",
-            .model = "fixture:test",
-        }, initialTransaction(identity), .{
-            .reference = identity.task_id,
-            .length = task.len,
-            .digest = binding.hash(binding.Blob, task),
-            .source = .{ .bytes = task },
-        });
-    }
-
-    pub fn createSessionWithMetadata(
-        self: *StorageOwner,
-        descriptor: SessionDescriptor,
-        transaction: session_transition.Transaction,
-    ) !void {
-        const task = "fixture task";
-        return self.createSessionWithContent(descriptor, transaction, .{
-            .reference = descriptor.identities.task_id,
-            .length = task.len,
-            .digest = binding.hash(binding.Blob, task),
-            .source = .{ .bytes = task },
-        });
-    }
-
-    pub fn createSessionWithContent(
-        self: *StorageOwner,
-        descriptor: SessionDescriptor,
-        transaction: session_transition.Transaction,
-        task_content: ContentImport,
-    ) !void {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        try descriptor.identities.validate();
-        if (descriptor.workspace_path.len == 0 or
-            descriptor.workspace_path.len > max_workspace_path_bytes or
-            descriptor.model.len == 0 or descriptor.model.len > max_model_bytes or
-            !std.unicode.utf8ValidateSlice(descriptor.model))
-        {
-            return error.InvalidSessionMetadata;
-        }
-        if (transaction.sequence != 1) return error.InvalidTransitionSequence;
-        try validateTransactionIdentity(descriptor.identities, transaction);
-        if (task_content.reference != descriptor.identities.task_id) {
-            return error.InvalidContentReference;
-        }
-        var payload_buffer: [session_transition.max_payload_size]u8 = undefined;
-        const payload = try session_transition.encode(&payload_buffer, transaction);
-
+    pub fn admitTurn(self: *Store, command: AdmitTurn) !AdmissionResult {
+        try validateAdmitTurn(command);
         try self.execute("BEGIN IMMEDIATE");
-        errdefer self.rollbackOrPoison();
-        const statement = try self.prepare(
-            \\INSERT INTO session (
-            \\    session_id, agent_id, task_id, workspace_path, model, head_sequence
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, 1)
-        );
-        defer finalize(statement);
-        var encoded_identities: [3][8]u8 = undefined;
-        try bindIdentity(statement, 1, descriptor.identities.session_id, &encoded_identities[0]);
-        try bindIdentity(statement, 2, descriptor.identities.agent_id, &encoded_identities[1]);
-        try bindIdentity(statement, 3, descriptor.identities.task_id, &encoded_identities[2]);
-        try bindText(statement, 4, descriptor.workspace_path);
-        try bindText(statement, 5, descriptor.model);
-        try expectDone(c.sqlite3_step(statement));
-        try self.insertContent(descriptor.identities.session_id, task_content);
-        try self.insertTransaction(descriptor.identities.session_id, transaction, payload);
-        try self.ensureAdmissionCapacity();
-        try self.reach(.before_commit);
-        try self.execute("COMMIT");
-    }
+        errdefer self.rollback();
 
-    pub fn memoryAccounting(self: *StorageOwner, reset_highwater: bool) !MemoryAccounting {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        var heap_current: c.sqlite3_int64 = 0;
-        var heap_highwater: c.sqlite3_int64 = 0;
-        try expectOk(c.sqlite3_status64(
-            c.SQLITE_STATUS_MEMORY_USED,
-            &heap_current,
-            &heap_highwater,
-            @intFromBool(reset_highwater),
-        ));
-        const cache = try self.databaseStatus(c.SQLITE_DBSTATUS_CACHE_USED, reset_highwater);
-        const lookaside = try self.databaseStatus(c.SQLITE_DBSTATUS_LOOKASIDE_USED, reset_highwater);
-        const statements = try self.databaseStatus(c.SQLITE_DBSTATUS_STMT_USED, reset_highwater);
-        return .{
-            .allowance_bytes = try processHeapLimit(),
-            .heap_current_bytes = try nonnegative(heap_current),
-            .heap_highwater_bytes = try nonnegative(heap_highwater),
-            .page_cache_current_bytes = cache.current,
-            .lookaside_current_slots = lookaside.current,
-            .lookaside_highwater_slots = lookaside.highwater,
-            .statements_current_bytes = statements.current,
-        };
-    }
-
-    pub fn sqlitePagerAccounting(
-        self: *StorageOwner,
-        reset_counters: bool,
-    ) !SqlitePagerAccounting {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        const writes = try self.databaseStatus(c.SQLITE_DBSTATUS_CACHE_WRITE, reset_counters);
-        const spills = try self.databaseStatus(c.SQLITE_DBSTATUS_CACHE_SPILL, reset_counters);
-        return .{
-            .page_size_bytes = try self.pragmaU64("PRAGMA page_size"),
-            .page_count = try self.pragmaU64("PRAGMA page_count"),
-            .freelist_pages = try self.pragmaU64("PRAGMA freelist_count"),
-            .cache_pages_written = writes.current,
-            .cache_spill_events = spills.current,
-        };
-    }
-
-    pub fn readSession(self: *StorageOwner, session_id: u64) !StoredSession {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        if (session_id == 0) return error.InvalidIdentity;
-        const statement = try self.prepare(read_session_sql);
-        defer finalize(statement);
-        var encoded_session_id: [8]u8 = undefined;
-        try bindIdentity(statement, 1, session_id, &encoded_session_id);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return error.SessionNotFound;
-        if (result != c.SQLITE_ROW) return mapSqliteError(result);
-        const ownership_epoch = c.sqlite3_column_int64(statement, 2);
-        const workspace_length = c.sqlite3_column_bytes(statement, 3);
-        const model_length = c.sqlite3_column_bytes(statement, 4);
-        if (ownership_epoch <= 0 or workspace_length <= 0 or workspace_length > max_workspace_path_bytes or
-            model_length <= 0 or model_length > max_model_bytes)
-        {
-            return error.CorruptHostStore;
-        }
-        var stored: StoredSession = .{
-            .identities = .{
-                .session_id = session_id,
-                .agent_id = try readIdentityColumn(statement, 0),
-                .task_id = try readIdentityColumn(statement, 1),
-            },
-            .ownership_epoch = @intCast(ownership_epoch),
-            .workspace_path = undefined,
-            .workspace_path_length = @intCast(workspace_length),
-            .model = undefined,
-            .model_length = @intCast(model_length),
-        };
-        try stored.identities.validate();
-        const workspace_pointer = c.sqlite3_column_text(statement, 3) orelse {
-            return error.CorruptHostStore;
-        };
-        const model_pointer = c.sqlite3_column_text(statement, 4) orelse {
-            return error.CorruptHostStore;
-        };
-        @memcpy(
-            stored.workspace_path[0..stored.workspace_path_length],
-            workspace_pointer[0..stored.workspace_path_length],
-        );
-        @memcpy(stored.model[0..stored.model_length], model_pointer[0..stored.model_length]);
-        if (!std.unicode.utf8ValidateSlice(stored.modelName())) return error.CorruptHostStore;
-        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-        return stored;
-    }
-
-    pub fn sessionHead(self: *StorageOwner, session_id: u64) !u64 {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        if (session_id == 0) return error.InvalidIdentity;
-        const statement = try self.prepare(session_head_sql);
-        defer finalize(statement);
-        var encoded_session_id: [8]u8 = undefined;
-        try bindIdentity(statement, 1, session_id, &encoded_session_id);
-        const step_result = c.sqlite3_step(statement);
-        if (step_result == c.SQLITE_DONE) return 0;
-        if (step_result != c.SQLITE_ROW) return mapSqliteError(step_result);
-        const value = c.sqlite3_column_int64(statement, 0);
-        if (value < 0) return error.CorruptHostStore;
-        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-        return @intCast(value);
-    }
-
-    pub fn claimSession(self: *StorageOwner, session_id: u64) !u64 {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        if (session_id == 0) return error.InvalidIdentity;
-        const statement = try self.prepare(claim_ownership_sql);
-        defer finalize(statement);
-        var encoded_session_id: [8]u8 = undefined;
-        try bindIdentity(statement, 1, session_id, &encoded_session_id);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return error.SessionNotFoundOrEpochExhausted;
-        if (result != c.SQLITE_ROW) return mapSqliteError(result);
-        const epoch = c.sqlite3_column_int64(statement, 0);
-        if (epoch <= 1) return error.CorruptHostStore;
-        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-        return @intCast(epoch);
-    }
-
-    pub fn completionHead(self: *StorageOwner, session_id: u64) !u64 {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        if (session_id == 0) return error.InvalidIdentity;
-        const statement = try self.prepare(completion_head_sql);
-        defer finalize(statement);
-        var encoded_session_id: [8]u8 = undefined;
-        try bindIdentity(statement, 1, session_id, &encoded_session_id);
-        const step_result = c.sqlite3_step(statement);
-        if (step_result == c.SQLITE_DONE) return 0;
-        if (step_result != c.SQLITE_ROW) return mapSqliteError(step_result);
-        const value = c.sqlite3_column_int64(statement, 0);
-        if (value < 0) return error.CorruptHostStore;
-        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-        return @intCast(value);
-    }
-
-    pub fn publishCompletion(
-        self: *StorageOwner,
-        publication: CompletionPublication,
-    ) !u64 {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        const envelope = publication.envelope();
-        const consumed_by_sequence = publication.auditSequence();
-        const result = publication.result();
-        if (consumed_by_sequence) |sequence| {
-            if (sequence == 0) return error.InvalidSequence;
-        }
-        try completion_inbox.validate(envelope);
-
-        try self.execute("BEGIN IMMEDIATE");
-        errdefer self.rollbackOrPoison();
-
-        var identities: [6][8]u8 = undefined;
-        const existing = try self.prepare(find_completion_sql);
-        defer finalize(existing);
-        try bindIdentity(existing, 1, envelope.session_id, &identities[0]);
-        try bindIdentity(existing, 2, envelope.agent_id, &identities[2]);
-        try bindU64(existing, 3, envelope.agent_generation);
-        try bindIdentity(existing, 4, envelope.operation_id, &identities[3]);
-        try bindU64(existing, 5, envelope.operation_generation);
-        try bindIdentity(existing, 6, envelope.attempt_id, &identities[4]);
-        try bindU64(existing, 7, @intFromEnum(envelope.kind));
-        const existing_result = c.sqlite3_step(existing);
-        if (existing_result == c.SQLITE_ROW) {
-            const sequence = c.sqlite3_column_int64(existing, 0);
-            const result_ref = try readIdentityColumn(existing, 1);
-            const result_digest = try readBindingColumn(binding.Result, existing, 2);
-            const completion_digest = try readBindingColumn(binding.Completion, existing, 3);
-            const ownership_epoch = try readIdentityColumn(existing, 4);
-            if (sequence <= 0) return error.CorruptHostStore;
-            if (ownership_epoch != envelope.ownership_epoch or result_ref != envelope.result_ref or
-                !binding.eql(binding.Result, result_digest, envelope.result_digest) or
-                !binding.eql(binding.Completion, completion_digest, envelope.completion_digest))
-            {
-                return error.ConflictingCompletionEvidence;
-            }
-            if (consumed_by_sequence) |sequence_value| {
-                if (c.sqlite3_column_type(existing, 5) == c.SQLITE_NULL) {
-                    const audit = try self.prepare(
-                        "UPDATE completion_inbox SET consumed_by_sequence = ?2 WHERE inbox_id = ?1 AND consumed_by_sequence IS NULL",
-                    );
-                    defer finalize(audit);
-                    try bindU64(audit, 1, @intCast(sequence));
-                    try bindU64(audit, 2, sequence_value);
-                    if (c.sqlite3_step(audit) != c.SQLITE_DONE) return error.CorruptHostStore;
-                }
-            }
-            if (c.sqlite3_step(existing) != c.SQLITE_DONE) return error.CorruptHostStore;
-            try self.reach(.before_commit);
+        if (try self.turnExists(command.turn_id)) {
+            if (!try self.turnReplayMatches(command)) return error.TurnConflict;
             try self.execute("COMMIT");
-            return @intCast(sequence);
-        }
-        if (existing_result != c.SQLITE_DONE) return mapSqliteError(existing_result);
-
-        const count = try self.prepare(pending_completion_count_sql);
-        defer finalize(count);
-        try bindIdentity(count, 1, envelope.session_id, &identities[0]);
-        try bindIdentity(count, 2, envelope.agent_id, &identities[2]);
-        const count_result = c.sqlite3_step(count);
-        if (count_result == c.SQLITE_DONE) return error.InvalidCompletionIdentity;
-        if (count_result != c.SQLITE_ROW) return mapSqliteError(count_result);
-        const pending_count = c.sqlite3_column_int64(count, 0);
-        if (pending_count < 0) return error.CorruptHostStore;
-        if (consumed_by_sequence == null and pending_count >= completion_inbox.max_records) {
-            return error.CompletionCapacityExceeded;
-        }
-        if (c.sqlite3_step(count) != c.SQLITE_DONE) return error.CorruptHostStore;
-
-        switch (result) {
-            .first_import => |value| {
-                if (value.reference != envelope.result_ref) return error.CompletionContentMismatch;
-                try self.insertContent(envelope.session_id, value);
-            },
-            .existing => try self.requireContent(envelope.session_id, envelope.result_ref),
+            return .replay;
         }
 
-        const insert = try self.prepare(
-            \\INSERT INTO completion_inbox (
-            \\    session_id, ownership_epoch, agent_generation,
-            \\    operation_id, operation_generation, attempt_id, evidence_kind,
-            \\    result_reference, result_digest, completion_digest, consumed_by_sequence
-            \\) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12
-            \\  FROM session WHERE session_id = ?1 AND agent_id = ?11
-            \\RETURNING inbox_id
-        );
-        defer finalize(insert);
-        try bindIdentity(insert, 1, envelope.session_id, &identities[0]);
-        try bindIdentity(insert, 2, envelope.ownership_epoch, &identities[1]);
-        try bindU64(insert, 3, envelope.agent_generation);
-        try bindIdentity(insert, 4, envelope.operation_id, &identities[3]);
-        try bindU64(insert, 5, envelope.operation_generation);
-        try bindIdentity(insert, 6, envelope.attempt_id, &identities[4]);
-        try bindU64(insert, 7, @intFromEnum(envelope.kind));
-        try bindIdentity(insert, 8, envelope.result_ref, &identities[5]);
-        try bindBlob(insert, 9, &envelope.result_digest.bytes);
-        try bindBlob(insert, 10, &envelope.completion_digest.bytes);
-        try bindIdentity(insert, 11, envelope.agent_id, &identities[2]);
-        if (consumed_by_sequence) |sequence_value| {
-            try bindU64(insert, 12, sequence_value);
-        } else try expectOk(c.sqlite3_bind_null(insert, 12));
-        const insert_result = c.sqlite3_step(insert);
-        if (insert_result == c.SQLITE_DONE) return error.InvalidCompletionIdentity;
-        if (insert_result != c.SQLITE_ROW) return mapSqliteError(insert_result);
-        const inbox_id = c.sqlite3_column_int64(insert, 0);
-        if (inbox_id <= 0) return error.CorruptHostStore;
-        if (c.sqlite3_step(insert) != c.SQLITE_DONE) return error.CorruptHostStore;
-        try self.reach(.before_commit);
-        try self.execute("COMMIT");
-        return @intCast(inbox_id);
-    }
-
-    /// Matches one complete evidence envelope against the immutable Inbox row
-    /// selected by its semantic identity. The caller receives no row fields to
-    /// reinterpret or use as a second source of authority.
-    pub fn matchCompletion(
-        self: *StorageOwner,
-        envelope: completion_inbox.Envelope,
-    ) !?CompletionMatch {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        try completion_inbox.validate(envelope);
-
-        const statement = try self.prepare(find_completion_sql);
-        defer finalize(statement);
-        var identities: [4][8]u8 = undefined;
-        try bindIdentity(statement, 1, envelope.session_id, &identities[0]);
-        try bindIdentity(statement, 2, envelope.agent_id, &identities[1]);
-        try bindU64(statement, 3, envelope.agent_generation);
-        try bindIdentity(statement, 4, envelope.operation_id, &identities[2]);
-        try bindU64(statement, 5, envelope.operation_generation);
-        try bindIdentity(statement, 6, envelope.attempt_id, &identities[3]);
-        try bindU64(statement, 7, @intFromEnum(envelope.kind));
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return null;
-        if (result != c.SQLITE_ROW) return mapSqliteError(result);
-        const inbox_id = c.sqlite3_column_int64(statement, 0);
-        if (inbox_id <= 0) return error.CorruptHostStore;
-        const result_ref = try readIdentityColumn(statement, 1);
-        const result_digest = try readBindingColumn(binding.Result, statement, 2);
-        const completion_digest = try readBindingColumn(binding.Completion, statement, 3);
-        const ownership_epoch = try readIdentityColumn(statement, 4);
-        if (ownership_epoch != envelope.ownership_epoch or result_ref != envelope.result_ref or
-            !binding.eql(binding.Result, result_digest, envelope.result_digest) or
-            !binding.eql(binding.Completion, completion_digest, envelope.completion_digest))
-        {
-            return error.ConflictingCompletionEvidence;
-        }
-        const disposition: CompletionMatch = switch (c.sqlite3_column_type(statement, 5)) {
-            c.SQLITE_NULL => .pending,
-            c.SQLITE_INTEGER => consumed: {
-                const sequence = c.sqlite3_column_int64(statement, 5);
-                if (sequence <= 0) return error.CorruptHostStore;
-                break :consumed .{ .consumed = @intCast(sequence) };
-            },
-            else => return error.CorruptHostStore,
-        };
-        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-        return disposition;
-    }
-
-    pub fn readCompletion(
-        self: *StorageOwner,
-        session_id: u64,
-        sequence: u64,
-    ) !StoredCompletion {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        if (session_id == 0) return error.InvalidIdentity;
-        if (sequence == 0 or sequence > std.math.maxInt(i64)) return error.InvalidSequence;
-        const statement = try self.prepare(read_completion_sql);
-        defer finalize(statement);
-        var encoded_session_id: [8]u8 = undefined;
-        try bindIdentity(statement, 1, session_id, &encoded_session_id);
-        try bindU64(statement, 2, sequence);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return error.CompletionNotFound;
-        if (result != c.SQLITE_ROW) return mapSqliteError(result);
-        const kind_value = c.sqlite3_column_int64(statement, 0);
-        if (kind_value <= 0 or kind_value > std.math.maxInt(u8)) return error.CorruptHostStore;
-        const envelope: completion_inbox.Envelope = .{
-            .kind = std.enums.fromInt(
-                completion_inbox.EvidenceKind,
-                @as(u8, @intCast(kind_value)),
-            ) orelse return error.UnsupportedCompletionKind,
-            .session_id = session_id,
-            .ownership_epoch = try readIdentityColumn(statement, 1),
-            .agent_id = try readIdentityColumn(statement, 2),
-            .agent_generation = try readPositiveU32Column(statement, 3),
-            .operation_id = try readIdentityColumn(statement, 4),
-            .operation_generation = try readPositiveU32Column(statement, 5),
-            .attempt_id = try readIdentityColumn(statement, 6),
-            .result_ref = try readIdentityColumn(statement, 7),
-            .result_digest = try readBindingColumn(binding.Result, statement, 8),
-            .completion_digest = try readBindingColumn(binding.Completion, statement, 9),
-        };
-        try completion_inbox.validate(envelope);
-        const consumed_by_sequence: ?u64 = switch (c.sqlite3_column_type(statement, 10)) {
-            c.SQLITE_NULL => null,
-            c.SQLITE_INTEGER => consumed: {
-                const consumed = c.sqlite3_column_int64(statement, 10);
-                if (consumed <= 0) return error.CorruptHostStore;
-                break :consumed @intCast(consumed);
-            },
-            else => return error.CorruptHostStore,
-        };
-        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-        return .{ .inbox_id = sequence, .envelope = envelope, .consumed_by_sequence = consumed_by_sequence };
-    }
-
-    pub fn readCompletionAfter(
-        self: *StorageOwner,
-        session_id: u64,
-        after_id: u64,
-        through_id: u64,
-    ) !?StoredCompletion {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        if (session_id == 0 or after_id > through_id or through_id > std.math.maxInt(i64)) {
-            return error.InvalidSequence;
-        }
-        const statement = try self.prepare(read_completion_after_sql);
-        defer finalize(statement);
-        var encoded_session_id: [8]u8 = undefined;
-        try bindIdentity(statement, 1, session_id, &encoded_session_id);
-        try bindU64(statement, 2, after_id);
-        try bindU64(statement, 3, through_id);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return null;
-        if (result != c.SQLITE_ROW) return mapSqliteError(result);
-        const inbox_id_value = c.sqlite3_column_int64(statement, 0);
-        const kind_value = c.sqlite3_column_int64(statement, 1);
-        if (inbox_id_value <= 0 or kind_value <= 0 or kind_value > std.math.maxInt(u8)) {
-            return error.CorruptHostStore;
-        }
-        const stored: StoredCompletion = .{
-            .inbox_id = @intCast(inbox_id_value),
-            .envelope = .{
-                .kind = std.enums.fromInt(
-                    completion_inbox.EvidenceKind,
-                    @as(u8, @intCast(kind_value)),
-                ) orelse return error.UnsupportedCompletionKind,
-                .session_id = session_id,
-                .ownership_epoch = try readIdentityColumn(statement, 2),
-                .agent_id = try readIdentityColumn(statement, 3),
-                .agent_generation = try readPositiveU32Column(statement, 4),
-                .operation_id = try readIdentityColumn(statement, 5),
-                .operation_generation = try readPositiveU32Column(statement, 6),
-                .attempt_id = try readIdentityColumn(statement, 7),
-                .result_ref = try readIdentityColumn(statement, 8),
-                .result_digest = try readBindingColumn(binding.Result, statement, 9),
-                .completion_digest = try readBindingColumn(binding.Completion, statement, 10),
-            },
-            .consumed_by_sequence = switch (c.sqlite3_column_type(statement, 11)) {
-                c.SQLITE_NULL => null,
-                c.SQLITE_INTEGER => consumed: {
-                    const value = c.sqlite3_column_int64(statement, 11);
-                    if (value <= 0) return error.CorruptHostStore;
-                    break :consumed @intCast(value);
-                },
-                else => return error.CorruptHostStore,
-            },
-        };
-        try completion_inbox.validate(stored.envelope);
-        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-        return stored;
-    }
-
-    pub fn commit(
-        self: *StorageOwner,
-        token: OwnerToken,
-        transaction: session_transition.Transaction,
-    ) !u64 {
-        return self.commitPrepared(token, .{ .transaction = transaction });
-    }
-
-    pub fn commitPrepared(
-        self: *StorageOwner,
-        token: OwnerToken,
-        prepared: PreparedCommit,
-    ) !u64 {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        const transaction = prepared.transaction;
-        const contents = prepared.content;
-        if (token.session_id == 0 or token.epoch == 0) return error.StaleOwner;
-        if (contents.len > session_transition.max_facts) return error.ExcessiveContentImports;
-        if (transaction.sequence == 0 or transaction.sequence > session_transition.max_transitions) {
-            return error.SessionSequenceExhausted;
-        }
-        try self.validateTransactionContentImports(transaction, contents);
-        var payload_buffer: [session_transition.max_payload_size]u8 = undefined;
-        const payload = try session_transition.encode(&payload_buffer, transaction);
-        const agent_id = try validateCommitIdentity(token, transaction);
-        const expected_sequence = transaction.sequence - 1;
-
-        try self.execute("BEGIN IMMEDIATE");
-        errdefer self.rollbackOrPoison();
-        const advance = try self.prepare(advance_session_head_sql);
-        defer finalize(advance);
-        var identities: [2][8]u8 = undefined;
-        try bindIdentity(advance, 1, token.session_id, &identities[0]);
-        try bindU64(advance, 2, transaction.sequence);
-        try bindU64(advance, 3, token.epoch);
-        try bindU64(advance, 4, expected_sequence);
-        try bindIdentity(advance, 5, agent_id, &identities[1]);
-        try expectDone(c.sqlite3_step(advance));
-        if (c.sqlite3_changes(self.database) != 1) return error.StaleOwnerOrSequenceConflict;
-        try self.reach(.after_transition_head_advance);
-        for (contents) |content| switch (content) {
-            .transaction_fact => |value| try self.insertContent(token.session_id, value),
-            .patch_intent => |value| {
-                try self.insertContent(token.session_id, value.intent);
-                try self.insertContent(token.session_id, value.patch);
-            },
-        };
-        try self.requireTransactionContent(token.session_id, transaction);
-        try self.insertTransaction(token.session_id, transaction, payload);
-        if (isAdmission(transaction)) try self.ensureAdmissionCapacity();
-        try self.reach(.before_commit);
-        try self.execute("COMMIT");
-        return transaction.sequence;
-    }
-
-    fn insertTransaction(
-        self: *StorageOwner,
-        session_id: u64,
-        transaction: session_transition.Transaction,
-        payload: []const u8,
-    ) !void {
-        const digest = recordDigest(session_id, transaction.sequence, payload);
-        const insert = try self.prepare(
-            \\INSERT INTO session_transition (session_id, sequence, payload, record_digest)
-            \\VALUES (?1, ?2, ?3, ?4)
-        );
-        defer finalize(insert);
-        var encoded_session_id: [8]u8 = undefined;
-        try bindIdentity(insert, 1, session_id, &encoded_session_id);
-        try bindU64(insert, 2, transaction.sequence);
-        try bindBlob(insert, 3, payload);
-        try bindBlob(insert, 4, &digest.bytes);
-        try expectDone(c.sqlite3_step(insert));
-        try self.reach(.after_transition_insert);
-
-        for (transaction.factSlice()) |fact| switch (fact) {
-            .conversation_advanced => |advanced| try self.commitConversation(
-                session_id,
-                transaction.sequence,
-                advanced.entry_id,
-                advanced.parent_id,
-                advanced.kind,
-                advanced.content_ref,
-            ),
-            .result => |result| switch (result.evidence) {
-                .immediate => {},
-                .durable => |evidence| try self.associateCompletion(
-                    session_id,
-                    transaction.sequence,
-                    result,
-                    evidence,
-                ),
-            },
-            .task_admitted,
-            .operation_admitted,
-            .attempt_admitted,
-            .authorization,
-            .outcome,
-            .cancellation,
-            .shutdown,
-            .result_applied,
-            .approval_required,
-            => {},
-        };
-    }
-
-    fn associateCompletion(
-        self: *StorageOwner,
-        session_id: u64,
-        sequence: u64,
-        result: session_transition.ResultRecord,
-        evidence: session_transition.DurableResultEvidence,
-    ) !void {
-        const operation = result.operation;
-        const attempt_id: u64 = switch (evidence) {
-            inline else => |value| value,
-        };
-        const evidence_kind = std.meta.activeTag(evidence);
-        var ids: [6][8]u8 = undefined;
-        const statement = try self.prepare(associate_completion_sql);
-        defer finalize(statement);
-        try bindIdentity(statement, 1, session_id, &ids[0]);
-        try bindU64(statement, 2, sequence);
-        try bindIdentity(statement, 3, operation.agent.ownership_epoch, &ids[1]);
-        try bindU64(statement, 4, operation.agent.agent_generation);
-        try bindIdentity(statement, 5, operation.operation_id, &ids[2]);
-        try bindU64(statement, 6, operation.generation);
-        try bindIdentity(statement, 7, attempt_id, &ids[3]);
-        try bindU64(statement, 8, @intFromEnum(evidence_kind));
-        try bindIdentity(statement, 9, result.result_ref, &ids[4]);
-        try bindBlob(statement, 10, &result.result_digest.bytes);
-        try bindIdentity(statement, 11, operation.agent.agent_id, &ids[5]);
-        try expectDone(c.sqlite3_step(statement));
-        if (c.sqlite3_changes(self.database) != 1) return error.CompletionEvidenceMissing;
-    }
-
-    fn commitConversation(
-        self: *StorageOwner,
-        session_id: u64,
-        sequence: u64,
-        entry_id: u64,
-        parent_id: u64,
-        kind: session_transition.ConversationKind,
-        content_ref: u64,
-    ) !void {
-        var ids: [4][8]u8 = undefined;
-        const insert = try self.prepare(
-            \\INSERT INTO conversation_entry (
-            \\    session_id, entry_id, parent_id, kind, content_ref, committed_by_sequence
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-        );
-        defer finalize(insert);
-        try bindIdentity(insert, 1, session_id, &ids[0]);
-        try bindIdentity(insert, 2, entry_id, &ids[1]);
-        if (parent_id == 0) try expectOk(c.sqlite3_bind_null(insert, 3)) else try bindIdentity(insert, 3, parent_id, &ids[2]);
-        try bindU64(insert, 4, @intFromEnum(kind));
-        try bindIdentity(insert, 5, content_ref, &ids[3]);
-        try bindU64(insert, 6, sequence);
-        try expectDone(c.sqlite3_step(insert));
-    }
-
-    pub fn readTransition(
-        self: *StorageOwner,
-        session_id: u64,
-        sequence: u64,
-        out: *StoredTransition,
-    ) !void {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        if (self.fault) |hook| try hook.reached(hook.context, .before_transition_read);
-        if (session_id == 0) return error.InvalidIdentity;
-        if (sequence == 0 or sequence > std.math.maxInt(i64)) return error.InvalidSequence;
-
-        const statement = try self.prepare(read_transition_sql);
-        defer finalize(statement);
-        var encoded_session_id: [8]u8 = undefined;
-        try bindIdentity(statement, 1, session_id, &encoded_session_id);
-        try bindU64(statement, 2, sequence);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return error.TransitionNotFound;
-        if (result != c.SQLITE_ROW) return mapSqliteError(result);
-        try decodeVerifiedTransitionRow(statement, session_id, sequence, out);
-        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-    }
-
-    pub fn scanCompletedAttemptWindow(
-        self: *StorageOwner,
-        session_id: u64,
-        operation_id: u64,
-        operation_generation: u32,
-        attempt_id: u64,
-        ledger_head: u64,
-        row_budget: u8,
-        scan: *CompletedAttemptScan,
-    ) !u8 {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        if (session_id == 0 or operation_id == 0 or operation_generation == 0 or attempt_id == 0) {
-            return error.InvalidIdentity;
-        }
-        if (ledger_head == 0 or ledger_head > session_transition.max_transitions or row_budget == 0) {
-            return error.InvalidHistoricalScanRange;
-        }
-        if (scan.next_sequence == 0 or scan.next_sequence > ledger_head + 1) {
-            return error.InvalidHistoricalScanCursor;
-        }
-        if (scan.done()) return 0;
-        const last_sequence = @min(
-            ledger_head,
-            scan.next_sequence + @as(u64, row_budget) - 1,
-        );
-
-        const statement = try self.prepare(scan_completed_attempt_sql);
-        defer finalize(statement);
-        var encoded_session_id: [8]u8 = undefined;
-        try bindIdentity(statement, 1, session_id, &encoded_session_id);
-        try bindU64(statement, 2, scan.next_sequence);
-        try bindU64(statement, 3, last_sequence);
-
-        var processed: u8 = 0;
-        while (processed < row_budget and scan.next_sequence <= last_sequence) {
-            const step = c.sqlite3_step(statement);
-            if (step == c.SQLITE_DONE) return error.TransitionNotFound;
-            if (step != c.SQLITE_ROW) return mapSqliteError(step);
-            var stored: StoredTransition = undefined;
-            try decodeVerifiedTransitionRow(statement, session_id, scan.next_sequence, &stored);
-            scan.next_sequence += 1;
-            processed += 1;
-            try applyCompletedAttemptFacts(
-                scan,
-                stored.transaction,
-                operation_id,
-                operation_generation,
-                attempt_id,
+        const session_exists = try self.sessionExists(command.session_id);
+        if (!session_exists) {
+            if (command.expected_conversation_revision != 0 or command.turn_ordinal != 1) {
+                return error.SessionNotFound;
+            }
+            const insert_session = try self.prepare(
+                "INSERT INTO session (session_id, workspace_path, access_scope_digest) VALUES (?1, ?2, ?3)",
             );
-            if (scan.completed != null) break;
-        }
-        if (scan.completed == null and scan.next_sequence > ledger_head) scan.exhausted = true;
-        return processed;
-    }
-
-    pub fn readConversationEntry(
-        self: *StorageOwner,
-        session_id: u64,
-        entry_id: u64,
-    ) !StoredConversationEntry {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        const statement = try self.prepare(read_conversation_sql);
-        defer finalize(statement);
-        var ids: [2][8]u8 = undefined;
-        try bindIdentity(statement, 1, session_id, &ids[0]);
-        try bindIdentity(statement, 2, entry_id, &ids[1]);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return error.ConversationEntryNotFound;
-        if (result != c.SQLITE_ROW) return mapSqliteError(result);
-        const parent_id: u64 = if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL)
-            0
-        else
-            try readIdentityColumn(statement, 0);
-        const kind = c.sqlite3_column_int64(statement, 1);
-        if (kind < 1 or kind > 4) return error.CorruptHostStore;
-        if (c.sqlite3_column_type(statement, 3) != c.SQLITE_INTEGER) return error.CorruptHostStore;
-        const committed_value = c.sqlite3_column_int64(statement, 3);
-        if (committed_value <= 0) return error.CorruptHostStore;
-        const committed: u64 = @intCast(committed_value);
-        const stored: StoredConversationEntry = .{
-            .entry_id = entry_id,
-            .parent_id = parent_id,
-            .kind = @intCast(kind),
-            .content_ref = try readIdentityColumn(statement, 2),
-            .committed_by_sequence = committed,
-        };
-        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-        return stored;
-    }
-
-    pub fn contentMetadata(
-        self: *StorageOwner,
-        session_id: u64,
-        reference: u64,
-    ) !ContentMetadata {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        const stored = try self.findContent(session_id, reference);
-        return .{ .length = stored.length, .digest = stored.digest };
-    }
-
-    pub fn readContentWindow(
-        self: *StorageOwner,
-        session_id: u64,
-        reference: u64,
-        offset: u64,
-        out: []u8,
-    ) ![]const u8 {
-        self.request_lock.lockUncancelable(self.io);
-        defer self.request_lock.unlock(self.io);
-        try self.ensureOpen();
-        const stored = try self.findContent(session_id, reference);
-        if (offset > stored.length) return error.InvalidContentOffset;
-        const wanted: usize = @intCast(@min(stored.length - offset, out.len));
-        if (wanted == 0) return out[0..0];
-        var blob: ?*c.sqlite3_blob = null;
-        try expectOk(c.sqlite3_blob_open(
-            self.database,
-            "main",
-            "content",
-            "payload",
-            stored.row_id,
-            0,
-            &blob,
-        ));
-        const opened = blob orelse return error.CorruptHostStore;
-        defer closeBlob(opened);
-        if (offset > std.math.maxInt(c_int) or wanted > std.math.maxInt(c_int)) {
-            return error.InvalidContentOffset;
-        }
-        try expectOk(c.sqlite3_blob_read(
-            opened,
-            out.ptr,
-            @intCast(wanted),
-            @intCast(offset),
-        ));
-        return out[0..wanted];
-    }
-
-    const StoredContent = struct {
-        row_id: c.sqlite3_int64,
-        length: u64,
-        digest: binding.Blob,
-    };
-
-    fn findContent(
-        self: *StorageOwner,
-        session_id: u64,
-        reference: u64,
-    ) !StoredContent {
-        if (session_id == 0 or reference == 0) return error.InvalidContentReference;
-        const statement = try self.prepare(read_content_sql);
-        defer finalize(statement);
-        var ids: [2][8]u8 = undefined;
-        try bindIdentity(statement, 1, session_id, &ids[0]);
-        try bindIdentity(statement, 2, reference, &ids[1]);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return error.ContentNotFound;
-        if (result != c.SQLITE_ROW) return mapSqliteError(result);
-        const row_id = c.sqlite3_column_int64(statement, 0);
-        const length_value = c.sqlite3_column_int64(statement, 1);
-        if (row_id <= 0 or length_value <= 0 or length_value > max_content_bytes) {
-            return error.CorruptHostStore;
-        }
-        const stored: StoredContent = .{
-            .row_id = row_id,
-            .length = @intCast(length_value),
-            .digest = try readBindingColumn(binding.Blob, statement, 2),
-        };
-        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-        return stored;
-    }
-
-    fn requireContent(self: *StorageOwner, session_id: u64, reference: u64) !void {
-        if (reference == 0) return;
-        _ = self.findContent(session_id, reference) catch |err| switch (err) {
-            error.ContentNotFound => return error.MissingContentReference,
-            else => return err,
-        };
-    }
-
-    fn requireTransactionContent(
-        self: *StorageOwner,
-        session_id: u64,
-        transaction: session_transition.Transaction,
-    ) !void {
-        for (transaction.factSlice()) |fact| {
-            const references = fact.contentReferences();
-            for (references.slice()) |reference| {
-                try self.requireContent(session_id, reference.reference);
-            }
-        }
-    }
-
-    fn validateTransactionContentImports(
-        self: *StorageOwner,
-        transaction: session_transition.Transaction,
-        contents: []const TransactionContentImport,
-    ) !void {
-        var imported_references: [max_first_content_imports]u64 = undefined;
-        var imported_count: usize = 0;
-        for (contents) |entry| switch (entry) {
-            .transaction_fact => |content| {
-                try appendImportReference(&imported_references, &imported_count, content.reference);
-                if (!transaction.referencesContent(content.reference)) {
-                    return error.UnreferencedContentImport;
-                }
-            },
-            .patch_intent => |pair| {
-                try appendImportReference(&imported_references, &imported_count, pair.intent.reference);
-                try appendImportReference(&imported_references, &imported_count, pair.patch.reference);
-                if (pair.intent.reference == pair.patch.reference or
-                    !transaction.referencesPatchIntent(pair.intent.reference) or
-                    transaction.referencesContent(pair.patch.reference))
-                {
-                    return error.InvalidPatchContentReference;
-                }
-                const patch_reference = try self.decodePatchIntentReference(pair.intent);
-                if (patch_reference != pair.patch.reference) {
-                    return error.InvalidPatchContentReference;
-                }
-            },
-        };
-    }
-
-    fn decodePatchIntentReference(self: *StorageOwner, content: ContentImport) !u64 {
-        if (content.length < patch_tool.intent_header_size or
-            content.length > patch_tool.max_intent_size)
-        {
-            return error.InvalidPatchIntent;
-        }
-        var buffer: [patch_tool.max_intent_size]u8 = undefined;
-        const length: usize = @intCast(content.length);
-        const bytes = switch (content.source) {
-            .bytes => |value| blk: {
-                if (value.len != length) return error.InvalidContentLength;
-                break :blk value;
-            },
-            .file => |source| blk: {
-                const actual = try source.handle.readPositionalAll(
-                    self.io,
-                    buffer[0..length],
-                    source.offset,
-                );
-                if (actual != length) return error.TruncatedContent;
-                break :blk buffer[0..length];
-            },
-        };
-        const intent = patch_tool.decodeIntent(bytes) catch return error.InvalidPatchIntent;
-        return intent.patch_ref;
-    }
-
-    fn appendImportReference(
-        references: *[max_first_content_imports]u64,
-        count: *usize,
-        reference: u64,
-    ) !void {
-        if (reference == 0) return error.InvalidContentReference;
-        for (references[0..count.*]) |prior| {
-            if (prior == reference) return error.DuplicateContentImport;
-        }
-        if (count.* == references.len) return error.ExcessiveContentImports;
-        references[count.*] = reference;
-        count.* += 1;
-    }
-
-    fn insertContent(
-        self: *StorageOwner,
-        session_id: u64,
-        content: ContentImport,
-    ) !void {
-        if (session_id == 0 or content.reference == 0) return error.InvalidContentReference;
-        if (content.length == 0 or content.length > max_content_bytes or
-            content.length > std.math.maxInt(c_int))
-        {
-            return error.InvalidContentLength;
-        }
-        switch (content.source) {
-            .bytes => |bytes| if (bytes.len != content.length) return error.InvalidContentLength,
-            .file => {},
-        }
-        if (self.findContent(session_id, content.reference)) |stored| {
-            if (stored.length != content.length or
-                !binding.eql(binding.Blob, stored.digest, content.digest))
-            {
-                return error.ConflictingContentReference;
-            }
-            return error.ContentAlreadyExists;
-        } else |err| switch (err) {
-            error.ContentNotFound => {},
-            else => return err,
+            defer finalize(insert_session);
+            try bindU64(insert_session, 1, command.session_id);
+            try bindText(insert_session, 2, command.workspace_path);
+            try bindBlob(insert_session, 3, &command.access_scope_digest);
+            try done(insert_session);
+            try self.expectOneChange();
+        } else {
+            try self.validateSessionBinding(command);
         }
 
-        const insert = try self.prepare(
-            \\INSERT INTO content (
-            \\    session_id, content_ref, byte_length, digest, payload
-            \\) VALUES (?1, ?2, ?3, ?4, zeroblob(?5))
-            \\RETURNING content_id
+        const current_revision = try self.conversationRevision(command.session_id);
+        if (current_revision != command.expected_conversation_revision) return error.StaleConversation;
+        if (try self.hasActiveTurn(command.session_id)) return error.SessionBusy;
+        if (try self.nextTurnOrdinal(command.session_id) != command.turn_ordinal) {
+            return error.InvalidTurnOrdinal;
+        }
+
+        try self.insertContent(command.content_id, command.user_text);
+        const insert_turn = try self.prepare(
+            "INSERT INTO turn (turn_id, session_id, turn_ordinal, admission_digest, initial_entry_id) VALUES (?1, ?2, ?3, ?4, ?5)",
         );
-        defer finalize(insert);
-        var ids: [2][8]u8 = undefined;
-        try bindIdentity(insert, 1, session_id, &ids[0]);
-        try bindIdentity(insert, 2, content.reference, &ids[1]);
-        try bindU64(insert, 3, content.length);
-        try bindBlob(insert, 4, &content.digest.bytes);
-        try bindU64(insert, 5, content.length);
-        const result = c.sqlite3_step(insert);
-        if (result != c.SQLITE_ROW) return mapSqliteError(result);
-        const row_id = c.sqlite3_column_int64(insert, 0);
-        if (row_id <= 0) return error.CorruptHostStore;
-        if (c.sqlite3_step(insert) != c.SQLITE_DONE) return error.CorruptHostStore;
+        defer finalize(insert_turn);
+        try bindU64(insert_turn, 1, command.turn_id);
+        try bindU64(insert_turn, 2, command.session_id);
+        try bindU64(insert_turn, 3, command.turn_ordinal);
+        try bindBlob(insert_turn, 4, &command.admission_digest);
+        try bindU64(insert_turn, 5, command.entry_id);
+        try done(insert_turn);
+        try self.expectOneChange();
+        try self.reach(.after_turn_row);
 
-        var blob: ?*c.sqlite3_blob = null;
-        try expectOk(c.sqlite3_blob_open(
-            self.database,
-            "main",
-            "content",
-            "payload",
-            row_id,
-            1,
-            &blob,
-        ));
-        const opened = blob orelse return error.CorruptHostStore;
-        defer closeBlob(opened);
+        const insert_entry = try self.prepare(
+            "INSERT INTO conversation_entry (session_id, revision, entry_id, turn_id, kind, content_id) VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+        );
+        defer finalize(insert_entry);
+        try bindU64(insert_entry, 1, command.session_id);
+        try bindU64(insert_entry, 2, current_revision + 1);
+        try bindU64(insert_entry, 3, command.entry_id);
+        try bindU64(insert_entry, 4, command.turn_id);
+        try bindU64(insert_entry, 5, command.content_id);
+        try done(insert_entry);
+        try self.expectOneChange();
+        try self.reach(.before_turn_commit);
+        try self.execute("COMMIT");
+        try self.reach(.after_turn_commit);
+        return .admitted;
+    }
 
-        var hasher = binding.Hasher(binding.Blob).init();
-        var offset: u64 = 0;
-        var window: [content_window_bytes]u8 = undefined;
-        while (offset < content.length) {
-            const wanted: usize = @intCast(@min(content.length - offset, window.len));
-            const bytes = switch (content.source) {
-                .bytes => |source| source[@intCast(offset)..][0..wanted],
-                .file => |file| blk: {
-                    const read = try file.handle.readPositionalAll(
-                        self.io,
-                        window[0..wanted],
-                        file.offset + offset,
-                    );
-                    if (read != wanted) return error.TruncatedContentImport;
-                    break :blk window[0..wanted];
-                },
-            };
-            try expectOk(c.sqlite3_blob_write(
-                opened,
-                bytes.ptr,
-                @intCast(bytes.len),
-                @intCast(offset),
-            ));
-            hasher.update(bytes);
-            offset += bytes.len;
+    pub fn admitOperation(self: *Store, command: AdmitOperation) !AdmissionResult {
+        try validateOperation(command);
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        if (try self.existingOperation(command.operation_id)) |existing| {
+            if (existing.turn_id != command.turn_id or
+                existing.ordinal != command.operation_ordinal or
+                existing.kind != command.kind or
+                existing.descriptor_content_id != command.descriptor_content_id or
+                !std.mem.eql(u8, &existing.digest, &command.descriptor_digest))
+            {
+                return error.OperationConflict;
+            }
+            try self.execute("COMMIT");
+            return .replay;
         }
-        if (!binding.eql(binding.Blob, hasher.final(), content.digest)) {
+        try self.requireActiveTurn(command.turn_id);
+        if (try self.nextOperationOrdinal(command.turn_id) != command.operation_ordinal) {
+            return error.InvalidOperationOrdinal;
+        }
+        try self.insertContent(command.descriptor_content_id, command.descriptor);
+        try self.insertOperation(.{
+            .turn_id = command.turn_id,
+            .operation_id = command.operation_id,
+            .ordinal = command.operation_ordinal,
+            .kind = command.kind,
+            .descriptor_content_id = command.descriptor_content_id,
+            .descriptor_digest = command.descriptor_digest,
+        });
+        try self.reach(.before_operation_commit);
+        try self.execute("COMMIT");
+        try self.reach(.after_operation_commit);
+        return .admitted;
+    }
+
+    pub fn admitAttempt(
+        self: *Store,
+        command: AdmitAttempt,
+    ) !AdmissionResult {
+        try validateAttempt(command);
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        if (try self.attemptExists(command.attempt_id)) {
+            if (!try self.attemptReplayMatches(command)) return error.AttemptConflict;
+            try self.execute("COMMIT");
+            return .replay;
+        }
+        const operation = try self.requireUnresolvedOperation(command.operation_id);
+        if (command.dispatch_content_id != operation.descriptor_content_id) {
+            return error.AttemptDispatchConflict;
+        }
+        if (try self.nextAttemptOrdinal(command.operation_id) != command.attempt_ordinal) {
+            return error.InvalidAttemptOrdinal;
+        }
+        const revision = try self.conversationRevision(operation.session_id);
+        if (command.context_cutoff_revision > revision) return error.FutureContextCutoff;
+        try self.ensureContent(command.dispatch_content_id, command.dispatch_request);
+        try self.insertContent(command.parameters_content_id, command.parameters);
+        const statement = try self.prepare(
+            \\INSERT INTO attempt (
+            \\    attempt_id, operation_id, attempt_ordinal, dispatch_content_id,
+            \\    dispatch_digest, parameters_content_id, context_cutoff_revision,
+            \\    workspace_digest, external_idempotency_key, possible_duplicate
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, command.attempt_id);
+        try bindU64(statement, 2, command.operation_id);
+        try bindU64(statement, 3, command.attempt_ordinal);
+        try bindU64(statement, 4, command.dispatch_content_id);
+        try bindBlob(statement, 5, &command.dispatch_digest);
+        try bindU64(statement, 6, command.parameters_content_id);
+        try bindU64AllowZero(statement, 7, command.context_cutoff_revision);
+        try bindBlob(statement, 8, &command.workspace_digest);
+        if (command.external_idempotency_key) |key|
+            try bindText(statement, 9, key)
+        else
+            try bindNull(statement, 9);
+        try bindU64AllowZero(statement, 10, @intFromBool(command.possible_duplicate));
+        try done(statement);
+        try self.expectOneChange();
+        try self.reach(.before_attempt_commit);
+        try self.execute("COMMIT");
+        try self.reach(.after_attempt_commit);
+        return .admitted;
+    }
+
+    pub fn completeAndResolve(self: *Store, command: CompleteAndResolve) !AdmissionResult {
+        try validateCompletion(command);
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        if (try self.resolutionExists(command.operation_id)) {
+            if (!try self.resolutionReplayMatches(
+                command.operation_id,
+                command.resolution_kind,
+                command.completion_id,
+                command.result_content_id,
+                command.resolution_digest,
+            ) or !try self.completionReplayMatches(command)) return error.ResolutionConflict;
+            try self.execute("COMMIT");
+            return .replay;
+        }
+        try self.requireAttemptForOperation(command.attempt_id, command.operation_id);
+        try self.ensureContent(command.completion_content_id, command.completion_content);
+        try self.insertContent(command.result_content_id, command.result_content);
+        _ = try self.ensureCompletion(.{
+            .completion_id = command.completion_id,
+            .operation_id = command.operation_id,
+            .attempt_id = command.attempt_id,
+            .ordinal = command.completion_ordinal,
+            .kind = command.evidence_kind,
+            .content_id = command.completion_content_id,
+            .digest = command.completion_digest,
+        });
+        try self.reach(.after_completion_row);
+        try self.insertResolution(
+            command.operation_id,
+            command.resolution_kind,
+            command.completion_id,
+            command.result_content_id,
+            command.resolution_digest,
+        );
+        try self.reach(.before_resolution_commit);
+        try self.execute("COMMIT");
+        try self.reach(.after_resolution_commit);
+        return .admitted;
+    }
+
+    pub fn recordCompletion(self: *Store, command: RecordCompletion) !AdmissionResult {
+        try validateRecordedCompletion(command);
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        if (try self.existingCompletion(command.completion_id)) |existing| {
+            if (existing.operation_id != command.operation_id or
+                existing.attempt_id != command.attempt_id or
+                existing.ordinal != command.completion_ordinal or
+                existing.kind != command.evidence_kind or
+                existing.content_id != command.content_id or
+                !std.mem.eql(u8, &existing.digest, &command.completion_digest))
+            {
+                return error.CompletionConflict;
+            }
+            try self.execute("COMMIT");
+            return .replay;
+        }
+        try self.requireAttemptForOperation(command.attempt_id, command.operation_id);
+        if (!try self.resolutionExists(command.operation_id) and
+            try self.nextCompletionOrdinal(command.attempt_id) != 1)
+        {
+            return error.MultipleApplicableCompletions;
+        }
+        if (try self.nextCompletionOrdinal(command.attempt_id) != command.completion_ordinal) {
+            return error.InvalidCompletionOrdinal;
+        }
+        try self.insertContent(command.content_id, command.content);
+        try self.insertCompletion(.{
+            .completion_id = command.completion_id,
+            .operation_id = command.operation_id,
+            .attempt_id = command.attempt_id,
+            .ordinal = command.completion_ordinal,
+            .kind = command.evidence_kind,
+            .content_id = command.content_id,
+            .digest = command.completion_digest,
+        });
+        try self.execute("COMMIT");
+        try self.reach(.after_completion_commit);
+        return .admitted;
+    }
+
+    pub fn resolveWithoutCompletion(
+        self: *Store,
+        command: ResolveWithoutCompletion,
+    ) !AdmissionResult {
+        if (command.operation_id == 0 or command.content_id == 0 or
+            command.content.len == 0 or command.content.len > max_text_bytes or
+            !std.mem.eql(u8, &command.resolution_digest, &semanticDigest(.resolution, command.content)) or
+            (command.resolution_kind != .denied and command.resolution_kind != .cancelled and
+                command.resolution_kind != .indeterminate and command.resolution_kind != .failure))
+        {
+            return error.InvalidResolution;
+        }
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        if (try self.resolutionExists(command.operation_id)) {
+            if (!try self.resolutionReplayMatches(
+                command.operation_id,
+                command.resolution_kind,
+                null,
+                command.content_id,
+                command.resolution_digest,
+            )) return error.ResolutionConflict;
+            try self.execute("COMMIT");
+            return .replay;
+        }
+        _ = try self.requireUnresolvedOperation(command.operation_id);
+        try self.insertContent(command.content_id, command.content);
+        try self.insertResolution(
+            command.operation_id,
+            command.resolution_kind,
+            null,
+            command.content_id,
+            command.resolution_digest,
+        );
+        try self.execute("COMMIT");
+        return .admitted;
+    }
+
+    pub fn settleTurn(self: *Store, command: SettleTurn) !AdmissionResult {
+        try validateSettlement(command);
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        if (try self.turnOutcome(command.turn_id)) |existing| {
+            if (existing != command.outcome or !try self.turnSettlementReplayMatches(command)) {
+                return error.TurnOutcomeConflict;
+            }
+            try self.execute("COMMIT");
+            return .replay;
+        }
+        if (try self.unresolvedOperationCount(command.turn_id) != 0) {
+            return error.UnresolvedOperations;
+        }
+        const statement = switch (command.outcome) {
+            .cancelled => try self.prepare(
+                "UPDATE turn SET outcome_kind = 3 WHERE turn_id = ?1 AND outcome_kind IS NULL",
+            ),
+            .failed => blk: {
+                try self.insertContent(command.failure_content_id.?, command.failure_message.?);
+                const failed = try self.prepare(
+                    "UPDATE turn SET outcome_kind = 2, outcome_content_id = ?2, failure_code = ?3 WHERE turn_id = ?1 AND outcome_kind IS NULL",
+                );
+                try bindU64(failed, 2, command.failure_content_id.?);
+                try bindU64(failed, 3, command.failure_code.?);
+                break :blk failed;
+            },
+            .completed => unreachable,
+        };
+        defer finalize(statement);
+        try bindU64(statement, 1, command.turn_id);
+        try done(statement);
+        try self.expectOneChange();
+        try self.reach(.before_turn_settlement_commit);
+        try self.execute("COMMIT");
+        try self.reach(.after_turn_settlement_commit);
+        return .admitted;
+    }
+
+    pub fn failTurnFromCompletion(
+        self: *Store,
+        command: FailTurnFromCompletion,
+    ) !AdmissionResult {
+        try validateCompletion(command.completion);
+        if (command.turn_id == 0 or command.failure_code == 0 or
+            command.completion.resolution_kind != .failure)
+        {
+            return error.InvalidTurnFailure;
+        }
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        if (try self.turnOutcome(command.turn_id)) |outcome| {
+            if (outcome != .failed or
+                !try self.completionReplayMatches(command.completion) or
+                !try self.resolutionReplayMatches(
+                    command.completion.operation_id,
+                    .failure,
+                    command.completion.completion_id,
+                    command.completion.result_content_id,
+                    command.completion.resolution_digest,
+                ) or
+                !try self.failedOutcomeMatches(
+                    command.turn_id,
+                    command.completion.result_content_id,
+                    command.completion.result_content,
+                    command.failure_code,
+                )) return error.TurnOutcomeConflict;
+            try self.execute("COMMIT");
+            return .replay;
+        }
+        const operation = try self.requireUnresolvedOperation(command.completion.operation_id);
+        if (operation.turn_id != command.turn_id) return error.InvalidModelOperation;
+        try self.requireAttemptForOperation(
+            command.completion.attempt_id,
+            command.completion.operation_id,
+        );
+        try self.ensureContent(
+            command.completion.completion_content_id,
+            command.completion.completion_content,
+        );
+        try self.insertContent(
+            command.completion.result_content_id,
+            command.completion.result_content,
+        );
+        _ = try self.ensureCompletion(.{
+            .completion_id = command.completion.completion_id,
+            .operation_id = command.completion.operation_id,
+            .attempt_id = command.completion.attempt_id,
+            .ordinal = command.completion.completion_ordinal,
+            .kind = command.completion.evidence_kind,
+            .content_id = command.completion.completion_content_id,
+            .digest = command.completion.completion_digest,
+        });
+        try self.insertResolution(
+            command.completion.operation_id,
+            .failure,
+            command.completion.completion_id,
+            command.completion.result_content_id,
+            command.completion.resolution_digest,
+        );
+        try self.reach(.after_failure_resolution);
+        try self.setFailedOutcome(
+            command.turn_id,
+            command.completion.result_content_id,
+            command.failure_code,
+        );
+        try self.reach(.before_turn_settlement_commit);
+        try self.execute("COMMIT");
+        try self.reach(.after_turn_settlement_commit);
+        return .admitted;
+    }
+
+    pub fn failTurnWithoutCompletion(
+        self: *Store,
+        command: FailTurnWithoutCompletion,
+    ) !AdmissionResult {
+        if (command.turn_id == 0 or command.operation_id == 0 or
+            command.result_content_id == 0 or command.failure_code == 0 or
+            command.message.len == 0 or command.message.len > max_text_bytes or
+            !std.unicode.utf8ValidateSlice(command.message))
+        {
+            return error.InvalidTurnFailure;
+        }
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        if (try self.turnOutcome(command.turn_id)) |outcome| {
+            if (outcome != .failed or
+                !try self.resolutionReplayMatches(
+                    command.operation_id,
+                    .indeterminate,
+                    null,
+                    command.result_content_id,
+                    semanticDigest(.resolution, command.message),
+                ) or
+                !try self.failedOutcomeMatches(
+                    command.turn_id,
+                    command.result_content_id,
+                    command.message,
+                    command.failure_code,
+                )) return error.TurnOutcomeConflict;
+            try self.execute("COMMIT");
+            return .replay;
+        }
+        const operation = try self.requireUnresolvedOperation(command.operation_id);
+        if (operation.turn_id != command.turn_id or operation.kind != .model) {
+            return error.InvalidModelOperation;
+        }
+        try self.insertContent(command.result_content_id, command.message);
+        try self.insertResolution(
+            command.operation_id,
+            .indeterminate,
+            null,
+            command.result_content_id,
+            semanticDigest(.resolution, command.message),
+        );
+        try self.reach(.after_failure_resolution);
+        try self.setFailedOutcome(
+            command.turn_id,
+            command.result_content_id,
+            command.failure_code,
+        );
+        try self.reach(.before_turn_settlement_commit);
+        try self.execute("COMMIT");
+        try self.reach(.after_turn_settlement_commit);
+        return .admitted;
+    }
+
+    pub fn admitModelToolCalls(self: *Store, command: AdmitModelToolCalls) !AdmissionResult {
+        try validateModelToolCalls(command);
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        const resolution_digest = semanticDigest(.resolution, command.captured_output);
+        if (try self.resolutionExists(command.model_operation_id)) {
+            if (!try self.resolutionReplayMatches(
+                command.model_operation_id,
+                .model_tool_calls,
+                command.completion_id,
+                command.completion_content_id,
+                resolution_digest,
+            ) or !try self.modelToolCallsReplayMatch(command)) return error.ResolutionConflict;
+            try self.execute("COMMIT");
+            return .replay;
+        }
+        const operation = try self.requireUnresolvedOperation(command.model_operation_id);
+        if (operation.turn_id != command.turn_id or operation.kind != .model) {
+            return error.InvalidModelOperation;
+        }
+        if (try self.unresolvedOperationCount(command.turn_id) != 1) {
+            return error.UnresolvedOperations;
+        }
+        try self.requireAttemptForOperation(command.attempt_id, command.model_operation_id);
+        if (try self.conversationRevision(operation.session_id) != command.expected_conversation_revision) {
+            return error.StaleConversation;
+        }
+        try self.ensureContent(command.completion_content_id, command.captured_output);
+        _ = try self.ensureCompletion(.{
+            .completion_id = command.completion_id,
+            .operation_id = command.model_operation_id,
+            .attempt_id = command.attempt_id,
+            .ordinal = 1,
+            .kind = .success,
+            .content_id = command.completion_content_id,
+            .digest = command.completion_digest,
+        });
+        try self.insertResolution(
+            command.model_operation_id,
+            .model_tool_calls,
+            command.completion_id,
+            command.completion_content_id,
+            resolution_digest,
+        );
+        var revision = command.expected_conversation_revision;
+        for (command.calls, 0..) |call, call_index| {
+            try self.insertContent(call.content_id, call.content);
+            revision += 1;
+            try self.insertConversationEntry(.{
+                .session_id = operation.session_id,
+                .revision = revision,
+                .entry_id = call.entry_id,
+                .turn_id = command.turn_id,
+                .kind = .tool_call,
+                .content_id = call.content_id,
+                .source_operation_id = command.model_operation_id,
+                .call_ordinal = @intCast(call_index),
+            });
+            try self.insertContent(call.descriptor_content_id, call.descriptor);
+            try self.insertOperation(.{
+                .turn_id = command.turn_id,
+                .operation_id = call.action_operation_id,
+                .ordinal = call.action_operation_ordinal,
+                .kind = call.action_kind,
+                .descriptor_content_id = call.descriptor_content_id,
+                .descriptor_digest = call.descriptor_digest,
+                .caused_by_entry_id = call.entry_id,
+            });
+        }
+        try self.execute("COMMIT");
+        return .admitted;
+    }
+
+    pub fn appendToolResults(self: *Store, command: AppendToolResults) !AdmissionResult {
+        if (command.turn_id == 0 or command.parent_model_operation_id == 0 or
+            command.results.len == 0 or command.results.len > 8)
+        {
+            return error.InvalidToolResults;
+        }
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        const session_id = try self.sessionForTurn(command.turn_id);
+        if (try self.conversationRevision(session_id) != command.expected_conversation_revision) {
+            const replayed = try self.toolResultsMatch(command);
+            if (!replayed) return error.StaleConversation;
+            try self.execute("COMMIT");
+            return .replay;
+        }
+        if (try self.childOperationCount(command.parent_model_operation_id) != command.results.len) {
+            return error.IncompleteToolResults;
+        }
+        var revision = command.expected_conversation_revision;
+        for (command.results, 0..) |result, call_index| {
+            const resolved = try self.resolvedChild(
+                command.turn_id,
+                command.parent_model_operation_id,
+                result.action_operation_id,
+                call_index,
+            );
+            revision += 1;
+            try self.insertConversationEntry(.{
+                .session_id = session_id,
+                .revision = revision,
+                .entry_id = result.entry_id,
+                .turn_id = command.turn_id,
+                .kind = .tool_result,
+                .content_id = resolved.content_id,
+                .source_operation_id = result.action_operation_id,
+                .call_ordinal = @intCast(call_index),
+            });
+        }
+        try self.execute("COMMIT");
+        return .admitted;
+    }
+
+    pub fn completeTurn(self: *Store, command: CompleteTurn) !AdmissionResult {
+        try validateCompleteTurn(command);
+        try self.execute("BEGIN IMMEDIATE");
+        errdefer self.rollback();
+        if (try self.turnOutcome(command.turn_id)) |outcome| {
+            if (outcome != .completed or !try self.completeTurnReplayMatches(command)) {
+                return error.TurnOutcomeConflict;
+            }
+            try self.execute("COMMIT");
+            return .replay;
+        }
+        const operation = try self.requireUnresolvedOperation(command.model_operation_id);
+        if (operation.turn_id != command.turn_id or operation.kind != .model) {
+            return error.InvalidModelOperation;
+        }
+        if (try self.unresolvedOperationCount(command.turn_id) != 1) {
+            return error.UnresolvedOperations;
+        }
+        try self.requireAttemptForOperation(command.attempt_id, command.model_operation_id);
+        if (try self.conversationRevision(operation.session_id) != command.expected_conversation_revision) {
+            return error.StaleConversation;
+        }
+        try self.ensureContent(command.completion_content_id, command.captured_output);
+        try self.insertContent(command.final_content_id, command.final_answer);
+        _ = try self.ensureCompletion(.{
+            .completion_id = command.completion_id,
+            .operation_id = command.model_operation_id,
+            .attempt_id = command.attempt_id,
+            .ordinal = 1,
+            .kind = .success,
+            .content_id = command.completion_content_id,
+            .digest = command.completion_digest,
+        });
+        const resolution_digest = semanticDigest(.resolution, command.final_answer);
+        try self.insertResolution(
+            command.model_operation_id,
+            .final_answer,
+            command.completion_id,
+            command.final_content_id,
+            resolution_digest,
+        );
+        try self.insertConversationEntry(.{
+            .session_id = operation.session_id,
+            .revision = command.expected_conversation_revision + 1,
+            .entry_id = command.final_entry_id,
+            .turn_id = command.turn_id,
+            .kind = .assistant_text,
+            .content_id = command.final_content_id,
+            .source_operation_id = command.model_operation_id,
+        });
+        try self.reach(.after_final_entry);
+        const settle = try self.prepare(
+            "UPDATE turn SET outcome_kind = 1, outcome_content_id = ?2 WHERE turn_id = ?1 AND outcome_kind IS NULL",
+        );
+        defer finalize(settle);
+        try bindU64(settle, 1, command.turn_id);
+        try bindU64(settle, 2, command.final_content_id);
+        try done(settle);
+        try self.expectOneChange();
+        try self.reach(.before_turn_outcome_commit);
+        try self.execute("COMMIT");
+        try self.reach(.after_turn_outcome_commit);
+        return .admitted;
+    }
+
+    pub fn readUnresolvedOperations(
+        self: *Store,
+        turn_id: u64,
+        out: []OperationView,
+    ) !usize {
+        if (turn_id == 0 or out.len == 0 or out.len > 256) return error.InvalidOperationWindow;
+        const statement = try self.prepare(
+            \\SELECT o.operation_id, o.operation_ordinal, o.kind,
+            \\       o.caused_by_operation_id, o.call_ordinal
+            \\FROM operation o
+            \\LEFT JOIN operation_resolution r ON r.operation_id = o.operation_id
+            \\WHERE o.turn_id = ?1 AND r.operation_id IS NULL
+            \\ORDER BY o.operation_ordinal LIMIT ?2
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        try bindU64(statement, 2, out.len);
+        var count: usize = 0;
+        while (count < out.len) : (count += 1) {
+            const result = c.sqlite3_step(statement);
+            if (result == c.SQLITE_DONE) return count;
+            if (result != c.SQLITE_ROW) return mapSqliteError(result);
+            const kind_value = c.sqlite3_column_int64(statement, 2);
+            if (kind_value < 1 or kind_value > 3) return error.CorruptHostStore;
+            out[count] = .{
+                .operation_id = try positiveColumn(statement, 0),
+                .operation_ordinal = std.math.cast(u32, try positiveColumn(statement, 1)) orelse
+                    return error.CorruptHostStore,
+                .kind = @enumFromInt(kind_value),
+                .caused_by_operation_id = try optionalPositiveColumn(statement, 3),
+                .call_ordinal = if (try optionalNonnegativeColumn(statement, 4)) |value|
+                    std.math.cast(u16, value) orelse return error.CorruptHostStore
+                else
+                    null,
+            };
+        }
+        return count;
+    }
+
+    /// Derive the ordered Conversation consequence of resolved child Actions.
+    /// No queue or consumption marker is stored: absence of the immutable Tool
+    /// Result entry is the complete recovery fact.
+    pub fn readPendingToolResults(
+        self: *Store,
+        turn_id: u64,
+        out: []PendingToolResult,
+    ) !usize {
+        if (turn_id == 0 or out.len == 0 or out.len > 8) return error.InvalidToolResultWindow;
+        const statement = try self.prepare(
+            \\SELECT child.caused_by_operation_id, child.operation_id, child.call_ordinal
+            \\FROM operation child
+            \\JOIN operation_resolution resolution ON resolution.operation_id = child.operation_id
+            \\LEFT JOIN conversation_entry result
+            \\  ON result.kind = 4 AND result.source_operation_id = child.operation_id
+            \\WHERE child.turn_id = ?1 AND child.kind IN (2, 3) AND result.entry_id IS NULL
+            \\  AND NOT EXISTS (
+            \\      SELECT 1 FROM operation sibling
+            \\      LEFT JOIN operation_resolution sibling_resolution
+            \\        ON sibling_resolution.operation_id = sibling.operation_id
+            \\      WHERE sibling.caused_by_operation_id = child.caused_by_operation_id
+            \\        AND sibling_resolution.operation_id IS NULL
+            \\  )
+            \\ORDER BY child.caused_by_operation_id, child.call_ordinal
+            \\LIMIT ?2
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        try bindU64(statement, 2, out.len + 1);
+        var count: usize = 0;
+        while (true) {
+            const result = c.sqlite3_step(statement);
+            if (result == c.SQLITE_DONE) return count;
+            if (result != c.SQLITE_ROW) return mapSqliteError(result);
+            if (count == out.len) return error.ToolResultWindowExceeded;
+            const pending: PendingToolResult = .{
+                .parent_model_operation_id = try positiveColumn(statement, 0),
+                .action_operation_id = try positiveColumn(statement, 1),
+                .call_ordinal = std.math.cast(u16, try nonnegativeColumn(statement, 2)) orelse
+                    return error.CorruptHostStore,
+            };
+            if (count != 0 and pending.parent_model_operation_id != out[0].parent_model_operation_id) {
+                return error.MultiplePendingToolResultBatches;
+            }
+            if (pending.call_ordinal != count) return error.CorruptHostStore;
+            out[count] = pending;
+            count += 1;
+        }
+    }
+
+    pub fn loadDecisionSnapshot(self: *Store, turn_id: u64) !DecisionSnapshot {
+        if (turn_id == 0) return error.InvalidIdentity;
+        const statement = try self.prepare(
+            \\SELECT t.session_id, t.outcome_kind,
+            \\       (SELECT COALESCE(MAX(e.revision), 0) FROM conversation_entry e WHERE e.session_id = t.session_id),
+            \\       (SELECT count(*) FROM attempt a
+            \\        JOIN operation o ON o.operation_id = a.operation_id
+            \\        LEFT JOIN operation_resolution r ON r.operation_id = o.operation_id
+            \\        LEFT JOIN attempt_completion completion ON completion.operation_id = o.operation_id
+            \\        WHERE o.turn_id = t.turn_id AND r.operation_id IS NULL
+            \\          AND completion.completion_id IS NULL)
+            \\FROM turn t WHERE t.turn_id = ?1
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.TurnNotFound;
+        const outcome_raw = c.sqlite3_column_int64(statement, 1);
+        const attempts = c.sqlite3_column_int64(statement, 3);
+        if (attempts < 0 or attempts > std.math.maxInt(u16)) return error.CorruptHostStore;
+        const snapshot: DecisionSnapshot = .{
+            .session_id = try positiveColumn(statement, 0),
+            .turn_id = turn_id,
+            .conversation_revision = try nonnegativeColumn(statement, 2),
+            .outcome = if (c.sqlite3_column_type(statement, 1) == c.SQLITE_NULL)
+                null
+            else if (outcome_raw >= @intFromEnum(TurnOutcome.completed) and
+                outcome_raw <= @intFromEnum(TurnOutcome.cancelled))
+                @enumFromInt(outcome_raw)
+            else
+                return error.CorruptHostStore,
+            .unresolved_external_attempts = @intCast(attempts),
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return snapshot;
+    }
+
+    pub fn readUnresolvedCompletion(
+        self: *Store,
+        operation_id: u64,
+    ) !?CompletionRecord {
+        if (operation_id == 0) return error.InvalidIdentity;
+        const statement = try self.prepare(
+            \\SELECT completion.operation_id, completion.attempt_id,
+            \\       completion.completion_id, completion.completion_ordinal,
+            \\       completion.evidence_kind, completion.evidence_content_id,
+            \\       completion.evidence_digest
+            \\FROM attempt_completion completion
+            \\LEFT JOIN operation_resolution resolution
+            \\  ON resolution.operation_id = completion.operation_id
+            \\WHERE completion.operation_id = ?1 AND resolution.operation_id IS NULL
+            \\ORDER BY completion.attempt_id, completion.completion_ordinal LIMIT 2
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        const first = c.sqlite3_step(statement);
+        if (first == c.SQLITE_DONE) return null;
+        if (first != c.SQLITE_ROW) return mapSqliteError(first);
+        const kind = std.enums.fromInt(EvidenceKind, c.sqlite3_column_int64(statement, 4)) orelse
+            return error.CorruptHostStore;
+        const value: CompletionRecord = .{
+            .operation_id = try positiveColumn(statement, 0),
+            .attempt_id = try positiveColumn(statement, 1),
+            .completion_id = try positiveColumn(statement, 2),
+            .completion_ordinal = std.math.cast(u32, try positiveColumn(statement, 3)) orelse
+                return error.CorruptHostStore,
+            .evidence_kind = kind,
+            .content_id = try positiveColumn(statement, 5),
+            .digest = try digestColumn(statement, 6),
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.MultipleApplicableCompletions;
+        return value;
+    }
+
+    pub fn readConversation(
+        self: *Store,
+        session_id: u64,
+        after_revision: u64,
+        out: []ConversationEntry,
+    ) !usize {
+        if (session_id == 0 or out.len == 0 or out.len > max_conversation_window) {
+            return error.InvalidConversationWindow;
+        }
+        const statement = try self.prepare(
+            \\SELECT revision, entry_id, turn_id, kind, content_id, source_operation_id, call_ordinal
+            \\FROM conversation_entry WHERE session_id = ?1 AND revision > ?2
+            \\ORDER BY revision LIMIT ?3
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, session_id);
+        try bindU64AllowZero(statement, 2, after_revision);
+        try bindU64(statement, 3, out.len);
+        var count: usize = 0;
+        while (count < out.len) : (count += 1) {
+            const result = c.sqlite3_step(statement);
+            if (result == c.SQLITE_DONE) return count;
+            if (result != c.SQLITE_ROW) return mapSqliteError(result);
+            const kind_raw = c.sqlite3_column_int64(statement, 3);
+            if (kind_raw < @intFromEnum(ConversationKind.user_text) or
+                kind_raw > @intFromEnum(ConversationKind.tool_result))
+            {
+                return error.CorruptHostStore;
+            }
+            out[count] = .{
+                .revision = try positiveColumn(statement, 0),
+                .entry_id = try positiveColumn(statement, 1),
+                .turn_id = try positiveColumn(statement, 2),
+                .kind = @enumFromInt(kind_raw),
+                .content_id = try positiveColumn(statement, 4),
+                .source_operation_id = try optionalPositiveColumn(statement, 5),
+                .call_ordinal = if (try optionalNonnegativeColumn(statement, 6)) |value|
+                    std.math.cast(u16, value) orelse return error.CorruptHostStore
+                else
+                    null,
+            };
+        }
+        return count;
+    }
+
+    pub fn sessionConversationRevision(self: *Store, session_id: u64) !u64 {
+        if (session_id == 0) return error.InvalidIdentity;
+        return self.conversationRevision(session_id);
+    }
+
+    pub fn readSession(self: *Store, session_id: u64) !SessionRecord {
+        if (session_id == 0) return error.InvalidIdentity;
+        const statement = try self.prepare(
+            \\SELECT s.session_id,
+            \\       COALESCE((SELECT MAX(revision) FROM conversation_entry WHERE session_id = s.session_id), 0),
+            \\       (SELECT turn_id FROM turn WHERE session_id = s.session_id AND outcome_kind IS NULL),
+            \\       (SELECT turn_id FROM turn WHERE session_id = s.session_id ORDER BY turn_ordinal DESC LIMIT 1)
+            \\FROM session s WHERE s.session_id = ?1
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, session_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.SessionNotFound;
+        const result: SessionRecord = .{
+            .session_id = try positiveColumn(statement, 0),
+            .conversation_revision = try nonnegativeColumn(statement, 1),
+            .active_turn_id = try optionalPositiveColumn(statement, 2),
+            .latest_turn_id = try optionalPositiveColumn(statement, 3),
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return result;
+    }
+
+    pub fn readTurn(self: *Store, turn_id: u64) !TurnRecord {
+        if (turn_id == 0) return error.InvalidIdentity;
+        const statement = try self.prepare(
+            \\SELECT session_id, turn_id, turn_ordinal, outcome_kind, outcome_content_id, failure_code
+            \\FROM turn WHERE turn_id = ?1
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.TurnNotFound;
+        const outcome: ?TurnOutcome = if (c.sqlite3_column_type(statement, 3) == c.SQLITE_NULL)
+            null
+        else blk: {
+            const value = c.sqlite3_column_int64(statement, 3);
+            if (value < 1 or value > 3) return error.CorruptHostStore;
+            break :blk @enumFromInt(value);
+        };
+        const result: TurnRecord = .{
+            .session_id = try positiveColumn(statement, 0),
+            .turn_id = try positiveColumn(statement, 1),
+            .turn_ordinal = std.math.cast(u32, try positiveColumn(statement, 2)) orelse
+                return error.CorruptHostStore,
+            .outcome = outcome,
+            .outcome_content_id = try optionalPositiveColumn(statement, 4),
+            .failure_code = if (try optionalPositiveColumn(statement, 5)) |value|
+                std.math.cast(u16, value) orelse return error.CorruptHostStore
+            else
+                null,
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return result;
+    }
+
+    pub fn readSessionWorkspace(self: *Store, session_id: u64, out: []u8) ![]const u8 {
+        if (session_id == 0 or out.len == 0 or out.len > max_path_bytes) {
+            return error.InvalidWorkspaceBuffer;
+        }
+        const statement = try self.prepare("SELECT workspace_path FROM session WHERE session_id = ?1");
+        defer finalize(statement);
+        try bindU64(statement, 1, session_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.SessionNotFound;
+        const length = c.sqlite3_column_bytes(statement, 0);
+        if (length <= 0 or length > out.len) return error.WorkspaceBufferTooSmall;
+        const pointer = c.sqlite3_column_text(statement, 0) orelse return error.CorruptHostStore;
+        @memcpy(out[0..@intCast(length)], pointer[0..@intCast(length)]);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return out[0..@intCast(length)];
+    }
+
+    pub fn nextTurnOrdinalForSession(self: *Store, session_id: u64) !u32 {
+        if (!try self.sessionExists(session_id)) return error.SessionNotFound;
+        const statement = try self.prepare(
+            "SELECT COALESCE(MAX(turn_ordinal), 0) + 1 FROM turn WHERE session_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, session_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptHostStore;
+        const value = std.math.cast(u32, try positiveColumn(statement, 0)) orelse
+            return error.TurnCapacityExceeded;
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return value;
+    }
+
+    pub fn nextOperationOrdinalForTurn(self: *Store, turn_id: u64) !u32 {
+        if (turn_id == 0) return error.InvalidIdentity;
+        return std.math.cast(u32, try self.nextOperationOrdinal(turn_id)) orelse
+            error.OperationOrdinalExhausted;
+    }
+
+    pub fn nextAttemptOrdinalForOperation(self: *Store, operation_id: u64) !u32 {
+        if (operation_id == 0) return error.InvalidIdentity;
+        return std.math.cast(u32, try self.nextAttemptOrdinal(operation_id)) orelse
+            error.AttemptOrdinalExhausted;
+    }
+
+    pub fn readOperation(self: *Store, operation_id: u64) !OperationRecord {
+        const statement = try self.prepare(
+            \\SELECT session_id, turn_id, operation_ordinal, kind,
+            \\       descriptor_content_id, descriptor_digest,
+            \\       caused_by_operation_id, caused_by_entry_id, call_ordinal
+            \\FROM operation WHERE operation_id = ?1
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.OperationNotFound;
+        const kind_raw = c.sqlite3_column_int64(statement, 3);
+        if (kind_raw < 1 or kind_raw > 3) return error.CorruptHostStore;
+        const value: OperationRecord = .{
+            .session_id = try positiveColumn(statement, 0),
+            .turn_id = try positiveColumn(statement, 1),
+            .operation_id = operation_id,
+            .operation_ordinal = std.math.cast(u32, try positiveColumn(statement, 2)) orelse
+                return error.CorruptHostStore,
+            .kind = @enumFromInt(kind_raw),
+            .descriptor_content_id = try positiveColumn(statement, 4),
+            .descriptor_digest = try digestColumn(statement, 5),
+            .caused_by_operation_id = try optionalPositiveColumn(statement, 6),
+            .caused_by_entry_id = try optionalPositiveColumn(statement, 7),
+            .call_ordinal = if (try optionalNonnegativeColumn(statement, 8)) |raw|
+                std.math.cast(u16, raw) orelse return error.CorruptHostStore
+            else
+                null,
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return value;
+    }
+
+    pub fn contentLength(self: *Store, content_id: u64) !usize {
+        const statement = try self.prepare(
+            "SELECT byte_length FROM content WHERE content_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, content_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ContentNotFound;
+        const length = std.math.cast(usize, try positiveColumn(statement, 0)) orelse
+            return error.CorruptHostStore;
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return length;
+    }
+
+    pub fn readContent(self: *Store, content_id: u64, out: []u8) ![]const u8 {
+        const statement = try self.prepare(
+            "SELECT byte_length, payload, digest FROM content WHERE content_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, content_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ContentNotFound;
+        const length = std.math.cast(usize, try positiveColumn(statement, 0)) orelse
+            return error.CorruptHostStore;
+        if (length > out.len or c.sqlite3_column_bytes(statement, 1) != length) {
+            return error.ContentBufferTooSmall;
+        }
+        const pointer = c.sqlite3_column_blob(statement, 1) orelse return error.CorruptHostStore;
+        const bytes: [*]const u8 = @ptrCast(pointer);
+        @memcpy(out[0..length], bytes[0..length]);
+        const expected = try digestColumn(statement, 2);
+        if (!std.mem.eql(u8, &expected, &binding.hash(binding.Blob, out[0..length]).bytes)) {
             return error.ContentDigestMismatch;
         }
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return out[0..length];
     }
 
-    fn harden(self: *StorageOwner, config: Config) !void {
-        try expectOk(c.sqlite3_extended_result_codes(self.database, 1));
-        try dbConfig(self.database, c.SQLITE_DBCONFIG_DEFENSIVE, 1);
-        try dbConfig(self.database, c.SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0);
-        try dbConfig(self.database, c.SQLITE_DBCONFIG_DQS_DDL, 0);
-        try dbConfig(self.database, c.SQLITE_DBCONFIG_DQS_DML, 0);
-        try dbConfig(self.database, c.SQLITE_DBCONFIG_ENABLE_FKEY, 1);
-
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_LENGTH, sqlite_max_length_bytes);
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_SQL_LENGTH, 65_536);
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_COLUMN, 64);
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_COMPOUND_SELECT, 8);
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_VDBE_OP, 100_000);
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_ATTACHED, 0);
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 256);
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_VARIABLE_NUMBER, 64);
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_TRIGGER_DEPTH, 0);
-        _ = c.sqlite3_limit(self.database, c.SQLITE_LIMIT_WORKER_THREADS, 0);
-
-        try self.execute("PRAGMA page_size=4096");
-        try self.execute("PRAGMA journal_mode=DELETE");
-        try self.execute("PRAGMA synchronous=EXTRA");
-        try self.execute("PRAGMA foreign_keys=ON");
-        try self.execute("PRAGMA busy_timeout=0");
-        try self.execute("PRAGMA mmap_size=0");
-        try self.execute("PRAGMA temp_store=FILE");
-        try self.execute("PRAGMA trusted_schema=OFF");
-        try self.execute("PRAGMA cell_size_check=ON");
-        if (try self.pragmaU64("PRAGMA page_size") != 4096) {
-            return error.UnsupportedHostStorePageSize;
+    fn validateSessionBinding(self: *Store, command: AdmitTurn) !void {
+        const statement = try self.prepare(
+            "SELECT workspace_path, access_scope_digest FROM session WHERE session_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, command.session_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.SessionNotFound;
+        if (!columnTextEquals(statement, 0, command.workspace_path) or
+            !columnBlobEquals(statement, 1, &command.access_scope_digest))
+        {
+            return error.SessionBindingConflict;
         }
-
-        var pragma_buffer: [64]u8 = undefined;
-        const cache_pragma = try std.fmt.bufPrintZ(
-            &pragma_buffer,
-            "PRAGMA cache_size=-{d}",
-            .{config.page_cache_kib},
-        );
-        try self.execute(cache_pragma);
-        const pages_pragma = try std.fmt.bufPrintZ(
-            &pragma_buffer,
-            "PRAGMA max_page_count={d}",
-            .{config.maximum_page_count},
-        );
-        try self.execute(pages_pragma);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
     }
 
-    fn installSchema(self: *StorageOwner) !void {
-        self.execute("BEGIN IMMEDIATE") catch |err| return err;
-        errdefer self.rollbackOrPoison();
-        inline for (.{ session_schema, content_schema, transition_schema, conversation_schema, completion_schema }) |sql| {
-            self.execute(sql) catch |err| return err;
-        }
-        self.execute(completion_index_schema) catch |err| return err;
-        self.execute("PRAGMA application_id=1330532423") catch |err| return err;
-        self.execute(install_schema_version) catch |err| return err;
-        self.execute("COMMIT") catch |err| {
-            self.rollbackOrPoison();
-            return err;
+    fn turnExists(self: *Store, turn_id: u64) !bool {
+        const statement = try self.prepare("SELECT 1 FROM turn WHERE turn_id = ?1");
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => true,
+            c.SQLITE_DONE => false,
+            else => |result| mapSqliteError(result),
         };
     }
 
-    fn verifySchemaIdentity(self: *StorageOwner) !void {
-        if (try self.pragmaU64("PRAGMA application_id") != application_id) {
-            return error.InvalidHostStoreIdentity;
+    fn turnReplayMatches(self: *Store, command: AdmitTurn) !bool {
+        const statement = try self.prepare(
+            \\SELECT t.session_id, t.turn_ordinal, t.admission_digest, t.initial_entry_id,
+            \\       e.content_id, e.revision, s.workspace_path, s.access_scope_digest, content.payload
+            \\FROM turn t
+            \\JOIN session s ON s.session_id = t.session_id
+            \\JOIN conversation_entry e ON e.turn_id = t.turn_id AND e.entry_id = t.initial_entry_id
+            \\JOIN content ON content.content_id = e.content_id
+            \\WHERE t.turn_id = ?1
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, command.turn_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return false;
+        const matches = try positiveColumn(statement, 0) == command.session_id and
+            try positiveColumn(statement, 1) == command.turn_ordinal and
+            columnBlobEquals(statement, 2, &command.admission_digest) and
+            try positiveColumn(statement, 3) == command.entry_id and
+            try positiveColumn(statement, 4) == command.content_id and
+            try positiveColumn(statement, 5) == command.expected_conversation_revision + 1 and
+            columnTextEquals(statement, 6, command.workspace_path) and
+            columnBlobEquals(statement, 7, &command.access_scope_digest) and
+            columnBlobEquals(statement, 8, command.user_text);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return matches;
+    }
+
+    fn sessionExists(self: *Store, session_id: u64) !bool {
+        const statement = try self.prepare("SELECT 1 FROM session WHERE session_id = ?1");
+        defer finalize(statement);
+        try bindU64(statement, 1, session_id);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => true,
+            c.SQLITE_DONE => false,
+            else => |result| mapSqliteError(result),
+        };
+    }
+
+    fn hasActiveTurn(self: *Store, session_id: u64) !bool {
+        const statement = try self.prepare(
+            "SELECT 1 FROM turn WHERE session_id = ?1 AND outcome_kind IS NULL LIMIT 1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, session_id);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => true,
+            c.SQLITE_DONE => false,
+            else => |result| mapSqliteError(result),
+        };
+    }
+
+    fn conversationRevision(self: *Store, session_id: u64) !u64 {
+        const statement = try self.prepare(
+            "SELECT COALESCE(MAX(revision), 0) FROM conversation_entry WHERE session_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, session_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptHostStore;
+        const value = try nonnegativeColumn(statement, 0);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return value;
+    }
+
+    fn nextTurnOrdinal(self: *Store, session_id: u64) !u64 {
+        const statement = try self.prepare(
+            "SELECT COALESCE(MAX(turn_ordinal), 0) + 1 FROM turn WHERE session_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, session_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptHostStore;
+        const value = try positiveColumn(statement, 0);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return value;
+    }
+
+    const ExistingOperation = struct {
+        turn_id: u64,
+        ordinal: u32,
+        kind: OperationKind,
+        descriptor_content_id: u64,
+        digest: Digest,
+    };
+
+    fn existingOperation(self: *Store, operation_id: u64) !?ExistingOperation {
+        const statement = try self.prepare(
+            "SELECT turn_id, operation_ordinal, kind, descriptor_content_id, descriptor_digest FROM operation WHERE operation_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return null;
+        if (result != c.SQLITE_ROW) return mapSqliteError(result);
+        const kind_raw = c.sqlite3_column_int64(statement, 2);
+        if (kind_raw < 1 or kind_raw > 3) return error.CorruptHostStore;
+        const existing: ExistingOperation = .{
+            .turn_id = try positiveColumn(statement, 0),
+            .ordinal = std.math.cast(u32, try positiveColumn(statement, 1)) orelse
+                return error.CorruptHostStore,
+            .kind = @enumFromInt(kind_raw),
+            .descriptor_content_id = try positiveColumn(statement, 3),
+            .digest = try digestColumn(statement, 4),
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return existing;
+    }
+
+    fn requireActiveTurn(self: *Store, turn_id: u64) !void {
+        const statement = try self.prepare(
+            "SELECT 1 FROM turn WHERE turn_id = ?1 AND outcome_kind IS NULL",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.TurnNotActive;
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+    }
+
+    fn nextOperationOrdinal(self: *Store, turn_id: u64) !u64 {
+        const statement = try self.prepare(
+            "SELECT COALESCE(MAX(operation_ordinal), 0) + 1 FROM operation WHERE turn_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptHostStore;
+        const value = try positiveColumn(statement, 0);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return value;
+    }
+
+    fn unresolvedOperationCount(self: *Store, turn_id: u64) !u64 {
+        const statement = try self.prepare(
+            \\SELECT count(*) FROM operation o
+            \\LEFT JOIN operation_resolution r ON r.operation_id = o.operation_id
+            \\WHERE o.turn_id = ?1 AND r.operation_id IS NULL
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptHostStore;
+        const value = try nonnegativeColumn(statement, 0);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return value;
+    }
+
+    const InsertOperation = struct {
+        turn_id: u64,
+        operation_id: u64,
+        ordinal: u32,
+        kind: OperationKind,
+        descriptor_content_id: u64,
+        descriptor_digest: Digest,
+        caused_by_operation_id: ?u64 = null,
+        caused_by_entry_id: ?u64 = null,
+        call_ordinal: ?u16 = null,
+    };
+
+    fn insertOperation(self: *Store, value: InsertOperation) !void {
+        const session_id = try self.sessionForTurn(value.turn_id);
+        const statement = try self.prepare(
+            \\INSERT INTO operation (
+            \\    operation_id, session_id, turn_id, operation_ordinal, kind,
+            \\    descriptor_content_id, descriptor_digest,
+            \\    caused_by_operation_id, caused_by_entry_id, call_ordinal
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, value.operation_id);
+        try bindU64(statement, 2, session_id);
+        try bindU64(statement, 3, value.turn_id);
+        try bindU64(statement, 4, value.ordinal);
+        try bindU64(statement, 5, @intFromEnum(value.kind));
+        try bindU64(statement, 6, value.descriptor_content_id);
+        try bindBlob(statement, 7, &value.descriptor_digest);
+        try bindOptionalU64(statement, 8, value.caused_by_operation_id);
+        try bindOptionalU64(statement, 9, value.caused_by_entry_id);
+        try bindOptionalU64AllowZero(statement, 10, value.call_ordinal);
+        try done(statement);
+        try self.expectOneChange();
+    }
+
+    fn attemptExists(self: *Store, attempt_id: u64) !bool {
+        const statement = try self.prepare("SELECT 1 FROM attempt WHERE attempt_id = ?1");
+        defer finalize(statement);
+        try bindU64(statement, 1, attempt_id);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => true,
+            c.SQLITE_DONE => false,
+            else => |result| mapSqliteError(result),
+        };
+    }
+
+    fn attemptReplayMatches(self: *Store, command: AdmitAttempt) !bool {
+        const statement = try self.prepare(
+            \\SELECT a.operation_id, a.attempt_ordinal, a.dispatch_content_id,
+            \\       a.dispatch_digest, a.parameters_content_id, parameters.payload,
+            \\       a.context_cutoff_revision, a.workspace_digest,
+            \\       a.external_idempotency_key, a.possible_duplicate
+            \\FROM attempt a
+            \\JOIN content parameters ON parameters.content_id = a.parameters_content_id
+            \\WHERE a.attempt_id = ?1
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, command.attempt_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return false;
+        const matches = try positiveColumn(statement, 0) == command.operation_id and
+            try positiveColumn(statement, 1) == command.attempt_ordinal and
+            try positiveColumn(statement, 2) == command.dispatch_content_id and
+            columnBlobEquals(statement, 3, &command.dispatch_digest) and
+            try positiveColumn(statement, 4) == command.parameters_content_id and
+            columnBlobEquals(statement, 5, command.parameters) and
+            try nonnegativeColumn(statement, 6) == command.context_cutoff_revision and
+            columnBlobEquals(statement, 7, &command.workspace_digest) and
+            optionalColumnTextEquals(statement, 8, command.external_idempotency_key) and
+            c.sqlite3_column_int64(statement, 9) == @intFromBool(command.possible_duplicate);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return matches;
+    }
+
+    const OperationAuthority = struct {
+        turn_id: u64,
+        session_id: u64,
+        kind: OperationKind,
+        descriptor_content_id: u64,
+    };
+
+    fn requireUnresolvedOperation(self: *Store, operation_id: u64) !OperationAuthority {
+        const statement = try self.prepare(
+            \\SELECT o.turn_id, t.session_id, o.kind, o.descriptor_content_id
+            \\FROM operation o
+            \\JOIN turn t ON t.turn_id = o.turn_id
+            \\LEFT JOIN operation_resolution r ON r.operation_id = o.operation_id
+            \\WHERE o.operation_id = ?1 AND r.operation_id IS NULL AND t.outcome_kind IS NULL
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.OperationNotRunnable;
+        const kind_raw = c.sqlite3_column_int64(statement, 2);
+        if (kind_raw < 1 or kind_raw > 3) return error.CorruptHostStore;
+        const value: OperationAuthority = .{
+            .turn_id = try positiveColumn(statement, 0),
+            .session_id = try positiveColumn(statement, 1),
+            .kind = @enumFromInt(kind_raw),
+            .descriptor_content_id = try positiveColumn(statement, 3),
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return value;
+    }
+
+    fn nextAttemptOrdinal(self: *Store, operation_id: u64) !u64 {
+        const statement = try self.prepare(
+            "SELECT COALESCE(MAX(attempt_ordinal), 0) + 1 FROM attempt WHERE operation_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptHostStore;
+        const value = try positiveColumn(statement, 0);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return value;
+    }
+
+    fn resolutionExists(self: *Store, operation_id: u64) !bool {
+        const statement = try self.prepare(
+            "SELECT 1 FROM operation_resolution WHERE operation_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => true,
+            c.SQLITE_DONE => false,
+            else => |result| mapSqliteError(result),
+        };
+    }
+
+    fn resolutionReplayMatches(
+        self: *Store,
+        operation_id: u64,
+        kind: ResolutionKind,
+        completion_id: ?u64,
+        result_content_id: u64,
+        digest: Digest,
+    ) !bool {
+        const statement = try self.prepare(
+            "SELECT resolution_kind, completion_id, result_content_id, result_digest FROM operation_resolution WHERE operation_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return false;
+        const matches = c.sqlite3_column_int64(statement, 0) == @intFromEnum(kind) and
+            try optionalPositiveColumn(statement, 1) == completion_id and
+            try positiveColumn(statement, 2) == result_content_id and
+            columnBlobEquals(statement, 3, &digest);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return matches;
+    }
+
+    fn completionReplayMatches(self: *Store, command: CompleteAndResolve) !bool {
+        const existing = (try self.existingCompletion(command.completion_id)) orelse return false;
+        return existing.operation_id == command.operation_id and
+            existing.attempt_id == command.attempt_id and
+            existing.ordinal == command.completion_ordinal and
+            existing.kind == command.evidence_kind and
+            existing.content_id == command.completion_content_id and
+            std.mem.eql(u8, &existing.digest, &command.completion_digest);
+    }
+
+    fn requireAttemptForOperation(self: *Store, attempt_id: u64, operation_id: u64) !void {
+        const statement = try self.prepare(
+            "SELECT 1 FROM attempt WHERE attempt_id = ?1 AND operation_id = ?2",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, attempt_id);
+        try bindU64(statement, 2, operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.AttemptNotFound;
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+    }
+
+    fn nextCompletionOrdinal(self: *Store, attempt_id: u64) !u64 {
+        const statement = try self.prepare(
+            "SELECT COALESCE(MAX(completion_ordinal), 0) + 1 FROM attempt_completion WHERE attempt_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, attempt_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptHostStore;
+        const value = try positiveColumn(statement, 0);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return value;
+    }
+
+    const ExistingCompletion = struct {
+        operation_id: u64,
+        attempt_id: u64,
+        ordinal: u32,
+        kind: EvidenceKind,
+        content_id: u64,
+        digest: Digest,
+    };
+
+    fn existingCompletion(self: *Store, completion_id: u64) !?ExistingCompletion {
+        const statement = try self.prepare(
+            "SELECT operation_id, attempt_id, completion_ordinal, evidence_kind, evidence_content_id, evidence_digest FROM attempt_completion WHERE completion_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, completion_id);
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return null;
+        if (result != c.SQLITE_ROW) return mapSqliteError(result);
+        const value: ExistingCompletion = .{
+            .operation_id = try positiveColumn(statement, 0),
+            .attempt_id = try positiveColumn(statement, 1),
+            .ordinal = std.math.cast(u32, try positiveColumn(statement, 2)) orelse
+                return error.CorruptHostStore,
+            .kind = std.enums.fromInt(EvidenceKind, c.sqlite3_column_int64(statement, 3)) orelse
+                return error.CorruptHostStore,
+            .content_id = try positiveColumn(statement, 4),
+            .digest = try digestColumn(statement, 5),
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return value;
+    }
+
+    const InsertCompletion = struct {
+        completion_id: u64,
+        operation_id: u64,
+        attempt_id: u64,
+        ordinal: u32,
+        kind: EvidenceKind,
+        content_id: u64,
+        digest: Digest,
+    };
+
+    fn insertCompletion(self: *Store, value: InsertCompletion) !void {
+        const statement = try self.prepare(
+            \\INSERT INTO attempt_completion (
+            \\    completion_id, operation_id, attempt_id, completion_ordinal, evidence_kind,
+            \\    evidence_content_id, evidence_digest
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, value.completion_id);
+        try bindU64(statement, 2, value.operation_id);
+        try bindU64(statement, 3, value.attempt_id);
+        try bindU64(statement, 4, value.ordinal);
+        try bindU64(statement, 5, @intFromEnum(value.kind));
+        try bindU64(statement, 6, value.content_id);
+        try bindBlob(statement, 7, &value.digest);
+        try done(statement);
+        try self.expectOneChange();
+    }
+
+    fn ensureCompletion(self: *Store, value: InsertCompletion) !AdmissionResult {
+        if (try self.existingCompletion(value.completion_id)) |existing| {
+            if (existing.operation_id != value.operation_id or
+                existing.attempt_id != value.attempt_id or
+                existing.ordinal != value.ordinal or existing.kind != value.kind or
+                existing.content_id != value.content_id or
+                !std.mem.eql(u8, &existing.digest, &value.digest))
+            {
+                return error.CompletionConflict;
+            }
+            return .replay;
         }
-        if (try self.pragmaU64("PRAGMA user_version") != schema_version) {
-            return error.UnsupportedHostStoreVersion;
+        try self.requireAttemptForOperation(value.attempt_id, value.operation_id);
+        if (try self.nextCompletionOrdinal(value.attempt_id) != value.ordinal) {
+            return error.InvalidCompletionOrdinal;
+        }
+        try self.insertCompletion(value);
+        return .admitted;
+    }
+
+    fn insertResolution(
+        self: *Store,
+        operation_id: u64,
+        kind: ResolutionKind,
+        completion_id: ?u64,
+        content_id: u64,
+        digest: Digest,
+    ) !void {
+        const statement = try self.prepare(
+            \\INSERT INTO operation_resolution (
+            \\    operation_id, resolution_kind, completion_id, result_content_id, result_digest
+            \\) VALUES (?1, ?2, ?3, ?4, ?5)
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        try bindU64(statement, 2, @intFromEnum(kind));
+        try bindOptionalU64(statement, 3, completion_id);
+        try bindU64(statement, 4, content_id);
+        try bindBlob(statement, 5, &digest);
+        try done(statement);
+        try self.expectOneChange();
+    }
+
+    fn setFailedOutcome(
+        self: *Store,
+        turn_id: u64,
+        content_id: u64,
+        failure_code: u16,
+    ) !void {
+        const statement = try self.prepare(
+            "UPDATE turn SET outcome_kind = 2, outcome_content_id = ?2, failure_code = ?3 WHERE turn_id = ?1 AND outcome_kind IS NULL",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        try bindU64(statement, 2, content_id);
+        try bindU64(statement, 3, failure_code);
+        try done(statement);
+        try self.expectOneChange();
+    }
+
+    const InsertConversationEntry = struct {
+        session_id: u64,
+        revision: u64,
+        entry_id: u64,
+        turn_id: u64,
+        kind: ConversationKind,
+        content_id: u64,
+        source_operation_id: ?u64 = null,
+        call_ordinal: ?u16 = null,
+    };
+
+    fn insertConversationEntry(self: *Store, value: InsertConversationEntry) !void {
+        const statement = try self.prepare(
+            \\INSERT INTO conversation_entry (
+            \\    session_id, revision, entry_id, turn_id, kind, content_id,
+            \\    source_operation_id, call_ordinal
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, value.session_id);
+        try bindU64(statement, 2, value.revision);
+        try bindU64(statement, 3, value.entry_id);
+        try bindU64(statement, 4, value.turn_id);
+        try bindU64(statement, 5, @intFromEnum(value.kind));
+        try bindU64(statement, 6, value.content_id);
+        try bindOptionalU64(statement, 7, value.source_operation_id);
+        try bindOptionalU64AllowZero(statement, 8, value.call_ordinal);
+        try done(statement);
+        try self.expectOneChange();
+    }
+
+    fn sessionForTurn(self: *Store, turn_id: u64) !u64 {
+        const statement = try self.prepare("SELECT session_id FROM turn WHERE turn_id = ?1");
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.TurnNotFound;
+        const session_id = try positiveColumn(statement, 0);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return session_id;
+    }
+
+    fn childOperationCount(self: *Store, parent_operation_id: u64) !usize {
+        const statement = try self.prepare(
+            "SELECT count(*) FROM operation WHERE caused_by_operation_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, parent_operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptHostStore;
+        const count = try nonnegativeColumn(statement, 0);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return std.math.cast(usize, count) orelse error.CorruptHostStore;
+    }
+
+    const ResolvedChild = struct { content_id: u64 };
+
+    fn resolvedChild(
+        self: *Store,
+        turn_id: u64,
+        parent_operation_id: u64,
+        operation_id: u64,
+        call_ordinal: usize,
+    ) !ResolvedChild {
+        const statement = try self.prepare(
+            \\SELECT r.result_content_id
+            \\FROM operation o
+            \\JOIN operation_resolution r ON r.operation_id = o.operation_id
+            \\WHERE o.operation_id = ?1 AND o.turn_id = ?2
+            \\  AND o.caused_by_operation_id = ?3 AND o.call_ordinal = ?4
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        try bindU64(statement, 2, turn_id);
+        try bindU64(statement, 3, parent_operation_id);
+        try bindU64AllowZero(statement, 4, call_ordinal);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.UnresolvedToolCall;
+        const value: ResolvedChild = .{ .content_id = try positiveColumn(statement, 0) };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return value;
+    }
+
+    fn toolResultsMatch(self: *Store, command: AppendToolResults) !bool {
+        if (try self.childOperationCount(command.parent_model_operation_id) != command.results.len) {
+            return false;
+        }
+        for (command.results, 0..) |candidate, call_index| {
+            const statement = try self.prepare(
+                \\SELECT entry_id, revision FROM conversation_entry
+                \\WHERE turn_id = ?1 AND kind = 4 AND source_operation_id = ?2 AND call_ordinal = ?3
+                ,
+            );
+            defer finalize(statement);
+            try bindU64(statement, 1, command.turn_id);
+            try bindU64(statement, 2, candidate.action_operation_id);
+            try bindU64AllowZero(statement, 3, call_index);
+            if (c.sqlite3_step(statement) != c.SQLITE_ROW) return false;
+            if (try positiveColumn(statement, 0) != candidate.entry_id) return false;
+            if (try positiveColumn(statement, 1) !=
+                command.expected_conversation_revision + call_index + 1) return false;
+            if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        }
+        return true;
+    }
+
+    fn modelToolCallsReplayMatch(self: *Store, command: AdmitModelToolCalls) !bool {
+        const completion = (try self.existingCompletion(command.completion_id)) orelse return false;
+        if (completion.operation_id != command.model_operation_id or
+            completion.attempt_id != command.attempt_id or completion.ordinal != 1 or
+            completion.kind != .success or completion.content_id != command.completion_content_id or
+            !std.mem.eql(u8, &completion.digest, &command.completion_digest)) return false;
+        for (command.calls, 0..) |call, call_index| {
+            const statement = try self.prepare(
+                \\SELECT entry.entry_id, entry.content_id, entry.revision, call_content.payload,
+                \\       child.operation_ordinal, child.kind, child.descriptor_content_id,
+                \\       child.descriptor_digest, descriptor.payload
+                \\FROM operation child
+                \\JOIN conversation_entry entry
+                \\  ON entry.turn_id = child.turn_id AND entry.entry_id = child.caused_by_entry_id
+                \\JOIN content call_content ON call_content.content_id = entry.content_id
+                \\JOIN content descriptor ON descriptor.content_id = child.descriptor_content_id
+                \\WHERE child.operation_id = ?1 AND child.turn_id = ?2
+                \\  AND child.caused_by_operation_id = ?3 AND child.call_ordinal = ?4
+                ,
+            );
+            defer finalize(statement);
+            try bindU64(statement, 1, call.action_operation_id);
+            try bindU64(statement, 2, command.turn_id);
+            try bindU64(statement, 3, command.model_operation_id);
+            try bindU64AllowZero(statement, 4, call_index);
+            if (c.sqlite3_step(statement) != c.SQLITE_ROW) return false;
+            const matches = try positiveColumn(statement, 0) == call.entry_id and
+                try positiveColumn(statement, 1) == call.content_id and
+                try positiveColumn(statement, 2) == command.expected_conversation_revision + call_index + 1 and
+                columnBlobEquals(statement, 3, call.content) and
+                try positiveColumn(statement, 4) == call.action_operation_ordinal and
+                c.sqlite3_column_int64(statement, 5) == @intFromEnum(call.action_kind) and
+                try positiveColumn(statement, 6) == call.descriptor_content_id and
+                columnBlobEquals(statement, 7, &call.descriptor_digest) and
+                columnBlobEquals(statement, 8, call.descriptor);
+            if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+            if (!matches) return false;
+        }
+        return try self.childOperationCount(command.model_operation_id) == command.calls.len;
+    }
+
+    fn completeTurnReplayMatches(self: *Store, command: CompleteTurn) !bool {
+        const completion = (try self.existingCompletion(command.completion_id)) orelse return false;
+        if (completion.operation_id != command.model_operation_id or
+            completion.attempt_id != command.attempt_id or completion.ordinal != 1 or
+            completion.kind != .success or completion.content_id != command.completion_content_id or
+            !std.mem.eql(u8, &completion.digest, &command.completion_digest)) return false;
+        if (!try self.resolutionReplayMatches(
+            command.model_operation_id,
+            .final_answer,
+            command.completion_id,
+            command.final_content_id,
+            semanticDigest(.resolution, command.final_answer),
+        )) return false;
+        const statement = try self.prepare(
+            \\SELECT t.outcome_content_id, entry.content_id, entry.source_operation_id,
+            \\       entry.revision, final.payload
+            \\FROM turn t
+            \\JOIN conversation_entry entry ON entry.entry_id = ?2 AND entry.turn_id = t.turn_id
+            \\JOIN content final ON final.content_id = entry.content_id
+            \\WHERE t.turn_id = ?1 AND t.outcome_kind = 1 AND entry.kind = 2
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, command.turn_id);
+        try bindU64(statement, 2, command.final_entry_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return false;
+        const matches = try positiveColumn(statement, 0) == command.final_content_id and
+            try positiveColumn(statement, 1) == command.final_content_id and
+            try positiveColumn(statement, 2) == command.model_operation_id and
+            try positiveColumn(statement, 3) == command.expected_conversation_revision + 1 and
+            columnBlobEquals(statement, 4, command.final_answer);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return matches;
+    }
+
+    fn turnSettlementReplayMatches(self: *Store, command: SettleTurn) !bool {
+        const statement = try self.prepare(
+            \\SELECT t.outcome_kind, t.outcome_content_id, t.failure_code, content.payload
+            \\FROM turn t LEFT JOIN content ON content.content_id = t.outcome_content_id
+            \\WHERE t.turn_id = ?1
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, command.turn_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return false;
+        const matches = switch (command.outcome) {
+            .cancelled => c.sqlite3_column_int64(statement, 0) == @intFromEnum(TurnOutcome.cancelled) and
+                c.sqlite3_column_type(statement, 1) == c.SQLITE_NULL and
+                c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL,
+            .failed => c.sqlite3_column_int64(statement, 0) == @intFromEnum(TurnOutcome.failed) and
+                try positiveColumn(statement, 1) == command.failure_content_id.? and
+                try positiveColumn(statement, 2) == command.failure_code.? and
+                columnBlobEquals(statement, 3, command.failure_message.?),
+            .completed => false,
+        };
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return matches;
+    }
+
+    fn failedOutcomeMatches(
+        self: *Store,
+        turn_id: u64,
+        content_id: u64,
+        message: []const u8,
+        failure_code: u16,
+    ) !bool {
+        const statement = try self.prepare(
+            \\SELECT t.outcome_content_id, t.failure_code, content.payload
+            \\FROM turn t JOIN content ON content.content_id = t.outcome_content_id
+            \\WHERE t.turn_id = ?1 AND t.outcome_kind = 2
+            ,
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return false;
+        const matches = try positiveColumn(statement, 0) == content_id and
+            try positiveColumn(statement, 1) == failure_code and
+            columnBlobEquals(statement, 2, message);
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return matches;
+    }
+
+    fn turnOutcome(self: *Store, turn_id: u64) !?TurnOutcome {
+        const statement = try self.prepare("SELECT outcome_kind FROM turn WHERE turn_id = ?1");
+        defer finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.TurnNotFound;
+        if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) {
+            if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+            return null;
+        }
+        const raw = c.sqlite3_column_int64(statement, 0);
+        if (raw < 1 or raw > 3) return error.CorruptHostStore;
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+        return @enumFromInt(raw);
+    }
+
+    fn insertContent(self: *Store, content_id: u64, bytes: []const u8) !void {
+        if (content_id == 0 or bytes.len == 0 or bytes.len > max_text_bytes) {
+            return error.InvalidContent;
+        }
+        const digest = binding.hash(binding.Blob, bytes);
+        const statement = try self.prepare(
+            "INSERT INTO content (content_id, byte_length, digest, payload) VALUES (?1, ?2, ?3, ?4)",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, content_id);
+        try bindU64(statement, 2, bytes.len);
+        try bindBlob(statement, 3, &digest.bytes);
+        try bindBlob(statement, 4, bytes);
+        try done(statement);
+        try self.expectOneChange();
+    }
+
+    fn ensureContent(self: *Store, content_id: u64, bytes: []const u8) !void {
+        const statement = try self.prepare(
+            "SELECT byte_length, digest FROM content WHERE content_id = ?1",
+        );
+        defer finalize(statement);
+        try bindU64(statement, 1, content_id);
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => return self.insertContent(content_id, bytes),
+            c.SQLITE_ROW => {
+                const length = try positiveColumn(statement, 0);
+                const digest = try digestColumn(statement, 1);
+                const expected = binding.hash(binding.Blob, bytes);
+                if (length != bytes.len or !std.mem.eql(u8, &digest, &expected.bytes)) {
+                    return error.ContentConflict;
+                }
+                if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
+            },
+            else => |result| return mapSqliteError(result),
         }
     }
 
-    fn schemaIsEmpty(self: *StorageOwner) !bool {
+    fn schemaIsEmpty(self: *Store) !bool {
         const statement = try self.prepare(
             "SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1",
         );
@@ -1613,331 +2321,287 @@ pub const StorageOwner = struct {
         };
     }
 
-    fn validateSchemaShape(self: *StorageOwner) !void {
-        try self.expectSchemaSql("table", "session", session_schema);
-        try self.expectSchemaSql("table", "content", content_schema);
-        try self.expectSchemaSql("table", "session_transition", transition_schema);
-        try self.expectSchemaSql("table", "conversation_entry", conversation_schema);
-        try self.expectSchemaSql("table", "completion_inbox", completion_schema);
-        try self.expectSchemaSql("index", "completion_inbox_by_session", completion_index_schema);
-        try self.expectSchemaCount(
-            "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
-            6,
-        );
-    }
-
-    fn expectSchemaSql(
-        self: *StorageOwner,
-        object_type: []const u8,
-        name: []const u8,
-        expected: []const u8,
-    ) !void {
-        const statement = try self.prepare(
-            "SELECT sql FROM sqlite_schema WHERE type = ?1 AND name = ?2",
-        );
-        defer finalize(statement);
-        try bindText(statement, 1, object_type);
-        try bindText(statement, 2, name);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW or
-            !columnTextEquals(statement, 0, expected) or
-            c.sqlite3_step(statement) != c.SQLITE_DONE)
-        {
-            return error.InvalidHostStoreSchema;
-        }
-    }
-
-    fn expectSchemaCount(self: *StorageOwner, sql: [:0]const u8, expected: u8) !void {
-        const statement = try self.prepare(sql);
-        defer finalize(statement);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW or
-            c.sqlite3_column_int64(statement, 0) != expected or
-            c.sqlite3_step(statement) != c.SQLITE_DONE)
-        {
-            return error.InvalidHostStoreSchema;
-        }
-    }
-
-    fn ensureAdmissionCapacity(self: *StorageOwner) !void {
-        const page_count = try self.pragmaU64("PRAGMA page_count");
-        const freelist_count = try self.pragmaU64("PRAGMA freelist_count");
-        const maximum_page_count = try self.pragmaU64("PRAGMA max_page_count");
-        if (page_count > maximum_page_count or freelist_count > page_count or
-            freelist_count + maximum_page_count - page_count < self.admission_reserve_pages)
-        {
-            return error.HostStoreCapacityReserved;
-        }
-    }
-
-    fn pragmaU64(self: *StorageOwner, sql: [:0]const u8) !u64 {
+    fn pragmaU64(self: *Store, sql: [:0]const u8) !u64 {
         const statement = try self.prepare(sql);
         defer finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptHostStore;
-        const value = c.sqlite3_column_int64(statement, 0);
-        if (value < 0) return error.CorruptHostStore;
+        const value = try nonnegativeColumn(statement, 0);
         if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-        return @intCast(value);
+        return value;
     }
 
-    const DatabaseStatus = struct { current: u64, highwater: u64 };
-
-    fn databaseStatus(
-        self: *StorageOwner,
-        operation: c_int,
-        reset_highwater: bool,
-    ) !DatabaseStatus {
-        var current: c_int = 0;
-        var highwater: c_int = 0;
-        try expectOk(c.sqlite3_db_status(
-            self.database,
-            operation,
-            &current,
-            &highwater,
-            @intFromBool(reset_highwater),
-        ));
-        return .{
-            .current = try nonnegative(current),
-            .highwater = try nonnegative(highwater),
-        };
-    }
-
-    fn prepare(self: *StorageOwner, sql: [:0]const u8) !*c.sqlite3_stmt {
+    fn prepare(self: *Store, sql: [:0]const u8) !*c.sqlite3_stmt {
         var maybe_statement: ?*c.sqlite3_stmt = null;
         const result = c.sqlite3_prepare_v2(self.database, sql.ptr, -1, &maybe_statement, null);
         if (result != c.SQLITE_OK) return mapSqliteError(result);
         return maybe_statement orelse error.HostStorePrepareFailed;
     }
 
-    fn execute(self: *StorageOwner, sql: [:0]const u8) !void {
+    fn execute(self: *Store, sql: [:0]const u8) !void {
         const result = c.sqlite3_exec(self.database, sql.ptr, null, null, null);
         if (result != c.SQLITE_OK) return mapSqliteError(result);
     }
 
-    fn ensureOpen(self: *const StorageOwner) !void {
-        if (!self.open_) return error.HostStoreClosed;
-        if (self.failed_) return error.HostStoreUnavailable;
+    fn expectOneChange(self: *Store) !void {
+        if (c.sqlite3_changes(self.database) != 1) return error.UnexpectedAffectedRows;
     }
 
-    fn reach(self: *StorageOwner, boundary: FaultBoundary) !void {
-        if (self.fault) |hook| try hook.reached(hook.context, boundary);
+    fn rollback(self: *Store) void {
+        _ = c.sqlite3_exec(self.database, "ROLLBACK", null, null, null);
     }
 
-    fn rollbackOrPoison(self: *StorageOwner) void {
-        self.execute("ROLLBACK") catch {
-            // SQLite may already have rolled back FULL, IOERR, or NOMEM automatically.
-        };
-        if (c.sqlite3_get_autocommit(self.database) == 0) self.failed_ = true;
+    fn reach(self: *Store, point: CrashPoint) !void {
+        if (self.fault_hook) |hook| try hook.reach(point);
     }
 };
 
-fn initialTransaction(identity: SessionIdentity) session_transition.Transaction {
-    const agent: session_transition.AgentContext = .{
-        .agent_id = identity.agent_id,
-        .agent_generation = 1,
-        .ownership_epoch = 1,
-    };
-    var transaction: session_transition.Transaction = .{ .sequence = 1, .fact_count = 1 };
-    transaction.facts[0] = session_transition.conversationAdvanced(.{
-        .agent = agent,
-        .entry_id = 1,
-        .parent_id = 0,
-        .kind = .user_text,
-        .content_ref = identity.task_id,
-    });
-    return transaction;
-}
-
-fn validateTransactionIdentity(
-    identity: SessionIdentity,
-    transaction: session_transition.Transaction,
-) !void {
-    for (transaction.factSlice()) |fact| {
-        const agent = fact.agent();
-        if (agent.agent_id != identity.agent_id or agent.ownership_epoch != 1) {
-            return error.InvalidTransitionIdentity;
-        }
-    }
-    if (transaction.fact_count != 1 or
-        std.meta.activeTag(transaction.facts[0]) != .conversation_advanced)
+fn validateAdmitTurn(command: AdmitTurn) !void {
+    if (command.session_id == 0 or command.turn_id == 0 or command.entry_id == 0 or
+        command.content_id == 0 or command.turn_ordinal == 0 or
+        command.workspace_path.len == 0 or command.workspace_path.len > max_path_bytes or
+        !std.unicode.utf8ValidateSlice(command.workspace_path) or
+        command.user_text.len == 0 or command.user_text.len > max_text_bytes or
+        !std.unicode.utf8ValidateSlice(command.user_text))
     {
-        return error.InvalidInitialTransition;
-    }
-    const root = transaction.facts[0].conversation_advanced;
-    if (root.entry_id != 1 or root.parent_id != 0 or root.kind != .user_text or
-        root.content_ref != identity.task_id)
-    {
-        return error.InvalidInitialTransition;
+        return error.InvalidTurnAdmission;
     }
 }
 
-fn validateCommitIdentity(
-    token: OwnerToken,
-    transaction: session_transition.Transaction,
-) !u64 {
-    const first = transaction.facts[0].agent();
-    if (first.agent_generation != 1) return error.InvalidTransitionIdentity;
-    for (transaction.factSlice()) |fact| {
-        const agent = fact.agent();
-        if (agent.agent_id != first.agent_id or agent.agent_generation != first.agent_generation) {
-            return error.InvalidTransitionIdentity;
+fn validateOperation(command: AdmitOperation) !void {
+    if (command.turn_id == 0 or command.operation_id == 0 or command.operation_ordinal == 0 or
+        command.kind != .model or command.descriptor_content_id == 0 or command.descriptor.len == 0 or
+        command.descriptor.len > max_text_bytes or
+        !std.mem.eql(u8, &command.descriptor_digest, &semanticDigest(.operation, command.descriptor)))
+    {
+        return error.InvalidOperationAdmission;
+    }
+}
+
+fn validateAttempt(command: AdmitAttempt) !void {
+    if (command.operation_id == 0 or command.attempt_id == 0 or command.attempt_ordinal == 0 or
+        command.dispatch_content_id == 0 or command.parameters_content_id == 0 or
+        command.dispatch_content_id == command.parameters_content_id or
+        command.dispatch_request.len == 0 or command.dispatch_request.len > max_text_bytes or
+        command.parameters.len == 0 or command.parameters.len > max_text_bytes or
+        !std.mem.eql(u8, &command.dispatch_digest, &semanticDigest(.dispatch, command.dispatch_request)))
+    {
+        return error.InvalidAttemptAdmission;
+    }
+    if (command.external_idempotency_key) |key| {
+        if (key.len == 0 or key.len > 256 or !std.unicode.utf8ValidateSlice(key)) {
+            return error.InvalidAttemptAdmission;
         }
-        const may_use_earlier_epoch = switch (fact) {
-            .result => |result| result.evidence == .durable,
-            else => false,
-        };
-        if (agent.ownership_epoch > token.epoch or
-            (!may_use_earlier_epoch and agent.ownership_epoch != token.epoch))
+    }
+}
+
+fn validateCompletion(command: CompleteAndResolve) !void {
+    if (command.operation_id == 0 or command.attempt_id == 0 or command.completion_id == 0 or
+        command.completion_ordinal == 0 or command.completion_content_id == 0 or
+        command.result_content_id == 0 or command.completion_content_id == command.result_content_id or
+        command.completion_content.len == 0 or command.completion_content.len > max_text_bytes or
+        command.result_content.len == 0 or command.result_content.len > max_text_bytes or
+        !std.mem.eql(u8, &command.completion_digest, &semanticDigest(.completion, command.completion_content)) or
+        !std.mem.eql(u8, &command.resolution_digest, &semanticDigest(.resolution, command.result_content)))
+    {
+        return error.InvalidCompletionAdmission;
+    }
+}
+
+fn validateRecordedCompletion(command: RecordCompletion) !void {
+    if (command.operation_id == 0 or command.attempt_id == 0 or command.completion_id == 0 or
+        command.completion_ordinal == 0 or command.content_id == 0 or
+        command.content.len == 0 or command.content.len > max_text_bytes or
+        !std.mem.eql(u8, &command.completion_digest, &semanticDigest(.completion, command.content)))
+    {
+        return error.InvalidCompletionAdmission;
+    }
+}
+
+/// The synchronous V1 CLI is the Host for one invocation. This kernel lock is
+/// held for the Store lifetime, so another process cannot infer lost volatile
+/// custody while the owning Host is still alive.
+fn acquireHostLock(database_path: []const u8) !c_int {
+    var path: [max_path_bytes + ".lock".len:0]u8 = undefined;
+    if (database_path.len + ".lock".len > path.len) return error.InvalidHostStorePath;
+    @memcpy(path[0..database_path.len], database_path);
+    @memcpy(path[database_path.len..][0..".lock".len], ".lock");
+    path[database_path.len + ".lock".len] = 0;
+    const descriptor = c.open(&path, c.O_RDWR | c.O_CREAT, @as(c_uint, 0o600));
+    if (descriptor < 0) return error.HostStoreLockOpenFailed;
+    errdefer _ = c.close(descriptor);
+    if (c.flock(descriptor, c.LOCK_EX | c.LOCK_NB) != 0) return error.HostStoreBusy;
+    return descriptor;
+}
+
+fn releaseHostLock(descriptor: c_int) void {
+    _ = c.flock(descriptor, c.LOCK_UN);
+    _ = c.close(descriptor);
+}
+
+fn validateSettlement(command: SettleTurn) !void {
+    if (command.turn_id == 0 or command.outcome == .completed) return error.InvalidTurnSettlement;
+    switch (command.outcome) {
+        .cancelled => if (command.failure_content_id != null or command.failure_message != null or
+            command.failure_code != null) return error.InvalidTurnSettlement,
+        .failed => {
+            const message = command.failure_message orelse return error.InvalidTurnSettlement;
+            if (command.failure_content_id == null or command.failure_code == null or
+                command.failure_code.? == 0 or message.len == 0 or message.len > max_text_bytes or
+                !std.unicode.utf8ValidateSlice(message)) return error.InvalidTurnSettlement;
+        },
+        .completed => unreachable,
+    }
+}
+
+fn validateModelToolCalls(command: AdmitModelToolCalls) !void {
+    if (command.turn_id == 0 or command.model_operation_id == 0 or command.attempt_id == 0 or
+        command.completion_id == 0 or command.completion_content_id == 0 or
+        command.calls.len == 0 or command.calls.len > 8 or
+        command.captured_output.len == 0 or command.captured_output.len > max_text_bytes or
+        !std.mem.eql(u8, &command.completion_digest, &semanticDigest(.completion, command.captured_output)))
+    {
+        return error.InvalidModelOutput;
+    }
+    for (command.calls, 0..) |call, index| {
+        if (call.entry_id == 0 or call.content_id == 0 or call.action_operation_id == 0 or
+            call.action_operation_ordinal == 0 or call.action_kind == .model or
+            call.descriptor_content_id == 0 or call.content.len == 0 or
+            call.content.len > max_text_bytes or call.descriptor.len == 0 or
+            call.descriptor.len > max_text_bytes or
+            !std.mem.eql(u8, &call.descriptor_digest, &semanticDigest(.operation, call.descriptor)))
         {
-            return error.StaleOwner;
+            return error.InvalidModelOutput;
+        }
+        const admitted_call = conversation.decodeToolCall(call.content) catch
+            return error.InvalidModelOutput;
+        const expected_key = switch (call.action_kind) {
+            .bash => model_contract.bash_key,
+            .apply_patch => model_contract.apply_patch_key,
+            .model => unreachable,
+        };
+        if (!std.mem.eql(u8, admitted_call.key, expected_key)) {
+            return error.InvalidActionProvenance;
+        }
+        for (command.calls[0..index]) |earlier| {
+            const current_ids = [_]u64{ call.entry_id, call.content_id, call.action_operation_id, call.descriptor_content_id };
+            const earlier_ids = [_]u64{ earlier.entry_id, earlier.content_id, earlier.action_operation_id, earlier.descriptor_content_id };
+            for (current_ids) |current_id| for (earlier_ids) |earlier_id| {
+                if (current_id == earlier_id) return error.InvalidModelOutput;
+            };
         }
     }
-    return first.agent_id;
+    try validateCapturedModelToolCalls(command.captured_output, command.calls);
 }
 
-fn isAdmission(transaction: session_transition.Transaction) bool {
-    for (transaction.factSlice()) |fact| switch (fact) {
-        .task_admitted, .operation_admitted, .attempt_admitted => return true,
-        .authorization,
-        .result,
-        .conversation_advanced,
-        .outcome,
-        .cancellation,
-        .shutdown,
-        .result_applied,
-        .approval_required,
-        => {},
-    };
-    return false;
+fn validateCapturedModelToolCalls(
+    captured_output: []const u8,
+    calls: []const ToolCallCandidate,
+) !void {
+    var scratch: model_protocol.ValidationScratch = .{};
+    const parsed = model_protocol.decode(&scratch, captured_output) catch
+        return error.InvalidModelOutput;
+    if (parsed.disposition != .tool_calls or parsed.tool_call_count != calls.len) {
+        return error.InvalidModelOutput;
+    }
+    for (calls, 0..) |call, index| {
+        const expected = conversation.decodeToolCall(call.content) catch
+            return error.InvalidModelOutput;
+        const span = parsed.tool_calls[index];
+        const key = captured_output[span.key_offset..][0..span.key_length];
+        const arguments = captured_output[span.arguments_offset..][0..span.arguments_length];
+        if (!std.mem.eql(u8, key, expected.key) or
+            !std.mem.eql(u8, arguments, expected.arguments)) return error.InvalidModelOutput;
+    }
 }
 
-fn validateConfig(path: []const u8, config: Config) !void {
-    if (path.len == 0 or path.len > max_path_bytes) return error.InvalidHostStorePath;
-    if (config.page_cache_kib != 32 and config.page_cache_kib != 64 and
-        config.page_cache_kib != 128)
+fn validateCompleteTurn(command: CompleteTurn) !void {
+    if (command.turn_id == 0 or command.model_operation_id == 0 or command.attempt_id == 0 or
+        command.completion_id == 0 or command.completion_content_id == 0 or
+        command.final_entry_id == 0 or command.final_content_id == 0 or
+        command.completion_content_id == command.final_content_id or
+        command.captured_output.len == 0 or command.captured_output.len > max_text_bytes or
+        command.final_answer.len == 0 or command.final_answer.len > max_text_bytes or
+        !std.unicode.utf8ValidateSlice(command.final_answer) or
+        !std.mem.eql(u8, &command.completion_digest, &semanticDigest(.completion, command.captured_output)))
     {
-        return error.UnsupportedPageCacheProfile;
-    }
-    if (config.maximum_page_count < 16) return error.InvalidMaximumPageCount;
-    if (config.admission_reserve_pages == 0 or
-        config.admission_reserve_pages >= config.maximum_page_count)
-    {
-        return error.InvalidAdmissionReserve;
+        return error.InvalidTurnCompletion;
     }
 }
 
-pub fn configureProcessHeapLimit(limit_bytes: u64) !void {
-    if (limit_bytes < 1024 * 1024 or limit_bytes > std.math.maxInt(i64)) {
-        return error.InvalidSqliteHeapLimit;
-    }
-    if (c.sqlite3_hard_heap_limit64(@intCast(limit_bytes)) < 0) {
-        return error.SqliteHeapLimitConfigurationFailed;
-    }
-}
-
-pub fn disableProcessHeapLimit() void {
-    _ = c.sqlite3_hard_heap_limit64(0);
-}
-
-fn processHeapLimit() !u64 {
-    const value = c.sqlite3_hard_heap_limit64(-1);
-    if (value < 0) return error.SqliteHeapLimitQueryFailed;
-    return @intCast(value);
-}
-
-fn openHostLock(io: std.Io, path: []const u8) !std.Io.File {
-    const cwd = std.Io.Dir.cwd();
-    for (0..8) |_| {
-        return cwd.openFile(io, path, .{
-            .mode = .read_write,
-            .lock = .exclusive,
-            .lock_nonblocking = true,
-        }) catch |open_error| switch (open_error) {
-            error.FileNotFound => cwd.createFile(io, path, .{
-                .read = true,
-                .truncate = false,
-                .exclusive = true,
-                .lock = .exclusive,
-                .lock_nonblocking = true,
-            }) catch |create_error| switch (create_error) {
-                error.PathAlreadyExists => continue,
-                error.WouldBlock => return error.HostStoreBusy,
-                else => return create_error,
-            },
-            error.WouldBlock => return error.HostStoreBusy,
-            else => return open_error,
-        };
-    }
-    return error.HostStoreLockRace;
-}
-
-fn dbConfig(database: *c.sqlite3, operation: c_int, value: c_int) !void {
-    var previous: c_int = 0;
-    const result = c.sqlite3_db_config(database, operation, value, &previous);
+fn bindU64(statement: *c.sqlite3_stmt, index: c_int, value: anytype) !void {
+    const wide: u64 = @intCast(value);
+    if (wide == 0 or wide > std.math.maxInt(i64)) return error.InvalidIdentity;
+    const result = c.sqlite3_bind_int64(statement, index, @intCast(wide));
     if (result != c.SQLITE_OK) return mapSqliteError(result);
 }
 
-fn bindU64(statement: *c.sqlite3_stmt, index: c_int, value: u64) !void {
+fn bindU64AllowZero(statement: *c.sqlite3_stmt, index: c_int, value: u64) !void {
     if (value > std.math.maxInt(i64)) return error.InvalidIdentity;
     const result = c.sqlite3_bind_int64(statement, index, @intCast(value));
     if (result != c.SQLITE_OK) return mapSqliteError(result);
 }
 
-fn bindIdentity(
-    statement: *c.sqlite3_stmt,
-    index: c_int,
-    value: u64,
-    encoded: *[8]u8,
-) !void {
-    if (value == 0) return error.InvalidIdentity;
-    std.mem.writeInt(u64, encoded, value, .little);
-    const result = c.sqlite3_bind_blob64(
-        statement,
-        index,
-        encoded,
-        encoded.len,
-        null,
-    );
+fn bindOptionalU64(statement: *c.sqlite3_stmt, index: c_int, value: ?u64) !void {
+    if (value) |present| return bindU64(statement, index, present);
+    return bindNull(statement, index);
+}
+
+fn bindOptionalU64AllowZero(statement: *c.sqlite3_stmt, index: c_int, value: anytype) !void {
+    if (value) |present| return bindU64AllowZero(statement, index, @intCast(present));
+    return bindNull(statement, index);
+}
+
+fn bindNull(statement: *c.sqlite3_stmt, index: c_int) !void {
+    const result = c.sqlite3_bind_null(statement, index);
     if (result != c.SQLITE_OK) return mapSqliteError(result);
 }
 
 fn bindBlob(statement: *c.sqlite3_stmt, index: c_int, bytes: []const u8) !void {
-    const result = c.sqlite3_bind_blob64(
-        statement,
-        index,
-        bytes.ptr,
-        bytes.len,
-        null,
-    );
+    const result = c.sqlite3_bind_blob64(statement, index, bytes.ptr, bytes.len, null);
     if (result != c.SQLITE_OK) return mapSqliteError(result);
 }
 
 fn bindText(statement: *c.sqlite3_stmt, index: c_int, bytes: []const u8) !void {
-    const result = c.sqlite3_bind_text64(
-        statement,
-        index,
-        bytes.ptr,
-        bytes.len,
-        null,
-        c.SQLITE_UTF8,
-    );
+    const result = c.sqlite3_bind_text64(statement, index, bytes.ptr, bytes.len, null, c.SQLITE_UTF8);
     if (result != c.SQLITE_OK) return mapSqliteError(result);
 }
 
-fn readIdentityColumn(statement: *c.sqlite3_stmt, index: c_int) !u64 {
-    if (c.sqlite3_column_bytes(statement, index) != 8) return error.CorruptHostStore;
-    const pointer = c.sqlite3_column_blob(statement, index) orelse return error.CorruptHostStore;
-    const bytes: [*]const u8 = @ptrCast(pointer);
-    const value = std.mem.readInt(u64, bytes[0..8], .little);
-    if (value == 0) return error.CorruptHostStore;
-    return value;
+fn done(statement: *c.sqlite3_stmt) !void {
+    const result = c.sqlite3_step(statement);
+    if (result != c.SQLITE_DONE) return mapSqliteError(result);
 }
 
-fn readBindingColumn(comptime T: type, statement: *c.sqlite3_stmt, index: c_int) !T {
-    if (c.sqlite3_column_bytes(statement, index) != @sizeOf(binding.Sha256)) {
-        return error.CorruptHostStore;
-    }
+fn finalize(statement: *c.sqlite3_stmt) void {
+    _ = c.sqlite3_finalize(statement);
+}
+
+fn positiveColumn(statement: *c.sqlite3_stmt, index: c_int) !u64 {
+    const value = c.sqlite3_column_int64(statement, index);
+    if (value <= 0) return error.CorruptHostStore;
+    return @intCast(value);
+}
+
+fn nonnegativeColumn(statement: *c.sqlite3_stmt, index: c_int) !u64 {
+    const value = c.sqlite3_column_int64(statement, index);
+    if (value < 0) return error.CorruptHostStore;
+    return @intCast(value);
+}
+
+fn optionalPositiveColumn(statement: *c.sqlite3_stmt, index: c_int) !?u64 {
+    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
+    return try positiveColumn(statement, index);
+}
+
+fn optionalNonnegativeColumn(statement: *c.sqlite3_stmt, index: c_int) !?u64 {
+    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
+    return try nonnegativeColumn(statement, index);
+}
+
+fn digestColumn(statement: *c.sqlite3_stmt, index: c_int) !Digest {
+    if (c.sqlite3_column_bytes(statement, index) != 32) return error.CorruptHostStore;
     const pointer = c.sqlite3_column_blob(statement, index) orelse return error.CorruptHostStore;
     const bytes: [*]const u8 = @ptrCast(pointer);
-    return .{ .bytes = bytes[0..@sizeOf(binding.Sha256)].* };
+    return bytes[0..32].*;
 }
 
 fn columnTextEquals(statement: *c.sqlite3_stmt, index: c_int, expected: []const u8) bool {
@@ -1947,157 +2611,21 @@ fn columnTextEquals(statement: *c.sqlite3_stmt, index: c_int, expected: []const 
     return std.mem.eql(u8, pointer[0..@intCast(length)], expected);
 }
 
-fn readPositiveU32Column(statement: *c.sqlite3_stmt, index: c_int) !u32 {
-    const value = c.sqlite3_column_int64(statement, index);
-    if (value <= 0 or value > std.math.maxInt(u32)) return error.CorruptHostStore;
-    return @intCast(value);
-}
-
-fn expectDone(result: c_int) !void {
-    if (result != c.SQLITE_DONE) return mapSqliteError(result);
-}
-
-fn expectOk(result: c_int) !void {
-    if (result != c.SQLITE_OK) return mapSqliteError(result);
-}
-
-fn finalize(statement: *c.sqlite3_stmt) void {
-    // sqlite3_finalize repeats the statement's last evaluation error. Every
-    // evaluation result is handled at its step call, so finalization has no
-    // independent failure to publish during deferred cleanup.
-    _ = c.sqlite3_finalize(statement);
-}
-
-fn closeBlob(blob: *c.sqlite3_blob) void {
-    // Blob I/O errors are returned by read/write. Close only releases the
-    // short-lived handle before the owning transaction completes.
-    _ = c.sqlite3_blob_close(blob);
-}
-
-fn closeDatabase(database: *c.sqlite3) void {
-    // Opening owns no outstanding statements at this cleanup boundary, so a
-    // close failure is an internal lifetime defect rather than a recoverable result.
-    std.debug.assert(c.sqlite3_close_v2(database) == c.SQLITE_OK);
-}
-
-fn nonnegative(value: anytype) !u64 {
-    if (value < 0) return error.CorruptSqliteAccounting;
-    return @intCast(value);
-}
-
-fn decodeVerifiedTransitionRow(
+fn optionalColumnTextEquals(
     statement: *c.sqlite3_stmt,
-    session_id: u64,
-    expected_sequence: u64,
-    out: *StoredTransition,
-) !void {
-    const sequence = try nonnegative(c.sqlite3_column_int64(statement, 0));
-    if (sequence != expected_sequence or sequence > session_transition.max_transitions) {
-        return error.CorruptHostStore;
-    }
-    const payload_length = c.sqlite3_column_bytes(statement, 1);
-    const digest_length = c.sqlite3_column_bytes(statement, 2);
-    if (payload_length <= 0 or payload_length > max_transition_payload or digest_length != 32) {
-        return error.CorruptHostStore;
-    }
-    const payload_pointer = c.sqlite3_column_blob(statement, 1) orelse
-        return error.CorruptHostStore;
-    const digest_pointer = c.sqlite3_column_blob(statement, 2) orelse
-        return error.CorruptHostStore;
-    const length: usize = @intCast(payload_length);
-    var payload: [max_transition_payload]u8 = undefined;
-    const payload_bytes: [*]const u8 = @ptrCast(payload_pointer);
-    @memcpy(payload[0..length], payload_bytes[0..length]);
-    const digest_bytes: [*]const u8 = @ptrCast(digest_pointer);
-    var stored_digest: binding.LedgerRecord = undefined;
-    @memcpy(&stored_digest.bytes, digest_bytes[0..32]);
-    if (!binding.eql(
-        binding.LedgerRecord,
-        recordDigest(session_id, sequence, payload[0..length]),
-        stored_digest,
-    )) return error.PayloadDigestMismatch;
-    out.* = .{
-        .session_id = session_id,
-        .sequence = sequence,
-        .transaction = try session_transition.decode(
-            sequence,
-            payload[0..length],
-        ),
-    };
+    index: c_int,
+    expected: ?[]const u8,
+) bool {
+    if (expected) |bytes| return columnTextEquals(statement, index, bytes);
+    return c.sqlite3_column_type(statement, index) == c.SQLITE_NULL;
 }
 
-fn applyCompletedAttemptFacts(
-    scan: *CompletedAttemptScan,
-    transaction: session_transition.Transaction,
-    operation_id: u64,
-    operation_generation: u32,
-    attempt_id: u64,
-) !void {
-    for (transaction.factSlice()) |fact| switch (fact) {
-        .operation_admitted => |operation| {
-            if (operation.operation.operation_id != operation_id or
-                operation.operation.generation != operation_generation)
-            {
-                continue;
-            }
-            if (scan.terminal_before_attempt) return error.InvalidHistoricalCompletionOrdering;
-            if (scan.operation) |existing| {
-                if (!std.meta.eql(existing, operation)) return error.ConflictingLedgerFacts;
-            } else scan.operation = operation;
-        },
-        .attempt_admitted => |attempt| {
-            if (attempt.operation.operation_id != operation_id or
-                attempt.operation.generation != operation_generation or
-                attempt.attempt_id != attempt_id)
-            {
-                continue;
-            }
-            if (scan.terminal_before_attempt) return error.InvalidHistoricalCompletionOrdering;
-            const operation = scan.operation orelse return error.InvalidHistoricalCompletionOrdering;
-            if (!std.meta.eql(operation.operation, attempt.operation) or
-                operation.descriptor_ref != attempt.descriptor_ref or
-                !binding.descriptorEql(operation.descriptor_digest, attempt.descriptor_digest))
-            {
-                return error.InvalidHistoricalCompletionRelationship;
-            }
-            if (scan.attempt) |existing| {
-                if (!std.meta.eql(existing, attempt)) return error.ConflictingLedgerFacts;
-            } else scan.attempt = attempt;
-        },
-        .result => |result| {
-            if (result.operation.operation_id != operation_id or
-                result.operation.generation != operation_generation or
-                scan.completed != null or scan.terminal_before_attempt)
-            {
-                continue;
-            }
-            if (scan.attempt) |attempt| {
-                const operation = scan.operation orelse {
-                    scan.terminal_before_attempt = true;
-                    continue;
-                };
-                if (!std.meta.eql(attempt.operation, result.operation)) {
-                    return error.InvalidHistoricalCompletionRelationship;
-                }
-                scan.completed = .{
-                    .operation = operation,
-                    .attempt = attempt,
-                    .terminal_result_sequence = transaction.sequence,
-                };
-            } else scan.terminal_before_attempt = true;
-        },
-        else => {},
-    };
-}
-
-fn recordDigest(session_id: u64, sequence: u64, payload: []const u8) binding.LedgerRecord {
-    var hasher = binding.Hasher(binding.LedgerRecord).init();
-    var identity: [16]u8 = undefined;
-    std.mem.writeInt(u64, identity[0..8], session_id, .little);
-    std.mem.writeInt(u64, identity[8..16], sequence, .little);
-    hasher.update(&identity);
-    hasher.update(payload);
-    return hasher.final();
+fn columnBlobEquals(statement: *c.sqlite3_stmt, index: c_int, expected: []const u8) bool {
+    const length = c.sqlite3_column_bytes(statement, index);
+    if (length < 0 or length != expected.len) return false;
+    const pointer = c.sqlite3_column_blob(statement, index) orelse return false;
+    const bytes: [*]const u8 = @ptrCast(pointer);
+    return std.mem.eql(u8, bytes[0..@intCast(length)], expected);
 }
 
 fn mapSqliteError(result: c_int) anyerror {
@@ -2111,1104 +2639,4 @@ fn mapSqliteError(result: c_int) anyerror {
         c.SQLITE_CONSTRAINT => error.HostStoreConstraint,
         else => error.HostStoreFailure,
     };
-}
-
-fn testContent(reference: u64) ContentImport {
-    const bytes = "host-store-test-content";
-    return .{
-        .reference = reference,
-        .length = bytes.len,
-        .digest = binding.hash(binding.Blob, bytes),
-        .source = .{ .bytes = bytes },
-    };
-}
-
-fn directContent(content: ContentImport) TransactionContentImport {
-    return .{ .transaction_fact = content };
-}
-
-fn pendingPublication(
-    envelope: completion_inbox.Envelope,
-    result: CompletionResult,
-) CompletionPublication {
-    return .{ .pending = .{ .envelope = envelope, .result = result } };
-}
-
-fn auditedPublication(
-    envelope: completion_inbox.Envelope,
-    result: CompletionResult,
-    sequence: u64,
-) CompletionPublication {
-    return .{ .audited = .{
-        .envelope = envelope,
-        .result = result,
-        .consumed_by_sequence = sequence,
-    } };
-}
-
-test "SQLite primary failure classes map to explicit Host Store outcomes" {
-    try std.testing.expectEqual(error.HostStoreBusy, mapSqliteError(c.SQLITE_BUSY));
-    try std.testing.expectEqual(error.HostStoreFull, mapSqliteError(c.SQLITE_FULL));
-    try std.testing.expectEqual(error.HostStoreIo, mapSqliteError(c.SQLITE_IOERR_WRITE));
-    try std.testing.expectEqual(error.CorruptHostStore, mapSqliteError(c.SQLITE_CORRUPT));
-    try std.testing.expectEqual(error.NotAHostStore, mapSqliteError(c.SQLITE_NOTADB));
-    try std.testing.expectEqual(error.HostStoreNoMemory, mapSqliteError(c.SQLITE_NOMEM));
-}
-
-test "an empty SQLite database left before schema publication can be initialized" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var terminated_path: [max_path_bytes:0]u8 = undefined;
-    @memcpy(terminated_path[0..path.len], path);
-    terminated_path[path.len] = 0;
-
-    var maybe_database: ?*c.sqlite3 = null;
-    try expectOk(c.sqlite3_open_v2(
-        &terminated_path,
-        &maybe_database,
-        c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
-        null,
-    ));
-    const database = maybe_database orelse return error.HostStoreOpenFailed;
-    try expectOk(c.sqlite3_exec(database, "VACUUM", null, null, null));
-    try expectOk(c.sqlite3_close_v2(database));
-
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-    try std.testing.expectEqual(@as(u64, application_id), try owner.pragmaU64("PRAGMA application_id"));
-    try std.testing.expectEqual(@as(u64, schema_version), try owner.pragmaU64("PRAGMA user_version"));
-}
-
-test "an unowned non-empty SQLite schema is rejected" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var terminated_path: [max_path_bytes:0]u8 = undefined;
-    @memcpy(terminated_path[0..path.len], path);
-    terminated_path[path.len] = 0;
-
-    var maybe_database: ?*c.sqlite3 = null;
-    try expectOk(c.sqlite3_open_v2(
-        &terminated_path,
-        &maybe_database,
-        c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
-        null,
-    ));
-    const database = maybe_database orelse return error.HostStoreOpenFailed;
-    try expectOk(c.sqlite3_exec(database, "CREATE TABLE foreign_data (value INTEGER)", null, null, null));
-    try expectOk(c.sqlite3_close_v2(database));
-
-    try std.testing.expectError(
-        error.InvalidHostStoreIdentity,
-        StorageOwner.open(std.testing.io, path, .{}),
-    );
-}
-
-test "matching identity cannot hide an incomplete or unhardened schema" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var terminated_path: [max_path_bytes:0]u8 = undefined;
-    @memcpy(terminated_path[0..path.len], path);
-    terminated_path[path.len] = 0;
-
-    var maybe_database: ?*c.sqlite3 = null;
-    try expectOk(c.sqlite3_open_v2(
-        &terminated_path,
-        &maybe_database,
-        c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
-        null,
-    ));
-    const database = maybe_database orelse return error.HostStoreOpenFailed;
-    try expectOk(c.sqlite3_exec(
-        database,
-        std.fmt.comptimePrint(
-            "CREATE TABLE session (session_id BLOB); PRAGMA application_id=1330532423; PRAGMA user_version={d}",
-            .{schema_version},
-        ),
-        null,
-        null,
-        null,
-    ));
-    try expectOk(c.sqlite3_close_v2(database));
-
-    try std.testing.expectError(
-        error.InvalidHostStoreSchema,
-        StorageOwner.open(std.testing.io, path, .{}),
-    );
-}
-
-test "installed schema retains the exact V1 keys constraints and completion index" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-
-    try owner.expectSchemaSql("table", "session", session_schema);
-    try owner.expectSchemaSql("table", "content", content_schema);
-    try owner.expectSchemaSql("table", "session_transition", transition_schema);
-    try owner.expectSchemaSql("table", "conversation_entry", conversation_schema);
-    try owner.expectSchemaSql("table", "completion_inbox", completion_schema);
-    try owner.expectSchemaSql("index", "completion_inbox_by_session", completion_index_schema);
-}
-
-test "Host Store round trips Conversation kinds and rejects hostile kinds" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-
-    const identity: SessionIdentity = .{
-        .session_id = 81,
-        .agent_id = 82,
-        .task_id = 83,
-    };
-    try owner.createSession(identity);
-    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    transaction.facts[0] = session_transition.conversationAdvanced(.{
-        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
-        .entry_id = 2,
-        .parent_id = 1,
-        .kind = .assistant_text,
-        .content_ref = 85,
-    });
-    _ = try owner.commitPrepared(
-        .{ .session_id = identity.session_id, .epoch = 1 },
-        .{ .transaction = transaction, .content = &.{directContent(testContent(85))} },
-    );
-
-    const stored = try owner.readConversationEntry(identity.session_id, 2);
-    try std.testing.expectEqual(@intFromEnum(session_transition.ConversationKind.assistant_text), stored.kind);
-    try std.testing.expectEqual(@as(u64, 1), stored.parent_id);
-    try std.testing.expectEqual(@as(u64, 85), stored.content_ref);
-
-    try owner.execute("PRAGMA ignore_check_constraints=ON");
-    try owner.execute("UPDATE conversation_entry SET kind=5");
-    try std.testing.expectError(
-        error.CorruptHostStore,
-        owner.readConversationEntry(identity.session_id, 2),
-    );
-}
-
-test "pre-release Host Store rejects the preceding schema epoch" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var terminated_path: [max_path_bytes:0]u8 = undefined;
-    @memcpy(terminated_path[0..path.len], path);
-    terminated_path[path.len] = 0;
-    var maybe_database: ?*c.sqlite3 = null;
-    try expectOk(c.sqlite3_open_v2(
-        &terminated_path,
-        &maybe_database,
-        c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
-        null,
-    ));
-    const database = maybe_database orelse return error.HostStoreOpenFailed;
-    try expectOk(c.sqlite3_exec(
-        database,
-        std.fmt.comptimePrint(
-            "CREATE TABLE legacy_schema (value INTEGER); PRAGMA application_id=1330532423; PRAGMA user_version={d}",
-            .{schema_version - 1},
-        ),
-        null,
-        null,
-        null,
-    ));
-    try expectOk(c.sqlite3_close_v2(database));
-
-    try std.testing.expectError(
-        error.UnsupportedHostStoreVersion,
-        StorageOwner.open(std.testing.io, path, .{}),
-    );
-}
-
-test "model identity is valid UTF-8 before write and after hostile persistence" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-    const identity: SessionIdentity = .{ .session_id = 11, .agent_id = 12, .task_id = 13 };
-    try std.testing.expectError(
-        error.InvalidSessionMetadata,
-        owner.createSessionWithMetadata(.{
-            .identities = identity,
-            .workspace_path = ".",
-            .model = "fixture:\xff",
-        }, initialTransaction(identity)),
-    );
-    try owner.createSessionWithMetadata(.{
-        .identities = identity,
-        .workspace_path = ".",
-        .model = "fixture:valid",
-    }, initialTransaction(identity));
-    try owner.execute("UPDATE session SET model=CAST(X'FF' AS TEXT)");
-    try std.testing.expectError(error.CorruptHostStore, owner.readSession(identity.session_id));
-}
-
-test "admission rolls back before consuming the closure reserve" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    const reserve: u16 = 8;
-    var owner = try StorageOwner.open(std.testing.io, path, .{
-        .maximum_page_count = 32,
-        .admission_reserve_pages = reserve,
-    });
-    defer owner.close();
-
-    var rejected = false;
-    for (1..10_001) |index| {
-        const id: u64 = @intCast(index * 4);
-        owner.createSession(.{
-            .session_id = id,
-            .agent_id = id + 1,
-            .task_id = id + 2,
-        }) catch |err| switch (err) {
-            error.HostStoreCapacityReserved => {
-                rejected = true;
-                break;
-            },
-            else => return err,
-        };
-    }
-    try std.testing.expect(rejected);
-    const page_count = try owner.pragmaU64("PRAGMA page_count");
-    const freelist_count = try owner.pragmaU64("PRAGMA freelist_count");
-    const maximum_page_count = try owner.pragmaU64("PRAGMA max_page_count");
-    try std.testing.expect(freelist_count + maximum_page_count - page_count >= reserve);
-}
-
-test "Completion recovery range is bounded by its Session index" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-
-    for (1..129) |index| {
-        const base: u64 = @intCast(index * 8);
-        try owner.createSession(.{
-            .session_id = base,
-            .agent_id = base + 1,
-            .task_id = base + 2,
-        });
-    }
-    const completion = completion_inbox.bind(.{
-        .kind = .model,
-        .session_id = 8,
-        .ownership_epoch = 1,
-        .agent_id = 9,
-        .agent_generation = 1,
-        .operation_id = 101,
-        .operation_generation = 1,
-        .attempt_id = 102,
-        .result_ref = 103,
-        .result_digest = binding.hash(binding.Result, "result-104"),
-    });
-    _ = try owner.publishCompletion(pendingPublication(
-        completion,
-        .{ .first_import = testContent(103) },
-    ));
-    try owner.execute("ANALYZE");
-    const statement = try owner.prepare(read_completion_after_sql);
-    defer finalize(statement);
-    var encoded_session_id: [8]u8 = undefined;
-    try bindIdentity(statement, 1, 8, &encoded_session_id);
-    try bindU64(statement, 2, 0);
-    try bindU64(statement, 3, std.math.maxInt(i64));
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CompletionNotFound;
-    if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptHostStore;
-    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
-        statement,
-        c.SQLITE_STMTSTATUS_FULLSCAN_STEP,
-        0,
-    ));
-    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
-        statement,
-        c.SQLITE_STMTSTATUS_SORT,
-        0,
-    ));
-    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
-        statement,
-        c.SQLITE_STMTSTATUS_AUTOINDEX,
-        0,
-    ));
-}
-
-test "historical Completion range is bounded by the Session Ledger key" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-    try owner.createSession(.{
-        .session_id = 8,
-        .agent_id = 9,
-        .task_id = 10,
-    });
-
-    const populate = try owner.prepare(
-        \\WITH RECURSIVE ledger_sequence(value) AS (
-        \\    SELECT 2
-        \\    UNION ALL
-        \\    SELECT value + 1 FROM ledger_sequence WHERE value < 32768
-        \\)
-        \\INSERT INTO session_transition (session_id, sequence, payload, record_digest)
-        \\SELECT ?1, value, zeroblob(1), zeroblob(32) FROM ledger_sequence
-    );
-    defer finalize(populate);
-    var populated_session_id: [8]u8 = undefined;
-    try bindIdentity(populate, 1, 8, &populated_session_id);
-    try expectDone(c.sqlite3_step(populate));
-    try owner.execute("ANALYZE");
-
-    const statement = try owner.prepare(scan_completed_attempt_sql);
-    defer finalize(statement);
-    var encoded_session_id: [8]u8 = undefined;
-    try bindIdentity(statement, 1, 8, &encoded_session_id);
-    try bindU64(statement, 2, 1);
-    try bindU64(statement, 3, session_transition.max_transitions);
-    var row_count: u32 = 0;
-    while (true) {
-        const step = c.sqlite3_step(statement);
-        if (step == c.SQLITE_DONE) break;
-        if (step != c.SQLITE_ROW) return mapSqliteError(step);
-        row_count += 1;
-    }
-    try std.testing.expectEqual(session_transition.max_transitions, row_count);
-    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
-        statement,
-        c.SQLITE_STMTSTATUS_FULLSCAN_STEP,
-        0,
-    ));
-    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
-        statement,
-        c.SQLITE_STMTSTATUS_SORT,
-        0,
-    ));
-    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_stmt_status(
-        statement,
-        c.SQLITE_STMTSTATUS_AUTOINDEX,
-        0,
-    ));
-}
-
-test "late Completion evidence is inserted already consumed for audit" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-    try owner.createSession(.{
-        .session_id = 8,
-        .agent_id = 9,
-        .task_id = 10,
-    });
-    const envelope = completion_inbox.bind(.{
-        .kind = .model,
-        .session_id = 8,
-        .ownership_epoch = 1,
-        .agent_id = 9,
-        .agent_generation = 1,
-        .operation_id = 101,
-        .operation_generation = 1,
-        .attempt_id = 102,
-        .result_ref = 103,
-        .result_digest = binding.hash(binding.Result, "late-result"),
-    });
-    const inbox_id = try owner.publishCompletion(auditedPublication(
-        envelope,
-        .{ .first_import = testContent(103) },
-        1,
-    ));
-    const stored = try owner.readCompletion(8, inbox_id);
-    try std.testing.expectEqual(@as(?u64, 1), stored.consumed_by_sequence);
-    try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(8));
-
-    var pending = envelope;
-    pending.attempt_id = 105;
-    pending.result_ref = 106;
-    pending.result_digest = binding.hash(binding.Result, "pending-then-audited");
-    pending = completion_inbox.bind(.{
-        .kind = pending.kind,
-        .session_id = pending.session_id,
-        .ownership_epoch = pending.ownership_epoch,
-        .agent_id = pending.agent_id,
-        .agent_generation = pending.agent_generation,
-        .operation_id = pending.operation_id,
-        .operation_generation = pending.operation_generation,
-        .attempt_id = pending.attempt_id,
-        .result_ref = pending.result_ref,
-        .result_digest = pending.result_digest,
-    });
-    const pending_id = try owner.publishCompletion(pendingPublication(
-        pending,
-        .{ .first_import = testContent(106) },
-    ));
-    try std.testing.expectEqual(pending_id, try owner.completionHead(8));
-    try std.testing.expectEqual(pending_id, try owner.publishCompletion(auditedPublication(
-        pending,
-        .existing,
-        1,
-    )));
-    try std.testing.expectEqual(@as(?u64, 1), (try owner.readCompletion(8, pending_id)).consumed_by_sequence);
-    try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(8));
-
-    var cross_epoch = envelope;
-    cross_epoch.ownership_epoch = 2;
-    cross_epoch.result_ref = 107;
-    cross_epoch.result_digest = binding.hash(binding.Result, "cross-epoch-conflict");
-    cross_epoch = completion_inbox.bind(.{
-        .kind = cross_epoch.kind,
-        .session_id = cross_epoch.session_id,
-        .ownership_epoch = cross_epoch.ownership_epoch,
-        .agent_id = cross_epoch.agent_id,
-        .agent_generation = cross_epoch.agent_generation,
-        .operation_id = cross_epoch.operation_id,
-        .operation_generation = cross_epoch.operation_generation,
-        .attempt_id = cross_epoch.attempt_id,
-        .result_ref = cross_epoch.result_ref,
-        .result_digest = cross_epoch.result_digest,
-    });
-    try std.testing.expectError(
-        error.ConflictingCompletionEvidence,
-        owner.publishCompletion(auditedPublication(cross_epoch, .existing, 1)),
-    );
-
-    var conflicting = envelope;
-    conflicting.result_ref = 104;
-    conflicting.result_digest = binding.hash(binding.Result, "conflicting-late-result");
-    conflicting = completion_inbox.bind(.{
-        .kind = conflicting.kind,
-        .session_id = conflicting.session_id,
-        .ownership_epoch = conflicting.ownership_epoch,
-        .agent_id = conflicting.agent_id,
-        .agent_generation = conflicting.agent_generation,
-        .operation_id = conflicting.operation_id,
-        .operation_generation = conflicting.operation_generation,
-        .attempt_id = conflicting.attempt_id,
-        .result_ref = conflicting.result_ref,
-        .result_digest = conflicting.result_digest,
-    });
-    try std.testing.expectError(
-        error.ConflictingCompletionEvidence,
-        owner.publishCompletion(auditedPublication(conflicting, .existing, 1)),
-    );
-}
-
-test "Completion publication enforces the pending per-Session bound" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-    try owner.createSession(.{
-        .session_id = 8,
-        .agent_id = 9,
-        .task_id = 10,
-    });
-
-    try owner.execute("BEGIN IMMEDIATE");
-    errdefer owner.rollbackOrPoison();
-    const insert = try owner.prepare(
-        \\INSERT INTO completion_inbox (
-        \\    session_id, ownership_epoch, agent_generation,
-        \\    operation_id, operation_generation, attempt_id, evidence_kind,
-        \\    result_reference, result_digest, completion_digest
-        \\) VALUES (?1, ?2, 1, ?3, 1, ?4, 1, ?5, ?6, ?7)
-    );
-    defer finalize(insert);
-    var ids: [5][8]u8 = undefined;
-    const result_digest = binding.hash(binding.Result, "capacity-result");
-    const completion_digest = binding.hash(binding.Completion, "capacity-completion");
-    for (0..completion_inbox.max_records) |index| {
-        try owner.insertContent(8, testContent(index + 10_000));
-        try bindIdentity(insert, 1, 8, &ids[0]);
-        try bindIdentity(insert, 2, 1, &ids[1]);
-        try bindIdentity(insert, 3, 100, &ids[2]);
-        try bindIdentity(insert, 4, index + 1, &ids[3]);
-        try bindIdentity(insert, 5, index + 10_000, &ids[4]);
-        try bindBlob(insert, 6, &result_digest.bytes);
-        try bindBlob(insert, 7, &completion_digest.bytes);
-        try expectDone(c.sqlite3_step(insert));
-        try expectOk(c.sqlite3_reset(insert));
-        try expectOk(c.sqlite3_clear_bindings(insert));
-    }
-    try owner.execute("COMMIT");
-
-    try std.testing.expectError(error.CompletionCapacityExceeded, owner.publishCompletion(pendingPublication(completion_inbox.bind(.{
-        .kind = .model,
-        .session_id = 8,
-        .ownership_epoch = 1,
-        .agent_id = 9,
-        .agent_generation = 1,
-        .operation_id = 100,
-        .operation_generation = 1,
-        .attempt_id = completion_inbox.max_records + 1,
-        .result_ref = 20_000,
-        .result_digest = binding.hash(binding.Result, "result-200"),
-    }), .existing)));
-}
-
-test "content and its first durable reference share one SQLite commit" {
-    const FailBeforeCommit = struct {
-        armed: bool = false,
-
-        fn reached(context: *anyopaque, boundary: FaultBoundary) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (self.armed and boundary == .before_commit) return error.InjectedCrash;
-        }
-    };
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var fault: FailBeforeCommit = .{};
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{
-        .fault = .{ .context = &fault, .reached = FailBeforeCommit.reached },
-    });
-    defer owner.close();
-
-    fault.armed = true;
-    const identity: SessionIdentity = .{
-        .session_id = 301,
-        .agent_id = 302,
-        .task_id = 303,
-    };
-    try std.testing.expectError(error.InjectedCrash, owner.createSession(identity));
-    try std.testing.expectError(error.SessionNotFound, owner.readSession(identity.session_id));
-    try std.testing.expectError(
-        error.ContentNotFound,
-        owner.contentMetadata(identity.session_id, identity.task_id),
-    );
-
-    fault.armed = false;
-    try owner.createSession(identity);
-    var semantic: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    semantic.facts[0] = session_transition.conversationAdvanced(.{
-        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
-        .entry_id = 2,
-        .parent_id = 1,
-        .kind = .assistant_text,
-        .content_ref = 305,
-    });
-    fault.armed = true;
-    try std.testing.expectError(
-        error.InjectedCrash,
-        owner.commitPrepared(
-            .{ .session_id = identity.session_id, .epoch = 1 },
-            .{ .transaction = semantic, .content = &.{directContent(testContent(305))} },
-        ),
-    );
-    try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(identity.session_id));
-    try std.testing.expectError(
-        error.ContentNotFound,
-        owner.contentMetadata(identity.session_id, 305),
-    );
-    try std.testing.expectError(
-        error.ConversationEntryNotFound,
-        owner.readConversationEntry(identity.session_id, 2),
-    );
-
-    const completion = completion_inbox.bind(.{
-        .kind = .model,
-        .session_id = identity.session_id,
-        .ownership_epoch = 1,
-        .agent_id = identity.agent_id,
-        .agent_generation = 1,
-        .operation_id = 306,
-        .operation_generation = 1,
-        .attempt_id = 307,
-        .result_ref = 308,
-        .result_digest = binding.hash(binding.Result, "completion-content"),
-    });
-    try std.testing.expectError(
-        error.InjectedCrash,
-        owner.publishCompletion(pendingPublication(
-            completion,
-            .{ .first_import = testContent(308) },
-        )),
-    );
-    try std.testing.expectEqual(@as(u64, 0), try owner.completionHead(identity.session_id));
-    try std.testing.expectError(
-        error.ContentNotFound,
-        owner.contentMetadata(identity.session_id, 308),
-    );
-}
-
-test "content survives reopen through fixed windows and remains Session scoped" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var bytes: [content_window_bytes * 2 + 17]u8 = undefined;
-    for (&bytes, 0..) |*byte, index| byte.* = @intCast(index % 251);
-    const content: ContentImport = .{
-        .reference = 405,
-        .length = bytes.len,
-        .digest = binding.hash(binding.Blob, &bytes),
-        .source = .{ .bytes = &bytes },
-    };
-
-    {
-        var owner = try StorageOwner.open(std.testing.io, path, .{});
-        defer owner.close();
-        try owner.createSession(.{
-            .session_id = 401,
-            .agent_id = 402,
-            .task_id = 403,
-        });
-        var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-        transaction.facts[0] = session_transition.conversationAdvanced(.{
-            .agent = .{ .agent_id = 402, .agent_generation = 1, .ownership_epoch = 1 },
-            .entry_id = 2,
-            .parent_id = 1,
-            .kind = .assistant_text,
-            .content_ref = content.reference,
-        });
-        _ = try owner.commitPrepared(
-            .{ .session_id = 401, .epoch = 1 },
-            .{ .transaction = transaction, .content = &.{directContent(content)} },
-        );
-    }
-
-    {
-        var owner = try StorageOwner.open(std.testing.io, path, .{});
-        defer owner.close();
-        const metadata = try owner.contentMetadata(401, content.reference);
-        try std.testing.expectEqual(@as(u64, bytes.len), metadata.length);
-        try std.testing.expectEqual(content.digest, metadata.digest);
-        var window: [content_window_bytes]u8 = undefined;
-        var offset: usize = 0;
-        while (offset < bytes.len) {
-            const read = try owner.readContentWindow(401, content.reference, offset, &window);
-            try std.testing.expectEqualSlices(u8, bytes[offset .. offset + read.len], read);
-            offset += read.len;
-        }
-
-        try owner.createSession(.{
-            .session_id = 411,
-            .agent_id = 412,
-            .task_id = 413,
-        });
-        var cross_session: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-        cross_session.facts[0] = session_transition.conversationAdvanced(.{
-            .agent = .{ .agent_id = 412, .agent_generation = 1, .ownership_epoch = 1 },
-            .entry_id = 2,
-            .parent_id = 1,
-            .kind = .assistant_text,
-            .content_ref = content.reference,
-        });
-        try std.testing.expectError(
-            error.MissingContentReference,
-            owner.commit(.{ .session_id = 411, .epoch = 1 }, cross_session),
-        );
-        try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(411));
-    }
-}
-
-test "content import rejects wrong length digest and conflicting identity before commit" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-    const identity: SessionIdentity = .{ .session_id = 501, .agent_id = 502, .task_id = 503 };
-    try owner.createSession(identity);
-    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    transaction.facts[0] = session_transition.conversationAdvanced(.{
-        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
-        .entry_id = 2,
-        .parent_id = 1,
-        .kind = .assistant_text,
-        .content_ref = 505,
-    });
-    const bytes = "validated content";
-    try std.testing.expectError(
-        error.InvalidContentLength,
-        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-            .transaction = transaction,
-            .content = &.{directContent(.{
-                .reference = 505,
-                .length = bytes.len - 1,
-                .digest = binding.hash(binding.Blob, bytes),
-                .source = .{ .bytes = bytes },
-            })},
-        }),
-    );
-    try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(identity.session_id));
-
-    try std.testing.expectError(
-        error.ContentDigestMismatch,
-        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-            .transaction = transaction,
-            .content = &.{directContent(.{
-                .reference = 505,
-                .length = bytes.len,
-                .digest = binding.hash(binding.Blob, "different content"),
-                .source = .{ .bytes = bytes },
-            })},
-        }),
-    );
-    try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(identity.session_id));
-    try std.testing.expectError(error.ContentNotFound, owner.contentMetadata(identity.session_id, 505));
-
-    transaction.facts[0].conversation_advanced.content_ref = identity.task_id;
-    try std.testing.expectError(
-        error.ConflictingContentReference,
-        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-            .transaction = transaction,
-            .content = &.{directContent(.{
-                .reference = identity.task_id,
-                .length = bytes.len,
-                .digest = binding.hash(binding.Blob, bytes),
-                .source = .{ .bytes = bytes },
-            })},
-        }),
-    );
-    try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(identity.session_id));
-}
-
-test "content maximum is representable and remains exact" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-    const identity: SessionIdentity = .{ .session_id = 601, .agent_id = 602, .task_id = 603 };
-    try owner.createSession(identity);
-
-    const bytes = try std.testing.allocator.alloc(u8, max_content_bytes + 1);
-    defer std.testing.allocator.free(bytes);
-    @memset(bytes, 'x');
-    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    transaction.facts[0] = session_transition.conversationAdvanced(.{
-        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
-        .entry_id = 2,
-        .parent_id = 1,
-        .kind = .assistant_text,
-        .content_ref = 605,
-    });
-    _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-        .transaction = transaction,
-        .content = &.{directContent(.{
-            .reference = 605,
-            .length = max_content_bytes,
-            .digest = binding.hash(binding.Blob, bytes[0..max_content_bytes]),
-            .source = .{ .bytes = bytes[0..max_content_bytes] },
-        })},
-    });
-    try std.testing.expectEqual(
-        @as(u64, max_content_bytes),
-        (try owner.contentMetadata(identity.session_id, 605)).length,
-    );
-
-    transaction.sequence = 3;
-    transaction.facts[0].conversation_advanced = .{
-        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
-        .entry_id = 3,
-        .parent_id = 2,
-        .kind = .assistant_text,
-        .content_ref = 606,
-    };
-    try std.testing.expectError(
-        error.InvalidContentLength,
-        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-            .transaction = transaction,
-            .content = &.{directContent(.{
-                .reference = 606,
-                .length = max_content_bytes + 1,
-                .digest = binding.hash(binding.Blob, bytes),
-                .source = .{ .bytes = bytes },
-            })},
-        }),
-    );
-}
-
-test "semantic commit rejects content without a first reference" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-    const identity: SessionIdentity = .{ .session_id = 611, .agent_id = 612, .task_id = 613 };
-    try owner.createSession(identity);
-    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    transaction.facts[0] = session_transition.conversationAdvanced(.{
-        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
-        .entry_id = 2,
-        .parent_id = 1,
-        .kind = .assistant_text,
-        .content_ref = identity.task_id,
-    });
-    try std.testing.expectError(
-        error.UnreferencedContentImport,
-        owner.commitPrepared(
-            .{ .session_id = identity.session_id, .epoch = 1 },
-            .{ .transaction = transaction, .content = &.{directContent(testContent(615))} },
-        ),
-    );
-    try std.testing.expectEqual(@as(u64, 1), try owner.sessionHead(identity.session_id));
-    try std.testing.expectError(error.ContentNotFound, owner.contentMetadata(identity.session_id, 615));
-}
-
-test "three first imports succeed while existing references do not consume the cap" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-    const identity: SessionIdentity = .{ .session_id = 611, .agent_id = 612, .task_id = 613 };
-    try owner.createSession(identity);
-    const agent: session_transition.AgentContext = .{
-        .agent_id = identity.agent_id,
-        .agent_generation = 1,
-        .ownership_epoch = 1,
-    };
-
-    var existing_references: [max_first_content_imports + 2]u64 = undefined;
-    for (&existing_references, 0..) |*reference, index| {
-        reference.* = 700 + index;
-        var transaction: session_transition.Transaction = .{
-            .sequence = 2 + index,
-            .fact_count = 1,
-        };
-        transaction.facts[0] = session_transition.outcome(agent, index + 1, reference.*);
-        _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-            .transaction = transaction,
-            .content = &.{directContent(testContent(reference.*))},
-        });
-    }
-
-    var existing: session_transition.Transaction = .{ .sequence = 7, .fact_count = 3 };
-    for (0..2) |index| existing.facts[index] = session_transition.approvalRequired(.{
-        .operation = .{
-            .agent = agent,
-            .operation_id = 800 + index,
-            .generation = 1,
-        },
-        .binding_ref = existing_references[index * 2],
-        .descriptor_ref = existing_references[index * 2 + 1],
-    });
-    existing.facts[2] = session_transition.outcome(agent, 10, existing_references[4]);
-    _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-        .transaction = existing,
-    });
-
-    var exact: session_transition.Transaction = .{ .sequence = 8, .fact_count = 2 };
-    exact.facts[0] = session_transition.approvalRequired(.{
-        .operation = .{ .agent = agent, .operation_id = 900, .generation = 1 },
-        .binding_ref = 900,
-        .descriptor_ref = 901,
-    });
-    exact.facts[1] = session_transition.outcome(agent, 11, 902);
-    var exact_imports: [max_first_content_imports]TransactionContentImport = undefined;
-    for (&exact_imports, 0..) |*content, index| {
-        content.* = directContent(testContent(900 + index));
-    }
-    _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-        .transaction = exact,
-        .content = &exact_imports,
-    });
-
-    var excessive: session_transition.Transaction = .{ .sequence = 9, .fact_count = 2 };
-    for (0..2) |index| excessive.facts[index] = session_transition.approvalRequired(.{
-        .operation = .{ .agent = agent, .operation_id = 910 + index, .generation = 1 },
-        .binding_ref = 910 + index * 2,
-        .descriptor_ref = 911 + index * 2,
-    });
-    var imports: [max_first_content_imports + 1]TransactionContentImport = undefined;
-    for (&imports, 0..) |*content, index| content.* = directContent(testContent(910 + index));
-    try std.testing.expectError(
-        error.ExcessiveContentImports,
-        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-            .transaction = excessive,
-            .content = &imports,
-        }),
-    );
-}
-
-test "patch content requires its first-referenced Intent in the same commit" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/host.sqlite3",
-        .{tmp.sub_path},
-    );
-    var owner = try StorageOwner.open(std.testing.io, path, .{});
-    defer owner.close();
-    const identity: SessionIdentity = .{ .session_id = 621, .agent_id = 622, .task_id = 623 };
-    try owner.createSession(identity);
-    const operation: session_transition.OperationContext = .{
-        .agent = .{ .agent_id = identity.agent_id, .agent_generation = 1, .ownership_epoch = 1 },
-        .operation_id = 624,
-        .generation = 1,
-    };
-    var target_path: patch_tool.TargetPath = .{ .length = 8, .bytes = @splat(0) };
-    @memcpy(target_path.bytes[0..8], "file.txt");
-    var intent: patch_tool.Intent = .{
-        .patch_ref = 626,
-        .workspace_path = "/tmp/workspace",
-        .target_path = target_path,
-        .patch_digest = binding.hash(binding.PatchDescriptor, "patch"),
-        .intent_digest = undefined,
-        .preimage_digest = binding.hash(binding.Preimage, "before"),
-        .postimage_digest = binding.hash(binding.Postimage, "after"),
-        .preimage_inode = 1,
-        .file_mode = 0o100644,
-    };
-    intent.intent_digest = patch_tool.intentDigest(intent);
-    var intent_buffer: [patch_tool.max_intent_size]u8 = undefined;
-    const intent_bytes = try patch_tool.encodeIntent(&intent_buffer, intent);
-    const intent_content: ContentImport = .{
-        .reference = 625,
-        .length = intent_bytes.len,
-        .digest = binding.hash(binding.Blob, intent_bytes),
-        .source = .{ .bytes = intent_bytes },
-    };
-    const descriptor: binding.Descriptor = .{ .apply_patch = intent.intent_digest };
-    var transaction: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
-    transaction.facts[0] = session_transition.operationAdmitted(
-        operation,
-        .{ .operation_id = 624, .generation = 1 },
-        625,
-        descriptor,
-    );
-    const patch: TransactionContentImport = .{ .patch_intent = .{
-        .intent = intent_content,
-        .patch = testContent(626),
-    } };
-    try std.testing.expectError(
-        error.InvalidPatchIntent,
-        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-            .transaction = transaction,
-            .content = &.{.{ .patch_intent = .{
-                .intent = testContent(625),
-                .patch = testContent(626),
-            } }},
-        }),
-    );
-
-    var mismatched_intent = intent;
-    mismatched_intent.patch_ref = 627;
-    mismatched_intent.intent_digest = patch_tool.intentDigest(mismatched_intent);
-    var mismatched_buffer: [patch_tool.max_intent_size]u8 = undefined;
-    const mismatched_bytes = try patch_tool.encodeIntent(&mismatched_buffer, mismatched_intent);
-    try std.testing.expectError(
-        error.InvalidPatchContentReference,
-        owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-            .transaction = transaction,
-            .content = &.{.{ .patch_intent = .{
-                .intent = .{
-                    .reference = 625,
-                    .length = mismatched_bytes.len,
-                    .digest = binding.hash(binding.Blob, mismatched_bytes),
-                    .source = .{ .bytes = mismatched_bytes },
-                },
-                .patch = testContent(626),
-            } }},
-        }),
-    );
-    _ = try owner.commitPrepared(.{ .session_id = identity.session_id, .epoch = 1 }, .{
-        .transaction = transaction,
-        .content = &.{patch},
-    });
-    _ = try owner.contentMetadata(identity.session_id, 625);
-    _ = try owner.contentMetadata(identity.session_id, 626);
 }

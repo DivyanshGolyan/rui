@@ -227,7 +227,8 @@ pub const CaptureMetrics = struct {
         );
         self.decoded_capacity_high_water_bytes = @max(
             self.decoded_capacity_high_water_bytes,
-            capture.text.items.capacity + capture.arguments.items.capacity,
+            capture.text.items.capacity + capture.arguments.items.capacity +
+                capture.tool_batch.items.capacity,
         );
         self.assistant_text_occupied_high_water_bytes = @max(
             self.assistant_text_occupied_high_water_bytes,
@@ -563,9 +564,8 @@ pub const Capture = struct {
     event: EventProjection = .{},
     text: CappedBytes = .{},
     arguments: CappedBytes = .{},
+    tool_batch: CappedBytes = .{},
     selected: SelectedCandidate = .none,
-    selected_tool_key: [model_contract.max_tool_key_size]u8 = undefined,
-    selected_tool_key_length: u8 = 0,
     candidate_failure: model_protocol.Failure = .none,
     mapping: ToolMapping = .{},
     candidate_count: u8 = 0,
@@ -588,6 +588,7 @@ pub const Capture = struct {
         if (self.scanner_initialized) self.scanner.deinit();
         self.text.deinit(self.allocator);
         self.arguments.deinit(self.allocator);
+        self.tool_batch.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -679,7 +680,7 @@ pub const Capture = struct {
 
     fn startEventParser(self: *Capture) !void {
         std.debug.assert(!self.scanner_initialized);
-        self.event = .{ .capture_values = self.candidate_count == 0 };
+        self.event = .{ .capture_values = self.candidate_count == 0 or self.selected == .tool };
         if (self.event.capture_values) {
             self.text.clearRetainingCapacity();
             self.arguments.clearRetainingCapacity();
@@ -1196,12 +1197,11 @@ pub const Capture = struct {
             self.candidate_failure = .unsupported_provider_output;
             return;
         }
-        self.candidate_count +|= 1;
-        if (self.candidate_count != 1) {
-            self.candidate_failure = .multiple_outputs;
-            return;
-        }
         if (std.mem.eql(u8, item_type, "message")) {
+            if (self.candidate_count != 0) {
+                self.candidate_failure = .multiple_outputs;
+                return;
+            }
             if (!self.event.role.valid() or
                 !std.mem.eql(u8, self.event.role.slice(), "assistant") or
                 !self.event.content_field.valid() or self.event.content_shape_invalid or
@@ -1220,6 +1220,7 @@ pub const Capture = struct {
                 return;
             }
             self.arguments.clearRetainingCapacity();
+            self.candidate_count = 1;
             self.selected = .text;
             return;
         }
@@ -1236,15 +1237,41 @@ pub const Capture = struct {
         }
         const name = self.event.name.slice();
         if (std.mem.eql(u8, name, "onepage_input_request")) {
+            if (self.candidate_count != 0) {
+                self.candidate_failure = .multiple_outputs;
+                return;
+            }
+            self.candidate_count = 1;
             self.selected = .input;
         } else if (self.mapping.keyForName(name)) |key| {
-            @memcpy(self.selected_tool_key[0..key.len], key);
-            self.selected_tool_key_length = @intCast(key.len);
+            if (self.selected != .none and self.selected != .tool) {
+                self.candidate_failure = .multiple_outputs;
+                return;
+            }
+            if (self.candidate_count == model_contract.max_tool_count) {
+                self.candidate_failure = .oversized;
+                return;
+            }
+            try self.appendToolRecord(key, self.arguments.items.items);
+            self.candidate_count += 1;
             self.selected = .tool;
         } else {
             self.candidate_failure = .unknown_tool;
         }
         self.text.clearRetainingCapacity();
+        self.arguments.clearRetainingCapacity();
+    }
+
+    fn appendToolRecord(self: *Capture, key: []const u8, arguments: []const u8) !void {
+        const record_length = model_protocol.tool_call_record_header_size + key.len + arguments.len;
+        var header: [model_protocol.tool_call_record_header_size]u8 = @splat(0);
+        std.mem.writeInt(u32, header[0..4], @intCast(record_length), .little);
+        std.mem.writeInt(u16, header[4..6], @intCast(key.len), .little);
+        std.mem.writeInt(u32, header[8..12], @intCast(arguments.len), .little);
+        const maximum = model_protocol.max_response_size - model_protocol.header_size;
+        try self.tool_batch.append(self.allocator, &header, maximum);
+        try self.tool_batch.append(self.allocator, key, maximum);
+        try self.tool_batch.append(self.allocator, arguments, maximum);
     }
 
     fn emitSelected(self: *Capture) !void {
@@ -1252,10 +1279,10 @@ pub const Capture = struct {
         switch (self.selected) {
             .none => return error.CandidateMissing,
             .text => try model_protocol.writeText(writer, self.text.items.items),
-            .tool => try model_protocol.writeTool(
+            .tool => try model_protocol.writeCapturedToolCalls(
                 writer,
-                self.selected_tool_key[0..self.selected_tool_key_length],
-                self.arguments.items.items,
+                self.candidate_count,
+                self.tool_batch.items.items,
             ),
             .input => try self.captureInputRequest(self.arguments.items.items),
         }
@@ -1280,39 +1307,9 @@ pub const Capture = struct {
             return;
         };
         self.parser_steps +|= input.parser_steps;
-        if (std.mem.eql(u8, input.response_type.slice(), "text")) {
-            if (input.choice_count != 0) {
-                self.malformed = true;
-                return;
-            }
-            try model_protocol.writeInputText(
-                self.candidate orelse return error.CandidateWriterMissing,
-                input.prompt.slice(),
-            );
-            return;
-        }
-        if (!std.mem.eql(u8, input.response_type.slice(), "single_choice")) {
-            self.malformed = true;
-            return;
-        }
-        if (input.choice_count == 0) {
-            self.malformed = true;
-            return;
-        }
-        var choices: [model_contract.max_choice_count]model_protocol.Choice = undefined;
-        for (input.choices[0..input.choice_count], 0..) |choice, index| {
-            for (choices[0..index]) |earlier| {
-                if (std.mem.eql(u8, earlier.id, choice.id.slice())) {
-                    self.malformed = true;
-                    return;
-                }
-            }
-            choices[index] = .{ .id = choice.id.slice(), .label = choice.label.slice() };
-        }
-        try model_protocol.writeInputChoice(
+        try model_protocol.writeInputText(
             self.candidate orelse return error.CandidateWriterMissing,
             input.prompt.slice(),
-            choices[0..input.choice_count],
         );
     }
 
@@ -1330,7 +1327,11 @@ pub const Capture = struct {
         }
         if (self.malformed) return failureOutcome(.malformed);
         if (self.candidate_failure != .none) return failureOutcome(self.candidate_failure);
-        if (self.candidate_count != 1) return failureOutcome(.malformed);
+        if (self.candidate_count == 0 or
+            (self.selected != .tool and self.candidate_count != 1))
+        {
+            return failureOutcome(.malformed);
+        }
         try self.emitSelected();
         if (self.resource_exceeded) return failureOutcome(.oversized);
         if (self.malformed) return failureOutcome(.malformed);
@@ -1377,19 +1378,14 @@ fn terminalStatus(event_type: []const u8, response_status: ?[]const u8) !?Termin
     return nested;
 }
 
-const InputContextKind = enum { root_object, choices_array, choice_object };
-const InputField = enum { unknown, prompt, response_type, choices, choice_id, choice_label };
-const InputStringTarget = enum { none, discard, key, prompt, response_type, choice_id, choice_label };
+const InputContextKind = enum { root_object };
+const InputField = enum { unknown, prompt };
+const InputStringTarget = enum { none, discard, key, prompt };
 
 const InputContext = struct {
     kind: InputContextKind,
     expect_key: bool,
     field: InputField = .unknown,
-};
-
-const InputChoiceProjection = struct {
-    id: BoundedString(model_contract.max_choice_id_size) = .{},
-    label: BoundedString(model_contract.max_choice_label_size) = .{},
 };
 
 /// Closed semantic projection of the provider-owned input-request argument.
@@ -1408,11 +1404,6 @@ const InputRequestProjection = struct {
     string_target: InputStringTarget = .none,
     key: BoundedString(32) = .{},
     prompt: BoundedString(model_contract.max_prompt_size) = .{},
-    response_type: BoundedString(32) = .{},
-    choices_field: FieldStatus = .{},
-    choices: [model_contract.max_choice_count]InputChoiceProjection = undefined,
-    choice_count: usize = 0,
-    active_choice: ?usize = null,
     parser_steps: usize = 0,
 
     fn parse(bytes: []const u8) !InputRequestProjection {
@@ -1439,25 +1430,9 @@ const InputRequestProjection = struct {
         {
             return error.InvalidInputRequest;
         }
-        if (result.too_large or result.prompt.overflowed or result.response_type.overflowed) {
-            return error.InputRequestTooLarge;
-        }
-        for (result.choices[0..result.choice_count]) |choice| {
-            if (choice.id.overflowed or choice.label.overflowed) {
-                return error.InputRequestTooLarge;
-            }
-        }
-        if (result.invalid or !result.prompt.valid() or result.prompt.length == 0 or
-            !result.response_type.valid() or !result.choices_field.valid())
-        {
+        if (result.too_large or result.prompt.overflowed) return error.InputRequestTooLarge;
+        if (result.invalid or !result.prompt.valid() or result.prompt.length == 0) {
             return error.InvalidInputRequest;
-        }
-        for (result.choices[0..result.choice_count]) |choice| {
-            if (!choice.id.valid() or choice.id.length == 0 or
-                !choice.label.valid() or choice.label.length == 0)
-            {
-                return error.InvalidInputRequest;
-            }
         }
         return result;
     }
@@ -1490,28 +1465,12 @@ const InputRequestProjection = struct {
         }
         const context = &self.contexts[self.context_count - 1];
         switch (context.kind) {
-            .root_object, .choice_object => {
+            .root_object => {
                 if (context.expect_key) {
                     if (token == .object_end) return self.closeContext();
                     return self.beginString(token, .key);
                 }
                 try self.consumeField(context.field, token);
-            },
-            .choices_array => {
-                if (token == .array_end) return self.closeContext();
-                if (token != .object_begin) {
-                    self.invalid = true;
-                    return self.skipToken(token);
-                }
-                if (self.choice_count == self.choices.len) {
-                    self.too_large = true;
-                    self.active_choice = null;
-                } else {
-                    self.choices[self.choice_count] = .{};
-                    self.active_choice = self.choice_count;
-                    self.choice_count += 1;
-                }
-                self.pushContext(.choice_object);
             },
         }
     }
@@ -1519,27 +1478,6 @@ const InputRequestProjection = struct {
     fn consumeField(self: *InputRequestProjection, field: InputField, token: std.json.Token) !void {
         switch (field) {
             .prompt => try self.consumeUniqueString(token, .prompt, &self.prompt),
-            .response_type => try self.consumeUniqueString(
-                token,
-                .response_type,
-                &self.response_type,
-            ),
-            .choices => {
-                if (self.choices_field.seen) {
-                    self.choices_field.duplicate = true;
-                    self.invalid = true;
-                    return self.skipToken(token);
-                }
-                self.choices_field.seen = true;
-                if (token != .array_begin) {
-                    self.choices_field.wrong_type = true;
-                    self.invalid = true;
-                    return self.skipToken(token);
-                }
-                self.pushContext(.choices_array);
-            },
-            .choice_id => try self.consumeChoiceString(token, .choice_id),
-            .choice_label => try self.consumeChoiceString(token, .choice_label),
             .unknown => {
                 self.invalid = true;
                 try self.skipToken(token);
@@ -1565,29 +1503,6 @@ const InputRequestProjection = struct {
             return self.skipToken(token);
         }
         try self.beginString(token, target);
-    }
-
-    fn consumeChoiceString(
-        self: *InputRequestProjection,
-        token: std.json.Token,
-        target: InputStringTarget,
-    ) !void {
-        const index = self.active_choice orelse {
-            return self.beginString(token, .discard);
-        };
-        switch (target) {
-            .choice_id => try self.consumeUniqueString(
-                token,
-                target,
-                &self.choices[index].id,
-            ),
-            .choice_label => try self.consumeUniqueString(
-                token,
-                target,
-                &self.choices[index].label,
-            ),
-            else => unreachable,
-        }
     }
 
     fn beginString(
@@ -1625,9 +1540,6 @@ const InputRequestProjection = struct {
         switch (self.string_target) {
             .key => self.key.append(bytes),
             .prompt => self.prompt.append(bytes),
-            .response_type => self.response_type.append(bytes),
-            .choice_id => self.choices[self.active_choice.?].id.append(bytes),
-            .choice_label => self.choices[self.active_choice.?].label.append(bytes),
             .discard => {},
             .none => unreachable,
         }
@@ -1683,14 +1595,12 @@ const InputRequestProjection = struct {
         }
         self.contexts[self.context_count] = .{
             .kind = kind,
-            .expect_key = kind != .choices_array,
+            .expect_key = true,
         };
         self.context_count += 1;
     }
 
     fn closeContext(self: *InputRequestProjection) void {
-        const kind = self.contexts[self.context_count - 1].kind;
-        if (kind == .choice_object) self.active_choice = null;
         self.context_count -= 1;
         if (self.context_count == 0) {
             self.root_closed = true;
@@ -1703,33 +1613,16 @@ const InputRequestProjection = struct {
         if (self.context_count == 0) return;
         const context = &self.contexts[self.context_count - 1];
         switch (context.kind) {
-            .root_object, .choice_object => {
+            .root_object => {
                 context.expect_key = true;
                 context.field = .unknown;
             },
-            .choices_array => {},
         }
     }
 };
 
-fn classifyInputField(kind: InputContextKind, key: []const u8) InputField {
-    return switch (kind) {
-        .root_object => if (std.mem.eql(u8, key, "prompt"))
-            .prompt
-        else if (std.mem.eql(u8, key, "response_type"))
-            .response_type
-        else if (std.mem.eql(u8, key, "choices"))
-            .choices
-        else
-            .unknown,
-        .choice_object => if (std.mem.eql(u8, key, "id"))
-            .choice_id
-        else if (std.mem.eql(u8, key, "label"))
-            .choice_label
-        else
-            .unknown,
-        .choices_array => .unknown,
-    };
+fn classifyInputField(_: InputContextKind, key: []const u8) InputField {
+    return if (std.mem.eql(u8, key, "prompt")) .prompt else .unknown;
 }
 
 /// Pull-based form of the provider request encoder. Libcurl owns the upload
@@ -1894,7 +1787,7 @@ pub const RequestReader = struct {
             },
             .tail => {
                 self.phase = .done;
-                return .{ .raw = "],\"tool_choice\":\"auto\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[]}" };
+                return .{ .raw = "],\"tool_choice\":\"auto\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[]}" };
             },
             .done => return null,
         };
@@ -2225,7 +2118,7 @@ test "SSE capture maps final text, tools, input, and repeated terminals" {
     try std.testing.expectEqual(model_operation.DispatchOutcome.candidate, try capture.publish());
     var scratch: model_protocol.ValidationScratch = .{};
     const parsed = try model_protocol.decode(&scratch, output.bytes[0..output.length]);
-    try std.testing.expectEqual(model_protocol.Disposition.tool_call, parsed.disposition);
+    try std.testing.expectEqual(model_protocol.Disposition.tool_calls, parsed.disposition);
 
     var repeated_output: TestCandidate = .{};
     var repeated = repeated_output.capture();
@@ -2238,6 +2131,33 @@ test "SSE capture maps final text, tools, input, and repeated terminals" {
     try std.testing.expectEqual(
         model_protocol.Failure.multiple_outputs,
         (try repeated.publish()).failure.failure,
+    );
+}
+
+test "SSE capture publishes one ordered provider-neutral Tool Call batch" {
+    var output: TestCandidate = .{};
+    var capture = output.capture();
+    defer capture.deinit();
+    for (model_contract.default_catalog) |definition| try capture.mapping.add(definition);
+    try capture.appendSse("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\",\\\"timeout_ms\\\":1000}\",\"call_id\":\"call_1\"}}\n\n");
+    try capture.appendSse("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"echo hi\\\",\\\"timeout_ms\\\":1000}\",\"call_id\":\"call_2\"}}\n\n");
+    try capture.appendSse("data: {\"type\":\"response.completed\"}\n\n");
+    capture.finishSse();
+    const batch_outcome = try capture.publish();
+    try std.testing.expectEqual(model_operation.DispatchOutcome.candidate, batch_outcome);
+    var scratch: model_protocol.ValidationScratch = .{};
+    const parsed = try model_protocol.decode(&scratch, output.bytes[0..output.length]);
+    try std.testing.expectEqual(model_protocol.Disposition.tool_calls, parsed.disposition);
+    try std.testing.expectEqual(@as(u8, 2), parsed.tool_call_count);
+    const first = parsed.tool_calls[0];
+    const second = parsed.tool_calls[1];
+    try std.testing.expectEqualStrings(
+        "{\"command\":\"pwd\",\"timeout_ms\":1000}",
+        output.bytes[first.arguments_offset..][0..first.arguments_length],
+    );
+    try std.testing.expectEqualStrings(
+        "{\"command\":\"echo hi\",\"timeout_ms\":1000}",
+        output.bytes[second.arguments_offset..][0..second.arguments_length],
     );
 }
 
@@ -2615,7 +2535,7 @@ test "candidate conversion is independent of provider object field order" {
     try std.testing.expectEqual(model_operation.DispatchOutcome.candidate, try capture.publish());
     var scratch: model_protocol.ValidationScratch = .{};
     const parsed = try model_protocol.decode(&scratch, output.bytes[0..output.length]);
-    try std.testing.expectEqual(model_protocol.Disposition.tool_call, parsed.disposition);
+    try std.testing.expectEqual(model_protocol.Disposition.tool_calls, parsed.disposition);
 }
 
 test "capture owns only a small fixed window and releases growable candidate buffers" {
@@ -2765,9 +2685,9 @@ test "candidate writer failures escape capture as Host errors" {
 
 test "input request arguments require the exact closed shape" {
     const valid = [_][]const u8{
-        "{\"prompt\":\"Explain\",\"response_type\":\"text\",\"choices\":[]}",
-        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"Alpha\"}]}",
-        "{\"choices\":[{\"label\":\"Caf\\u00e9 \\uD83D\\uDE00\",\"id\":\"a\\\"b\"}],\"response_type\":\"single_choice\",\"prompt\":\"Say \\\"hi\\\"\"}",
+        "{\"prompt\":\"Explain\"}",
+        "{\"prompt\":\"Caf\\u00e9 \\uD83D\\uDE00\"}",
+        "{\"prompt\":\"Say \\\"hi\\\"\"}",
     };
     for (valid) |arguments| {
         var output: TestCandidate = .{};
@@ -2779,18 +2699,12 @@ test "input request arguments require the exact closed shape" {
         try std.testing.expect(output.length != 0);
     }
     const invalid = [_][]const u8{
-        "{\"prompt\":\"Explain\",\"response_type\":\"text\"}",
-        "{\"prompt\":\"Explain\",\"response_type\":\"text\",\"choices\":[],\"extra\":true}",
-        "{\"prompt\":\"Explain\",\"prompt\":\"Again\",\"response_type\":\"text\",\"choices\":[]}",
-        "{\"prompt\":42,\"response_type\":\"text\",\"choices\":[]}",
-        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[]}",
-        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"\",\"label\":\"Alpha\"}]}",
-        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"\"}]}",
-        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\"}]}",
-        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"Alpha\",\"extra\":true}]}",
-        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"Alpha\"},{\"id\":\"a\",\"label\":\"Again\"}]}",
-        "{\"prompt\":\"Choose\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"a\",\"label\":\"\\uD800\"}]}",
-        "{\"prompt\":\"Explain\",\"response_type\":\"text\",\"choices\":[]} trailing",
+        "{}",
+        "{\"prompt\":\"Explain\",\"extra\":true}",
+        "{\"prompt\":\"Explain\",\"prompt\":\"Again\"}",
+        "{\"prompt\":42}",
+        "{\"prompt\":\"\\uD800\"}",
+        "{\"prompt\":\"Explain\"} trailing",
     };
     for (invalid) |arguments| {
         var output: TestCandidate = .{};
@@ -2812,51 +2726,19 @@ test "input request arguments require the exact closed shape" {
 }
 
 test "input request semantic bounds publish one typed oversized outcome" {
-    const Field = enum { prompt, choice_id, choice_label };
-    const cases = [_]struct { field: Field, length: usize }{
-        .{ .field = .prompt, .length = model_contract.max_prompt_size + 1 },
-        .{ .field = .choice_id, .length = model_contract.max_choice_id_size + 1 },
-        .{ .field = .choice_label, .length = model_contract.max_choice_label_size + 1 },
-    };
-    for (cases) |case| {
-        var arguments: [16 * 1024]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&arguments);
-        try writer.writeAll("{\"prompt\":\"");
-        if (case.field == .prompt) {
-            for (0..case.length) |_| try writer.writeByte('p');
-        } else try writer.writeAll("Choose");
-        try writer.writeAll("\",\"response_type\":\"single_choice\",\"choices\":[{\"id\":\"");
-        if (case.field == .choice_id) {
-            for (0..case.length) |_| try writer.writeByte('i');
-        } else try writer.writeAll("a");
-        try writer.writeAll("\",\"label\":\"");
-        if (case.field == .choice_label) {
-            for (0..case.length) |_| try writer.writeByte('l');
-        } else try writer.writeAll("Alpha");
-        try writer.writeAll("\"}]}");
+    var arguments: [16 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&arguments);
+    try writer.writeAll("{\"prompt\":\"");
+    for (0..model_contract.max_prompt_size + 1) |_| try writer.writeByte('p');
+    try writer.writeAll("\"}");
 
-        var output: TestCandidate = .{};
-        var capture = output.capture();
-        defer capture.deinit();
-        try capture.captureInputRequest(writer.buffered());
-        capture.terminal_status = .completed;
-        capture.candidate_count = 1;
-        const outcome = try capture.publish();
-        try std.testing.expectEqual(model_protocol.Failure.oversized, outcome.failure.failure);
-        try std.testing.expectEqual(@as(usize, 0), output.length);
-    }
-}
-
-test "duplicate input choice IDs publish one typed malformed provider outcome" {
     var output: TestCandidate = .{};
     var capture = output.capture();
     defer capture.deinit();
-    try capture.appendSse(
-        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"onepage_input_request\",\"arguments\":\"{\\\"prompt\\\":\\\"Choose\\\",\\\"response_type\\\":\\\"single_choice\\\",\\\"choices\\\":[{\\\"id\\\":\\\"same\\\",\\\"label\\\":\\\"First\\\"},{\\\"id\\\":\\\"same\\\",\\\"label\\\":\\\"Second\\\"}]}\"}}\n\n" ++
-            "data: {\"type\":\"response.completed\"}\n\n",
-    );
-
+    try capture.captureInputRequest(writer.buffered());
+    capture.terminal_status = .completed;
+    capture.candidate_count = 1;
     const outcome = try capture.publish();
-    try std.testing.expectEqual(model_protocol.Failure.malformed, outcome.failure.failure);
+    try std.testing.expectEqual(model_protocol.Failure.oversized, outcome.failure.failure);
     try std.testing.expectEqual(@as(usize, 0), output.length);
 }

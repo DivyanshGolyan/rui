@@ -9,16 +9,13 @@ pub const max_result_contract_size: usize = 1024;
 pub const max_tool_count: usize = 8;
 pub const max_bash_command_bytes: usize = 2048;
 pub const max_patch_input_bytes: usize = 16 * 1024;
-/// One admitted patch byte can require a six-byte JSON Unicode escape. Keep
-/// this transfer bound outside the Activation Slot so the full byte capacity
-/// survives its worst-case escaped representation without increasing resident state.
+/// One admitted patch byte can require a six-byte JSON Unicode escape. The
+/// transient transfer buffer preserves the full byte capacity in that case.
 pub const max_tool_arguments_envelope_size: usize =
     6 * max_patch_input_bytes + "{\"patch\":\"\"}".len;
 pub const max_prompt_size: usize = 2048;
+pub const max_input_response_size: usize = 4096;
 pub const max_input_text_size: usize = 4096;
-pub const max_choice_count: usize = 8;
-pub const max_choice_id_size: usize = 64;
-pub const max_choice_label_size: usize = 256;
 pub const max_json_depth: usize = 32;
 pub const max_json_tokens: usize = 64;
 pub const max_json_members: usize = 32;
@@ -27,11 +24,6 @@ pub const strict_tool_json_v1: u16 = 1;
 
 pub const bash_key = "bash.v1";
 pub const apply_patch_key = "apply_patch.v1";
-
-pub const InputShape = enum(u8) {
-    text = 1,
-    single_choice = 2,
-};
 
 pub const ToolDefinition = struct {
     key: []const u8,
@@ -46,15 +38,11 @@ pub const default_instructions =
 
 pub const model_contract_bytes =
     "onepage.model-contract.v1\n" ++
-    "agent_profile=default\n" ++
     "tool_arguments.validation_profile=StrictToolJsonV1\n" ++
     "tool_arguments.identity=exact_bytes\n" ++
     "response=assistant_text|tool_call|input_request|provider_failure\n" ++
     "input_request.prompt_bytes=1..2048\n" ++
-    "input_request.text_response_bytes=1..4096\n" ++
-    "input_request.choice_count=1..8\n" ++
-    "input_request.choice_id_bytes=1..64\n" ++
-    "input_request.choice_label_bytes=1..256\n";
+    "input_request.text_response_bytes=1..4096\n";
 
 const bash_schema =
     "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Required non-empty valid UTF-8 text without NUL bytes and with at most 2048 bytes.\",\"minLength\":1,\"maxLength\":2048},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":100,\"maximum\":120000}},\"required\":[\"command\",\"timeout_ms\"],\"additionalProperties\":false}";
@@ -65,24 +53,24 @@ pub const default_catalog = [_]ToolDefinition{
     .{
         .key = bash_key,
         .provider_tool_name = "bash",
-        .description = "Run one bounded Bash command in the Job Workspace.",
+        .description = "Run one bounded Bash command in the Turn Workspace.",
         .input_schema = bash_schema,
         .result_contract = "Bounded UTF-8 text containing status, exit code, and base64 stdout and stderr.",
     },
     .{
         .key = apply_patch_key,
         .provider_tool_name = "apply_patch",
-        .description = "Apply one bounded patch to one regular file in the Job Workspace.",
+        .description = "Apply one bounded patch to one regular file in the Turn Workspace.",
         .input_schema = patch_schema,
         .result_contract = "Bounded UTF-8 text containing the patch disposition.",
     },
 };
 
 pub const default_catalog_digest: binding.ToolCatalog = .{ .bytes = .{
-    0x06, 0xd9, 0xb7, 0x2a, 0xa3, 0x67, 0x80, 0x1e,
-    0xda, 0xf1, 0x9d, 0xb5, 0x17, 0xa1, 0x86, 0xdc,
-    0x40, 0xdd, 0x5f, 0x47, 0x69, 0x0d, 0xcc, 0x48,
-    0x64, 0x5a, 0x1c, 0x1a, 0x93, 0xff, 0xbd, 0x12,
+    0xe8, 0xaf, 0xaa, 0xa1, 0x6f, 0xcd, 0x2a, 0xc8,
+    0x5c, 0x19, 0xf1, 0x37, 0x8a, 0xf6, 0x77, 0xe1,
+    0x07, 0x5d, 0xf5, 0x3b, 0x5b, 0xc3, 0x2d, 0xab,
+    0xc7, 0x10, 0x59, 0xde, 0x1a, 0x4e, 0xf2, 0x98,
 } };
 
 pub fn validateToolKey(key: []const u8) !void {

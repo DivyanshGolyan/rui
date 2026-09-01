@@ -125,7 +125,7 @@ pub fn encodeToolResult(out: []u8, result: ToolResult) ![]const u8 {
 }
 
 /// Finalize a tool-result envelope whose content has already been written at
-/// `out[result_header_size..]`. This lets lifecycle conversion produce the
+/// `out[result_header_size..]`. This lets Action conversion produce the
 /// canonical durable value once instead of retaining a second complete copy.
 pub fn finishToolResult(
     out: []u8,
