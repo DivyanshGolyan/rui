@@ -16,8 +16,7 @@
       "items": {
         "oneOf": [
           { "$ref": "#/$defs/permission_response" },
-          { "$ref": "#/$defs/text_input_response" },
-          { "$ref": "#/$defs/single_choice_input_response" }
+          { "$ref": "#/$defs/text_input_response" }
         ]
       }
     }
@@ -59,27 +58,9 @@
             "type": { "const": "text" },
             "text": {
               "type": "string",
-              "maxLength": 65536,
+              "maxLength": 4096,
               "description": "The Run Service additionally enforces the matching open request's max_bytes limit over canonical UTF-8."
             }
-          }
-        }
-      }
-    },
-    "single_choice_input_response": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["request_id", "kind", "response"],
-      "properties": {
-        "request_id": { "$ref": "#/$defs/opaque_id" },
-        "kind": { "const": "input" },
-        "response": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["type", "choice_id"],
-          "properties": {
-            "type": { "const": "single_choice" },
-            "choice_id": { "$ref": "#/$defs/opaque_id" }
           }
         }
       }

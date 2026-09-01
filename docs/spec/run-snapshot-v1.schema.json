@@ -7,7 +7,7 @@
   "required": [
     "api_version",
     "run",
-    "job_summary",
+    "turn_memberships",
     "interaction_requests",
     "output",
     "failure",
@@ -20,8 +20,8 @@
     "run": {
       "$ref": "#/$defs/run"
     },
-    "job_summary": {
-      "$ref": "#/$defs/job_summary"
+    "turn_memberships": {
+      "$ref": "#/$defs/turn_membership_collection"
     },
     "interaction_requests": {
       "type": "array",
@@ -63,11 +63,11 @@
       "type": "string",
       "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,127}$"
     },
-    "job_key": {
+    "agent_call_key": {
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
-      "description": "Caller-defined Job Key: 1-128 Unicode scalar values and at most 512 UTF-8 bytes. The byte bound and rejection of lone surrogates are enforced by the production decoder."
+      "description": "Caller-defined Agent Call Key: 1-128 Unicode scalar values and at most 512 UTF-8 bytes. The byte bound and rejection of lone surrogates are enforced by the production decoder."
     },
     "decimal_string": {
       "type": "string",
@@ -109,7 +109,6 @@
           "enum": [
             "running",
             "input_required",
-            "suspended",
             "completed",
             "failed",
             "cancelled"
@@ -132,45 +131,42 @@
         }
       }
     },
-    "job_counts": {
+    "turn_counts": {
       "type": "object",
       "additionalProperties": false,
+      "description": "Counts partition every Turn in the Run by its derived current condition or terminal outcome.",
       "required": [
         "total",
-        "pending",
-        "running",
-        "input_required",
+        "runnable",
+        "waiting_for_input",
         "in_flight",
         "completed",
         "failed",
-        "cancelled",
-        "indeterminate"
+        "cancelled"
       ],
       "properties": {
         "total": { "type": "integer", "minimum": 0 },
-        "pending": { "type": "integer", "minimum": 0 },
-        "running": { "type": "integer", "minimum": 0 },
-        "input_required": { "type": "integer", "minimum": 0 },
+        "runnable": { "type": "integer", "minimum": 0 },
+        "waiting_for_input": { "type": "integer", "minimum": 0 },
         "in_flight": { "type": "integer", "minimum": 0 },
         "completed": { "type": "integer", "minimum": 0 },
         "failed": { "type": "integer", "minimum": 0 },
-        "cancelled": { "type": "integer", "minimum": 0 },
-        "indeterminate": { "type": "integer", "minimum": 0 }
+        "cancelled": { "type": "integer", "minimum": 0 }
       }
     },
-    "job_summary": {
+    "turn_membership_collection": {
       "type": "object",
       "additionalProperties": false,
       "required": ["counts", "recent", "cursor"],
       "properties": {
         "counts": {
-          "$ref": "#/$defs/job_counts"
+          "$ref": "#/$defs/turn_counts"
         },
         "recent": {
           "type": "array",
           "maxItems": 256,
           "items": {
-            "$ref": "#/$defs/job"
+            "$ref": "#/$defs/turn_membership"
           }
         },
         "cursor": {
@@ -181,23 +177,22 @@
         }
       }
     },
-    "job": {
+    "turn_membership": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "key", "state", "session_id"],
+      "required": ["turn_id", "agent_call_key", "condition", "session_id"],
       "properties": {
-        "id": { "$ref": "#/$defs/opaque_id" },
-        "key": { "$ref": "#/$defs/job_key" },
-        "state": {
+        "turn_id": { "$ref": "#/$defs/opaque_id" },
+        "agent_call_key": { "$ref": "#/$defs/agent_call_key" },
+        "condition": {
+          "description": "Derived with this precedence: terminal outcome; unresolved admitted external attempt; open request with no remaining progress; otherwise runnable. No independent lifecycle value is persisted.",
           "enum": [
-            "pending",
-            "running",
-            "input_required",
+            "runnable",
+            "waiting_for_input",
             "in_flight",
             "completed",
             "failed",
-            "cancelled",
-            "indeterminate"
+            "cancelled"
           ]
         },
         "session_id": { "$ref": "#/$defs/opaque_id" }
@@ -206,10 +201,10 @@
     "runtime_origin": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "job_id"],
+      "required": ["type", "turn_id"],
       "properties": {
         "type": { "const": "runtime" },
-        "job_id": {
+        "turn_id": {
           "$ref": "#/$defs/opaque_id"
         }
       }
@@ -217,10 +212,13 @@
     "agent_origin": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "job_id"],
+      "required": ["type", "turn_id", "operation_id"],
       "properties": {
         "type": { "const": "agent" },
-        "job_id": {
+        "turn_id": {
+          "$ref": "#/$defs/opaque_id"
+        },
+        "operation_id": {
           "$ref": "#/$defs/opaque_id"
         }
       }
@@ -266,11 +264,10 @@
         "operation": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "id", "generation"],
+          "required": ["kind", "id"],
           "properties": {
             "kind": { "$ref": "#/$defs/opaque_id" },
-            "id": { "$ref": "#/$defs/opaque_id" },
-            "generation": { "$ref": "#/$defs/decimal_string" }
+            "id": { "$ref": "#/$defs/opaque_id" }
           }
         },
         "descriptor": {
@@ -327,56 +324,25 @@
           "items": { "$ref": "#/$defs/content_part" }
         },
         "response_shape": {
-          "oneOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["type", "max_bytes"],
-              "properties": {
-                "type": { "const": "text" },
-                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 65536 }
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["type", "options"],
-              "properties": {
-                "type": { "const": "single_choice" },
-                "options": {
-                  "type": "array",
-                  "minItems": 1,
-                  "maxItems": 32,
-                  "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["id", "label"],
-                    "properties": {
-                      "id": { "$ref": "#/$defs/opaque_id" },
-                      "label": { "type": "string", "maxLength": 1024 }
-                    }
-                  }
-                }
-              }
-            }
-          ]
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "max_bytes"],
+          "properties": {
+            "type": { "const": "text" },
+            "max_bytes": { "type": "integer", "minimum": 1, "maximum": 4096 }
+          }
         }
       }
     },
     "output": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["parts", "artifacts"],
+      "required": ["parts"],
       "properties": {
         "parts": {
           "type": "array",
           "maxItems": 256,
           "items": { "$ref": "#/$defs/content_part" }
-        },
-        "artifacts": {
-          "type": "array",
-          "maxItems": 256,
-          "items": { "$ref": "#/$defs/artifact" }
         }
       }
     },
@@ -422,58 +388,6 @@
           ]
         }
       }
-    },
-    "artifact": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["artifact_id", "name", "kind", "parts"],
-          "properties": {
-            "artifact_id": { "$ref": "#/$defs/opaque_id" },
-            "name": { "type": "string", "maxLength": 1024 },
-            "kind": { "const": "blob" },
-            "parts": {
-              "type": "array",
-              "minItems": 1,
-              "maxItems": 256,
-              "items": { "$ref": "#/$defs/content_part" }
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "artifact_id",
-            "name",
-            "kind",
-            "relative_path",
-            "before_digest",
-            "after_digest",
-            "parts"
-          ],
-          "properties": {
-            "artifact_id": { "$ref": "#/$defs/opaque_id" },
-            "name": { "type": "string", "maxLength": 1024 },
-            "kind": { "const": "workspace_change" },
-            "relative_path": { "type": "string", "minLength": 1, "maxLength": 4096 },
-            "before_digest": {
-              "oneOf": [
-                { "type": "null" },
-                { "$ref": "#/$defs/digest" }
-              ]
-            },
-            "after_digest": { "$ref": "#/$defs/digest" },
-            "parts": {
-              "type": "array",
-              "minItems": 1,
-              "maxItems": 256,
-              "items": { "$ref": "#/$defs/content_part" }
-            }
-          }
-        }
-      ]
     },
     "failure": {
       "type": "object",

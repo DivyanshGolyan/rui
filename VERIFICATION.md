@@ -1,310 +1,171 @@
 # OnePage verification contract
 
-This document maps each public architectural claim to required evidence. A claim is not complete because a type or comment expresses it; the production composition and its failure boundaries must demonstrate it.
+This document defines evidence required for V1 claims. Tests use production interfaces and fresh-process reopen. An interrupted suite is reported as interrupted, not green.
 
-## Claim matrix
+## Domain authority
 
 | Claim | Required evidence |
 | --- | --- |
-| One actual bounded Activation Slot | Compile-time size, alignment, component accounting, proof that every field has a production reader and writer, absence of filler or speculative reserve, and `<= 32 KiB` assertions over the production slot type; startup pool accounting from `@sizeOf(ActivationSlot)`. Peak activation measurements include host stack and heap buffers outside the slot and reject duplicate full-response staging. |
-| Core State is independent of slot layout | Canonical codec vectors, unknown-version rejection, and restore into differently poisoned slots with identical semantic outcomes. |
-| No Core activation allocation | Compile-time rejection of allocator-bearing parameter and storage types across every lifecycle method, direct review of Core dependencies, plus complete activate, transition, suspend, restore, and reuse tests. |
-| Native semantic invariants | Randomized accepted and rejected transition traces with typed outcomes, rejection-state preservation, semantic observations, deterministic canonical encoding, and poisoned-slot restoration. |
-| One Host-owned workflow lifecycle and one agent runtime | Product and process-topology tests prove the CLI only composes Run Service operations; the Zig Host Runtime owns Workflow Runs, Evaluation Generations, evaluator processes, Jobs, Sessions, providers, tools, permissions, storage, and recovery. QuickJS receives only one bounded generation input and returns one terminal evaluation outcome. |
-| Run Service is the public semantic seam | Contract tests cover idempotent `startOrAttach`, pure `getSnapshot`, atomic `submitResponses`, idempotent `requestCancel`, single-driver `advance`, and bounded immutable `readContent` without exposing Harness Projections, SQLite identities, or evaluator frames. |
-| Run creation survives lost acknowledgement | Terminate after Run commit and before output. Repeating the same Caller Run Key and exact bindings attaches to the same Run; changed workflow, arguments, Workspace, semantics, or profile conflicts without creating another Run. |
-| Run advancement is fenced | Two in-process `advance` calls cannot evaluate the same Generation or Job frontier. The Host Runtime guard plus durable Evaluation Generation fencing suffice without a second lease protocol. A second CLI process receives `busy` under the lifetime Host Store lock, then can inspect after the owner detaches. Terminal advancement returns the existing snapshot and never reopens the Run. |
-| Workflow replay is reconstructive | Kill and advance from a fresh process at source load, Job ensure, blocked-output publication, and final-outcome commit; exact source, arguments, stored Workspace, semantics identity, and canonical keyed Job specs recreate the same topology without duplicate Sessions or effects. Advancement from another directory still uses the stored Workspace. No JavaScript heap, Promise resolver, closure, bytecode, or instruction position survives a barrier. |
-| Job identity is idempotent | `(run_id, key)` plus equal canonical Job-spec digest reattaches after lost response or evaluator death; the same key with changed task, input, schema, or Agent Profile fails closed. Nested `input` and `schema` object insertion order canonicalizes identically at every depth. Omitted and explicit `default` Agent Profile canonicalize identically; unknown Agent or Workflow Resource Profile names fail before durable creation. |
-| Job visibility excludes timing | The Host durably binds each evaluation generation to one exact Visibility Snapshot before child launch. Retry uses the same snapshot even if later Jobs complete. Permute real completion order for the same blocked set and prove the next committed generation receives the same visible set and produces the same topology and final digest. Realm tests prove `Promise.all` and `Promise.allSettled` remain available while `Promise.race` and `Promise.any` are absent; workflow code has no physical-completion-order input. |
-| Workflow evaluation is bounded and capability-constrained | Raw-realm tests prove imports and ambient filesystem, process, network, environment, credential, clock, random, timer, module, bytecode, JavaScript-visible `eval`, and constructor-based dynamic-code access are absent. Heap, stack, native arena, protocol, Job, aggregate visible-result, diagnostic, microtask, CPU, wall-time, and cumulative-evaluation limits each produce a stable typed outcome; the parent kills an unresponsive child. The parent result model preserves semantic outcomes only for its own deadline and observed `SIGXCPU`; every other signal, stop, unknown termination, or nonzero exit is one `AbnormalChild`. Fixtures exercise deadline, `SIGXCPU`, crash, `SIGKILL`, and nonzero exit without interpreting `SIGKILL` alone as a resource-limit verdict. |
-| The JavaScript bridge is strict | Corpus, C undefined-behavior sanitizer, macOS leak-detector, and four independently runnable deterministic mutation/property targets encode valid UTF-16 surrogate pairs as their standard UTF-8 scalars and reject lone high or low surrogates without replacement. The targets cover the protocol decoder, JavaScript-value encoder, result-to-JavaScript decoder, and generated workflow/capability sequences with truncation, multi-byte overwrite, deletion, insertion, length corruption, generated values, and generated call sequences; every case must produce a bounded closed outcome and repeat byte-for-byte. They also reject `undefined`, functions, symbols, bigint, accessors, proxies, cycles, host objects, unsupported prototypes, non-finite numbers, unsafe integers, excessive depth, cumulative entries, bytes, and reentrant conversion without a partial Job request or native ownership error. Object-key order is canonical at every depth. These local gates are reproducible mutation/property testing, not a claim of coverage-guided fuzzing. Zig 0.16 exposes C undefined-behavior and thread sanitizers but no AddressSanitizer mode for this mixed Zig/C target, so V1 does not claim ASan evidence; the gate must be extended if a supported toolchain adds it. |
-| Job Output interpretation is exact | Schema fixtures accept exactly one JSON document under the closed JSON Schema 2020-12 subset and reject Markdown fences, prefixes, suffixes, repair, coercion, unknown keywords, references, invalid JSON, and schema mismatch as `JobOutputInvalid`. Caught failures expose only frozen bounded `JobError { code, job_key, message }` with a closed stable code. |
-| Workflow Output is durable and exact | Root-return fixtures accept every strict Workflow Data Value, canonicalize negative zero, and reject implicit or explicit `undefined`, functions, symbols, bigint, non-finite numbers, unsafe integral numbers, unsupported objects, and oversized structure as `WorkflowOutputInvalid`. Commit precedes Run Snapshot publication; output interruption, inspection, and content reads reuse the stored bytes without evaluation. |
-| Workflow structured concurrency is closed | A fulfilled root with pending Jobs remains `Blocked`; a pending root without pending Jobs is `Deadlocked`; rejected roots, unhandled rejections, resource exhaustion, and protocol failure remain distinct; repeated replay logs are diagnostic only. |
-| Workflow, Session, and public Run states remain distinct | Internal facts use `Blocked` only for a Workflow Run awaiting Jobs, `Awaiting User` only for a Session with an open Interaction Request, and `In-flight` only for a Session with one admitted external Attempt. A Run Snapshot reports `input_required` only when a request is open and no other work can progress. No public generic `waiting` state hides which owner can advance the work. |
-| Interaction requests are immutable and complete | Permission and input fixtures prove never-reused request identities, explicit origin and response shape, open/answered/withdrawn state, full visibility of every open request without pagination, and replacement only through withdrawal plus a new identity. |
-| Responses are typed, authorized, atomic, and idempotent | The production decoder implements [`docs/spec/interaction-response-batch-v1.schema.json`](docs/spec/interaction-response-batch-v1.schema.json). Permission responses cannot be expressed as text and must match the invocation-derived Principal, delegated Authority, request-bound operation identity and generation, echoed descriptor digest, decision, and open request. Input responses validate role, text or single-choice shape, request-specific bounds, and request state. Duplicate request identities, conflicting, unknown, withdrawn, stale, or unauthorized input reject the whole batch; identical replay succeeds. |
-| User role does not grant authority | Tests prove that a Caller or parent Agent may supply User-role content but cannot authorize an operation unless its Principal has a matching explicit grant. The default same-OS-principal trust profile is documented as an accountability boundary, not privilege separation. |
-| Run-owned content survives transient owners | Final text, permission descriptors, large diagnostics, and Artifacts remain readable by opaque Run-scoped reference after Harness and evaluator destruction. Range, digest, media-type, retention, scope, and truncation tests prove that no reference dangles while its Run is inspectable. |
-| JSON is normative and Markdown is derived | The production codec and golden tests implement [`docs/spec/run-snapshot-v1.schema.json`](docs/spec/run-snapshot-v1.schema.json), including JavaScript-safe string encoding for opaque integer-class values, distinct Unicode Job Keys and shell-safe system IDs, deterministic serialization, strict stdout/stderr separation, complete-only inline parts, and a bounded Markdown renderer that consumes the same semantic type, introduces no independent facts, labels untrusted content, marks presentation truncation, and emits safe read/respond commands. |
-| Workspace effects are serialized | Two admitted Bash or patch effects cannot hold the same Workspace Effect Fence. Contention occurs before Attempt admission, releases the Active Credit, and leaves the Session durably ready. Different Workspaces may proceed concurrently. Recovery rebuilds occupied fences from admitted non-terminal effect Attempts before admitting new effects. |
-| Session Ledger is sole semantic authority | Recovery from complete ordered canonical transactions with rebuildable indexes absent, stale, corrupt, or behind. |
-| Host Store transitions are atomic | Termination and injected SQLite failures around multi-table transactions expose either the previous complete Session sequence or the complete new sequence, never enclosed partial facts. |
-| Immutable content and its first reference are atomic | Injected failures and process termination during task creation, semantic commit, and Completion publication expose either both the SQLite content row and its first durable reference or neither. The exact 1 MiB content maximum commits successfully and one byte more fails before SQLite. Prepared semantic commits reject duplicate and unreferenced imports; Patch bytes require their typed, directly imported Patch Intent in the same transaction. Fixed-window imports round-trip across reopen through a pointer-stable borrowed source, and a Session cannot resolve another Session's content identity. |
-| Transient scratch is one bounded live resource | Each live Harness alone owns one opaque pointer-stable scratch allocation; its Session receives only a borrowed capability. Allocation precedes Session binding and ownership-epoch claim; failed construction leaves no claim, and close releases the scratch before Harness retirement. The borrowed Session admits at most one unlinked scratch file and writer, three pending first imports, and 3 MiB aggregate extent. Three is the exact apply-patch admission closure: patch bytes, canonical Patch Intent, and Tool Call content. Transactions may reference more already-durable content; three first imports succeed and four fail. Append and reset faults fail closed. Dormant Sessions own neither scratch metadata nor a file. |
-| Prepare, commit, publish ordering | Failure injection at every semantic publication point, including semantic-index capacity, proves that every rejection precedes commit and post-commit publication is infallible assignment; otherwise the owner becomes unavailable and fresh `open` reconstructs. |
-| One Storage Owner is the durable gateway | A host-level lifetime-lock test excludes a second process; a process-level test excludes a second SQLite-owning `HostRuntime`; dependency plus runtime tests prove Core, Harness, adapters, workers, and CLI cannot open SQLite directly. A request-serialization test proves two Harnesses cannot interleave one connection transaction. |
-| Adapter evidence is not a second authority | Typed tool-result content, Captured Model Output, and immutable Completion Inbox evidence survive lost notifications and process termination; every envelope requires the epoch admitted with its Attempt and the evidence kind selected by the Attempt's typed descriptor; Session admits a model or durable Action Result only when the exact pending envelope matches Session, agent, Operation generation, Attempt, ownership epoch, result reference, and result digest; terminal commitment atomically sets `consumed_by_sequence`; recovery scans only pending rows; truly irrelevant evidence is not persisted; valid late evidence remains associated with the first terminal Result sequence even after a later Operation of the same effect class replaces resident history; the 4,096-row pending bound is enforced at insertion; and changed epoch, kind, or content evidence for the same Attempt fails closed on resident and durable-history paths. |
-| Captured model output is admitted once | Provider output is bounded in unlinked transient scratch before it is authoritative. Candidate or failure settlement rejection publishes no Completion. Crash before the atomic content-plus-Completion transaction leaves no recoverable candidate; recovery records possible duplicate model work or billing and admits a replacement Attempt with a new response reference. Crash after commit reruns the same versioned validator over the exact bound bytes without provider redispatch. The first terminal `result_applied` transaction commits the disposition, content identity, Validation Profile, Tool Catalog binding, and Core State. Request reconstruction, Conversation reads, ordinary recovery, and built-in execution consume that authority without canonical reparse. Malformed capture deterministically commits a typed terminal failure. |
-| Session publication has one replayable value | Applying the same canonical transaction live and after decode produces equal `ResidentState`; post-commit publication is one assignment and Conversation has no second reconstruction reducer. |
-| Session observation has one bounded value | Lifecycle consumers read one immutable `SemanticView` containing the current model and consequential Operations, relevant Attempts, control state, indeterminate Result, ledger head, and committed Core State. The exact pending-Completion query returns at most the evidence bound to one admitted Operation and Attempt. Production has no caller-supplied replay callbacks, type-erased evidence scans, or parallel kind/recovery indexes. |
-| Operation meaning has one encoding | Codec and lifecycle tests prove one `operation_admitted` fact binds each opaque Operation identity, the descriptor tag is the sole effect-kind classifier, and an Action explicitly names its source model Operation's complete `(ID, generation)` identity. Session may allocate Action identities monotonically and returns the committed identity to lifecycle, but no consumer derives kind, parentage, recovery behavior, or authoritative order from numeric values. Ledger sequence and explicit relationships supply those meanings. Attempts exactly match that descriptor binding; Authorization, Approval Required, Result application, Completion recovery, identity values, and parentage carry no parallel effect-kind classifier. Bash/patch mismatch, patch-approval substitution, and reused-ID generation regressions fail closed. |
-| Session compiles every semantic transaction | Production exposes command-specific typed Session operations, not raw fact or encoded-Core publication. Pure reducers return candidate Core State by value; Session derives exact fact order, identities, provenance, Conversation parentage, content closure, and canonical encoding from the operation. Tests prove rejection leaves committed state byte-identical; final completion cannot omit model Result or Result Applied; substituted final text, Action descriptor, operation generation, tool Result reference, or digest cannot commit; and each typed operation fits the transaction fact bound. Activation restores only the latest Core State held by the committed Semantic View. |
-| Conversation is semantically provider-neutral | Canonical codec and recovery tests distinguish exactly `user_text`, `assistant_text`, `tool_call`, and `tool_result`; reject every other V1 kind; reject missing, duplicated, non-adjacent, or wrongly parented call/result pairs; and prove context selection never splits a pair. |
-| Model retries preserve one request | The model Operation binds the exact model profile, instructions, Model Context, semantic request digest, and Tool Catalog Digest; every replacement Attempt emits byte-identical house request data, while changing any component requires a new Operation. |
-| Tool visibility is not execution authority | An arbitrary fixture Tool Key and JSON arguments round-trip through Conversation and Provider codecs, but only the closed admitted bindings for `bash` and `apply_patch` can produce Actions; unknown, duplicate, ambiguous, or unbound keys fail closed. |
-| Provider conversion is an edge concern | The semantic request contains no Host Store locator, SQLite identity, blob path, internal content handle, native layout, or provider wire object. Deterministic adapter tests lower the same request and map provider names back to Tool Keys without changing durable Conversation. GREASE-like fixtures inject bounded unknown record members, explicitly ignorable non-authoritative variants, values, ordering, and chunk partitions into open provider records and produce byte-identical canonical output. Paired negative fixtures reject malformed framing, exhausted resources, every ambiguous or invalid field consumed by a recognized conversion, and unknown must-understand output-item, content-part, provider-action, or terminal variants as `unsupported_provider_output`. |
-| Codex authorization respects trust spheres | Device authorization, OAuth token, rejection, and JWT claim fixtures ignore duplicated unknown provider extensions while rejecting duplicated or wrongly typed consumed fields. The OS credential-store round trip uses a separate closed OnePage decoder that rejects unknown, missing, duplicated, malformed, or oversized fields. |
-| Harness lifetime is structural | `Harness.open` returns an opaque stable handle; `Harness.close` consumes it, destroys its complete allocation, and releases exactly one lease; runtime close remains busy while any lease is live; and data-only Projections can open content only through their originating live Harness generation. A long-lived-runtime test repeatedly opens and closes Harnesses and proves no resident or allocated-byte slope with historical handle count. |
-| Async waits retain no dead owner | Attempt admission transfers one Active Credit from Harness to adapter, then destroys the Harness and releases its Slot. Terminal Inbox evidence transfers the same credit to one bounded closure handoff; no adapter or wake hint retains a Harness pointer. Awaiting User releases the credit while its immutable Interaction Request and any accepted response remain durable. |
-| Wake hints are not authority | Duplicate, dropped, full, late, and stale `(Session identity, generation)` hints cannot advance a Session. Bounded durable readiness reconciliation finds terminal Inbox evidence after every hint is removed and applies it through a fresh `Harness.open / offer / drive` quantum. |
-| Approval Required is not Authorization | Ledger inspection and restore tests prove pending `ask` state atomically creates one exact permission Interaction Request and no Authorization until a matching authorized allow or deny response commits. |
-| Control settlement cannot strand admitted work | Shutdown denies pending Approval Required state; cancellation and shutdown reconcile durable Completion Inbox evidence until every admitted Operation is terminal or indeterminate. |
-| Known provider failure is terminal | A dispatch error after Attempt admission produces one durable provider-failure Result; repeated restore regenerates failure without admitting a replacement Attempt. |
-| Ingress custody is not durable acknowledgement | Crash after `offer` acceptance but before Host Store commit loses no acknowledged fact: Completion is rediscovered, an `ask` decision is requested again, an uncommitted Task remains absent, and cancellation remains unapplied. |
-| No silent Bash replay or forced User escalation | Process termination after possible command execution produces an indeterminate Result without redispatch, appends the corresponding Tool Result to Conversation, and lets the Agent choose its next action. It becomes a terminal `JobIndeterminate` only if the Session cannot safely reach a more reliable Outcome. |
-| Patch reconciliation is honest | Exact preimage, postimage, and divergent Workspace fixtures plus concurrent replacement, symlink, and stale-Authorization cases. |
-| Authorization binds exact execution | Descriptor-digest tests cover tool kind, bytes, Workspace, working directory, environment authority, timeout, generation, and preimage. |
-| Authoritative bindings are collision-resistant and typed | Domain-separated SHA-256 vectors and type-level mismatch tests cover descriptors, Patch Intent, preimage, postimage, Results, Completions, and ledger records; absence is represented separately from digest bytes. |
-| Dormant population does not scale active memory | Increase Dormant Sessions and terminal Jobs while holding every resident pool fixed; report RSS tolerance and disk growth separately. Blocked Workflow Runs retain no evaluator. A live evaluation is bounded by its current Visibility Snapshot and Workflow Resource Profile and retains no cumulative state from earlier evaluations. |
-| Orchestration and workload memory are distinct | Density and product runs separately report OnePage-owned resident memory and memory consumed by model-requested subprocess trees. OnePage-owned capture remains bounded under large command output, while no subprocess memory ceiling is claimed or imposed. |
-| SQLite remains within its host allowance | Process-global current and high-water heap stay below the Host Runtime hard limit for the 32, 64, and 128 KiB cache profiles at increasing Session populations. Page-cache, lookaside, and statement counters are reported as overlapping diagnostics; request and result reservations are reported separately. |
-| Storage work is bounded | Indexed-query plans and worst-case admitted inputs prove each Host Store statement and result remains bounded. |
-| Async credit scheduling is issue #34 evidence | Active Credit transfer, closure handoff, closure priority, wake recovery, and burst-drain checks belong to issue #34. Issue #32 proves only durable capture and one shared reconstructible semantic-admission workspace. |
-| Active capacity is startup-fixed | Configure zero, one, exactly full, and one beyond full; prove Slot and Active Credit storage are reserved once; each credit has exactly one Harness, admitted Attempt, or closure-handoff owner; admission transfers rather than duplicates it; opening beyond capacity acquires no Session ownership; temporary exhaustion does not allocate or spin; and closure handoff outranks new admission. An Active Credit does not preallocate parser, transport, stack, and subprocess memory as one bundle. |
-| Semantic validation is a shared closure stage | V1 owns one fixed semantic-admission workspace independently of `active_capacity`. Provider waits and effect execution retain none of it. A burst that completes every Active Credit queues bounded durable evidence, admits every capture without acquiring another credit, prioritizes closure over new admission, and cannot deadlock or redispatch for temporary workspace unavailability. |
-| Output remains bounded in orchestration RAM | Adversarial model and command outputs larger than resident windows, exact durable spool recovery, and steady resident-memory measurements prove that OnePage does not retain a complete value plus another complete encoded copy. Model-requested subprocess RSS is reported separately. |
-| Model transport has a measured slope | A production-shaped TLS and streaming fixture runs at 1, 10, 50, and 100 active calls through handshake, upload, ordinary streaming, slow-consumer backpressure, cancellation, completion, and idle-pool retention. It reports process physical footprint, kernel socket memory, virtual stack reservation, and the fitted per-call slope; frames, pools, and request/response windows remain explicitly bounded. |
-| Ownership and slot reuse are fenced | Late, duplicate, prior-epoch, future-epoch, stale-window, and generation-exhaustion tests across scrubbed slot reuse. |
-| Terminal output is safe | Control, ANSI, OSC, hyperlink, clipboard, carriage-return, backspace, fragmented UTF-8, and oversized-line fixtures. |
+| SQLite is sole authority | Recreate every Decision Snapshot and Run Snapshot from canonical relational rows with no Session Ledger, reducer image, continuation blob, or resident cache. |
+| Session is linear and reusable | Complete two Turns in one Session, prove immutable ordered Conversation entries, and reject branching, stale revision, and a concurrent second Turn. |
+| Turns settle; Sessions do not | Completion, failure, and cancellation fixtures commit one Turn Outcome and release Session occupancy atomically. Failure-code and Operation-uncertainty fixtures remain orthogonal to terminality. Closing Harness resources changes no Session or Turn meaning. |
+| Conditions are derived | Rebuild runnable, input-required, in-flight, dormant, and terminal conditions from relational rows after dropping every rebuildable index. |
+| Causality is explicit | Every Conversation entry, Operation, Attempt, Completion, Resolution, Interaction Request, and output resolves to its exact Turn and causal parent without relying on insertion order alone. |
+| Pre-V1 is a flag day | Schema tests reject obsolete ledger/reducer formats; no compatibility reader, alias, migration, or dual-write path exists. |
 
-## Required test seams
+## Context and model requests
 
-The highest semantic product seam is the native Run Service against a temporary Git repository and deterministic adapters. It proves that a Caller can idempotently create or attach by Run Key, inspect without mutation, submit typed responses, advance under one fenced driver, explicitly cancel, and read immutable content while the Host Runtime owns every Evaluation Generation and evaluator process. The highest presentation seam runs all six CLI commands over that same service and receives identical committed Run Snapshots after presentation interruption.
+| Claim | Required evidence |
+| --- | --- |
+| Context revisions are sparse | Create a Session and its complete baseline atomically, reject a Session without one, change one component, and prove every unchanged component resolves to its earlier immutable reference. |
+| Revisions are atomic | Start a Turn with an authorized Session Context Patch changing model and Tool Catalog; interruption exposes the revision, Turn, Contract, and initiating entry together or none. Reject independent and mid-Turn mutation. |
+| Turn Contract is immutable | Resolve Session defaults, explicit overrides, date, timezone, Workspace facts, authority, and output requirements once; later ambient changes do not alter the admitted Turn. |
+| Model request is exact | Persist one Model Request Manifest for each model Operation and reconstruct the same provider-neutral request after fresh-process reopen. |
+| Retry does not drift | Replacement Attempts reuse the same manifest while credentials and transport are refreshed independently. A changed component requires a new model Operation. |
+| Historical requests remain explainable | After changing model, instructions, tools, or renderer code, reconstruct each earlier Operation from its manifest and content references. |
+| Provider cache is optional | Disable or lose provider-side conversation/cache identity and produce the same semantic request from local authority. |
 
-`zig build fixture-repair -Doptimize=ReleaseSmall` is the reproducible repair command. It begins with a committed executable failure, drives red Bash Result -> authorized Patch Intent -> applied Patch Result -> green Bash Result -> Final Answer through the production CLI and Harness, and runs both Permission Modes. The Provider validates the complete durable Conversation at each turn and has no call-count or time-based response selector.
+Required sparse-context fixture:
 
-Workflow fixtures use the production runner kernel and private bounded child protocol. They cover the exact `export default async function workflow({ agent }, args)` signature, arguments-file decoding, Caller Run Key and invocation-Workspace binding, built-in `default` Agent Profile and Workflow Resource Profile selection, unknown-name rejection, rejected static and dynamic imports, the sole deep-frozen `agent` capability, Job Outputs, Workflow Output, and `JobError`, deterministic `Promise.all` and `Promise.allSettled` joins, rejected access to `Promise.race` and `Promise.any`, staged ordinary-JavaScript replay, whole-blocked-set barriers, a lost ensure response, evaluator death, Host restart, incompatible semantics identity, structured concurrency, final-outcome idempotency, and every named resource limit. Two Jobs in the Run's one Workspace prove Bash and patch serialization while their model calls remain independently concurrent. Different-Workspace concurrency is covered at the Host Runtime seam with separate directly created Sessions. The compatibility corpus of saved Claude workflows is evidence for JavaScript language coverage, not a second production script syntax.
+```text
+r1: model=A, instructions=I1, tools=T1
+r2: tools=T2
+r3: instructions=I2
 
-The highest deterministic lifecycle seam is `Harness.open / offer / drive` with the production Core reducer, real SQLite Host Store and immutable content, fixed Host-owned pools, deterministic adapters, and semantic fault injection. Lifecycle tests assert durable behaviour, adapter admission, Conversation advancement, Projections, and Outcomes rather than private table names, SQL text, row identifiers, numeric Core fields, or helper calls.
+Turn 1 binds r1
+Turn 2 binds r2
+Turn 3 binds r3
 
-Provider contract tests use the versioned semantic request and Captured Model Output rather than a provider wire fixture. They cover exact Tool Catalog binding, deterministic name-to-Key mapping, one complete assistant text or tool call, and bounded exact JSON arguments under `StrictToolJsonV1`. Admission rejects partial, multiple, unknown, duplicate-field, malformed, excessive-depth, excessive-member/token, schema-invalid, or oversized outputs exactly once; it does not require whitespace, key-order, or number-spelling normalization when exact bytes already identify the call. Conversion consumes request and response windows without materializing a second request-sized JSON value, a complete SSE event, a JSON DOM, or a complete canonical result beside the selected decoded value. The same wire bytes produce the same outcome under arbitrary transport partitioning and object-field order. Unknown record members and explicitly ignorable variants leave the result unchanged; unknown must-understand semantic variants produce `unsupported_provider_output`. Repeated terminal content does not duplicate already-spooled output. Termination before atomic content-plus-Completion publication loses the transient candidate and makes a fresh owner audit possible duplicate work or billing before admitting a replacement Attempt. Termination after commit makes a fresh owner admit the same exact captured bytes without redispatch. Provider replay state is tested only if the Codex feasibility work proves that the accepted transport requires a bounded sidecar; local Conversation must still reconstruct the request without it.
+Turn 3 resolves model=A, instructions=I2, tools=T2
+```
 
-Issue #11 has two distinct gates. Its merge gate is deterministic: ordinary CI covers authorization, transport, tool-call, capture, admission, settlement, crash, and failure paths without network or Keychain access. Its closure gate is attended compatibility evidence: one opt-in live Codex tracer must use the same production Provider and capacity-one Harness seams to inspect a controlled failing repository, request Bash and patch Actions, consume their canonical Tool Results, verify the repair, and finish with a durable Final Answer. The live gate may run later when credentials and Keychain approval are available; it does not block independent QuickJS or Workflow Run implementation, does not become hermetic CI, and does not permit a subscription-availability claim until it passes. Issue #43 cannot complete until that evidence exists and later repeats the live proof through asynchronous durable Workflow Runs and measured provider concurrency without adding another adapter.
+The fixture restarts between each revision and verifies exact content references and manifest digests.
 
-`zig build codex-live-repair` is that opt-in tracer. It requires prior `onepage --codex-login`
-authorization, creates a disposable Git repository outside the worktree, and runs the same installed
-`zig-out/bin/onepage` executable used for login with the production Codex Provider, Harness, Bash and
-one-file patch implementation. Reusing that exact installed executable avoids treating Zig's changing
-cache paths as the documented login target. A rebuilt ad-hoc-signed binary may still require one new
-Keychain approval. The tracer is excluded from `zig build check`;
-ordinary release checks use fake authorization and transport and make no network or Keychain access.
-On failure it reports and preserves the disposable root so the bounded CLI diagnostic and durable state
-can be inspected; a successful run removes the root. Every invocation first invalidates any older report.
-Only after the process exits and every repair assertion passes does it atomically write
-`.zig-cache/codex-live-capacity-one.json`. A successful report must include the exact compiled adapter
-structures and windows, whole-process RSS and physical footprint, virtual size, live thread count,
-whole-process stack reservation sampled while TCP is active, observed TCP queues and configured queue
-high-water limits, and the
-zero-capacity idle-pool policy. The report labels the process figures as a capacity-one whole-process
-observation and the macOS socket high-water values as limits rather than allocated kernel memory. It is
-not the concurrency slope owned by issue #43. Fake failures distinguish local refresh rejection,
-missing refresh authority, provider HTTP 401/403, model rejection, rate or quota rejection, and backend
-failure. The shared diagnostic admits only a generic source (`none`, `local_credentials`, or
-`provider`) and one bounded 64-byte opaque ASCII code. Shared protocol, Harness, and CLI code validate
-and preserve those bytes but never interpret adapter semantics. The Codex adapter privately defines stable
-`codex.refresh.<class>` and `codex.http.<class>.<decimal-status>` codes. The latter encodes the exact
-received non-2xx status while distinguishing authentication, authorization, model, rate, quota, backend,
-and general rejection classes. Provider `error.code`, `error.type`, and the exact bounded ChatGPT
-unsupported-model detail shape may inform that classification but are not retained. Detail prose is never
-retained. The native transport reads ordinary content-length or chunked
-diagnostic bodies through the response reader under
-the existing request timeout, retaining no body when it is malformed or exceeds 4,096 bytes.
+## Model output and tools
 
-The live tracer selects `gpt-5.6-sol` as the supported V1 default without adding a model registry or
-catalog lookup. Callers may still provide another raw model. If that model receives the bounded ChatGPT
-unsupported-model response, one durable Attempt fails without an invisible retry as
-`model_unavailable (provider, code=codex.http.model.400)`.
+One model response fixture emits assistant text plus three Tool Calls. Admission must:
 
-A single test-only loopback fixture drives the production native transport. It asserts the exact bounded
-request headers and JSON shape, including that the adapter advertises only lifecycle-supported catalog
-tools and omits `input_request` until issue #38 supplies durable admission, a two-turn tool-result continuation, non-2xx classification without an
-invisible retry, and immediate return after the first terminal SSE event even if the response body remains
-open. Its rejection cases cover a diagnostic delivered after the response head in chunked encoding and
-oversized, malformed, or stalled bodies that preserve status without retaining content. Semantic capture
-fixtures separately prove that more than 128 ordinary reasoning and lifecycle events remain valid below
-the total-byte bound, that the total-byte bound is exact, and that failed, cancelled, or incomplete terminal status
-overrides partial candidate output. The loopback fixture does not validate public backend acceptance of
-OnePage's truthful `originator`; that remains an opt-in live compatibility question rather than a hermetic
-CI assertion.
+1. validate the complete ordered candidate before mutation;
+2. commit every Tool Call and child Action Operation atomically;
+3. reject the complete candidate for a duplicate call identity, unknown Tool Key, malformed arguments, or invalid member;
+4. execute children independently under capacity and Workspace fences;
+5. survive independent permission, denial, failure, cancellation, and uncertain-effect outcomes; and
+6. construct the next Model Request Manifest with every Tool Result in original call order regardless of completion order.
 
-The production model transport links the supported macOS system libcurl and uses its blocking easy path
-through the existing synchronous Provider seam. The implementation restricts each easy handle to its owning
-worker and configures redirects, transparent content decoding, environment proxy inheritance, automatic
-request replay, and transport retries off. Request bytes stream from the immutable house request through a
-resumable bounded encoder rather than a request-sized buffer or disk spool.
+Permute physical completion order and prove that Conversation, the next model request, Turn Output, and Workflow topology remain identical.
 
-Current hermetic evidence covers arbitrary one-byte output partitions through that production encoder,
-terminal-before-cancel and cancel-before-terminal precedence, whole-call timeout, connect failure before
-upload, failure after upload bytes are supplied, HTTP rejection, compressed success, malformed Capture,
-and Host-side request-read or candidate-publication failure. Callback abort classification preserves the
-first OnePage disposition rather than deriving meaning from `CURLcode` alone. Before issue #34 closes, the
-selected-path gate must additionally prove every configured prohibition against a loopback fixture and show
-that no deterministic protocol or resource failure is redispatched by the transport.
+Tool visibility and execution authority remain separate. Arbitrary provider-neutral Tool Keys round-trip as data, but only admitted `bash` and `apply_patch` bindings execute. Permission responses bind exact Principal, request, Operation, descriptor digest, and option.
 
-The capacity 1, 10, 50, and 100 transport gate records cold and warm DNS separately. It reports process
-threads, transient resolver threads, file descriptors, sockets, worker regular and alternate stack virtual
-reservation and committed pages, physical footprint, retained post-churn memory, idle wakeups, cancellation
-latency, and graceful-shutdown latency. Ordinary non-DNS cancellation must return within the recorded V1
-SLA and functioning-resolver shutdown must join every worker before Host destruction. A deliberately wedged
-resolver is a separate result: V1 does not average it into ordinary cancellation or claim a hard reusable-
-process close bound. A fixture subprocess terminated after the shutdown grace period must reopen the admitted
-Attempt through normal durable recovery without treating process exit as semantic cancellation.
+## Operations, Attempts, and recovery
 
-Ingress tests distinguish three outcomes: `full` or `busy` leaves ownership with the producer; `accepted` transfers volatile custody to the live Harness; only a later committed semantic transition acknowledges durable acceptance. Interaction Responses are first validated and committed through the Run Service, then offered only after a fresh Harness acquires an Active Credit. Adapter tests destroy the admitting Harness, publish terminal Inbox evidence, drop every wake hint, and prove bounded durable readiness reconciliation opens a new Harness and applies the Completion. Tests fill ingress while every Active Credit is occupied and prove bounded retry without an unbounded fallback queue.
+| Boundary | Required fresh-process result |
+| --- | --- |
+| Before Attempt commit | No external dispatch authority exists. |
+| After Attempt commit, before dispatch | Recovery treats dispatch according to the Operation's conservative uncertainty contract. |
+| During provider/tool execution | No Harness, reducer image, or notification is required to rediscover admitted work. |
+| After Completion commit, before Resolution | The exact evidence is admitted once without repeating the physical Attempt. |
+| After Resolution, before acknowledgement | Replay returns the committed result without another transition. |
 
-Run-interface crash and race tests terminate after Run creation, Interaction Request creation, response commit, terminal outcome commit, and each corresponding point before stdout acknowledgement. They cover identical and conflicting replay, withdrawn requests, descriptor mismatch, multiple simultaneous open requests, full actionable-request visibility beside paginated history, SIGINT detachment without cancellation, two concurrent in-process drivers, a second CLI process receiving `busy`, content survival after evaluator and Harness destruction, and all opaque integer-class values round-tripping through QuickJS without precision loss.
+Model recovery records possible duplicate work or billing and reuses the exact manifest. Bash recovery never redispatches uncertain work. Patch recovery distinguishes preimage, expected postimage, divergence, and invalid target. Late or conflicting Completion evidence remains auditable but cannot produce a second Resolution.
 
-Run protocol fixtures validate both normative JSON schemas. Response batches cover permission allow and deny, text input at and beyond the request byte bound, every advertised single-choice option, an unadvertised option, duplicate request identities, unknown fields, operation fields that callers must not assert, identical replay, and conflicting replay. Snapshot fixtures include shell-safe system IDs beside Job Keys such as `build/api` and `修复`; every inline part is complete, and every truncated preview belongs to a readable immutable `content_ref`.
+Storage failure injection covers full, I/O, allocation, corrupt content, foreign reference, wrong digest, and transaction rollback. SQLite faults expose neither half a semantic relation nor content without its first reference.
 
-Workspace-effect tests contend before Attempt admission, prove that the losing Session retains no Active Credit and remains durably ready, and then admit it after the first effect reaches terminal application. Fresh-process recovery rebuilds the occupied fence from an admitted non-terminal Bash or patch Attempt before accepting new work for that Workspace. No test or implementation classifies arbitrary Bash as read-only.
+## Interaction and conversational continuation
 
-Session-private Core tests exercise the command-specific reducers and canonical codec without filesystem or provider behaviour. One fixed seed builds and shuffles 32 bounded plans containing zero, one, or two Tool Result continuations before final-answer, failure, or input-request termination. Within those plans the generator varies identities, generations, Operation and transaction sequences, response references, tool arguments, failure kinds, rejection order, Conversation entries, and whole-slot poison bytes. It interleaves invalid identity, phase, order, stale Operation and generation, substituted digest, zero result, wrong consequence, invalid entry/context, range, overflow, and generation-exhaustion cases. Before each rejected command it records canonical input bytes and proves them unchanged afterward. After every accepted command it repeats the same input to prove deterministic output, round-trips the canonical encoding, restores through a fully PRNG-poisoned opaque slot, proves exact canonical equality, and scrubs the slot. Session compiler tests separately substitute Agent, Attempt, ownership epoch, result reference, and digest in exact pending Completion evidence because those relationships deliberately do not enter the private reducer. No parallel native-spike executor exists. Codec tests prove that only kind-specific typed facts cross the semantic interface, that durable Result evidence cannot contradict the admitted descriptor, that immediate evidence and Result application carry no parallel kind, that opaque Operation identities carry no kind or parent encoding, and that malformed or obsolete flat wire records fail before construction. Narrow storage tests cover schema and payload versions, clear rejection of the prior experimental epoch, interrupted empty-schema initialization, rejection of foreign schema, exact V1 DDL, self-projecting typed transactions, committed-only Conversation attachment, SQLite-assigned Inbox identity, Completion association, insertion-side pending capacity, consumed-row exclusion, SQLite failure mapping, Inbox conflicts, low-water reserve preservation, and bounded critical range reads.
+Fixtures prove:
 
-Incremental recovery tests restore histories larger than one configured quantum and prove that each `drive` consumes no more than that quantum, returns `restoring` with `more = true`, and exposes no Projection before the snapshotted Session Ledger and pending Completion Inbox watermarks. A pending late Completion charges its Inbox read and each verified prior-Operation ledger row to that same quantum. The tests compare the recovered and live `ResidentState`, prove that consumed or irrelevant evidence cannot re-enter it, and prove that a failed Host Store transaction leaves the prior resident value published and the live Harness unavailable.
+- ordinary User input admitted to an idle Session starts a new Turn;
+- ordinary uncorrelated input conflicts while a Turn is nonterminal;
+- a model input request atomically appends its assistant prompt and creates one immutable Interaction Request;
+- an identical response replay is idempotent;
+- a conflicting, stale, withdrawn, unknown, or unauthorized response fails without mutation;
+- an accepted correlated response appends User text and resumes the same Turn;
+- permission text cannot substitute for a typed permission response; and
+- a terminal Turn has no open Interaction Request or applicable response.
 
-Storage topology tests start two fresh processes against one Host Store and prove that exactly one holds the lifetime lock. In-process tests prove that exactly one Host Runtime controls SQLite's process-global heap allowance and that the Storage Owner request mutex covers each complete operation. Every adapter publication passes through the Storage Owner; content and its Completion become durable in one SQLite transaction. The production dependency graph contains exactly one SQLite opener, one connection owner, and no second recoverable content store or per-Session lock tree.
+`input_required` appears in a Run Snapshot only when at least one request is open and no other member Turn can progress.
 
-Point lookups are bounded structurally by primary or unique-key equality. Populated critical range tests, including the exact 32,768-row historical Completion statement, execute the exact production statement and reject nonzero `SQLITE_STMTSTATUS_FULLSCAN_STEP`, `SORT`, or `AUTOINDEX`; they do not depend on unstable planner prose. Limits cover request count and bytes, statement parameters, returned rows and bytes, fixed-window content imports and reads, transaction work, recovery work, database pages, and immutable content references. The 32, 64, and 128 KiB page-cache profiles are test points; larger host-derived profiles use the same semantics.
+## Workflow replay
 
-## Deterministic crash facility
+Workflow fixtures use the production QuickJS boundary and the exact `export default async function workflow({ agent }, args)` signature. They cover:
 
-Crash claims use one private test facility with a closed set of named semantic crash points. The production composition exposes no environment switch, public failpoint interface, or generalized fault framework. A fixture child process selects one point, reaches it through the production path, and terminates immediately without returning an error or running deferred cleanup. Its parent opens the same durable state in a fresh process and verifies the documented outcome through the normal Run Service, Harness, and Storage Owner interfaces.
+- idempotent Caller Run Key and stored invocation Workspace;
+- canonical Agent Call Key and Turn specification;
+- lost membership acknowledgement;
+- evaluator death before and after Turn admission;
+- whole-blocked-set replay;
+- staged fan-out and synthesis;
+- deterministic `Promise.all` and `Promise.allSettled`;
+- absence of `Promise.race` and `Promise.any`;
+- final Workflow Output idempotency;
+- source, arguments, value, CPU, wall-time, and cumulative replay bounds; and
+- no JavaScript continuation or evaluator process retained at a barrier.
 
-The shared catalogue includes the distinct boundaries needed by owning slices: after Attempt commit before dispatch; after dispatch before Completion publication; after Completion Inbox commit before wake or application; after patch mutation before Result commit; after Session or Run transaction commit before resident publication or stdout acknowledgement; and after Interaction Request or Response commit before acknowledgement. A slice adds a point only when it proves a different recovery decision. Returned `InjectedCrash`, allocator failure, adapter error, and SQLite fault hooks remain useful negative-path tests but do not satisfy a process-crash claim.
+Two workflow calls in one Workspace prove same-Workspace effect serialization while independent model Operations and different Workspaces may progress concurrently.
 
-## Targeted crash evidence
+## Run interface
 
-Crash tests belong to the vertical slice whose effect contract they prove. V1 does not multiply every semantic state by every tool and storage failure. Fresh-process tests cover these distinct decisions:
+Golden and hostile-input tests implement both checked-in JSON schemas exactly. JSON contains the complete versioned Run Snapshot; Markdown consumes the same semantic value and introduces no facts.
 
-1. termination before Attempt admission is safe to dispatch later, while a committed admitted Attempt is already at the conservative uncertainty boundary;
-2. a model or Bash Attempt terminated after dispatch may have begun is never automatically repeated as the same Attempt; an indeterminate Bash Result enters Conversation and permits a later model decision without requiring User intervention unless that decision requests permission or input;
-3. a patch terminated after mutation recognizes its bound expected postimage and does not reapply;
-4. a patch target matching neither preimage nor postimage stops without writing;
-5. process exit after SQLite commit but before `ResidentState` publication reconstructs exactly the committed transaction;
-6. storage or active-capacity exhaustion admits no new external effect unless its bounded terminal evidence can still use the supported closure path.
-7. evaluator death after durable Job creation reattaches the same Job on replay, while death after durable Workflow Run completion returns the stored Workflow Output without reevaluation;
-8. workflow resource exhaustion, runner crash, cancellation, and incompatible semantics identity fail the Run explicitly without corrupting or implicitly cancelling already durable Job state.
+Tests cover:
 
-Ordinary transaction, reducer, Inbox, Projection, and volatile-ingress tests cover the intermediate ledger states without requiring a separate process-crash fixture for each one. Every acknowledged fact must still reappear after recovery. A failed transaction exposes no subset of its semantic facts, lost Completion notifications recover through the Inbox, and admitted uncertain work never disappears, completes twice, or becomes model-visible without a committed Conversation Entry.
+- create/attach conflict by exact binding;
+- pure inspection;
+- atomic response batches;
+- explicit cancellation;
+- atomic Run cancellation propagation to every nonterminal member Turn and no Session finality;
+- single-driver advancement;
+- immutable content range reads;
+- JavaScript-safe string encoding of opaque integer-class values;
+- complete visibility of every actionable open request;
+- Run–Turn membership summaries that keep Agent Call Key separate from Turn identity and partition members into the exact derived conditions/outcomes;
+- stable pagination over immutable or revision-bound records;
+- untrusted model/tool text isolated from control framing; and
+- SIGINT, timeout, terminal closure, and output failure detaching without cancellation.
 
-## Durable-store failures
+## Compaction
 
-OnePage tests its classification and publication behavior, not SQLite's pager implementation. The residual release matrix covers `SQLITE_FULL`, an injected ambiguous `IOERR` at the Storage Owner boundary, corrupt or invalid schema on open, and process exit after a successful commit. `BUSY` is required only if it is reachable through the supported singleton topology; `NOMEM` remains covered by ordinary failed-transaction and unavailable-owner tests. A custom VFS, short-write campaign, and exhaustive allocation failure sweep are outside V1.
+Compaction tests preserve every source Conversation byte while selecting one replacement checkpoint plus the largest complete compatible suffix. They cover:
 
-Tests also cover invalid canonical payloads, sequence gaps and conflicts, missing immutable content, unsupported Host Store and payload versions, and recovery with rebuildable views removed. Physical Host Store corruption may make every Session unavailable, and tests must not misreport it as an isolated Session failure.
+- exact next-request-plus-reserved-output pressure;
+- intact Tool Call/Tool Result boundaries;
+- source change during summarization;
+- invalid, empty, oversized, stale, corrupt, and incomplete checkpoints;
+- prior-checkpoint lineage;
+- acknowledgement loss after checkpoint commit;
+- repeated compaction;
+- Session Context Revision, Turn Contract, Model Request Manifest, and model provenance derived through the checkpoint's creating model Operation;
+- fallback to older valid checkpoint or uncompacted history; and
+- `ResourceExceeded` after the allowed valid Attempts cannot produce a fitting request.
 
-Model-retry recovery repeatedly terminates the process after dispatch but before Completion publication. Every replacement Attempt must commit the exact count of earlier dispatches that may duplicate provider work or billing before redispatch. A two-Attempt fresh-process case lets the replacement win, then publishes and offers valid late evidence for the original; the evidence remains audited against the winning Result transaction without a second Session Ledger transition or failure Projection. Focused model, Bash, and Patch cases reject evidence whose epoch differs from the matched Attempt, including a same-identity cross-epoch storage conflict. At the fixed Attempt-history limit, the next restore must publish and apply one durable provider-failure Result without dispatching a ninth Attempt or making the Session unavailable.
+## Memory and density
 
-Operational tests enforce maximum page count by filling a transaction until admission rolls back, then prove the configured low-water page margin remains available. Before dispatch, each effect slice proves that its immutable descriptor and known closure evidence are durable and that the remaining terminal representation is bounded. This does not claim guaranteed recovery from arbitrary filesystem exhaustion after a possible effect. Tests also reuse free pages without foreground `VACUUM`. Schema tests open a valid, non-empty but schema-empty SQLite file to prove bootstrap is based on transactional identity rather than file existence. Snapshot, export, collection, shrinking, and migration evidence is post-V1.
+Measurements report whole-process RSS and each independent axis:
 
-`zig build host-store-density` explicitly runs the single-store cutover fixture at 100, 1,000, and 10,000 Dormant Sessions. It emits JSON Lines containing logical content bytes; database, allocated-page, and rollback-journal bytes; cache writes and spills; actual process disk-read and disk-write byte deltas; transaction mean and p50/p95/p99 latency; throughput; RSS and physical footprint; and SQLite heap current/high-water values. `zig build check` compiles this fixture but does not execute its machine-sensitive population sweep. The fixture separately reports ordinary response, exact-maximum model-response, and exact 3 MiB live-Session spool occupancy, keeping disk-backed spool payload separate from the fixed 4 KiB import window and the 208-byte Harness-local scratch metadata allocation (20,800 bytes at capacity 100). The checked-in issue-#49 report matches the same machine, 36-byte task, fixture shape, and instrumentation against fixed base `59a97ec`; it remains a single-run cutover comparison rather than the later whole-product active-capacity and mixed-content density gate.
+- Dormant Session count;
+- terminal and nonterminal Turn count;
+- Active Capacity and occupied Active Credits;
+- Activation Slot size and occupancy;
+- provider workers, stacks, transport buffers, sockets, and resolver resources;
+- effect workers and subprocess trees;
+- semantic-validation workspace;
+- SQLite heap, database bytes, journal bytes, and writes;
+- Workflow Evaluator heap, bridge memory, process RSS, and replay count;
+- immutable content and transient scratch; and
+- model-requested workload memory.
 
-## Resource ledger
+Required population points are 0, 100, 1,000, and 10,000 Dormant Sessions at fixed capacity, then Active Capacity 1, 10, and 100 at fixed durable population. Repeated 0→capacity→0 churn must return resident orchestration memory to the same bounded envelope. Terminal Turn population adds durable bytes rather than resident execution objects.
 
-### Measurement order
+Every new allocation topology records its owner, multiplier, maximum, ordinary occupancy, release boundary, failure behaviour, and reason an existing owner cannot serve it before implementation.
 
-Optimize the production-shaped path before an isolated component. The first evidence is end-to-end
-wall and CPU time, throughput, whole-process physical footprint, RSS, virtual size, threads, wakeups,
-I/O, and durable bytes for a real Host Runtime, Host Store, Harness, provider, and semantic closure.
-Phase timing then identifies which owned stage is material. A parser, allocator, SQLite, transport, or
-Core microbenchmark earns release weight only when the phase evidence shows that component materially
-affects the product path. A locally faster component is not a product improvement when transfer,
-synchronization, retained memory, or insufficient concurrency dominates the complete workload.
+## Canonical gates
 
-`zig build measure-runtime` runs one isolated ReleaseSafe point and emits a versioned JSON record to
-stdout. `-Dmeasurement-scenario=dormant -Dmeasurement-count=N` measures durable Session population and
-historical Harness churn. `-Dmeasurement-scenario=completion -Dmeasurement-count=N` measures complete
-deterministic Session lifecycles rather than provider/parser throughput in isolation.
-`zig build measure-runtime-sweep` runs the required dormant points in independent processes plus the
-end-to-end completion point and writes raw JSONL under `.zig-cache`; use
-`-Dmeasurement-repetitions=N` to control repetitions. Report the median and complete observed range,
-the exact commit, build mode, machine, and cold/warm conditions. Numeric performance results are release
-evidence, not a noise-sensitive normal-`check` assertion.
+Before V1 release:
 
-The runtime fixture is the measurement foundation, not the final density proof. Issue #3 reuses the
-same schema at startup capacities 1, 10, and 100 while labelling its present completion path as
-sequential; issue #34 must add its production-shaped
-1/10/50/100 provider-transport points. macOS `physical_footprint` is the primary whole-process memory
-measure. RSS, lifetime peak footprint, and virtual size remain separate observations: virtual size
-includes large platform mappings and stack reservation and must not be presented as committed memory.
-Once the durable Run/Job seam exists, the product benchmark must invoke the agent population from an
-ordinary JavaScript Workflow through the real disposable evaluator. It reports Host and evaluator-child
-memory separately and together, and verifies zero evaluator processes at Blocked and terminal boundaries.
-The standalone evaluator fixture remains component evidence; it must not be presented as an end-to-end
-agent-workflow measurement.
-
-The checked-in [`runtime capacity and density baseline`](docs/measurements/2026-08-31-runtime-sweep.md)
-contains the raw three-repetition sweep and deterministic summary for the sole SQLite Host Store. It
-records exact Slot and Active Credit reservation, fixed shared-workspace reservation and high water,
-live Harness count after each workload, whole-process memory, timing, I/O, and durable bytes. The report
-explicitly preserves the remaining roughly 2.36 GB process-write observation for 10,000 Dormant Sessions
-instead of treating the sole-store ownership simplification as a storage-throughput optimization.
-
-Every density and product run reports these categories separately:
-
-- for every resident stage, the capacity that multiplies it, occupied count, requested allocation
-  bytes, allocator-observed bytes where available, allocation count, reusable reservation, and
-  high-water use; distinguish live payload from spare capacity, alignment, allocator rounding, and
-  fragmentation rather than inferring process cost from `@sizeOf` alone;
-- for every new allocation topology, the recorded design decision naming its owner, multiplier,
-  maximum and ordinary occupancy, release boundary, failure behavior, and rejected reuse or sharing
-  alternatives;
-- for every large value path, the semantic, compatibility, work, storage, and resident-memory bounds;
-  the live representation at each stage; and any interval in which two complete representations
-  coexist;
-- actual Activation Slot size and production-used components, exact configured reservation, and occupied high-water bytes;
-- native executor stack and thread count;
-- live Harness ingress, Completion, adapter-record, and recovery buffers; allocator bytes before and after repeated open/close cycles;
-- semantic-validation capacity, exact workspace components and reservation, occupancy, queue depth, wait time, and high-water bytes; ordinary, maximally escaped, maximum-depth, many-member, and burst-completion cases;
-- process-wide SQLite hard heap allowance and current/high-water total; overlapping page-cache, lookaside, and prepared-statement diagnostics; separate Storage Owner request/result bytes;
-- model transport permit count, userspace, virtual-stack, idle-pool, and kernel-socket memory; fixed
-  transfer and parser windows; actual and high-water decoded-candidate allocation separate from the
-  counted wire-event maximum;
-- effect permit count and adapter-owned bounded state separately from model-requested subprocess memory;
-- workflow evaluator process count, engine heap limit and high water, native bridge arena, source and protocol bytes, visible Job-result bytes, evaluation CPU and wall time, cumulative replay count, and parent-observed physical footprint;
-- whole-process virtual size, physical RSS or platform physical-footprint measure, compressed memory where available, and measurement conditions after warm-up, steady-state occupancy, and slots have been dirtied and released;
-- model-requested subprocess-tree RSS where available, labelled as workload memory rather than a OnePage bound;
-- Host Store bytes split into SQLite payload, index, rollback-journal, and free-page diagnostics, plus transient-scratch high water;
-- Workflow Runs, Jobs, logical Sessions, runnable, resident, Awaiting User, blocked-set, and In-flight counts;
-- model Attempts, possible duplicate billing, tool Attempts, and indeterminate effects.
-
-No headline may present the Activation Slot ceiling or reservation as total per-agent process memory.
-
-## Release gates
-
-Before the V1 demonstration is considered credible:
-
-- the deterministic repair passes through the real CLI and Harness interfaces;
-- the opt-in live Codex Harness tracer completes one controlled inspect, patch, verify, and Final Answer loop through the existing Provider, Conversation, Action, Attempt, and Result seams before workflow integration; deterministic transport fixtures cover the same protocol paths in ordinary CI;
-- deterministic fan-out and staged workflow fixtures pass through the disposable QuickJS evaluator and the same Job/Session service used by the one-Job CLI path;
-- all six Run Service operations pass the lost-acknowledgement, idempotency, single-driver, terminal-immutability, and content-retention matrix;
-- every open Interaction Request is visible in one Run Snapshot; typed response batches enforce request freshness and permission Authority without relying on whole-Run revision equality;
-- both normative JSON schemas pass golden and hostile-input tests; derived Markdown agrees with the Run Snapshot, keeps untrusted content outside control framing, preserves JavaScript-safe identity values and Unicode Job Keys, and never truncates content without a readable immutable reference;
-- SIGINT, caller timeout, terminal closure, and broken output detach without implicitly cancelling the Run;
-- no blocked or terminal Workflow Run retains a QuickJS process, heap, Promise graph, or native resolver;
-- workflow source, bridge, replay, semantics-version, structured-concurrency, watchdog, C undefined-behavior sanitizer, supported-platform leak detection, and all four deterministic mutation/property gates pass;
-- user-authored exception messages cannot forge `ResourceExceeded`; only evaluator- or parent-observed
-  budget and termination evidence produces that outcome, including during module initialization;
-- the closed deterministic crash-point catalogue terminates fixture subprocesses without cleanup, and the targeted effect-specific crash cases and residual storage classifications pass after fresh-process reopen;
-- the Session reconstructs from canonical transactions with rebuildable indexes deleted;
-- the Host Runtime exclusively owns the Host Store and every durable path traverses the Storage Owner;
-- SQLite allocation remains within the validated host allowance across supported cache profiles and increasing Session population;
-- arbitrary Bash uncertainty is visibly indeterminate, never silently replayed, and reaches the Agent as a Tool Result before any terminal `JobIndeterminate` decision;
-- one-file patch reconciliation passes all three Workspace states;
-- both Permission Modes exercise the same validation, Session Ledger, Attempt, and recovery paths;
-- large model and tool outputs remain bounded in resident memory and complete on disk; no provider
-  call allocates its maximum legal wire-event size merely to frame or parse that event;
-- workflow visibility, Run snapshots, Markdown rendering, Bash output, patches, provider capture, and
-  evaluator bridges retain no overlapping complete representations without a recorded and measured
-  necessity;
-- Captured Model Output remains non-authoritative until one shared semantic-admission workspace commits its Result or typed failure; provider waits retain no validation scratch, and matching admitted JSON is not parsed and reserialized by later readers;
-- a burst completing every Active Credit cannot starve semantic admission, require another credit, or cause model redispatch;
-- repeated Harness open and consuming close under one Host Runtime leaves no allocation proportional to historical handle count;
-- every fixed Slot buffer has a production use and the activation path retains no avoidable duplicate full-response buffer;
-- the live transport satisfies its measured normal and guarded per-call memory budgets, or the documented capacity is reduced to the measured envelope;
-- the Codex adapter proven by the early Harness tracer is the same adapter used by the final durable Workflow Run path; no provider-specific Session or Run lifecycle exists;
-- density results include raw machine-readable measurements and a concise published table for 0, 100, 1,000, and 10,000 Dormant Sessions at fixed `active_capacity`, then `active_capacity` 1, 10, and 100 at fixed durable population; a 100,000-Session point is optional stress evidence. Report the incremental resident slope for both sweeps, and fail if Dormant population creates a resident Host handle, index, object, or other allocation proportional to its count;
-- representative final-answer, tool-call, maximally escaped, maximum-depth, and large-output mixes report allocation count and bytes, steady-state RSS, activation and semantic-admission latency, and throughput. Compare these as one release gate so a smaller representation cannot silently buy unacceptable CPU work, copying, or cache-locality regressions;
-- `zig build check` discovers every stable first-party Zig source through a production, test, or self-maintaining declaration-coverage root without adding a parallel manual inventory.
+- deterministic model, Bash, patch, interaction, multi-tool, context-revision, compaction, workflow, and Run fixtures pass;
+- hard-termination fixtures pass from fresh processes at every distinct acknowledgement and external-effect boundary;
+- ReleaseSafe tests and ReleaseSmall build pass;
+- evaluator protocol, JavaScript conversion, sanitizer, mutation/property, and leak gates pass on their supported platforms;
+- compiler-backed declaration discovery reaches the completed source graph;
+- `git diff --check` passes; and
+- the opt-in Codex repair completes through the same Model Request Manifest, Operation, tool, permission, and Turn paths used by deterministic fixtures.

@@ -1,10 +1,10 @@
 ---
-status: superseded by ADR-0009
+status: superseded by ADR-0019
 ---
 
 # Use one Session WAL as semantic authority
 
-Each Session has one append-only semantic ledger that orders every fact required to reconstruct its lifecycle, including task admission, model and Action Operation admission, Attempts, Authorization, Results, Conversation advancement, cancellation, and Outcome. ADR-0009 replaces the physical per-Session WAL with normalized ledger rows in the Host Store, and ADR-0018 requires immutable content and its first durable reference to commit in the same SQLite transaction. Session derives canonical Core State with the exact facts in one semantic transaction and replay selects the newest committed value; runnable indexes, manifests, and observer read models remain rebuildable at a named ledger sequence.
+Each Session has one append-only semantic ledger that orders every fact required to reconstruct its reusable Conversation and Job episodes, including Job admission, model and Action Operation admission, Attempts, Authorization, Results, Conversation advancement, cancellation, and Job Outcome. ADR-0009 replaces the physical per-Session WAL with normalized ledger rows in the Host Store, and ADR-0018 requires immutable content and its first durable reference to commit in the same SQLite transaction. Session derives canonical active-Job Core State with the exact facts in one semantic transaction and replay selects the newest committed value; runnable indexes, manifests, and observer read models remain rebuildable at a named ledger sequence.
 
 The Session WAL replaces the effect-only operation journal as authority; it is not a third history and does not duplicate Conversation content. Conversation remains the immutable model-visible tree, while the WAL establishes when its entries become authoritative for a Session. Streaming deltas, terminal rendering, diagnostics, scheduler polling, and raw payload bytes are excluded because they are not semantic lifecycle facts.
 

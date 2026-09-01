@@ -1,3 +1,7 @@
-# Keep the V1 Core native-only
+---
+status: amended by ADR-0019
+---
 
-OnePage uses native Zig as the sole V1 Core executor and defines no Wasm ABI or secondary runtime conformance target. The compile-time-bounded native Activation Slot, canonical fixed-width Core State, allocator-free native lifecycle interface, and randomized native invariant traces directly verify the product claims; compiling the same reducer with the same compiler for Wasm added a large test interface and runtime harness without providing an independent semantic oracle. A future shipping environment may introduce a new target without preserving the removed experimental ABI.
+# Keep the V1 runtime native-only
+
+OnePage uses native Zig as the sole V1 agent runtime and defines no Wasm ABI or secondary lifecycle conformance target. SQLite-backed relational authority, compile-time-bounded Activation Slots, and production-interface invariant tests directly verify V1 claims; compiling a second reducer target added a large test surface without an independent semantic oracle. A future shipping environment may introduce another target without preserving the removed experimental ABI.
