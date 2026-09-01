@@ -958,7 +958,9 @@ pub const SemanticView = struct {
                     {
                         return error.AttemptDescriptorMismatch;
                     }
-                    if (std.meta.activeTag(descriptor.descriptor_digest) != .model) {
+                    if (std.meta.activeTag(descriptor.descriptor_digest) == .model) {
+                        if (history.result != null) return error.ModelAlreadySettled;
+                    } else {
                         const authorization = history.authorization orelse
                             return error.ActionNotAuthorized;
                         if (!authorization.allowed) return error.ActionNotAuthorized;
@@ -6265,6 +6267,39 @@ test "late evidence for an earlier model Attempt survives a later admission" {
     _ = try inbox.apply(&semantic, late, 1, 1, 1);
     try std.testing.expectEqual(@as(u8, 2), semantic.model.attempt_count);
     try std.testing.expectEqualDeep(late, inbox.entries[0].?);
+}
+
+test "Model Attempt cannot follow a terminal Result" {
+    const agent: session_transition.AgentContext = .{
+        .agent_id = 1,
+        .agent_generation = 1,
+        .ownership_epoch = 1,
+    };
+    const operation: session_transition.OperationContext = .{
+        .agent = agent,
+        .operation_id = 10,
+        .generation = 1,
+    };
+    const descriptor = testDescriptor("model descriptor");
+    var semantic: SemanticView = .{};
+    var admission: session_transition.Transaction = .{ .sequence = 1, .fact_count = 2 };
+    admission.facts[0] = session_transition.operationAdmitted(operation, null, 11, descriptor);
+    admission.facts[1] = session_transition.modelAttemptAdmitted(operation, 13, 11, descriptor, 0);
+    try semantic.apply(admission);
+
+    var settlement: session_transition.Transaction = .{ .sequence = 2, .fact_count = 1 };
+    settlement.facts[0] = session_transition.result(.{
+        .operation = operation,
+        .result_ref = 14,
+        .result_digest = testResultDigest("model result"),
+        .class = .ordinary,
+        .evidence = .{ .durable = .{ .model = 13 } },
+    });
+    try semantic.apply(settlement);
+
+    var stale_retry: session_transition.Transaction = .{ .sequence = 3, .fact_count = 1 };
+    stale_retry.facts[0] = session_transition.modelAttemptAdmitted(operation, 15, 11, descriptor, 1);
+    try std.testing.expectError(error.ModelAlreadySettled, semantic.apply(stale_retry));
 }
 
 test "conflicting Inbox evidence becomes non-authoritative ambiguity" {
