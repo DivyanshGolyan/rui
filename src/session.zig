@@ -903,7 +903,6 @@ pub const SemanticView = struct {
     model: OperationView = .{},
     consequential: OperationView = .{},
     control: ?session_transition.Fact = null,
-    indeterminate: ?session_transition.ResultRecord = null,
 
     fn apply(self: *SemanticView, transaction: session_transition.Transaction) !void {
         if (transaction.sequence != self.last_sequence + 1) return error.NonmonotonicSequence;
@@ -1081,11 +1080,6 @@ pub const SemanticView = struct {
                         history.terminal_result_sequence = transaction.sequence;
                     } else if (history.terminal_result_sequence == null) {
                         return error.MissingTerminalResultSequence;
-                    }
-                    if (descriptor_kind != .model and
-                        record.class == .indeterminate)
-                    {
-                        self.indeterminate = record;
                     }
                 },
                 .result_applied => |record| {
@@ -2366,9 +2360,19 @@ pub const Session = struct {
     ) !void {
         defer core_image.scrub(slot);
         const committed = try self.loadContinuation(slot);
+        const model_operation = continuation.operation(committed);
         const operation = self.operationContext(material.operation_id, material.operation_generation);
-        const history = self.resident.semantic.operation(operation) orelse
-            return error.InvalidOperationHistory;
+        const history = try self.requireActionOperation(
+            operation.operation_id,
+            operation.generation,
+        );
+        const descriptor = history.descriptor orelse return error.MissingActionDescriptor;
+        const source = descriptor.source_operation orelse return error.MissingSourceOperation;
+        if (source.operation_id != model_operation.id or
+            source.generation != model_operation.generation)
+        {
+            return error.InvalidSourceOperation;
+        }
         const result = history.result orelse return error.InvalidOperationHistory;
         if (result.result_ref != material.result_ref or
             !binding.eql(binding.Result, result.result_digest, material.result_digest) or
@@ -5822,6 +5826,18 @@ test "typed tool completion derives the Action and binds the exact Result" {
         .content = "success",
     });
     try created.storeContent(916, visible);
+    try std.testing.expectError(
+        error.InvalidActionDescriptor,
+        created.admitToolResult(&slot, .{
+            .operation_id = model_operation.id,
+            .operation_generation = model_operation.generation,
+            .attempt_id = 111,
+            .result_ref = 911,
+            .result_digest = response_digest,
+            .visible_ref = 916,
+        }),
+    );
+    try std.testing.expectEqual(@as(?ConversationEntry, null), created.pending_conversation);
     try std.testing.expectError(
         error.ResultApplicationMismatch,
         created.admitToolResult(&slot, .{

@@ -2179,9 +2179,9 @@ fn hasIndeterminateBash(
     session: *session_store.Session,
 ) !bool {
     const view = try session.semanticView();
-    const result = view.indeterminate orelse return false;
-    const operation = view.operation(result.operation) orelse return error.InvalidOperationHistory;
-    return operation.kind() == .bash;
+    if (view.consequential.kind() != .bash) return false;
+    const result = view.consequential.result orelse return false;
+    return result.class == .indeterminate;
 }
 
 fn reach(fault: ?FaultHook, boundary: FaultBoundary) !void {

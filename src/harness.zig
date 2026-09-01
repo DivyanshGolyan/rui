@@ -921,7 +921,7 @@ fn openTestRuntimeConfigured(
 }
 
 test "Harness owner retains only live lifecycle state" {
-    try std.testing.expectEqual(@as(usize, 7_952), Harness.residentOwnerBytes());
+    try std.testing.expectEqual(@as(usize, 7_832), Harness.residentOwnerBytes());
 }
 
 test "Harness close releases opaque transient scratch before retirement" {
