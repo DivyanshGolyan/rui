@@ -2,9 +2,15 @@ name: Check
 
 on:
   pull_request:
+    types:
+      - opened
+      - reopened
+      - ready_for_review
+      - labeled
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,6 +21,7 @@ concurrency:
 
 jobs:
   check:
+    if: github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'run-ci'
     name: Zig 0.16.0 on macOS ARM64
     runs-on: macos-15
     timeout-minutes: 15
