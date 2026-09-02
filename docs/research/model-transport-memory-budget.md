@@ -2,6 +2,11 @@
 
 Date: 2026-08-27
 
+> **Historical measurement record.** Capacity-one bounds and transport comparisons below remain
+> evidence, but their selected resident candidate buffers and blocking-worker topology are
+> superseded. ADR-0019 and ADR-0021, published through issues #66 and #69, require disk-first scratch,
+> one shared validation/import workspace, and one Host-wide model/Bash I/O Reactor.
+
 ## Capacity-one implementation evidence (2026-08-29)
 
 The issue #11 adapter now has the following capacity-one bounds. These are classified by evidence source so compile-time limits are not presented as measured resident memory.
@@ -187,6 +192,10 @@ figure is a whole-machine ceiling: a slow consumer or high-bandwidth/high-latenc
 queues into MiBs per socket.
 
 ## Threads, fibers, virtual memory, and RSS
+
+> **Historical design discussion.** The blocking-worker-per-Attempt choice below is superseded by
+> ADR-0021 and the issues #66/#69 publication contract: one Host-wide readiness reactor owns model
+> and Bash I/O, while SQLite holds durable backlog and content-sized evidence remains disk-first.
 
 The transport should use readiness-driven I/O or a population-bounded worker pool, never an
 unbounded thread population. V1 deliberately chooses the latter: one blocking worker per active

@@ -2,6 +2,11 @@
 
 Research date: 2026-08-25
 
+> **Historical research record.** References below to a transition Ledger, Completion Inbox,
+> recovery cursor, or cached semantic projections describe the superseded design. ADR-0019 and
+> ADR-0021, published through issues #66 and #69, make normalized SQLite rows the sole recoverable
+> semantic authority and use no generic ledger or inbox protocol.
+
 Primary source: `anomalyco/opencode`
 
 Current development revision: [`69aaa22793bcbe0b016ad9cfad22616906766df0`](https://github.com/anomalyco/opencode/tree/69aaa22793bcbe0b016ad9cfad22616906766df0) (`dev`)

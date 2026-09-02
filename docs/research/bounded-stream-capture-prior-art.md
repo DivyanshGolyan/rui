@@ -2,6 +2,10 @@
 
 Research date: 2026-08-30
 
+> **Historical research record.** The decision below predates the relational and disk-first Host
+> Runtime design. ADR-0019 and ADR-0021, as published through issues #66 and #69, supersede its
+> per-call parsing, resident candidate-buffer, and rejection-of-spooling recommendations.
+
 ## Decision
 
 Do not make one complete SSE event the resident allocation unit, and do not add a pool of large
