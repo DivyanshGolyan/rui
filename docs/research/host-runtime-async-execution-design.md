@@ -4,12 +4,17 @@ Research date: 2026-08-30
 Revised for the single-store architecture: 2026-08-31
 Governing work: [issue #34](https://github.com/DivyanshGolyan/onepage/issues/34)
 
+> **Superseded architecture guidance.** ADR-0019, ADR-0021, and the current
+> issue #34 contract replace the detached-I/O design below. Its measurements
+> remain evidence; its `ExecutionCell`, Activation Slot, blocking-worker,
+> generation, pre-reservation, Workspace-fence, and lifecycle recommendations
+> must not be implemented.
+
 The original research inspected revision `bf6081e8a502435457ba6c23c78dbd9e908b9615`.
 That revision used per-Session directories, lock files, and a custom durable blob
 tree. [ADR-0018](../adr/0018-use-sqlite-as-the-sole-durable-content-store.md)
 supersedes every ownership recommendation based on those objects. The measured
-executor and transport results remain useful; the detached I/O design below is
-the current guidance.
+executor and transport results remain useful only as historical evidence.
 
 ## Decision
 

@@ -2,6 +2,12 @@
 
 Date: 2026-08-29
 
+> **Historical provider evidence.** The pinned wire observations remain useful, but the explicit Job
+> binding and synchronous resident candidate-or-failure port below are superseded. ADR-0019 and
+> ADR-0021, published through issues #66 and #69, use Turns and Operations, disk-first transient
+> scratch, and post-seal shared validation. Issue #59 owns exact Turn Contract and Model Request
+> Manifest binding.
+
 ## Verdict
 
 **Go for the capacity-one OnePage V1 provider path.** Earlier protocol evidence produced successful

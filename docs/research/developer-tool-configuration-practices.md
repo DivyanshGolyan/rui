@@ -4,6 +4,12 @@ Research date: 2026-08-29
 
 OnePage revision examined: `10c461f01165389acd23453ee1b820e123606f55`
 
+> **Historical research record.** The configuration evidence remains useful, but the Run-owned retry
+> and Job-owned model-binding recommendations below predate the finalized domain. ADR-0019 and
+> ADR-0021 plus issues #59, #66, and #69 replace Jobs with Turns, keep retry eligibility with the
+> unresolved model Operation, and assign exact model binding to Turn Contracts and Model Request
+> Manifests.
+
 ## Verdict
 
 OnePage should be configurable, but it should not ship a general-purpose configuration system in V1.

@@ -8,4 +8,4 @@ OnePage keeps a reusable bounded resident Activation Slot separate from an agent
 
 Raw 64 KiB images remain useful historical measurements and may be used only as invalidatable same-build caches. They are not authoritative checkpoints.
 
-ADR-0008 supersedes the native/Wasm conformance choice. ADR-0011 retains only the useful bounded transient-slot rule and supersedes the exact 64 KiB constraint. ADR-0019 removes persistent Core State entirely.
+ADR-0008 supersedes the native/Wasm conformance choice. ADR-0011 retained only the bounded transient-slot rule and superseded the exact 64 KiB constraint. ADR-0019 removed persistent Core State entirely; ADR-0021 later removed the Activation Slot pool.

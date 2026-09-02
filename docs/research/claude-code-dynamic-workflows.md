@@ -2,6 +2,11 @@
 
 Research date: 2026-08-27
 
+> **Historical research record.** The V1 direction recorded below predates the finalized domain and
+> Host Runtime. ADR-0019 and ADR-0021, published through issues #66 and #69, replace Jobs with Turns,
+> remove Activation Slots and Workspace fences, and keep workflow membership as a direct mapping
+> from Agent Call Keys to Turns.
+
 ## Scope
 
 This note uses current first-party Anthropic documentation, the Anthropic article introducing dynamic workflows, and 40 saved workflow scripts from the user's local Claude Code project history. It distinguishes Claude Code's native workflow runtime from Skills, the model-visible Agent tool, agent teams, hooks, and the Claude Agent SDK.

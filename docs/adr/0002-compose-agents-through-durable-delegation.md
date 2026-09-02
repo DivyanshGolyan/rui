@@ -5,6 +5,6 @@
 > capacity, or verification requirement. Reconsider this decision against measured product demand
 > before implementation.
 
-If a post-V1 product requires delegation, OnePage may model it as an asynchronous Operation that creates a child Agent, Session, and Turn through the same runtime used for a root Agent. After the parent-child link and Operation are durable, the parent could release its Activation Slot and later receive the child's Turn Output as a typed Result; no recursive call stack or resident ancestry would be retained.
+If a post-V1 product requires delegation, OnePage may model it as an asynchronous Operation that creates a child Agent, Session, and Turn through the same runtime used for a root Agent. After the parent-child link and Operation are durable, the parent could release its transient Host resources and later receive the child's Turn Output as a typed Result; no recursive call stack or resident ancestry would be retained.
 
 That future design would require activation, suspension, resume, admission, and completion routing for one selected agent to remain bounded independently of ancestor depth, descendant count, and sibling count. It would address durable records directly rather than traverse or hydrate a delegation tree. None of these prospective topology rules constrains V1.

@@ -1,8 +1,8 @@
 # First real harness design
 
-Status: historical; superseded in part by `ARCHITECTURE.md`, ADR-0006, ADR-0008, and ADR-0009. ADR-0007 records the historical semantic precursor to ADR-0009.
+Status: historical. Its implementation order and architecture guidance are wholly superseded by the normative documents, ADR-0019, ADR-0021, and the live issue graph.
 
-`PRODUCT.md`, `ARCHITECTURE.md`, and `VERIFICATION.md` are normative. They supersede this document's raw Core image, effect-only operation journal, submitted/accepted operation split, checkpoint-authority, Wasm, and delegation-scope details while retaining the accepted `Harness.open / offer / drive` interface, effect semantics, and two-tool product loop. Current Session code admits an Operation once with its exact descriptor and compiles each command-specific pure Core reduction into one atomic semantic transaction. V1 now includes caller-directed keyed Jobs through a disposable workflow evaluator; model-directed delegation remains post-V1.
+`CONTEXT.md`, `PRODUCT.md`, `ARCHITECTURE.md`, `VERIFICATION.md`, and `docs/style.md` are normative. Do not extract retained requirements from this document: its Harness lifecycle, keyed Job, Core image, operation journal, checkpoint, Workspace-fence, activation, Wasm, and implementation-order guidance is historical. Current domain and runtime requirements live in ADR-0019, ADR-0021, and the linked open issues.
 
 Related specifications:
 
