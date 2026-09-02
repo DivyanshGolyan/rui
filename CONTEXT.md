@@ -65,7 +65,7 @@ The single terminal resolution of a Turn: completed, failed, or cancelled. Compl
 _Avoid_: Attempt Completion, Operation Resolution, process exit
 
 **Turn Condition**:
-The total semantic classification derived from committed facts. Run membership summaries use exactly runnable, waiting for input, in flight, completed, failed, or cancelled. Derivation is ordered: terminal Outcome wins; otherwise an unresolved admitted external Attempt is in flight; otherwise an open request with no remaining progress is waiting for input; otherwise the Turn is runnable. `Input Required` is reserved for the Run-wide condition where no member can progress.
+The total semantic classification derived from committed facts. Run membership summaries use exactly runnable, waiting for input, in flight, completed, failed, or cancelled. Derivation is ordered: terminal Outcome wins; otherwise an unresolved Operation with an admitted Attempt or immutable future retry eligibility is in flight; otherwise an open request with no remaining progress is waiting for input; otherwise the Turn is runnable. `Input Required` is reserved for the Run-wide condition where no member can progress.
 _Avoid_: persisted phase, status cache, ready flag
 
 **Session Context Revision**:
@@ -153,7 +153,7 @@ One uniquely identified physical try to execute an Operation. Its durable insert
 _Avoid_: Operation, retry policy, request notification
 
 **Attempt Completion**:
-The immutable bounded evidence captured from one Attempt. It records what was observed, not what OnePage may safely do next.
+The single immutable bounded evidence record captured from one Attempt. It records what was observed, not what OnePage may safely do next.
 _Avoid_: Operation Resolution, notification, Turn Outcome
 
 **Operation Resolution**:
@@ -177,7 +177,7 @@ A volatile one-shot capability issued only to the command that committed a new A
 _Avoid_: Attempt, Authorization, lease, ownership epoch
 
 **Physical Custody**:
-The transient fact that a live Host execution cell currently owns an Attempt. Loss of custody never rewrites durable meaning.
+A bounded Host record representing the transient fact that one execution lane currently owns the physical handles for an Attempt. It contains no payload or semantic state, and loss of custody never rewrites durable meaning.
 _Avoid_: Operation state, database authority, Session ownership
 
 ### Interaction
@@ -271,7 +271,7 @@ The startup-fixed maximum population of concurrent active external work admitted
 _Avoid_: Session population, total RSS, preallocated resource bundle
 
 **Active Credit**:
-One volatile Host capacity credit owned by an admitted active Attempt or its immediate settlement handoff.
+The accounting term for one occupied Physical Custody record. Occupancy reserves one unit of Host concurrency for a prospective Attempt before admission and retains it only through live execution and immediate settlement.
 _Avoid_: Authorization, durable semaphore, Activation Slot
 
 **Orchestration Memory**:

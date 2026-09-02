@@ -49,9 +49,9 @@ This preserves historical context without copying a complete system prompt on ev
 
 V1 executes `bash` and one-file `apply_patch`. The Tool Catalog is model-visible data; a separate closed Host mapping and exact Authorization decide what may execute.
 
-One model response may contain multiple ordered Tool Calls. Each becomes an independently recoverable child Operation. Same-Workspace effects may execute serially while unrelated work proceeds concurrently. The next model Operation waits for every child result and receives Tool Results in original call order, not physical completion order.
+One model response may contain multiple ordered Tool Calls. Each becomes an independently recoverable child Operation and may settle into SQLite as soon as it finishes. Bash and model Operations may run concurrently even within one Workspace; V1 keeps Patch execution on one private serial lane without claiming Workspace isolation. The next model Operation waits for every child result and receives Tool Results together in original call order, not physical completion order.
 
-`ask` creates an immutable permission request for each exact validated descriptor. Explicit bypass authorizes the same descriptor without a request. Neither mode bypasses validation, Attempt admission, effect fencing, or recovery.
+`ask` creates an immutable permission request for each exact validated descriptor. Explicit bypass authorizes the same descriptor without a request. Neither mode bypasses validation, Attempt admission, or effect-specific recovery.
 
 ## Workflow and Run interface
 
@@ -64,8 +64,11 @@ JSON is the complete versioned automation contract. Markdown is the default dete
 - SQLite is the sole recoverable OnePage-owned semantic and content store and the canonical relational authority; OS-held credentials are non-semantic security material.
 - No Session Ledger, reducer image, continuation blob, or resident object graph duplicates canonical rows.
 - At most one Turn is nonterminal in one Session.
-- One Operation Resolution selects meaning from zero or more Attempt Completions.
+- Each Attempt has at most one Completion; one Operation Resolution selects meaning across zero or more Attempts.
 - Attempt admission precedes physical dispatch.
+- Long-lived request and response content streams through bounded windows to dynamically charged, immediately unlinked scratch; no prompt-, response-, or output-sized resident allocation is multiplied by Active Capacity.
+- Complete output is parsed only after its effect-specific terminal boundary in one shared Host validation/import workspace. Normal content, Completion, Resolution, and semantic consequence settle atomically.
+- A retryable model Completion is the sole Completion-only exception: it commits with immutable future eligibility while the Operation remains unresolved and consumes no waiting memory or timer object.
 - Model retry reuses one exact Model Request Manifest and records possible duplicate work or billing.
 - Uncertain Bash is never replayed automatically; the Agent receives an indeterminate Tool Result.
 - Patch recovery reconciles exact preimage, expected postimage, and observed state.
@@ -88,6 +91,6 @@ JSON is the complete versioned automation contract. Markdown is the default dete
 
 ## Demonstration standard
 
-The release demonstration runs a deterministic 10–50 Turn workflow, kills OnePage at named semantic boundaries, resumes from SQLite, proves uncertain Bash is not replayed, changes a patch target during downtime and fails reconciliation safely, continues one Session across multiple Turns, changes model-visible context between Turns, and emits one committed Workflow Output.
+The release demonstration runs a deterministic 10–50 Turn workflow, kills OnePage at named semantic and physical handoff boundaries, resumes from SQLite, proves uncertain Bash is not replayed, changes a patch target during downtime and fails reconciliation safely, continues one Session across multiple Turns, changes model-visible context between Turns, executes independent same-Workspace Bash work concurrently, and emits one committed Workflow Output.
 
 It reports whole-process RSS and separate slopes for Dormant Sessions, terminal Turns, Active Capacity, provider transport, SQLite, semantic validation, evaluator memory, immutable content, and workload subprocesses. The density run includes 0, 100, 1,000, and 10,000 Dormant Sessions and Active Capacity 1, 10, and 100.

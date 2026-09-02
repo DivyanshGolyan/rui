@@ -60,6 +60,7 @@ The Host Store atomically enforces:
 - one linear Conversation per Session;
 - at most one nonterminal Turn per Session;
 - one terminal Turn Outcome;
+- at most one Attempt Completion per Attempt;
 - one Operation Resolution per Operation;
 - exact Attempt identity and ordinal within an Operation;
 - exact causal parentage between model Operations, Tool Calls, child Action Operations, and Tool Results;
@@ -138,21 +139,27 @@ model Operation M1
 └── call 2 ──► Bash Operation B2
 ```
 
-Child Operations settle independently. Physical execution may be concurrent when capacities and Workspace fences permit. After every child resolves, one transaction appends their Tool Result Conversation Entries in original call-ordinal order. Only then may the next model Operation start. Physical completion order never chooses Conversation order. Denial, failure, cancellation, and uncertainty each produce typed model-visible Tool Results.
+Child Operations execute and settle independently under Active Capacity, including within one Workspace. Each Completion and Resolution is committed when that child settles; no sibling holds it outside SQLite. After every child resolves, one transaction appends their Tool Result Conversation Entries in original call-ordinal order. Only then may the next model Operation start. Physical completion order never chooses Conversation order. Denial, failure, cancellation, and uncertainty each produce typed model-visible Tool Results.
 
-V1 may serialize same-Workspace Bash and patch execution without restricting the canonical model to one Tool Call.
+OnePage provides no Workspace-wide fence, quiescence assumption, or isolation claim against other agents and processes. V1 uses one private serial Patch execution lane to keep the in-process mutation path small, while Bash and provider work remain concurrent. That implementation choice is not durable policy and may change without changing the relational model. Patch correctness comes from exact preimage, expected postimage, and observed-state reconciliation.
 
-## Operations and recovery
+## Host Runtime execution and settlement
 
 An **Operation** is one model request or admitted Action. An **Attempt** is one physical try. An **Attempt Completion** records bounded observed evidence. An **Operation Resolution** records what OnePage may safely do next. These distinctions are durable because an external effect may outlive its process owner.
 
-Every authoritative transition follows:
+The foreground Host/control context is the sole Storage Owner and the only code permitted to use SQLite. Every mutation goes through one SQLite-specific command module. A command validates bounded syntax, reserves an Active Credit before a dispatching transaction, starts `BEGIN IMMEDIATE`, loads one bounded canonical Decision Snapshot, invokes one pure total classifier, writes one fixed relational mutation, checks exact affected-row counts, derives any consequence, commits, and releases that consequence only after successful `COMMIT`. Inspection and advancement use the same bounded loader and classifier.
 
-```text
-prepare ──► SQLite commit ──► infallible publication or fresh reconstruction
-```
+One model/Bash I/O Reactor multiplexes long-lived provider streams and subprocess pipes. One private serial lane performs Patch execution. These lanes own only volatile OS and library handles plus fixed borrowed windows; they cannot access SQLite or decide semantic meaning. One bounded content-free Physical Custody table implements Active Capacity: occupancy of one record is one Active Credit, not a second object or pool. There is no per-Turn driver, thread, stack, Session graph, candidate buffer, response buffer, parser workspace, or lifecycle object.
 
-Attempt admission commits before physical dispatch. The command that commits a new Attempt receives one volatile Dispatch Permit; reconstructing an admitted Attempt never recreates that permit.
+After Attempt commit, the Storage Owner materializes any exact outbound request from SQLite into an immediately unlinked scratch file through fixed windows. The execution lane consumes that descriptor and streams inbound bytes directly to another immediately unlinked scratch file. No SQLite transaction spans request construction, network or subprocess execution, filesystem mutation, or response streaming. Scratch is bounded, dynamically charged, non-authoritative, and nonrecoverable; a process crash discards it and leaves the durable Attempt unresolved for effect-specific recovery.
+
+Only after transport or execution reaches an effect-specific terminal boundary does its owning lane seal the scratch descriptor and hand it to the Storage Owner. The Storage Owner uses one shared serial validation/import workspace to parse complete model output or tool evidence, then normally commits immutable content, the Attempt Completion, the Operation Resolution, Conversation or interaction facts, and the next semantic consequence in one transaction. The sole intentional Completion-only state is a retryable model Completion committed atomically with immutable retry eligibility while its Operation remains unresolved. SQLite eligibility rows are the retry queue; one periodic bounded query while the Host is running is the only V1 retry-eligibility trigger.
+
+Each Attempt can have at most one Completion. An exact replay returns the existing record; contradictory evidence is rejected rather than stored beside it. Cancellation records intent and may signal the live owner, but only the effect-specific terminal owner may propose Completion evidence. This removes the generic Completion Inbox, consumption watermark, two-transaction admission protocol, online stream detector, and scratch replay path.
+
+Attempt admission commits before physical dispatch. Only the invocation that observes that commit receives a volatile one-shot Dispatch Permit; reconstruction never recreates it. Failure while preparing post-commit request scratch is evidence for that Attempt, not authority to erase it.
+
+## Effect-specific recovery
 
 Recovery is effect-specific:
 
@@ -188,22 +195,22 @@ The Run Service owns six semantic operations:
 - committed snapshot read;
 - atomic typed response submission;
 - durable cancellation request;
-- fenced advancement; and
+- bounded advancement; and
 - immutable content read.
 
 JSON is the complete versioned external contract. Markdown is a deterministic bounded rendering of the same Run Snapshot and introduces no facts. Process interruption detaches without cancellation; only the explicit cancellation command carries cancellation authority.
 
-Every Run–Turn membership summary appears in exactly one category derived from committed Turn rows: `runnable`, `waiting_for_input`, `in_flight`, `completed`, `failed`, or `cancelled`. Derivation has an exact precedence: terminal Outcome wins; otherwise an unresolved admitted external Attempt is `in_flight`; otherwise an open request with no remaining progress is `waiting_for_input`; otherwise the nonterminal Turn is `runnable`. `input_required` is reserved for Run state. Membership and Turn creation are atomic, so no public `pending` state exists.
+Every Run–Turn membership summary appears in exactly one category derived from committed Turn rows: `runnable`, `waiting_for_input`, `in_flight`, `completed`, `failed`, or `cancelled`. Derivation has an exact precedence: terminal Outcome wins; otherwise an unresolved Operation with an admitted Attempt or immutable future retry eligibility is `in_flight`; otherwise an open request with no remaining progress is `waiting_for_input`; otherwise the nonterminal Turn is `runnable`. A retry-delayed Turn therefore remains `in_flight` even when it owns no Active Credit and no physical effect is live. `input_required` is reserved for Run state. Membership and Turn creation are atomic, so no public `pending` state exists.
 
 ## Capacity and memory
 
-One startup-fixed `active_capacity` bounds transferable Active Credits. A credit is owned by one admitted external Attempt or its immediate settlement handoff. An Activation Slot contains only bounded current decision data and no historical Conversation or speculative scratch.
+One startup-fixed `active_capacity` bounds the Physical Custody table. Reserving a free record before admitting an external Attempt occupies one Active Credit; releasing that same record after immediate settlement returns it. Bounded Decision Snapshots and the shared validation/import workspace are borrowed serially; neither is preallocated per credit.
 
-A Dormant Session, terminal Turn, and Blocked Workflow Run retain no Harness, Slot, Active Credit, thread, socket, subprocess, evaluator, materialized Conversation, or context graph. In-flight work may retain the bounded transport or effect resource charged to its Active Credit.
+A Dormant Session, terminal Turn, and Blocked Workflow Run retain no resident driver, Slot, Active Credit, thread, socket, subprocess, evaluator, materialized Conversation, or context graph. Long-lived in-flight work may retain only its credit, content-free custody record, transport handles, and dynamically charged unlinked scratch.
 
-Memory claims report whole-process RSS and the slope of each population separately: durable Sessions, terminal Turns, Active Capacity, provider transports, effect workers, SQLite, semantic-validation workspace, evaluator, and model-requested subprocesses. Workload memory is observed separately from OnePage-owned orchestration memory.
+Memory claims report whole-process RSS and the slope of each population separately: durable Sessions, terminal Turns, Active Capacity, provider transports, execution lanes and transport resources, SQLite, semantic-validation workspace, evaluator, and model-requested subprocesses. Workload memory is observed separately from OnePage-owned orchestration memory.
 
-Every large value moves through explicit stages—wire/source, provisional decoded data, admitted semantic data, immutable content, and presentation window—with one owner and release boundary. A bound does not authorize a resident allocation of the same size.
+Every large value moves through explicit stages—SQLite or wire, unlinked scratch, one shared validation/import workspace, canonical SQLite content, and presentation window—with one owner and release boundary. Variable content goes to disk unless a measured CPU-critical operation requires a fixed borrowed memory window. A byte limit never authorizes a resident allocation of the same size.
 
 ## Compaction
 

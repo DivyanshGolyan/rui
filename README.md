@@ -12,7 +12,7 @@ Session
   └── Turns
        └── Operations
             ├── Attempts
-            ├── Completions
+            │    └── at most one Completion
             └── Resolution
 ```
 
@@ -22,11 +22,11 @@ Sessions are reusable linear Conversations and never terminal. One ordinary User
 
 Persistent model-visible defaults change through sparse Session Context Revisions. Each Turn freezes one Turn Contract, and each model Operation freezes one provider-neutral Model Request Manifest. Provider credentials and transport remain late-bound. Compaction changes only the bounded Model Context projection and never rewrites Conversation history.
 
-SQLite rows and constraints are canonical authority. OnePage does not retain a second Session Ledger, reducer image, continuation blob, or resident Session graph.
+SQLite rows and constraints are canonical authority. OnePage does not retain a second Session Ledger, reducer image, continuation blob, or resident Session graph. The approved Host Runtime streams variable request and response content through bounded memory windows to non-authoritative unlinked scratch, then imports sealed evidence through one shared validation workspace.
 
 ## Current status
 
-The checkout implements the deterministic single-Session Harness, SQLite Host Store, provider-neutral model path, Codex subscription adapter, permissioned Bash and one-file patch execution, effect-specific recovery, and disposable QuickJS evaluator kernel.
+The production source still implements the historical deterministic single-Session runtime, SQLite Host Store, provider-neutral model path, Codex subscription adapter, permissioned Bash and one-file patch execution, effect-specific recovery, and disposable QuickJS evaluator kernel. It does not yet implement the relational Session/Turn or disk-first Host Runtime decisions.
 
 The remaining V1 work replaces the historical terminal-Session/ledger implementation with relational reusable Sessions and Turns, adds sparse model-context versioning, and then carries the proven components through durable Workflow Runs. GitHub issue #2 is the authoritative workstream.
 
@@ -96,5 +96,6 @@ The newest foundational decisions are:
 - [ADR-0018: SQLite is the sole durable content store](docs/adr/0018-use-sqlite-as-the-sole-durable-content-store.md)
 - [ADR-0019: relational Session and Turn facts are authority](docs/adr/0019-use-relational-session-turn-authority.md)
 - [ADR-0020: model-visible context is versioned sparsely](docs/adr/0020-version-model-visible-context-sparsely.md)
+- [ADR-0021: the Host Runtime is disk-first and bounded](docs/adr/0021-use-a-disk-first-bounded-host-runtime.md)
 
 The complete ADR, research, spike, measurement, and historical-design collections live under [`docs/`](docs/).

@@ -8,8 +8,8 @@ This document defines evidence required for V1 claims. Tests use production inte
 | --- | --- |
 | SQLite is sole authority | Recreate every Decision Snapshot and Run Snapshot from canonical relational rows with no Session Ledger, reducer image, continuation blob, or resident cache. |
 | Session is linear and reusable | Complete two Turns in one Session, prove immutable ordered Conversation entries, and reject branching, stale revision, and a concurrent second Turn. |
-| Turns settle; Sessions do not | Completion, failure, and cancellation fixtures commit one Turn Outcome and release Session occupancy atomically. Failure-code and Operation-uncertainty fixtures remain orthogonal to terminality. Closing Harness resources changes no Session or Turn meaning. |
-| Conditions are derived | Rebuild runnable, input-required, in-flight, dormant, and terminal conditions from relational rows after dropping every rebuildable index. |
+| Turns settle; Sessions do not | Completion, failure, and cancellation fixtures commit one Turn Outcome and release Session occupancy atomically. Failure-code and Operation-uncertainty fixtures remain orthogonal to terminality. Releasing transient Host resources changes no Session or Turn meaning. |
+| Conditions are derived | Rebuild the exact Turn partition—runnable, waiting for input, in flight, completed, failed, and cancelled—plus Session dormancy and Run `input_required` from relational rows after dropping every rebuildable index. Prove immutable future retry eligibility derives in flight without a live effect. |
 | Causality is explicit | Every Conversation entry, Operation, Attempt, Completion, Resolution, Interaction Request, and output resolves to its exact Turn and causal parent without relying on insertion order alone. |
 | Pre-V1 is a flag day | Schema tests reject obsolete ledger/reducer formats; no compatibility reader, alias, migration, or dual-write path exists. |
 
@@ -48,7 +48,7 @@ One model response fixture emits assistant text plus three Tool Calls. Admission
 1. validate the complete ordered candidate before mutation;
 2. commit every Tool Call and child Action Operation atomically;
 3. reject the complete candidate for a duplicate call identity, unknown Tool Key, malformed arguments, or invalid member;
-4. execute children independently under capacity and Workspace fences;
+4. execute children independently under Active Capacity with no Workspace fence or isolation claim;
 5. survive independent permission, denial, failure, cancellation, and uncertain-effect outcomes; and
 6. construct the next Model Request Manifest with every Tool Result in original call order regardless of completion order.
 
@@ -62,11 +62,15 @@ Tool visibility and execution authority remain separate. Arbitrary provider-neut
 | --- | --- |
 | Before Attempt commit | No external dispatch authority exists. |
 | After Attempt commit, before dispatch | Recovery treats dispatch according to the Operation's conservative uncertainty contract. |
-| During provider/tool execution | No Harness, reducer image, or notification is required to rediscover admitted work. |
-| After Completion commit, before Resolution | The exact evidence is admitted once without repeating the physical Attempt. |
+| During provider/tool execution | No SQLite transaction, payload-sized resident buffer, reducer image, or notification is required to rediscover admitted work. |
+| After scratch seal, before normal settlement | Scratch is non-authoritative; process death loses it and leaves the Attempt unresolved for effect-specific recovery. |
+| Normal settlement | Immutable content, the single Attempt Completion, Operation Resolution, Conversation or interaction facts, and the next semantic consequence commit together or not at all. |
+| Retryable model settlement | Completion and immutable retry eligibility commit together while the Operation remains unresolved and owns no waiting memory or timer. |
 | After Resolution, before acknowledgement | Replay returns the committed result without another transition. |
 
-Model recovery records possible duplicate work or billing and reuses the exact manifest. Bash recovery never redispatches uncertain work. Patch recovery distinguishes preimage, expected postimage, divergence, and invalid target. Late or conflicting Completion evidence remains auditable but cannot produce a second Resolution.
+Model recovery records possible duplicate work or billing and reuses the exact manifest. Bash recovery never redispatches uncertain work. Patch recovery distinguishes preimage, expected postimage, divergence, and invalid target. Each Attempt admits at most one Completion: exact replay is idempotent and conflicting evidence is rejected without mutation. Cancellation intent and transport shutdown cannot race to create competing Completions; only the effect-specific terminal owner proposes evidence.
+
+Streaming fixtures prove that the I/O Reactor writes provider and Bash bytes directly to dynamically charged, immediately unlinked scratch through fixed borrowed windows. No per-Attempt candidate, parser, request, response, or output buffer scales with Active Capacity. Complete model output is parsed once after terminal seal in the shared serial validation/import workspace. Post-commit request-materialization failure becomes evidence for the admitted Attempt.
 
 Storage failure injection covers full, I/O, allocation, corrupt content, foreign reference, wrong digest, and transaction rollback. SQLite faults expose neither half a semantic relation nor content without its first reference.
 
@@ -101,7 +105,7 @@ Workflow fixtures use the production QuickJS boundary and the exact `export defa
 - source, arguments, value, CPU, wall-time, and cumulative replay bounds; and
 - no JavaScript continuation or evaluator process retained at a barrier.
 
-Two workflow calls in one Workspace prove same-Workspace effect serialization while independent model Operations and different Workspaces may progress concurrently.
+Two workflow calls in one Workspace prove that independent Bash Operations may progress concurrently, completions settle without sibling head-of-line blocking, and filesystem interference is reported as observed evidence rather than prevented by a Host fence. Separate fixtures prove the private Patch lane is serial without turning that implementation choice into a Workspace invariant.
 
 ## Run interface
 
@@ -114,7 +118,8 @@ Tests cover:
 - atomic response batches;
 - explicit cancellation;
 - atomic Run cancellation propagation to every nonterminal member Turn and no Session finality;
-- single-driver advancement;
+- concurrent advancement attempts classified from the same bounded committed facts without a resident driver lease;
+- retry-delayed unresolved model Operations remain `in_flight`, own no Active Credit, and become eligible through the bounded SQLite poll;
 - immutable content range reads;
 - JavaScript-safe string encoding of opaque integer-class values;
 - complete visibility of every actionable open request;
@@ -145,14 +150,14 @@ Measurements report whole-process RSS and each independent axis:
 - Dormant Session count;
 - terminal and nonterminal Turn count;
 - Active Capacity and occupied Active Credits;
-- Activation Slot size and occupancy;
-- provider workers, stacks, transport buffers, sockets, and resolver resources;
-- effect workers and subprocess trees;
-- semantic-validation workspace;
+- Storage Owner, I/O Reactor, and Patch-lane incremental and retained-idle cost;
+- the one content-free Physical Custody table's record size and occupancy, where each occupied record is one Active Credit;
+- transport-library threads, stacks, fixed windows, sockets, and resolver resources;
+- subprocess trees and model-requested workload memory;
+- shared serial validation/import workspace high-water;
 - SQLite heap, database bytes, journal bytes, and writes;
 - Workflow Evaluator heap, bridge memory, process RSS, and replay count;
-- immutable content and transient scratch; and
-- model-requested workload memory.
+- immutable content, unlinked-scratch logical and physical bytes, filesystem-cache pressure, and raw-plus-canonical overlap.
 
 Required population points are 0, 100, 1,000, and 10,000 Dormant Sessions at fixed capacity, then Active Capacity 1, 10, and 100 at fixed durable population. Repeated 0→capacity→0 churn must return resident orchestration memory to the same bounded envelope. Terminal Turn population adds durable bytes rather than resident execution objects.
 
