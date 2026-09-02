@@ -1,5 +1,5 @@
 ---
-status: amended by ADR-0019
+status: superseded by ADR-0021
 ---
 
 # Size the Activation Slot from bounded needs
