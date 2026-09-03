@@ -3,6 +3,8 @@
 Research date: 2026-08-24
 Codex revision: [`0d9bb6c34c2742ee8bcddfccb6404a447926ff9f`](https://github.com/openai/codex/tree/0d9bb6c34c2742ee8bcddfccb6404a447926ff9f)
 
+> Decision status: ADR-0019, ADR-0021, ADR-0023, and completed issue #93 supersede this note's proposed Conversation tree, stored Compaction Checkpoint, older-base fallback, generic operation journal, and 64 KiB Core. Retain the document only as commit-pinned Codex evidence; OnePage's current Session is linear, Compaction Base is derived, incompatible continuation fails closed, and normalized SQLite rows are sole authority.
+
 ## Decision
 
 OnePage should keep its session → append-only conversation tree → bounded model-context projection model. Codex contributes useful physical and replay semantics, but not an object model to copy:

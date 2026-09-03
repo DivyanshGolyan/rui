@@ -1,5 +1,7 @@
 # Provider and transcript abstractions in DeepSeek Harness, pi, and OpenCode V2
 
+> Decision status: this research predates ADR-0023. OnePage retains exactly four Conversation kinds, not the five-kind recommendation below. Attempt Completion owns one canonical ordered model-output representation, including provider-only continuation fields; adapters derive replay inputs without a Provider Replay Receipt or silent fallback to visible Conversation.
+
 Research date: 2026-08-27
 
 - DeepSeek Harness revision: [`b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`](https://github.com/deepseek-ai/deepseek-harness/tree/b150a551b8d465e31e418e1b2eaf5e79bbb7d28e)
