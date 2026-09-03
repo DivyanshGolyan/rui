@@ -3,6 +3,12 @@
 Status: disposable Wayfinder prototype for issue #67. This is not production
 code and nothing in this directory is linked into OnePage.
 
+> Historical topology note: ADR-0021 later removed this artifact's optional
+> serial Patch thread. The normative design specifies temporary typed Action
+> execution under Active Capacity and no permanent Patch lane. This prototype
+> did not measure that replacement Patch topology; its measurements remain
+> evidence only for the disk-first reactor, scratch, and shared-import design.
+
 ## Question
 
 Can one Host keep content-sized custody on disk while Active Capacity rises from

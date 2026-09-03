@@ -1,5 +1,5 @@
 ---
-status: amended by ADR-0021
+status: superseded by ADR-0022
 ---
 
 # ADR-0015: Expose a protocol-independent Run Service

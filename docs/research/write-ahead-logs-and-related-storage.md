@@ -2,6 +2,8 @@
 
 Research date: 2026-08-29
 
+> Decision status: ADR-0019 and the current architecture supersede this note's Session Ledger/Core authority. Issue #95 owns the still-unsettled SQLite journal, synchronous, page, cache, and command-work choices. The concrete SQLite settings and “current” claims below are historical research conclusions, not adopted V1 policy.
+
 ## Decision for OnePage
 
 OnePage should keep two layers conceptually separate:

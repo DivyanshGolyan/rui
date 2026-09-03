@@ -2,6 +2,8 @@
 
 Research date: 2026-09-01
 
+> Decision status: ADR-0022, ADR-0023, and completed issue #93 supersede this note's older `Run Service`, `input_required`, generic correlated-response, and provider-neutral-manifest recommendations. The Host Runtime owns the typed Run API; later input is a User Message; provider continuation is Completion-owned; and Model Request Manifests include provider protocol and replay facts.
+
 ## Question
 
 What durable concepts do mature or actively developed coding-agent harnesses use for:
@@ -421,15 +423,15 @@ The reviewed harnesses can re-resolve some settings between model requests. That
 
 - **Session Context Revision:** sparse persistent defaults whose unchanged components continue by reference;
 - **Turn Contract:** resolved caller policy, context revision, runtime facts, authority, output contract, and Turn-wide budgets frozen at admission; and
-- **Model Request Manifest:** exact provider-neutral model, instructions, tools, Model Context, limits, and output contract bound to one model Operation.
+- **Model Request Manifest:** exact provider protocol operation, requested concrete model, instructions, tools, Model Context, replay format, behavior-affecting options, limits, and output contract bound to one model Operation.
 
-V1 need not support changing the Turn Contract mid-Turn. A new model Operation may use a later Conversation projection or Compaction Checkpoint while retaining the same Turn Contract. Replacement Attempts reuse the same manifest.
+V1 need not support changing the Turn Contract mid-Turn. A new model Operation may use a later Conversation projection or derived Compaction Base while retaining the same Turn Contract. Replacement Attempts reuse the same manifest.
 
 ## Recommended OnePage vocabulary
 
 | Term | Meaning | Lifecycle owner |
 | --- | --- | --- |
-| `Run` | One durable workflow evaluation and its orchestration graph | Run Service / workflow layer |
+| `Run` | One durable workflow evaluation and its orchestration graph | Host Runtime / workflow layer |
 | `Session` | Reusable linear Conversation and sparse persistent context history | Host Store |
 | `Turn` | One admitted ordinary User input, processed through model and Action Operations until Final Answer or terminal outcome | Session |
 | `Operation` | One model request or proposed Action where exact input, Attempts, and recovery matter | Turn |
@@ -449,7 +451,7 @@ A Turn ends with exactly one typed outcome:
 
 Operation uncertainty remains separate evidence rather than another Turn outcome.
 
-`input_required` is a derived nonterminal condition. A correlated response resumes the same Turn. The Session remains reusable after terminal Turn outcome; a later ordinary caller input creates another Turn.
+A later User Message may extend the same nonterminal Turn at the next assistant-response model-Operation boundary. Permission Decisions and model interruption are separate typed commands. The Session remains reusable after terminal Turn outcome; a later ordinary caller input creates another Turn.
 
 ### Multiple Tool Calls
 
