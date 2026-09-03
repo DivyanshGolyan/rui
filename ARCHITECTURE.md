@@ -8,16 +8,16 @@ This document is normative. [`CONTEXT.md`](CONTEXT.md) defines the domain langua
 Caller
   │
   ▼
-local CLI ──► Run Service ──► Host Runtime ──► Host Store (SQLite)
-                              │       │
-                              │       └── Turns ──► Operations ──► Attempts
-                              │
-                              └── disposable Workflow Evaluator
+local CLI ──► Host Runtime (Run API) ──► Host Store (SQLite)
+                    │          │
+                    │          └── Turns ──► Operations ──► Attempts
+                    │
+                    └── disposable Workflow Evaluator
 ```
 
-One native Zig **Host Runtime** owns one **Host Store**, every live execution resource, and every disposable evaluator. The **Run Service** is the protocol-independent product boundary; the CLI only parses commands and renders committed snapshots. QuickJS evaluates Workflow Definitions but owns no Session, provider, tool, permission, recovery, or durable state.
+One native Zig **Host Runtime** owns one **Host Store**, every live execution resource, every disposable evaluator, and one narrow typed **Run API**. The Run API is a module boundary, not another component or lifecycle. The CLI only parses commands, invokes explicit typed operations, and renders committed snapshots. QuickJS evaluates Workflow Definitions but owns no Session, provider, tool, permission, recovery, or durable state.
 
-A **Session** is one reusable linear Conversation in one Workspace and access scope. A **Turn** begins with one ordinary User input and advances that Session until Final Answer or a typed terminal outcome. At most one Turn is nonterminal in a Session. A **Workflow Run** maps each caller-defined Agent Call Key directly to one Turn; there is no intermediate Job domain.
+A **Session** is one reusable linear Conversation in one Workspace and access scope. A **Turn** begins with one initiating User Message and advances that Session until Final Answer or a typed terminal outcome. At most one Turn is nonterminal in a Session. A **Workflow Run** maps each caller-defined Agent Call Key directly to one Turn; there is no intermediate Job domain.
 
 ## Simplicity rule
 
@@ -33,6 +33,7 @@ The Host Store is the sole recoverable OnePage-owned semantic and content store.
 
 ```text
 sessions
+user_messages
 conversation_entries
 session_context_revisions
 session_context_changes
@@ -40,11 +41,14 @@ turns
 turn_contracts
 operations
 model_request_manifests
+model_context_items
 attempts
 attempt_completions
+model_output_items
 operation_resolutions
-interaction_requests
-interaction_resolutions
+permission_requests
+permission_decisions
+run_cancellation_intents
 workflow_runs
 run_turn_memberships
 evaluation_generations
@@ -58,17 +62,20 @@ SQLite constraints and transactions establish identity, parentage, uniqueness, o
 The Host Store atomically enforces:
 
 - one linear Conversation per Session;
+- immutable User Message admission order with at most one Conversation Entry projection per message;
 - at most one nonterminal Turn per Session;
 - one terminal Turn Outcome;
 - at most one Attempt Completion per Attempt;
 - one Operation Resolution per Operation;
 - exact Attempt identity and ordinal within an Operation;
 - exact causal parentage between model Operations, Tool Calls, child Action Operations, and Tool Results;
-- immutable Interaction Requests with at most one resolution;
-- idempotent Run and Turn membership by exact canonical binding; and
+- immutable Permission Requests with at most one Permission Decision;
+- idempotent Run and Turn membership by exact canonical binding;
+- at most one Run membership per Turn;
+- at most one Run Cancellation Intent per Run; and
 - content publication together with its first durable reference.
 
-Turn Condition, Session dormancy, Run `input_required`, runnable work, and observer summaries are derived from canonical rows. Persist a derived value only after measurement proves that an index is necessary; it remains rebuildable and non-authoritative.
+Turn Condition, Session dormancy, Run `permission_required`, runnable work, and observer summaries are derived from canonical rows. Persist a derived value only after measurement proves that an index is necessary; it remains rebuildable and non-authoritative.
 
 V1 is a flag day. Unreleased databases and fixtures are recreated; no ledger-to-relational migration, compatibility reader, alias table, or dual-write path is permitted.
 
@@ -76,9 +83,9 @@ V1 is a flag day. Unreleased databases and fixtures are recreated; no ledger-to-
 
 Conversation contains exactly four immutable V1 entry kinds: User text, assistant text, Tool Call, and Tool Result. Each entry records its Turn and exact causal source. Compaction never edits or deletes these entries.
 
-Starting a Turn is one transaction, not an order of partially visible writes. It validates identity, exact expected Conversation Revision and Context Revision, Workspace, access scope, Principal authority, occupancy, and idempotent membership. For a new Session it creates the complete baseline Session Context Revision. For an existing idle Session, an optional closed Session Context Patch may atomically append one sparse revision. A command that supplies the same component as a persistent patch and Turn-local override conflicts. The transaction binds the Turn Contract to the resulting revision and creates the Turn and initiating User entry; all become visible together or none do. V1 has no independent context-mutation command or mid-Turn context change.
+Starting a Turn is one transaction, not an order of partially visible writes. It validates identity, exact expected Conversation Revision and Context Revision, Workspace, access scope, Principal authority, occupancy, idempotent membership, and every locally decidable replay-compatibility precondition. For a new Session it creates the complete baseline Session Context Revision. For an existing idle Session, an optional closed Session Context Patch may atomically append one sparse revision only when the resulting context is compatible with the continuation facts already present. A command that supplies the same component as a persistent patch and Turn-local override conflicts. The transaction binds the Turn Contract to the resulting revision and creates the Turn, initiating User Message, and its Conversation Entry; all become visible together or none do. Compatibility admission performs no provider I/O. V1 has no independent context-mutation command or mid-Turn context change.
 
-A correlated permission or input response resumes the exact nonterminal Turn. An unsolicited ordinary User message is accepted only when the Session has no nonterminal Turn and starts a new Turn. A Turn becomes terminal only when no open request, unresolved Operation, applicable Completion, or admitted effect can still change its outcome. Turn settlement and Session occupancy release commit atomically.
+Agent-call admission creates the Turn, membership, initiating User Message, and its Conversation Entry atomically. A later User Message command inserts one immutable `user_messages` row with exact Session, Turn, admission ordinal, content, Principal provenance, and idempotency binding; it does not create a Conversation Entry or change an admitted Model Request Manifest. Immediately before admitting the next model Operation that requests an assistant response, one transaction projects every applicable unprojected User Message into Conversation in admission order and freezes the resulting manifest. An internal compaction model Operation reads only already-applied Model Context and leaves pending User Messages unprojected. The unique projection relation derives whether a message remains pending; there is no message phase, batch entity, or resident queue. A Permission Decision authorizes or denies one exact proposed Action and is not Conversation content. A Turn becomes terminal only when no applicable unprojected User Message, actionable Permission Request, unresolved Operation, applicable Completion, or admitted effect can still change its outcome. Turn settlement and Session occupancy release commit atomically.
 
 Accepted Conversation entries remain canonical after a failed or cancelled Turn. A Session never succeeds, fails, or closes.
 
@@ -110,25 +117,30 @@ r3: instructions=I2
 resolve(r3) = model=A, instructions=I2, tools=T2
 ```
 
-Date, timezone, current Workspace facts, explicit caller overrides, authority, and requested output schema are Turn-local facts. They enter the immutable **Turn Contract** without mutating future Session defaults.
+Date, timezone, current Workspace facts, explicit caller overrides, authority, Permission Mode, and requested output schema are Turn-local facts. They enter the immutable **Turn Contract** without mutating future Session defaults. Permission Mode is selected at Turn admission, defaults to `ask`, and cannot change while the Turn is active.
 
-Each model **Operation** binds one immutable **Model Request Manifest** containing provider-neutral references and digests for:
+Each model **Operation** binds one immutable **Model Request Manifest** containing references and digests for:
 
-- exact model identity;
+- the provider protocol operation, requested concrete model identity, and behavior-affecting protocol options;
 - rendered Instruction Set;
 - Tool Catalog;
-- Model Context or Compaction Checkpoint plus suffix;
+- one exact Model Context replay recipe: an optional derived Compaction Base plus one total ordered suffix of canonical host inputs and accepted model Operation Resolutions;
+- the replay format;
 - Turn-local runtime facts needed by the model;
 - reasoning and output limits; and
 - output contract.
 
-Replacement Attempts reuse that manifest. Authentication, access tokens, sockets, HTTP headers, and transport buffers remain late-bound and are not canonical model input. A changed manifest requires a new model Operation.
+The recipe freezes the selected Compaction Base and each ordered source identity needed to preserve complete provider-native rounds. Replacement Attempts reuse that manifest and reconstruct the same request semantics; they need not preserve JSON key order or other wire spelling with no provider meaning. Authentication secrets, access tokens, endpoints, sockets, HTTP headers that do not affect behavior, and transport buffers remain late-bound. A changed manifest requires a new model Operation.
 
-The provider is logically stateless from OnePage's authority boundary. Provider caches, previous-response identifiers, and server-side optimizations may be used only when failure falls back to the same locally reconstructible manifest.
+The provider owns no OnePage semantic authority. Every value required to reconstruct a continuation is retained in the Host Store and frozen by the manifest. Provider-hosted caches and previous-response identifiers are optional accelerators only when their loss still permits the same request to be constructed from that frozen local recipe.
 
 ## Model output and multiple Tool Calls
 
-One model Operation may resolve to a Final Answer, an input request, or an optional bounded assistant-text prefix accompanied by an ordered bounded set of Tool Calls. Final Answer has no Tool Calls. All model-visible output and child-call descriptors validate before atomic admission; an invalid member rejects the complete candidate. Successful admission appends the optional assistant-text entry followed by Tool Call entries in call-ordinal order in one transaction.
+One model Operation may resolve to assistant-only output or an optional bounded assistant-text prefix accompanied by an ordered bounded set of Tool Calls. All model-visible output and child-call descriptors validate before atomic admission; an invalid member rejects the complete candidate. Successful admission appends the optional assistant-text entry followed by Tool Call entries in call-ordinal order in one transaction. Assistant-only output is a Final Answer only when that settlement transaction proves that no earlier applicable unprojected User Message exists. If a User Message committed first, the output remains ordinary assistant text, no Turn Outcome is inserted, and ordinary advancement later projects the message and admits the next model Operation. If settlement commits first, the terminal Turn Outcome prevents that message command from attaching to the completed Turn. SQLite commit order therefore decides the race without a lifecycle branch outside the canonical transaction classifier. V1 has no model-created conversational Input Request; later input is a User Message admitted independently of model output.
+
+A terminal model response is first retained losslessly and in provider order as immutable Model Output Items owned by its Attempt Completion. Each item stores its semantic fields, provider-only continuation fields, and response-evidence fields once. Its Operation Resolution selects the accepted Completion; the same transaction publishes every applicable four-kind Conversation projection by reference to those semantic fields. The provider adapter derives a later replay-input view by stripping response-only or non-replayable fields; OnePage does not persist a second replay copy or a complete serialized request body.
+
+Unknown open fields inside a known item are preserved. An unknown consequential discriminator—such as a top-level item, content block, Action subtype, compaction variant, or terminal status—is preserved as Completion evidence but resolves as `unsupported_provider_output`; it publishes no Conversation, continuation, or effect consequence. Core neither exposes private reasoning through generic content reads nor fabricates meaning for opaque or encrypted reasoning, signatures, and compaction items. Raw HTTP and SSE framing, token deltas, partial streams, interrupted output, and late output are scratch evidence, not replay authority, and are deleted after successful canonical import.
 
 Each Tool Call creates one child Action Operation with `caused_by_operation_id` and a stable call ordinal. No Step or Tool Call Group is durable authority: the child set is derived from that parent relation.
 
@@ -141,7 +153,7 @@ model Operation M1
 
 Child Operations execute and settle independently under Active Capacity, including within one Workspace. Each Completion and Resolution is committed when that child settles; no sibling holds it outside SQLite. After every child resolves, one transaction appends their Tool Result Conversation Entries in original call-ordinal order. Only then may the next model Operation start. Physical completion order never chooses Conversation order. Denial, failure, cancellation, and uncertainty each produce typed model-visible Tool Results.
 
-OnePage provides no Workspace-wide fence, quiescence assumption, or isolation claim against other agents and processes. V1 uses one private serial Patch execution lane to keep the in-process mutation path small, while Bash and provider work remain concurrent. That implementation choice is not durable policy and may change without changing the relational model. Patch correctness comes from exact preimage, expected postimage, and observed-state reconciliation.
+OnePage provides no Workspace-wide fence, quiescence assumption, global Action serialization, or isolation claim against other agents and processes. Bash, Patch, and provider work may proceed concurrently under Active Capacity. A closed typed Action adapter gives Bash and Patch the same lifecycle while temporary execution custody exists only for an active Attempt. Patch correctness comes from exact preimage, expected postimage, and observed-state reconciliation.
 
 ## Host Runtime execution and settlement
 
@@ -149,15 +161,27 @@ An **Operation** is one model request or admitted Action. An **Attempt** is one 
 
 The foreground Host/control context is the sole Storage Owner and the only code permitted to use SQLite. Every mutation goes through one SQLite-specific command module. A command validates bounded syntax, reserves an Active Credit before a dispatching transaction, starts `BEGIN IMMEDIATE`, loads one bounded canonical Decision Snapshot, invokes one pure total classifier, writes one fixed relational mutation, checks exact affected-row counts, derives any consequence, commits, and releases that consequence only after successful `COMMIT`. Inspection and advancement use the same bounded loader and classifier.
 
-One model/Bash I/O Reactor multiplexes long-lived provider streams and subprocess pipes. One private serial lane performs Patch execution. These lanes own only volatile OS and library handles plus fixed borrowed windows; they cannot access SQLite or decide semantic meaning. One bounded content-free Physical Custody table implements Active Capacity: occupancy of one record is one Active Credit, not a second object or pool. There is no per-Turn driver, thread, stack, Session graph, candidate buffer, response buffer, parser workspace, or lifecycle object.
+One I/O Reactor multiplexes long-lived provider streams and subprocess pipes and observes temporary Action executors, including Patch. Execution machinery owns only volatile OS and library handles plus fixed borrowed windows while work is active; it cannot access SQLite or decide semantic meaning. One bounded content-free Physical Custody table implements Active Capacity: occupancy of one record is one Active Credit, not a second object or pool. There is no per-Turn driver, permanent Patch lane, retained worker, Session graph, candidate buffer, response buffer, parser workspace, or lifecycle object.
 
-After Attempt commit, the Storage Owner materializes any exact outbound request from SQLite into an immediately unlinked scratch file through fixed windows. The execution lane consumes that descriptor and streams inbound bytes directly to another immediately unlinked scratch file. No SQLite transaction spans request construction, network or subprocess execution, filesystem mutation, or response streaming. Scratch is bounded, dynamically charged, non-authoritative, and nonrecoverable; a process crash discards it and leaves the durable Attempt unresolved for effect-specific recovery.
+After Attempt commit, the Storage Owner asks the selected adapter to materialize an outbound request from the frozen manifest and canonical source items into an immediately unlinked scratch file through fixed windows. Neither the generated request body nor a second replay representation becomes authority. Execution consumes that descriptor and streams inbound bytes directly to another immediately unlinked scratch file. No SQLite transaction spans request construction, network or subprocess execution, filesystem mutation, or response streaming. Scratch is dynamically charged, non-authoritative, and nonrecoverable; a process crash discards it and leaves the durable Attempt unresolved for effect-specific recovery.
 
-Only after transport or execution reaches an effect-specific terminal boundary does its owning lane seal the scratch descriptor and hand it to the Storage Owner. The Storage Owner uses one shared serial validation/import workspace to parse complete model output or tool evidence, then normally commits immutable content, the Attempt Completion, the Operation Resolution, Conversation or interaction facts, and the next semantic consequence in one transaction. The sole intentional Completion-only state is a retryable model Completion committed atomically with immutable retry eligibility while its Operation remains unresolved. SQLite eligibility rows are the retry queue; one periodic bounded query while the Host is running is the only V1 retry-eligibility trigger.
+Only after transport or execution reaches an effect-specific terminal boundary does its effect owner seal the scratch descriptor and hand it to the Storage Owner. The Storage Owner uses one shared serial validation/import workspace to parse complete model output or tool evidence, then normally commits immutable content, the Attempt Completion, the Operation Resolution, Conversation or permission facts, and the next semantic consequence in one transaction. The sole intentional Completion-only state is a retryable model Completion committed atomically with immutable retry eligibility while its Operation remains unresolved. SQLite eligibility rows are the retry queue; one periodic bounded query while the Host is running is the only V1 retry-eligibility trigger.
+
+Variable caller content enters through a sealed source supplied to the semantic mutation that first references it. The Run API exposes no independent content-publication operation or caller-visible staged Content Reference. The Storage Owner verifies exact length, digest, media or schema type, and stable positional bytes while importing under its owning content and command-work contract; no semantic row may reference incomplete or unvalidated bytes.
 
 Each Attempt can have at most one Completion. An exact replay returns the existing record; contradictory evidence is rejected rather than stored beside it. Cancellation records intent and may signal the live owner, but only the effect-specific terminal owner may propose Completion evidence. This removes the generic Completion Inbox, consumption watermark, two-transaction admission protocol, online stream detector, and scratch replay path.
 
-Attempt admission commits before physical dispatch. Only the invocation that observes that commit receives a volatile one-shot Dispatch Permit; reconstruction never recreates it. Failure while preparing post-commit request scratch is evidence for that Attempt, not authority to erase it.
+The Run API's explicit model-interruption command targets one exact unresolved Model Operation in one nonterminal member Turn. It validates the Principal's Run authority, exact Run, Turn and Operation identities, the Operation-local unresolved precondition, and its idempotency binding in one transaction. The `Interrupted` Resolution binds that Principal and key, so exact replay returns the committed result; a non-model target, changed binding, terminal Turn, or Operation carrying another Resolution conflicts without mutation. No whole-Run revision gates the command. Its one fixed semantic mutation is insertion of the Resolution. It neither cancels the Turn nor decides whether another Operation follows. Ordinary advancement derives continuation only when independently admitted User Messages are applicable; otherwise ordinary terminality derives the cancelled Turn Outcome.
+
+An intentional model interruption may therefore commit an `Interrupted` Resolution without inventing an Attempt Completion. The pair of facts is authoritative: an Attempt without Completion under an unresolved Operation requires effect-specific recovery, while one under an Interrupted Resolution was deliberately abandoned and is never recovered or retried. The Resolution fences semantic acceptance but does not claim that the provider stopped processing or avoided billing. After commit, one atomic launch-boundary transition in the content-free Physical Custody record decides physical truth: if interruption wins before launch, the I/O Reactor suppresses the unconsumed Dispatch Permit; if launch wins, it closes or detaches the transport. This volatile race selects cleanup only and cannot alter the committed Resolution. Physical Custody and its Active Credit remain occupied until suppression or transport detachment completes; late provider output is discarded. V1 issues no separate provider-cancellation request and waits for no provider acknowledgement. Partial, interrupted, or late provider reasoning, signatures, compaction items, and other continuation material never become durable request input. Actions have no independent interruption command; Turn cancellation follows their effect-specific settlement rules because external state may have changed.
+
+The V1 cancellation command targets one exact Workflow Run. It validates the Principal's Run authority and request binding, then inserts the Run's unique Cancellation Intent. Exact replay returns the existing fact and a changed binding conflicts; no whole-Run expected revision is required. The committed Run intent and immutable Run–Turn membership immediately fence new evaluator generations, memberships, Operations, and Attempts without copying cancellation rows to member Turns.
+
+Every SQL admission and settlement path joins through that relational fence. If model-result settlement commits first, its Resolution remains valid and later cancellation governs only remaining work. If cancellation commits first, late provider bytes are discarded and cannot create a Completion or semantic Resolution; bounded driving inserts `Interrupted` Resolutions for affected unresolved Model Operations, each citing the Run Cancellation Intent as its causal source. A directly requested `Interrupted` Resolution instead cites the authorizing Principal and command key. This one-of provenance is structural, not another Resolution kind or lifecycle phase. An unresolved Action with no Attempt resolves without execution. An Action with a committed Attempt is already admitted and must settle from terminal evidence or reconciliation. Active Bash receives best-effort process-group interruption. Patch may stop as not applied before mutation starts; after mutation starts it finishes bounded execution and reconciliation. Every accepted Tool Call still receives one typed Tool Result in call-ordinal Conversation order.
+
+Pending User Messages and Permission Requests beneath a cancelled Run become inapplicable by relation and do not prevent terminal settlement. Their immutable admission rows remain audit facts; no withdrawal row, copied Turn intent, message phase, or resident queue is added. Bounded driving performs physical cleanup and resolves already-admitted work incrementally; it does not propagate the semantic fence. When no admitted Operation can still change meaning, ordinary terminality derives cancelled Turn Outcomes and releases Session occupancy. No cancellation-specific phase or in-memory coordinator exists.
+
+Attempt admission commits before physical dispatch. Only the invocation that observes that commit receives a volatile one-shot Dispatch Permit; reconstruction never recreates it. The commit durably admits the Attempt but does not oblige the owner to launch after a later committed interruption. Permit consumption and post-commit suppression compete through the Physical Custody record's one atomic launch boundary. The winner truthfully determines whether the external effect may have started; it never chooses semantic meaning. Failure while preparing post-commit request scratch is evidence for that Attempt, not authority to erase it.
 
 ## Effect-specific recovery
 
@@ -175,32 +199,29 @@ SQLite owns transaction atomicity and recovery. OnePage owns semantic validation
 
 The provider-neutral Tool Catalog does not grant execution authority. V1 maps only `bash` and `apply_patch` Tool Keys to executable Actions. Each child Action Operation binds a typed descriptor before permission or dispatch.
 
-`ask` creates an immutable permission Interaction Request for the exact validated descriptor. A response is accepted only from a Principal whose Authority covers the request, Operation identity, descriptor digest, and option. Explicit bypass creates Authorization for the same descriptor without a request. Both modes preserve validation, binding, Attempt admission, and recovery.
+The Turn Contract's `ask` mode creates one immutable Permission Request for the exact validated descriptor. One Permission Decision is accepted only from a Principal whose Authority covers the request, Operation identity, descriptor digest, and decision. Turn admission accepts explicit `bypass` only when the Principal's Authority permits that mode; the transaction that later admits the child Action Operation also creates Authorization for that same descriptor, with provenance to the immutable Turn Contract. Both modes preserve validation, binding, Attempt admission, and recovery; advancement never chooses or changes the mode.
 
 ## Workflow Runs
 
 A Workflow Run durably binds its Caller Run Key, Workflow Definition bytes, arguments, Workspace, semantics identity, evaluator limits, Evaluation Generations, Turn memberships, and terminal outcome.
 
-Each `agent({ key, task, input, schema, model, reasoning_effort, session, session_context })` call produces one canonical Turn-membership specification. Required `task` is the initiating User instruction; optional `input` is bounded strict data rendered canonically into that same initiating User entry. Optional `session_context` carries the closed persistent patch described above. Equal `(run_id, key, digest)` reattaches to the same Turn. Reusing a key with different bindings conflicts. V1 permits at most one Run membership per Turn, so Run cancellation cannot affect another Run; the Turn's committed Conversation and outcome remain valid independently if the Run is later removed.
+Each `agent({ key, task, input, schema, model, reasoning_effort, permission_mode, session, session_context })` call produces one canonical Turn-membership specification. Required `task` is the initiating User instruction; optional `input` is bounded strict data rendered canonically into that same initiating User entry. Optional `permission_mode` defaults to `ask`; selecting `bypass` requires the Principal's Authority and freezes that choice in the Turn Contract. Optional `session_context` carries the closed persistent patch described above. Equal `(run_id, key, digest)` reattaches to the same Turn. Reusing a key with different bindings conflicts. V1 permits at most one Run membership per Turn, so Run cancellation cannot affect another Run; the Turn's committed Conversation and outcome remain valid independently if the Run is later removed.
 
 Each evaluator starts from source against one immutable Visibility Snapshot of terminal Turn Outputs and stable failures. It returns the complete blocked Turn set and exits. No JavaScript heap, Promise graph, continuation, bytecode, or completion callback survives a durable barrier. Workflow code cannot observe physical Turn completion order; V1 supports deterministic joins and excludes `Promise.race` and `Promise.any`.
 
-Admitting Run Cancellation Intent atomically stops new evaluator generations and new Turn memberships and records Turn cancellation intent for every nonterminal member Turn. Later Turn evidence still reconciles under its own Operation rules. Cancelling a Run never makes a Session terminal.
+Admitting Run Cancellation Intent atomically stops new evaluator generations and new Turn memberships and relationally fences every member Turn. Later Turn evidence still reconciles under its own Operation rules. Cancelling a Run never makes a Session terminal.
 
 ## Run interface
 
-The Run Service owns six semantic operations:
+The Host Runtime exposes one narrow typed Run API and no separately instantiated Run Service. Its explicit semantic admissions create or attach a Run, admit an agent call with its initiating User Message, admit a later User Message through the same primitive without immediately projecting it into Conversation, decide one Permission Request, interrupt one exact unresolved Model Operation, and cancel one Run. Each verb owns its distinct authority, concurrency, idempotency, and transaction contract; there is no generic native command or result union.
 
-- idempotent creation or attachment;
-- committed snapshot read;
-- atomic typed response submission;
-- durable cancellation request;
-- bounded advancement; and
-- immutable content read.
+`drive` is a separate Host scheduler operation. One bounded quantum may settle evidence, admit consequences, release committed external work, and compose several individually atomic transactions before stopping at quiescence, an observable block, terminality, interruption, or quantum exhaustion. It is not one atomic mutation and returns only a small drive report. The caller repeats it when immediate runnable work remains; mutations never drive implicitly.
 
-JSON is the complete versioned external contract. Markdown is a deterministic bounded rendering of the same Run Snapshot and introduces no facts. Process interruption detaches without cancellation; only the explicit cancellation command carries cancellation authority.
+Current inspection is a resource-free logical pull scan. Its bounded continuation contains only Run identity, captured current revision, logical section, and last emitted stable key. Each next-item call performs one short bounded query and retains no SQLite cursor, statement, transaction, lock, page, payload collection, or cleanup obligation. A changed revision invalidates the scan; the revision is a current-state guard, not a promise of historical reconstruction. There is no finish operation.
 
-Every Run–Turn membership summary appears in exactly one category derived from committed Turn rows: `runnable`, `waiting_for_input`, `in_flight`, `completed`, `failed`, or `cancelled`. Derivation has an exact precedence: terminal Outcome wins; otherwise an unresolved Operation with an admitted Attempt or immutable future retry eligibility is `in_flight`; otherwise an open request with no remaining progress is `waiting_for_input`; otherwise the nonterminal Turn is `runnable`. A retry-delayed Turn therefore remains `in_flight` even when it owns no Active Credit and no physical effect is live. `input_required` is reserved for Run state. Membership and Turn creation are atomic, so no public `pending` state exists.
+Every actionable Permission Request and every other current logical collection member appears in the complete scan. Physical keyset batching is private and no logical collection cap, caller page size, or serialized continuation token exists. Variable fields are immutable Content References read through fixed windows. JSON is the complete versioned external contract and Markdown is its deterministic model-facing rendering, but both are CLI adapters outside the native Run API. Client or Host-process interruption only detaches.
+
+Every Run–Turn membership summary appears in exactly one category derived from committed Turn rows: `runnable`, `waiting_for_permission`, `in_flight`, `completed`, `failed`, or `cancelled`. Derivation has an exact precedence: terminal Outcome wins; otherwise an unresolved Operation with an admitted Attempt or immutable future retry eligibility is `in_flight`; otherwise an actionable Permission Request with no remaining progress is `waiting_for_permission`; otherwise the nonterminal Turn is `runnable`. A retry-delayed Turn therefore remains `in_flight` even when it owns no Active Credit and no physical effect is live. `permission_required` is reserved for Run state. Membership and Turn creation are atomic, so no public `pending` state exists.
 
 ## Capacity and memory
 
@@ -208,18 +229,20 @@ One startup-fixed `active_capacity` bounds the Physical Custody table. Reserving
 
 A Dormant Session, terminal Turn, and Blocked Workflow Run retain no resident driver, Slot, Active Credit, thread, socket, subprocess, evaluator, materialized Conversation, or context graph. Long-lived in-flight work may retain only its credit, content-free custody record, transport handles, and dynamically charged unlinked scratch.
 
-Memory claims report whole-process RSS and the slope of each population separately: durable Sessions, terminal Turns, Active Capacity, provider transports, execution lanes and transport resources, SQLite, semantic-validation workspace, evaluator, and model-requested subprocesses. Workload memory is observed separately from OnePage-owned orchestration memory.
+Memory claims report whole-process RSS and the slope of each population separately: durable Sessions, terminal Turns, Active Capacity, provider transports, temporary Action executors and transport resources, SQLite, semantic-validation workspace, evaluator, and model-requested subprocesses. Workload memory is observed separately from OnePage-owned orchestration memory.
 
 Every large value moves through explicit stages—SQLite or wire, unlinked scratch, one shared validation/import workspace, canonical SQLite content, and presentation window—with one owner and release boundary. Variable content goes to disk unless a measured CPU-critical operation requires a fixed borrowed memory window. A byte limit never authorizes a resident allocation of the same size.
 
 ## Compaction
 
-Conversation remains complete. When the next exact request plus reserved output cannot fit the bound model context, OnePage may create a compaction model Operation under the active Turn. A committed Compaction Checkpoint binds only its source Conversation range, prior checkpoint lineage, replacement projection and digest, and creating model Operation ID. Turn Contract, Session Context Revision, Model Request Manifest, and model provenance derive through that Operation; provider transport identity remains Attempt evidence.
+Conversation remains complete. User Messages have no token-admission quota and are never silently split or truncated. The configured token value is an approximate **Compaction Trigger**, not a strict content ceiling: OnePage anchors on provider-reported usage where available and estimates only newly appended model-visible content. Every User Message admitted between consecutive assistant-response model Operations remains a distinct durable fact, and all are applied together when the next such Operation freezes its manifest.
 
-Later model requests use the newest compatible checkpoint plus the largest complete later suffix that fits. A missing, invalid, stale, or incomplete checkpoint falls back to an older valid checkpoint or uncompacted history. Compaction never creates a second Conversation or durable-history limit.
+When that estimate predicts pressure before pending User Messages are applied, OnePage may first create a compaction model Operation over only the already-applied Model Context; the pending rows remain unprojected until the following assistant-response model Operation selects the new base, projects every applicable message, and freezes its manifest. If the provider instead authoritatively rejects an already-admitted request for context overflow before output or effects are accepted, the rejected Operation resolves with its User Messages already applied, and compaction covers that committed context. Because compaction changes Model Context, continuation afterwards is a new model Operation with a new manifest rather than a replacement Attempt of the old Operation. An accepted compaction Resolution becomes a **Compaction Base** only when a later manifest selects it. Its creating Operation's complete source manifest defines coverage and lineage; its selected Completion owns the one canonical replacement output. No separate checkpoint row duplicates those facts.
+
+Later model requests first select the newest accepted Compaction Base in the current lineage, then validate that exact base and append one complete total ordered suffix of canonical host inputs and accepted model Resolutions. Core proves structural replay-recipe validity: lineage, suffix completeness, content presence and digest, and supported stored format. The provider adapter separately applies only compatibility restrictions demonstrated by its wire contract. The total classifier requires both and persists no validity flag. A failed or unresolved compaction never displaces the selected base; missing, corrupt, unsupported, or incompatible material in the selected base fails explicitly as `continuation_unavailable` rather than selecting an older base or rebuilding from visible Conversation. A requested context change known to invalidate continuity is rejected atomically during Turn admission. Codex V1 starts with the proven same-concrete-model rule and records both requested model and served-model evidence; broader compatibility requires adapter fixtures rather than a permanent Core equality rule. If compaction cannot produce a fitting compatible request, the Turn settles as `ResourceExceeded`. Compaction never creates another Conversation or durable-history limit.
 
 ## Failure and future scope
 
 Closed failures include stale identity, conflicting replay, invalid canonical data, capacity exhaustion, unsupported provider output, storage failure, and corrupt referenced content. Observer state and diagnostics cannot carry authority.
 
-V1 excludes branching Conversations, edit/delete, queued steering, multi-host coordination, provider registries, dynamic tools, MCP execution, generalized scheduling, retained workflow VMs, and storage migration compatibility. A future conversation fork should create a new Session with explicit ancestry rather than turning every Session into a tree.
+V1 excludes branching Conversations, edit/delete, attachments, automatic provider/model fallback, incompatible provider/model switching, lossy handoff, multi-host coordination, provider registries, dynamic tools, MCP execution, generalized scheduling, retained workflow VMs, and storage migration compatibility. A model change between Turns is allowed only when the selected adapter demonstrates continuation compatibility. A future conversation fork should create a new Session with explicit ancestry rather than turning every Session into a tree.

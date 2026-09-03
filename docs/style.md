@@ -26,7 +26,7 @@ A change violates this rule when it adds a Session Ledger, reducer image, contin
 ## Freeze at the boundary
 
 - Record persistent model-visible defaults as sparse Session Context Revisions.
-- Resolve one immutable Turn Contract when ordinary User input starts a Turn.
+- Resolve one immutable Turn Contract when an initiating User Message starts a Turn.
 - Bind one immutable Model Request Manifest to each model Operation.
 - Reuse that manifest for replacement Attempts.
 - Late-bind only credentials, transport handles, sockets, and other non-semantic mechanisms.
@@ -57,7 +57,7 @@ Keep context components typed and closed for current consumers. Do not store a m
 - Normally commit content, the single Completion, Resolution, and semantic consequence atomically. Permit Completion without Resolution only for a retryable model result committed with immutable retry eligibility.
 - Reconcile according to effect: model retry with explicit duplicate risk, no automatic Bash replay, exact patch preimage/postimage observation.
 - Keep User role, Caller identity, Principal, Authority, Authorization, and Permission Mode separate.
-- Do not add a Workspace fence, quiescence promise, or isolation claim. Treat the serial Patch lane as a private V1 implementation choice.
+- Do not add a Workspace fence, quiescence promise, global Action serialization, or isolation claim. Bash and Patch share the closed Action lifecycle and may execute concurrently under Active Capacity.
 
 Every SQLite command follows:
 
@@ -74,17 +74,16 @@ The same bounded loader and classifier serve inspection and advancement. A post-
 | Owner | Responsibility |
 | --- | --- |
 | Storage Owner | SQLite, canonical transactions, bounded content reads/writes, and no domain-policy delegation to callers. |
-| Host Runtime | Derive Turn Condition and advance legal quanta through the Storage Owner, one multiplexed model/Bash I/O Reactor, one private serial Patch lane, and content-free custody. |
-| Provider adapter | Authentication, request lowering, transport grammar, and direct streaming between scratch descriptors and the provider; no SQLite access or semantic admission. |
-| Action adapter | Execute one immutable admitted Bash or patch Attempt and return sealed evidence; select no permission, retry, or recovery policy. |
-| Run Service | Pure inspection, acknowledged updates, bounded advancement, cancellation, and immutable content reads. |
+| Host Runtime | Expose the narrow typed Run API; derive Turn Condition; drive legal quanta through the Storage Owner, one multiplexed I/O Reactor, temporary Action executors, and content-free custody. |
+| Provider adapter | Authentication, derived replay-input projection, request lowering, transport grammar, and direct streaming between scratch descriptors and the provider; no SQLite access or semantic admission. |
+| Action adapter | Execute one immutable admitted Bash or Patch Attempt under temporary custody and return sealed evidence; select no permission, retry, or recovery policy. |
 | Workflow Evaluator | Evaluate one immutable Generation and return one terminal outcome; retain nothing across a durable barrier. |
 
 An interface is deep when callers provide semantic intent and cannot construct the owner's internal facts, storage rows, lifecycle phases, or capabilities.
 
 ## Bounds and memory
 
-- Give every payload, queue, scan, retry, output, context, evaluator run, and execution population an explicit dominating bound.
+- Give every resident allocation, per-event computational workload, external effect, evaluator run, and concurrent execution population an explicit dominating bound. Stream durable collections and variable content rather than imposing cardinality caps solely to protect memory.
 - Name the resource each limit protects. Remove a limit that adds no guarantee beyond a stricter byte, work, depth, or time bound.
 - Treat a new pool, cache, arena, spool, growable buffer, per-call allocation, or allocation lifetime as an architectural change.
 - Before implementation, record its owner, multiplier, maximum, ordinary occupancy, release boundary, failure behaviour, and why an existing owner cannot serve it.
@@ -99,9 +98,9 @@ An interface is deep when callers provide semantic intent and cannot construct t
 
 - State the trust assumption at each external seam.
 - Validate strict syntax, owned resources, consumed semantic fields, durable authority, and consequential effects.
-- Treat provider object records as open: ignore bounded unknown metadata.
+- Treat provider object records as open: preserve unknown fields inside known records while ignoring them semantically.
 - Treat consumed fields and must-understand semantic unions as closed: reject missing, duplicate, contradictory, wrongly typed, unsupported, or oversized meaning.
-- Keep OnePage-owned durable, interaction, tool-input, cross-process, and authority-bearing formats closed and exact.
+- Keep OnePage-owned durable, User Message, permission, tool-input, cross-process, and authority-bearing formats closed and exact.
 - Validate important records before write and after read.
 - Trust the configured local machine and SQLite once their documented boundary has accepted canonical data; do not add redundant revalidation solely to distrust them.
 
@@ -111,7 +110,7 @@ An interface is deep when callers provide semantic intent and cannot construct t
 - Destroy consumed handles rather than retaining tombstones for invalid reuse.
 - Never expose SQLite connections, prepared statements, evaluator frames, provider handles, or internal advancement generations through product interfaces.
 - Let one owner access each libcurl easy handle, file descriptor, subprocess, SQLite connection, and mutable writer.
-- Distinguish graceful in-process shutdown from process-exit recovery. Never free state beneath an execution lane or callback that has not joined.
+- Distinguish graceful in-process shutdown from process-exit recovery. Never free state beneath a live effect owner or callback that has not joined.
 - Treat notifications and wakeups as hints. Only committed rows acknowledge semantic input.
 
 ## Failure discipline

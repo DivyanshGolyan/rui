@@ -11,11 +11,11 @@ The model-driven decision-maker that advances one Turn through Conversation entr
 _Avoid_: worker, Workflow Run, provider
 
 **User**:
-The Conversation role that starts a Turn or answers a requested input. A User may be a person or another Agent.
+The Conversation role that authors a User Message. A User may be a person or another Agent.
 _Avoid_: human, Caller, Principal, approver
 
 **Caller**:
-The entity invoking the Run Service.
+The entity invoking the Host Runtime's Run API.
 _Avoid_: User, Principal, Agent
 
 **Principal**:
@@ -31,7 +31,7 @@ The durable decision that permits one exact validated Action to be attempted.
 _Avoid_: blanket permission, Approval, Authority
 
 **Permission Mode**:
-The advancing-invocation rule that obtains Authorization either from an authorized response or explicit bypass.
+The immutable Turn Contract policy selected when the Turn is admitted. `ask`, the default, requires an authorized Permission Decision for each exact validated Action; explicit `bypass` creates Authorization from that bound policy without a request. Turn admission rejects bypass unless the Principal's Authority permits it. The mode cannot change while the Turn is active.
 _Avoid_: Session authority, tool capability
 
 ### Conversation
@@ -45,7 +45,7 @@ A Session with no nonterminal Turn and no active external work.
 _Avoid_: sleeping process, closed Session, retained agent
 
 **Conversation**:
-The complete immutable linear sequence of model-visible entries accumulated within one Session.
+The complete immutable linear sequence of canonical semantic entries accumulated within one Session.
 _Avoid_: Session, operation log, provider transcript, tree
 
 **Conversation Entry**:
@@ -56,8 +56,12 @@ _Avoid_: event, mutable message, provider frame
 The ordinal of a Conversation Entry within one Session.
 _Avoid_: Session phase, ledger head, ownership generation
 
+**User Message**:
+Immutable User-authored content admitted to one Turn. It becomes a Conversation Entry when a model Operation requesting the next assistant response applies it; an initiating User Message is admitted and applied atomically with its Turn. An internal compaction model Operation does not apply a pending User Message.
+_Avoid_: Interaction Response, steering event, mutable prompt
+
 **Turn**:
-One idempotently admitted episode that begins with an ordinary User input and advances one Session until Final Answer or a typed terminal outcome. A correlated permission or input response may resume the same nonterminal Turn; at most one Turn is nonterminal in a Session.
+One idempotently admitted episode that begins with an initiating User Message and advances one Session until Final Answer or a typed terminal outcome. Later User Messages may extend the same nonterminal Turn; at most one Turn is nonterminal in a Session.
 _Avoid_: Job, Session, model request, worker
 
 **Turn Outcome**:
@@ -65,7 +69,7 @@ The single terminal resolution of a Turn: completed, failed, or cancelled. Compl
 _Avoid_: Attempt Completion, Operation Resolution, process exit
 
 **Turn Condition**:
-The total semantic classification derived from committed facts. Run membership summaries use exactly runnable, waiting for input, in flight, completed, failed, or cancelled. Derivation is ordered: terminal Outcome wins; otherwise an unresolved Operation with an admitted Attempt or immutable future retry eligibility is in flight; otherwise an open request with no remaining progress is waiting for input; otherwise the Turn is runnable. `Input Required` is reserved for the Run-wide condition where no member can progress.
+The total semantic classification derived from committed facts. Run membership summaries use exactly runnable, waiting for permission, in flight, completed, failed, or cancelled. Derivation is ordered: terminal Outcome wins; otherwise an unresolved Operation with an admitted Attempt or immutable future retry eligibility is in flight; otherwise an actionable Permission Request with no remaining progress is waiting for permission; otherwise the Turn is runnable. `Permission Required` is reserved for the Run-wide condition where no member can progress.
 _Avoid_: persisted phase, status cache, ready flag
 
 **Session Context Revision**:
@@ -77,24 +81,24 @@ An optional closed sparse command supplied when starting a Turn in an idle Sessi
 _Avoid_: mutable prompt, mid-Turn update, generic configuration map
 
 **Turn Contract**:
-The immutable resolved policy and runtime facts that apply to one Turn, including the bound Session Context Revision and any explicit Turn-local overrides.
+The immutable resolved policy and runtime facts that apply to one Turn, including the bound Session Context Revision, Permission Mode, and any explicit Turn-local overrides.
 _Avoid_: mutable Session defaults, provider configuration, Model Request Manifest
 
 **Model Context**:
-The bounded projection of Conversation used by one model Operation, including an optional Compaction Checkpoint and a later complete suffix.
+The exact replay recipe used by one model Operation: an optional selected Compaction Base followed by one total ordered suffix of canonical host inputs and accepted model Operation Resolutions. Core and the selected adapter validate that chosen base without searching backward for an alternative.
 _Avoid_: Conversation, Session Context Revision, prompt cache
 
 **Model Request Manifest**:
-The immutable provider-neutral references and digests that identify the exact model, Instruction Set, Tool Catalog, Model Context, limits, and output contract consumed by one model Operation.
+The immutable references and digests that identify the provider protocol operation, requested concrete model, Instruction Set, Tool Catalog, totally ordered Model Context, replay format, behavior-affecting protocol options, limits, and output contract consumed by one model Operation.
 _Avoid_: raw HTTP request, credentials, mutable provider defaults
 
 **Instruction Set**:
 The immutable model-visible instructions selected through Session context and resolved for one Turn.
 _Avoid_: complete model request, Tool Catalog, provider system field
 
-**Compaction Checkpoint**:
-An immutable replacement Model Context binding its exact source range, prior checkpoint, replacement content and digest, and creating model Operation. Turn, context, manifest, and model provenance derive through that Operation.
-_Avoid_: Conversation rewrite, retention, reducer checkpoint
+**Compaction Base**:
+The derived role of an accepted compaction model Operation Resolution when a later Model Request Manifest selects its replacement Model Context. Its creating Operation's source manifest defines the complete covered frontier and lineage; its selected Completion owns the replacement output. It is not a separate authoritative row or a rewrite of Conversation.
+_Avoid_: Compaction Checkpoint, Conversation rewrite, retention, reducer checkpoint
 
 **Workspace**:
 The repository checkout that a Session observes and may be authorized to change.
@@ -103,7 +107,7 @@ _Avoid_: Session, Conversation, repository history
 ### Model and tools
 
 **Final Answer**:
-A non-empty assistant response with no Tool Call that successfully completes the current Turn.
+A non-empty assistant response with no Tool Call that successfully completes the current Turn because no earlier applicable User Message requires another model Operation.
 _Avoid_: finish tool, process exit, Workflow Output
 
 **Tool Call**:
@@ -126,9 +130,9 @@ _Avoid_: Adapter, permission, executable capability
 The bounded immutable set of Tool Definitions offered by one Model Request Manifest.
 _Avoid_: runtime registry, provider catalog, plugin graph
 
-**Captured Model Output**:
-The immutable content carried by a model Attempt Completion before its provider-neutral meaning is selected by the Operation Resolution.
-_Avoid_: admitted assistant entry, provider stream, Tool Result
+**Model Output Item**:
+One ordered canonical provider-result item owned by a model Attempt Completion. It retains supported semantic fields, provider-only continuation fields, and response-evidence fields exactly once; a provider adapter derives any later replay-input view from it.
+_Avoid_: Conversation Entry, Provider Replay Receipt, raw HTTP or SSE frame
 
 **Validation Profile**:
 The versioned strict-data rules used to validate model tool arguments and provider-neutral output.
@@ -149,7 +153,7 @@ The durable order of Operations within one Turn.
 _Avoid_: global sequence, generation, timestamp order
 
 **Attempt**:
-One uniquely identified physical try to execute an Operation. Its durable insertion is the external-dispatch fence and binds the exact request, provenance, and retry identity.
+One uniquely identified physical try to execute an Operation. Its durable insertion is the external-dispatch fence and binds the Operation's immutable manifest or Action descriptor, provenance, and retry identity without storing a request body.
 _Avoid_: Operation, retry policy, request notification
 
 **Attempt Completion**:
@@ -157,8 +161,12 @@ The single immutable bounded evidence record captured from one Attempt. It recor
 _Avoid_: Operation Resolution, notification, Turn Outcome
 
 **Operation Resolution**:
-The single durable semantic result selected for an Operation. Its basis may be an Attempt Completion, permission denial, validation failure, cancellation, reconciliation, or recovery uncertainty.
+The single durable semantic result selected for an Operation. Its basis may be an Attempt Completion, permission denial, validation failure, interruption, cancellation, reconciliation, or recovery uncertainty.
 _Avoid_: Attempt Completion, generic Result, Turn Outcome
+
+**Interrupted Resolution**:
+An Operation Resolution stating that one exact unresolved Model Operation ended before any result was accepted. Its causal provenance is exactly one of: an authorized direct Model Interruption binding its Principal and idempotency key, or the canonical Run Cancellation Intent joined through immutable Run–Turn membership. An interrupted Model Operation may have no Attempt Completion; this records deliberate abandonment, not an assertion that the provider stopped processing. It ends only that Operation. The Turn may continue through independently admitted User Messages after direct interruption; Run cancellation fences that continuation and eventually yields a cancelled Turn Outcome. Actions cannot receive the direct interruption command.
+_Avoid_: Turn Outcome, failed Attempt, process detachment
 
 **Indeterminate Resolution**:
 An Operation Resolution stating that external state may have changed but the terminal effect cannot be proved. It is evidence for the Agent's next decision unless the Turn cannot safely continue.
@@ -173,30 +181,30 @@ The immutable one-file mutation description binding Workspace, target, patch, pr
 _Avoid_: patch result, approval, workspace snapshot
 
 **Dispatch Permit**:
-A volatile one-shot capability issued only to the command that committed a new Attempt. It authorizes physical launch after commit but is not durable semantic authority.
+A volatile one-shot capability issued only to the command that committed a new Attempt. It authorizes but does not oblige physical launch after commit; a later committed interruption may suppress it before the owner crosses the Physical Custody launch boundary. It is not durable semantic authority and reconstruction never recreates it.
 _Avoid_: Attempt, Authorization, lease, ownership epoch
 
 **Physical Custody**:
-A bounded Host record representing the transient fact that one execution lane currently owns the physical handles for an Attempt. It contains no payload or semantic state, and loss of custody never rewrites durable meaning.
+A bounded Host record representing the transient fact that one effect owner currently holds the physical handles for an Attempt. One atomic launch-boundary transition distinguishes suppression before an external effect from cleanup after it may have started. The record contains no payload or semantic state, and loss of custody never rewrites durable meaning.
 _Avoid_: Operation state, database authority, Session ownership
 
-### Interaction
+### Permission and cancellation
 
-**Interaction Request**:
-An immutable durable request for one typed response, issued for permission or bounded conversational input within one Turn.
-_Avoid_: prompt, notification, User Request
+**Permission Request**:
+An immutable durable request for a Principal's decision on one exact proposed Action and descriptor. Absence of a Permission Decision means the request remains actionable while its Operation and Run permit admission.
+_Avoid_: input request, prompt, notification, User Message
 
-**Interaction Resolution**:
-The single terminal answer, decision, or withdrawal of an Interaction Request. Absence of this relation means the request is open.
-_Avoid_: generic response queue, permission text
+**Permission Decision**:
+The single allow-once or deny decision for one exact Permission Request. An allowed decision may establish Authorization; it is never Conversation content.
+_Avoid_: User Message, generic response batch, permission text
 
-**Input Required**:
-A public Run condition in which at least one Interaction Request is open and no other Turn in the Run can currently progress.
+**Permission Required**:
+A public Run condition in which at least one Permission Request is actionable and no other member Turn can currently progress.
 _Avoid_: blocked Turn, suspended, generic waiting
 
-**Cancellation Intent**:
-Durable intent targeting one Turn or Workflow Run. Turn intent stops ordinary admission and reconciles admitted Operations. Run intent atomically stops evaluator generations and new membership and records Turn cancellation intent for every nonterminal member. It is not an Interaction Request and never makes a Session terminal.
-_Avoid_: permission request, process detachment, terminal outcome
+**Run Cancellation Intent**:
+Durable intent to stop one Workflow Run. Through immutable Run–Turn membership it fences new evaluation, membership, Operation, and Attempt admission immediately while already-admitted work resolves or reconciles before terminal cancellation.
+_Avoid_: Turn Cancellation Intent, Permission Request, process detachment, terminal outcome
 
 ### Workflows and runs
 
@@ -230,7 +238,7 @@ _Avoid_: live completion stream, Conversation
 
 **Blocked Workflow Run**:
 A nonterminal Workflow Run waiting for its complete requested Turn set before another Evaluation Generation.
-_Avoid_: Input Required, retained JavaScript
+_Avoid_: Permission Required, retained JavaScript
 
 **Turn Output**:
 The bounded workflow-visible value produced by one successful Turn Outcome.
@@ -240,12 +248,12 @@ _Avoid_: Workflow Output, Tool Result, provider response
 The bounded strict-data value durably committed with a completed Workflow Run.
 _Avoid_: Turn Output, Final Answer
 
-**Run Service**:
-The protocol-independent interface for creating, inspecting, advancing, responding to, cancelling, and reading content from Workflow Runs.
-_Avoid_: CLI, Harness, daemon, wire protocol
+**Run API**:
+The narrow typed caller-facing boundary of the Host Runtime for admitting Run work, inspecting current Run state, driving progress, deciding permission, interrupting one exact Model Operation, cancelling a Run, and reading content.
+_Avoid_: Run Service, CLI, daemon, wire protocol
 
 **Run Snapshot**:
-A committed revisioned read model derived from canonical Run, Turn, Session, interaction, and effect facts.
+A current committed read model derived from canonical Run, Turn, Session, permission, and effect facts. Its revision can guard inspection but does not promise historical reconstruction.
 _Avoid_: durable authority, event stream, Harness Projection
 
 ### Runtime and storage
@@ -283,9 +291,9 @@ Memory intentionally consumed by a model-requested process and its descendants.
 _Avoid_: Orchestration Memory, subprocess output capture
 
 **Content Reference**:
-An opaque identity for complete immutable bounded content stored in the Host Store.
+An opaque identity for complete immutable content stored in the Host Store with its exact length and digest.
 _Avoid_: Workspace path, preview, transient file
 
 **Binding Digest**:
-A typed domain-separated digest that binds exact bytes for one identity, authorization, dispatch, or reconciliation role.
+A typed domain-separated digest that binds exact bytes for one identity, content, authorization, or reconciliation role.
 _Avoid_: identifier, authentication tag, tamper proof
