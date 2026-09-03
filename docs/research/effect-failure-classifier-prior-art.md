@@ -15,9 +15,9 @@ typed reason codes beneath them:
 1. `defer_without_attempt` — local capacity is unavailable, so no Attempt is admitted.
 2. `reattempt_same_operation` — a completed model Attempt is safe and authorized to retry later
    using the exact Model Request Manifest.
-3. `resolve_operation` — select the Operation's semantic result and atomically publish its bounded
-   consequence: a Tool Result, an ordinary follow-up Model Operation carrying a validation
-   diagnostic, or a failed Turn Outcome when no legal continuation remains.
+3. `resolve_operation` — select the Operation's semantic result and atomically publish its already
+   defined bounded consequence, such as a Tool Result or failed Turn Outcome when no legal
+   continuation remains. This research does not define another model-visible input primitive.
 4. `stop_host` — the sole semantic store or shared runtime machinery is unusable, so OnePage cannot
    safely admit or settle work.
 
@@ -39,7 +39,7 @@ Each command-specific pure decision should select a fixed relational command, no
 | --- | --- | --- |
 | No Active Credit | `defer_without_attempt` | Insert nothing; Operation remains eligible. |
 | Retryable model transport/provider result and retry policy remains | `reattempt_same_operation` | Commit the Attempt Completion and durable `eligible_at`; leave the Operation unresolved. |
-| Model-addressable output rejection | `resolve_operation` | Commit Completion + Resolution + one ordinary follow-up Model Operation whose new manifest carries a bounded validation diagnostic. |
+| Potentially model-addressable output rejection | `resolve_operation` | Commit Completion + Resolution. #91 must separately decide whether V1 has an existing canonical input that can authorize another Model Operation; do not invent an implicit validation diagnostic here. |
 | Definite or indeterminate Action observation | `resolve_operation` | Commit Completion + Resolution + typed Tool Result; the Agent chooses any later Action. |
 | Retry/repair/work bound exhausted | `resolve_operation` | Resolve the current Operation and commit a typed failed Turn Outcome; Session remains reusable. |
 | Persistent loss of Host Store usability or fatal shared-runtime invariant | `stop_host` | Admit and launch nothing further; manufacture no Turn outcome; recover from SQLite on restart. |
@@ -96,10 +96,10 @@ using a fresh identity
 [Stripe advanced error handling](https://docs.stripe.com/error-low-level)).
 
 That distinction matches OnePage's Operation boundary. An output-size or known model-output contract
-violation that the model can correct should resolve the old model Operation and create one ordinary
-follow-up Model Operation whose new manifest carries a bounded validation diagnostic. This is not a
-new Operation kind or domain entity. Silently changing the old manifest would turn correction into
-an unrecorded retry mutation.
+violation should resolve the old model Operation. Whether V1 can then admit another Model Operation
+depends on an independently defined canonical input; this research does not manufacture a
+validation-diagnostic input. Silently changing the old manifest would turn correction into an
+unrecorded retry mutation.
 
 The phrase "model response violates OnePage's contract" is too broad, however. Only a
 **model-addressable** rejection belongs here. An unsupported provider wire shape, digest failure,
@@ -244,10 +244,10 @@ Accidental for V1:
 3. **A retryable Completion must not resolve the Operation.** Once retry policy is exhausted, the same
    transaction must resolve the model Operation and fail the Turn; otherwise the relational graph has
    an exhausted unresolved Operation.
-4. **Model-addressable rejection is narrower than validation failure.** Only errors with safe,
-   actionable model feedback create an ordinary follow-up Model Operation carrying a bounded
-   validation diagnostic. Provider incompatibility, corrupt content, and runtime invariants take
-   different paths.
+4. **Potentially model-addressable rejection is narrower than validation failure.** #91 must decide
+   whether any existing canonical input can carry safe actionable feedback before admitting another
+   Model Operation. Provider incompatibility, corrupt content, and runtime invariants take different
+   paths; this research adds no validation-diagnostic primitive.
 5. **Tool diagnostics are bounded semantic content.** Raw stderr, rejected model output, provider
    prose, and scratch artifacts do not automatically become Conversation entries.
 6. **BUSY and constraints are not Host-fatal.** Classify exact SQLite extended codes and distinguish

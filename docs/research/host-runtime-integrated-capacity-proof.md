@@ -1,5 +1,7 @@
 # Integrated Host Runtime capacity proof
 
+> Decision status: this disposable proof measured a serial Patch-lane topology that ADR-0021 later simplified. The normative design has no permanent Patch lane; Bash and Patch share a typed Action lifecycle and temporary execution custody under Active Capacity. The measurements below remain historical evidence for the other disk-first runtime claims.
+
 Date: 2026-09-02
 
 Status: architecture recommendation from the disposable issue #67 prototype.

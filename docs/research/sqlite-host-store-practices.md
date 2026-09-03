@@ -1,10 +1,11 @@
 # SQLite Host Store practices
 
-This note records which mature storage patterns OnePage adopts for the V1 Host Store. It is
-implementation guidance, not a new durability claim; the normative contract remains in
-`ARCHITECTURE.md` and `VERIFICATION.md`.
+This note records mature storage patterns considered for the V1 Host Store. Issue #95 owns the
+still-unsettled SQLite settings and command-work limits; concrete numeric values below, including
+4 KiB pages, are evidence to evaluate rather than adopted V1 policy. The normative contract remains
+in `ARCHITECTURE.md` and `VERIFICATION.md`.
 
-## Adopt directly
+## Candidate practices
 
 - Identify the file twice: SQLite's `application_id` marks an application file format in the database
   header, while OnePage's transactional identity row carries the independent schema version

@@ -4,6 +4,8 @@ Date: 2026-09-02
 
 Status: research comparison, not a normative contract. Primary sources only.
 
+> Current decision: ADR-0021 no longer retains the serial Patch lane described and measured below. Bash and Patch share a typed Action lifecycle, may execute concurrently under Active Capacity, and use temporary execution custody observed by the common I/O Reactor. The earlier topology remains historical evidence.
+
 ## Verdict
 
 The proposed OnePage Host Runtime follows mature physical-runtime patterns and
