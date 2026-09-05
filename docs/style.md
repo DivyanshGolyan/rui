@@ -71,7 +71,7 @@ bounded syntax ──► BEGIN IMMEDIATE ──► bounded Decision Snapshot
                ──► exact row counts ──► COMMIT ──► release consequence
 ```
 
-The same bounded loader and classifier serve inspection and advancement. A post-commit preparation failure records evidence for the admitted Attempt; it cannot erase durable authority. Retry eligibility uses only the bounded SQLite poll. Other intra-Host wakes may request a rescan of live Physical Custody, but never carry semantic facts or trigger delayed retries. Sleep when no work or required deadline/poll is due; do not add an empty-table scan timer. Before starting another queued inspection, give ready controls a bounded turn through the existing driving path. Keep a capture already in progress atomic as a read view; no extra scheduler or reader is implied.
+The same bounded loader and classifier serve inspection and advancement. A post-commit preparation failure records evidence for the admitted Attempt; it cannot erase durable authority. Retry eligibility uses only the bounded SQLite poll. Other intra-Host wakes may request a rescan of live Physical Custody, but never carry semantic facts or trigger delayed retries. Sleep when no work or required deadline/poll is due; do not add an empty-table scan timer. Before starting another queued inspection, give ready controls and ordinary settlement/advancement work bounded turns through the existing driving path, without draining either class indefinitely. Encode and escape report fields through fixed-size windows and block writes; permitted strings may span windows. Keep a capture already in progress atomic as a read view; no extra scheduler or reader is implied.
 
 ## Deep modules
 
