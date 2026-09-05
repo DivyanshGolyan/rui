@@ -1,5 +1,7 @@
 # Shutdown, cancellation, and recovery priors
 
+> **Historical evidence published 6 September 2026.** The observations and recommendations below retain their investigation context. Subsequent accepted decisions and retired implementation tickets do not change the measured results; this publication makes no production-certification claim.
+
 Research date: 2026-09-05.
 
 Decision status: evidence only. This note informs [Choose live Host ownership and cross-process command semantics](https://github.com/DivyanshGolyan/onepage/issues/100); it does not approve a OnePage shutdown policy. Research is tracked in [Research shutdown, cancellation, and recovery contracts across execution systems](https://github.com/DivyanshGolyan/onepage/issues/107).

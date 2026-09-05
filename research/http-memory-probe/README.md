@@ -1,5 +1,7 @@
 # Throwaway local HTTP memory probe
 
+> **Historical evidence published 6 September 2026.** The observations and recommendations below retain their investigation context. Subsequent accepted decisions and retired implementation tickets do not change the measured results; this publication makes no production-certification claim.
+
 Question: does a small native local HTTP interface introduce material memory
 overhead before OnePage chooses its client-server transport?
 

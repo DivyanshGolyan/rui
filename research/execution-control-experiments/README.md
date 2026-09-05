@@ -1,5 +1,7 @@
 # Execution-control experiments
 
+> **Historical evidence published 6 September 2026.** The observations and recommendations below retain their investigation context. Subsequent accepted decisions and retired implementation tickets do not change the measured results; this publication makes no production-certification claim.
+
 Throwaway evidence from 5 September 2026. These probes answer narrow design questions; they are not production code or release certification. No paid LLM calls or application Stores were used. The work is isolated on `codex/execution-control-experiments`, based on repository commit `3bdadc8` and the subsequent accepted [Session/cancellation design](https://github.com/DivyanshGolyan/onepage/issues/101#issuecomment-5550876667). The baseline still implements the older runtime; these probes must not become a second implementation.
 
 ## Results and recommended decisions
