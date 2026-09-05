@@ -32,6 +32,10 @@ A bounded read-only scan covered 20 recent local Codex sessions, 51.1 MB of JSON
 
 This is recent coding activity, including experiment/fork history, rather than an unbiased production distribution. Semantic transcripts are not raw provider streams, and nontext content is not represented by those text sizes. Large tool-output values do not imply equally large resident windows. Claude transcripts were unnecessary for these experiments.
 
+## Inspection follow-up
+
+The [completed inspection-latency experiment](inspection-latency/README.md) adds 72 fresh-process observations comparing fixed-buffer encoding, turns for ready settlements, and cooperative abort budgets. It supports the simple encoder and bounded turns between captures; strict deadlines and acceptable report-failure behavior remain open. This later evidence does not change the earlier measurements below.
+
 ## Evidence and reproduction
 
 - [Parser](parser/README.md): 23 checks, 47 measurements; malformed late input and failed-import rollback; pinned SQLite; actual historical Capture eligibility measured separately.
