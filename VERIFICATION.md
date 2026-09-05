@@ -82,6 +82,8 @@ The relational settlement matrix covers all combinations used by recovery. `Comp
 
 Streaming fixtures prove that the I/O Reactor writes provider and Bash bytes directly to dynamically charged, immediately unlinked scratch through fixed borrowed windows. No per-Attempt candidate, parser, request, response, or output buffer scales with Active Capacity. Complete model output is parsed once after terminal seal in the shared serial validation/import workspace. Post-commit request-materialization failure becomes evidence for the admitted Attempt.
 
+Post-seal parser fixtures vary payload length and output-item count independently. Prove bounded resident parser/validation state, scratch-backed range metadata when cardinality grows, exact preservation of required provider bytes, and incremental import after complete provider validation. Cover fragmented and escaped input, opaque continuation and unknown fields under the adapter contract, a malformed final item, scratch exhaustion, and rollback after an initial content write. No partial semantic success, incomplete content reference, or recoverable range index may escape. Exercise the real adapter and settlement transaction: syntactic JSON validity and the narrow experimental validator do not establish full provider or output-schema correctness. Preserve the existing effect/recovery fixtures and add cases at actual missing boundaries rather than a parallel recovery framework.
+
 Storage failure injection covers full, I/O, allocation, corrupt content, foreign reference, wrong digest, and transaction rollback. SQLite faults expose neither half a semantic relation nor content without its first reference.
 
 ## User Messages and permission
@@ -273,6 +275,8 @@ Measurements report whole-process RSS and each independent axis:
 - SQLite heap, database bytes, journal bytes, and writes;
 - Workflow Evaluator heap, bridge memory, process RSS, and replay count;
 - immutable content, unlinked-scratch logical and physical bytes, filesystem-cache pressure, and raw-plus-canonical overlap.
+
+SQLite memory evidence records the pinned version/build, requested and effective cache size, effective spill threshold in pages, page size, heap-limit readback and enforcement prerequisites, and allocation/page-cache high-water and spill counts across incremental imports of increasing size. Include a diagnostic spill-disabled control that exposes dirty-page growth and a supported-spill case that completes larger-than-cache imports under the selected heap budget. Test allocation failure and rollback through the actual Store boundary without publishing partial content or semantic success. Distinguish SQLite-accounted memory from whole-process and filesystem-cache costs; the experimental heap/cache values are not production defaults. Publication of a passing pinned-build prototype does not certify the integrated importer.
 
 Required population points are 0, 100, 1,000, and 10,000 Dormant Sessions at fixed capacity, then Active Capacity 1, 10, 50, and 100 at fixed durable population. Repeated 0→capacity→0 churn must return resident orchestration memory to the same bounded envelope. Terminal Turn population adds durable bytes rather than resident execution objects. At each active point, report end-to-end Turn latency, provider and tool overhead, evaluator replay, SQLite transaction cost, and throughput alongside memory and OS-resource measurements.
 
