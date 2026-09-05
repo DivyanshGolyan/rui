@@ -1,0 +1,112 @@
+{
+  "captured_at": "2026-09-05T17:54:51.517155+00:00",
+  "source_checkout": "/Users/divyanshgolyan/code/personal/onepage",
+  "source_head": "3bdadc8395716e587f3da11f0b85ecdb3b91274a",
+  "note": "Working-copy contract snapshot; production source remains historical. Experiments are not production certification.",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "47c408808014bb9931310c6ced0070dfa4944e958aed494e6472cc49e2e8fe70"
+    },
+    {
+      "path": "PRODUCT.md",
+      "sha256": "85762493ddc8922360a2bda2952f920caf54be0645ea60341e5d50da0d78c75e"
+    },
+    {
+      "path": "CONTEXT.md",
+      "sha256": "d74d6be803d0fe7e5835dc896992c372f32e164f5136ef9115046cd820909942"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "sha256": "aaa57d230ed8c0c069ec0e17a764040a306917f739b3650b58aea48214eceb3f"
+    },
+    {
+      "path": "VERIFICATION.md",
+      "sha256": "9bb0cc0e7a00650186ec5ef5213e370e73e5a07664fa37eb63f44e7fedc3bcbb"
+    },
+    {
+      "path": "docs/style.md",
+      "sha256": "4738e342a97cc9a6d4d216d656272c0b3975a6128e59509224d051860ce9d8e0"
+    },
+    {
+      "path": "AGENTS.md",
+      "sha256": "d98770a0362a95698a0f01d0ecc8795c9902b27a76ee01c61c2d4ecfacfbb45e"
+    },
+    {
+      "path": "docs/adr/0010-make-simplicity-a-v1-requirement.md",
+      "sha256": "0db5758a55275ea21df97d274f808e7fce18316c3b2a932f37bbc09f899b37c9"
+    },
+    {
+      "path": "docs/adr/0011-size-the-activation-slot-from-bounded-needs.md",
+      "sha256": "e1a75b0aa6fa65d6a780085761a5ece83d37b9230a46fa8bb46ae37be570613c"
+    },
+    {
+      "path": "docs/adr/0012-separate-model-tool-contracts-from-execution.md",
+      "sha256": "113af6ebcd38eaf6cc81cbd74415863a1900ee637540be7e92364e6be8ce78ac"
+    },
+    {
+      "path": "docs/adr/0013-bound-orchestration-memory-not-workload-memory.md",
+      "sha256": "09e9097429ea0c9e045d28385df560ef0790e60422d4e8c8f0911d43fc28be82"
+    },
+    {
+      "path": "docs/adr/0014-use-ephemeral-quickjs-for-workflow-evaluation.md",
+      "sha256": "8a77fa54a7afb8ce07074009a650bfd3441c3433d5329d205b84803105f5fb62"
+    },
+    {
+      "path": "docs/adr/0015-expose-a-protocol-independent-run-service.md",
+      "sha256": "cc1397c7afe0e8662181a1caa7b73a6a842dcb244041bb6f4a35b43af19006d5"
+    },
+    {
+      "path": "docs/adr/0016-separate-captured-output-from-semantic-admission.md",
+      "sha256": "8eaa4c0a4915aea5685b7999b2815220b9edaec5e7708593c6ed2de7d6aed32c"
+    },
+    {
+      "path": "docs/adr/0017-bound-v1-configuration-and-trust.md",
+      "sha256": "83a91d99f00492ab0658e4d98586eaf9a9e459bc1a6d5389cf2d62464a932bb7"
+    },
+    {
+      "path": "docs/adr/0018-use-sqlite-as-the-sole-durable-content-store.md",
+      "sha256": "23041395d2c32ee9a02c6e4423e7331ff3c78ee3b758daed03ab956fb3e87816"
+    },
+    {
+      "path": "docs/adr/0019-use-relational-session-turn-authority.md",
+      "sha256": "33606cb039fc7a81d74b58ca68a3828a65033d0ee9840c2cb2d646a51320c060"
+    },
+    {
+      "path": "docs/adr/0020-version-model-visible-context-sparsely.md",
+      "sha256": "481d0625edfedf904aa60770d37d775cf48cecfaffee463b107cdcd520b5d7ae"
+    },
+    {
+      "path": "docs/adr/0021-use-a-disk-first-bounded-host-runtime.md",
+      "sha256": "b79a9da0a26b1d0057e309192c23cb4c06de7ad40c81f3951de253b2accc6494"
+    },
+    {
+      "path": "docs/adr/0022-expose-runs-through-the-host-runtime-api.md",
+      "sha256": "602f0833aa923a9b7ae1e33b308b5e73b4394caa4f572c335739b1a8bce007bd"
+    },
+    {
+      "path": "docs/adr/0023-preserve-provider-replay-without-silent-degradation.md",
+      "sha256": "524060f227f076d2898a0f78d4f070fde185ddfd76e5f15600f66e997db81682"
+    },
+    {
+      "path": "docs/adr/0024-capture-run-inspection-before-delivery.md",
+      "sha256": "557b83ad81ffd2a9b345897a8bf9e070818b434b26e60ffbbf0156ce71992a1d"
+    },
+    {
+      "path": "docs/design/execution-control-simplicity.md",
+      "sha256": "ad2727deacc94806eab5f48587b83e4296db9ac4ffb3a47394d5e3dc621a9048"
+    },
+    {
+      "path": "docs/design/system-instruction-first-inclusion.md",
+      "sha256": "4d7e816f650771ef2ef26d075373efea348d2ef8a5be4d1c3a9579c639e6e607"
+    },
+    {
+      "path": "docs/design/turn-contract-removal.md",
+      "sha256": "2028ed1c320ca25e03340d8310d31bc7d0862d2dfa19ecde9a821c6631ccad6f"
+    },
+    {
+      "path": "docs/design/workflow-cancellation-stop-mapping.md",
+      "sha256": "935fef7149bdb057f5ba6ed81383965a91830598801e98e9da4801e2290b049f"
+    }
+  ]
+}
