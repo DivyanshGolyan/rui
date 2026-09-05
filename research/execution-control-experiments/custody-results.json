@@ -1,0 +1,2580 @@
+{
+  "created_utc": "2026-09-05T17:03:17.380257+00:00",
+  "environment": {
+    "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+    "hardware": "MacBookPro18,1",
+    "memory_bytes": 17179869184,
+    "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+    "baseline": "3bdadc8395716e587f3da11f0b85ecdb3b91274a"
+  },
+  "kind": "throwaway protocol fixture",
+  "repetitions_per_variant": 10,
+  "builds": [
+    {
+      "sqlite_package": "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
+      "sqlite_flags": [
+        "-DSQLITE_THREADSAFE=0",
+        "-DSQLITE_DEFAULT_PAGE_SIZE=4096",
+        "-DSQLITE_MAX_DEFAULT_PAGE_SIZE=4096",
+        "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
+        "-DSQLITE_DEFAULT_MMAP_SIZE=0",
+        "-DSQLITE_MAX_MMAP_SIZE=0",
+        "-DSQLITE_DEFAULT_SYNCHRONOUS=3",
+        "-DSQLITE_DQS=0",
+        "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+        "-DSQLITE_OMIT_SHARED_CACHE=1",
+        "-DSQLITE_TEMP_STORE=1",
+        "-DSQLITE_USE_URI=0",
+        "-DSQLITE_ENABLE_API_ARMOR=1"
+      ],
+      "sanitized": false
+    },
+    {
+      "sqlite_package": "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
+      "sqlite_flags": [
+        "-DSQLITE_THREADSAFE=0",
+        "-DSQLITE_DEFAULT_PAGE_SIZE=4096",
+        "-DSQLITE_MAX_DEFAULT_PAGE_SIZE=4096",
+        "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
+        "-DSQLITE_DEFAULT_MMAP_SIZE=0",
+        "-DSQLITE_MAX_MMAP_SIZE=0",
+        "-DSQLITE_DEFAULT_SYNCHRONOUS=3",
+        "-DSQLITE_DQS=0",
+        "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+        "-DSQLITE_OMIT_SHARED_CACHE=1",
+        "-DSQLITE_TEMP_STORE=1",
+        "-DSQLITE_USE_URI=0",
+        "-DSQLITE_ENABLE_API_ARMOR=1"
+      ],
+      "sanitized": true
+    }
+  ],
+  "runs": [
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 0,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 1,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 2,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 3,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 4,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 5,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 6,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 7,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 8,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 9,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 0,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 1,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 2,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 3,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 4,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 5,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 6,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 7,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 8,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 9,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 0,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 1,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 2,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 3,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 4,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 5,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 6,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 7,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 8,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 9,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 0,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 1,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 2,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 3,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 4,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 5,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 6,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 7,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 8,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 9,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 0,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 1,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 2,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 3,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 4,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 5,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 6,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 7,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 8,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 9,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 0,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 1,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 2,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 3,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 4,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 5,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 6,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 7,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 8,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 9,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 0,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 1,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 2,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 3,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 4,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 5,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 6,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 7,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 8,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 9,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 0,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 1,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 2,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 3,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 4,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 5,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 6,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 7,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 8,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": false,
+      "repetition": 9,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 0,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 1,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 2,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 3,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 4,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 5,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 6,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 7,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 8,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": false,
+      "repetition": 9,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 0,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 1,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 2,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 3,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 4,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 5,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 6,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 7,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 8,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "rollback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 9,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS rollback",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 0,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 1,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 2,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 3,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 4,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 5,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 6,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 7,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 8,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 9,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS commit-before-dispatch",
+      "stderr": ""
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 0,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 1,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 2,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 3,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 4,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 5,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 6,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 7,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 8,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "commit-before-dispatch",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 9,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: recovery must not fabricate a Dispatch Permit"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 0,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 1,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 2,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 3,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 4,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 5,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 6,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 7,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 8,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 9,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS uncertain-external",
+      "stderr": ""
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 0,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 1,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 2,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 3,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 4,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 5,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 6,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 7,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 8,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "uncertain-external",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 9,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: uncertain Bash must not get a blind replacement Attempt"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 0,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 1,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 2,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 3,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 4,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 5,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 6,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 7,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 8,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 9,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS cancel-before-cleanup",
+      "stderr": ""
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 0,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 1,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 2,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 3,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 4,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 5,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 6,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 7,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 8,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "cancel-before-cleanup",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 9,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: cannot reserve slot while old executor retains pipes/resources"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 0,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 1,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 2,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 3,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 4,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 5,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 6,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 7,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 8,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": false,
+      "sanitized": true,
+      "repetition": 9,
+      "returncode": 0,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}\nPASS stale-callback",
+      "stderr": ""
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 0,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 1,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 2,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 3,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 4,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 5,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 6,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 7,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 8,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    },
+    {
+      "scenario": "stale-callback",
+      "broken": true,
+      "sanitized": true,
+      "repetition": 9,
+      "returncode": 2,
+      "passed": true,
+      "observed_sqlite_pragmas": {
+        "journal_mode": "delete",
+        "synchronous": 3
+      },
+      "stdout": "{\"journal_mode\":\"delete\",\"synchronous\":3}",
+      "stderr": "ASSERTION: delayed old callback must not settle newer Attempt"
+    }
+  ],
+  "summary": {
+    "total_runs": 180,
+    "safe_runs_passed": 100,
+    "negative_controls_detected": 80,
+    "all_passed": true
+  }
+}
