@@ -1,0 +1,30 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 0 and seed 1 with 1 worker on 10 cores with 455MB heap and 64MB offheap memory [pid: 38304] (Mac OS X 15.7.7 aarch64, Homebrew 17.0.19 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-session-tlc-zgevb41f/SessionTerminal.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/Naturals.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/Sequences.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/FiniteSets.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/TLC.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module SessionTerminal
+Starting... (2026-09-05 13:30:04)
+Implied-temporal checking--satisfiability problem has 5 branches.
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-05 13:30:04.
+Checking 5 branches of temporal properties for the current state space with 88630 total distinct states at (2026-09-05 13:30:07)
+Finished checking temporal properties in 00s at 2026-09-05 13:30:08
+Progress(19) at 2026-09-05 13:30:08: 36,647 states generated (36,647 s/min), 17,726 distinct states found (17,726 ds/min), 2,845 states left on queue.
+Progress(28) at 2026-09-05 13:30:10: 69,625 states generated, 29,144 distinct states found, 0 states left on queue.
+Checking 5 branches of temporal properties for the complete state space with 145720 total distinct states at (2026-09-05 13:30:10)
+Finished checking temporal properties in 01s at 2026-09-05 13:30:11
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 6.4E-11
+69625 states generated, 29144 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 28.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 7 and the 95th percentile is 3).
+Finished in 07s at (2026-09-05 13:30:11)

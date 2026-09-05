@@ -3,3 +3,7 @@ zig-out/
 zig-pkg/
 snapshots/
 consults/
+
+# Generated Python bytecode
+__pycache__/
+*.py[cod]

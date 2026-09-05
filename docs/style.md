@@ -23,10 +23,14 @@ When rules compete, decide in this order:
 
 A change violates this rule when it adds a Session Ledger, reducer image, continuation blob, cached phase, shadow frontier, second durable store, or resident graph that can disagree with canonical rows.
 
+## Design and implementation planning
+
+During the design phase, normative documents own accepted requirements and open decision/research issues own unanswered questions. Amend the owning document when a decision is accepted; retain historical discussions and experiments as evidence. Do not maintain speculative implementation tickets as another copy of the design. Once the V1 contract is aligned, create bounded implementation slices with links to the contract and concrete verification. Exact schema/encoding mechanics may be chosen during implementation where behavior is already determined. A superseded planning ticket is not completed implementation.
+
 ## Freeze at the boundary
 
 - Record persistent model-visible defaults as sparse Session Context Revisions.
-- Resolve one immutable Turn Contract when an initiating User Message starts a Turn.
+- Keep supplied runtime information in its instruction/tool records, exact permission provenance on Action admission, and any retained execution limit on the scope it constrains. Do not resolve a separate Turn Contract or generic runtime-facts bag at message admission.
 - Bind one immutable Model Request Manifest to each model Operation.
 - Reuse that manifest for replacement Attempts.
 - Late-bind only credentials, transport handles, sockets, and other non-semantic mechanisms.
@@ -47,10 +51,10 @@ Keep context components typed and closed for current consumers. Do not store a m
 ## External effects
 
 - Prepare and validate exact immutable dispatch descriptors before permission or Attempt admission; validate streamed evidence after its terminal seal.
-- Reserve one content-free Physical Custody record before opening the dispatching write transaction; its occupancy is the Active Credit, not a second allocation.
+- Reserve one content-free in-memory Physical Custody record before opening the dispatching write transaction; its occupancy is the Active Credit, not a second allocation. Use the startup-sized table and ordinary bounded scans, without a duplicate SQLite slot table, free list, or active-record index. Return rolled-back reservations and retain occupied records through physical cleanup; exact identity checks reject stale events after reuse.
 - Commit Attempt admission before physical launch.
 - Return a one-shot Dispatch Permit only to the invocation that observed the Attempt commit; never reconstruct or store it.
-- Keep SQLite transactions closed during request materialization, network or subprocess I/O, filesystem mutation, and response streaming.
+- Keep SQLite transactions closed during request materialization, network or subprocess I/O, filesystem mutation, and response streaming. The sole exception is the inspection read transaction spanning its private report-scratch writes under [ADR-0024](adr/0024-capture-run-inspection-before-delivery.md); delivery remains outside the transaction.
 - Stream variable content through fixed borrowed windows to dynamically charged, immediately unlinked scratch.
 - Parse complete output only after terminal seal in the one shared serial validation/import workspace.
 - Treat Completion as observed evidence and Resolution as selected meaning.
@@ -67,7 +71,7 @@ bounded syntax ──► BEGIN IMMEDIATE ──► bounded Decision Snapshot
                ──► exact row counts ──► COMMIT ──► release consequence
 ```
 
-The same bounded loader and classifier serve inspection and advancement. A post-commit preparation failure records evidence for the admitted Attempt; it cannot erase durable authority. Retry eligibility uses only the bounded SQLite poll. Other intra-Host wakes may request a rescan of live Physical Custody, but never carry semantic facts or trigger delayed retries.
+The same bounded loader and classifier serve inspection and advancement. A post-commit preparation failure records evidence for the admitted Attempt; it cannot erase durable authority. Retry eligibility uses only the bounded SQLite poll. Other intra-Host wakes may request a rescan of live Physical Custody, but never carry semantic facts or trigger delayed retries. Sleep when no work or required deadline/poll is due; do not add an empty-table scan timer. Before starting another queued inspection, give ready controls a bounded turn through the existing driving path. Keep a capture already in progress atomic as a read view; no extra scheduler or reader is implied.
 
 ## Deep modules
 

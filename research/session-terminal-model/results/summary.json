@@ -1,0 +1,114 @@
+{
+  "jar_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model_sha256": "068c08f7eb9795fcce5bb4b16bc0629ce4941483f759bc621ffa0d5fd403ce6b",
+  "cases": {
+    "correct": {
+      "expected_violation": null,
+      "actual_violation": null,
+      "exit_code": 0,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        69625,
+        29144,
+        0
+      ],
+      "config_sha256": "8656c10c53980e6392fb4e2ee42b06082f707b41d38d657049ecb250aa1356a8"
+    },
+    "progress": {
+      "expected_violation": null,
+      "actual_violation": null,
+      "exit_code": 0,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        69625,
+        29144,
+        0
+      ],
+      "config_sha256": "4c62639b86a882118d0476911a6e8f05cb4493995898e872ac39c0a202fb7537"
+    },
+    "broken-carry": {
+      "expected_violation": "ExcludedNeverApplied",
+      "actual_violation": "ExcludedNeverApplied",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        127,
+        105,
+        52
+      ],
+      "config_sha256": "be37ea0405831cfb0b45f9fb5246dcd25c60205ad7cbe6d47a47284c085bd47d"
+    },
+    "broken-disposition": {
+      "expected_violation": "ExcludedNeverApplied",
+      "actual_violation": "ExcludedNeverApplied",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        23,
+        23,
+        14
+      ],
+      "config_sha256": "6dc5fb7034c3a76bd469f6208ccb86bf7926334f34d6f203dfdbe7fbed11ef83"
+    },
+    "broken-late-result": {
+      "expected_violation": "NoLateAcceptance",
+      "actual_violation": "NoLateAcceptance",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        174,
+        138,
+        69
+      ],
+      "config_sha256": "e93bef3c88c9cc8718200c545349effc482cde38ad74d9737b6807986795c785"
+    },
+    "witness-failed-continuation": {
+      "expected_violation": "NoFailedContinuationWitness",
+      "actual_violation": "NoFailedContinuationWitness",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        253,
+        198,
+        92
+      ],
+      "config_sha256": "f29171a201d7d328ca5b3c06865fd2d39139c1300b1f5d4307e4a50c1039e3eb"
+    },
+    "witness-stopped-continuation": {
+      "expected_violation": "NoStoppedContinuationWitness",
+      "actual_violation": "NoStoppedContinuationWitness",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        264,
+        207,
+        95
+      ],
+      "config_sha256": "adf07da97a360159c42e435806d26706a917e2a82f2dc957d8e11f71bf2bc879"
+    },
+    "witness-crash-recovery": {
+      "expected_violation": "NoCrashRecoveryWitness",
+      "actual_violation": "NoCrashRecoveryWitness",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        368,
+        280,
+        127
+      ],
+      "config_sha256": "28e896f3d37011736fba4aec56bbaeb07567aa26df0cfd4beed43723e597f8ad"
+    },
+    "witness-late-after-continuation": {
+      "expected_violation": "NoLateAfterContinuationWitness",
+      "actual_violation": "NoLateAfterContinuationWitness",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        2561,
+        1720,
+        618
+      ],
+      "config_sha256": "751d5567a0f96b2b703025191a0f58a5b87b8b13e39fb65afcaae3880e5ea00b"
+    }
+  }
+}

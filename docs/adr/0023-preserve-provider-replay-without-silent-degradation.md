@@ -4,6 +4,12 @@ status: accepted
 
 # Preserve provider continuation without duplicate replay authority
 
+## Accepted amendment — System Instructions in Conversation
+
+The [Session decision](https://github.com/DivyanshGolyan/onepage/issues/101#issuecomment-5550876667) adds System Instruction as a fifth Conversation Entry kind. Appended instructions are visible alongside user messages, assistant replies, and tool results, with immutable ordering and content. They are host/operator inputs, not model-output projections, and grant no Action Authorization. Provider-only reasoning remains private Completion-owned content. First inclusion commits atomically with its assistant-response request; exact storage/wire encoding remains implementation work. This supersedes only the four-kind enumeration in the original decision below; the continuation ownership and no-duplicate-content rules remain in force.
+
+## Original decision
+
 Conversation remains OnePage's complete four-kind semantic history, but visible Conversation alone may be insufficient to preserve provider reasoning continuity. Each model Attempt Completion therefore owns one ordered canonical set of Model Output Items. Each item retains its supported semantic fields, provider-only continuation fields—including opaque or encrypted reasoning and compaction values—and response-evidence fields exactly once. Conversation references the same supported semantic content. A provider adapter derives any later replay-input view by stripping response-only or non-replayable fields; OnePage stores neither a Provider Replay Receipt nor a complete serialized request body as second authority.
 
 Unknown open fields inside a known record are preserved. An unknown consequential union discriminator is preserved as Completion evidence but resolves as `unsupported_provider_output`; it publishes no Conversation, continuation, or effect consequence. Generic content reads never expose private continuation material. Raw HTTP or SSE capture remains temporary scratch and is deleted after successful canonical import.

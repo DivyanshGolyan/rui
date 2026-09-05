@@ -1,0 +1,62 @@
+{
+  "scope": "Existing native evaluator only. Visible outcomes are fixture inputs; session is ordinary input data.",
+  "probe_sha256": "d1260109e88b9cf540fabc0f38a5e90a6688fbd1d39ce812e9a8aa8783c292e5",
+  "executable_sha256": "8d974987af793506e1f79aceeb1e5b946e49f19402b8b92dc6a998d936228c24",
+  "checks": {
+    "initial_submission": {
+      "blocked": [
+        {
+          "key": "draft",
+          "task": "Draft",
+          "input": {
+            "session": "writer"
+          }
+        }
+      ]
+    },
+    "fresh_evaluator_recovers_draft_for_revision": {
+      "blocked": [
+        {
+          "key": "revise",
+          "task": "Revise",
+          "input": {
+            "draft": "original draft",
+            "session": "writer"
+          }
+        }
+      ]
+    },
+    "both_results_recover_without_new_requests": {
+      "completed": {
+        "draft": "original draft",
+        "revised": {
+          "text": "revised answer"
+        }
+      }
+    },
+    "repeat_completed_evaluation": "passed",
+    "aliases_and_reawait_keep_operation_identity": {
+      "completed": [
+        "A",
+        "B",
+        "A"
+      ]
+    },
+    "cached_turnfailed": {
+      "completed": {
+        "code": "TurnFailed",
+        "key": "draft"
+      }
+    },
+    "cached_turncancelled": {
+      "completed": {
+        "code": "TurnCancelled",
+        "key": "draft"
+      }
+    },
+    "same_evaluation_changed_binding_rejected": {
+      "error_tag": 2,
+      "error": "TurnRequestInvalid"
+    }
+  }
+}
