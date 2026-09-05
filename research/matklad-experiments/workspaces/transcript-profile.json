@@ -1,0 +1,264 @@
+{
+  "recorded_at": "2026-09-05T18:00:00.319149+00:00",
+  "selection": "Up to 20 newest-started files in 2026/09/05 sorted by filename descending, whole-file snapshot sizes fitting an aggregate 100000000-byte cap. Active sessions may have grown afterward. No auth/config files.",
+  "source_format": "Codex semantic JSONL transcripts, not raw provider SSE; response_item records only for payload distributions. Event messages may duplicate semantic content and are excluded from payload stats. Text size counts decoded UTF-8 string bytes, not model tokens or in-memory parser representation.",
+  "files": [
+    {
+      "source_id": "sample-source-01.jsonl",
+      "snapshot_bytes": 712132,
+      "snapshot_sha256": "4c825dc72bc1623c783dd1d374fc86a5ccd8a16cfede453d5e0cb943772b2000",
+      "record_count": 140
+    },
+    {
+      "source_id": "sample-source-02.jsonl",
+      "snapshot_bytes": 1183055,
+      "snapshot_sha256": "455460030d92b3faa609ec33f83216df25a3ae8e6bbc73c45b89ca3bd4937055",
+      "record_count": 111
+    },
+    {
+      "source_id": "sample-source-03.jsonl",
+      "snapshot_bytes": 1112824,
+      "snapshot_sha256": "60908d9694c3e40f3129e15bec1e2e0376cdaa684c91170180e05efbdccf7bb4",
+      "record_count": 155
+    },
+    {
+      "source_id": "sample-source-04.jsonl",
+      "snapshot_bytes": 3012355,
+      "snapshot_sha256": "14790a3618e2ea51a2385b1af1bd7117c9dc27a6a1cf0cd51d2cff0de4848157",
+      "record_count": 346
+    },
+    {
+      "source_id": "sample-source-05.jsonl",
+      "snapshot_bytes": 807397,
+      "snapshot_sha256": "eae8cd7bc5e39a140f24258f339e5bd48a24a61c51537298fb0212d6bad00c1e",
+      "record_count": 281
+    },
+    {
+      "source_id": "sample-source-06.jsonl",
+      "snapshot_bytes": 707156,
+      "snapshot_sha256": "0e30e7cbe892c219027b988b91e0276af8db6287fcf288972afdec3bab976a2b",
+      "record_count": 234
+    },
+    {
+      "source_id": "sample-source-07.jsonl",
+      "snapshot_bytes": 1020965,
+      "snapshot_sha256": "e216959c8b41631029b38b35578472da580a2dc0ae538c49c7f8a1d771f46a91",
+      "record_count": 82
+    },
+    {
+      "source_id": "sample-source-08.jsonl",
+      "snapshot_bytes": 1107543,
+      "snapshot_sha256": "2bcb69e4b12854e09d289b98429f2ae538925bd63ed0634a31b3963b1fe221cb",
+      "record_count": 98
+    },
+    {
+      "source_id": "sample-source-09.jsonl",
+      "snapshot_bytes": 877254,
+      "snapshot_sha256": "0e711934b0d014b47c253233afe68c1b24c039e4e7b643ac97f2e32249b8bde0",
+      "record_count": 145
+    },
+    {
+      "source_id": "sample-source-10.jsonl",
+      "snapshot_bytes": 2866101,
+      "snapshot_sha256": "e868370ad844c57a4ca89d953098c2113cfb4bc4f22a79e5a227b84572b1dfe8",
+      "record_count": 109
+    },
+    {
+      "source_id": "sample-source-11.jsonl",
+      "snapshot_bytes": 737129,
+      "snapshot_sha256": "e7d1ba089af47c98dc73544cdf4bf9e52db517ce6bb0804afd7b5455e34f040f",
+      "record_count": 119
+    },
+    {
+      "source_id": "sample-source-12.jsonl",
+      "snapshot_bytes": 17490840,
+      "snapshot_sha256": "31ce9553a11537bc441282cc6eef3c9c2b36c83dfc76b3f44dbc8e1fa3689604",
+      "record_count": 2877
+    },
+    {
+      "source_id": "sample-source-13.jsonl",
+      "snapshot_bytes": 636101,
+      "snapshot_sha256": "bacc079aeda2ad6ad21c9b0e10cfd9d58375645a5f79c0c3edb51ced32c0e885",
+      "record_count": 154
+    },
+    {
+      "source_id": "sample-source-14.jsonl",
+      "snapshot_bytes": 627202,
+      "snapshot_sha256": "c9c18fa30304c33d3fd2ce44f0fcc1400713c36cb2d87efa5b722e2dc7b214e8",
+      "record_count": 146
+    },
+    {
+      "source_id": "sample-source-15.jsonl",
+      "snapshot_bytes": 563744,
+      "snapshot_sha256": "a201236544f3fa75639226bffe5f73a2b27bd6436e69edc5cac829a2fce76586",
+      "record_count": 135
+    },
+    {
+      "source_id": "sample-source-16.jsonl",
+      "snapshot_bytes": 669652,
+      "snapshot_sha256": "74fdb64b55682a4d74f8ce43ba39fff2cc7ff2c40cdc1160d7e03d152199af8e",
+      "record_count": 123
+    },
+    {
+      "source_id": "sample-source-17.jsonl",
+      "snapshot_bytes": 567855,
+      "snapshot_sha256": "b51995b286c1b1303d66cb8200dbeb53869dac955ef8a36700d0fd9c70695091",
+      "record_count": 66
+    },
+    {
+      "source_id": "sample-source-18.jsonl",
+      "snapshot_bytes": 5661147,
+      "snapshot_sha256": "f109288c06eb2cfcf32697a9a5a7c229a77a5a46b081313c092d78339c73db6b",
+      "record_count": 420
+    },
+    {
+      "source_id": "sample-source-19.jsonl",
+      "snapshot_bytes": 1879353,
+      "snapshot_sha256": "47d0b0748a56729fa15533c36edd05d9089d026b5b4a10c8511c023daae4b4bc",
+      "record_count": 225
+    },
+    {
+      "source_id": "sample-source-20.jsonl",
+      "snapshot_bytes": 8865283,
+      "snapshot_sha256": "78746a2f51b4fdecf7fcb00aae09e8fd98e60e3b30691577ce0dee04e9f63703",
+      "record_count": 2443
+    }
+  ],
+  "input_bytes": 51105088,
+  "invalid_or_partial_lines": 0,
+  "record_types": {
+    "compacted/unknown": 17,
+    "event_msg/item_completed": 2116,
+    "event_msg/task_complete": 296,
+    "event_msg/task_started": 307,
+    "event_msg/thread_settings_applied": 192,
+    "event_msg/token_count": 1019,
+    "event_msg/turn_aborted": 4,
+    "inter_agent_communication_metadata/unknown": 80,
+    "response_item/agent_message": 80,
+    "response_item/custom_tool_call": 648,
+    "response_item/custom_tool_call_output": 647,
+    "response_item/function_call": 143,
+    "response_item/function_call_output": 223,
+    "response_item/message": 722,
+    "response_item/reasoning": 499,
+    "session_meta/unknown": 34,
+    "token_usage_record/unknown": 986,
+    "turn_context/unknown": 324,
+    "world_state/unknown": 72
+  },
+  "payload_statistics": {
+    "custom_tool_call/arguments": {
+      "count": 648,
+      "text_bytes_total": 938038,
+      "text_bytes_p50": 509,
+      "text_bytes_p95": 7116,
+      "text_bytes_max": 36113,
+      "payload_json_bytes_p95": 7618
+    },
+    "custom_tool_call_output/output": {
+      "count": 647,
+      "text_bytes_total": 6791118,
+      "text_bytes_p50": 4617,
+      "text_bytes_p95": 40153,
+      "text_bytes_max": 66580,
+      "payload_json_bytes_p95": 40864
+    },
+    "function_call/arguments": {
+      "count": 143,
+      "text_bytes_total": 73684,
+      "text_bytes_p50": 235,
+      "text_bytes_p95": 1515,
+      "text_bytes_max": 2324,
+      "payload_json_bytes_p95": 1843
+    },
+    "function_call_output/output": {
+      "count": 223,
+      "text_bytes_total": 194470,
+      "text_bytes_p50": 115,
+      "text_bytes_p95": 2144,
+      "text_bytes_max": 21780,
+      "payload_json_bytes_p95": 86807
+    },
+    "message/assistant": {
+      "count": 434,
+      "text_bytes_total": 332454,
+      "text_bytes_p50": 374,
+      "text_bytes_p95": 3038,
+      "text_bytes_max": 6488,
+      "payload_json_bytes_p95": 3361
+    },
+    "message/developer": {
+      "count": 50,
+      "text_bytes_total": 422552,
+      "text_bytes_p50": 2429,
+      "text_bytes_p95": 47065,
+      "text_bytes_max": 47804,
+      "payload_json_bytes_p95": 48051
+    },
+    "message/user": {
+      "count": 238,
+      "text_bytes_total": 162932,
+      "text_bytes_p50": 60,
+      "text_bytes_p95": 4127,
+      "text_bytes_max": 12004,
+      "payload_json_bytes_p95": 4471
+    }
+  },
+  "selected_samples": [
+    {
+      "bytes": 374,
+      "source_id": "sample-source-12.jsonl",
+      "line": 2470,
+      "record_bytes": 760,
+      "payload_json_bytes": 671,
+      "payload_sha256": "02dc527a9abdac9a8cd32b080294707a7c2990568e6ff346111529bf88a77536",
+      "category": "message/assistant",
+      "selection": "assistant_median"
+    },
+    {
+      "bytes": 3038,
+      "source_id": "sample-source-19.jsonl",
+      "line": 198,
+      "record_bytes": 3449,
+      "payload_json_bytes": 3361,
+      "payload_sha256": "f3632c9daeea6796260601016a8239cbe5285585df5020e59901c666d7de9911",
+      "category": "message/assistant",
+      "selection": "assistant_p95"
+    },
+    {
+      "bytes": 36113,
+      "source_id": "sample-source-12.jsonl",
+      "line": 2666,
+      "record_bytes": 36704,
+      "payload_json_bytes": 36615,
+      "payload_sha256": "7ef306bb238bd320cb50fe80d50c576a62475ff946a4a75e9fb95de719c96173",
+      "source_category": "custom_tool_call/arguments",
+      "category": "all_arguments",
+      "selection": "largest_arguments"
+    },
+    {
+      "bytes": 39238,
+      "source_id": "sample-source-02.jsonl",
+      "line": 48,
+      "record_bytes": 39975,
+      "payload_json_bytes": 39888,
+      "payload_sha256": "e0a8ae86db80a700d551bf1ac8053484c6125dab67d62e5ffc5db86a01a4cee9",
+      "source_category": "custom_tool_call_output/output",
+      "category": "all_outputs",
+      "selection": "tool_output_p95"
+    },
+    {
+      "bytes": 66580,
+      "source_id": "sample-source-10.jsonl",
+      "line": 71,
+      "record_bytes": 67552,
+      "payload_json_bytes": 67465,
+      "payload_sha256": "357882ce3ce9d383565cf3086efc809abee64550e2c2d7ad7b63f61fe9c4fbdb",
+      "source_category": "custom_tool_call_output/output",
+      "category": "all_outputs",
+      "selection": "largest_tool_output"
+    }
+  ],
+  "privacy": "Metadata only; no transcript payload copied. Source identifiers, line numbers, sizes and hashes permit local re-extraction into temporary storage."
+}
