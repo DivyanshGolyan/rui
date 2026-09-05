@@ -4,7 +4,7 @@ OnePage is a resource-bounded, crash-resumable local runtime for programmable co
 
 ```text
 Workflow Run
-  └── keyed Turn membership
+  └── keyed Session operations and original results
 
 Session
   ├── linear Conversation
@@ -21,15 +21,23 @@ A Caller supplies a JavaScript Workflow Definition and stable Run Key. One nativ
 
 Sessions are reusable linear Conversations and never terminal. One initiating User Message starts a Turn; later User Messages use the same admission primitive and may extend it at the next assistant-response model-Operation boundary. Internal compaction leaves pending messages untouched. A Permission Decision authorizes or denies one exact proposed Action and is not Conversation content. Turns settle. One model response may produce multiple ordered Tool Calls, each represented as an independently recoverable child Operation.
 
-Persistent model-visible defaults change through sparse Session Context Revisions. Each Turn freezes one Turn Contract, and each model Operation freezes one exact Model Request Manifest. Provider credentials and transport remain late-bound. Compaction changes only the bounded Model Context projection and never rewrites Conversation history.
+Persistent model-visible defaults change through sparse Session Context Revisions. Each new model request selects current Session settings and freezes its exact inputs in a Model Request Manifest. Action admission binds current Permission Mode and exact authorization provenance. No separate Turn Contract is required. Provider credentials and transport remain late-bound. Compaction changes only the bounded Model Context projection and never rewrites Conversation history.
 
-SQLite rows and constraints are canonical authority. OnePage does not retain a second Session Ledger, reducer image, continuation blob, or resident Session graph. The approved Host Runtime streams variable request and response content through bounded memory windows to non-authoritative unlinked scratch, then imports sealed evidence through one shared validation workspace.
+SQLite rows and constraints are canonical authority. Physical execution uses one startup-sized in-memory custody table and ordinary scans; dormant Sessions retain no execution slot. Idle machinery sleeps except for existing event/deadline obligations, including the bounded retry poll. OnePage does not retain a second Session Ledger, reducer image, continuation blob, or resident Session graph. The approved Host Runtime streams variable request and response content through bounded memory windows to non-authoritative unlinked scratch, then imports sealed evidence through one shared validation workspace.
 
 ## Current status
 
 The production source still implements the historical deterministic single-Session runtime, SQLite Host Store, provider-neutral model path, Codex subscription adapter, permissioned Bash and one-file patch execution, effect-specific recovery, and disposable QuickJS evaluator kernel. It does not yet implement the relational Session/Turn or disk-first Host Runtime decisions.
 
-The remaining V1 work replaces the historical terminal-Session/ledger implementation with relational reusable Sessions and Turns, adds sparse model-context versioning, and then carries the proven components through durable Workflow Runs. GitHub issue #2 is the authoritative workstream.
+The remaining V1 work replaces the historical terminal-Session/ledger implementation with relational reusable Sessions and Turns, adds sparse model-context versioning, and then carries the proven components through durable Workflow Runs. [V1 design readiness](https://github.com/DivyanshGolyan/onepage/issues/2) indexes the remaining decisions and research; it is not an implementation checklist.
+
+## Planning
+
+Accepted behavior, ownership, terminology, and required evidence live in the normative documents below. Open decision and research issues hold unanswered questions; resolving one updates its owning documents. Implementation tickets are created when implementation is ready to begin against an aligned V1 contract, rather than maintained as parallel specifications during design.
+
+The former implementation, cleanup, and release-verification tickets were closed as superseded planning, not completed work. Their useful requirements remain in the owning documents, and their source findings and original discussions remain historical evidence. The [cleanup record](docs/design/planning-cleanup-2026-09-05.md) maps those tickets to their owners. Future tickets should link the relevant contract sections and define one concrete implementation slice and its proof.
+
+Readiness requires the V1 behavior decisions, provider evidence, and minimal resource matrix to agree with the docs. It does not require speculative post-V1 design, every SQL column, or every wire spelling to be settled. New evidence may still justify an explicit contract amendment during implementation.
 
 ## Normative contracts
 
@@ -39,7 +47,7 @@ The remaining V1 work replaces the historical terminal-Session/ledger implementa
 - [`VERIFICATION.md`](VERIFICATION.md) — required evidence
 - [`docs/style.md`](docs/style.md) — implementation discipline
 
-The superseded Run Snapshot and Interaction Response Batch schemas were deleted rather than migrated. Issue #39 must publish the replacement CLI's exact closed JSON fields, unions, omission rules, and integer encodings through compiled public types and golden fixtures; no new handwritten schema is accepted in advance of that implementation.
+The superseded Run Snapshot and Interaction Response Batch schemas were deleted rather than migrated. The replacement HTTP/CLI contract must publish its exact closed JSON fields, unions, omission rules, and integer encodings through compiled public types and golden fixtures; no new handwritten schema is accepted in advance of that implementation.
 
 Accepted ADRs are normative. Historical spikes, measurements, design records, and research explain how the project reached the current decisions but do not override them.
 
@@ -100,5 +108,6 @@ The newest foundational decisions are:
 - [ADR-0021: the Host Runtime is disk-first and bounded](docs/adr/0021-use-a-disk-first-bounded-host-runtime.md)
 - [ADR-0022: Runs use the Host Runtime's narrow typed API](docs/adr/0022-expose-runs-through-the-host-runtime-api.md)
 - [ADR-0023: provider continuation has no duplicate replay authority](docs/adr/0023-preserve-provider-replay-without-silent-degradation.md)
+- [ADR-0024: capture Run inspection before delivery](docs/adr/0024-capture-run-inspection-before-delivery.md)
 
 The complete ADR, research, spike, measurement, and historical-design collections live under [`docs/`](docs/).

@@ -15,23 +15,27 @@ The Conversation role that authors a User Message. A User may be a person or ano
 _Avoid_: human, Caller, Principal, approver
 
 **Caller**:
-The entity invoking the Host Runtime's Run API.
+An input or observation source invoking the Host Runtime. The Caller has no separate conversational position within a Session; its observation is current only as of the instant captured.
 _Avoid_: User, Principal, Agent
 
+**Local Owner**:
+The single owner of a Host Runtime and its Store. All clients admitted to that server act for this owner and share access to its Sessions and Workflow Runs.
+_Avoid_: per-agent Principal, role, delegated identity
+
 **Principal**:
-The identity against which access and delegated authority are checked.
-_Avoid_: User, Caller, permission decision
+The implicit Local Owner wherever this term remains in the V1 contracts; it is not a separate identity for each Caller.
+_Avoid_: User Message author, per-client account, permission decision
 
 **Authority**:
-A policy or delegated capability that permits a Principal to make one class of decisions.
-_Avoid_: User role, Caller identity, Authorization
+The Local Owner's control over its Store, shared by admitted clients. V1 has no independently delegated or per-Session authority.
+_Avoid_: role hierarchy, Caller identity, Action Authorization
 
 **Authorization**:
 The durable decision that permits one exact validated Action to be attempted.
 _Avoid_: blanket permission, Approval, Authority
 
 **Permission Mode**:
-The immutable Turn Contract policy selected when the Turn is admitted. `ask`, the default, requires an authorized Permission Decision for each exact validated Action; explicit `bypass` creates Authorization from that bound policy without a request. Turn admission rejects bypass unless the Principal's Authority permits it. The mode cannot change while the Turn is active.
+Persistent Session configuration, defaulting to `ask`, selected and bound at each child Action admission. `ask` creates an exact Permission Request; explicit `bypass` creates exact Authorization without a request. The Local Owner may change the mode during active work. Existing requests, Authorizations, and running actions keep their admitted meaning; recovery never reselects their mode. Server access alone does not select bypass.
 _Avoid_: Session authority, tool capability
 
 ### Conversation
@@ -49,15 +53,19 @@ The complete immutable linear sequence of canonical semantic entries accumulated
 _Avoid_: Session, operation log, provider transcript, tree
 
 **Conversation Entry**:
-One immutable User text, assistant text, Tool Call, or Tool Result in a Conversation, with exact Turn and causal provenance.
+One immutable User text, assistant text, Tool Call, Tool Result, or System Instruction in a Conversation, with exact Turn and causal provenance.
 _Avoid_: event, mutable message, provider frame
+
+**System Instruction**:
+An immutable Conversation Entry carrying an appended operator instruction or host-supplied contextual update for the model. Session history distinguishes it from User text, assistant output, and tool content. Later changes append another instruction rather than rewriting it. Its provider representation must preserve instruction authority and legal placement; it cannot grant Action Authorization. First inclusion commits atomically with its assistant-response request; exact storage encoding remains implementation work.
+_Avoid_: Context Update, User Message, Permission Decision, provider thinking
 
 **Conversation Revision**:
 The ordinal of a Conversation Entry within one Session.
 _Avoid_: Session phase, ledger head, ownership generation
 
 **User Message**:
-Immutable User-authored content admitted to one Turn. It becomes a Conversation Entry when a model Operation requesting the next assistant response applies it; an initiating User Message is admitted and applied atomically with its Turn. An internal compaction model Operation does not apply a pending User Message.
+Immutable User-authored content admitted to one Turn. It becomes a Conversation Entry when a model Operation requesting the next assistant response applies it; an initiating User Message is admitted and applied atomically with its Turn. An internal compaction model Operation does not apply a pending User Message. A failed Turn Outcome or applicable cancellation authority makes remaining unprojected admissions inapplicable without deleting them or adding a message phase; later work does not implicitly apply them. Projection proves application to Conversation/model context, not provider consumption.
 _Avoid_: Interaction Response, steering event, mutable prompt
 
 **Turn**:
@@ -65,7 +73,7 @@ One idempotently admitted episode that begins with an initiating User Message an
 _Avoid_: Job, Session, model request, worker
 
 **Turn Outcome**:
-The single terminal resolution of a Turn: completed, failed, or cancelled. Completion references its Final Answer; failure carries a typed failure code such as resource exhaustion. Operation uncertainty remains a separate fact that may inform either a later model decision or the Turn's failure.
+The single terminal resolution of a Turn: completed, failed, or cancelled. Completion references its Final Answer; failure carries a typed failure code and either pre-request validation provenance or a same-Turn reference to the accepted Operation Resolution establishing the failure. Once all other semantic obligations are resolved, the failed outcome may commit with unprojected User Messages remaining; it makes them inapplicable and releases logical Session occupancy atomically. Operation uncertainty remains a separate fact that may inform either a later model decision or the Turn's failure.
 _Avoid_: Attempt Completion, Operation Resolution, process exit
 
 **Turn Condition**:
@@ -73,16 +81,16 @@ The total semantic classification derived from committed facts. Run membership s
 _Avoid_: persisted phase, status cache, ready flag
 
 **Session Context Revision**:
-One atomic sparse change to persistent model-visible Session defaults. Unchanged components continue from earlier revisions.
-_Avoid_: rewritten system prompt, Turn Contract, configuration snapshot
+One atomic sparse change to persistent Session configuration, including model-visible settings and the Host-enforced Permission Mode. Unchanged components continue from earlier revisions.
+_Avoid_: rewritten system prompt, configuration snapshot
 
 **Session Context Patch**:
-An optional closed sparse command supplied when starting a Turn in an idle Session. It carries the exact expected Context Revision and may change model, instructions, enabled built-in Tool Keys, context policy, reasoning default, or output limit. Authorized Turn admission atomically appends the patch as a new Session Context Revision and binds the new Turn to it. A persistent field cannot also be supplied as a Turn-local override in the same command.
-_Avoid_: mutable prompt, mid-Turn update, generic configuration map
+A sparse change to persistent Session settings, independent of message submission. Omitted settings remain unchanged; later changes to the same setting replace its current value without rewriting history. New model requests use the committed Session state at their construction boundary; existing requests retain their selected inputs.
+_Avoid_: message content, temporary override, generic configuration map
 
-**Turn Contract**:
-The immutable resolved policy and runtime facts that apply to one Turn, including the bound Session Context Revision, Permission Mode, and any explicit Turn-local overrides.
-_Avoid_: mutable Session defaults, provider configuration, Model Request Manifest
+**Output Schema**:
+An optional persistent Session setting describing the shape of a model-generated final answer. Each applicable model request freezes its selected schema in the Model Request Manifest. The provider adapter translates and validates it at the provider boundary; workflow consumers receive the exact validated value. Without a schema, the final answer is ordinary text. It is not a per-message override or a transformation of prose.
+_Avoid_: Tool Catalog input schema, Workflow Output, result envelope
 
 **Model Context**:
 The exact replay recipe used by one model Operation: an optional selected Compaction Base followed by one total ordered suffix of canonical host inputs and accepted model Operation Resolutions. Core and the selected adapter validate that chosen base without searching backward for an alternative.
@@ -93,7 +101,7 @@ The immutable references and digests that identify the provider protocol operati
 _Avoid_: raw HTTP request, credentials, mutable provider defaults
 
 **Instruction Set**:
-The immutable model-visible instructions selected through Session context and resolved for one Turn.
+Immutable instruction content in Session configuration. Its model-visible use is bound through the fixed initial prefix or an appended System Instruction; later requests replay those historical bindings rather than rewriting earlier instructions from current settings.
 _Avoid_: complete model request, Tool Catalog, provider system field
 
 **Compaction Base**:
@@ -165,7 +173,7 @@ The single durable semantic result selected for an Operation. Its basis may be a
 _Avoid_: Attempt Completion, generic Result, Turn Outcome
 
 **Interrupted Resolution**:
-An Operation Resolution stating that one exact unresolved Model Operation ended before any result was accepted. Its causal provenance is exactly one of: an authorized direct Model Interruption binding its Principal and idempotency key, or the canonical Run Cancellation Intent joined through immutable Run–Turn membership. An interrupted Model Operation may have no Attempt Completion; this records deliberate abandonment, not an assertion that the provider stopped processing. It ends only that Operation. The Turn may continue through independently admitted User Messages after direct interruption; Run cancellation fences that continuation and eventually yields a cancelled Turn Outcome. Actions cannot receive the direct interruption command.
+An Operation Resolution stating that one exact unresolved Model Operation ended before any result was accepted. Its causal provenance is exactly one of: an authorized direct Model Interruption binding the Local Owner and exact command-target provenance, or an applicable ordinary Session stop with its causal command provenance, including the Run Cancellation Intent when propagation caused the stop. An interrupted Model Operation may have no Attempt Completion; this records deliberate abandonment, not an assertion that the provider stopped processing. It ends only that Operation. The Turn may continue through independently admitted User Messages after direct interruption; an applicable Session stop fences that work and eventually yields a cancelled Turn Outcome. A Run intent alone fences the Run, not every Turn in a Session it once used. Actions cannot receive the direct interruption command.
 _Avoid_: Turn Outcome, failed Attempt, process detachment
 
 **Indeterminate Resolution**:
@@ -191,7 +199,7 @@ _Avoid_: Operation state, database authority, Session ownership
 ### Permission and cancellation
 
 **Permission Request**:
-An immutable durable request for a Principal's decision on one exact proposed Action and descriptor. Absence of a Permission Decision means the request remains actionable while its Operation and Run permit admission.
+An immutable durable request for a Principal's decision on one exact proposed Action and descriptor. Absence of a Permission Decision means the request remains actionable while its Operation and applicable Session stop/terminal facts permit admission.
 _Avoid_: input request, prompt, notification, User Message
 
 **Permission Decision**:
@@ -202,14 +210,18 @@ _Avoid_: User Message, generic response batch, permission text
 A public Run condition in which at least one Permission Request is actionable and no other member Turn can currently progress.
 _Avoid_: blocked Turn, suspended, generic waiting
 
+**Session Stop**:
+A request to end the current work selected in a Session, regardless of who submitted it. Completion means that work has a terminal outcome and has released the Session for reuse; an idle stop completes immediately. Acknowledging the request does not mean it has completed, and completion does not prevent later Session work.
+_Avoid_: Session closure, Host shutdown, provider cancellation acknowledgement
+
 **Run Cancellation Intent**:
-Durable intent to stop one Workflow Run. Through immutable Run–Turn membership it fences new evaluation, membership, Operation, and Attempt admission immediately while already-admitted work resolves or reconciles before terminal cancellation.
+Durable intent to end one Workflow Run and stop the current work in every Session to which that Run has submitted a message. Other workflows using those Sessions observe the same stops. While cancellation is unfinished, recovery may repeat its Session stops, including earlier successful or idle stops; callers coordinate Session reuse. Completion follows ordinary Session-stop completion regardless of who submitted the stopped work. The existing terminal Run outcome records completion and prevents further propagation on recovery. Sessions remain reusable. No per-Session propagation receipt is required.
 _Avoid_: Turn Cancellation Intent, Permission Request, process detachment, terminal outcome
 
 ### Workflows and runs
 
 **Workflow Definition**:
-A bounded program that composes keyed Turns and returns one Workflow Output.
+A bounded program that creates Sessions, composes keyed message results, and returns one Workflow Output.
 _Avoid_: Workflow Run, scheduler, agent runtime
 
 **Workflow Evaluator**:
@@ -221,7 +233,7 @@ One immutable evaluation input binding source, arguments, semantics, evaluator l
 _Avoid_: JavaScript continuation, live completion stream
 
 **Workflow Run**:
-The durable identity binding one Caller Run Key, exact workflow inputs, Evaluation Generations, Turn memberships, and terminal outcome.
+The durable identity binding one Caller Run Key, exact workflow inputs, Evaluation Generations, keyed Session operations and original results, and terminal outcome. Internal work references may be shared across Runs without ownership of Session history.
 _Avoid_: evaluator process, Session, durable heap
 
 **Run Key**:
@@ -229,15 +241,15 @@ A Caller-supplied idempotency key that creates or reattaches one Workflow Run wh
 _Avoid_: Run identity, Agent Call Key, display name
 
 **Agent Call Key**:
-A Caller-defined identity for one Turn membership within a Workflow Run.
+A Caller-defined identity for one Session creation, configuration change, or message submission and its recorded result within a Workflow Run. These operations share the key namespace; different messages may share a work outcome.
 _Avoid_: Turn identity, Run Key, system ID
 
 **Visibility Snapshot**:
-The immutable run-local set of terminal Turn Outputs and stable failures visible to one Evaluation Generation.
+The immutable run-local set of recorded operation results and stable failures visible to one Evaluation Generation.
 _Avoid_: live completion stream, Conversation
 
 **Blocked Workflow Run**:
-A nonterminal Workflow Run waiting for its complete requested Turn set before another Evaluation Generation.
+A nonterminal Workflow Run waiting for the recorded results required by its complete blocked set before another Evaluation Generation.
 _Avoid_: Permission Required, retained JavaScript
 
 **Turn Output**:
@@ -249,17 +261,17 @@ The bounded strict-data value durably committed with a completed Workflow Run.
 _Avoid_: Turn Output, Final Answer
 
 **Run API**:
-The narrow typed caller-facing boundary of the Host Runtime for admitting Run work, inspecting current Run state, driving progress, deciding permission, interrupting one exact Model Operation, cancelling a Run, and reading content.
+The narrow typed boundary of the Host Runtime for Run and Session admissions, observation, permission, stopping, cancellation, exact Model Interruption, and content reads. Bounded driving is internal to the Host; callers do not schedule progress.
 _Avoid_: Run Service, CLI, daemon, wire protocol
 
 **Run Snapshot**:
-A current committed read model derived from canonical Run, Turn, Session, permission, and effect facts. Its revision can guard inspection but does not promise historical reconstruction.
+A complete read model captured from one committed view of canonical Run, Session, internal work, permission, and effect facts. Later progress does not invalidate that captured report; its revision grants no historical snapshot service or mutation authority.
 _Avoid_: durable authority, event stream, Harness Projection
 
 ### Runtime and storage
 
 **Host Runtime**:
-The sole live owner that coordinates Workflow Runs, Turns, external execution, and bounded capacities for one Host Store.
+The explicitly started local server and sole live owner coordinating Workflow Runs, reusable Sessions, Turns, external execution, and bounded capacities for one Host Store. Its lifetime and advancement are independent of clients.
 _Avoid_: Agent, Session, Storage Owner
 
 **Host Store**:
@@ -279,7 +291,7 @@ The startup-fixed maximum population of concurrent active external work admitted
 _Avoid_: Session population, total RSS, preallocated resource bundle
 
 **Active Credit**:
-The accounting term for one occupied Physical Custody record. Occupancy reserves one unit of Host concurrency for a prospective Attempt before admission and retains it only through live execution and immediate settlement.
+The accounting term for one occupied in-memory Physical Custody record. Occupancy reserves one unit of Host concurrency for a prospective Attempt before admission and retains it through live execution and physical resource cleanup, even if the logical outcome is already terminal.
 _Avoid_: Authorization, durable semaphore, Activation Slot
 
 **Orchestration Memory**:

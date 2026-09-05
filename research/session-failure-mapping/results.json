@@ -1,0 +1,39 @@
+{
+  "sqlite_version": "3.53.4",
+  "source_sha256": "f8461420eeb468e3054bd2e3b90716afd2df4794d21030b3d8c0a2a2defff88c",
+  "scope": "prospective fixture; not production schema or power-loss test",
+  "cases": [
+    {
+      "name": "pending_failure",
+      "passed": true
+    },
+    {
+      "name": "failure_wins",
+      "passed": true
+    },
+    {
+      "name": "operation_obligation",
+      "passed": true
+    },
+    {
+      "name": "nonterminal_errors",
+      "passed": true
+    },
+    {
+      "name": "permissions",
+      "passed": true
+    },
+    {
+      "name": "rollback",
+      "passed": true
+    },
+    {
+      "name": "lost_ack",
+      "passed": true
+    },
+    {
+      "name": "success_pending",
+      "passed": true
+    }
+  ]
+}

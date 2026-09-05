@@ -4,6 +4,12 @@ status: amended by ADR-0022 and ADR-0023
 
 # Use two executable tools and bounded model dispositions
 
+## Accepted ownership amendment — 5 September 2026
+
+[ADR-0020's ownership amendment](0020-version-model-visible-context-sparsely.md#accepted-ownership-amendment--5-september-2026) removes the separate Turn Contract. Current Session settings are selected independently at model request or Action admission, with exact historical inputs/permissions retained there. Permission Mode persists on the Session and may change; existing Authorizations are unchanged. Runtime information and retained resource limits stay with their actual consumers/scopes. Numeric limits remain with their assigned decisions. The older Turn-local settings and permission language below is historical where it conflicts with these amendments.
+
+## Original decision
+
 OnePage v1 exposes only `bash` and `apply_patch`. The Caller selects one immutable Permission Mode
 when admitting a Turn: `ask`, the default, creates one immutable Permission Request for every exact
 validated tool call; `bypass` creates Authorization for every validated call without creating that
