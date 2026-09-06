@@ -1,0 +1,96 @@
+{
+  "generated_at": "2026-09-06T08:00:34.041499+00:00",
+  "from": "2026-08-07T08:00:34.041499+00:00",
+  "to": "2026-09-06T08:00:34.041499+00:00",
+  "analysis_source_sha256": "86e9d54fe089406aed947507a4d8fa178d99c4854667a98a1312d44334767653",
+  "metrics": {
+    "claude_candidate_files": 3031,
+    "claude_scanned_bytes": 2640013671,
+    "duplicate_usage_records": 134860,
+    "claude_contributing_files": 1974,
+    "claude_zero_input": 112,
+    "duplicate_usage_values_differ": 25116,
+    "codex_candidate_files": 509,
+    "codex_scanned_bytes": 1138490649,
+    "codex_contributing_files": 484,
+    "codex_shadow_legacy_excluded": 7371
+  },
+  "claude": {
+    "observations": 174389,
+    "input_tokens": {
+      "p10": 74197,
+      "p50": 168051,
+      "p90": 311639,
+      "p95": 337686,
+      "p99": 360657,
+      "max": 368419
+    },
+    "output_tokens": {
+      "p50": 335,
+      "p95": 2243,
+      "p99": 5734
+    },
+    "input_buckets": {
+      "le_1000": 0,
+      "le_4000": 0,
+      "le_16000": 36,
+      "le_64000": 11302,
+      "le_128000": 58419,
+      "le_256000": 134619,
+      "le_1000000": 174389
+    },
+    "cached_input_fraction": 0.9820196347731256
+  },
+  "codex_canonical": {
+    "observations": 7244,
+    "input_tokens": {
+      "p10": 45754,
+      "p50": 112858,
+      "p90": 201038,
+      "p95": 214860,
+      "p99": 231751,
+      "max": 248421
+    },
+    "output_tokens": {
+      "p50": 198,
+      "p95": 1745,
+      "p99": 3870
+    },
+    "input_buckets": {
+      "le_1000": 0,
+      "le_4000": 0,
+      "le_16000": 0,
+      "le_64000": 1626,
+      "le_128000": 4105,
+      "le_256000": 7244,
+      "le_1000000": 7244
+    },
+    "cached_input_fraction": 0.9655611944222237
+  },
+  "codex_legacy_proxy": {
+    "observations": 9912,
+    "input_tokens": {
+      "p10": 34384,
+      "p50": 92874,
+      "p90": 182554,
+      "p95": 202339,
+      "p99": 224024,
+      "max": 244562
+    },
+    "output_tokens": {
+      "p50": 235,
+      "p95": 1446,
+      "p99": 3205
+    },
+    "input_buckets": {
+      "le_1000": 0,
+      "le_4000": 0,
+      "le_16000": 24,
+      "le_64000": 3025,
+      "le_128000": 7067,
+      "le_256000": 9912,
+      "le_1000000": 9912
+    },
+    "cached_input_fraction": 0.9537282961094661
+  }
+}

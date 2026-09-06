@@ -1,0 +1,1423 @@
+{
+  "metadata": {
+    "date": "2026-09-06T13:29:14+0530",
+    "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6 (main, Jun 10 2026, 10:03:53) [Clang 17.0.0 (clang-1700.6.4.2)]",
+    "curl_build": "/tmp/onepage-stock-curl-qualification/curl-8.22.0",
+    "link_flags": [
+      "/tmp/onepage-stock-curl-qualification/curl-8.22.0/lib/.libs/libcurl.a",
+      "-L/opt/homebrew/Cellar/openssl@3/3.6.3/lib",
+      "-framework",
+      "CoreFoundation",
+      "-framework",
+      "CoreServices",
+      "-framework",
+      "Security",
+      "-framework",
+      "CoreFoundation",
+      "-framework",
+      "CoreServices",
+      "-framework",
+      "SystemConfiguration",
+      "-lssl",
+      "-lcrypto",
+      "-lssl",
+      "-lcrypto",
+      "-lz",
+      "-lsqlite3",
+      "-lpthread"
+    ],
+    "fd_limit": [
+      8192,
+      9223372036854775807
+    ],
+    "flags": [
+      "-O2",
+      "-std=c11",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-I/tmp/onepage-stock-curl-qualification/curl-8.22.0/include"
+    ],
+    "machine": "hw.model: MacBookPro18,1\nhw.memsize: 17179869184\nhw.logicalcpu: 10\nhw.pagesize: 16384\n",
+    "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+    "source_hashes": {
+      "network.c": "3bad52931327baa6ab2781d36d6af280065982de91cc2673209ff75e8ac56dbb",
+      "server.py": "657bac99c5262c1f8fa8d6cb6f9b2c20f5d51a51da71deecf43457ec33ae54dd",
+      "run_tls.py": "87f5ccc1e5137dbddfc5f7b8a92254352d0460326ac4ba8385368f2314d91487"
+    },
+    "disk_free_bytes": 63986733056,
+    "curl_config": "/* lib/curl_config.h.  Generated from curl_config.h.in by configure.  */\n/* lib/curl_config.h.in.  Generated from configure.ac by autoheader.  */\n\n/* !checksrc! disable COPYRIGHT all */\n\n/* Location of default CA bundle */\n/* #undef CURL_CA_BUNDLE */\n\n/* define \"1\" to use OpenSSL's built-in CA store */\n/* #undef CURL_CA_FALLBACK */\n\n/* If native CA store is enabled */\n/* #undef CURL_CA_NATIVE */\n\n/* Location of default CA path */\n/* #undef CURL_CA_PATH */\n\n/* If safe CA bundle search is enabled */\n/* #undef CURL_CA_SEARCH_SAFE */\n\n/* curl_debug_global_mem debug build */\n/* #undef CURL_DEBUG_GLOBAL_MEM */\n\n/* Default SSL backend */\n/* #undef CURL_DEFAULT_SSL_BACKEND */\n\n/* disable alt-svc */\n/* #undef CURL_DISABLE_ALTSVC */\n\n/* to disable aws-sigv4 support */\n/* #undef CURL_DISABLE_AWS */\n\n/* to disable basic authentication */\n/* #undef CURL_DISABLE_BASIC_AUTH */\n\n/* to disable bearer authentication */\n/* #undef CURL_DISABLE_BEARER_AUTH */\n\n/* disable local binding support */\n/* #undef CURL_DISABLE_BINDLOCAL */\n\n/* If unsafe CA bundle search in PATH on Windows is disabled */\n/* #undef CURL_DISABLE_CA_SEARCH */\n\n/* to disable cookies support */\n/* #undef CURL_DISABLE_COOKIES */\n\n/* to disable DICT */\n/* #undef CURL_DISABLE_DICT */\n\n/* to disable digest authentication */\n/* #undef CURL_DISABLE_DIGEST_AUTH */\n\n/* disable DoH */\n/* #undef CURL_DISABLE_DOH */\n\n/* to disable FILE */\n/* #undef CURL_DISABLE_FILE */\n\n/* disable form API */\n/* #undef CURL_DISABLE_FORM_API */\n\n/* to disable FTP */\n/* #undef CURL_DISABLE_FTP */\n\n/* to disable curl_easy_options */\n/* #undef CURL_DISABLE_GETOPTIONS */\n\n/* to disable Gopher */\n/* #undef CURL_DISABLE_GOPHER */\n\n/* disable headers-api */\n/* #undef CURL_DISABLE_HEADERS_API */\n\n/* disable alt-svc */\n/* #undef CURL_DISABLE_HSTS */\n\n/* to disable HTTP */\n/* #undef CURL_DISABLE_HTTP */\n\n/* to disable HTTP Message Signatures support */\n#define CURL_DISABLE_HTTPSIG 1\n\n/* disable HTTP authentication */\n/* #undef CURL_DISABLE_HTTP_AUTH */\n\n/* to disable IMAP */\n/* #undef CURL_DISABLE_IMAP */\n\n/* to disable IPFS */\n/* #undef CURL_DISABLE_IPFS */\n\n/* to disable kerberos authentication */\n/* #undef CURL_DISABLE_KERBEROS_AUTH */\n\n/* to disable LDAP */\n#define CURL_DISABLE_LDAP 1\n\n/* to disable LDAPS */\n#define CURL_DISABLE_LDAPS 1\n\n/* to disable --libcurl C code generation option */\n/* #undef CURL_DISABLE_LIBCURL_OPTION */\n\n/* disable mime API */\n/* #undef CURL_DISABLE_MIME */\n\n/* to disable MQTT */\n/* #undef CURL_DISABLE_MQTT */\n\n/* to disable negotiate authentication */\n/* #undef CURL_DISABLE_NEGOTIATE_AUTH */\n\n/* disable netrc parsing */\n/* #undef CURL_DISABLE_NETRC */\n\n/* if the OpenSSL configuration is not loaded automatically */\n/* #undef CURL_DISABLE_OPENSSL_AUTO_LOAD_CONFIG */\n\n/* disable date parsing */\n/* #undef CURL_DISABLE_PARSEDATE */\n\n/* to disable POP3 */\n/* #undef CURL_DISABLE_POP3 */\n\n/* disable progress-meter */\n/* #undef CURL_DISABLE_PROGRESS_METER */\n\n/* to disable proxies */\n/* #undef CURL_DISABLE_PROXY */\n\n/* to disable RTSP */\n/* #undef CURL_DISABLE_RTSP */\n\n/* disable SHA-512/256 hash algorithm */\n/* #undef CURL_DISABLE_SHA512_256 */\n\n/* disable DNS shuffling */\n/* #undef CURL_DISABLE_SHUFFLE_DNS */\n\n/* to disable SMTP */\n/* #undef CURL_DISABLE_SMTP */\n\n/* to disable socketpair support */\n/* #undef CURL_DISABLE_SOCKETPAIR */\n\n/* to disable TELNET */\n/* #undef CURL_DISABLE_TELNET */\n\n/* to disable TFTP */\n/* #undef CURL_DISABLE_TFTP */\n\n/* to disable verbose strings */\n/* #undef CURL_DISABLE_VERBOSE_STRINGS */\n\n/* disable WebSockets */\n/* #undef CURL_DISABLE_WEBSOCKETS */\n\n/* enable NTLM support */\n/* #undef CURL_ENABLE_NTLM */\n\n/* to enable SMB */\n/* #undef CURL_ENABLE_SMB */\n\n/* Definition to make a library symbol externally visible. */\n#define CURL_EXTERN_SYMBOL __attribute__((__visibility__(\"default\")))\n\n/* MIT Kerberos version */\n/* #undef CURL_KRB5_VERSION */\n\n/* cpu-machine-OS */\n#define CURL_OS \"aarch64-apple-darwin24.6.0\"\n\n/* built with multiple SSL backends */\n/* #undef CURL_WITH_MULTI_SSL */\n\n/* Define to the type of arg 2 for gethostname. */\n#define GETHOSTNAME_TYPE_ARG2 size_t\n\n/* Define to 1 if you have the `accept4' function. */\n/* #undef HAVE_ACCEPT4 */\n\n/* Define to 1 if you have the alarm function. */\n#define HAVE_ALARM 1\n\n/* Define to 1 if you have the `arc4random' function. */\n/* #undef HAVE_ARC4RANDOM */\n\n/* Define to 1 if you have the <arpa/inet.h> header file. */\n#define HAVE_ARPA_INET_H 1\n\n/* Define to 1 if you have _Atomic support. */\n#define HAVE_ATOMIC 1\n\n/* Define to 1 if you have the basename function. */\n#define HAVE_BASENAME 1\n\n/* Define to 1 if bool is an available type. */\n#define HAVE_BOOL_T 1\n\n/* if BROTLI is in use */\n/* #undef HAVE_BROTLI */\n\n/* Define to 1 if you have the <brotli/decode.h> header file. */\n/* #undef HAVE_BROTLI_DECODE_H */\n\n/* Define to 1 if you have the __builtin_available function. */\n#define HAVE_BUILTIN_AVAILABLE 1\n\n/* Define to 1 if you have the clock_gettime function and monotonic timer. */\n#define HAVE_CLOCK_GETTIME_MONOTONIC 1\n\n/* Define to 1 if you have the clock_gettime function and raw monotonic timer.\n   */\n#define HAVE_CLOCK_GETTIME_MONOTONIC_RAW 1\n\n/* Define to 1 if you have the closesocket function. */\n/* #undef HAVE_CLOSESOCKET */\n\n/* Define to 1 if you have the CloseSocket camel case function. */\n/* #undef HAVE_CLOSESOCKET_CAMEL */\n\n/* Define to 1 if you have the fseeko declaration */\n#define HAVE_DECL_FSEEKO 1\n\n/* if you have the function DES_ecb_encrypt */\n#define HAVE_DES_ECB_ENCRYPT 1\n\n/* if you have <dirent.h> */\n#define HAVE_DIRENT_H 1\n\n/* Define to 1 if you have the <dlfcn.h> header file. */\n#define HAVE_DLFCN_H 1\n\n/* Define to 1 if you have the `eventfd' function. */\n/* #undef HAVE_EVENTFD */\n\n/* Define to 1 if you have the fcntl function. */\n#define HAVE_FCNTL 1\n\n/* Define to 1 if you have the <fcntl.h> header file. */\n#define HAVE_FCNTL_H 1\n\n/* Define to 1 if you have a working fcntl O_NONBLOCK function. */\n#define HAVE_FCNTL_O_NONBLOCK 1\n\n/* Define to 1 if you have the `fnmatch' function. */\n#define HAVE_FNMATCH 1\n\n/* Define to 1 if you have the freeaddrinfo function. */\n#define HAVE_FREEADDRINFO 1\n\n/* Define to 1 if you have the `fseeko' function. */\n#define HAVE_FSEEKO 1\n\n/* Define to 1 if you have the fsetxattr function. */\n#define HAVE_FSETXATTR 1\n\n/* fsetxattr() takes 5 args */\n/* #undef HAVE_FSETXATTR_5 */\n\n/* fsetxattr() takes 6 args */\n#define HAVE_FSETXATTR_6 1\n\n/* Define to 1 if you have a working getaddrinfo function. */\n#define HAVE_GETADDRINFO 1\n\n/* Define to 1 if the getaddrinfo function is thread-safe. */\n#define HAVE_GETADDRINFO_THREADSAFE 1\n\n/* Define to 1 if you have the `geteuid' function. */\n#define HAVE_GETEUID 1\n\n/* Define to 1 if you have the gethostbyname_r function. */\n/* #undef HAVE_GETHOSTBYNAME_R */\n\n/* gethostbyname_r() takes 3 args */\n/* #undef HAVE_GETHOSTBYNAME_R_3 */\n\n/* gethostbyname_r() takes 5 args */\n/* #undef HAVE_GETHOSTBYNAME_R_5 */\n\n/* gethostbyname_r() takes 6 args */\n/* #undef HAVE_GETHOSTBYNAME_R_6 */\n\n/* Define to 1 if you have the gethostname function. */\n#define HAVE_GETHOSTNAME 1\n\n/* Define to 1 if you have a working getifaddrs function. */\n#define HAVE_GETIFADDRS 1\n\n/* Define to 1 if you have the `getpass_r' function. */\n/* #undef HAVE_GETPASS_R */\n\n/* Define to 1 if you have the getpeername function. */\n#define HAVE_GETPEERNAME 1\n\n/* Define to 1 if you have the `getppid' function. */\n#define HAVE_GETPPID 1\n\n/* Define to 1 if you have the `getpwuid' function. */\n#define HAVE_GETPWUID 1\n\n/* Define to 1 if you have the `getpwuid_r' function. */\n#define HAVE_GETPWUID_R 1\n\n/* Define to 1 if you have the `getrlimit' function. */\n#define HAVE_GETRLIMIT 1\n\n/* Define to 1 if you have the getsockname function. */\n#define HAVE_GETSOCKNAME 1\n\n/* Define to 1 if you have the `gettimeofday' function. */\n#define HAVE_GETTIMEOFDAY 1\n\n/* Define to 1 if you have a working glibc-style strerror_r function. */\n/* #undef HAVE_GLIBC_STRERROR_R */\n\n/* Define to 1 if you have a working gmtime_r function. */\n#define HAVE_GMTIME_R 1\n\n/* Define to 1 if you have the <gsasl.h> header file. */\n/* #undef HAVE_GSASL_H */\n\n/* if you have GSS-API libraries */\n/* #undef HAVE_GSSAPI */\n\n/* Define to 1 if you have the <gssapi/gssapi_generic.h> header file. */\n/* #undef HAVE_GSSAPI_GSSAPI_GENERIC_H */\n\n/* Define to 1 if you have the <gssapi/gssapi.h> header file. */\n/* #undef HAVE_GSSAPI_GSSAPI_H */\n\n/* Define to 1 if you have the <gssapi/gssapi_krb5.h> header file. */\n/* #undef HAVE_GSSAPI_GSSAPI_KRB5_H */\n\n/* if you have Apple GSS Framework */\n/* #undef HAVE_GSSAPPLE */\n\n/* if you have GNU GSS */\n/* #undef HAVE_GSSGNU */\n\n/* Define to 1 if you have the `gss_set_neg_mechs' function. */\n/* #undef HAVE_GSS_SET_NEG_MECHS */\n\n/* Define to 1 if you have the <idn2.h> header file. */\n/* #undef HAVE_IDN2_H */\n\n/* Define to 1 if you have the <ifaddrs.h> header file. */\n#define HAVE_IFADDRS_H 1\n\n/* Define to 1 if you have the `if_nametoindex' function. */\n#define HAVE_IF_NAMETOINDEX 1\n\n/* Define to 1 if you have the <inttypes.h> header file. */\n#define HAVE_INTTYPES_H 1\n\n/* Define to 1 if you have the ioctlsocket function. */\n/* #undef HAVE_IOCTLSOCKET */\n\n/* Define to 1 if you have the IoctlSocket camel case function. */\n/* #undef HAVE_IOCTLSOCKET_CAMEL */\n\n/* Define to 1 if you have a working IoctlSocket camel case FIONBIO function.\n   */\n/* #undef HAVE_IOCTLSOCKET_CAMEL_FIONBIO */\n\n/* Define to 1 if you have a working ioctlsocket FIONBIO function. */\n/* #undef HAVE_IOCTLSOCKET_FIONBIO */\n\n/* Define to 1 if you have a working ioctl FIONBIO function. */\n#define HAVE_IOCTL_FIONBIO 1\n\n/* Define to 1 if you have a working ioctl SIOCGIFADDR function. */\n#define HAVE_IOCTL_SIOCGIFADDR 1\n\n/* Define to 1 if you have the <io.h> header file. */\n/* #undef HAVE_IO_H */\n\n/* Define to 1 if you have the lber.h header file. */\n/* #undef HAVE_LBER_H */\n\n/* Define to 1 if you have the ldap.h header file. */\n/* #undef HAVE_LDAP_H */\n\n/* Define to 1 if you have the `ldap_init_fd' function. */\n/* #undef HAVE_LDAP_INIT_FD */\n\n/* Use LDAPS implementation */\n/* #undef HAVE_LDAP_SSL */\n\n/* Define to 1 if you have the ldap_ssl.h header file. */\n/* #undef HAVE_LDAP_SSL_H */\n\n/* Define to 1 if you have the `ldap_url_parse' function. */\n/* #undef HAVE_LDAP_URL_PARSE */\n\n/* Define to 1 if you have the `brotlidec' library (-lbrotlidec). */\n/* #undef HAVE_LIBBROTLIDEC */\n\n/* Define to 1 if you have the <libgen.h> header file. */\n#define HAVE_LIBGEN_H 1\n\n/* Define to 1 if you have the `idn2' library (-lidn2). */\n/* #undef HAVE_LIBIDN2 */\n\n/* Define to 1 if you have the <libpsl.h> header file. */\n/* #undef HAVE_LIBPSL_H */\n\n/* Define to 1 if you have the `ssh' library (-lssh). */\n/* #undef HAVE_LIBSSH */\n\n/* Define to 1 if you have the `ssh2' library (-lssh2). */\n/* #undef HAVE_LIBSSH2 */\n\n/* Define to 1 if you have the `ssl' library (-lssl). */\n#define HAVE_LIBSSL 1\n\n/* if zlib is available */\n#define HAVE_LIBZ 1\n\n/* Define to 1 if you have the `zstd' library (-lzstd). */\n/* #undef HAVE_LIBZSTD */\n\n/* Define to 1 if you have the <linux/tcp.h> header file. */\n/* #undef HAVE_LINUX_TCP_H */\n\n/* Define to 1 if you have the <locale.h> header file. */\n#define HAVE_LOCALE_H 1\n\n/* Define to 1 if you have a working localtime_r function. */\n#define HAVE_LOCALTIME_R 1\n\n/* Define to 1 if you have the `mach_absolute_time' function. */\n#define HAVE_MACH_ABSOLUTE_TIME 1\n\n/* Define to 1 if you have the `mbedtls_des_crypt_ecb' function. */\n/* #undef HAVE_MBEDTLS_DES_CRYPT_ECB */\n\n/* Define to 1 if you have the memrchr function or macro. */\n/* #undef HAVE_MEMRCHR */\n\n/* Define to 1 if you have the `memset_explicit' function. */\n/* #undef HAVE_MEMSET_EXPLICIT */\n\n/* Define to 1 if you have the memset_s function. */\n#define HAVE_MEMSET_S 1\n\n/* Define to 1 if you have the <netdb.h> header file. */\n#define HAVE_NETDB_H 1\n\n/* Define to 1 if you have the <netinet/in6.h> header file. */\n/* #undef HAVE_NETINET_IN6_H */\n\n/* Define to 1 if you have the <netinet/in.h> header file. */\n#define HAVE_NETINET_IN_H 1\n\n/* Define to 1 if you have the <netinet/ip.h> header file. */\n#define HAVE_NETINET_IP_H 1\n\n/* Define to 1 if you have the <netinet/tcp.h> header file. */\n#define HAVE_NETINET_TCP_H 1\n\n/* Define to 1 if you have the <netinet/udp.h> header file. */\n#define HAVE_NETINET_UDP_H 1\n\n/* Define to 1 if you have the <net/if.h> header file. */\n#define HAVE_NET_IF_H 1\n\n/* Define to 1 if you have the <nghttp2/nghttp2.h> header file. */\n/* #undef HAVE_NGHTTP2_NGHTTP2_H */\n\n/* Define to 1 if you have the <nghttp3/nghttp3.h> header file. */\n/* #undef HAVE_NGHTTP3_NGHTTP3_H */\n\n/* Define to 1 if you have the <ngtcp2/ngtcp2_crypto.h> header file. */\n/* #undef HAVE_NGTCP2_NGTCP2_CRYPTO_H */\n\n/* Define to 1 if you have the <ngtcp2/ngtcp2.h> header file. */\n/* #undef HAVE_NGTCP2_NGTCP2_H */\n\n/* if you have opendir */\n#define HAVE_OPENDIR 1\n\n/* Define to 1 if you have the <openssl/crypto.h> header file. */\n#define HAVE_OPENSSL_CRYPTO_H 1\n\n/* Define to 1 if you have the <openssl/err.h> header file. */\n#define HAVE_OPENSSL_ERR_H 1\n\n/* Define to 1 if you have the <openssl/pem.h> header file. */\n#define HAVE_OPENSSL_PEM_H 1\n\n/* Define to 1 if you have the <openssl/rsa.h> header file. */\n#define HAVE_OPENSSL_RSA_H 1\n\n/* Define to 1 if you have the <openssl/ssl.h> header file. */\n#define HAVE_OPENSSL_SSL_H 1\n\n/* Define to 1 if you have the `pipe' function. */\n#define HAVE_PIPE 1\n\n/* Define to 1 if you have the `pipe2' function. */\n/* #undef HAVE_PIPE2 */\n\n/* Define to 1 if you have the `poll' function. */\n#define HAVE_POLL 1\n\n/* Define to 1 if you have the <poll.h> header file. */\n#define HAVE_POLL_H 1\n\n/* Define to 1 if you have a working POSIX-style strerror_r function. */\n#define HAVE_POSIX_STRERROR_R 1\n\n/* Define to 1 if you have the <proto/bsdsocket.h> header file. */\n/* #undef HAVE_PROTO_BSDSOCKET_H */\n\n/* Define to 1 if you have the <pwd.h> header file. */\n#define HAVE_PWD_H 1\n\n/* Define to 1 if you have the `quiche_conn_set_qlog_fd' function. */\n/* #undef HAVE_QUICHE_CONN_SET_QLOG_FD */\n\n/* Define to 1 if you have the <quiche.h> header file. */\n/* #undef HAVE_QUICHE_H */\n\n/* Define to 1 if you have the `realpath' function. */\n#define HAVE_REALPATH 1\n\n/* Define to 1 if you have the recv function. */\n#define HAVE_RECV 1\n\n/* Define to 1 if symbol `sa_family_t' exists */\n#define HAVE_SA_FAMILY_T 1\n\n/* Define to 1 if you have the `sched_yield' function. */\n#define HAVE_SCHED_YIELD 1\n\n/* Define to 1 if you have the send function. */\n#define HAVE_SEND 1\n\n/* Define to 1 if you have the `sendmmsg' function. */\n/* #undef HAVE_SENDMMSG */\n\n/* Define to 1 if you have the `sendmsg' function. */\n#define HAVE_SENDMSG 1\n\n/* Define to 1 if you have the `setlocale' function. */\n#define HAVE_SETLOCALE 1\n\n/* Define to 1 if you have the `setrlimit' function. */\n#define HAVE_SETRLIMIT 1\n\n/* Define to 1 if you have the sigaction function. */\n#define HAVE_SIGACTION 1\n\n/* Define to 1 if you have the siginterrupt function. */\n#define HAVE_SIGINTERRUPT 1\n\n/* Define to 1 if you have the signal function. */\n#define HAVE_SIGNAL 1\n\n/* Define to 1 if you have the sigsetjmp function or macro. */\n#define HAVE_SIGSETJMP 1\n\n/* Define to 1 if struct sockaddr_in6 has the sin6_scope_id member */\n#define HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID 1\n\n/* Define to 1 if you have the socket function. */\n#define HAVE_SOCKET 1\n\n/* Define to 1 if you have the socketpair function. */\n#define HAVE_SOCKETPAIR 1\n\n/* Define to 1 if you have the `SSL_set0_wbio' function. */\n#define HAVE_SSL_SET0_WBIO 1\n\n/* Define to 1 if you have the `SSL_set1_ech_config_list' function. */\n/* #undef HAVE_SSL_SET1_ECH_CONFIG_LIST */\n\n/* Define to 1 if you have the `SSL_set_quic_tls_cbs' function. */\n#define HAVE_SSL_SET_QUIC_TLS_CBS 1\n\n/* Define to 1 if you have the `SSL_set_quic_use_legacy_codepoint' function.\n   */\n/* #undef HAVE_SSL_SET_QUIC_USE_LEGACY_CODEPOINT */\n\n/* Define to 1 if you have the <stdatomic.h> header file. */\n#define HAVE_STDATOMIC_H 1\n\n/* Define to 1 if you have the <stdbool.h> header file. */\n#define HAVE_STDBOOL_H 1\n\n/* Define to 1 if you have the <stdint.h> header file. */\n#define HAVE_STDINT_H 1\n\n/* Define to 1 if you have the <stdio.h> header file. */\n#define HAVE_STDIO_H 1\n\n/* Define to 1 if you have the <stdlib.h> header file. */\n#define HAVE_STDLIB_H 1\n\n/* Define to 1 if you have the strcasecmp function. */\n#define HAVE_STRCASECMP 1\n\n/* Define to 1 if you have the strcmpi function. */\n/* #undef HAVE_STRCMPI */\n\n/* Define to 1 if you have the strerror_r function. */\n#define HAVE_STRERROR_R 1\n\n/* Define to 1 if you have the stricmp function. */\n/* #undef HAVE_STRICMP */\n\n/* Define to 1 if you have the <strings.h> header file. */\n#define HAVE_STRINGS_H 1\n\n/* Define to 1 if you have the <string.h> header file. */\n#define HAVE_STRING_H 1\n\n/* Define to 1 if you have the <stropts.h> header file. */\n/* #undef HAVE_STROPTS_H */\n\n/* if struct sockaddr_storage is defined */\n#define HAVE_STRUCT_SOCKADDR_STORAGE 1\n\n/* Define to 1 if you have the timeval struct. */\n#define HAVE_STRUCT_TIMEVAL 1\n\n/* Define to 1 if suseconds_t is an available type. */\n#define HAVE_SUSECONDS_T 1\n\n/* Define to 1 if you have the <sys/eventfd.h> header file. */\n/* #undef HAVE_SYS_EVENTFD_H */\n\n/* Define to 1 if you have the <sys/filio.h> header file. */\n#define HAVE_SYS_FILIO_H 1\n\n/* Define to 1 if you have the <sys/ioctl.h> header file. */\n#define HAVE_SYS_IOCTL_H 1\n\n/* Define to 1 if you have the <sys/param.h> header file. */\n#define HAVE_SYS_PARAM_H 1\n\n/* Define to 1 if you have the <sys/poll.h> header file. */\n#define HAVE_SYS_POLL_H 1\n\n/* Define to 1 if you have the <sys/resource.h> header file. */\n#define HAVE_SYS_RESOURCE_H 1\n\n/* Define to 1 if you have the <sys/select.h> header file. */\n#define HAVE_SYS_SELECT_H 1\n\n/* Define to 1 if you have the <sys/sockio.h> header file. */\n#define HAVE_SYS_SOCKIO_H 1\n\n/* Define to 1 if you have the <sys/stat.h> header file. */\n#define HAVE_SYS_STAT_H 1\n\n/* Define to 1 if you have the <sys/types.h> header file. */\n#define HAVE_SYS_TYPES_H 1\n\n/* Define to 1 if you have the <sys/un.h> header file. */\n#define HAVE_SYS_UN_H 1\n\n/* Define to 1 if you have the <sys/utime.h> header file. */\n/* #undef HAVE_SYS_UTIME_H */\n\n/* Define to 1 if you have the <sys/xattr.h> header file. */\n#define HAVE_SYS_XATTR_H 1\n\n/* Define to 1 if you have the <termios.h> header file. */\n#define HAVE_TERMIOS_H 1\n\n/* Define to 1 if you have the <termio.h> header file. */\n/* #undef HAVE_TERMIO_H */\n\n/* if POSIX pthreads are supported */\n#define HAVE_THREADS_POSIX 1\n\n/* Define this if time_t is unsigned */\n/* #undef HAVE_TIME_T_UNSIGNED */\n\n/* Define to 1 if you have the <unicode/uidna.h> header file. */\n/* #undef HAVE_UNICODE_UIDNA_H */\n\n/* Define to 1 if you have the <unistd.h> header file. */\n#define HAVE_UNISTD_H 1\n\n/* Define to 1 if you have the `utime' function. */\n#define HAVE_UTIME 1\n\n/* Define to 1 if you have the `utimes' function. */\n#define HAVE_UTIMES 1\n\n/* Define to 1 if you have the <utime.h> header file. */\n#define HAVE_UTIME_H 1\n\n/* Define to 1 if you have the <uv.h> header file. */\n/* #undef HAVE_UV_H */\n\n/* Define to 1 if you have the `wc_Des_EcbEncrypt' function. */\n/* #undef HAVE_WC_DES_ECBENCRYPT */\n\n/* Define to 1 if you have the `wolfSSL_BIO_new' function. */\n/* #undef HAVE_WOLFSSL_BIO_NEW */\n\n/* Define to 1 if you have the `wolfSSL_BIO_set_shutdown' function. */\n/* #undef HAVE_WOLFSSL_BIO_SET_SHUTDOWN */\n\n/* Define to 1 if you have the `wolfSSL_CTX_GenerateEchConfig' function. */\n/* #undef HAVE_WOLFSSL_CTX_GENERATEECHCONFIG */\n\n/* Define to 1 if you have the `wolfSSL_get_peer_certificate' function. */\n/* #undef HAVE_WOLFSSL_GET_PEER_CERTIFICATE */\n\n/* Define to 1 if you have the `wolfSSL_set_quic_use_legacy_codepoint'\n   function. */\n/* #undef HAVE_WOLFSSL_SET_QUIC_USE_LEGACY_CODEPOINT */\n\n/* Define to 1 if you have the `wolfSSL_UseALPN' function. */\n/* #undef HAVE_WOLFSSL_USEALPN */\n\n/* Define this symbol if your OS supports changing the contents of argv */\n#define HAVE_WRITABLE_ARGV 1\n\n/* if libzstd is in use */\n/* #undef HAVE_ZSTD */\n\n/* Define to 1 if you have the <zstd.h> header file. */\n/* #undef HAVE_ZSTD_H */\n\n/* Define to the sub-directory where libtool stores uninstalled libraries. */\n#define LT_OBJDIR \".libs/\"\n\n/* Define to 1 if you need the lber.h header file even with ldap.h */\n/* #undef NEED_LBER_H */\n\n/* Define to 1 if _REENTRANT preprocessor symbol must be defined. */\n/* #undef NEED_REENTRANT */\n\n/* Define to 1 if _THREAD_SAFE preprocessor symbol must be defined. */\n/* #undef NEED_THREAD_SAFE */\n\n/* openssl with new QUIC API */\n/* #undef OPENSSL_QUIC_API2 */\n\n/* Name of package */\n#define PACKAGE \"curl\"\n\n/* Define to the address where bug reports for this package should be sent. */\n#define PACKAGE_BUGREPORT \"a suitable curl mailing list: https://curl.se/mail/\"\n\n/* Define to the full name of this package. */\n#define PACKAGE_NAME \"curl\"\n\n/* Define to the full name and version of this package. */\n#define PACKAGE_STRING \"curl -\"\n\n/* Define to the one symbol short name of this package. */\n#define PACKAGE_TARNAME \"curl\"\n\n/* Define to the home page for this package. */\n#define PACKAGE_URL \"\"\n\n/* Define to the version of this package. */\n#define PACKAGE_VERSION \"-\"\n\n/* Size of curl_off_t in number of bytes */\n#define SIZEOF_CURL_OFF_T 8\n\n/* Size of curl_socket_t in number of bytes */\n#define SIZEOF_CURL_SOCKET_T 4\n\n/* Size of int in number of bytes */\n#define SIZEOF_INT 4\n\n/* Size of long in number of bytes */\n#define SIZEOF_LONG 8\n\n/* Size of off_t in number of bytes */\n#define SIZEOF_OFF_T 8\n\n/* Size of size_t in number of bytes */\n#define SIZEOF_SIZE_T 8\n\n/* Size of time_t in number of bytes */\n#define SIZEOF_TIME_T 8\n\n/* Define to 1 if all of the C90 standard headers exist (not just the ones\n   required in a freestanding environment). This macro is provided for\n   backward compatibility; new code need not use it. */\n#define STDC_HEADERS 1\n\n/* if AmiSSL is in use */\n/* #undef USE_AMISSL */\n\n/* to use Apple fast UDP (SYS_recvmsg_x, SYS_sendmsg_x) */\n/* #undef USE_APPLE_FAST_UDP */\n\n/* if AppleIDN */\n/* #undef USE_APPLE_IDN */\n\n/* enable Apple OS certificate validation */\n#define USE_APPLE_SECTRUST 1\n\n/* Define to enable c-ares support */\n/* #undef USE_ARES */\n\n/* if libbacktrace is in use */\n/* #undef USE_BACKTRACE */\n\n/* if ECH support is available */\n/* #undef USE_ECH */\n\n/* if GnuTLS is enabled */\n/* #undef USE_GNUTLS */\n\n/* GSASL support enabled */\n/* #undef USE_GSASL */\n\n/* enable HTTPS RR support */\n/* #undef USE_HTTPSRR */\n\n/* Define if you want to enable IPv6 support */\n#define USE_IPV6 1\n\n/* if libpsl is in use */\n/* #undef USE_LIBPSL */\n\n/* if libssh is in use */\n/* #undef USE_LIBSSH */\n\n/* if libssh2 is in use */\n/* #undef USE_LIBSSH2 */\n\n/* if libuv is in use */\n/* #undef USE_LIBUV */\n\n/* if mbedTLS is enabled */\n/* #undef USE_MBEDTLS */\n\n/* if nghttp2 is in use */\n/* #undef USE_NGHTTP2 */\n\n/* if nghttp3 is in use */\n/* #undef USE_NGHTTP3 */\n\n/* if ngtcp2 is in use */\n/* #undef USE_NGTCP2 */\n\n/* Use OpenLDAP-specific code */\n/* #undef USE_OPENLDAP */\n\n/* if OpenSSL is in use */\n#define USE_OPENSSL 1\n\n/* if HTTP/3 proxy support is available */\n/* #undef USE_PROXY_HTTP3 */\n\n/* if quiche is in use */\n/* #undef USE_QUICHE */\n\n/* if you want c-ares for DNS lookup */\n/* #undef USE_RESOLV_ARES */\n\n/* if you want threaded DNS lookup */\n#define USE_RESOLV_THREADED 1\n\n/* if Rustls is enabled */\n/* #undef USE_RUSTLS */\n\n/* to enable Windows native SSL/TLS support */\n/* #undef USE_SCHANNEL */\n\n/* if SSL session export support is available */\n/* #undef USE_SSLS_EXPORT */\n\n/* Use Unix domain sockets */\n#define USE_UNIX_SOCKETS 1\n\n/* if Watt-32 is in use */\n/* #undef USE_WATT32 */\n\n/* Define to 1 if you are building a Windows target with crypto API support.\n   */\n/* #undef USE_WIN32_CRYPTO */\n\n/* Define to 1 if you have the `normaliz' (WinIDN) library (-lnormaliz). */\n/* #undef USE_WIN32_IDN */\n\n/* Use Windows LDAP implementation */\n/* #undef USE_WIN32_LDAP */\n\n/* to enable SSPI support */\n/* #undef USE_WINDOWS_SSPI */\n\n/* if wolfSSL is enabled */\n/* #undef USE_WOLFSSL */\n\n/* Version number of package */\n#define VERSION \"-\"\n\n/* Define to 1 if OS is AIX. */\n#ifndef _ALL_SOURCE\n/* #  undef _ALL_SOURCE */\n#endif\n\n/* Number of bits in a file offset, on hosts where this is settable. */\n/* #undef _FILE_OFFSET_BITS */\n\n/* Define for large files, on AIX-style hosts. */\n/* #undef _LARGE_FILES */\n\n/* Define to empty if `const' does not conform to ANSI C. */\n/* #undef const */\n\n/* Define to `unsigned int' if <sys/types.h> does not define. */\n/* #undef size_t */\n\n/* the signed version of size_t */\n/* #undef ssize_t */\n",
+    "curl_archive_sha256": "f224ee569c250ee8306a2187fbd8ed2a114233a9c47b0b0b2172a2aa98d9bf1f"
+  },
+  "runs": [
+    {
+      "index": 0,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "upload_buffer": 65536,
+      "request_bytes": 262144,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":3659,\"live_malloc_bytes\":446352,\"allocator_reserved_bytes\":47185920,\"physical_bytes\":2786176,\"fds\":10}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":49305,\"live_malloc_bytes\":2002448,\"allocator_reserved_bytes\":131072000,\"physical_bytes\":70403840,\"fds\":10}\n{\"cycle\":1,\"idle_physical\":70403840,\"idle_fds\":10,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":49139,\"live_malloc_bytes\":1954176,\"allocator_reserved_bytes\":130023424,\"physical_bytes\":70190848,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":48811,\"live_malloc_bytes\":1825696,\"allocator_reserved_bytes\":122683392,\"physical_bytes\":69338880,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":48811,\"live_malloc_bytes\":1825696,\"allocator_reserved_bytes\":122683392,\"physical_bytes\":69338880,\"fds\":3}\n",
+      "wall_seconds": 7.101575375068933,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 753801962248333,
+          "remove_call_ns": 40667,
+          "cleanup_call_ns": 3875,
+          "completions_before_cancel": 3,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            52125,
+            0,
+            44583
+          ],
+          "max_phase_ns": [
+            11084,
+            459394917,
+            12629250,
+            292,
+            67136750,
+            6186542,
+            44708
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 753801961376333,
+          "commit_ns": 753801962196250,
+          "removed_ns": 753801962292958,
+          "released_ns": 753801963230333,
+          "ordinary_finished_ns": 753802629009208,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 441598583,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 791,
+        "max_poll_ns": 12629167,
+        "max_write_ns": 1547792,
+        "wall_seconds": 6.535041,
+        "cpu_seconds": 6.649887,
+        "cpu_one_core_fraction": 1.017574,
+        "max_model_callback_gap_ns": 216937584,
+        "model_terminal_spread_ns": 209460166,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 10616375,
+        "max_live_spool_allocated": 102760448,
+        "max_storage_allocated": 119631872,
+        "scratch_logical_highwater": 70168883,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 6389760,
+          "physical": 2278144,
+          "lifetime_physical": 2278144,
+          "virtual": 420164878336,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 6848512,
+          "physical": 2671488,
+          "lifetime_physical": 2720640,
+          "virtual": 420308697088,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 7241728,
+          "physical": 2786176,
+          "lifetime_physical": 2786176,
+          "virtual": 420309008384,
+          "threads": 4,
+          "fds": 10
+        },
+        "active": {
+          "rss": 309395456,
+          "physical": 276236032,
+          "lifetime_physical": 279136000,
+          "virtual": 421500370944,
+          "threads": 5,
+          "fds": 2010
+        },
+        "first_cycle_idle": {
+          "rss": 285655040,
+          "physical": 70403840,
+          "lifetime_physical": 279136000,
+          "virtual": 421466357760,
+          "threads": 3,
+          "fds": 10
+        },
+        "final_cycle_idle": {
+          "rss": 285655040,
+          "physical": 70403840,
+          "lifetime_physical": 279136000,
+          "virtual": 421466357760,
+          "threads": 3,
+          "fds": 10
+        },
+        "idle": {
+          "rss": 285638656,
+          "physical": 70387456,
+          "lifetime_physical": 279136000,
+          "virtual": 421466324992,
+          "threads": 3,
+          "fds": 10
+        },
+        "closed": {
+          "rss": 278036480,
+          "physical": 69338880,
+          "lifetime_physical": 279136000,
+          "virtual": 421457199104,
+          "threads": 2,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.18581250007264316,
+              "generation_seconds": 4.007917750044726,
+              "terminal_write_seconds": 0.07999774999916553
+            }
+          ],
+          "wall_seconds": 7.1045192499877885,
+          "cpu_seconds": 5.5469729999999995,
+          "max_rss_bytes": 867336192,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 1,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "upload_buffer": 16384,
+      "request_bytes": 262144,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":3659,\"live_malloc_bytes\":451232,\"allocator_reserved_bytes\":67108864,\"physical_bytes\":2950016,\"fds\":10}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":50489,\"live_malloc_bytes\":1834592,\"allocator_reserved_bytes\":147849216,\"physical_bytes\":63899200,\"fds\":10}\n{\"cycle\":1,\"idle_physical\":63899200,\"idle_fds\":10,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":50323,\"live_malloc_bytes\":1782688,\"allocator_reserved_bytes\":138412032,\"physical_bytes\":63538752,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":49995,\"live_malloc_bytes\":1639408,\"allocator_reserved_bytes\":130023424,\"physical_bytes\":62539328,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":49995,\"live_malloc_bytes\":1639408,\"allocator_reserved_bytes\":130023424,\"physical_bytes\":62539328,\"fds\":3}\n",
+      "wall_seconds": 6.371653417008929,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 753808519353541,
+          "remove_call_ns": 35416,
+          "cleanup_call_ns": 3875,
+          "completions_before_cancel": 2,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            48958,
+            0,
+            39417
+          ],
+          "max_phase_ns": [
+            9042,
+            449078333,
+            12675750,
+            292,
+            40874500,
+            2326875,
+            39542
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 753808518320666,
+          "commit_ns": 753808519304625,
+          "removed_ns": 753808519393000,
+          "released_ns": 753808520247125,
+          "ordinary_finished_ns": 753809158265000,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 381260125,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 928,
+        "max_poll_ns": 12675666,
+        "max_write_ns": 1123958,
+        "wall_seconds": 6.332284,
+        "cpu_seconds": 6.577258,
+        "cpu_one_core_fraction": 1.038687,
+        "max_model_callback_gap_ns": 198509875,
+        "model_terminal_spread_ns": 192203708,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 6796083,
+        "max_live_spool_allocated": 96419840,
+        "max_storage_allocated": 117985280,
+        "scratch_logical_highwater": 70962167,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 6504448,
+          "physical": 2409280,
+          "lifetime_physical": 2409280,
+          "virtual": 420168597504,
+          "threads": 4,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 7012352,
+          "physical": 2835328,
+          "lifetime_physical": 2884480,
+          "virtual": 420194975744,
+          "threads": 4,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 7405568,
+          "physical": 2950016,
+          "lifetime_physical": 2950016,
+          "virtual": 420195287040,
+          "threads": 5,
+          "fds": 10
+        },
+        "active": {
+          "rss": 202653696,
+          "physical": 182437440,
+          "lifetime_physical": 191579712,
+          "virtual": 421232508928,
+          "threads": 6,
+          "fds": 2010
+        },
+        "first_cycle_idle": {
+          "rss": 199458816,
+          "physical": 63899200,
+          "lifetime_physical": 191579712,
+          "virtual": 421214699520,
+          "threads": 3,
+          "fds": 10
+        },
+        "final_cycle_idle": {
+          "rss": 199458816,
+          "physical": 63899200,
+          "lifetime_physical": 191579712,
+          "virtual": 421214699520,
+          "threads": 3,
+          "fds": 10
+        },
+        "idle": {
+          "rss": 199442432,
+          "physical": 63882816,
+          "lifetime_physical": 191579712,
+          "virtual": 421214666752,
+          "threads": 3,
+          "fds": 10
+        },
+        "closed": {
+          "rss": 181829632,
+          "physical": 62539328,
+          "lifetime_physical": 191579712,
+          "virtual": 421196103680,
+          "threads": 2,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.4919001249363646,
+              "generation_seconds": 4.007209667004645,
+              "terminal_write_seconds": 0.0764812920242548
+            }
+          ],
+          "wall_seconds": 6.374506207997911,
+          "cpu_seconds": 5.482777,
+          "max_rss_bytes": 893861888,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 2,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "upload_buffer": 16384,
+      "request_bytes": 1048576,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":3652,\"live_malloc_bytes\":447072,\"allocator_reserved_bytes\":39845888,\"physical_bytes\":2769792,\"fds\":10}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":50435,\"live_malloc_bytes\":1794528,\"allocator_reserved_bytes\":118489088,\"physical_bytes\":46237248,\"fds\":10}\n{\"cycle\":1,\"idle_physical\":46237248,\"idle_fds\":10,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":50269,\"live_malloc_bytes\":1743840,\"allocator_reserved_bytes\":118489088,\"physical_bytes\":46057024,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":49941,\"live_malloc_bytes\":1600592,\"allocator_reserved_bytes\":113246208,\"physical_bytes\":43484736,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":49941,\"live_malloc_bytes\":1600592,\"allocator_reserved_bytes\":113246208,\"physical_bytes\":43484736,\"fds\":3}\n",
+      "wall_seconds": 8.27378054196015,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 753816918787375,
+          "remove_call_ns": 33917,
+          "cleanup_call_ns": 2917,
+          "completions_before_cancel": 6,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            70625,
+            0,
+            36917
+          ],
+          "max_phase_ns": [
+            19959,
+            435502834,
+            12807625,
+            3459,
+            43570625,
+            2642250,
+            37042
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 753816917074541,
+          "commit_ns": 753816918716791,
+          "removed_ns": 753816918824333,
+          "released_ns": 753816919528250,
+          "ordinary_finished_ns": 753817576556500,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 366898750,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 864,
+        "max_poll_ns": 12807500,
+        "max_write_ns": 5875084,
+        "wall_seconds": 8.240623,
+        "cpu_seconds": 8.641192,
+        "cpu_one_core_fraction": 1.048609,
+        "max_model_callback_gap_ns": 215692416,
+        "model_terminal_spread_ns": 224968875,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 11184583,
+        "max_live_spool_allocated": 59326464,
+        "max_storage_allocated": 112898048,
+        "scratch_logical_highwater": 69459534,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 6438912,
+          "physical": 2360192,
+          "lifetime_physical": 2360192,
+          "virtual": 420166975488,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 6832128,
+          "physical": 2655104,
+          "lifetime_physical": 2704256,
+          "virtual": 420167139328,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 7225344,
+          "physical": 2769792,
+          "lifetime_physical": 2769792,
+          "virtual": 420167450624,
+          "threads": 4,
+          "fds": 10
+        },
+        "active": {
+          "rss": 169312256,
+          "physical": 151438912,
+          "lifetime_physical": 174081600,
+          "virtual": 421231935488,
+          "threads": 5,
+          "fds": 2010
+        },
+        "first_cycle_idle": {
+          "rss": 169312256,
+          "physical": 46237248,
+          "lifetime_physical": 174081600,
+          "virtual": 421185339392,
+          "threads": 3,
+          "fds": 10
+        },
+        "final_cycle_idle": {
+          "rss": 169312256,
+          "physical": 46237248,
+          "lifetime_physical": 174081600,
+          "virtual": 421185339392,
+          "threads": 3,
+          "fds": 10
+        },
+        "idle": {
+          "rss": 169295872,
+          "physical": 46220864,
+          "lifetime_physical": 174081600,
+          "virtual": 421185306624,
+          "threads": 3,
+          "fds": 10
+        },
+        "closed": {
+          "rss": 164528128,
+          "physical": 43484736,
+          "lifetime_physical": 174081600,
+          "virtual": 421179326464,
+          "threads": 2,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.343100665952079,
+              "generation_seconds": 4.00751929206308,
+              "terminal_write_seconds": 0.11627829191274941
+            }
+          ],
+          "wall_seconds": 8.276737374952063,
+          "cpu_seconds": 7.385172,
+          "max_rss_bytes": 1052819456,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 3,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "upload_buffer": 65536,
+      "request_bytes": 1048576,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":3649,\"live_malloc_bytes\":440352,\"allocator_reserved_bytes\":18874368,\"physical_bytes\":2556736,\"fds\":10}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":49307,\"live_malloc_bytes\":1700336,\"allocator_reserved_bytes\":131072000,\"physical_bytes\":39733120,\"fds\":10}\n{\"cycle\":1,\"idle_physical\":39733120,\"idle_fds\":10,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":49141,\"live_malloc_bytes\":1645008,\"allocator_reserved_bytes\":121634816,\"physical_bytes\":39372672,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":48812,\"live_malloc_bytes\":1514048,\"allocator_reserved_bytes\":113246208,\"physical_bytes\":38618944,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":48812,\"live_malloc_bytes\":1514048,\"allocator_reserved_bytes\":113246208,\"physical_bytes\":38618944,\"fds\":3}\n",
+      "wall_seconds": 8.097952082986012,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 753825138192583,
+          "remove_call_ns": 57125,
+          "cleanup_call_ns": 4250,
+          "completions_before_cancel": 14,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            18709,
+            0,
+            61458
+          ],
+          "max_phase_ns": [
+            16708,
+            449658833,
+            12345458,
+            2458,
+            87509666,
+            6846166,
+            61625
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 753825136621291,
+          "commit_ns": 753825138173916,
+          "removed_ns": 753825138254083,
+          "released_ns": 753825139079708,
+          "ordinary_finished_ns": 753825828030541,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 351260000,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 861,
+        "max_poll_ns": 12345416,
+        "max_write_ns": 1281708,
+        "wall_seconds": 8.06203,
+        "cpu_seconds": 8.46413,
+        "cpu_one_core_fraction": 1.049876,
+        "max_model_callback_gap_ns": 248207792,
+        "model_terminal_spread_ns": 242973917,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 11069041,
+        "max_live_spool_allocated": 80912384,
+        "max_storage_allocated": 120852480,
+        "scratch_logical_highwater": 68582973,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 6275072,
+          "physical": 2163456,
+          "lifetime_physical": 2163456,
+          "virtual": 420146003968,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 6651904,
+          "physical": 2458432,
+          "lifetime_physical": 2507584,
+          "virtual": 420280385536,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 7028736,
+          "physical": 2556736,
+          "lifetime_physical": 2556736,
+          "virtual": 420280696832,
+          "threads": 4,
+          "fds": 10
+        },
+        "active": {
+          "rss": 272302080,
+          "physical": 246597568,
+          "lifetime_physical": 261932992,
+          "virtual": 421106106368,
+          "threads": 5,
+          "fds": 2010
+        },
+        "first_cycle_idle": {
+          "rss": 272203776,
+          "physical": 39733120,
+          "lifetime_physical": 261932992,
+          "virtual": 421063704576,
+          "threads": 3,
+          "fds": 10
+        },
+        "final_cycle_idle": {
+          "rss": 272203776,
+          "physical": 39733120,
+          "lifetime_physical": 261932992,
+          "virtual": 421063704576,
+          "threads": 3,
+          "fds": 10
+        },
+        "idle": {
+          "rss": 272187392,
+          "physical": 39716736,
+          "lifetime_physical": 261932992,
+          "virtual": 421063671808,
+          "threads": 3,
+          "fds": 10
+        },
+        "closed": {
+          "rss": 254689280,
+          "physical": 38618944,
+          "lifetime_physical": 261932992,
+          "virtual": 421045108736,
+          "threads": 2,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.26668083399999887,
+              "generation_seconds": 4.007333582965657,
+              "terminal_write_seconds": 0.1008974170545116
+            }
+          ],
+          "wall_seconds": 8.100965750054456,
+          "cpu_seconds": 7.20825,
+          "max_rss_bytes": 1092730880,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 4,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "upload_buffer": 65536,
+      "request_bytes": 4194304,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":3653,\"live_malloc_bytes\":442128,\"allocator_reserved_bytes\":28311552,\"physical_bytes\":2671552,\"fds\":10}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":49347,\"live_malloc_bytes\":1617824,\"allocator_reserved_bytes\":119537664,\"physical_bytes\":45893440,\"fds\":10}\n{\"cycle\":1,\"idle_physical\":45893440,\"idle_fds\":10,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":49181,\"live_malloc_bytes\":1551104,\"allocator_reserved_bytes\":117440512,\"physical_bytes\":45500224,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":48852,\"live_malloc_bytes\":1420128,\"allocator_reserved_bytes\":113246208,\"physical_bytes\":44386112,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":48852,\"live_malloc_bytes\":1420128,\"allocator_reserved_bytes\":113246208,\"physical_bytes\":44386112,\"fds\":3}\n",
+      "wall_seconds": 16.697168666985817,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 753841973751458,
+          "remove_call_ns": 37458,
+          "cleanup_call_ns": 5833,
+          "completions_before_cancel": 1,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            84958,
+            0,
+            43375
+          ],
+          "max_phase_ns": [
+            11625,
+            459638041,
+            12506625,
+            750,
+            39236375,
+            2093500,
+            43458
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 753841972704583,
+          "commit_ns": 753841973666500,
+          "removed_ns": 753841973794833,
+          "released_ns": 753841975023791,
+          "ordinary_finished_ns": 753842675948000,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 365878000,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 2377,
+        "max_poll_ns": 12506584,
+        "max_write_ns": 1499750,
+        "wall_seconds": 16.66291,
+        "cpu_seconds": 17.355443,
+        "cpu_one_core_fraction": 1.041561,
+        "max_model_callback_gap_ns": 247374208,
+        "model_terminal_spread_ns": 244993584,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 10638958,
+        "max_live_spool_allocated": 81051648,
+        "max_storage_allocated": 120991744,
+        "scratch_logical_highwater": 67216009,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 6324224,
+          "physical": 2245504,
+          "lifetime_physical": 2245504,
+          "virtual": 420155441152,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 6733824,
+          "physical": 2573248,
+          "lifetime_physical": 2622400,
+          "virtual": 420289822720,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 7110656,
+          "physical": 2671552,
+          "lifetime_physical": 2671552,
+          "virtual": 420290134016,
+          "threads": 4,
+          "fds": 10
+        },
+        "active": {
+          "rss": 256294912,
+          "physical": 235898688,
+          "lifetime_physical": 247629632,
+          "virtual": 420965138432,
+          "threads": 5,
+          "fds": 2010
+        },
+        "first_cycle_idle": {
+          "rss": 256294912,
+          "physical": 45893440,
+          "lifetime_physical": 247629632,
+          "virtual": 420917952512,
+          "threads": 3,
+          "fds": 10
+        },
+        "final_cycle_idle": {
+          "rss": 256294912,
+          "physical": 45893440,
+          "lifetime_physical": 247629632,
+          "virtual": 420917952512,
+          "threads": 3,
+          "fds": 10
+        },
+        "idle": {
+          "rss": 256278528,
+          "physical": 45877056,
+          "lifetime_physical": 247629632,
+          "virtual": 420917919744,
+          "threads": 3,
+          "fds": 10
+        },
+        "closed": {
+          "rss": 250118144,
+          "physical": 44386112,
+          "lifetime_physical": 247629632,
+          "virtual": 420910891008,
+          "threads": 2,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.8597187920240685,
+              "generation_seconds": 4.0051801659865305,
+              "terminal_write_seconds": 0.22039341705385596
+            }
+          ],
+          "wall_seconds": 16.70014012500178,
+          "cpu_seconds": 15.412222,
+          "max_rss_bytes": 981696512,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 5,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "upload_buffer": 16384,
+      "request_bytes": 4194304,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":3653,\"live_malloc_bytes\":442960,\"allocator_reserved_bytes\":19922944,\"physical_bytes\":2573056,\"fds\":10}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":50436,\"live_malloc_bytes\":1815728,\"allocator_reserved_bytes\":121634816,\"physical_bytes\":64734848,\"fds\":10}\n{\"cycle\":1,\"idle_physical\":64734848,\"idle_fds\":10,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":50270,\"live_malloc_bytes\":1755632,\"allocator_reserved_bytes\":102760448,\"physical_bytes\":64161408,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":49941,\"live_malloc_bytes\":1627360,\"allocator_reserved_bytes\":98566144,\"physical_bytes\":62588544,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":49941,\"live_malloc_bytes\":1627360,\"allocator_reserved_bytes\":98566144,\"physical_bytes\":62588544,\"fds\":3}\n",
+      "wall_seconds": 16.770200500031933,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 753858893398458,
+          "remove_call_ns": 54583,
+          "cleanup_call_ns": 4292,
+          "completions_before_cancel": 1,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            108250,
+            0,
+            59042
+          ],
+          "max_phase_ns": [
+            19041,
+            460417375,
+            22660833,
+            6542,
+            46901958,
+            1051917,
+            59250
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 753858892158083,
+          "commit_ns": 753858893290208,
+          "removed_ns": 753858893457500,
+          "released_ns": 753858895511333,
+          "ordinary_finished_ns": 753859606464041,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 527297500,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 2390,
+        "max_poll_ns": 22660625,
+        "max_write_ns": 1095084,
+        "wall_seconds": 16.740504,
+        "cpu_seconds": 17.462083,
+        "cpu_one_core_fraction": 1.043104,
+        "max_model_callback_gap_ns": 252402333,
+        "model_terminal_spread_ns": 254983042,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 8768750,
+        "max_live_spool_allocated": 88842240,
+        "max_storage_allocated": 106237952,
+        "scratch_logical_highwater": 67216009,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 6275072,
+          "physical": 2147008,
+          "lifetime_physical": 2147008,
+          "virtual": 420147052544,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 6684672,
+          "physical": 2474752,
+          "lifetime_physical": 2523904,
+          "virtual": 420281434112,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 7061504,
+          "physical": 2573056,
+          "lifetime_physical": 2573056,
+          "virtual": 420281745408,
+          "threads": 4,
+          "fds": 10
+        },
+        "active": {
+          "rss": 204177408,
+          "physical": 166069888,
+          "lifetime_physical": 168560256,
+          "virtual": 421224595456,
+          "threads": 5,
+          "fds": 2010
+        },
+        "first_cycle_idle": {
+          "rss": 185630720,
+          "physical": 64734848,
+          "lifetime_physical": 168560256,
+          "virtual": 421188485120,
+          "threads": 3,
+          "fds": 10
+        },
+        "final_cycle_idle": {
+          "rss": 185630720,
+          "physical": 64734848,
+          "lifetime_physical": 168560256,
+          "virtual": 421188485120,
+          "threads": 3,
+          "fds": 10
+        },
+        "idle": {
+          "rss": 185614336,
+          "physical": 64718464,
+          "lifetime_physical": 168560256,
+          "virtual": 421188452352,
+          "threads": 3,
+          "fds": 10
+        },
+        "closed": {
+          "rss": 162398208,
+          "physical": 62588544,
+          "lifetime_physical": 168560256,
+          "virtual": 421164646400,
+          "threads": 2,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.6021136250346899,
+              "generation_seconds": 4.0072734169662,
+              "terminal_write_seconds": 0.19853566703386605
+            }
+          ],
+          "wall_seconds": 16.773572457954288,
+          "cpu_seconds": 15.41913,
+          "max_rss_bytes": 1070891008,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    }
+  ]
+}
