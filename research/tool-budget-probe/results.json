@@ -1,0 +1,170 @@
+[
+  {
+    "repetition": 0,
+    "exit_code": 0,
+    "stderr": "",
+    "samples": [
+      {
+        "phase": "baseline",
+        "physical": 983616,
+        "rss": 1212416,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 3,
+        "workers_created": 0
+      },
+      {
+        "phase": "pipes_and_files",
+        "physical": 983616,
+        "rss": 1228800,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 6003,
+        "workers_created": 0
+      },
+      {
+        "phase": "workers_ready",
+        "physical": 83084480,
+        "rss": 83165184,
+        "virtual": 420221812736,
+        "threads": 1001,
+        "fds": 6003,
+        "workers_created": 1000
+      },
+      {
+        "create_error": 0,
+        "message": "none"
+      },
+      {
+        "phase": "workers_joined",
+        "physical": 1000000,
+        "rss": 1245184,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 6003,
+        "workers_created": 1000
+      },
+      {
+        "phase": "released",
+        "physical": 1000000,
+        "rss": 1245184,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 3,
+        "workers_created": 1000
+      }
+    ]
+  },
+  {
+    "repetition": 1,
+    "exit_code": 0,
+    "stderr": "",
+    "samples": [
+      {
+        "phase": "baseline",
+        "physical": 967168,
+        "rss": 1212416,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 3,
+        "workers_created": 0
+      },
+      {
+        "phase": "pipes_and_files",
+        "physical": 967168,
+        "rss": 1228800,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 6003,
+        "workers_created": 0
+      },
+      {
+        "phase": "workers_ready",
+        "physical": 83051584,
+        "rss": 83165184,
+        "virtual": 420221812736,
+        "threads": 1001,
+        "fds": 6003,
+        "workers_created": 1000
+      },
+      {
+        "create_error": 0,
+        "message": "none"
+      },
+      {
+        "phase": "workers_joined",
+        "physical": 983552,
+        "rss": 1245184,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 6003,
+        "workers_created": 1000
+      },
+      {
+        "phase": "released",
+        "physical": 983552,
+        "rss": 1245184,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 3,
+        "workers_created": 1000
+      }
+    ]
+  },
+  {
+    "repetition": 2,
+    "exit_code": 0,
+    "stderr": "",
+    "samples": [
+      {
+        "phase": "baseline",
+        "physical": 983616,
+        "rss": 1212416,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 3,
+        "workers_created": 0
+      },
+      {
+        "phase": "pipes_and_files",
+        "physical": 983616,
+        "rss": 1228800,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 6003,
+        "workers_created": 0
+      },
+      {
+        "phase": "workers_ready",
+        "physical": 83068032,
+        "rss": 83165184,
+        "virtual": 420221812736,
+        "threads": 1001,
+        "fds": 6003,
+        "workers_created": 1000
+      },
+      {
+        "create_error": 0,
+        "message": "none"
+      },
+      {
+        "phase": "workers_joined",
+        "physical": 1000000,
+        "rss": 1245184,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 6003,
+        "workers_created": 1000
+      },
+      {
+        "phase": "released",
+        "physical": 1000000,
+        "rss": 1245184,
+        "virtual": 419910516736,
+        "threads": 1,
+        "fds": 3,
+        "workers_created": 1000
+      }
+    ]
+  }
+]
