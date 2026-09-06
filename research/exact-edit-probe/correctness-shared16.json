@@ -1,0 +1,269 @@
+[
+  {
+    "case": "small",
+    "source_bytes": 4,
+    "old_bytes": 3,
+    "new_bytes": 3,
+    "returncode": 0,
+    "status": {
+      "window": 16384,
+      "reuse": 1,
+      "wall_seconds": 0.000902,
+      "cpu_seconds": 0.005697,
+      "read_calls": 5,
+      "write_calls": 2,
+      "result": "replaced",
+      "offset": 0,
+      "output_bytes": 4,
+      "needle_and_scan_buffer_bytes": 16389,
+      "preimage": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee",
+      "postimage": "7aa7a5359173d05b63cfd682e3c38487f3cb4f7f1d60659fe59fab1505977d4c"
+    },
+    "memory": {
+      "maximum resident set size": 1130496,
+      "peak memory footprint": 885312
+    }
+  },
+  {
+    "case": "boundary",
+    "source_bytes": 16391,
+    "old_bytes": 6,
+    "new_bytes": 8,
+    "returncode": 0,
+    "status": {
+      "window": 16384,
+      "reuse": 1,
+      "wall_seconds": 0.000549,
+      "cpu_seconds": 0.004261,
+      "read_calls": 7,
+      "write_calls": 3,
+      "result": "replaced",
+      "offset": 16382,
+      "output_bytes": 16393,
+      "needle_and_scan_buffer_bytes": 16395,
+      "preimage": "aead7c5beaaede7b07b9fc8bf1e5b4385cb5a5c3082e8dfe2027b02105b4cad5",
+      "postimage": "172e6ec3be2e6e9607f54a8464e1106bcfc95c72abba22237790df2a5070d5ec"
+    },
+    "memory": {
+      "maximum resident set size": 1081344,
+      "peak memory footprint": 836160
+    }
+  },
+  {
+    "case": "overlapping",
+    "source_bytes": 5,
+    "old_bytes": 3,
+    "new_bytes": 1,
+    "returncode": 4,
+    "status": {
+      "result": "ambiguous"
+    },
+    "memory": {
+      "maximum resident set size": 1081344,
+      "peak memory footprint": 836160
+    }
+  },
+  {
+    "case": "missing",
+    "source_bytes": 3,
+    "old_bytes": 3,
+    "new_bytes": 1,
+    "returncode": 5,
+    "status": {
+      "result": "not_found"
+    },
+    "memory": {
+      "maximum resident set size": 1081344,
+      "peak memory footprint": 819712
+    }
+  },
+  {
+    "case": "empty",
+    "source_bytes": 3,
+    "old_bytes": 0,
+    "new_bytes": 1,
+    "returncode": 3,
+    "status": {
+      "result": "empty_needle_rejected"
+    },
+    "memory": {
+      "maximum resident set size": 1048576,
+      "peak memory footprint": 836160
+    }
+  },
+  {
+    "case": "crlf",
+    "source_bytes": 10,
+    "old_bytes": 3,
+    "new_bytes": 5,
+    "returncode": 0,
+    "status": {
+      "window": 16384,
+      "reuse": 1,
+      "wall_seconds": 0.00025,
+      "cpu_seconds": 0.001892,
+      "read_calls": 6,
+      "write_calls": 3,
+      "result": "replaced",
+      "offset": 5,
+      "output_bytes": 12,
+      "needle_and_scan_buffer_bytes": 16389,
+      "preimage": "6f4792b265fe72790b344fd3ef5294701d9d087bed9fce815c0f4bbad6d2ed87",
+      "postimage": "907ebec42ec12aecdb583e1b08499f1988802fead36abf76cd21a297e0be0b72"
+    },
+    "memory": {
+      "maximum resident set size": 1081344,
+      "peak memory footprint": 819712
+    }
+  },
+  {
+    "case": "utf8",
+    "source_bytes": 9,
+    "old_bytes": 5,
+    "new_bytes": 6,
+    "returncode": 0,
+    "status": {
+      "window": 16384,
+      "reuse": 1,
+      "wall_seconds": 0.000237,
+      "cpu_seconds": 0.001825,
+      "read_calls": 6,
+      "write_calls": 3,
+      "result": "replaced",
+      "offset": 3,
+      "output_bytes": 10,
+      "needle_and_scan_buffer_bytes": 16393,
+      "preimage": "21930fa6ec66037043df473222f26a8e25443c69b16a1ca0e7f93c004d3766f0",
+      "postimage": "7baf6c626e90216807e22818524002d422849654186a6199fb6f0392896dc68b"
+    },
+    "memory": {
+      "maximum resident set size": 1081344,
+      "peak memory footprint": 819712
+    }
+  },
+  {
+    "case": "deletion",
+    "source_bytes": 7,
+    "old_bytes": 4,
+    "new_bytes": 0,
+    "returncode": 0,
+    "status": {
+      "window": 16384,
+      "reuse": 1,
+      "wall_seconds": 0.000264,
+      "cpu_seconds": 0.002007,
+      "read_calls": 4,
+      "write_calls": 1,
+      "result": "replaced",
+      "offset": 0,
+      "output_bytes": 3,
+      "needle_and_scan_buffer_bytes": 16391,
+      "preimage": "010971ea0013a09d91df437de2cd6f66df4dbdf78974926175d8421055ad1f62",
+      "postimage": "cb8379ac2098aa165029e3938a51da0bcecfc008fd6795f401178647f96c5b34"
+    },
+    "memory": {
+      "maximum resident set size": 1081344,
+      "peak memory footprint": 819712
+    }
+  },
+  {
+    "case": "many_lines",
+    "source_bytes": 1000004,
+    "old_bytes": 4,
+    "new_bytes": 8,
+    "returncode": 0,
+    "status": {
+      "window": 16384,
+      "reuse": 1,
+      "wall_seconds": 0.002872,
+      "cpu_seconds": 0.004433,
+      "read_calls": 127,
+      "write_calls": 63,
+      "result": "replaced",
+      "offset": 1000000,
+      "output_bytes": 1000008,
+      "needle_and_scan_buffer_bytes": 16391,
+      "preimage": "273a42eb158117d1706c1929a2f1a64ffc6e0b2b3d367bb9dedf3e228376c94e",
+      "postimage": "643f05ceb2c545dad1480718d871f5b14fd15c5db96e6c9b62941d947a5e9659"
+    },
+    "memory": {
+      "maximum resident set size": 1146880,
+      "peak memory footprint": 901696
+    }
+  },
+  {
+    "case": "large",
+    "source_bytes": 134217741,
+    "old_bytes": 13,
+    "new_bytes": 3,
+    "returncode": 0,
+    "status": {
+      "window": 16384,
+      "reuse": 1,
+      "wall_seconds": 0.421304,
+      "cpu_seconds": 0.308412,
+      "read_calls": 16388,
+      "write_calls": 8193,
+      "result": "replaced",
+      "offset": 134217728,
+      "output_bytes": 134217731,
+      "needle_and_scan_buffer_bytes": 16409,
+      "preimage": "e4ff1cc7836640a439f20a4261138ef4ccd49c49172bd38e71f79fed30b40647",
+      "postimage": "27c483c1e4c134998916db77db555e2473b5088c69523fff9a8b5b23abaf8e96"
+    },
+    "memory": {
+      "maximum resident set size": 1081344,
+      "peak memory footprint": 819712
+    }
+  },
+  {
+    "case": "large_replacement",
+    "source_bytes": 17,
+    "old_bytes": 3,
+    "new_bytes": 4194304,
+    "returncode": 0,
+    "status": {
+      "window": 16384,
+      "reuse": 1,
+      "wall_seconds": 0.005242,
+      "cpu_seconds": 0.006314,
+      "read_calls": 261,
+      "write_calls": 258,
+      "result": "replaced",
+      "offset": 7,
+      "output_bytes": 4194318,
+      "needle_and_scan_buffer_bytes": 16389,
+      "preimage": "a255ce8fbb06ada5d3d51a87083fff91d5e5c03e38614d946b31c8ac9f96927c",
+      "postimage": "a87f24f33b9d34e249ab1b44e29e42026c2d21127f51c1461cbdc0a7e005a2fd"
+    },
+    "memory": {
+      "maximum resident set size": 1146880,
+      "peak memory footprint": 885248
+    }
+  },
+  {
+    "case": "large_needle",
+    "source_bytes": 1000001,
+    "old_bytes": 1000001,
+    "new_bytes": 3,
+    "returncode": 0,
+    "status": {
+      "window": 16384,
+      "reuse": 1,
+      "wall_seconds": 0.000994,
+      "cpu_seconds": 0.002781,
+      "read_calls": 4,
+      "write_calls": 1,
+      "result": "replaced",
+      "offset": 0,
+      "output_bytes": 3,
+      "needle_and_scan_buffer_bytes": 3000002,
+      "preimage": "022fab15c2e79584f04d0c32ec621c850fc874101286919586a7f581fd52b4e4",
+      "postimage": "11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437"
+    },
+    "memory": {
+      "maximum resident set size": 3129344,
+      "peak memory footprint": 2884160
+    }
+  }
+]

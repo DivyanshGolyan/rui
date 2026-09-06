@@ -1,6 +1,6 @@
-import hashlib,json,pathlib,subprocess,tempfile,re
+import hashlib,json,pathlib,subprocess,tempfile,re,os
 P=pathlib.Path
-exe='/tmp/onepage-exact-edit-probe-bin';results=[]
+exe=os.environ.get('EXACT_EDIT_EXE','/tmp/onepage-exact-edit-probe-bin');results=[]
 with tempfile.TemporaryDirectory(prefix='onepage-exact-fixture-') as tmp:
  d=P(tmp)
  cases=[('small',b'old\n',b'old',b'new'),('boundary',b'x'*16382+b'NEEDLE'+b'end',b'NEEDLE',b'replaced'),('overlapping',b'ababa',b'aba',b'X'),('missing',b'abc',b'def',b'X'),('empty',b'abc',b'',b'X'),('crlf',b'one\r\ntwo\r\n',b'two',b'three'),('utf8','hi café!'.encode(),'café'.encode(),'你好'.encode()),('deletion',b'abc def',b'abc ',b''),('many_lines',b'x\n'*500000+b'end\n',b'end\n',b'changed\n'),('large',None,b'UNIQUE_MARKER',b'new'),('large_replacement',b'prefix OLD suffix',b'OLD',b'Y'*4194304),('large_needle',b'a'*1000000+b'b',b'a'*1000000+b'b',b'new')]
@@ -31,5 +31,5 @@ with tempfile.TemporaryDirectory(prefix='onepage-exact-fixture-') as tmp:
   else:assert not out.exists()
   memory={k:int(v) for v,k in re.findall(r'^\s*(\d+)\s+(maximum resident set size|peak memory footprint)\s*$',r.stderr.decode(),re.M)}
   results.append({'case':name,'source_bytes':src.stat().st_size,'old_bytes':len(old),'new_bytes':len(new),'returncode':r.returncode,'status':status,'memory':memory})
-P(__file__).with_name('results.json').write_text(json.dumps(results,indent=2)+'\n')
+P(__file__).with_name(os.environ.get('EXACT_EDIT_RESULTS','results.json')).write_text(json.dumps(results,indent=2)+'\n')
 print(json.dumps(results,indent=2))
