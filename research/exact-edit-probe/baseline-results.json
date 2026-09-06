@@ -1,0 +1,102 @@
+[
+  {
+    "repetition": 0,
+    "kind": "baseline",
+    "memory": {
+      "maximum resident set size": 1081344,
+      "peak memory footprint": 836160
+    },
+    "context_bytes": [
+      "104"
+    ]
+  },
+  {
+    "repetition": 0,
+    "kind": "edit",
+    "memory": {
+      "maximum resident set size": 1163264,
+      "peak memory footprint": 901632
+    },
+    "context_bytes": []
+  },
+  {
+    "repetition": 1,
+    "kind": "edit",
+    "memory": {
+      "maximum resident set size": 1097728,
+      "peak memory footprint": 852544
+    },
+    "context_bytes": []
+  },
+  {
+    "repetition": 1,
+    "kind": "baseline",
+    "memory": {
+      "maximum resident set size": 1048576,
+      "peak memory footprint": 819712
+    },
+    "context_bytes": [
+      "104"
+    ]
+  },
+  {
+    "repetition": 2,
+    "kind": "baseline",
+    "memory": {
+      "maximum resident set size": 1048576,
+      "peak memory footprint": 836160
+    },
+    "context_bytes": [
+      "104"
+    ]
+  },
+  {
+    "repetition": 2,
+    "kind": "edit",
+    "memory": {
+      "maximum resident set size": 1097728,
+      "peak memory footprint": 852544
+    },
+    "context_bytes": []
+  },
+  {
+    "repetition": 3,
+    "kind": "edit",
+    "memory": {
+      "maximum resident set size": 1097728,
+      "peak memory footprint": 836096
+    },
+    "context_bytes": []
+  },
+  {
+    "repetition": 3,
+    "kind": "baseline",
+    "memory": {
+      "maximum resident set size": 1048576,
+      "peak memory footprint": 819712
+    },
+    "context_bytes": [
+      "104"
+    ]
+  },
+  {
+    "repetition": 4,
+    "kind": "baseline",
+    "memory": {
+      "maximum resident set size": 1048576,
+      "peak memory footprint": 819712
+    },
+    "context_bytes": [
+      "104"
+    ]
+  },
+  {
+    "repetition": 4,
+    "kind": "edit",
+    "memory": {
+      "maximum resident set size": 1097728,
+      "peak memory footprint": 852544
+    },
+    "context_bytes": []
+  }
+]
