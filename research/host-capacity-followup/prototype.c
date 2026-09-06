@@ -1150,7 +1150,7 @@ static int run_integrated(int argc, char **argv) {
     runtime.capacity = capacity;
     const char *control_text = getenv("ONEPAGE_PROOF_CONTROL");
     runtime.control_mode = control_text ? atoi(control_text) : 0;
-    if (runtime.control_mode < 0 || runtime.control_mode > 2) return 2;
+    if (runtime.control_mode < 0 || runtime.control_mode > 3) return 2;
     runtime.url = argv[2]; runtime.cafile = argv[3]; runtime.scratch = argv[4];
     runtime.database_path = argv[5];
     runtime.self_path = program_path;
@@ -1315,7 +1315,19 @@ static int run_integrated(int argc, char **argv) {
                 cycle_settled++;
                 settled++;
                 progressed = true;
-                if (runtime.control_mode == 2 && service_control(db, &runtime, capacity - cycle_settled) != 0) return 1;
+                if (runtime.control_mode >= 2 && service_control(db, &runtime, capacity - cycle_settled) != 0) return 1;
+                if (runtime.control_mode == 3 && i != capacity - 1) {
+                    struct PhysicalCustody *target = &runtime.cells[capacity - 1];
+                    if (atomic_load_explicit(&target->state, memory_order_acquire) == CUSTODY_SEALED &&
+                        (target->flags & FLAG_CANCELLED)) {
+                        if (settle(db, &runtime, target, import_window, &max_overlap, &max_settle_ns) != 0) return 1;
+                        runtime.cancelled_bytes = target->bytes_a + target->bytes_b;
+                        received_bytes += runtime.cancelled_bytes;
+                        release_cell(target);
+                        runtime.control_released_ns = now_ns();
+                        cycle_settled++; settled++;
+                    }
+                }
             }
             uint64_t scan_elapsed = now_ns() - scan_started;
             if (scan_elapsed > max_owner_scan_ns) max_owner_scan_ns = scan_elapsed;

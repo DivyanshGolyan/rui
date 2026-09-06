@@ -1,7 +1,7 @@
 """Run: python3 research/host-capacity-scaling/run.py [--smoke]. macOS only."""
 import argparse, hashlib, json, os, pathlib, platform, resource, select, shutil, signal, sqlite3, subprocess, sys, tempfile, time
 P=pathlib.Path(__file__).resolve().parent
-p=argparse.ArgumentParser(); p.add_argument('--smoke',action='store_true'); p.add_argument('--capacity',type=int,choices=[100,500,1000]); p.add_argument('--curl-build',type=pathlib.Path); p.add_argument('--native-poll',action='store_true'); a=p.parse_args()
+p=argparse.ArgumentParser(); p.add_argument('--smoke',action='store_true'); p.add_argument('--capacity',type=int,choices=[100,500,1000]); p.add_argument('--curl-build',type=pathlib.Path); p.add_argument('--native-poll',action='store_true'); p.add_argument('--refined',action='store_true'); a=p.parse_args()
 resource.setrlimit(resource.RLIMIT_NOFILE,(8192,resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
 flags=['-O2','-std=c11','-Wall','-Wextra','-Werror']
 link=['-lcurl','-lsqlite3','-lpthread']
@@ -18,6 +18,7 @@ if a.curl_build:
     meta['curl_config']=(a.curl_build/'lib/curl_config.h').read_text()
     meta['curl_archive_sha256']=hashlib.sha256((a.curl_build/'lib/.libs/libcurl.a').read_bytes()).hexdigest()
 output=P/('smoke.json' if a.smoke else ('single.json' if a.capacity else 'results.json'))
+if a.refined: output=P/('refined-smoke.json' if a.smoke else 'refined-results.json')
 results={'metadata':meta,'runs':[]}
 def save(): output.write_text(json.dumps(results,indent=2)+'\n')
 with tempfile.TemporaryDirectory(prefix='onepage-capacity-PROTOTYPE-') as tmp:
@@ -25,6 +26,7 @@ with tempfile.TemporaryDirectory(prefix='onepage-capacity-PROTOTYPE-') as tmp:
     subprocess.run(['clang',*flags,str(P/'prototype.c'),'-o',str(binary),*link],check=True)
     subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost','-addext','extendedKeyUsage=serverAuth','-addext','keyUsage=digitalSignature,keyEncipherment,keyCertSign'],check=True,capture_output=True)
     cases=[(10,1,1,m) for m in (1,2)] if a.smoke else [(c,1,4,m) for order in [(100,500,1000),(500,1000,100),(1000,100,500)] for c in order for m in ((1,2) if order[0]!=500 else (2,1))]+[(1000,5,4,0)]
+    if a.refined: cases=[(10,1,1,3)] if a.smoke else [(c,1,4,3) for order in [(100,500,1000),(500,1000,100),(1000,100,500)] for c in order]
     if a.capacity: cases=[(a.capacity,1,4,m) for m in (1,2)]
     for index,(capacity,cycles,seconds,control) in enumerate(cases):
         case=root/str(index); case.mkdir(); server=None; client=None
