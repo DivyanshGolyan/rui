@@ -1,0 +1,204 @@
+{
+  "metadata": {
+    "date": "2026-09-06T11:36:22+0530",
+    "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6 (main, Jun 10 2026, 10:03:53) [Clang 17.0.0 (clang-1700.6.4.2)]",
+    "fd_limit": [
+      8192,
+      9223372036854775807
+    ],
+    "flags": [
+      "-O2",
+      "-std=c11",
+      "-Wall",
+      "-Wextra",
+      "-Werror"
+    ],
+    "machine": "hw.model: MacBookPro18,1\nhw.memsize: 17179869184\nhw.logicalcpu: 10\nhw.pagesize: 16384\n",
+    "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+    "source_hashes": {
+      "prototype.c": "04f50364cbc8f00497a5ddc8e8eeee5356c7756f80a018add15dc6851a304363",
+      "server.py": "7299224ac9e5b03164d16072336b81e1d5a8a5600406ff315df0733c155f74e9",
+      "run.py": "42cbfe24b23266ba7e36930e896731a76658d40b75732d138925d43ec7f00268"
+    },
+    "disk_free_bytes": 64387198976
+  },
+  "runs": [
+    {
+      "index": 0,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "relief": false,
+      "client_returncode": 1,
+      "client_stderr": "curl_multi_poll: Unrecoverable error in select/poll errno=22\n",
+      "wall_seconds": 0.7318756659515202,
+      "client": {
+        "received_bytes": 0,
+        "max_owner_scan_ns": 911542,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport (LibreSSL/3.3.6) zlib/1.2.12 nghttp2/1.64.0",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 0,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 0,
+        "resolution_rows": 0,
+        "validator_max": 0,
+        "host_fatal": true,
+        "unresolved_attempts": 1000,
+        "artifact_rows": 0,
+        "completion_classes": {
+          "success": 0,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 1,
+        "max_poll_ns": 262625,
+        "max_write_ns": 0,
+        "wall_seconds": 0.29736,
+        "cpu_seconds": 0.252393,
+        "cpu_one_core_fraction": 0.848779,
+        "max_model_callback_gap_ns": 0,
+        "model_terminal_spread_ns": 0,
+        "max_single_raw_spool_allocated": 0,
+        "max_settle_ns": 0,
+        "max_live_spool_allocated": 0,
+        "max_storage_allocated": 266240,
+        "scratch_logical_highwater": 0,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 79616,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": 11830144,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4341760,
+          "physical": 2261824,
+          "lifetime_physical": 2261824,
+          "virtual": 420024123392,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4734976,
+          "physical": 2573184,
+          "lifetime_physical": 2622336,
+          "virtual": 420158504960,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4767744,
+          "physical": 2605952,
+          "lifetime_physical": 2622336,
+          "virtual": 420158816256,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 13877248,
+          "physical": 11682688,
+          "lifetime_physical": 11682688,
+          "virtual": 420178739200,
+          "threads": 4,
+          "fds": 1752
+        },
+        "first_cycle_idle": {
+          "rss": 0,
+          "physical": 0,
+          "lifetime_physical": 0,
+          "virtual": 0,
+          "threads": 0,
+          "fds": 0
+        },
+        "final_cycle_idle": {
+          "rss": 0,
+          "physical": 0,
+          "lifetime_physical": 0,
+          "virtual": 0,
+          "threads": 0,
+          "fds": 0
+        },
+        "idle": {
+          "rss": 14958592,
+          "physical": 11830144,
+          "lifetime_physical": 12764032,
+          "virtual": 420178739200,
+          "threads": 4,
+          "fds": 78
+        },
+        "closed": {
+          "rss": 14794752,
+          "physical": 11780992,
+          "lifetime_physical": 12764032,
+          "virtual": 420178264064,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 0,
+          "completed": 0,
+          "disconnected": 0,
+          "body_bytes": 0,
+          "waves": [],
+          "wall_seconds": 0.7351590830367059,
+          "cpu_seconds": 0.065759,
+          "max_rss_bytes": 25919488,
+          "expected_body_bytes": 89741000
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 0,
+      "integrity": "ok",
+      "checks": {
+        "client_success": false,
+        "full_cohorts": false,
+        "exact_bytes": false,
+        "cleanup": true,
+        "integrity": true
+      },
+      "passed": false
+    }
+  ]
+}

@@ -1,0 +1,572 @@
+{
+  "metadata": {
+    "date": "2026-09-06T11:35:05+0530",
+    "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6 (main, Jun 10 2026, 10:03:53) [Clang 17.0.0 (clang-1700.6.4.2)]",
+    "fd_limit": [
+      8192,
+      9223372036854775807
+    ],
+    "flags": [
+      "-O2",
+      "-std=c11",
+      "-Wall",
+      "-Wextra",
+      "-Werror"
+    ],
+    "machine": "hw.model: MacBookPro18,1\nhw.memsize: 17179869184\nhw.logicalcpu: 10\nhw.pagesize: 16384\n",
+    "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+    "source_hashes": {
+      "prototype.c": "fd6932dce3fc7ee2715c9085e0c1f3581ea31e188ae87de3d61179c0af11d6e9",
+      "server.py": "7299224ac9e5b03164d16072336b81e1d5a8a5600406ff315df0733c155f74e9",
+      "run.py": "97df64499ba45ec28708bda67d17fd0b4371dedd081b11cb4b3d33549b41d1a3"
+    },
+    "disk_free_bytes": 64426262528
+  },
+  "runs": [
+    {
+      "index": 0,
+      "capacity": 100,
+      "cycles": 1,
+      "seconds": 4,
+      "relief": false,
+      "client_returncode": 0,
+      "client_stderr": "{\"cycle\":1,\"idle_physical\":9274560,\"idle_fds\":8,\"scratch\":0}\n",
+      "wall_seconds": 4.536720584030263,
+      "client": {
+        "received_bytes": 8974100,
+        "max_owner_scan_ns": 50847083,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport (LibreSSL/3.3.6) zlib/1.2.12 nghttp2/1.64.0",
+        "sqlite_version": "3.43.2",
+        "capacity": 100,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 100,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 12800,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 100,
+        "resolution_rows": 100,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 100,
+        "completion_classes": {
+          "success": 100,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 2118,
+        "max_poll_ns": 24887750,
+        "max_write_ns": 1109917,
+        "wall_seconds": 4.353635,
+        "cpu_seconds": 1.405112,
+        "cpu_one_core_fraction": 0.322745,
+        "max_model_callback_gap_ns": 64466250,
+        "model_terminal_spread_ns": 1921708,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 6631958,
+        "max_live_spool_allocated": 13926400,
+        "max_storage_allocated": 15253504,
+        "scratch_logical_highwater": 8974100,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": 0,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4308992,
+          "physical": 2229056,
+          "lifetime_physical": 2229056,
+          "virtual": 420015734784,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4669440,
+          "physical": 2507648,
+          "lifetime_physical": 2556800,
+          "virtual": 420150116352,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4702208,
+          "physical": 2540416,
+          "lifetime_physical": 2556800,
+          "virtual": 420150427648,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 17973248,
+          "physical": 15484096,
+          "lifetime_physical": 15484096,
+          "virtual": 420619403264,
+          "threads": 4,
+          "fds": 208
+        },
+        "first_cycle_idle": {
+          "rss": 17973248,
+          "physical": 9274560,
+          "lifetime_physical": 15484096,
+          "virtual": 420619403264,
+          "threads": 4,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 17973248,
+          "physical": 9274560,
+          "lifetime_physical": 15484096,
+          "virtual": 420619403264,
+          "threads": 4,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 17973248,
+          "physical": 9274560,
+          "lifetime_physical": 15484096,
+          "virtual": 420619403264,
+          "threads": 4,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 17498112,
+          "physical": 9225408,
+          "lifetime_physical": 15484096,
+          "virtual": 420618665984,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 100,
+          "completed": 100,
+          "disconnected": 0,
+          "body_bytes": 8974100,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 100,
+              "setup_seconds": 0.051260291947983205,
+              "generation_seconds": 3.99174720805604,
+              "terminal_write_seconds": 0.012250125058926642
+            }
+          ],
+          "wall_seconds": 4.54110941698309,
+          "cpu_seconds": 1.302528,
+          "max_rss_bytes": 72892416,
+          "expected_body_bytes": 8974100
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 8974100,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true
+      },
+      "passed": true
+    },
+    {
+      "index": 1,
+      "capacity": 500,
+      "cycles": 1,
+      "seconds": 4,
+      "relief": false,
+      "client_returncode": 0,
+      "client_stderr": "{\"cycle\":1,\"idle_physical\":24708672,\"idle_fds\":8,\"scratch\":0}\n",
+      "wall_seconds": 5.302728625014424,
+      "client": {
+        "received_bytes": 44870500,
+        "max_owner_scan_ns": 191853208,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport (LibreSSL/3.3.6) zlib/1.2.12 nghttp2/1.64.0",
+        "sqlite_version": "3.43.2",
+        "capacity": 500,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 500,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 64000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 500,
+        "resolution_rows": 500,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 500,
+        "completion_classes": {
+          "success": 500,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 2103,
+        "max_poll_ns": 15081209,
+        "max_write_ns": 2021667,
+        "wall_seconds": 5.282047,
+        "cpu_seconds": 4.652994,
+        "cpu_one_core_fraction": 0.880907,
+        "max_model_callback_gap_ns": 307784875,
+        "model_terminal_spread_ns": 35962833,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 6402958,
+        "max_live_spool_allocated": 65273856,
+        "max_storage_allocated": 67481600,
+        "scratch_logical_highwater": 42372342,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": 0,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4341760,
+          "physical": 2261824,
+          "lifetime_physical": 2261824,
+          "virtual": 420015734784,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4800512,
+          "physical": 2655168,
+          "lifetime_physical": 2704320,
+          "virtual": 420167942144,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4833280,
+          "physical": 2687936,
+          "lifetime_physical": 2704320,
+          "virtual": 420168253440,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 66158592,
+          "physical": 64112192,
+          "lifetime_physical": 64112192,
+          "virtual": 421025988608,
+          "threads": 4,
+          "fds": 1008
+        },
+        "first_cycle_idle": {
+          "rss": 64782336,
+          "physical": 24708672,
+          "lifetime_physical": 64112192,
+          "virtual": 421023105024,
+          "threads": 4,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 64782336,
+          "physical": 24708672,
+          "lifetime_physical": 64112192,
+          "virtual": 421023105024,
+          "threads": 4,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 64782336,
+          "physical": 24708672,
+          "lifetime_physical": 64112192,
+          "virtual": 421023105024,
+          "threads": 4,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 63471616,
+          "physical": 24413696,
+          "lifetime_physical": 64112192,
+          "virtual": 421021319168,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 500,
+          "completed": 500,
+          "disconnected": 0,
+          "body_bytes": 44870500,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 500,
+              "setup_seconds": 0.31286637496668845,
+              "generation_seconds": 3.9978238330222666,
+              "terminal_write_seconds": 0.04422245908062905
+            }
+          ],
+          "wall_seconds": 5.305907416041009,
+          "cpu_seconds": 3.290535,
+          "max_rss_bytes": 253542400,
+          "expected_body_bytes": 44870500
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 44870500,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true
+      },
+      "passed": true
+    },
+    {
+      "index": 2,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "relief": false,
+      "client_returncode": 1,
+      "client_stderr": "",
+      "wall_seconds": 0.323388124932535,
+      "client": {
+        "received_bytes": 0,
+        "max_owner_scan_ns": 896000,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport (LibreSSL/3.3.6) zlib/1.2.12 nghttp2/1.64.0",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 0,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 0,
+        "resolution_rows": 0,
+        "validator_max": 0,
+        "host_fatal": true,
+        "unresolved_attempts": 1000,
+        "artifact_rows": 0,
+        "completion_classes": {
+          "success": 0,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 1,
+        "max_poll_ns": 316916,
+        "max_write_ns": 0,
+        "wall_seconds": 0.294305,
+        "cpu_seconds": 0.258267,
+        "cpu_one_core_fraction": 0.877548,
+        "max_model_callback_gap_ns": 0,
+        "model_terminal_spread_ns": 0,
+        "max_single_raw_spool_allocated": 0,
+        "max_settle_ns": 0,
+        "max_live_spool_allocated": 0,
+        "max_storage_allocated": 266240,
+        "scratch_logical_highwater": 0,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 79616,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": 10978304,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4358144,
+          "physical": 2278208,
+          "lifetime_physical": 2278208,
+          "virtual": 420024123392,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4702208,
+          "physical": 2540416,
+          "lifetime_physical": 2589568,
+          "virtual": 420158504960,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4734976,
+          "physical": 2573184,
+          "lifetime_physical": 2589568,
+          "virtual": 420158816256,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 14188544,
+          "physical": 12026880,
+          "lifetime_physical": 12026880,
+          "virtual": 420208099328,
+          "threads": 4,
+          "fds": 1806
+        },
+        "first_cycle_idle": {
+          "rss": 0,
+          "physical": 0,
+          "lifetime_physical": 0,
+          "virtual": 0,
+          "threads": 0,
+          "fds": 0
+        },
+        "final_cycle_idle": {
+          "rss": 0,
+          "physical": 0,
+          "lifetime_physical": 0,
+          "virtual": 0,
+          "threads": 0,
+          "fds": 0
+        },
+        "idle": {
+          "rss": 13991936,
+          "physical": 10978304,
+          "lifetime_physical": 12878848,
+          "virtual": 420207050752,
+          "threads": 4,
+          "fds": 282
+        },
+        "closed": {
+          "rss": 13828096,
+          "physical": 10912768,
+          "lifetime_physical": 12878848,
+          "virtual": 420206575616,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 0,
+          "completed": 0,
+          "disconnected": 0,
+          "body_bytes": 0,
+          "waves": [],
+          "wall_seconds": 0.3267942910315469,
+          "cpu_seconds": 0.064814,
+          "max_rss_bytes": 26247168,
+          "expected_body_bytes": 89741000
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 0,
+      "integrity": "ok",
+      "checks": {
+        "client_success": false,
+        "full_cohorts": false,
+        "exact_bytes": false,
+        "cleanup": true,
+        "integrity": true
+      },
+      "passed": false
+    }
+  ]
+}

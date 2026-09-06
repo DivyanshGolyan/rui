@@ -1,0 +1,8 @@
+Date: 2026-09-06T11:39:42.319969+05:30
+Platform: macOS-15.7.7-arm64-arm-64bit-Mach-O
+fd=5 curl=0 No error errno=0 native_poll=0 errno=0
+fd=1023 curl=0 No error errno=0 native_poll=0 errno=0
+fd=1024 curl=12 Unrecoverable error in select/poll errno=22 native_poll=0 errno=0
+fd=1100 curl=12 Unrecoverable error in select/poll errno=22 native_poll=0 errno=0
+fd=2000 curl=12 Unrecoverable error in select/poll errno=22 native_poll=0 errno=0
+libcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.64.0
