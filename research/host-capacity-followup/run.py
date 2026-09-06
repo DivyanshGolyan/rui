@@ -2,6 +2,8 @@
 import argparse, hashlib, json, os, pathlib, platform, resource, select, shutil, signal, sqlite3, subprocess, sys, tempfile, time
 P=pathlib.Path(__file__).resolve().parent
 p=argparse.ArgumentParser(); p.add_argument('--smoke',action='store_true'); p.add_argument('--capacity',type=int,choices=[100,500,1000]); p.add_argument('--curl-build',type=pathlib.Path); p.add_argument('--native-poll',action='store_true'); p.add_argument('--refined',action='store_true'); a=p.parse_args()
+if a.refined and a.capacity:
+    p.error('--refined cannot be combined with --capacity')
 resource.setrlimit(resource.RLIMIT_NOFILE,(8192,resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
 flags=['-O2','-std=c11','-Wall','-Wextra','-Werror']
 link=['-lcurl','-lsqlite3','-lpthread']
