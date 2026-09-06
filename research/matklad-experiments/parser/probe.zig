@@ -3,6 +3,8 @@ const std = @import("std");
 const prod = @import("prod");
 const c = @cImport({
     @cInclude("stdio.h");
+    @cInclude("unistd.h");
+    @cInclude("time.h");
     @cInclude("sqlite3.h");
 });
 extern fn probe_rss() u64;
@@ -54,7 +56,8 @@ const Parser = struct {
     closed: bool = false,
     count: u64 = 0,
     unsupported: bool = false,
-    index: *c.FILE,
+    index: ?*c.FILE,
+    importer: ?*Importer = null,
     fn field(name: []const u8) Field {
         inline for (std.meta.fields(Field)) |f| {
             if (std.mem.eql(u8, name, f.name)) return @enumFromInt(f.value);
@@ -154,7 +157,10 @@ const Parser = struct {
                         if (std.mem.eql(u8, kind, "message")) required |= bit(.role) | bit(.content) else if (std.mem.eql(u8, kind, "function_call")) required |= bit(.name) | bit(.arguments) | bit(.call_id) else if (!std.mem.eql(u8, kind, "reasoning") and !std.mem.eql(u8, kind, "compaction")) self.unsupported = true;
                         if ((fr.seen & required) != required) return error.MissingField;
                         const pair = [2]u64{ fr.start, end - fr.start };
-                        if (c.fwrite(&pair, @sizeOf(@TypeOf(pair)), 1, self.index) != 1) return error.IO;
+                        if (self.index) |idx| {
+                            if (c.fwrite(&pair, @sizeOf(@TypeOf(pair)), 1, idx) != 1) return error.IO;
+                        }
+                        if (self.importer) |imp| try imp.item(pair, self.count);
                         self.count += 1;
                     } else if (std.mem.eql(u8, kind, "output_text")) {
                         if ((fr.seen & bit(.text)) == 0) return error.MissingText;
@@ -181,11 +187,11 @@ const Parser = struct {
     }
 };
 
-fn scan(file: *c.FILE, index: *c.FILE, allocator: std.mem.Allocator, window: usize) !Parser {
+fn scan(file: *c.FILE, index: ?*c.FILE, importer: ?*Importer, allocator: std.mem.Allocator, window: usize) !Parser {
     var scanner = std.json.Scanner.initStreaming(allocator);
     defer scanner.deinit();
     try scanner.ensureTotalStackCapacity(64);
-    var p: Parser = .{ .index = index };
+    var p: Parser = .{ .index = index, .importer = importer };
     var buf: [4096]u8 = undefined;
     var base: u64 = 0;
     while (true) {
@@ -208,32 +214,54 @@ fn scan(file: *c.FILE, index: *c.FILE, allocator: std.mem.Allocator, window: usi
 fn sql(db: ?*c.sqlite3, q: [*:0]const u8) !void {
     if (c.sqlite3_exec(db, q, null, null, null) != c.SQLITE_OK) return error.SQLite;
 }
-fn importItems(db: ?*c.sqlite3, file: *c.FILE, index: *c.FILE, count: u64, inject_failure: bool) !void {
-    try sql(db, "BEGIN IMMEDIATE");
-    errdefer sql(db, "ROLLBACK") catch {};
-    c.rewind(index);
-    var buf: [4096]u8 = undefined;
-    var stmt: ?*c.sqlite3_stmt = null;
-    if (c.sqlite3_prepare_v2(db, "INSERT INTO items(payload) VALUES(zeroblob(?))", -1, &stmt, null) != c.SQLITE_OK) return error.SQLite;
-    defer _ = c.sqlite3_finalize(stmt);
-    for (0..count) |ordinal| {
-        if (inject_failure and ordinal == 1) return error.InjectedImportFailure;
-        var pair: [2]u64 = undefined;
-        if (c.fread(&pair, @sizeOf(@TypeOf(pair)), 1, index) != 1) return error.IO;
-        _ = c.sqlite3_reset(stmt);
-        _ = c.sqlite3_bind_int64(stmt, 1, @intCast(pair[1]));
-        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SQLite;
+fn nowNs() u64 {
+    var ts: c.struct_timespec = undefined;
+    _ = c.clock_gettime(c.CLOCK_MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.tv_sec)) * 1000000000 + @as(u64, @intCast(ts.tv_nsec));
+}
+const Importer = struct {
+    db: ?*c.sqlite3,
+    file: *c.FILE,
+    stmt: ?*c.sqlite3_stmt,
+    inject_failure: bool,
+    fn item(self: *@This(), pair: [2]u64, ordinal: u64) !void {
+        if (self.inject_failure and ordinal == 1) return error.InjectedImportFailure;
+        _ = c.sqlite3_reset(self.stmt);
+        _ = c.sqlite3_bind_int64(self.stmt, 1, @intCast(pair[1]));
+        if (c.sqlite3_step(self.stmt) != c.SQLITE_DONE) return error.SQLite;
         var blob: ?*c.sqlite3_blob = null;
-        if (c.sqlite3_blob_open(db, "main", "items", "payload", c.sqlite3_last_insert_rowid(db), 1, &blob) != c.SQLITE_OK) return error.SQLite;
+        if (c.sqlite3_blob_open(self.db, "main", "items", "payload", c.sqlite3_last_insert_rowid(self.db), 1, &blob) != c.SQLITE_OK) return error.SQLite;
         defer _ = c.sqlite3_blob_close(blob);
-        if (c.fseeko(file, @intCast(pair[0]), c.SEEK_SET) != 0) return error.IO;
+        var buf: [4096]u8 = undefined;
         var offset: usize = 0;
         while (offset < pair[1]) {
             const n = @min(buf.len, pair[1] - offset);
-            if (c.fread(&buf, 1, n, file) != n) return error.IO;
+            if (c.pread(c.fileno(self.file), &buf, n, @intCast(pair[0] + offset)) != n) return error.IO;
             if (c.sqlite3_blob_write(blob, &buf, @intCast(n), @intCast(offset)) != c.SQLITE_OK) return error.SQLite;
             offset += n;
         }
+    }
+};
+fn importItems(db: ?*c.sqlite3, file: *c.FILE, index: ?*c.FILE, count: u64, inject_failure: bool, allocator: std.mem.Allocator, window: usize) !void {
+    const start = nowNs();
+    defer _ = c.fprintf(c.__stderrp, "import_ns=%llu\n", nowNs() - start);
+    try sql(db, "BEGIN IMMEDIATE");
+    errdefer sql(db, "ROLLBACK") catch {};
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(db, "INSERT INTO items(payload) VALUES(zeroblob(?))", -1, &stmt, null) != c.SQLITE_OK) return error.SQLite;
+    defer _ = c.sqlite3_finalize(stmt);
+    var imp: Importer = .{ .db = db, .file = file, .stmt = stmt, .inject_failure = inject_failure };
+    if (index) |idx| {
+        c.rewind(idx);
+        for (0..count) |ordinal| {
+            var pair: [2]u64 = undefined;
+            if (c.fread(&pair, @sizeOf(@TypeOf(pair)), 1, idx) != 1) return error.IO;
+            try imp.item(pair, ordinal);
+        }
+    } else {
+        c.rewind(file);
+        const p = try scan(file, null, &imp, allocator, window);
+        if (p.count != count) return error.BadShape;
     }
     try sql(db, "COMMIT");
 }
@@ -260,18 +288,25 @@ pub fn main(init: std.process.Init) !void {
     var diagnostic: [:0]const u8 = "none";
     var struct_bytes: usize = 0;
     var decoded: usize = 0;
-    if ((std.mem.eql(u8, mode, "stream") or std.mem.eql(u8, mode, "stream-fail"))) {
+    if (std.mem.startsWith(u8, mode, "stream")) {
         var db: ?*c.sqlite3 = null;
         if (c.sqlite3_open(db_path, &db) != c.SQLITE_OK) return error.SQLite;
         defer _ = c.sqlite3_close(db);
         try sql(db, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA; PRAGMA cache_size=-256; PRAGMA mmap_size=0; CREATE TABLE items(id INTEGER PRIMARY KEY,payload BLOB NOT NULL)");
-        const index = c.tmpfile() orelse return error.IO;
-        defer _ = c.fclose(index);
+        const two = std.mem.indexOf(u8, mode, "two") != null;
+        const index: ?*c.FILE = if (two) null else (c.tmpfile() orelse return error.IO);
+        defer {
+            if (index) |idx| {
+                _ = c.fclose(idx);
+            }
+        }
         struct_bytes = @sizeOf(Parser) + 4096;
-        if (scan(file, index, allocator, window)) |p| {
+        const validation_start = nowNs();
+        if (scan(file, index, null, allocator, window)) |p| {
+            _ = c.fprintf(c.__stderrp, "validation_ns=%llu\n", nowNs() - validation_start);
             items = p.count;
             supported = !p.unsupported;
-            importItems(db, file, index, items, std.mem.eql(u8, mode, "stream-fail")) catch |err| {
+            importItems(db, file, index, items, std.mem.endsWith(u8, mode, "fail"), allocator, window) catch |err| {
                 valid = false;
                 diagnostic = @errorName(err);
             };

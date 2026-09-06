@@ -19,6 +19,7 @@ def synthetic(n):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--smoke', action='store_true')
+    ap.add_argument('--focus-large', action='store_true')
     ap.add_argument('--skip-transcripts', action='store_true')
     ap.add_argument('--output', type=pathlib.Path)
     opts = ap.parse_args()
@@ -40,9 +41,9 @@ def main():
                  '-cflags','-std=c99','-fno-strict-aliasing',*macros,'--',str(source),
                  '-cflags','--',str(HERE/'metrics.c'),
                  '--dep', 'prod', '-Mroot='+str(HERE/'probe.zig'), '-Mprod='+str(REPO/'src/codex_provider.zig'), '-femit-bin='+str(binary)]
-        subprocess.run(build, cwd=REPO, check=True, capture_output=True)
+        subprocess.run(build, cwd=REPO, check=True)
         serial = 0
-        def run(label, data, mode='stream', window=4096, expected=True, supported=True, sample=False):
+        def run_one(label, data, mode='stream', window=4096, expected=True, supported=True, sample=False):
             nonlocal serial
             serial += 1
             inp, db = temp/f'{serial}.input', temp/f'{serial}.sqlite'
@@ -51,6 +52,10 @@ def main():
             result = subprocess.run([str(binary), mode, str(inp), str(db), str(window)], capture_output=True, check=True, timeout=60)
             elapsed = time.perf_counter_ns()-start
             r = json.loads(result.stdout)
+            timing=re.search(rb'import_ns=(\d+)',result.stderr)
+            r['import_ns']=int(timing[1]) if timing else None
+            validation=re.search(rb'validation_ns=(\d+)',result.stderr)
+            r['validation_ns']=int(validation[1]) if validation else None
             r.update(label=label, mode=mode, window=window, process_elapsed_ns=elapsed, input_sha256=hashlib.sha256(data).hexdigest())
             assert r['valid'] is expected, (label, r)
             assert r['allocator_live_after'] == 0, (label, 'allocator leak', r)
@@ -73,7 +78,7 @@ def main():
                         while text[offset].isspace(): offset += 1
                         if text[offset] == ',': offset += 1
                     assert blobs == expected_blobs, 'ordinal raw-byte mismatch'
-                    r['index_scratch_bytes'] = len(blobs)*16
+                    r['index_scratch_bytes'] = 0 if 'two' in mode else len(blobs)*16
                     r['preserved_item_bytes'] = sum(map(len, blobs))
                 else:
                     assert not blobs, (label, 'partial publication')
@@ -81,6 +86,14 @@ def main():
             inp.unlink()
             (rows if sample else checks).append(r)
             return r
+
+        def run(label, data, mode='stream', **kwargs):
+            if mode.startswith('stream'):
+                modes=[mode, mode.replace('stream','stream-two')]
+                if sum(label.encode()) % 2: modes.reverse()
+                results=[run_one(label,data,mode=m,**kwargs) for m in modes]
+                return results[0]
+            return run_one(label,data,mode=mode,**kwargs)
 
         base=encoded(synthetic(64))
         for window in [1, 7, 127, 4096]:
@@ -110,6 +123,7 @@ def main():
 
         sizes=[64*1024] if opts.smoke else [64*1024, 1024*1024, 4*1024*1024]
         repeats=1 if opts.smoke else 5
+        if opts.focus_large: sizes=[4*1024*1024]; repeats=10
         jobs=[(n,mode,i) for n in sizes for mode in ['stream','dom'] for i in range(repeats)]
         random.Random(419).shuffle(jobs)
         for n, mode, i in jobs:
@@ -147,8 +161,9 @@ def main():
                 transcript_metadata.append({'selection':meta['selection'],'source_id':meta['source_id'],'line':meta['line'],'payload_sha256':meta['payload_sha256'],'source_type':payload['type'],'fixture_bytes':len(encoded(items))})
         # Sequential post-seal burst, shared process parser workspace within each
         # array; output item population grows without retaining a resident item index.
-        for count in ([10] if opts.smoke else [10,100,1000]):
-            run(f'many-items-{count}',encoded([message('bounded') for _ in range(count)]),sample=True)
+        for count in ([] if opts.focus_large else ([10] if opts.smoke else [10,1000,10000])):
+            for rep in range(repeats):
+                run(f'many-items-{count}-repeat-{rep}',encoded([message('bounded') for _ in range(count)]),sample=True)
     report={'platform':platform.platform(),'zig':subprocess.check_output(['zig','version'],text=True).strip(),
             'method':'Fresh native processes; rotated synthetic cases; repository-pinned SQLite with build.zig macros, 256KiB cache; 4KiB windows; counted Zig allocations; actual production Capture separately measured. No live provider.',
             'limitations':['Prototype accepts sealed JSON output-item arrays, not full SSE streams. Narrow consumed-field validation only; no schema or complete provider policy.','DOM is an allocation positive control, not the current production architecture.','Local transcript text is rewrapped, not raw provider wire or opaque continuation. Payloads existed only in private temporary files, cleaned on normal completion and handled failures; abrupt process death can leave them behind.','Elapsed time includes startup; shared machine; cache not flushed; no release latency claim.'],

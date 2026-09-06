@@ -1,5 +1,7 @@
 # Post-seal streaming parser and import feasibility
 
+This experiment branch adds the [two-pass comparison](TWO_PASS.md); historical measurements below remain unchanged.
+
 > **Historical experiment published 6 September 2026.** See the [publication notes](../PUBLICATION.md) for current contract ownership, preserved evidence, privacy substitutions, and reproduction limits.
 
 The narrow prototype processes larger strings without retaining decoded copies. With the repository-pinned SQLite build, process memory also stays approximately flat over the tested sizes. This supports implementing the already accepted disk-first design; it does not certify a complete provider adapter.
