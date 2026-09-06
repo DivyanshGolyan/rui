@@ -3,14 +3,11 @@ const evaluator = @import("workflow_evaluator.zig");
 const protocol = @import("workflow_protocol.zig");
 
 pub fn main(init: std.process.Init) !void {
-    try closeUnintendedDescriptors();
+    // Prototype parent supplies only the three explicit stdio descriptors.
     applyProcessLimits() catch return error.ProcessLimitUnavailable;
 
     const input = try std.heap.page_allocator.alloc(u8, protocol.Limits.input_frame_bytes);
-    defer {
-        @memset(input, 0);
-        std.heap.page_allocator.free(input);
-    }
+    // Mapping has process lifetime; do not touch all pages on exit.
     var stdin_buffer: [4096]u8 = undefined;
     var stdin_reader = std.Io.File.stdin().reader(init.io, &stdin_buffer);
     var input_length: usize = 0;
@@ -27,15 +24,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const output = try std.heap.page_allocator.alloc(u8, protocol.Limits.output_frame_bytes);
-    defer {
-        @memset(output, 0);
-        std.heap.page_allocator.free(output);
-    }
+    // Mapping has process lifetime; do not touch all pages on exit.
     const bridge = try std.heap.page_allocator.alloc(u8, protocol.Limits.bridge_arena_bytes);
-    defer {
-        @memset(bridge, 0);
-        std.heap.page_allocator.free(bridge);
-    }
+    // Mapping has process lifetime; do not touch all pages on exit.
     const result = evaluator.evaluate(input[0..input_length], output, bridge);
     if (result.len == 0) return error.OutputFrameExceeded;
 
@@ -43,24 +34,6 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     try stdout_writer.interface.writeAll(result);
     try stdout_writer.interface.flush();
-}
-
-fn closeUnintendedDescriptors() !void {
-    if (@import("builtin").os.tag == .windows) return;
-
-    const descriptor_limit = try std.posix.getrlimit(.NOFILE);
-    const upper_bound: std.posix.rlim_t = @min(
-        descriptor_limit.cur,
-        @as(std.posix.rlim_t, std.math.maxInt(std.posix.fd_t)),
-    );
-    var descriptor: std.posix.fd_t = 3;
-    while (@as(std.posix.rlim_t, @intCast(descriptor)) < upper_bound) : (descriptor += 1) {
-        while (true) switch (std.posix.errno(std.posix.system.close(descriptor))) {
-            .SUCCESS, .BADF => break,
-            .INTR => continue,
-            else => return error.DescriptorIsolationUnavailable,
-        };
-    }
 }
 
 fn applyProcessLimits() !void {

@@ -67,6 +67,8 @@ pub fn build(b: *std.Build) void {
         quickjs_primary,
     );
     b.installArtifact(workflow_evaluator);
+    const probe_install = b.addInstallArtifact(workflow_evaluator, .{});
+    b.step("evaluator-probe", "Build only the throwaway evaluator candidate").dependOn(&probe_install.step);
 
     const test_step = b.step("test", "Run the deterministic product and storage tests");
     addTestGraph(

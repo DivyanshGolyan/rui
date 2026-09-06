@@ -1,0 +1,101 @@
+[
+  {
+    "case": "tiny",
+    "repetitions": 5,
+    "median_service_ms": 12.175,
+    "max_service_ms": 15.022,
+    "median_child_peak_mib": 0.96942138671875,
+    "median_combined_peak_mib": 1.829345703125,
+    "median_added_combined_mib": 1.078857421875,
+    "max_loop_gap_ms": 1.301,
+    "outcome_tag": 0
+  },
+  {
+    "case": "fanout64",
+    "repetitions": 5,
+    "median_service_ms": 10.592,
+    "max_service_ms": 12.198,
+    "median_child_peak_mib": 0.98504638671875,
+    "median_combined_peak_mib": 1.907470703125,
+    "median_added_combined_mib": 1.14129638671875,
+    "max_loop_gap_ms": 1.283,
+    "outcome_tag": 1
+  },
+  {
+    "case": "partial-replay",
+    "repetitions": 5,
+    "median_service_ms": 11.441,
+    "max_service_ms": 12.711,
+    "median_child_peak_mib": 1.96954345703125,
+    "median_combined_peak_mib": 2.8294677734375,
+    "median_added_combined_mib": 2.06329345703125,
+    "max_loop_gap_ms": 1.289,
+    "outcome_tag": 1
+  },
+  {
+    "case": "aggregate-256k",
+    "repetitions": 5,
+    "median_service_ms": 14.897,
+    "max_service_ms": 16.187,
+    "median_child_peak_mib": 4.70391845703125,
+    "median_combined_peak_mib": 5.6263427734375,
+    "median_added_combined_mib": 4.8602294921875,
+    "max_loop_gap_ms": 1.301,
+    "outcome_tag": 0
+  },
+  {
+    "case": "near-result-60k",
+    "repetitions": 5,
+    "median_service_ms": 14.889,
+    "max_service_ms": 375.706,
+    "median_child_peak_mib": 4.547607421875,
+    "median_combined_peak_mib": 5.47003173828125,
+    "median_added_combined_mib": 4.71954345703125,
+    "max_loop_gap_ms": 2.625,
+    "outcome_tag": 0
+  },
+  {
+    "case": "report-700k-rejected",
+    "repetitions": 5,
+    "median_service_ms": 15.017,
+    "max_service_ms": 20.581,
+    "median_child_peak_mib": 6.485107421875,
+    "median_combined_peak_mib": 7.40753173828125,
+    "median_added_combined_mib": 6.65704345703125,
+    "max_loop_gap_ms": 1.305,
+    "outcome_tag": 4
+  },
+  {
+    "case": "objects20k",
+    "repetitions": 5,
+    "median_service_ms": 21.452,
+    "max_service_ms": 28.228,
+    "median_child_peak_mib": 8.406982421875,
+    "median_combined_peak_mib": 9.2825927734375,
+    "median_added_combined_mib": 8.51641845703125,
+    "max_loop_gap_ms": 1.303,
+    "outcome_tag": 0
+  },
+  {
+    "case": "heap-exhaustion",
+    "repetitions": 5,
+    "median_service_ms": 55.544,
+    "max_service_ms": 62.443,
+    "median_child_peak_mib": 18.5322265625,
+    "median_combined_peak_mib": 19.37646484375,
+    "median_added_combined_mib": 18.6259765625,
+    "max_loop_gap_ms": 1.484,
+    "outcome_tag": 2
+  },
+  {
+    "case": "runaway",
+    "repetitions": 5,
+    "median_service_ms": 1012.193,
+    "max_service_ms": 1018.909,
+    "median_child_peak_mib": 4.48516845703125,
+    "median_combined_peak_mib": 5.39190673828125,
+    "median_added_combined_mib": 4.625732421875,
+    "max_loop_gap_ms": 2.033,
+    "outcome_tag": 4
+  }
+]
