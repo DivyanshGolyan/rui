@@ -1,0 +1,486 @@
+{
+  "metadata": {
+    "date": "2026-09-06T12:52:13+0530",
+    "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6 (main, Jun 10 2026, 10:03:53) [Clang 17.0.0 (clang-1700.6.4.2)]",
+    "curl_build": "None",
+    "link_flags": [
+      "-lcurl",
+      "-lsqlite3",
+      "-lpthread"
+    ],
+    "fd_limit": [
+      8192,
+      9223372036854775807
+    ],
+    "flags": [
+      "-O2",
+      "-std=c11",
+      "-Wall",
+      "-Wextra",
+      "-Werror"
+    ],
+    "machine": "hw.model: MacBookPro18,1\nhw.memsize: 17179869184\nhw.logicalcpu: 10\nhw.pagesize: 16384\n",
+    "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+    "source_hashes": {
+      "prototype.c": "00717dafa090b15dd052bf88cd51aefb71cb059f188fa3d27901b311278723df",
+      "server.py": "ccc0e75e363bb8c77a2223e71f154290d1964d560b8f12a1708212e9e6ad389c",
+      "run.py": "731b155e70fc97bb39c905b2d938dd074af53f8c1d6efb22fb585cb0b4abe7f2"
+    },
+    "disk_free_bytes": 65598324736
+  },
+  "runs": [
+    {
+      "index": 0,
+      "capacity": 10,
+      "cycles": 1,
+      "seconds": 1,
+      "control_mode": 3,
+      "reactor_mode": 1,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":3473,\"live_malloc_bytes\":364624,\"allocator_reserved_bytes\":37748736,\"physical_bytes\":2687872,\"fds\":8}\n* Host localhost:52325 was resolved.\n* IPv6: ::1\n* IPv4: 127.0.0.1\n*   Trying [::1]:52325...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52325...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52325...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52325...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52325...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52325...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52325...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52325...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52325...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52325...\n* connect to ::1 port 52325 from ::1 port 52326 failed: Connection refused\n*   Trying 127.0.0.1:52325...\n* connect to ::1 port 52325 from ::1 port 52327 failed: Connection refused\n*   Trying 127.0.0.1:52325...\n* connect to ::1 port 52325 from ::1 port 52328 failed: Connection refused\n*   Trying 127.0.0.1:52325...\n* connect to ::1 port 52325 from ::1 port 52329 failed: Connection refused\n*   Trying 127.0.0.1:52325...\n* connect to ::1 port 52325 from ::1 port 52330 failed: Connection refused\n*   Trying 127.0.0.1:52325...\n* connect to ::1 port 52325 from ::1 port 52331 failed: Connection refused\n*   Trying 127.0.0.1:52325...\n* connect to ::1 port 52325 from ::1 port 52332 failed: Connection refused\n*   Trying 127.0.0.1:52325...\n* connect to ::1 port 52325 from ::1 port 52333 failed: Connection refused\n*   Trying 127.0.0.1:52325...\n* connect to ::1 port 52325 from ::1 port 52334 failed: Connection refused\n*   Trying 127.0.0.1:52325...\n* connect to ::1 port 52325 from ::1 port 52335 failed: Connection refused\n*   Trying 127.0.0.1:52325...\n* Connected to localhost (127.0.0.1) port 52325\n* ALPN: curl offers http/1.1\n*  CAfile: /var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-capacity-PROTOTYPE-yykuc53c/cert.pem\n*  CApath: none\n* Connected to localhost (127.0.0.1) port 52325\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52325\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52325\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52325\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52325\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52325\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52325\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52325\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52325\n* ALPN: curl offers http/1.1\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=1 HTTP/1.1\nHost: localhost:52325\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=2 HTTP/1.1\nHost: localhost:52325\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=3 HTTP/1.1\nHost: localhost:52325\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=4 HTTP/1.1\nHost: localhost:52325\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=5 HTTP/1.1\nHost: localhost:52325\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=6 HTTP/1.1\nHost: localhost:52325\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=7 HTTP/1.1\nHost: localhost:52325\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=8 HTTP/1.1\nHost: localhost:52325\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=9 HTTP/1.1\nHost: localhost:52325\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=10 HTTP/1.1\nHost: localhost:52325\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":3923,\"live_malloc_bytes\":571920,\"allocator_reserved_bytes\":56623104,\"physical_bytes\":4293568,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":4293568,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":3811,\"live_malloc_bytes\":546928,\"allocator_reserved_bytes\":56623104,\"physical_bytes\":4162496,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":3483,\"live_malloc_bytes\":402800,\"allocator_reserved_bytes\":56623104,\"physical_bytes\":4162496,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":3483,\"live_malloc_bytes\":402800,\"allocator_reserved_bytes\":56623104,\"physical_bytes\":4162496,\"fds\":3}\n",
+      "wall_seconds": 1.637172166025266,
+      "client": {
+        "reactor_control": {
+          "mode": 1,
+          "phase_at_commit": 0,
+          "seen_ns": 751576041462500,
+          "remove_call_ns": 34834,
+          "cleanup_call_ns": 3459,
+          "completions_before_cancel": 9,
+          "pending_phase_ns": [
+            0,
+            0,
+            12929458,
+            42,
+            3958,
+            84,
+            38375
+          ],
+          "max_phase_ns": [
+            1125,
+            1329416,
+            15029708,
+            375,
+            4571792,
+            113375,
+            40166
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 751576026486583,
+          "commit_ns": 751576028528958,
+          "removed_ns": 751576041500875,
+          "released_ns": 751576041663000,
+          "ordinary_finished_ns": 751576032389583,
+          "pending_at_commit": 9,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 6000
+        },
+        "native_poll": false,
+        "received_bytes": 651669,
+        "max_owner_scan_ns": 5985667,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport (LibreSSL/3.3.6) zlib/1.2.12 nghttp2/1.64.0",
+        "sqlite_version": "3.43.2",
+        "capacity": 10,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 10,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 1280,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 10,
+        "resolution_rows": 10,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 9,
+        "completion_classes": {
+          "success": 9,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 261,
+        "max_poll_ns": 15029625,
+        "max_write_ns": 92000,
+        "wall_seconds": 1.132827,
+        "cpu_seconds": 0.062764,
+        "cpu_one_core_fraction": 0.055405,
+        "max_model_callback_gap_ns": 12942666,
+        "model_terminal_spread_ns": 15124667,
+        "max_single_raw_spool_allocated": 73728,
+        "max_settle_ns": 1779708,
+        "max_live_spool_allocated": 671744,
+        "max_storage_allocated": 1150976,
+        "scratch_logical_highwater": 651669,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4325376,
+          "physical": 2245440,
+          "lifetime_physical": 2245440,
+          "virtual": 420024139776,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4751360,
+          "physical": 2589568,
+          "lifetime_physical": 2638720,
+          "virtual": 420158521344,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4849664,
+          "physical": 2687872,
+          "lifetime_physical": 2687872,
+          "virtual": 420158832640,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 6832128,
+          "physical": 4293568,
+          "lifetime_physical": 4686784,
+          "virtual": 420178001920,
+          "threads": 5,
+          "fds": 28
+        },
+        "first_cycle_idle": {
+          "rss": 6832128,
+          "physical": 4293568,
+          "lifetime_physical": 4686784,
+          "virtual": 420178001920,
+          "threads": 4,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 6832128,
+          "physical": 4293568,
+          "lifetime_physical": 4686784,
+          "virtual": 420178001920,
+          "threads": 4,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 6815744,
+          "physical": 4277184,
+          "lifetime_physical": 4686784,
+          "virtual": 420177969152,
+          "threads": 4,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 6275072,
+          "physical": 4162496,
+          "lifetime_physical": 4686784,
+          "virtual": 420177231872,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 10,
+          "completed": 9,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 651669,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 10,
+              "setup_seconds": 0.000224500079639256,
+              "generation_seconds": 0.9903046250110492,
+              "terminal_write_seconds": 0.022670416976325214
+            }
+          ],
+          "wall_seconds": 1.640034083975479,
+          "cpu_seconds": 0.092159,
+          "max_rss_bytes": 30621696,
+          "expected_body_bytes": 651669
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 645669,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 1,
+      "capacity": 10,
+      "cycles": 1,
+      "seconds": 1,
+      "control_mode": 3,
+      "reactor_mode": 2,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":3472,\"live_malloc_bytes\":364432,\"allocator_reserved_bytes\":28311552,\"physical_bytes\":2589568,\"fds\":8}\n* Host localhost:52346 was resolved.\n* IPv6: ::1\n* IPv4: 127.0.0.1\n*   Trying [::1]:52346...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52346...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52346...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52346...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52346...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52346...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52346...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52346...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52346...\n* Hostname localhost was found in DNS cache\n*   Trying [::1]:52346...\n* connect to ::1 port 52346 from ::1 port 52347 failed: Connection refused\n*   Trying 127.0.0.1:52346...\n* connect to ::1 port 52346 from ::1 port 52348 failed: Connection refused\n*   Trying 127.0.0.1:52346...\n* connect to ::1 port 52346 from ::1 port 52349 failed: Connection refused\n*   Trying 127.0.0.1:52346...\n* connect to ::1 port 52346 from ::1 port 52350 failed: Connection refused\n*   Trying 127.0.0.1:52346...\n* connect to ::1 port 52346 from ::1 port 52351 failed: Connection refused\n*   Trying 127.0.0.1:52346...\n* connect to ::1 port 52346 from ::1 port 52352 failed: Connection refused\n*   Trying 127.0.0.1:52346...\n* connect to ::1 port 52346 from ::1 port 52353 failed: Connection refused\n*   Trying 127.0.0.1:52346...\n* connect to ::1 port 52346 from ::1 port 52354 failed: Connection refused\n*   Trying 127.0.0.1:52346...\n* connect to ::1 port 52346 from ::1 port 52355 failed: Connection refused\n*   Trying 127.0.0.1:52346...\n* connect to ::1 port 52346 from ::1 port 52356 failed: Connection refused\n*   Trying 127.0.0.1:52346...\n* Connected to localhost (127.0.0.1) port 52346\n* ALPN: curl offers http/1.1\n*  CAfile: /var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-capacity-PROTOTYPE-yykuc53c/cert.pem\n*  CApath: none\n* Connected to localhost (127.0.0.1) port 52346\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52346\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52346\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52346\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52346\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52346\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52346\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52346\n* ALPN: curl offers http/1.1\n* Connected to localhost (127.0.0.1) port 52346\n* ALPN: curl offers http/1.1\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=1 HTTP/1.1\nHost: localhost:52346\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=2 HTTP/1.1\nHost: localhost:52346\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=3 HTTP/1.1\nHost: localhost:52346\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=4 HTTP/1.1\nHost: localhost:52346\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=5 HTTP/1.1\nHost: localhost:52346\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=6 HTTP/1.1\nHost: localhost:52346\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=7 HTTP/1.1\nHost: localhost:52346\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=8 HTTP/1.1\nHost: localhost:52346\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=9 HTTP/1.1\nHost: localhost:52346\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n* SSL connection using TLSv1.3 / AEAD-AES256-GCM-SHA384 / [blank] / UNDEF\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*  subject: CN=localhost\n*  start date: Sep  6 07:22:13 2026 GMT\n*  expire date: Sep  7 07:22:13 2026 GMT\n*  subjectAltName: host \"localhost\" matched cert's \"localhost\"\n*  issuer: CN=localhost\n*  SSL certificate verify ok.\n* using HTTP/1.x\n> POST /responses?operation=10 HTTP/1.1\nHost: localhost:52346\nAccept: */*\nContent-Length: 4096\nContent-Type: application/x-www-form-urlencoded\n\n* upload completely sent off: 4096 bytes\n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n< HTTP/1.1 200 OK\n< Content-Type: text/event-stream\n< Connection: close\n< \n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n* Closing connection\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":3928,\"live_malloc_bytes\":649760,\"allocator_reserved_bytes\":37748736,\"physical_bytes\":4113472,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":4113472,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":3815,\"live_malloc_bytes\":628576,\"allocator_reserved_bytes\":37748736,\"physical_bytes\":3982400,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":3488,\"live_malloc_bytes\":594640,\"allocator_reserved_bytes\":37748736,\"physical_bytes\":3982400,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":3488,\"live_malloc_bytes\":594640,\"allocator_reserved_bytes\":37748736,\"physical_bytes\":3982400,\"fds\":3}\n",
+      "wall_seconds": 1.1619330829707906,
+      "client": {
+        "reactor_control": {
+          "mode": 2,
+          "phase_at_commit": 0,
+          "seen_ns": 751577297933750,
+          "remove_call_ns": 85958,
+          "cleanup_call_ns": 3750,
+          "completions_before_cancel": 9,
+          "pending_phase_ns": [
+            0,
+            0,
+            14190334,
+            166,
+            0,
+            0,
+            89917
+          ],
+          "max_phase_ns": [
+            292,
+            1304375,
+            15017334,
+            541,
+            3972792,
+            24875,
+            91542
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 751577282693208,
+          "commit_ns": 751577283743291,
+          "removed_ns": 751577298023708,
+          "released_ns": 751577298187958,
+          "ordinary_finished_ns": 751577287572875,
+          "pending_at_commit": 9,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 6000
+        },
+        "native_poll": false,
+        "received_bytes": 651669,
+        "max_owner_scan_ns": 2927833,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport (LibreSSL/3.3.6) zlib/1.2.12 nghttp2/1.64.0",
+        "sqlite_version": "3.43.2",
+        "capacity": 10,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 10,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 1280,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 10,
+        "resolution_rows": 10,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 9,
+        "completion_classes": {
+          "success": 9,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 252,
+        "max_poll_ns": 15017167,
+        "max_write_ns": 75667,
+        "wall_seconds": 1.132825,
+        "cpu_seconds": 0.058319,
+        "cpu_one_core_fraction": 0.051481,
+        "max_model_callback_gap_ns": 12250875,
+        "model_terminal_spread_ns": 15377667,
+        "max_single_raw_spool_allocated": 73728,
+        "max_settle_ns": 732875,
+        "max_live_spool_allocated": 671744,
+        "max_storage_allocated": 1150976,
+        "scratch_logical_highwater": 651669,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4243456,
+          "physical": 2163520,
+          "lifetime_physical": 2163520,
+          "virtual": 420014702592,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4653056,
+          "physical": 2491264,
+          "lifetime_physical": 2540416,
+          "virtual": 420149084160,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4751360,
+          "physical": 2589568,
+          "lifetime_physical": 2589568,
+          "virtual": 420149395456,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 6619136,
+          "physical": 4113472,
+          "lifetime_physical": 4490304,
+          "virtual": 420427563008,
+          "threads": 5,
+          "fds": 28
+        },
+        "first_cycle_idle": {
+          "rss": 6619136,
+          "physical": 4113472,
+          "lifetime_physical": 4490304,
+          "virtual": 420427563008,
+          "threads": 4,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 6619136,
+          "physical": 4113472,
+          "lifetime_physical": 4490304,
+          "virtual": 420427563008,
+          "threads": 4,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 6602752,
+          "physical": 4097088,
+          "lifetime_physical": 4490304,
+          "virtual": 420427530240,
+          "threads": 4,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 6062080,
+          "physical": 3982400,
+          "lifetime_physical": 4490304,
+          "virtual": 420426792960,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 10,
+          "completed": 9,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 651669,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 10,
+              "setup_seconds": 0.0004673328949138522,
+              "generation_seconds": 0.9922525830334052,
+              "terminal_write_seconds": 0.022475917008705437
+            }
+          ],
+          "wall_seconds": 1.1648784159915522,
+          "cpu_seconds": 0.092144,
+          "max_rss_bytes": 31064064,
+          "expected_body_bytes": 651669
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 645669,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    }
+  ]
+}
