@@ -17,15 +17,15 @@ meta={'date':time.strftime('%Y-%m-%dT%H:%M:%S%z'),'platform':platform.platform()
 if a.curl_build:
     meta['curl_config']=(a.curl_build/'lib/curl_config.h').read_text()
     meta['curl_archive_sha256']=hashlib.sha256((a.curl_build/'lib/.libs/libcurl.a').read_bytes()).hexdigest()
-output=P/('smoke.json' if a.smoke else ('single.json' if a.capacity else 'results.json'))
+output=P/('socket-smoke.json' if a.smoke else ('socket-single.json' if a.capacity else 'socket-results.json'))
 results={'metadata':meta,'runs':[]}
 def save(): output.write_text(json.dumps(results,indent=2)+'\n')
 with tempfile.TemporaryDirectory(prefix='onepage-capacity-PROTOTYPE-') as tmp:
     root=pathlib.Path(tmp); binary=root/'probe'; cert=root/'cert.pem'; key=root/'key.pem'
     subprocess.run(['clang',*flags,str(P/'prototype.c'),'-o',str(binary),*link],check=True)
     subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost','-addext','extendedKeyUsage=serverAuth','-addext','keyUsage=digitalSignature,keyEncipherment,keyCertSign'],check=True,capture_output=True)
-    cases=[(10,m) for m in (1,2)] if a.smoke else [(c,m) for order in [(100,500,1000),(500,1000,100),(1000,100,500)] for c in order for m in ((1,2) if order[0]!=500 else (2,1))]
-    if a.capacity: cases=[(a.capacity,m) for m in (1,2)]
+    cases=[(10,m) for m in (2,3)] if a.smoke else [(c,m) for order in [(100,500,1000),(500,1000,100),(1000,100,500)] for c in order for m in ((2,3) if order[0]!=500 else (3,2))]
+    if a.capacity: cases=[(a.capacity,m) for m in (2,3)]
     for index,(capacity,reactor_mode) in enumerate(cases):
         cycles,seconds,control = 1, (1 if a.smoke else 4), 3
         case=root/str(index); case.mkdir(); server=None; client=None

@@ -624,34 +624,6 @@ static int socket_interest(CURL *easy, curl_socket_t fd, int what, void *opaque,
     p->generation[fd]++;
     return 0;
 }
-static CURLMcode socket_poll_step(CURLM *multi, struct SocketPoll *p, int *running) {
-    CURLMcode result = curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, running);
-    if (result != CURLM_OK) return result;
-    struct pollfd fds[MAX_CAPACITY + 16];
-    uint32_t generations[MAX_CAPACITY + 16];
-    nfds_t count = 0;
-    for (int fd = 0; fd < SOCKET_BOUND; ++fd) {
-        if (!p->interest[fd]) continue;
-        if (count >= MAX_CAPACITY + 16) return CURLM_OUT_OF_MEMORY;
-        fds[count] = (struct pollfd){.fd=fd, .events=p->interest[fd]};
-        generations[count++] = p->generation[fd];
-    }
-    long timeout = -1;
-    result = curl_multi_timeout(multi, &timeout);
-    if (result != CURLM_OK) return result;
-    if (timeout < 0 || timeout > 10) timeout = 10;
-    int ready = poll(fds, count, (int)timeout);
-    if (ready < 0) return errno == EINTR ? CURLM_OK : CURLM_UNRECOVERABLE_POLL;
-    for (nfds_t i = 0; i < count; ++i) {
-        if (!fds[i].revents || generations[i] != p->generation[fds[i].fd]) continue;
-        int events = ((fds[i].revents & POLLIN) ? CURL_CSELECT_IN : 0) |
-                     ((fds[i].revents & POLLOUT) ? CURL_CSELECT_OUT : 0) |
-                     ((fds[i].revents & (POLLERR|POLLHUP|POLLNVAL)) ? CURL_CSELECT_ERR : 0);
-        result = curl_multi_socket_action(multi, fds[i].fd, events, running);
-        if (result != CURLM_OK) return result;
-    }
-    return CURLM_OK;
-}
 
 enum ReactorPhase { PH_OTHER, PH_SCAN, PH_POLL, PH_PIPES, PH_PERFORM, PH_COMPLETIONS, PH_CANCEL };
 static void reactor_phase(struct Runtime *runtime, int next) {
@@ -693,10 +665,48 @@ static int reactor_cancel(struct Runtime *runtime, CURLM *multi) {
     return 0;
 }
 
+static CURLMcode socket_poll_step(CURLM *multi, struct SocketPoll *p, int *running, struct Runtime *runtime) {
+    if (reactor_cancel(runtime, multi) != 0) return CURLM_INTERNAL_ERROR;
+    reactor_phase(runtime, PH_PERFORM);
+    CURLMcode result = curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, running);
+    if (result != CURLM_OK) return result;
+    struct pollfd fds[MAX_CAPACITY + 16];
+    uint32_t generations[MAX_CAPACITY + 16];
+    nfds_t count = 0;
+    for (int fd = 0; fd < SOCKET_BOUND; ++fd) {
+        if (!p->interest[fd]) continue;
+        if (count >= MAX_CAPACITY + 16) return CURLM_OUT_OF_MEMORY;
+        fds[count] = (struct pollfd){.fd=fd, .events=p->interest[fd]};
+        generations[count++] = p->generation[fd];
+    }
+    long timeout = -1;
+    result = curl_multi_timeout(multi, &timeout);
+    if (result != CURLM_OK) return result;
+    if (timeout < 0 || timeout > 10) timeout = 10;
+    reactor_phase(runtime, PH_POLL);
+    uint64_t poll_started = now_ns();
+    int ready = poll(fds, count, (int)timeout);
+    max_u64(&runtime->max_poll_ns, now_ns() - poll_started);
+    reactor_phase(runtime, PH_PERFORM);
+    if (reactor_cancel(runtime, multi) != 0) return CURLM_INTERNAL_ERROR;
+    if (ready < 0) return errno == EINTR ? CURLM_OK : CURLM_UNRECOVERABLE_POLL;
+    for (nfds_t i = 0; i < count; ++i) {
+        if (reactor_cancel(runtime, multi) != 0) return CURLM_INTERNAL_ERROR;
+        if (!fds[i].revents || generations[i] != p->generation[fds[i].fd]) continue;
+        int events = ((fds[i].revents & POLLIN) ? CURL_CSELECT_IN : 0) |
+                     ((fds[i].revents & POLLOUT) ? CURL_CSELECT_OUT : 0) |
+                     ((fds[i].revents & (POLLERR|POLLHUP|POLLNVAL)) ? CURL_CSELECT_ERR : 0);
+        reactor_phase(runtime, PH_PERFORM);
+        result = curl_multi_socket_action(multi, fds[i].fd, events, running);
+        if (result != CURLM_OK) return result;
+    }
+    return CURLM_OK;
+}
+
 static void *reactor_main(void *opaque) {
     struct Runtime *runtime = opaque;
     struct SocketPoll socket_poll = {0};
-    bool native_poll = getenv("ONEPAGE_PROOF_NATIVE_POLL") != NULL;
+    bool native_poll = runtime->reactor_control_mode == 3 || getenv("ONEPAGE_PROOF_NATIVE_POLL") != NULL;
     CURLM *multi = curl_multi_init();
     if (!multi) {
         atomic_store(&runtime->fatal, true);
@@ -719,7 +729,7 @@ static void *reactor_main(void *opaque) {
 
     while (!atomic_load_explicit(&runtime->stop, memory_order_acquire)) {
         reactor_phase(runtime, PH_SCAN);
-        if (runtime->reactor_control_mode == 2 && reactor_cancel(runtime, multi) != 0) {
+        if (runtime->reactor_control_mode >= 2 && reactor_cancel(runtime, multi) != 0) {
             atomic_store(&runtime->fatal, true); break;
         }
         int live = 0;
@@ -787,7 +797,7 @@ static void *reactor_main(void *opaque) {
         }
 
         reactor_phase(runtime, PH_PIPES);
-        if (runtime->reactor_control_mode == 2 && reactor_cancel(runtime, multi) != 0) {
+        if (runtime->reactor_control_mode >= 2 && reactor_cancel(runtime, multi) != 0) {
             atomic_store(&runtime->fatal, true); break;
         }
         for (unsigned i = 0; i < extra_count; ++i)
@@ -796,7 +806,7 @@ static void *reactor_main(void *opaque) {
 
         reactor_phase(runtime, PH_PERFORM);
         int running = 0;
-        CURLMcode performed = native_poll ? socket_poll_step(multi, &socket_poll, &running) : curl_multi_perform(multi, &running);
+        CURLMcode performed = native_poll ? socket_poll_step(multi, &socket_poll, &running, runtime) : curl_multi_perform(multi, &running);
         if (performed != CURLM_OK) {
             fprintf(stderr, "curl_multi_perform: %s errno=%d\n", curl_multi_strerror(performed), errno);
             atomic_store(&runtime->fatal, true);
@@ -806,7 +816,7 @@ static void *reactor_main(void *opaque) {
         int remaining = 0;
         CURLMsg *message;
         while (true) {
-            if (runtime->reactor_control_mode == 2 && reactor_cancel(runtime, multi) != 0) {
+            if (runtime->reactor_control_mode >= 2 && reactor_cancel(runtime, multi) != 0) {
                 atomic_store(&runtime->fatal, true); break;
             }
             message = curl_multi_info_read(multi, &remaining);
@@ -974,6 +984,7 @@ static int service_control(sqlite3 *db, struct Runtime *runtime, int pending) {
     if (sql_exec(db, sql) != 0) return -1;
     runtime->control_pending_results = pending;
     runtime->control_committed_ns = now_ns();
+    runtime->phase_at_commit = atomic_load(&runtime->reactor_phase);
     atomic_store(&runtime->cancel_target, (uint64_t)runtime->capacity);
     signal_owner(runtime);
     return 0;
@@ -1209,7 +1220,7 @@ static int run_integrated(int argc, char **argv) {
     runtime.capacity = capacity;
     const char *reactor_text = getenv("ONEPAGE_PROOF_REACTOR_CONTROL");
     runtime.reactor_control_mode = reactor_text ? atoi(reactor_text) : 1;
-    if (runtime.reactor_control_mode < 1 || runtime.reactor_control_mode > 2) return 2;
+    if (runtime.reactor_control_mode < 1 || runtime.reactor_control_mode > 3) return 2;
     const char *control_text = getenv("ONEPAGE_PROOF_CONTROL");
     runtime.control_mode = control_text ? atoi(control_text) : 0;
     if (runtime.control_mode < 0 || runtime.control_mode > 3) return 2;
@@ -1514,7 +1525,7 @@ static int run_integrated(int argc, char **argv) {
     printf("\"control\":{\"mode\":%d,\"request_ns\":%llu,\"commit_ns\":%llu,\"removed_ns\":%llu,\"released_ns\":%llu,\"ordinary_finished_ns\":%llu,\"pending_at_commit\":%d,\"stop_rows\":%d,\"cancelled_rows\":%d,\"discarded_bytes\":%llu},",
         runtime.control_mode, requested, runtime.control_committed_ns, removed, runtime.control_released_ns,
         runtime.ordinary_finished_ns, runtime.control_pending_results, stop_rows, model_cancelled_rows, runtime.cancelled_bytes);
-    printf("\"native_poll\":%s,", getenv("ONEPAGE_PROOF_NATIVE_POLL") ? "true" : "false");
+    printf("\"native_poll\":%s,", (runtime.reactor_control_mode == 3 || getenv("ONEPAGE_PROOF_NATIVE_POLL")) ? "true" : "false");
     printf("\"received_bytes\":%llu,\"max_owner_scan_ns\":%llu,\"custody_array_reserved_bytes\":%zu,\"curl_version\":\"%s\",\"sqlite_version\":\"%s\",",
            received_bytes, max_owner_scan_ns, sizeof(runtime.cells), curl_version(), sqlite3_libversion());
     int expected_attempts = capacity * cycles;

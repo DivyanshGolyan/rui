@@ -1,0 +1,4112 @@
+{
+  "metadata": {
+    "date": "2026-09-06T12:59:43+0530",
+    "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6 (main, Jun 10 2026, 10:03:53) [Clang 17.0.0 (clang-1700.6.4.2)]",
+    "curl_build": "/tmp/onepage-reactor-probe-curl/curl-8.7.1",
+    "link_flags": [
+      "/tmp/onepage-reactor-probe-curl/curl-8.7.1/lib/.libs/libcurl.a",
+      "-framework",
+      "CoreFoundation",
+      "-framework",
+      "Security",
+      "-framework",
+      "SystemConfiguration",
+      "-lz",
+      "-lsqlite3",
+      "-lpthread"
+    ],
+    "fd_limit": [
+      8192,
+      9223372036854775807
+    ],
+    "flags": [
+      "-O2",
+      "-std=c11",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-I/tmp/onepage-reactor-probe-curl/curl-8.7.1/include"
+    ],
+    "machine": "hw.model: MacBookPro18,1\nhw.memsize: 17179869184\nhw.logicalcpu: 10\nhw.pagesize: 16384\n",
+    "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+    "source_hashes": {
+      "prototype.c": "e78a00b199eb6911e05395ad9eff66c84babb8582cdad08e76be2c2d9c60e6f1",
+      "server.py": "ccc0e75e363bb8c77a2223e71f154290d1964d560b8f12a1708212e9e6ad389c",
+      "run.py": "6082e3761c4ddf996f2d300e390e7f60be702f53d2f93bf62b03f10b431de089"
+    },
+    "disk_free_bytes": 64333299712,
+    "curl_config": "/* lib/curl_config.h.  Generated from curl_config.h.in by configure.  */\n/* lib/curl_config.h.in.  Generated from configure.ac by autoheader.  */\n\n/* to enable curl debug memory tracking */\n/* #undef CURLDEBUG */\n\n/* Location of default ca bundle */\n/* #undef CURL_CA_BUNDLE */\n\n/* define \"1\" to use built in CA store of SSL library */\n/* #undef CURL_CA_FALLBACK */\n\n/* Location of default ca path */\n/* #undef CURL_CA_PATH */\n\n/* Default SSL backend */\n/* #undef CURL_DEFAULT_SSL_BACKEND */\n\n/* disable alt-svc */\n/* #undef CURL_DISABLE_ALTSVC */\n\n/* to disable AWS sig support */\n/* #undef CURL_DISABLE_AWS */\n\n/* to disable basic authentication */\n/* #undef CURL_DISABLE_BASIC_AUTH */\n\n/* to disable bearer authentication */\n/* #undef CURL_DISABLE_BEARER_AUTH */\n\n/* disable local binding support */\n/* #undef CURL_DISABLE_BINDLOCAL */\n\n/* to disable cookies support */\n/* #undef CURL_DISABLE_COOKIES */\n\n/* to disable DICT */\n/* #undef CURL_DISABLE_DICT */\n\n/* to disable digest authentication */\n/* #undef CURL_DISABLE_DIGEST_AUTH */\n\n/* disable DoH */\n/* #undef CURL_DISABLE_DOH */\n\n/* to disable FILE */\n/* #undef CURL_DISABLE_FILE */\n\n/* disable form API */\n/* #undef CURL_DISABLE_FORM_API */\n\n/* to disable FTP */\n/* #undef CURL_DISABLE_FTP */\n\n/* to disable curl_easy_options */\n/* #undef CURL_DISABLE_GETOPTIONS */\n\n/* to disable Gopher */\n/* #undef CURL_DISABLE_GOPHER */\n\n/* disable headers-api */\n/* #undef CURL_DISABLE_HEADERS_API */\n\n/* disable alt-svc */\n/* #undef CURL_DISABLE_HSTS */\n\n/* to disable HTTP */\n/* #undef CURL_DISABLE_HTTP */\n\n/* disable HTTP authentication */\n/* #undef CURL_DISABLE_HTTP_AUTH */\n\n/* to disable IMAP */\n/* #undef CURL_DISABLE_IMAP */\n\n/* to disable kerberos authentication */\n/* #undef CURL_DISABLE_KERBEROS_AUTH */\n\n/* to disable LDAP */\n#define CURL_DISABLE_LDAP 1\n\n/* to disable LDAPS */\n#define CURL_DISABLE_LDAPS 1\n\n/* to disable --libcurl C code generation option */\n/* #undef CURL_DISABLE_LIBCURL_OPTION */\n\n/* disable mime API */\n/* #undef CURL_DISABLE_MIME */\n\n/* to disable MQTT */\n/* #undef CURL_DISABLE_MQTT */\n\n/* to disable negotiate authentication */\n/* #undef CURL_DISABLE_NEGOTIATE_AUTH */\n\n/* disable netrc parsing */\n/* #undef CURL_DISABLE_NETRC */\n\n/* to disable NTLM support */\n/* #undef CURL_DISABLE_NTLM */\n\n/* if the OpenSSL configuration won't be loaded automatically */\n/* #undef CURL_DISABLE_OPENSSL_AUTO_LOAD_CONFIG */\n\n/* disable date parsing */\n/* #undef CURL_DISABLE_PARSEDATE */\n\n/* to disable POP3 */\n/* #undef CURL_DISABLE_POP3 */\n\n/* disable progress-meter */\n/* #undef CURL_DISABLE_PROGRESS_METER */\n\n/* to disable proxies */\n/* #undef CURL_DISABLE_PROXY */\n\n/* to disable RTSP */\n/* #undef CURL_DISABLE_RTSP */\n\n/* disable DNS shuffling */\n/* #undef CURL_DISABLE_SHUFFLE_DNS */\n\n/* to disable SMB/CIFS */\n/* #undef CURL_DISABLE_SMB */\n\n/* to disable SMTP */\n/* #undef CURL_DISABLE_SMTP */\n\n/* to disable socketpair support */\n/* #undef CURL_DISABLE_SOCKETPAIR */\n\n/* to disable TELNET */\n/* #undef CURL_DISABLE_TELNET */\n\n/* to disable TFTP */\n/* #undef CURL_DISABLE_TFTP */\n\n/* to disable verbose strings */\n/* #undef CURL_DISABLE_VERBOSE_STRINGS */\n\n/* Definition to make a library symbol externally visible. */\n#define CURL_EXTERN_SYMBOL __attribute__ ((__visibility__ (\"default\")))\n\n/* IP address type in sockaddr */\n#define CURL_SA_FAMILY_T sa_family_t\n\n/* built with multiple SSL backends */\n/* #undef CURL_WITH_MULTI_SSL */\n\n/* enable debug build options */\n/* #undef DEBUGBUILD */\n\n/* Define if you want to enable IPv6 support */\n#define ENABLE_IPV6 1\n\n/* Define to the type of arg 2 for gethostname. */\n#define GETHOSTNAME_TYPE_ARG2 size_t\n\n/* Define to 1 if you have the alarm function. */\n#define HAVE_ALARM 1\n\n/* Define to 1 if you have the `arc4random' function. */\n#define HAVE_ARC4RANDOM 1\n\n/* Define to 1 if you have the <arpa/inet.h> header file. */\n#define HAVE_ARPA_INET_H 1\n\n/* Define to 1 if you have _Atomic support. */\n#define HAVE_ATOMIC 1\n\n/* Define to 1 if you have the basename function. */\n#define HAVE_BASENAME 1\n\n/* Define to 1 if bool is an available type. */\n#define HAVE_BOOL_T 1\n\n/* if BROTLI is in use */\n/* #undef HAVE_BROTLI */\n\n/* Define to 1 if you have the <brotli/decode.h> header file. */\n/* #undef HAVE_BROTLI_DECODE_H */\n\n/* Define to 1 if you have the __builtin_available function. */\n#define HAVE_BUILTIN_AVAILABLE 1\n\n/* Define to 1 if you have the clock_gettime function and monotonic timer. */\n#define HAVE_CLOCK_GETTIME_MONOTONIC 1\n\n/* Define to 1 if you have the clock_gettime function and raw monotonic timer.\n   */\n#define HAVE_CLOCK_GETTIME_MONOTONIC_RAW 1\n\n/* Define to 1 if you have the closesocket function. */\n/* #undef HAVE_CLOSESOCKET */\n\n/* Define to 1 if you have the CloseSocket camel case function. */\n/* #undef HAVE_CLOSESOCKET_CAMEL */\n\n/* Define to 1 if you have the <crypto.h> header file. */\n/* #undef HAVE_CRYPTO_H */\n\n/* Define to 1 if you have the fseeko declaration */\n#define HAVE_DECL_FSEEKO 1\n\n/* Define to 1 if you have the declaration of `getpwuid_r', and to 0 if you\n   don't. */\n#define HAVE_DECL_GETPWUID_R 1\n\n/* \"Set if getpwuid_r() declaration is missing\" */\n/* #undef HAVE_DECL_GETPWUID_R_MISSING */\n\n/* Define to 1 if you have the <dlfcn.h> header file. */\n#define HAVE_DLFCN_H 1\n\n/* Define to 1 if you have the <err.h> header file. */\n/* #undef HAVE_ERR_H */\n\n/* Define to 1 if you have the fcntl function. */\n#define HAVE_FCNTL 1\n\n/* Define to 1 if you have the <fcntl.h> header file. */\n#define HAVE_FCNTL_H 1\n\n/* Define to 1 if you have a working fcntl O_NONBLOCK function. */\n#define HAVE_FCNTL_O_NONBLOCK 1\n\n/* Define to 1 if you have the `fnmatch' function. */\n#define HAVE_FNMATCH 1\n\n/* Define to 1 if you have the freeaddrinfo function. */\n#define HAVE_FREEADDRINFO 1\n\n/* Define to 1 if you have the `fseeko' function. */\n#define HAVE_FSEEKO 1\n\n/* Define to 1 if you have the fsetxattr function. */\n#define HAVE_FSETXATTR 1\n\n/* fsetxattr() takes 5 args */\n/* #undef HAVE_FSETXATTR_5 */\n\n/* fsetxattr() takes 6 args */\n#define HAVE_FSETXATTR_6 1\n\n/* Define to 1 if you have the ftruncate function. */\n#define HAVE_FTRUNCATE 1\n\n/* Define to 1 if you have a working getaddrinfo function. */\n#define HAVE_GETADDRINFO 1\n\n/* Define to 1 if the getaddrinfo function is threadsafe. */\n#define HAVE_GETADDRINFO_THREADSAFE 1\n\n/* Define to 1 if you have the `geteuid' function. */\n#define HAVE_GETEUID 1\n\n/* Define to 1 if you have the gethostbyname function. */\n#define HAVE_GETHOSTBYNAME 1\n\n/* Define to 1 if you have the gethostbyname_r function. */\n/* #undef HAVE_GETHOSTBYNAME_R */\n\n/* gethostbyname_r() takes 3 args */\n/* #undef HAVE_GETHOSTBYNAME_R_3 */\n\n/* gethostbyname_r() takes 5 args */\n/* #undef HAVE_GETHOSTBYNAME_R_5 */\n\n/* gethostbyname_r() takes 6 args */\n/* #undef HAVE_GETHOSTBYNAME_R_6 */\n\n/* Define to 1 if you have the gethostname function. */\n#define HAVE_GETHOSTNAME 1\n\n/* Define to 1 if you have a working getifaddrs function. */\n#define HAVE_GETIFADDRS 1\n\n/* Define to 1 if you have the `getpass_r' function. */\n/* #undef HAVE_GETPASS_R */\n\n/* Define to 1 if you have the getpeername function. */\n#define HAVE_GETPEERNAME 1\n\n/* Define to 1 if you have the `getppid' function. */\n#define HAVE_GETPPID 1\n\n/* Define to 1 if you have the `getpwuid' function. */\n#define HAVE_GETPWUID 1\n\n/* Define to 1 if you have the `getpwuid_r' function. */\n#define HAVE_GETPWUID_R 1\n\n/* Define to 1 if you have the `getrlimit' function. */\n#define HAVE_GETRLIMIT 1\n\n/* Define to 1 if you have the getsockname function. */\n#define HAVE_GETSOCKNAME 1\n\n/* Define to 1 if you have the `gettimeofday' function. */\n#define HAVE_GETTIMEOFDAY 1\n\n/* Define to 1 if you have a working glibc-style strerror_r function. */\n/* #undef HAVE_GLIBC_STRERROR_R */\n\n/* Define to 1 if you have a working gmtime_r function. */\n#define HAVE_GMTIME_R 1\n\n/* if you have the function gnutls_srp_verifier */\n/* #undef HAVE_GNUTLS_SRP */\n\n/* if you have GSS-API libraries */\n/* #undef HAVE_GSSAPI */\n\n/* Define to 1 if you have the <gssapi/gssapi_generic.h> header file. */\n/* #undef HAVE_GSSAPI_GSSAPI_GENERIC_H */\n\n/* Define to 1 if you have the <gssapi/gssapi.h> header file. */\n/* #undef HAVE_GSSAPI_GSSAPI_H */\n\n/* Define to 1 if you have the <gssapi/gssapi_krb5.h> header file. */\n/* #undef HAVE_GSSAPI_GSSAPI_KRB5_H */\n\n/* if you have GNU GSS */\n/* #undef HAVE_GSSGNU */\n\n/* Define to 1 if you have the <hyper.h> header file. */\n/* #undef HAVE_HYPER_H */\n\n/* Define to 1 if you have the <idn2.h> header file. */\n/* #undef HAVE_IDN2_H */\n\n/* Define to 1 if you have the <ifaddrs.h> header file. */\n#define HAVE_IFADDRS_H 1\n\n/* Define to 1 if you have the `if_nametoindex' function. */\n#define HAVE_IF_NAMETOINDEX 1\n\n/* Define to 1 if you have a IPv6 capable working inet_ntop function. */\n#define HAVE_INET_NTOP 1\n\n/* Define to 1 if you have a IPv6 capable working inet_pton function. */\n#define HAVE_INET_PTON 1\n\n/* Define to 1 if you have the <inttypes.h> header file. */\n#define HAVE_INTTYPES_H 1\n\n/* Define to 1 if you have the ioctl function. */\n#define HAVE_IOCTL 1\n\n/* Define to 1 if you have the ioctlsocket function. */\n/* #undef HAVE_IOCTLSOCKET */\n\n/* Define to 1 if you have the IoctlSocket camel case function. */\n/* #undef HAVE_IOCTLSOCKET_CAMEL */\n\n/* Define to 1 if you have a working IoctlSocket camel case FIONBIO function.\n   */\n/* #undef HAVE_IOCTLSOCKET_CAMEL_FIONBIO */\n\n/* Define to 1 if you have a working ioctlsocket FIONBIO function. */\n/* #undef HAVE_IOCTLSOCKET_FIONBIO */\n\n/* Define to 1 if you have a working ioctl FIONBIO function. */\n#define HAVE_IOCTL_FIONBIO 1\n\n/* Define to 1 if you have a working ioctl SIOCGIFADDR function. */\n#define HAVE_IOCTL_SIOCGIFADDR 1\n\n/* Define to 1 if you have the <io.h> header file. */\n/* #undef HAVE_IO_H */\n\n/* Define to 1 if you have the lber.h header file. */\n/* #undef HAVE_LBER_H */\n\n/* Define to 1 if you have the ldap.h header file. */\n/* #undef HAVE_LDAP_H */\n\n/* Define to 1 if you have the `ldap_init_fd' function. */\n/* #undef HAVE_LDAP_INIT_FD */\n\n/* Use LDAPS implementation */\n/* #undef HAVE_LDAP_SSL */\n\n/* Define to 1 if you have the ldap_ssl.h header file. */\n/* #undef HAVE_LDAP_SSL_H */\n\n/* Define to 1 if you have the `ldap_url_parse' function. */\n/* #undef HAVE_LDAP_URL_PARSE */\n\n/* Define to 1 if you have the `brotlidec' library (-lbrotlidec). */\n/* #undef HAVE_LIBBROTLIDEC */\n\n/* Define to 1 if you have the <libgen.h> header file. */\n#define HAVE_LIBGEN_H 1\n\n/* Define to 1 if you have the `idn2' library (-lidn2). */\n/* #undef HAVE_LIBIDN2 */\n\n/* Define to 1 if you have the <libpsl.h> header file. */\n/* #undef HAVE_LIBPSL_H */\n\n/* Define to 1 if using libressl. */\n/* #undef HAVE_LIBRESSL */\n\n/* Define to 1 if you have the <librtmp/rtmp.h> header file. */\n/* #undef HAVE_LIBRTMP_RTMP_H */\n\n/* Define to 1 if you have the `ssh' library (-lssh). */\n/* #undef HAVE_LIBSSH */\n\n/* Define to 1 if you have the `ssh2' library (-lssh2). */\n/* #undef HAVE_LIBSSH2 */\n\n/* Define to 1 if you have the `ssl' library (-lssl). */\n/* #undef HAVE_LIBSSL */\n\n/* Define to 1 if you have the `wolfssh' library (-lwolfssh). */\n/* #undef HAVE_LIBWOLFSSH */\n\n/* if zlib is available */\n#define HAVE_LIBZ 1\n\n/* Define to 1 if you have the `zstd' library (-lzstd). */\n/* #undef HAVE_LIBZSTD */\n\n/* Define to 1 if you have the <linux/tcp.h> header file. */\n/* #undef HAVE_LINUX_TCP_H */\n\n/* Define to 1 if you have the <locale.h> header file. */\n#define HAVE_LOCALE_H 1\n\n/* Define to 1 if the compiler supports the 'long long' data type. */\n#define HAVE_LONGLONG 1\n\n/* Define to 1 if you have the `mach_absolute_time' function. */\n#define HAVE_MACH_ABSOLUTE_TIME 1\n\n/* Define to 1 if you have the memrchr function or macro. */\n/* #undef HAVE_MEMRCHR */\n\n/* Define to 1 if you have the MSG_NOSIGNAL flag. */\n#define HAVE_MSG_NOSIGNAL 1\n\n/* Define to 1 if you have the <msh3.h> header file. */\n/* #undef HAVE_MSH3_H */\n\n/* Define to 1 if you have the <netdb.h> header file. */\n#define HAVE_NETDB_H 1\n\n/* Define to 1 if you have the <netinet/in6.h> header file. */\n/* #undef HAVE_NETINET_IN6_H */\n\n/* Define to 1 if you have the <netinet/in.h> header file. */\n#define HAVE_NETINET_IN_H 1\n\n/* Define to 1 if you have the <netinet/tcp.h> header file. */\n#define HAVE_NETINET_TCP_H 1\n\n/* Define to 1 if you have the <netinet/udp.h> header file. */\n#define HAVE_NETINET_UDP_H 1\n\n/* Define to 1 if you have the <net/if.h> header file. */\n#define HAVE_NET_IF_H 1\n\n/* Define to 1 if you have the <nghttp2/nghttp2.h> header file. */\n/* #undef HAVE_NGHTTP2_NGHTTP2_H */\n\n/* Define to 1 if you have the <nghttp3/nghttp3.h> header file. */\n/* #undef HAVE_NGHTTP3_NGHTTP3_H */\n\n/* Define to 1 if you have the <ngtcp2/ngtcp2_crypto.h> header file. */\n/* #undef HAVE_NGTCP2_NGTCP2_CRYPTO_H */\n\n/* Define to 1 if you have the <ngtcp2/ngtcp2.h> header file. */\n/* #undef HAVE_NGTCP2_NGTCP2_H */\n\n/* if you have an old MIT Kerberos version, lacking GSS_C_NT_HOSTBASED_SERVICE\n   */\n/* #undef HAVE_OLD_GSSMIT */\n\n/* Define to 1 if using OpenSSL 3 or later. */\n/* #undef HAVE_OPENSSL3 */\n\n/* Define to 1 if you have the <openssl/crypto.h> header file. */\n/* #undef HAVE_OPENSSL_CRYPTO_H */\n\n/* Define to 1 if you have the <openssl/err.h> header file. */\n/* #undef HAVE_OPENSSL_ERR_H */\n\n/* Define to 1 if you have the <openssl/pem.h> header file. */\n/* #undef HAVE_OPENSSL_PEM_H */\n\n/* if you have the functions OSSL_QUIC_client_method */\n/* #undef HAVE_OPENSSL_QUIC */\n\n/* Define to 1 if you have the <openssl/rsa.h> header file. */\n/* #undef HAVE_OPENSSL_RSA_H */\n\n/* if you have the functions SSL_CTX_set_srp_username and\n   SSL_CTX_set_srp_password */\n/* #undef HAVE_OPENSSL_SRP */\n\n/* Define to 1 if you have the <openssl/ssl.h> header file. */\n/* #undef HAVE_OPENSSL_SSL_H */\n\n/* Define to 1 if you have the <openssl/x509.h> header file. */\n/* #undef HAVE_OPENSSL_X509_H */\n\n/* Define to 1 if you have the <pem.h> header file. */\n/* #undef HAVE_PEM_H */\n\n/* Define to 1 if you have the `pipe' function. */\n#define HAVE_PIPE 1\n\n/* If you have a fine poll */\n#define HAVE_POLL_FINE 1\n\n/* Define to 1 if you have the <poll.h> header file. */\n#define HAVE_POLL_H 1\n\n/* Define to 1 if you have a working POSIX-style strerror_r function. */\n#define HAVE_POSIX_STRERROR_R 1\n\n/* Define to 1 if you have the <proto/bsdsocket.h> header file. */\n/* #undef HAVE_PROTO_BSDSOCKET_H */\n\n/* if you have <pthread.h> */\n#define HAVE_PTHREAD_H 1\n\n/* Define to 1 if you have the <pwd.h> header file. */\n#define HAVE_PWD_H 1\n\n/* Define to 1 if you have the `quiche_conn_set_qlog_fd' function. */\n/* #undef HAVE_QUICHE_CONN_SET_QLOG_FD */\n\n/* Define to 1 if you have the <quiche.h> header file. */\n/* #undef HAVE_QUICHE_H */\n\n/* Define to 1 if you have the recv function. */\n#define HAVE_RECV 1\n\n/* Define to 1 if you have the <rsa.h> header file. */\n/* #undef HAVE_RSA_H */\n\n/* Define to 1 if you have the `sched_yield' function. */\n#define HAVE_SCHED_YIELD 1\n\n/* Define to 1 if you have the select function. */\n#define HAVE_SELECT 1\n\n/* Define to 1 if you have the send function. */\n#define HAVE_SEND 1\n\n/* Define to 1 if you have the `sendmsg' function. */\n#define HAVE_SENDMSG 1\n\n/* Define to 1 if you have the <setjmp.h> header file. */\n#define HAVE_SETJMP_H 1\n\n/* Define to 1 if you have the `setlocale' function. */\n#define HAVE_SETLOCALE 1\n\n/* Define to 1 if you have the `setmode' function. */\n#define HAVE_SETMODE 1\n\n/* Define to 1 if you have the `setrlimit' function. */\n#define HAVE_SETRLIMIT 1\n\n/* Define to 1 if you have the sigaction function. */\n#define HAVE_SIGACTION 1\n\n/* Define to 1 if you have the siginterrupt function. */\n#define HAVE_SIGINTERRUPT 1\n\n/* Define to 1 if you have the signal function. */\n#define HAVE_SIGNAL 1\n\n/* Define to 1 if you have the sigsetjmp function or macro. */\n#define HAVE_SIGSETJMP 1\n\n/* Define to 1 if you have the `snprintf' function. */\n#define HAVE_SNPRINTF 1\n\n/* Define to 1 if struct sockaddr_in6 has the sin6_scope_id member */\n#define HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID 1\n\n/* Define to 1 if you have the socket function. */\n#define HAVE_SOCKET 1\n\n/* Define to 1 if you have the socketpair function. */\n#define HAVE_SOCKETPAIR 1\n\n/* Define to 1 if you have the <socket.h> header file. */\n/* #undef HAVE_SOCKET_H */\n\n/* Define to 1 if you have the `SSL_get_ech_status' function. */\n/* #undef HAVE_SSL_GET_ECH_STATUS */\n\n/* Define to 1 if you have the <ssl.h> header file. */\n/* #undef HAVE_SSL_H */\n\n/* Define to 1 if you have the `SSL_set0_wbio' function. */\n/* #undef HAVE_SSL_SET0_WBIO */\n\n/* Define to 1 if you have the `SSL_set_quic_use_legacy_codepoint' function.\n   */\n/* #undef HAVE_SSL_SET_QUIC_USE_LEGACY_CODEPOINT */\n\n/* Define to 1 if you have the <stdatomic.h> header file. */\n#define HAVE_STDATOMIC_H 1\n\n/* Define to 1 if you have the <stdbool.h> header file. */\n#define HAVE_STDBOOL_H 1\n\n/* Define to 1 if you have the <stdint.h> header file. */\n#define HAVE_STDINT_H 1\n\n/* Define to 1 if you have the <stdio.h> header file. */\n#define HAVE_STDIO_H 1\n\n/* Define to 1 if you have the <stdlib.h> header file. */\n#define HAVE_STDLIB_H 1\n\n/* Define to 1 if you have the strcasecmp function. */\n#define HAVE_STRCASECMP 1\n\n/* Define to 1 if you have the strcmpi function. */\n/* #undef HAVE_STRCMPI */\n\n/* Define to 1 if you have the strdup function. */\n#define HAVE_STRDUP 1\n\n/* Define to 1 if you have the strerror_r function. */\n#define HAVE_STRERROR_R 1\n\n/* Define to 1 if you have the stricmp function. */\n/* #undef HAVE_STRICMP */\n\n/* Define to 1 if you have the <strings.h> header file. */\n#define HAVE_STRINGS_H 1\n\n/* Define to 1 if you have the <string.h> header file. */\n#define HAVE_STRING_H 1\n\n/* Define to 1 if you have the <stropts.h> header file. */\n/* #undef HAVE_STROPTS_H */\n\n/* Define to 1 if you have the strtok_r function. */\n#define HAVE_STRTOK_R 1\n\n/* Define to 1 if you have the strtoll function. */\n#define HAVE_STRTOLL 1\n\n/* if struct sockaddr_storage is defined */\n#define HAVE_STRUCT_SOCKADDR_STORAGE 1\n\n/* Define to 1 if you have the timeval struct. */\n#define HAVE_STRUCT_TIMEVAL 1\n\n/* Define to 1 if suseconds_t is an available type. */\n#define HAVE_SUSECONDS_T 1\n\n/* Define to 1 if you have the <sys/filio.h> header file. */\n#define HAVE_SYS_FILIO_H 1\n\n/* Define to 1 if you have the <sys/ioctl.h> header file. */\n#define HAVE_SYS_IOCTL_H 1\n\n/* Define to 1 if you have the <sys/param.h> header file. */\n#define HAVE_SYS_PARAM_H 1\n\n/* Define to 1 if you have the <sys/poll.h> header file. */\n#define HAVE_SYS_POLL_H 1\n\n/* Define to 1 if you have the <sys/resource.h> header file. */\n#define HAVE_SYS_RESOURCE_H 1\n\n/* Define to 1 if you have the <sys/select.h> header file. */\n#define HAVE_SYS_SELECT_H 1\n\n/* Define to 1 if you have the <sys/socket.h> header file. */\n#define HAVE_SYS_SOCKET_H 1\n\n/* Define to 1 if you have the <sys/sockio.h> header file. */\n#define HAVE_SYS_SOCKIO_H 1\n\n/* Define to 1 if you have the <sys/stat.h> header file. */\n#define HAVE_SYS_STAT_H 1\n\n/* Define to 1 if you have the <sys/time.h> header file. */\n#define HAVE_SYS_TIME_H 1\n\n/* Define to 1 if you have the <sys/types.h> header file. */\n#define HAVE_SYS_TYPES_H 1\n\n/* Define to 1 if you have the <sys/un.h> header file. */\n#define HAVE_SYS_UN_H 1\n\n/* Define to 1 if you have the <sys/utime.h> header file. */\n/* #undef HAVE_SYS_UTIME_H */\n\n/* Define to 1 if you have the <sys/wait.h> header file. */\n#define HAVE_SYS_WAIT_H 1\n\n/* Define to 1 if you have the <sys/xattr.h> header file. */\n#define HAVE_SYS_XATTR_H 1\n\n/* Define to 1 if you have the <termios.h> header file. */\n#define HAVE_TERMIOS_H 1\n\n/* Define to 1 if you have the <termio.h> header file. */\n/* #undef HAVE_TERMIO_H */\n\n/* Define this if time_t is unsigned */\n/* #undef HAVE_TIME_T_UNSIGNED */\n\n/* Define to 1 if you have the <unistd.h> header file. */\n#define HAVE_UNISTD_H 1\n\n/* Define to 1 if you have the `utime' function. */\n#define HAVE_UTIME 1\n\n/* Define to 1 if you have the `utimes' function. */\n#define HAVE_UTIMES 1\n\n/* Define to 1 if you have the <utime.h> header file. */\n#define HAVE_UTIME_H 1\n\n/* Define to 1 if you have the <wolfssh/ssh.h> header file. */\n/* #undef HAVE_WOLFSSH_SSH_H */\n\n/* if you have wolfSSL_DES_ecb_encrypt */\n/* #undef HAVE_WOLFSSL_DES_ECB_ENCRYPT */\n\n/* if you have wolfSSL_BIO_set_shutdown */\n/* #undef HAVE_WOLFSSL_FULL_BIO */\n\n/* Define to 1 if you have the `wolfSSL_get_peer_certificate' function. */\n/* #undef HAVE_WOLFSSL_GET_PEER_CERTIFICATE */\n\n/* Define to 1 if you have the `wolfSSL_UseALPN' function. */\n/* #undef HAVE_WOLFSSL_USEALPN */\n\n/* Define this symbol if your OS supports changing the contents of argv */\n#define HAVE_WRITABLE_ARGV 1\n\n/* Define to 1 if you have the <x509.h> header file. */\n/* #undef HAVE_X509_H */\n\n/* if libzstd is in use */\n/* #undef HAVE_ZSTD */\n\n/* Define to 1 if you have the <zstd.h> header file. */\n/* #undef HAVE_ZSTD_H */\n\n/* Define to 1 if you have the `_fseeki64' function. */\n/* #undef HAVE__FSEEKI64 */\n\n/* Define to the sub-directory where libtool stores uninstalled libraries. */\n#define LT_OBJDIR \".libs/\"\n\n/* Define to 1 if you need the lber.h header file even with ldap.h */\n/* #undef NEED_LBER_H */\n\n/* Define to 1 if _REENTRANT preprocessor symbol must be defined. */\n/* #undef NEED_REENTRANT */\n\n/* Define to 1 if _THREAD_SAFE preprocessor symbol must be defined. */\n/* #undef NEED_THREAD_SAFE */\n\n/* Define to enable NTLM delegation to winbind's ntlm_auth helper. */\n/* #undef NTLM_WB_ENABLED */\n\n/* Define absolute filename for winbind's ntlm_auth helper. */\n/* #undef NTLM_WB_FILE */\n\n/* cpu-machine-OS */\n#define OS \"aarch64-apple-darwin24.6.0\"\n\n/* Name of package */\n#define PACKAGE \"curl\"\n\n/* Define to the address where bug reports for this package should be sent. */\n#define PACKAGE_BUGREPORT \"a suitable curl mailing list: https://curl.se/mail/\"\n\n/* Define to the full name of this package. */\n#define PACKAGE_NAME \"curl\"\n\n/* Define to the full name and version of this package. */\n#define PACKAGE_STRING \"curl -\"\n\n/* Define to the one symbol short name of this package. */\n#define PACKAGE_TARNAME \"curl\"\n\n/* Define to the home page for this package. */\n#define PACKAGE_URL \"\"\n\n/* Define to the version of this package. */\n#define PACKAGE_VERSION \"-\"\n\n/* a suitable file to read random data from */\n/* #undef RANDOM_FILE */\n\n/* Size of curl_off_t in number of bytes */\n#define SIZEOF_CURL_OFF_T 8\n\n/* Size of curl_socket_t in number of bytes */\n#define SIZEOF_CURL_SOCKET_T 4\n\n/* Size of int in number of bytes */\n#define SIZEOF_INT 4\n\n/* Size of long in number of bytes */\n#define SIZEOF_LONG 8\n\n/* Size of long long in number of bytes */\n/* #undef SIZEOF_LONG_LONG */\n\n/* Size of off_t in number of bytes */\n#define SIZEOF_OFF_T 8\n\n/* Size of size_t in number of bytes */\n#define SIZEOF_SIZE_T 8\n\n/* Size of time_t in number of bytes */\n#define SIZEOF_TIME_T 8\n\n/* Define to 1 if all of the C90 standard headers exist (not just the ones\n   required in a freestanding environment). This macro is provided for\n   backward compatibility; new code need not use it. */\n#define STDC_HEADERS 1\n\n/* if AmiSSL is in use */\n/* #undef USE_AMISSL */\n\n/* Define to enable c-ares support */\n/* #undef USE_ARES */\n\n/* if BearSSL is enabled */\n/* #undef USE_BEARSSL */\n\n/* if ECH support is available */\n/* #undef USE_ECH */\n\n/* if GnuTLS is enabled */\n/* #undef USE_GNUTLS */\n\n/* GSASL support enabled */\n/* #undef USE_GSASL */\n\n/* if hyper is in use */\n/* #undef USE_HYPER */\n\n/* if libpsl is in use */\n/* #undef USE_LIBPSL */\n\n/* if librtmp is in use */\n/* #undef USE_LIBRTMP */\n\n/* if libSSH is in use */\n/* #undef USE_LIBSSH */\n\n/* if libSSH2 is in use */\n/* #undef USE_LIBSSH2 */\n\n/* If you want to build curl with the built-in manual */\n#define USE_MANUAL 1\n\n/* if mbedTLS is enabled */\n/* #undef USE_MBEDTLS */\n\n/* if msh3 is in use */\n/* #undef USE_MSH3 */\n\n/* if nghttp2 is in use */\n/* #undef USE_NGHTTP2 */\n\n/* if nghttp3 is in use */\n/* #undef USE_NGHTTP3 */\n\n/* if ngtcp2 is in use */\n/* #undef USE_NGTCP2 */\n\n/* if ngtcp2_crypto_boringssl is in use */\n/* #undef USE_NGTCP2_CRYPTO_BORINGSSL */\n\n/* if ngtcp2_crypto_gnutls is in use */\n/* #undef USE_NGTCP2_CRYPTO_GNUTLS */\n\n/* if ngtcp2_crypto_quictls is in use */\n/* #undef USE_NGTCP2_CRYPTO_QUICTLS */\n\n/* if ngtcp2_crypto_wolfssl is in use */\n/* #undef USE_NGTCP2_CRYPTO_WOLFSSL */\n\n/* if ngtcp2 + nghttp3 is in use */\n/* #undef USE_NGTCP2_H3 */\n\n/* Use OpenLDAP-specific code */\n/* #undef USE_OPENLDAP */\n\n/* if OpenSSL is in use */\n/* #undef USE_OPENSSL */\n\n/* if openssl quic + nghttp3 is in use */\n/* #undef USE_OPENSSL_H3 */\n\n/* if openssl QUIC is in use */\n/* #undef USE_OPENSSL_QUIC */\n\n/* if quiche is in use */\n/* #undef USE_QUICHE */\n\n/* if rustls is enabled */\n/* #undef USE_RUSTLS */\n\n/* to enable Windows native SSL/TLS support */\n/* #undef USE_SCHANNEL */\n\n/* enable Secure Transport */\n#define USE_SECTRANSP 1\n\n/* if you want POSIX threaded DNS lookup */\n#define USE_THREADS_POSIX 1\n\n/* if you want Win32 threaded DNS lookup */\n/* #undef USE_THREADS_WIN32 */\n\n/* Use TLS-SRP authentication */\n/* #undef USE_TLS_SRP */\n\n/* Use Unix domain sockets */\n#define USE_UNIX_SOCKETS 1\n\n/* enable websockets support */\n/* #undef USE_WEBSOCKETS */\n\n/* Define to 1 if you are building a Windows target with crypto API support.\n   */\n/* #undef USE_WIN32_CRYPTO */\n\n/* Define to 1 if you have the `normaliz' (WinIDN) library (-lnormaliz). */\n/* #undef USE_WIN32_IDN */\n\n/* Define to 1 if you are building a Windows target with large file support.\n   */\n/* #undef USE_WIN32_LARGE_FILES */\n\n/* Use Windows LDAP implementation */\n/* #undef USE_WIN32_LDAP */\n\n/* Define to 1 if you are building a Windows target without large file\n   support. */\n/* #undef USE_WIN32_SMALL_FILES */\n\n/* to enable SSPI support */\n/* #undef USE_WINDOWS_SSPI */\n\n/* if wolfSSH is in use */\n/* #undef USE_WOLFSSH */\n\n/* if wolfSSL is enabled */\n/* #undef USE_WOLFSSL */\n\n/* Version number of package */\n#define VERSION \"-\"\n\n/* Define to 1 if OS is AIX. */\n#ifndef _ALL_SOURCE\n/* #  undef _ALL_SOURCE */\n#endif\n\n/* Number of bits in a file offset, on hosts where this is settable. */\n/* #undef _FILE_OFFSET_BITS */\n\n/* Define for large files, on AIX-style hosts. */\n/* #undef _LARGE_FILES */\n\n/* Define to empty if `const' does not conform to ANSI C. */\n/* #undef const */\n\n/* Type to use in place of in_addr_t when system does not provide it. */\n/* #undef in_addr_t */\n\n/* Define to `__inline__' or `__inline' if that's what the C compiler\n   calls it, or to nothing if 'inline' is not supported under any name.  */\n#ifndef __cplusplus\n/* #undef inline */\n#endif\n\n/* Define to `unsigned int' if <sys/types.h> does not define. */\n/* #undef size_t */\n\n/* the signed version of size_t */\n/* #undef ssize_t */\n",
+    "curl_archive_sha256": "f43285f50993e95e3d29691d2403a5efe5b5d635c613b7356f1249c555f34e51"
+  },
+  "runs": [
+    {
+      "index": 0,
+      "capacity": 100,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 2,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1488,\"live_malloc_bytes\":291632,\"allocator_reserved_bytes\":28311552,\"physical_bytes\":2392832,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":5457,\"live_malloc_bytes\":870912,\"allocator_reserved_bytes\":53477376,\"physical_bytes\":15402112,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":15402112,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":5450,\"live_malloc_bytes\":849904,\"allocator_reserved_bytes\":53477376,\"physical_bytes\":15271040,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":5121,\"live_malloc_bytes\":719072,\"allocator_reserved_bytes\":53477376,\"physical_bytes\":13108352,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":5121,\"live_malloc_bytes\":719072,\"allocator_reserved_bytes\":53477376,\"physical_bytes\":13108352,\"fds\":3}\n",
+      "wall_seconds": 4.495249124942347,
+      "client": {
+        "reactor_control": {
+          "mode": 2,
+          "phase_at_commit": 4,
+          "seen_ns": 752029618529333,
+          "remove_call_ns": 17291,
+          "cleanup_call_ns": 4792,
+          "completions_before_cancel": 9,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            5766667,
+            83,
+            22208
+          ],
+          "max_phase_ns": [
+            2625,
+            58451542,
+            12051958,
+            209,
+            104423500,
+            199167,
+            24458
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752029611683416,
+          "commit_ns": 752029612762583,
+          "removed_ns": 752029618551541,
+          "released_ns": 752029619277958,
+          "ordinary_finished_ns": 752029678612000,
+          "pending_at_commit": 99,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": false,
+        "received_bytes": 8908359,
+        "max_owner_scan_ns": 51600459,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 100,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 100,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 12800,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 100,
+        "resolution_rows": 100,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 99,
+        "completion_classes": {
+          "success": 99,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 828,
+        "max_poll_ns": 12051875,
+        "max_write_ns": 91875,
+        "wall_seconds": 4.318689,
+        "cpu_seconds": 0.878163,
+        "cpu_one_core_fraction": 0.20334,
+        "max_model_callback_gap_ns": 18864458,
+        "model_terminal_spread_ns": 8751500,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 7100334,
+        "max_live_spool_allocated": 12558336,
+        "max_storage_allocated": 14942208,
+        "scratch_logical_highwater": 8100690,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4046848,
+          "physical": 1999552,
+          "lifetime_physical": 1999552,
+          "virtual": 420015226880,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4423680,
+          "physical": 2294528,
+          "lifetime_physical": 2343680,
+          "virtual": 420149608448,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4653056,
+          "physical": 2392832,
+          "lifetime_physical": 2392832,
+          "virtual": 420149919744,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 22102016,
+          "physical": 18531456,
+          "lifetime_physical": 18941056,
+          "virtual": 420612571136,
+          "threads": 5,
+          "fds": 208
+        },
+        "first_cycle_idle": {
+          "rss": 22102016,
+          "physical": 15402112,
+          "lifetime_physical": 18941056,
+          "virtual": 420612571136,
+          "threads": 4,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 22102016,
+          "physical": 15402112,
+          "lifetime_physical": 18941056,
+          "virtual": 420612571136,
+          "threads": 4,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 22085632,
+          "physical": 15385728,
+          "lifetime_physical": 18941056,
+          "virtual": 420612538368,
+          "threads": 4,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 21544960,
+          "physical": 13108352,
+          "lifetime_physical": 18941056,
+          "virtual": 420611801088,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 100,
+          "completed": 99,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 8908359,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 100,
+              "setup_seconds": 0.011762249981984496,
+              "generation_seconds": 3.9912321669980884,
+              "terminal_write_seconds": 0.015265875030308962
+            }
+          ],
+          "wall_seconds": 4.498098707990721,
+          "cpu_seconds": 0.620761,
+          "max_rss_bytes": 72318976,
+          "expected_body_bytes": 8908359
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 8884359,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 1,
+      "capacity": 100,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1487,\"live_malloc_bytes\":285120,\"allocator_reserved_bytes\":28311552,\"physical_bytes\":2409216,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":5488,\"live_malloc_bytes\":939744,\"allocator_reserved_bytes\":77594624,\"physical_bytes\":12797120,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":12797120,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":5481,\"live_malloc_bytes\":887664,\"allocator_reserved_bytes\":77594624,\"physical_bytes\":12649664,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":5152,\"live_malloc_bytes\":754096,\"allocator_reserved_bytes\":77594624,\"physical_bytes\":12649664,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":5152,\"live_malloc_bytes\":754096,\"allocator_reserved_bytes\":77594624,\"physical_bytes\":12649664,\"fds\":3}\n",
+      "wall_seconds": 4.348855666001327,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 752034045758208,
+          "remove_call_ns": 43166,
+          "cleanup_call_ns": 6542,
+          "completions_before_cancel": 3,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            71667,
+            0,
+            49792
+          ],
+          "max_phase_ns": [
+            3125,
+            56901917,
+            12050833,
+            167,
+            4045333,
+            156750,
+            49917
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752034044762583,
+          "commit_ns": 752034045686541,
+          "removed_ns": 752034045808000,
+          "released_ns": 752034046428500,
+          "ordinary_finished_ns": 752034119718916,
+          "pending_at_commit": 99,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 8908359,
+        "max_owner_scan_ns": 46350917,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 100,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 100,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 12800,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 100,
+        "resolution_rows": 100,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 99,
+        "completion_classes": {
+          "success": 99,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 1827,
+        "max_poll_ns": 12050791,
+        "max_write_ns": 3972750,
+        "wall_seconds": 4.320516,
+        "cpu_seconds": 0.811757,
+        "cpu_one_core_fraction": 0.187884,
+        "max_model_callback_gap_ns": 23031042,
+        "model_terminal_spread_ns": 18316000,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 6115291,
+        "max_live_spool_allocated": 6250496,
+        "max_storage_allocated": 11636736,
+        "scratch_logical_highwater": 6730575,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4063232,
+          "physical": 2015936,
+          "lifetime_physical": 2015936,
+          "virtual": 420015226880,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4440064,
+          "physical": 2310912,
+          "lifetime_physical": 2360064,
+          "virtual": 420149608448,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4669440,
+          "physical": 2409216,
+          "lifetime_physical": 2409216,
+          "virtual": 420149919744,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 22282240,
+          "physical": 18662592,
+          "lifetime_physical": 19170496,
+          "virtual": 420637835264,
+          "threads": 7,
+          "fds": 208
+        },
+        "first_cycle_idle": {
+          "rss": 22282240,
+          "physical": 12797120,
+          "lifetime_physical": 19170496,
+          "virtual": 420637835264,
+          "threads": 6,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 22282240,
+          "physical": 12797120,
+          "lifetime_physical": 19170496,
+          "virtual": 420637835264,
+          "threads": 6,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 22265856,
+          "physical": 12780736,
+          "lifetime_physical": 19170496,
+          "virtual": 420637802496,
+          "threads": 6,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 21708800,
+          "physical": 12649664,
+          "lifetime_physical": 19170496,
+          "virtual": 420637065216,
+          "threads": 5,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 100,
+          "completed": 99,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 8908359,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 100,
+              "setup_seconds": 0.046142457984387875,
+              "generation_seconds": 3.992460042005405,
+              "terminal_write_seconds": 0.00930370797868818
+            }
+          ],
+          "wall_seconds": 4.351716333068907,
+          "cpu_seconds": 0.61059,
+          "max_rss_bytes": 72122368,
+          "expected_body_bytes": 8908359
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 8884359,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 2,
+      "capacity": 500,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 2,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1488,\"live_malloc_bytes\":285120,\"allocator_reserved_bytes\":28311552,\"physical_bytes\":2409216,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":16735,\"live_malloc_bytes\":1009712,\"allocator_reserved_bytes\":82837504,\"physical_bytes\":33326336,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":33326336,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":16728,\"live_malloc_bytes\":988352,\"allocator_reserved_bytes\":82837504,\"physical_bytes\":33178880,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":16400,\"live_malloc_bytes\":854288,\"allocator_reserved_bytes\":79691776,\"physical_bytes\":29754624,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":16400,\"live_malloc_bytes\":854288,\"allocator_reserved_bytes\":79691776,\"physical_bytes\":29754624,\"fds\":3}\n",
+      "wall_seconds": 5.178677749936469,
+      "client": {
+        "reactor_control": {
+          "mode": 2,
+          "phase_at_commit": 4,
+          "seen_ns": 752039155675333,
+          "remove_call_ns": 63834,
+          "cleanup_call_ns": 8083,
+          "completions_before_cancel": 75,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            66237458,
+            42,
+            72000
+          ],
+          "max_phase_ns": [
+            8292,
+            229798875,
+            12151167,
+            333,
+            278492708,
+            2015833,
+            75500
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752039088201250,
+          "commit_ns": 752039089437833,
+          "removed_ns": 752039155747333,
+          "released_ns": 752039156878791,
+          "ordinary_finished_ns": 752039398409208,
+          "pending_at_commit": 499,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": false,
+        "received_bytes": 44804759,
+        "max_owner_scan_ns": 230682792,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 500,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 500,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 64000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 500,
+        "resolution_rows": 500,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 499,
+        "completion_classes": {
+          "success": 499,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 260,
+        "max_poll_ns": 12151125,
+        "max_write_ns": 1005416,
+        "wall_seconds": 5.151235,
+        "cpu_seconds": 3.528236,
+        "cpu_one_core_fraction": 0.68493,
+        "max_model_callback_gap_ns": 97961333,
+        "model_terminal_spread_ns": 81113791,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 6911083,
+        "max_live_spool_allocated": 52879360,
+        "max_storage_allocated": 61419520,
+        "scratch_logical_highwater": 36793810,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4063232,
+          "physical": 2015936,
+          "lifetime_physical": 2015936,
+          "virtual": 420015226880,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4440064,
+          "physical": 2310912,
+          "lifetime_physical": 2360064,
+          "virtual": 420149608448,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4669440,
+          "physical": 2409216,
+          "lifetime_physical": 2409216,
+          "virtual": 420149919744,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 83083264,
+          "physical": 79070464,
+          "lifetime_physical": 79693056,
+          "virtual": 420777771008,
+          "threads": 6,
+          "fds": 1008
+        },
+        "first_cycle_idle": {
+          "rss": 82460672,
+          "physical": 33326336,
+          "lifetime_physical": 79693056,
+          "virtual": 420776722432,
+          "threads": 5,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 82460672,
+          "physical": 33326336,
+          "lifetime_physical": 79693056,
+          "virtual": 420776722432,
+          "threads": 5,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 82444288,
+          "physical": 33309952,
+          "lifetime_physical": 79693056,
+          "virtual": 420776689664,
+          "threads": 5,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 78987264,
+          "physical": 29754624,
+          "lifetime_physical": 79693056,
+          "virtual": 420772806656,
+          "threads": 4,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 500,
+          "completed": 499,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 44804759,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 500,
+              "setup_seconds": 0.18599816597998142,
+              "generation_seconds": 3.9960460420697927,
+              "terminal_write_seconds": 0.09080383297987282
+            }
+          ],
+          "wall_seconds": 5.181560875033028,
+          "cpu_seconds": 2.843696,
+          "max_rss_bytes": 250249216,
+          "expected_body_bytes": 44804759
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 44780759,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 3,
+      "capacity": 500,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1487,\"live_malloc_bytes\":283456,\"allocator_reserved_bytes\":29360128,\"physical_bytes\":2441984,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":15070,\"live_malloc_bytes\":1047200,\"allocator_reserved_bytes\":92274688,\"physical_bytes\":24675712,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":24675712,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":15062,\"live_malloc_bytes\":995120,\"allocator_reserved_bytes\":92274688,\"physical_bytes\":24495488,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":14734,\"live_malloc_bytes\":861168,\"allocator_reserved_bytes\":89128960,\"physical_bytes\":21726592,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":14734,\"live_malloc_bytes\":861168,\"allocator_reserved_bytes\":89128960,\"physical_bytes\":21726592,\"fds\":3}\n",
+      "wall_seconds": 5.067845750018023,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 752044277996333,
+          "remove_call_ns": 34042,
+          "cleanup_call_ns": 4875,
+          "completions_before_cancel": 8,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            105083,
+            0,
+            39042
+          ],
+          "max_phase_ns": [
+            6916,
+            218156583,
+            12228125,
+            3750,
+            265555333,
+            2020625,
+            39167
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752044277166416,
+          "commit_ns": 752044277891250,
+          "removed_ns": 752044278035375,
+          "released_ns": 752044278592125,
+          "ordinary_finished_ns": 752044579414583,
+          "pending_at_commit": 499,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 44804759,
+        "max_owner_scan_ns": 192810542,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 500,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 500,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 64000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 500,
+        "resolution_rows": 500,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 499,
+        "completion_classes": {
+          "success": 499,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 404,
+        "max_poll_ns": 12228000,
+        "max_write_ns": 1179833,
+        "wall_seconds": 5.03646,
+        "cpu_seconds": 3.380765,
+        "cpu_one_core_fraction": 0.671258,
+        "max_model_callback_gap_ns": 91751459,
+        "model_terminal_spread_ns": 84596000,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 6187875,
+        "max_live_spool_allocated": 47906816,
+        "max_storage_allocated": 63787008,
+        "scratch_logical_highwater": 35626972,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4063232,
+          "physical": 2015936,
+          "lifetime_physical": 2015936,
+          "virtual": 420016275456,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4472832,
+          "physical": 2343680,
+          "lifetime_physical": 2392832,
+          "virtual": 420150657024,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4702208,
+          "physical": 2441984,
+          "lifetime_physical": 2441984,
+          "virtual": 420150968320,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 81051648,
+          "physical": 77317504,
+          "lifetime_physical": 78300544,
+          "virtual": 420787208192,
+          "threads": 6,
+          "fds": 1008
+        },
+        "first_cycle_idle": {
+          "rss": 81051648,
+          "physical": 24675712,
+          "lifetime_physical": 78300544,
+          "virtual": 420786159616,
+          "threads": 5,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 81051648,
+          "physical": 24675712,
+          "lifetime_physical": 78300544,
+          "virtual": 420786159616,
+          "threads": 5,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 81035264,
+          "physical": 24659328,
+          "lifetime_physical": 78300544,
+          "virtual": 420786126848,
+          "threads": 5,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 77791232,
+          "physical": 21726592,
+          "lifetime_physical": 78300544,
+          "virtual": 420782243840,
+          "threads": 4,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 500,
+          "completed": 499,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 44804759,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 500,
+              "setup_seconds": 0.25343433301895857,
+              "generation_seconds": 3.997724457993172,
+              "terminal_write_seconds": 0.04511116701178253
+            }
+          ],
+          "wall_seconds": 5.07073500007391,
+          "cpu_seconds": 2.7913490000000003,
+          "max_rss_bytes": 251985920,
+          "expected_body_bytes": 44804759
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 44780759,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 4,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 2,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1488,\"live_malloc_bytes\":283344,\"allocator_reserved_bytes\":18874368,\"physical_bytes\":2343680,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":29899,\"live_malloc_bytes\":1128512,\"allocator_reserved_bytes\":100663296,\"physical_bytes\":41141824,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":41141824,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":29892,\"live_malloc_bytes\":1110064,\"allocator_reserved_bytes\":100663296,\"physical_bytes\":40994368,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":29564,\"live_malloc_bytes\":974496,\"allocator_reserved_bytes\":97517568,\"physical_bytes\":40453696,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":29564,\"live_malloc_bytes\":974496,\"allocator_reserved_bytes\":97517568,\"physical_bytes\":40453696,\"fds\":3}\n",
+      "wall_seconds": 6.252282541943714,
+      "client": {
+        "reactor_control": {
+          "mode": 2,
+          "phase_at_commit": 4,
+          "seen_ns": 752050438292125,
+          "remove_call_ns": 117167,
+          "cleanup_call_ns": 8458,
+          "completions_before_cancel": 130,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            135170333,
+            42,
+            125708
+          ],
+          "max_phase_ns": [
+            7750,
+            488819709,
+            12535084,
+            250,
+            693554833,
+            6705334,
+            125916
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752050302340333,
+          "commit_ns": 752050303121750,
+          "removed_ns": 752050438417833,
+          "released_ns": 752050440352500,
+          "ordinary_finished_ns": 752050943702541,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": false,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 499927958,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 76,
+        "max_poll_ns": 12535042,
+        "max_write_ns": 1369541,
+        "wall_seconds": 6.221023,
+        "cpu_seconds": 5.401834,
+        "cpu_one_core_fraction": 0.868319,
+        "max_model_callback_gap_ns": 217629208,
+        "model_terminal_spread_ns": 153806292,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 7738625,
+        "max_live_spool_allocated": 118571008,
+        "max_storage_allocated": 132296704,
+        "scratch_logical_highwater": 76908037,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 3997696,
+          "physical": 1950400,
+          "lifetime_physical": 1950400,
+          "virtual": 420005789696,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4374528,
+          "physical": 2245376,
+          "lifetime_physical": 2294528,
+          "virtual": 420140171264,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4603904,
+          "physical": 2343680,
+          "lifetime_physical": 2343680,
+          "virtual": 420140482560,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 157794304,
+          "physical": 153732672,
+          "lifetime_physical": 154355264,
+          "virtual": 420939251712,
+          "threads": 6,
+          "fds": 2008
+        },
+        "first_cycle_idle": {
+          "rss": 148881408,
+          "physical": 41141824,
+          "lifetime_physical": 154355264,
+          "virtual": 420928765952,
+          "threads": 5,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 148881408,
+          "physical": 41141824,
+          "lifetime_physical": 154355264,
+          "virtual": 420928765952,
+          "threads": 5,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 148865024,
+          "physical": 41125440,
+          "lifetime_physical": 154355264,
+          "virtual": 420928733184,
+          "threads": 5,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 145227776,
+          "physical": 40453696,
+          "lifetime_physical": 154355264,
+          "virtual": 420924850176,
+          "threads": 4,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.3205191660672426,
+              "generation_seconds": 4.002133750007488,
+              "terminal_write_seconds": 0.19204270897898823
+            }
+          ],
+          "wall_seconds": 6.255146707990207,
+          "cpu_seconds": 4.896183,
+          "max_rss_bytes": 468353024,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 5,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1489,\"live_malloc_bytes\":285648,\"allocator_reserved_bytes\":29360128,\"physical_bytes\":2425600,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":24612,\"live_malloc_bytes\":1142128,\"allocator_reserved_bytes\":101711872,\"physical_bytes\":48711168,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":48711168,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":24605,\"live_malloc_bytes\":1088000,\"allocator_reserved_bytes\":101711872,\"physical_bytes\":48563712,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":24276,\"live_malloc_bytes\":958656,\"allocator_reserved_bytes\":100663296,\"physical_bytes\":48465408,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":24276,\"live_malloc_bytes\":958656,\"allocator_reserved_bytes\":100663296,\"physical_bytes\":48465408,\"fds\":3}\n",
+      "wall_seconds": 5.964267416973598,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 752056346471125,
+          "remove_call_ns": 51958,
+          "cleanup_call_ns": 5375,
+          "completions_before_cancel": 5,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            107083,
+            0,
+            57417
+          ],
+          "max_phase_ns": [
+            7292,
+            499750041,
+            12322083,
+            375,
+            504138125,
+            4232542,
+            57500
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752056345262875,
+          "commit_ns": 752056346364125,
+          "removed_ns": 752056346528625,
+          "released_ns": 752056347120541,
+          "ordinary_finished_ns": 752057041267291,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 405607417,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 103,
+        "max_poll_ns": 12322041,
+        "max_write_ns": 1141792,
+        "wall_seconds": 5.931681,
+        "cpu_seconds": 5.089375,
+        "cpu_one_core_fraction": 0.857999,
+        "max_model_callback_gap_ns": 215035458,
+        "model_terminal_spread_ns": 197181000,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 8236125,
+        "max_live_spool_allocated": 63307776,
+        "max_storage_allocated": 109535232,
+        "scratch_logical_highwater": 74843994,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4079616,
+          "physical": 2032320,
+          "lifetime_physical": 2032320,
+          "virtual": 420016275456,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4440064,
+          "physical": 2310912,
+          "lifetime_physical": 2360064,
+          "virtual": 420150657024,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4685824,
+          "physical": 2425600,
+          "lifetime_physical": 2425600,
+          "virtual": 420150968320,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 152666112,
+          "physical": 149210624,
+          "lifetime_physical": 150144512,
+          "virtual": 420937154560,
+          "threads": 6,
+          "fds": 2009
+        },
+        "first_cycle_idle": {
+          "rss": 146997248,
+          "physical": 48711168,
+          "lifetime_physical": 150144512,
+          "virtual": 420929814528,
+          "threads": 5,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 146997248,
+          "physical": 48711168,
+          "lifetime_physical": 150144512,
+          "virtual": 420929814528,
+          "threads": 5,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 146980864,
+          "physical": 48694784,
+          "lifetime_physical": 150144512,
+          "virtual": 420929781760,
+          "threads": 5,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 145948672,
+          "physical": 48465408,
+          "lifetime_physical": 150144512,
+          "virtual": 420927995904,
+          "threads": 4,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.32129591703414917,
+              "generation_seconds": 4.003494374919683,
+              "terminal_write_seconds": 0.08696787501685321
+            }
+          ],
+          "wall_seconds": 5.967234999989159,
+          "cpu_seconds": 4.773555,
+          "max_rss_bytes": 461488128,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 6,
+      "capacity": 500,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1489,\"live_malloc_bytes\":286816,\"allocator_reserved_bytes\":37748736,\"physical_bytes\":2441984,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":16678,\"live_malloc_bytes\":1051776,\"allocator_reserved_bytes\":91226112,\"physical_bytes\":21021952,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":21021952,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":16671,\"live_malloc_bytes\":1001184,\"allocator_reserved_bytes\":91226112,\"physical_bytes\":20874496,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":16343,\"live_malloc_bytes\":867120,\"allocator_reserved_bytes\":90177536,\"physical_bytes\":19498240,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":16343,\"live_malloc_bytes\":867120,\"allocator_reserved_bytes\":90177536,\"physical_bytes\":19498240,\"fds\":3}\n",
+      "wall_seconds": 5.1473010840127245,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 752062022608708,
+          "remove_call_ns": 63875,
+          "cleanup_call_ns": 5667,
+          "completions_before_cancel": 8,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            12417,
+            0,
+            69625
+          ],
+          "max_phase_ns": [
+            6791,
+            219253791,
+            12163125,
+            292,
+            332029958,
+            1882416,
+            69708
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752062021443625,
+          "commit_ns": 752062022596291,
+          "removed_ns": 752062022678333,
+          "released_ns": 752062023513583,
+          "ordinary_finished_ns": 752062329118125,
+          "pending_at_commit": 499,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 44804759,
+        "max_owner_scan_ns": 195193541,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 500,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 500,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 64000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 500,
+        "resolution_rows": 500,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 499,
+        "completion_classes": {
+          "success": 499,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 413,
+        "max_poll_ns": 12163083,
+        "max_write_ns": 1141416,
+        "wall_seconds": 5.119394,
+        "cpu_seconds": 3.423408,
+        "cpu_one_core_fraction": 0.668713,
+        "max_model_callback_gap_ns": 115037208,
+        "model_terminal_spread_ns": 88902625,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 5772375,
+        "max_live_spool_allocated": 48603136,
+        "max_storage_allocated": 63434752,
+        "scratch_logical_highwater": 35268008,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4112384,
+          "physical": 2065088,
+          "lifetime_physical": 2065088,
+          "virtual": 420024664064,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4472832,
+          "physical": 2343680,
+          "lifetime_physical": 2392832,
+          "virtual": 420159045632,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4702208,
+          "physical": 2441984,
+          "lifetime_physical": 2441984,
+          "virtual": 420159356928,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 82984960,
+          "physical": 79463680,
+          "lifetime_physical": 80364800,
+          "virtual": 420789305344,
+          "threads": 6,
+          "fds": 1008
+        },
+        "first_cycle_idle": {
+          "rss": 80379904,
+          "physical": 21021952,
+          "lifetime_physical": 80364800,
+          "virtual": 420785111040,
+          "threads": 5,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 80379904,
+          "physical": 21021952,
+          "lifetime_physical": 80364800,
+          "virtual": 420785111040,
+          "threads": 5,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 80363520,
+          "physical": 21005568,
+          "lifetime_physical": 80364800,
+          "virtual": 420785078272,
+          "threads": 5,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 79216640,
+          "physical": 19498240,
+          "lifetime_physical": 80364800,
+          "virtual": 420783292416,
+          "threads": 4,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 500,
+          "completed": 499,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 44804759,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 500,
+              "setup_seconds": 0.03521887504030019,
+              "generation_seconds": 3.997094374964945,
+              "terminal_write_seconds": 0.042624374967999756
+            }
+          ],
+          "wall_seconds": 5.15028345794417,
+          "cpu_seconds": 2.854987,
+          "max_rss_bytes": 251133952,
+          "expected_body_bytes": 44804759
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 44780759,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 7,
+      "capacity": 500,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 2,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1487,\"live_malloc_bytes\":283344,\"allocator_reserved_bytes\":18874368,\"physical_bytes\":2310912,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":16765,\"live_malloc_bytes\":1116768,\"allocator_reserved_bytes\":101711872,\"physical_bytes\":28476864,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":28476864,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":16758,\"live_malloc_bytes\":1092672,\"allocator_reserved_bytes\":101711872,\"physical_bytes\":28329408,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":16430,\"live_malloc_bytes\":959280,\"allocator_reserved_bytes\":98566144,\"physical_bytes\":25970112,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":16430,\"live_malloc_bytes\":959280,\"allocator_reserved_bytes\":98566144,\"physical_bytes\":25970112,\"fds\":3}\n",
+      "wall_seconds": 5.177238834090531,
+      "client": {
+        "reactor_control": {
+          "mode": 2,
+          "phase_at_commit": 4,
+          "seen_ns": 752067347704083,
+          "remove_call_ns": 45791,
+          "cleanup_call_ns": 7292,
+          "completions_before_cancel": 10,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            33209625,
+            208,
+            53125
+          ],
+          "max_phase_ns": [
+            5958,
+            243515417,
+            12435458,
+            291,
+            346444500,
+            2289708,
+            57500
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752067313284750,
+          "commit_ns": 752067314494250,
+          "removed_ns": 752067347757208,
+          "released_ns": 752067349185250,
+          "ordinary_finished_ns": 752067637727791,
+          "pending_at_commit": 499,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": false,
+        "received_bytes": 44804759,
+        "max_owner_scan_ns": 207120417,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 500,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 500,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 64000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 500,
+        "resolution_rows": 500,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 499,
+        "completion_classes": {
+          "success": 499,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 268,
+        "max_poll_ns": 12435375,
+        "max_write_ns": 1313458,
+        "wall_seconds": 5.146374,
+        "cpu_seconds": 3.477252,
+        "cpu_one_core_fraction": 0.67567,
+        "max_model_callback_gap_ns": 79232833,
+        "model_terminal_spread_ns": 81627500,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 5518791,
+        "max_live_spool_allocated": 41287680,
+        "max_storage_allocated": 54177792,
+        "scratch_logical_highwater": 39599781,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 3964928,
+          "physical": 1917632,
+          "lifetime_physical": 1917632,
+          "virtual": 420005789696,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4341760,
+          "physical": 2212608,
+          "lifetime_physical": 2261760,
+          "virtual": 420140171264,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4571136,
+          "physical": 2310912,
+          "lifetime_physical": 2310912,
+          "virtual": 420140482560,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 83034112,
+          "physical": 79070656,
+          "lifetime_physical": 79726016,
+          "virtual": 420930289664,
+          "threads": 5,
+          "fds": 1009
+        },
+        "first_cycle_idle": {
+          "rss": 83034112,
+          "physical": 28476864,
+          "lifetime_physical": 79726016,
+          "virtual": 420929241088,
+          "threads": 4,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 83034112,
+          "physical": 28476864,
+          "lifetime_physical": 79726016,
+          "virtual": 420929241088,
+          "threads": 4,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 83017728,
+          "physical": 28460480,
+          "lifetime_physical": 79726016,
+          "virtual": 420929208320,
+          "threads": 4,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 79642624,
+          "physical": 25970112,
+          "lifetime_physical": 79726016,
+          "virtual": 420925325312,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 500,
+          "completed": 499,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 44804759,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 500,
+              "setup_seconds": 0.17345029092393816,
+              "generation_seconds": 3.995611417107284,
+              "terminal_write_seconds": 0.04452258301898837
+            }
+          ],
+          "wall_seconds": 5.180091790971346,
+          "cpu_seconds": 2.817637,
+          "max_rss_bytes": 250986496,
+          "expected_body_bytes": 44804759
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 44780759,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 8,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1489,\"live_malloc_bytes\":287328,\"allocator_reserved_bytes\":37748736,\"physical_bytes\":2474752,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":25962,\"live_malloc_bytes\":1053808,\"allocator_reserved_bytes\":90177536,\"physical_bytes\":48760192,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":48760192,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":25955,\"live_malloc_bytes\":1002240,\"allocator_reserved_bytes\":90177536,\"physical_bytes\":48612736,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":25627,\"live_malloc_bytes\":870224,\"allocator_reserved_bytes\":89128960,\"physical_bytes\":48547200,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":25627,\"live_malloc_bytes\":870224,\"allocator_reserved_bytes\":89128960,\"physical_bytes\":48547200,\"fds\":3}\n",
+      "wall_seconds": 6.005328250001185,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 752073100040291,
+          "remove_call_ns": 108208,
+          "cleanup_call_ns": 6500,
+          "completions_before_cancel": 65,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            171667,
+            0,
+            114792
+          ],
+          "max_phase_ns": [
+            8916,
+            483595917,
+            12549333,
+            250,
+            604861958,
+            6413625,
+            114833
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752073098821625,
+          "commit_ns": 752073099868666,
+          "removed_ns": 752073100155125,
+          "released_ns": 752073100997583,
+          "ordinary_finished_ns": 752073755495041,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 495840791,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 91,
+        "max_poll_ns": 12549250,
+        "max_write_ns": 1182875,
+        "wall_seconds": 5.97724,
+        "cpu_seconds": 5.175938,
+        "cpu_one_core_fraction": 0.865941,
+        "max_model_callback_gap_ns": 167880916,
+        "model_terminal_spread_ns": 174191708,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 8729833,
+        "max_live_spool_allocated": 74448896,
+        "max_storage_allocated": 108027904,
+        "scratch_logical_highwater": 74126066,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4063232,
+          "physical": 2015936,
+          "lifetime_physical": 2015936,
+          "virtual": 420016275456,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4505600,
+          "physical": 2376448,
+          "lifetime_physical": 2425600,
+          "virtual": 420159045632,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4734976,
+          "physical": 2474752,
+          "lifetime_physical": 2474752,
+          "virtual": 420159356928,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 154468352,
+          "physical": 150996416,
+          "lifetime_physical": 151684544,
+          "virtual": 420795596800,
+          "threads": 6,
+          "fds": 2008
+        },
+        "first_cycle_idle": {
+          "rss": 146636800,
+          "physical": 48760192,
+          "lifetime_physical": 151684544,
+          "virtual": 420784062464,
+          "threads": 5,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 146636800,
+          "physical": 48760192,
+          "lifetime_physical": 151684544,
+          "virtual": 420784062464,
+          "threads": 5,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 146620416,
+          "physical": 48743808,
+          "lifetime_physical": 151684544,
+          "virtual": 420784029696,
+          "threads": 5,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 145195008,
+          "physical": 48547200,
+          "lifetime_physical": 151684544,
+          "virtual": 420782243840,
+          "threads": 4,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.34185874997638166,
+              "generation_seconds": 4.003835375071503,
+              "terminal_write_seconds": 0.08452479192055762
+            }
+          ],
+          "wall_seconds": 6.00817587506026,
+          "cpu_seconds": 4.814368,
+          "max_rss_bytes": 469368832,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 9,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 2,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1484,\"live_malloc_bytes\":283344,\"allocator_reserved_bytes\":18874368,\"physical_bytes\":2343680,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":30632,\"live_malloc_bytes\":1125424,\"allocator_reserved_bytes\":92274688,\"physical_bytes\":51430848,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":51430848,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":30624,\"live_malloc_bytes\":1100992,\"allocator_reserved_bytes\":92274688,\"physical_bytes\":51283392,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":30296,\"live_malloc_bytes\":968864,\"allocator_reserved_bytes\":90177536,\"physical_bytes\":50841024,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":30296,\"live_malloc_bytes\":968864,\"allocator_reserved_bytes\":90177536,\"physical_bytes\":50841024,\"fds\":3}\n",
+      "wall_seconds": 6.638073040987365,
+      "client": {
+        "reactor_control": {
+          "mode": 2,
+          "phase_at_commit": 4,
+          "seen_ns": 752079767159916,
+          "remove_call_ns": 162291,
+          "cleanup_call_ns": 12375,
+          "completions_before_cancel": 81,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            152933917,
+            291,
+            174750
+          ],
+          "max_phase_ns": [
+            6750,
+            737366334,
+            12396000,
+            250,
+            680354833,
+            6694083,
+            175042
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752079613207083,
+          "commit_ns": 752079614225708,
+          "removed_ns": 752079767334666,
+          "released_ns": 752079769345333,
+          "ordinary_finished_ns": 752080531073500,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": false,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 739671917,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 70,
+        "max_poll_ns": 12395959,
+        "max_write_ns": 1165583,
+        "wall_seconds": 6.603577,
+        "cpu_seconds": 5.677755,
+        "cpu_one_core_fraction": 0.8598,
+        "max_model_callback_gap_ns": 162413209,
+        "model_terminal_spread_ns": 181725958,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 147880542,
+        "max_live_spool_allocated": 119529472,
+        "max_storage_allocated": 129060864,
+        "scratch_logical_highwater": 80138713,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4014080,
+          "physical": 1966784,
+          "lifetime_physical": 1966784,
+          "virtual": 420005789696,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4374528,
+          "physical": 2245376,
+          "lifetime_physical": 2294528,
+          "virtual": 420140171264,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4603904,
+          "physical": 2343680,
+          "lifetime_physical": 2343680,
+          "virtual": 420140482560,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 158531584,
+          "physical": 154437056,
+          "lifetime_physical": 154813888,
+          "virtual": 420932485120,
+          "threads": 7,
+          "fds": 2009
+        },
+        "first_cycle_idle": {
+          "rss": 148094976,
+          "physical": 51430848,
+          "lifetime_physical": 154813888,
+          "virtual": 420919230464,
+          "threads": 3,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 148094976,
+          "physical": 51430848,
+          "lifetime_physical": 154813888,
+          "virtual": 420919230464,
+          "threads": 3,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 148078592,
+          "physical": 51414464,
+          "lifetime_physical": 154813888,
+          "virtual": 420919197696,
+          "threads": 3,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 145817600,
+          "physical": 50841024,
+          "lifetime_physical": 154813888,
+          "virtual": 420916363264,
+          "threads": 2,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.363266458036378,
+              "generation_seconds": 4.00148983404506,
+              "terminal_write_seconds": 0.1977370409294963
+            }
+          ],
+          "wall_seconds": 6.640920375008136,
+          "cpu_seconds": 5.004192,
+          "max_rss_bytes": 467369984,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 10,
+      "capacity": 100,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1486,\"live_malloc_bytes\":284896,\"allocator_reserved_bytes\":28311552,\"physical_bytes\":2392832,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":5482,\"live_malloc_bytes\":902896,\"allocator_reserved_bytes\":77594624,\"physical_bytes\":11371904,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":11371904,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":5475,\"live_malloc_bytes\":852752,\"allocator_reserved_bytes\":77594624,\"physical_bytes\":11240832,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":5146,\"live_malloc_bytes\":719472,\"allocator_reserved_bytes\":77594624,\"physical_bytes\":11240832,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":5146,\"live_malloc_bytes\":719472,\"allocator_reserved_bytes\":77594624,\"physical_bytes\":11240832,\"fds\":3}\n",
+      "wall_seconds": 4.338316958048381,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 752084938349166,
+          "remove_call_ns": 26166,
+          "cleanup_call_ns": 3375,
+          "completions_before_cancel": 6,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            1291,
+            0,
+            29625
+          ],
+          "max_phase_ns": [
+            3375,
+            53079750,
+            12061041,
+            250,
+            8571334,
+            241375,
+            29750
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752084937220416,
+          "commit_ns": 752084938347875,
+          "removed_ns": 752084938378791,
+          "released_ns": 752084939206708,
+          "ordinary_finished_ns": 752085005458708,
+          "pending_at_commit": 99,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 8908359,
+        "max_owner_scan_ns": 43596375,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 100,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 100,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 12800,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 100,
+        "resolution_rows": 100,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 99,
+        "completion_classes": {
+          "success": 99,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 1926,
+        "max_poll_ns": 12060917,
+        "max_write_ns": 96750,
+        "wall_seconds": 4.320932,
+        "cpu_seconds": 0.804581,
+        "cpu_one_core_fraction": 0.186205,
+        "max_model_callback_gap_ns": 22418958,
+        "model_terminal_spread_ns": 15336334,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 6126750,
+        "max_live_spool_allocated": 7258112,
+        "max_storage_allocated": 11636736,
+        "scratch_logical_highwater": 6982057,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4030464,
+          "physical": 1983168,
+          "lifetime_physical": 1983168,
+          "virtual": 420015226880,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4423680,
+          "physical": 2294528,
+          "lifetime_physical": 2343680,
+          "virtual": 420149608448,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4653056,
+          "physical": 2392832,
+          "lifetime_physical": 2392832,
+          "virtual": 420149919744,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 22347776,
+          "physical": 18843008,
+          "lifetime_physical": 19252608,
+          "virtual": 420636688384,
+          "threads": 5,
+          "fds": 208
+        },
+        "first_cycle_idle": {
+          "rss": 22347776,
+          "physical": 11371904,
+          "lifetime_physical": 19252608,
+          "virtual": 420636688384,
+          "threads": 4,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 22347776,
+          "physical": 11371904,
+          "lifetime_physical": 19252608,
+          "virtual": 420636688384,
+          "threads": 4,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 22331392,
+          "physical": 11355520,
+          "lifetime_physical": 19252608,
+          "virtual": 420636655616,
+          "threads": 4,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 21790720,
+          "physical": 11240832,
+          "lifetime_physical": 19252608,
+          "virtual": 420635918336,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 100,
+          "completed": 99,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 8908359,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 100,
+              "setup_seconds": 0.055659124976955354,
+              "generation_seconds": 3.9932789161102846,
+              "terminal_write_seconds": 0.008778124931268394
+            }
+          ],
+          "wall_seconds": 4.341437416966073,
+          "cpu_seconds": 0.608433,
+          "max_rss_bytes": 72794112,
+          "expected_body_bytes": 8908359
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 8884359,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 11,
+      "capacity": 100,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 2,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1493,\"live_malloc_bytes\":289568,\"allocator_reserved_bytes\":57671680,\"physical_bytes\":2654976,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":5467,\"live_malloc_bytes\":896944,\"allocator_reserved_bytes\":78643200,\"physical_bytes\":13567168,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":13567168,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":5459,\"live_malloc_bytes\":873904,\"allocator_reserved_bytes\":78643200,\"physical_bytes\":13436096,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":5130,\"live_malloc_bytes\":743040,\"allocator_reserved_bytes\":78643200,\"physical_bytes\":11568320,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":5130,\"live_malloc_bytes\":743040,\"allocator_reserved_bytes\":78643200,\"physical_bytes\":11568320,\"fds\":3}\n",
+      "wall_seconds": 4.349547749967314,
+      "client": {
+        "reactor_control": {
+          "mode": 2,
+          "phase_at_commit": 4,
+          "seen_ns": 752089387868125,
+          "remove_call_ns": 30750,
+          "cleanup_call_ns": 5750,
+          "completions_before_cancel": 11,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            4381292,
+            166,
+            36584
+          ],
+          "max_phase_ns": [
+            2750,
+            64109333,
+            12083833,
+            500,
+            102946583,
+            202375,
+            36750
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752089382375333,
+          "commit_ns": 752089383486708,
+          "removed_ns": 752089387904750,
+          "released_ns": 752089388598000,
+          "ordinary_finished_ns": 752089453247541,
+          "pending_at_commit": 99,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": false,
+        "received_bytes": 8908359,
+        "max_owner_scan_ns": 56267333,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 100,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 100,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 12800,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 100,
+        "resolution_rows": 100,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 99,
+        "completion_classes": {
+          "success": 99,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 828,
+        "max_poll_ns": 12083666,
+        "max_write_ns": 2569958,
+        "wall_seconds": 4.320464,
+        "cpu_seconds": 0.876074,
+        "cpu_one_core_fraction": 0.202773,
+        "max_model_callback_gap_ns": 20043667,
+        "model_terminal_spread_ns": 7063667,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 6786167,
+        "max_live_spool_allocated": 10444800,
+        "max_storage_allocated": 14925824,
+        "scratch_logical_highwater": 8304172,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4259840,
+          "physical": 2212544,
+          "lifetime_physical": 2212544,
+          "virtual": 420044587008,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4685824,
+          "physical": 2556672,
+          "lifetime_physical": 2605824,
+          "virtual": 420178968576,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4915200,
+          "physical": 2654976,
+          "lifetime_physical": 2654976,
+          "virtual": 420179279872,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 22151168,
+          "physical": 18252992,
+          "lifetime_physical": 18908352,
+          "virtual": 420637736960,
+          "threads": 5,
+          "fds": 208
+        },
+        "first_cycle_idle": {
+          "rss": 22151168,
+          "physical": 13567168,
+          "lifetime_physical": 18908352,
+          "virtual": 420637736960,
+          "threads": 4,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 22151168,
+          "physical": 13567168,
+          "lifetime_physical": 18908352,
+          "virtual": 420637736960,
+          "threads": 4,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 22134784,
+          "physical": 13550784,
+          "lifetime_physical": 18908352,
+          "virtual": 420637704192,
+          "threads": 4,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 21594112,
+          "physical": 11568320,
+          "lifetime_physical": 18908352,
+          "virtual": 420636966912,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 100,
+          "completed": 99,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 8908359,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 100,
+              "setup_seconds": 0.010241624899208546,
+              "generation_seconds": 3.9918827920919284,
+              "terminal_write_seconds": 0.016594165936112404
+            }
+          ],
+          "wall_seconds": 4.352343542035669,
+          "cpu_seconds": 0.6187699999999999,
+          "max_rss_bytes": 72122368,
+          "expected_body_bytes": 8908359
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 8884359,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 12,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 2,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1490,\"live_malloc_bytes\":298544,\"allocator_reserved_bytes\":47185920,\"physical_bytes\":2507520,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":30773,\"live_malloc_bytes\":1118816,\"allocator_reserved_bytes\":101711872,\"physical_bytes\":38126976,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":38126976,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":30766,\"live_malloc_bytes\":1099456,\"allocator_reserved_bytes\":101711872,\"physical_bytes\":37979520,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":30438,\"live_malloc_bytes\":970912,\"allocator_reserved_bytes\":98566144,\"physical_bytes\":37340544,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":30438,\"live_malloc_bytes\":970912,\"allocator_reserved_bytes\":98566144,\"physical_bytes\":37340544,\"fds\":3}\n",
+      "wall_seconds": 6.289885958074592,
+      "client": {
+        "reactor_control": {
+          "mode": 2,
+          "phase_at_commit": 2,
+          "seen_ns": 752095218224458,
+          "remove_call_ns": 122792,
+          "cleanup_call_ns": 4958,
+          "completions_before_cancel": 308,
+          "pending_phase_ns": [
+            0,
+            0,
+            227208,
+            250,
+            0,
+            0,
+            127833
+          ],
+          "max_phase_ns": [
+            6250,
+            489426167,
+            12764334,
+            250,
+            717332625,
+            7029708,
+            128083
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752095217173875,
+          "commit_ns": 752095217997000,
+          "removed_ns": 752095218352291,
+          "released_ns": 752095219049666,
+          "ordinary_finished_ns": 752095831461000,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": false,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 353499000,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 73,
+        "max_poll_ns": 12764250,
+        "max_write_ns": 4066125,
+        "wall_seconds": 6.262752,
+        "cpu_seconds": 5.433302,
+        "cpu_one_core_fraction": 0.867558,
+        "max_model_callback_gap_ns": 210070084,
+        "model_terminal_spread_ns": 126021750,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 6519167,
+        "max_live_spool_allocated": 84533248,
+        "max_storage_allocated": 121327616,
+        "scratch_logical_highwater": 76908037,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4161536,
+          "physical": 2114240,
+          "lifetime_physical": 2114240,
+          "virtual": 420034101248,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4538368,
+          "physical": 2409216,
+          "lifetime_physical": 2458368,
+          "virtual": 420168482816,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4767744,
+          "physical": 2507520,
+          "lifetime_physical": 2507520,
+          "virtual": 420168794112,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 157237248,
+          "physical": 154043776,
+          "lifetime_physical": 154748288,
+          "virtual": 420940185600,
+          "threads": 6,
+          "fds": 2009
+        },
+        "first_cycle_idle": {
+          "rss": 149536768,
+          "physical": 38126976,
+          "lifetime_physical": 154748288,
+          "virtual": 420929814528,
+          "threads": 5,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 149536768,
+          "physical": 38126976,
+          "lifetime_physical": 154748288,
+          "virtual": 420929814528,
+          "threads": 5,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 149520384,
+          "physical": 38110592,
+          "lifetime_physical": 154748288,
+          "virtual": 420929781760,
+          "threads": 5,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 145817600,
+          "physical": 37340544,
+          "lifetime_physical": 154748288,
+          "virtual": 420925898752,
+          "threads": 4,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.33709120808634907,
+              "generation_seconds": 4.000950749963522,
+              "terminal_write_seconds": 0.09178483299911022
+            }
+          ],
+          "wall_seconds": 6.293095041997731,
+          "cpu_seconds": 4.9489,
+          "max_rss_bytes": 473858048,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 13,
+      "capacity": 1000,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1501,\"live_malloc_bytes\":295392,\"allocator_reserved_bytes\":47185920,\"physical_bytes\":2507520,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":25954,\"live_malloc_bytes\":1149456,\"allocator_reserved_bytes\":112197632,\"physical_bytes\":39896576,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":39896576,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":25947,\"live_malloc_bytes\":1097008,\"allocator_reserved_bytes\":112197632,\"physical_bytes\":39749120,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":25618,\"live_malloc_bytes\":968960,\"allocator_reserved_bytes\":110100480,\"physical_bytes\":39126528,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":25618,\"live_malloc_bytes\":968960,\"allocator_reserved_bytes\":110100480,\"physical_bytes\":39126528,\"fds\":3}\n",
+      "wall_seconds": 5.998783166985959,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 752101319618875,
+          "remove_call_ns": 104500,
+          "cleanup_call_ns": 6042,
+          "completions_before_cancel": 3,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            53666,
+            0,
+            110625
+          ],
+          "max_phase_ns": [
+            10125,
+            476449125,
+            12555250,
+            208,
+            362713500,
+            3826791,
+            110792
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752101318504708,
+          "commit_ns": 752101319565250,
+          "removed_ns": 752101319729541,
+          "released_ns": 752101320609166,
+          "ordinary_finished_ns": 752101985106916,
+          "pending_at_commit": 999,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 89675259,
+        "max_owner_scan_ns": 414575125,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 1000,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 1000,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 128000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 1000,
+        "resolution_rows": 1000,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 999,
+        "completion_classes": {
+          "success": 999,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 95,
+        "max_poll_ns": 12555166,
+        "max_write_ns": 801541,
+        "wall_seconds": 5.972523,
+        "cpu_seconds": 5.142333,
+        "cpu_one_core_fraction": 0.860998,
+        "max_model_callback_gap_ns": 207114000,
+        "model_terminal_spread_ns": 191092417,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 6777292,
+        "max_live_spool_allocated": 63930368,
+        "max_storage_allocated": 108400640,
+        "scratch_logical_highwater": 75292699,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4177920,
+          "physical": 2130624,
+          "lifetime_physical": 2130624,
+          "virtual": 420034101248,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4538368,
+          "physical": 2409216,
+          "lifetime_physical": 2458368,
+          "virtual": 420168482816,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4767744,
+          "physical": 2507520,
+          "lifetime_physical": 2507520,
+          "virtual": 420168794112,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 153878528,
+          "physical": 150439424,
+          "lifetime_physical": 151160320,
+          "virtual": 420946591744,
+          "threads": 6,
+          "fds": 2008
+        },
+        "first_cycle_idle": {
+          "rss": 149667840,
+          "physical": 39896576,
+          "lifetime_physical": 151160320,
+          "virtual": 420940300288,
+          "threads": 5,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 149667840,
+          "physical": 39896576,
+          "lifetime_physical": 151160320,
+          "virtual": 420940300288,
+          "threads": 5,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 149651456,
+          "physical": 39880192,
+          "lifetime_physical": 151160320,
+          "virtual": 420940267520,
+          "threads": 5,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 147718144,
+          "physical": 39126528,
+          "lifetime_physical": 151160320,
+          "virtual": 420937433088,
+          "threads": 4,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 1000,
+          "completed": 999,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 89675259,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 1000,
+              "setup_seconds": 0.3382614159490913,
+              "generation_seconds": 4.001375792082399,
+              "terminal_write_seconds": 0.08680924994405359
+            }
+          ],
+          "wall_seconds": 6.001903417054564,
+          "cpu_seconds": 4.819469,
+          "max_rss_bytes": 470155264,
+          "expected_body_bytes": 89675259
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 89651259,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 14,
+      "capacity": 100,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 2,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1488,\"live_malloc_bytes\":285120,\"allocator_reserved_bytes\":28311552,\"physical_bytes\":2392832,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":5457,\"live_malloc_bytes\":891392,\"allocator_reserved_bytes\":60817408,\"physical_bytes\":13599936,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":13599936,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":5451,\"live_malloc_bytes\":869104,\"allocator_reserved_bytes\":60817408,\"physical_bytes\":13468864,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":5122,\"live_malloc_bytes\":738224,\"allocator_reserved_bytes\":60817408,\"physical_bytes\":11797696,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":5122,\"live_malloc_bytes\":738224,\"allocator_reserved_bytes\":60817408,\"physical_bytes\":11797696,\"fds\":3}\n",
+      "wall_seconds": 4.333788790972903,
+      "client": {
+        "reactor_control": {
+          "mode": 2,
+          "phase_at_commit": 4,
+          "seen_ns": 752106401318625,
+          "remove_call_ns": 25833,
+          "cleanup_call_ns": 4209,
+          "completions_before_cancel": 10,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            5249541,
+            125,
+            30084
+          ],
+          "max_phase_ns": [
+            3500,
+            54104000,
+            12061167,
+            2583,
+            101181875,
+            220875,
+            30209
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752106394907833,
+          "commit_ns": 752106396069000,
+          "removed_ns": 752106401348750,
+          "released_ns": 752106401812583,
+          "ordinary_finished_ns": 752106457034833,
+          "pending_at_commit": 99,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": false,
+        "received_bytes": 8908359,
+        "max_owner_scan_ns": 52434458,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 100,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 100,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 12800,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 100,
+        "resolution_rows": 100,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 99,
+        "completion_classes": {
+          "success": 99,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 829,
+        "max_poll_ns": 12061083,
+        "max_write_ns": 76250,
+        "wall_seconds": 4.306353,
+        "cpu_seconds": 0.864973,
+        "cpu_one_core_fraction": 0.20086,
+        "max_model_callback_gap_ns": 20686708,
+        "model_terminal_spread_ns": 8167959,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 5223834,
+        "max_live_spool_allocated": 11698176,
+        "max_storage_allocated": 15130624,
+        "scratch_logical_highwater": 8100690,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4063232,
+          "physical": 2015936,
+          "lifetime_physical": 2015936,
+          "virtual": 420015226880,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4423680,
+          "physical": 2294528,
+          "lifetime_physical": 2343680,
+          "virtual": 420149608448,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4653056,
+          "physical": 2392832,
+          "lifetime_physical": 2392832,
+          "virtual": 420149919744,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 22052864,
+          "physical": 18449600,
+          "lifetime_physical": 18891968,
+          "virtual": 420619911168,
+          "threads": 5,
+          "fds": 208
+        },
+        "first_cycle_idle": {
+          "rss": 22052864,
+          "physical": 13599936,
+          "lifetime_physical": 18891968,
+          "virtual": 420619911168,
+          "threads": 4,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 22052864,
+          "physical": 13599936,
+          "lifetime_physical": 18891968,
+          "virtual": 420619911168,
+          "threads": 4,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 22036480,
+          "physical": 13583552,
+          "lifetime_physical": 18891968,
+          "virtual": 420619878400,
+          "threads": 4,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 21495808,
+          "physical": 11797696,
+          "lifetime_physical": 18891968,
+          "virtual": 420619141120,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 100,
+          "completed": 99,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 8908359,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 100,
+              "setup_seconds": 0.009829333052039146,
+              "generation_seconds": 3.9930419999873266,
+              "terminal_write_seconds": 0.013848250033333898
+            }
+          ],
+          "wall_seconds": 4.3365831669652835,
+          "cpu_seconds": 0.612807,
+          "max_rss_bytes": 71925760,
+          "expected_body_bytes": 8908359
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 8884359,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 15,
+      "capacity": 100,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1487,\"live_malloc_bytes\":285456,\"allocator_reserved_bytes\":28311552,\"physical_bytes\":2392832,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":5488,\"live_malloc_bytes\":905344,\"allocator_reserved_bytes\":69206016,\"physical_bytes\":11977920,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":11977920,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":5481,\"live_malloc_bytes\":855408,\"allocator_reserved_bytes\":69206016,\"physical_bytes\":11846848,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":5152,\"live_malloc_bytes\":723056,\"allocator_reserved_bytes\":69206016,\"physical_bytes\":11846848,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":5152,\"live_malloc_bytes\":723056,\"allocator_reserved_bytes\":69206016,\"physical_bytes\":11846848,\"fds\":3}\n",
+      "wall_seconds": 4.344057665904984,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 752110836941916,
+          "remove_call_ns": 29625,
+          "cleanup_call_ns": 2416,
+          "completions_before_cancel": 6,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            62250,
+            0,
+            32125
+          ],
+          "max_phase_ns": [
+            3875,
+            48263125,
+            12081958,
+            250,
+            4108292,
+            197791,
+            32250
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752110835716875,
+          "commit_ns": 752110836879666,
+          "removed_ns": 752110836974041,
+          "released_ns": 752110837666291,
+          "ordinary_finished_ns": 752110900665208,
+          "pending_at_commit": 99,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 8908359,
+        "max_owner_scan_ns": 30094667,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 100,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 100,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 12800,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 100,
+        "resolution_rows": 100,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 99,
+        "completion_classes": {
+          "success": 99,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 1920,
+        "max_poll_ns": 12081833,
+        "max_write_ns": 1069375,
+        "wall_seconds": 4.314762,
+        "cpu_seconds": 0.806277,
+        "cpu_one_core_fraction": 0.186865,
+        "max_model_callback_gap_ns": 22037042,
+        "model_terminal_spread_ns": 16857292,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 6190500,
+        "max_live_spool_allocated": 7102464,
+        "max_storage_allocated": 13545472,
+        "scratch_logical_highwater": 6730575,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4063232,
+          "physical": 2015936,
+          "lifetime_physical": 2015936,
+          "virtual": 420015226880,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4423680,
+          "physical": 2294528,
+          "lifetime_physical": 2343680,
+          "virtual": 420149608448,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4653056,
+          "physical": 2392832,
+          "lifetime_physical": 2392832,
+          "virtual": 420149919744,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 22183936,
+          "physical": 18564288,
+          "lifetime_physical": 19104960,
+          "virtual": 420628299776,
+          "threads": 5,
+          "fds": 208
+        },
+        "first_cycle_idle": {
+          "rss": 22183936,
+          "physical": 11977920,
+          "lifetime_physical": 19104960,
+          "virtual": 420628299776,
+          "threads": 4,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 22183936,
+          "physical": 11977920,
+          "lifetime_physical": 19104960,
+          "virtual": 420628299776,
+          "threads": 4,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 22167552,
+          "physical": 11961536,
+          "lifetime_physical": 19104960,
+          "virtual": 420628267008,
+          "threads": 4,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 21626880,
+          "physical": 11846848,
+          "lifetime_physical": 19104960,
+          "virtual": 420627529728,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 100,
+          "completed": 99,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 8908359,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 100,
+              "setup_seconds": 0.07762966607697308,
+              "generation_seconds": 3.9930531670106575,
+              "terminal_write_seconds": 0.01005095790605992
+            }
+          ],
+          "wall_seconds": 4.347021166002378,
+          "cpu_seconds": 0.613953,
+          "max_rss_bytes": 71417856,
+          "expected_body_bytes": 8908359
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 8884359,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 16,
+      "capacity": 500,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 2,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1488,\"live_malloc_bytes\":285120,\"allocator_reserved_bytes\":28311552,\"physical_bytes\":2409216,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":16789,\"live_malloc_bytes\":1104208,\"allocator_reserved_bytes\":81788928,\"physical_bytes\":32703936,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":32703936,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":16783,\"live_malloc_bytes\":1081952,\"allocator_reserved_bytes\":81788928,\"physical_bytes\":32572864,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":16455,\"live_malloc_bytes\":948432,\"allocator_reserved_bytes\":80740352,\"physical_bytes\":29918656,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":16455,\"live_malloc_bytes\":948432,\"allocator_reserved_bytes\":80740352,\"physical_bytes\":29918656,\"fds\":3}\n",
+      "wall_seconds": 5.174186666961759,
+      "client": {
+        "reactor_control": {
+          "mode": 2,
+          "phase_at_commit": 4,
+          "seen_ns": 752115901505708,
+          "remove_call_ns": 48875,
+          "cleanup_call_ns": 7959,
+          "completions_before_cancel": 38,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            43294416,
+            42,
+            56958
+          ],
+          "max_phase_ns": [
+            7792,
+            240786541,
+            12190209,
+            250,
+            281873166,
+            1537375,
+            59250
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752115857130708,
+          "commit_ns": 752115858211250,
+          "removed_ns": 752115901562666,
+          "released_ns": 752115902725208,
+          "ordinary_finished_ns": 752116169333375,
+          "pending_at_commit": 499,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": false,
+        "received_bytes": 44804759,
+        "max_owner_scan_ns": 206777375,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 500,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 500,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 64000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 500,
+        "resolution_rows": 500,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 499,
+        "completion_classes": {
+          "success": 499,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 264,
+        "max_poll_ns": 12190209,
+        "max_write_ns": 968791,
+        "wall_seconds": 5.142525,
+        "cpu_seconds": 3.511633,
+        "cpu_one_core_fraction": 0.682862,
+        "max_model_callback_gap_ns": 79152958,
+        "model_terminal_spread_ns": 72104584,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 5477750,
+        "max_live_spool_allocated": 49659904,
+        "max_storage_allocated": 55054336,
+        "scratch_logical_highwater": 38947594,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4046848,
+          "physical": 1999552,
+          "lifetime_physical": 1999552,
+          "virtual": 420015226880,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4440064,
+          "physical": 2310912,
+          "lifetime_physical": 2360064,
+          "virtual": 420149608448,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4669440,
+          "physical": 2409216,
+          "lifetime_physical": 2409216,
+          "virtual": 420149919744,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 82493440,
+          "physical": 78923200,
+          "lifetime_physical": 79250880,
+          "virtual": 420912463872,
+          "threads": 5,
+          "fds": 1008
+        },
+        "first_cycle_idle": {
+          "rss": 80674816,
+          "physical": 32703936,
+          "lifetime_physical": 79250880,
+          "virtual": 420909318144,
+          "threads": 4,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 80674816,
+          "physical": 32703936,
+          "lifetime_physical": 79250880,
+          "virtual": 420909318144,
+          "threads": 4,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 80658432,
+          "physical": 32687552,
+          "lifetime_physical": 79250880,
+          "virtual": 420909285376,
+          "threads": 4,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 79069184,
+          "physical": 29918656,
+          "lifetime_physical": 79250880,
+          "virtual": 420907499520,
+          "threads": 3,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 500,
+          "completed": 499,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 44804759,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 500,
+              "setup_seconds": 0.1894806659547612,
+              "generation_seconds": 3.9972690420690924,
+              "terminal_write_seconds": 0.0584366669645533
+            }
+          ],
+          "wall_seconds": 5.1769449999555945,
+          "cpu_seconds": 2.8246249999999997,
+          "max_rss_bytes": 250068992,
+          "expected_body_bytes": 44804759
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 44780759,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    },
+    {
+      "index": 17,
+      "capacity": 500,
+      "cycles": 1,
+      "seconds": 4,
+      "control_mode": 3,
+      "reactor_mode": 3,
+      "client_returncode": 0,
+      "client_stderr": "{\"memory_phase\":\"host_idle\",\"cycle\":0,\"live_blocks\":1489,\"live_malloc_bytes\":287232,\"allocator_reserved_bytes\":37748736,\"physical_bytes\":2507520,\"fds\":8}\n{\"memory_phase\":\"cycle_idle\",\"cycle\":1,\"live_blocks\":16597,\"live_malloc_bytes\":1445680,\"allocator_reserved_bytes\":97517568,\"physical_bytes\":37144128,\"fds\":8}\n{\"cycle\":1,\"idle_physical\":37144128,\"idle_fds\":8,\"scratch\":0}\n{\"memory_phase\":\"transport_closed\",\"cycle\":1,\"live_blocks\":16590,\"live_malloc_bytes\":1391440,\"allocator_reserved_bytes\":97517568,\"physical_bytes\":37013056,\"fds\":6}\n{\"memory_phase\":\"database_closed\",\"cycle\":1,\"live_blocks\":16262,\"live_malloc_bytes\":1259040,\"allocator_reserved_bytes\":95420416,\"physical_bytes\":36537920,\"fds\":3}\n{\"memory_phase\":\"libraries_closed\",\"cycle\":1,\"live_blocks\":16262,\"live_malloc_bytes\":1259040,\"allocator_reserved_bytes\":95420416,\"physical_bytes\":36537920,\"fds\":3}\n",
+      "wall_seconds": 5.334144915919751,
+      "client": {
+        "reactor_control": {
+          "mode": 3,
+          "phase_at_commit": 4,
+          "seen_ns": 752121303972208,
+          "remove_call_ns": 55500,
+          "cleanup_call_ns": 3459,
+          "completions_before_cancel": 5,
+          "pending_phase_ns": [
+            0,
+            0,
+            0,
+            0,
+            82167,
+            0,
+            59000
+          ],
+          "max_phase_ns": [
+            5875,
+            231751125,
+            12447458,
+            291,
+            297763541,
+            1411542,
+            59083
+          ]
+        },
+        "control": {
+          "mode": 3,
+          "request_ns": 752121302792666,
+          "commit_ns": 752121303890083,
+          "removed_ns": 752121304031250,
+          "released_ns": 752121304760208,
+          "ordinary_finished_ns": 752121622129166,
+          "pending_at_commit": 499,
+          "stop_rows": 1,
+          "cancelled_rows": 1,
+          "discarded_bytes": 24000
+        },
+        "native_poll": true,
+        "received_bytes": 44804759,
+        "max_owner_scan_ns": 166844500,
+        "custody_array_reserved_bytes": 128000,
+        "curl_version": "libcurl/8.7.1 SecureTransport zlib/1.2.12",
+        "sqlite_version": "3.43.2",
+        "capacity": 500,
+        "cycles": 1,
+        "completed_cycles": 1,
+        "model": 500,
+        "bash": 0,
+        "patch": 0,
+        "patch_mode": "owner",
+        "custody_bytes_each": 128,
+        "custody_bytes_capacity": 64000,
+        "custody_offsets": {
+          "state": 0,
+          "attempt_id": 8,
+          "easy": 80,
+          "runtime": 88,
+          "spool_a": 96
+        },
+        "reactor_stack_configured": 262144,
+        "patch_stack_configured": 0,
+        "settled": 500,
+        "resolution_rows": 500,
+        "validator_max": 1,
+        "host_fatal": false,
+        "unresolved_attempts": 0,
+        "artifact_rows": 499,
+        "completion_classes": {
+          "success": 499,
+          "protocol_error": 0,
+          "preparation_failure": 0,
+          "transport_failure": 0,
+          "local_resource_failure": 0,
+          "output_limit": 0,
+          "bash_cancelled": 0,
+          "patch_conflict": 0,
+          "patch_indeterminate": 0
+        },
+        "bash_evidence": {
+          "term_sent": 0,
+          "kill_sent": 0,
+          "reaped": 0,
+          "pipe_grace_expired": 0
+        },
+        "bash_timing_ns": {
+          "term_lateness_max": 0,
+          "kill_lateness_max": 0,
+          "signal_to_reap_max": 0,
+          "pipe_grace_lateness_max": 0
+        },
+        "reactor_loops": 417,
+        "max_poll_ns": 12447292,
+        "max_write_ns": 1064000,
+        "wall_seconds": 5.303695,
+        "cpu_seconds": 3.538902,
+        "cpu_one_core_fraction": 0.667252,
+        "max_model_callback_gap_ns": 95117208,
+        "model_terminal_spread_ns": 88115208,
+        "max_single_raw_spool_allocated": 139264,
+        "max_settle_ns": 7391542,
+        "max_live_spool_allocated": 39133184,
+        "max_storage_allocated": 61304832,
+        "scratch_logical_highwater": 35920195,
+        "scratch_logical_final": 0,
+        "sqlite_heap_supported": false,
+        "sqlite_heap_current": 0,
+        "sqlite_heap_highwater": 0,
+        "sqlite_cache_supported": true,
+        "sqlite_cache_current": 397312,
+        "spool_nocache": false,
+        "allocator_relief_return": 0,
+        "idle_physical_drift": 0,
+        "post_relief_physical_drift": -16384,
+        "patch_final_relation": 0,
+        "unopened": {
+          "rss": 4112384,
+          "physical": 2065088,
+          "lifetime_physical": 2065088,
+          "virtual": 420024664064,
+          "threads": 3,
+          "fds": 3
+        },
+        "store_open": {
+          "rss": 4538368,
+          "physical": 2409216,
+          "lifetime_physical": 2458368,
+          "virtual": 420159045632,
+          "threads": 3,
+          "fds": 6
+        },
+        "lanes_idle": {
+          "rss": 4767744,
+          "physical": 2507520,
+          "lifetime_physical": 2507520,
+          "virtual": 420159356928,
+          "threads": 4,
+          "fds": 8
+        },
+        "active": {
+          "rss": 82362368,
+          "physical": 78825024,
+          "lifetime_physical": 79922752,
+          "virtual": 421330370560,
+          "threads": 6,
+          "fds": 1009
+        },
+        "first_cycle_idle": {
+          "rss": 82362368,
+          "physical": 37144128,
+          "lifetime_physical": 79922752,
+          "virtual": 421328273408,
+          "threads": 5,
+          "fds": 8
+        },
+        "final_cycle_idle": {
+          "rss": 82362368,
+          "physical": 37144128,
+          "lifetime_physical": 79922752,
+          "virtual": 421328273408,
+          "threads": 5,
+          "fds": 8
+        },
+        "idle": {
+          "rss": 82345984,
+          "physical": 37127744,
+          "lifetime_physical": 79922752,
+          "virtual": 421328240640,
+          "threads": 5,
+          "fds": 8
+        },
+        "closed": {
+          "rss": 80068608,
+          "physical": 36537920,
+          "lifetime_physical": 79922752,
+          "virtual": 421325406208,
+          "threads": 4,
+          "fds": 3
+        }
+      },
+      "server_lines": [
+        {
+          "accepted": 500,
+          "completed": 499,
+          "disconnected": 0,
+          "cancelled": 1,
+          "body_bytes": 44804759,
+          "waves": [
+            {
+              "wave": 1,
+              "concurrent": 500,
+              "setup_seconds": 0.17857629200443625,
+              "generation_seconds": 3.9973064579535276,
+              "terminal_write_seconds": 0.04460162506438792
+            }
+          ],
+          "wall_seconds": 5.337239708984271,
+          "cpu_seconds": 2.8824509999999997,
+          "max_rss_bytes": 253378560,
+          "expected_body_bytes": 44804759
+        }
+      ],
+      "server_stderr": "",
+      "stored_bytes": 44780759,
+      "integrity": "ok",
+      "checks": {
+        "client_success": true,
+        "full_cohorts": true,
+        "exact_bytes": true,
+        "cleanup": true,
+        "integrity": true,
+        "control": true
+      },
+      "passed": true
+    }
+  ]
+}
