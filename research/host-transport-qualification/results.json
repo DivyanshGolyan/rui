@@ -1,0 +1,58 @@
+{
+  "date": "2026-09-06T13:09:06.148045+05:30",
+  "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "source_hashes": {
+    "probe.c": "ba80e9096f64d130a9d7acd840a19716189ba2b3054c582f15acfe852edf9444",
+    "run.py": "5948220ad2e7e86c3474a59edb998a5cf6e07427397d782f0ca9581c52e40527"
+  },
+  "runs": [
+    {
+      "minimum": 0,
+      "mode": "easy",
+      "stdout": "minimum=0 actual=5 mode=easy curl=0 multi=0 bytes=2 error=\nlibcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.64.0\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 0,
+      "mode": "socket",
+      "stdout": "minimum=0 actual=5 mode=socket curl=0 multi=0 bytes=2 error=\nlibcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.64.0\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1023,
+      "mode": "easy",
+      "stdout": "minimum=1023 actual=1023 mode=easy curl=0 multi=0 bytes=2 error=\nlibcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.64.0\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1023,
+      "mode": "socket",
+      "stdout": "minimum=1023 actual=1023 mode=socket curl=0 multi=0 bytes=2 error=\nlibcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.64.0\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1024,
+      "mode": "easy",
+      "stdout": "minimum=1024 actual=1024 mode=easy curl=43 multi=0 bytes=0 error=\nlibcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.64.0\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1024,
+      "mode": "socket",
+      "stdout": "minimum=1024 actual=1024 mode=socket curl=7 multi=0 bytes=0 error=Failed to connect to 127.0.0.1 port 58578 after 0 ms: Couldn't connect to server\nlibcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.64.0\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1100,
+      "mode": "easy",
+      "stdout": "minimum=1100 actual=1100 mode=easy curl=43 multi=0 bytes=0 error=\nlibcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.64.0\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1100,
+      "mode": "socket",
+      "stdout": "minimum=1100 actual=1100 mode=socket curl=7 multi=0 bytes=0 error=Failed to connect to 127.0.0.1 port 58578 after 0 ms: Couldn't connect to server\nlibcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.64.0\n",
+      "stderr": ""
+    }
+  ]
+}
