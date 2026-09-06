@@ -17,9 +17,9 @@ response and held-open cancellation target follow the prior probe.
 
 | Request body | Peak physical, 64 KiB buffer | Peak physical, 16 KiB buffer | Work interval, 64 / 16 KiB buffers |
 | --- | ---: | ---: | ---: |
-| 256 KiB | 266.24 MiB | 182.74 MiB | 6.535 / 6.332 s |
-| 1 MiB | 249.77 MiB | 165.96 MiB | 8.062 / 8.241 s |
-| 4 MiB | 236.22 MiB | 160.80 MiB | 16.663 / 16.741 s |
+| 256 KiB | 266.20 MiB | 182.70 MiB | 6.535 / 6.332 s |
+| 1 MiB | 249.80 MiB | 166.02 MiB | 8.062 / 8.241 s |
+| 4 MiB | 236.16 MiB | 160.75 MiB | 16.663 / 16.741 s |
 
 See [comparison.md](comparison.md) for exact rounded metrics including CPU and
 cancellation. All six cases pass: 6,000 operations, 5,994 ordinary successes and
