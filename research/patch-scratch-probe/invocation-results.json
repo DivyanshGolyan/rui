@@ -1,0 +1,152 @@
+[
+  {
+    "git": "/usr/bin/git",
+    "case": "ordinary",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      "target"
+    ]
+  },
+  {
+    "git": "/usr/bin/git",
+    "case": "global_crlf",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      "target"
+    ]
+  },
+  {
+    "git": "/usr/bin/git",
+    "case": "local_crlf",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      ".gitattributes",
+      "target"
+    ]
+  },
+  {
+    "git": "/usr/bin/git",
+    "case": "self_attributes",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      ".gitattributes"
+    ]
+  },
+  {
+    "git": "/usr/bin/git",
+    "case": "self_encoding",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      ".gitattributes"
+    ]
+  },
+  {
+    "git": "/usr/bin/git",
+    "case": "local_encoding",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      ".gitattributes",
+      "target"
+    ]
+  },
+  {
+    "git": "/usr/bin/git",
+    "case": "local_ident",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      ".gitattributes",
+      "target"
+    ]
+  },
+  {
+    "git": "/usr/bin/git",
+    "case": "parent_repository",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      "target"
+    ]
+  },
+  {
+    "git": "/opt/homebrew/bin/git",
+    "case": "ordinary",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      "target"
+    ]
+  },
+  {
+    "git": "/opt/homebrew/bin/git",
+    "case": "global_crlf",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      "target"
+    ]
+  },
+  {
+    "git": "/opt/homebrew/bin/git",
+    "case": "local_crlf",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      ".gitattributes",
+      "target"
+    ]
+  },
+  {
+    "git": "/opt/homebrew/bin/git",
+    "case": "self_attributes",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      ".gitattributes"
+    ]
+  },
+  {
+    "git": "/opt/homebrew/bin/git",
+    "case": "self_encoding",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      ".gitattributes"
+    ]
+  },
+  {
+    "git": "/opt/homebrew/bin/git",
+    "case": "local_encoding",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      ".gitattributes",
+      "target"
+    ]
+  },
+  {
+    "git": "/opt/homebrew/bin/git",
+    "case": "local_ident",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      ".gitattributes",
+      "target"
+    ]
+  },
+  {
+    "git": "/opt/homebrew/bin/git",
+    "case": "parent_repository",
+    "returncode": 0,
+    "exact_bytes": true,
+    "files": [
+      "target"
+    ]
+  }
+]
