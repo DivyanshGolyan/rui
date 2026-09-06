@@ -1,0 +1,336 @@
+{
+  "purpose": "reservation arithmetic, real Git inode overlap, inherited scratch lock and crash cleanup; not whole-Host memory certification",
+  "platform": "darwin",
+  "runs": [
+    {
+      "git": "/usr/bin/git",
+      "version": "git version 2.39.5 (Apple Git-154)",
+      "cases": [
+        {
+          "case": "replace",
+          "source": 4,
+          "patch": 48,
+          "output_bound": 52,
+          "reservation": 52,
+          "observed_after_git_including_open_old_inode": 4,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 3686400,
+            "peak memory footprint": 1868608
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "grow",
+          "source": 8,
+          "patch": 10052,
+          "output_bound": 10060,
+          "reservation": 10060,
+          "observed_after_git_including_open_old_inode": 9008,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 3768320,
+            "peak memory footprint": 1950528
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "shrink",
+          "source": 7010,
+          "patch": 8057,
+          "output_bound": 15067,
+          "reservation": 15067,
+          "observed_after_git_including_open_old_inode": 10,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 3817472,
+            "peak memory footprint": 2016128
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "one_mib_large_line_patch",
+          "source": 1048576,
+          "patch": 1048624,
+          "output_bound": 2097200,
+          "reservation": 2097200,
+          "observed_after_git_including_open_old_inode": 1048582,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 9355264,
+            "peak memory footprint": 7619776
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "many_lines",
+          "source": 1000004,
+          "patch": 75,
+          "output_bound": 1000079,
+          "reservation": 1000079,
+          "observed_after_git_including_open_old_inode": 1000008,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 19578880,
+            "peak memory footprint": 12026752
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "retained_old_handle_control",
+          "source": 1000004,
+          "patch": 75,
+          "output_bound": 1000079,
+          "reservation": 2000083,
+          "observed_after_git_including_open_old_inode": 2000012,
+          "held_old_handle": true,
+          "old_inode_unlinked": true,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 19693568,
+            "peak memory footprint": 12174272
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "kernel_limit",
+          "source": 4,
+          "patch": 7048,
+          "output_bound": 7052,
+          "reservation": 7052,
+          "observed_after_git_including_open_old_inode": 32,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": -25,
+          "memory": {
+            "maximum resident set size": 3735552,
+            "peak memory footprint": 1917760
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        }
+      ],
+      "crash": [
+        {
+          "helper": "completed_after_host_death",
+          "git_exec_observed": true,
+          "restart_blocked_while_helper_alive": true,
+          "restart_cleanup_after_lock": true,
+          "target_before_cleanup": "new\n"
+        },
+        {
+          "helper": "killed",
+          "git_exec_observed": true,
+          "restart_blocked_while_helper_alive": true,
+          "restart_cleanup_after_lock": true,
+          "target_before_cleanup": "old\n"
+        }
+      ],
+      "cleanup": {
+        "injected_rmdir_errno": 66,
+        "reservation_and_slot_retained_on_failure": true,
+        "released_after_success": true,
+        "limitation": "policy harness, not integrated Host cleanup"
+      }
+    },
+    {
+      "git": "/opt/homebrew/bin/git",
+      "version": "git version 2.55.0",
+      "cases": [
+        {
+          "case": "replace",
+          "source": 4,
+          "patch": 48,
+          "output_bound": 52,
+          "reservation": 52,
+          "observed_after_git_including_open_old_inode": 4,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 5488640,
+            "peak memory footprint": 3540032
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "grow",
+          "source": 8,
+          "patch": 10052,
+          "output_bound": 10060,
+          "reservation": 10060,
+          "observed_after_git_including_open_old_inode": 9008,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 5095424,
+            "peak memory footprint": 3097472
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "shrink",
+          "source": 7010,
+          "patch": 8057,
+          "output_bound": 15067,
+          "reservation": 15067,
+          "observed_after_git_including_open_old_inode": 10,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 4931584,
+            "peak memory footprint": 2950080
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "one_mib_large_line_patch",
+          "source": 1048576,
+          "patch": 1048624,
+          "output_bound": 2097200,
+          "reservation": 2097200,
+          "observed_after_git_including_open_old_inode": 1048582,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 11091968,
+            "peak memory footprint": 9143424
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "many_lines",
+          "source": 1000004,
+          "patch": 75,
+          "output_bound": 1000079,
+          "reservation": 1000079,
+          "observed_after_git_including_open_old_inode": 1000008,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 20971520,
+            "peak memory footprint": 13222784
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "retained_old_handle_control",
+          "source": 1000004,
+          "patch": 75,
+          "output_bound": 1000079,
+          "reservation": 2000083,
+          "observed_after_git_including_open_old_inode": 2000012,
+          "held_old_handle": true,
+          "old_inode_unlinked": true,
+          "returncode": 0,
+          "memory": {
+            "maximum resident set size": 20987904,
+            "peak memory footprint": 13272000
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        },
+        {
+          "case": "kernel_limit",
+          "source": 4,
+          "patch": 7048,
+          "output_bound": 7052,
+          "reservation": 7052,
+          "observed_after_git_including_open_old_inode": 32,
+          "held_old_handle": false,
+          "old_inode_unlinked": null,
+          "returncode": -25,
+          "memory": {
+            "maximum resident set size": 4521984,
+            "peak memory footprint": 2540416
+          },
+          "files_after_git": [
+            "target"
+          ],
+          "cleanup": true
+        }
+      ],
+      "crash": [
+        {
+          "helper": "completed_after_host_death",
+          "git_exec_observed": true,
+          "restart_blocked_while_helper_alive": true,
+          "restart_cleanup_after_lock": true,
+          "target_before_cleanup": "new\n"
+        },
+        {
+          "helper": "killed",
+          "git_exec_observed": true,
+          "restart_blocked_while_helper_alive": true,
+          "restart_cleanup_after_lock": true,
+          "target_before_cleanup": "old\n"
+        }
+      ],
+      "cleanup": {
+        "injected_rmdir_errno": 66,
+        "reservation_and_slot_retained_on_failure": true,
+        "released_after_success": true,
+        "limitation": "policy harness, not integrated Host cleanup"
+      }
+    }
+  ],
+  "accounting_shape": {
+    "per_active_patch_reservation_u64_bytes": 8,
+    "for_1000": 8000,
+    "shared_limit_and_used_u64_bytes": 16,
+    "scratch_lock_files_per_host": 1,
+    "extra_inherited_lock_descriptors_per_git_helper": 1,
+    "note": "field counts, not measured process footprint; existing custody/FD state/alignment and Git heap are additional"
+  }
+}
