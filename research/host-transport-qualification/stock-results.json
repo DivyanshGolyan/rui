@@ -1,0 +1,80 @@
+{
+  "link_flags": [
+    "/tmp/onepage-stock-curl-qualification/curl-8.22.0/lib/.libs/libcurl.a",
+    "-L/opt/homebrew/Cellar/openssl@3/3.6.3/lib",
+    "-framework",
+    "CoreFoundation",
+    "-framework",
+    "CoreServices",
+    "-framework",
+    "Security",
+    "-framework",
+    "CoreFoundation",
+    "-framework",
+    "CoreServices",
+    "-framework",
+    "SystemConfiguration",
+    "-lssl",
+    "-lcrypto",
+    "-lssl",
+    "-lcrypto",
+    "-lz"
+  ],
+  "curl_build": "/tmp/onepage-stock-curl-qualification/curl-8.22.0",
+  "date": "2026-09-06T13:12:38.485222+05:30",
+  "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "source_hashes": {
+    "probe.c": "ba80e9096f64d130a9d7acd840a19716189ba2b3054c582f15acfe852edf9444",
+    "run.py": "d6e6b53f57e7e744fd5903fd8124717e38ac588ad56eec7e7e3158b3d4539f9c"
+  },
+  "runs": [
+    {
+      "minimum": 0,
+      "mode": "easy",
+      "stdout": "minimum=0 actual=7 mode=easy curl=0 multi=0 bytes=2 error=\nlibcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 0,
+      "mode": "socket",
+      "stdout": "minimum=0 actual=7 mode=socket curl=0 multi=0 bytes=2 error=\nlibcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1023,
+      "mode": "easy",
+      "stdout": "minimum=1023 actual=1023 mode=easy curl=0 multi=0 bytes=2 error=\nlibcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1023,
+      "mode": "socket",
+      "stdout": "minimum=1023 actual=1023 mode=socket curl=0 multi=0 bytes=2 error=\nlibcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1024,
+      "mode": "easy",
+      "stdout": "minimum=1024 actual=1024 mode=easy curl=0 multi=0 bytes=2 error=\nlibcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1024,
+      "mode": "socket",
+      "stdout": "minimum=1024 actual=1024 mode=socket curl=0 multi=0 bytes=2 error=\nlibcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1100,
+      "mode": "easy",
+      "stdout": "minimum=1100 actual=1100 mode=easy curl=0 multi=0 bytes=2 error=\nlibcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12\n",
+      "stderr": ""
+    },
+    {
+      "minimum": 1100,
+      "mode": "socket",
+      "stdout": "minimum=1100 actual=1100 mode=socket curl=0 multi=0 bytes=2 error=\nlibcurl/8.22.0 OpenSSL/3.6.3 zlib/1.2.12\n",
+      "stderr": ""
+    }
+  ]
+}
