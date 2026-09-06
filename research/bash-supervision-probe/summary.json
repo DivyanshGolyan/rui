@@ -1,0 +1,98 @@
+[
+  {
+    "children": 100,
+    "bytes_per_stream": 0,
+    "repetitions": 3,
+    "launch_errors": [
+      0,
+      0,
+      0
+    ],
+    "achieved": 100,
+    "peak_mib": 1.3131103515625,
+    "added_kib": 512.125,
+    "retained_mib": 1.3131103515625,
+    "peak_fds": 404,
+    "peak_threads": 1
+  },
+  {
+    "children": 100,
+    "bytes_per_stream": 65536,
+    "repetitions": 3,
+    "launch_errors": [
+      0,
+      0,
+      0
+    ],
+    "achieved": 100,
+    "peak_mib": 1.3131103515625,
+    "added_kib": 512.125,
+    "retained_mib": 1.3131103515625,
+    "peak_fds": 404,
+    "peak_threads": 1
+  },
+  {
+    "children": 500,
+    "bytes_per_stream": 0,
+    "repetitions": 3,
+    "launch_errors": [
+      0,
+      0,
+      0
+    ],
+    "achieved": 500,
+    "peak_mib": 1.4537353515625,
+    "added_kib": 656.125,
+    "retained_mib": 1.4537353515625,
+    "peak_fds": 2004,
+    "peak_threads": 1
+  },
+  {
+    "children": 500,
+    "bytes_per_stream": 65536,
+    "repetitions": 3,
+    "launch_errors": [
+      0,
+      0,
+      0
+    ],
+    "achieved": 500,
+    "peak_mib": 1.3287353515625,
+    "added_kib": 528.125,
+    "retained_mib": 1.3287353515625,
+    "peak_fds": 2004,
+    "peak_threads": 1
+  },
+  {
+    "children": 1000,
+    "bytes_per_stream": 0,
+    "repetitions": 3,
+    "launch_errors": [
+      0,
+      0,
+      0
+    ],
+    "achieved": 1000,
+    "peak_mib": 1.54754638671875,
+    "added_kib": 752.1875,
+    "retained_mib": 1.54754638671875,
+    "peak_fds": 4004,
+    "peak_threads": 1
+  },
+  {
+    "children": 1000,
+    "bytes_per_stream": 65536,
+    "repetitions": 3,
+    "launch_errors": [
+      0,
+      0,
+      0
+    ],
+    "achieved": 1000,
+    "peak_mib": 1.563232421875,
+    "added_kib": 768.25,
+    "retained_mib": 1.563232421875,
+    "peak_fds": 4004,
+    "peak_threads": 1
+  }
+]
