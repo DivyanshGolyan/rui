@@ -41,7 +41,6 @@ const Evaluation = struct {
         var cursor = protocol.Cursor.init(input);
         try protocol.readHeader(&cursor, protocol.request_magic);
 
-        comptime { if (protocol.Limits.data_entries * @sizeOf([]const u8) < protocol.Limits.workflow_output_bytes) @compileError("probe reuse capacity insufficient"); }
         const key_storage = try allocator.alloc([]const u8, protocol.Limits.data_entries);
 
         const source_bytes = try cursor.readString(protocol.Limits.source_bytes);
@@ -57,7 +56,7 @@ const Evaluation = struct {
             .allocator = allocator,
             .source = source,
             .arguments = arguments,
-            .descriptor_scratch = std.mem.sliceAsBytes(key_storage)[0..protocol.Limits.workflow_output_bytes],
+            .descriptor_scratch = try allocator.alloc(u8, protocol.Limits.workflow_output_bytes),
             .object_prototype = undefined,
             .array_prototype = undefined,
             .deadline_ns = monotonicNanoseconds() +
