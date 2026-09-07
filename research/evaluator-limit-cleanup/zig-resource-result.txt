@@ -1,0 +1,1 @@
+has_AS=false; has_RSS=true

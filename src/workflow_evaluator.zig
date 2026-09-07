@@ -452,11 +452,7 @@ fn promiseRejectionTracker(
 
 fn drainJobs(runtime: *qjs.JSRuntime, state: *Evaluation) bool {
     while (qjs.JS_IsJobPending(runtime)) {
-        if (state.microtasks == protocol.Limits.microtasks) {
-            state.resource_code = "Microtasks";
-            return false;
-        }
-        state.microtasks += 1;
+        if (interruptHandler(runtime, state) != 0) return false;
         var job_context: ?*qjs.JSContext = null;
         if (qjs.JS_ExecutePendingJob(runtime, &job_context) < 0) {
             if (job_context) |context| discardException(context);
