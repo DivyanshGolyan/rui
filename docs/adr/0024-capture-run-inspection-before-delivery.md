@@ -61,6 +61,8 @@ private inspection copy provides a related lifetime precedent; its whole-cell
 backup and replication machinery are not selected for OnePage.
 
 - [Single-connection measurements](../../research/inspection-capture-proof/SINGLE_CONNECTION.md)
+- [Field-to-fact trace](../research/run-inspection-field-trace.md)
+- [Native query-cost experiment](../../research/run-inspection-query-cost/README.md)
 - [Inspection research](../research/reliable-run-inspection.md)
 - [Celld source review](../research/celld-inspection-memory-lessons.md)
 - [Historical Run API planning](https://github.com/DivyanshGolyan/onepage/issues/39)
