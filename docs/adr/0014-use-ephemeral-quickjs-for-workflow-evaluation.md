@@ -2,11 +2,15 @@
 
 Status: accepted
 
+For implementation, read the consolidated [workflow contract](../architecture/workflows.md) and [verification](../verification/workflows.md). The record below preserves the original decision and later amendments; superseded wording is historical.
+
+## Original decision
+
 One native Zig Host Runtime is the only agent runtime. A Host-managed QuickJS evaluator receives one immutable Evaluation Generation, evaluates the stored Workflow Definition from source against one Visibility Snapshot of terminal Turn Outputs and stable failures, returns one terminal outcome, and exits. No JavaScript heap, Promise resolver, continuation, bytecode, or completion callback survives a durable barrier. Caller-defined Agent Call Keys map directly to durable Turns. Equal canonical membership reattaches; changed binding conflicts. Physical Turn completion order is not observable, so V1 supports deterministic joins and excludes `Promise.race` and `Promise.any`.
 
 ## Accepted amendment — keyed Session operations
 
-The [accepted Session/workflow decision](https://github.com/DivyanshGolyan/onepage/issues/101#issuecomment-5550876667) supersedes the direct Agent Call Key-to-Turn mapping above. Run-local keys bind distinct Session operations and their original admissions/results; multiple message admissions may share a Turn outcome. The [current workflow contract](../../ARCHITECTURE.md#workflow-runs) preserves replay without retargeting it to later Session work. This does not alter disposable evaluation or deterministic joins.
+The [accepted Session/workflow decision](https://github.com/DivyanshGolyan/onepage/issues/101#issuecomment-5550876667) supersedes the direct Agent Call Key-to-Turn mapping above. Run-local keys bind distinct Session operations and their original admissions/results; multiple message admissions may share a Turn outcome. The [current workflow contract](../architecture/workflows.md#workflow-runs) preserves replay without retargeting it to later Session work. This does not alter disposable evaluation or deterministic joins.
 
 ## Accepted amendment — streamed Workflow Output
 

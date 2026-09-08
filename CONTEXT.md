@@ -35,7 +35,7 @@ The durable decision that permits one exact validated Action to be attempted.
 _Avoid_: blanket permission, Approval, Authority
 
 **Permission Mode**:
-Persistent Session configuration, defaulting to `ask`, selected and bound at each child Action admission. `ask` creates an exact Permission Request; explicit `bypass` creates exact Authorization without a request. The Local Owner may change the mode during active work. Existing requests, Authorizations, and running actions keep their admitted meaning; recovery never reselects their mode. Server access alone does not select bypass.
+Persistent Session setting selected at Action admission: `ask` creates an exact Permission Request; explicit `bypass` creates Authorization. Existing admissions retain their meaning after configuration changes. See [Tools and permission](ARCHITECTURE.md#tools-and-permission).
 _Avoid_: Session authority, tool capability
 
 ### Conversation
@@ -57,7 +57,7 @@ One immutable User text, assistant text, Tool Call, Tool Result, or System Instr
 _Avoid_: event, mutable message, provider frame
 
 **System Instruction**:
-An immutable Conversation Entry carrying an appended operator instruction or host-supplied contextual update for the model. Session history distinguishes it from User text, assistant output, and tool content. Later changes append another instruction rather than rewriting it. Its provider representation must preserve instruction authority and legal placement; it cannot grant Action Authorization. First inclusion commits atomically with its assistant-response request; exact storage encoding remains implementation work.
+An immutable Conversation Entry carrying an appended operator instruction or Host contextual update for the model. It preserves instruction authority and grants no Action Authorization. [First inclusion](ARCHITECTURE.md#sparse-context-and-exact-model-requests) binds it to an assistant-response request.
 _Avoid_: Context Update, User Message, Permission Decision, provider thinking
 
 **Conversation Revision**:
@@ -77,7 +77,7 @@ The single terminal resolution of a Turn: completed, failed, or cancelled. A com
 _Avoid_: Operation Resolution, process exit
 
 **Turn Condition**:
-The total semantic classification derived from committed facts. Run membership summaries use exactly runnable, waiting for permission, in flight, completed, failed, or cancelled. Derivation is ordered: terminal Outcome wins; otherwise an unresolved Operation with current admitted-execution facts or current future retry eligibility is in flight; otherwise an actionable Permission Request with no remaining progress is waiting for permission; otherwise the Turn is runnable. `Permission Required` is reserved for the Run-wide condition where no member can progress.
+The semantic classification derived from committed facts: runnable, waiting for permission, in flight, completed, failed or cancelled. [Run interface](docs/architecture/workflows.md#run-interface) owns precedence. `Permission Required` is the Run-wide condition where no member can progress.
 _Avoid_: persisted phase, status cache, ready flag
 
 **Session Context Revision**:
@@ -89,7 +89,7 @@ A sparse change to persistent Session settings, independent of message submissio
 _Avoid_: message content, temporary override, generic configuration map
 
 **Output Schema**:
-An optional persistent Session setting describing the shape of a model-generated final answer. Each applicable model request freezes its selected schema in the Model Request Manifest. The provider adapter translates and validates it at the provider boundary; workflow consumers receive the exact validated value. Without a schema, the final answer is ordinary text. It is not a per-message override or a transformation of prose.
+An optional persistent Session setting selecting the shape of a model-generated Final Answer. The producing request freezes it; the provider adapter validates success, and workflow consumers receive that exact value. Absence selects ordinary text.
 _Avoid_: Tool Catalog input schema, Workflow Output, result envelope
 
 **Model Context**:
@@ -131,7 +131,7 @@ A Tool Result containing a bounded excerpt, an explicit notice that more output 
 _Avoid_: failed Tool Call, complete inline output, durable Content Reference
 
 **Spillover Output**:
-The complete output of a Tool Call kept temporarily outside Model Context and accessible through the file path in its Spillover Tool Result. Once saved result publication and execution no longer need it, the full output may be discarded under the shared oldest-first temporary-file policy, even if another program still has it open. Losing it does not change the saved result or authorize automatic execution of the old call.
+Complete temporary Tool Call output reachable through a Spillover Tool Result path. The [shared retention policy](docs/architecture/resources.md#shared-temporary-file-retention) may remove it after active use, including while an external reader holds it open. Loss changes no saved result and permits no automatic replay.
 _Avoid_: Conversation Entry, diagnostic log, durable Content Reference
 
 **Tool Key**:
@@ -181,7 +181,7 @@ The optional final semantic value owned directly by an Operation, absent while u
 _Avoid_: Execution Evidence, separate Resolution entity, Turn Outcome
 
 **Interrupted Resolution**:
-An Operation Resolution stating that one exact unresolved Model Operation ended before any result was accepted. Its causal provenance is exactly one of: an authorized direct Model Interruption binding the Local Owner and exact command-target provenance, or an applicable ordinary Session stop with its causal command provenance, including the Run Cancellation Intent when propagation caused the stop. An interrupted Model Operation need not have terminal Execution Evidence; this records deliberate abandonment, not an assertion that the provider stopped processing. It ends only that Operation. The Turn may continue through independently admitted User Messages after direct interruption; an applicable Session stop fences that work and eventually yields a cancelled Turn Outcome. A Run intent alone fences the Run, not every Turn in a Session it once used. Actions cannot receive the direct interruption command.
+An Operation Resolution ending one exact unresolved Model Operation without accepted output, caused by direct Model Interruption or an applicable Session stop. It records abandonment, not provider termination. Direct interruption may permit the Turn to continue; Session stop fences selected work. [Execution and settlement](docs/architecture/execution.md#host-runtime-execution-and-settlement) owns provenance and applicability.
 _Avoid_: Turn Outcome, failed Attempt, process detachment
 
 **Indeterminate Resolution**:
@@ -197,11 +197,11 @@ The immutable one-file replacement description binding Workspace, target, exact 
 _Avoid_: edit result, approval, workspace snapshot
 
 **Dispatch Permit**:
-A volatile one-shot capability issued only to the command that committed a fresh Attempt admission on its Operation. It authorizes but does not oblige physical launch after commit; a later committed interruption may suppress it before the owner crosses the Physical Custody launch boundary. It is not durable semantic authority and reconstruction never recreates it.
+A volatile one-shot capability returned only to the invocation that committed fresh Attempt admission. It permits physical launch subject to the Physical Custody boundary and intervening interruption. Recovery cannot recreate it.
 _Avoid_: Attempt, Authorization, lease, ownership epoch
 
 **Physical Custody**:
-A bounded Host record representing transient resource ownership for active Edit preparation or a prospective/admitted Attempt. Preparation occupancy grants no authority to mutate a target. One atomic launch-boundary transition distinguishes suppression before an external effect from cleanup after it may have started. The record contains no payload or semantic state, and loss of custody never rewrites durable meaning.
+A bounded transient Host record owning resources for Edit preparation or a prospective/admitted Attempt. Its atomic launch boundary distinguishes suppression from cleanup after an effect may have started. It carries neither payload nor semantic authority; preparation occupancy permits no mutation.
 _Avoid_: Operation state, database authority, Session ownership
 
 ### Permission and cancellation
@@ -223,7 +223,7 @@ A request to end the current work selected in a Session, regardless of who submi
 _Avoid_: Session closure, Host shutdown, provider cancellation acknowledgement
 
 **Run Cancellation Intent**:
-Durable intent to end one Workflow Run and stop the current work in every Session to which that Run has submitted a message. Other workflows using those Sessions observe the same stops. While cancellation is unfinished, recovery may repeat its Session stops, including earlier successful or idle stops; callers coordinate Session reuse. Completion follows ordinary Session-stop completion regardless of who submitted the stopped work. The existing terminal Run outcome records completion and prevents further propagation on recovery. Sessions remain reusable. No per-Session propagation receipt is required.
+Durable intent fencing one Run and stopping current work in Sessions reached through its committed message admissions. Shared Sessions remain reusable. Until the terminal Run outcome records completion, recovery may repeat stops and affect newer work. [Execution and settlement](docs/architecture/execution.md#host-runtime-execution-and-settlement) owns propagation and completion.
 _Avoid_: Turn Cancellation Intent, Permission Request, process detachment, terminal outcome
 
 ### Workflows and runs
@@ -253,7 +253,7 @@ A Caller-defined identity for one Session creation, configuration change, or mes
 _Avoid_: Turn identity, Run Key, system ID
 
 **Visibility Snapshot**:
-The immutable run-local set of recorded operation results and stable failures visible to one Evaluation Generation. It stays fixed during that evaluation; crash recovery captures a new view of currently available original results. Fixed visibility does not require eagerly decoded values: the bridge looks up and decodes original outcomes on demand without a decoded-answer cache.
+The immutable Run-local set of original operation results and stable failures visible to one Evaluation Generation. Recovery captures a fresh view. Fixed visibility uses on-demand decoding rather than a decoded-answer cache.
 _Avoid_: live completion stream, Conversation
 
 **Blocked Workflow Run**:
@@ -299,7 +299,7 @@ The startup-fixed maximum population of shared active Edit preparation, prospect
 _Avoid_: Session population, total RSS, preallocated resource bundle
 
 **Active Credit**:
-The accounting term for one occupied in-memory Physical Custody record. Occupancy reserves one unit of shared Host concurrency for active Edit preparation or a prospective Attempt, retaining it until physical resource cleanup is safe. Waiting for permission holds no credit; approved execution reacquires one. Logical completion alone does not release resources still in use.
+One occupied Physical Custody record, charging shared concurrency through preparation/execution and safe physical cleanup. Permission waits release it; approved execution reacquires it. Semantic completion alone cannot release resources still in use.
 _Avoid_: Authorization, durable semaphore, Activation Slot
 
 **Orchestration Memory**:

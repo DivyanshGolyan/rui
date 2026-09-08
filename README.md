@@ -18,12 +18,6 @@ Session
 
 A Caller supplies a JavaScript Workflow Definition and stable Run Key. One native Zig Host Runtime owns Workflow Runs, reusable Sessions, Turns, providers, tools, permissions, recovery, capacities, and one SQLite Host Store. QuickJS is a disposable workflow evaluator, not another agent runtime.
 
-Sessions are reusable linear Conversations and never terminal. One initiating User Message starts a Turn; later User Messages use the same admission primitive and may extend it at the next assistant-response model-Operation boundary. Internal compaction leaves pending messages untouched. A Permission Decision authorizes or denies one exact proposed Action and is not Conversation content. Turns settle. One model response may produce multiple ordered Tool Calls, each represented as an independently recoverable child Operation.
-
-Persistent model-visible defaults change through sparse Session Context Revisions. Each new model request selects current Session settings and freezes its exact inputs in a Model Request Manifest. Action admission binds current Permission Mode and exact authorization provenance. No separate Turn Contract is required. Provider credentials and transport remain late-bound. Compaction changes only the bounded Model Context projection and never rewrites Conversation history.
-
-SQLite rows and constraints are canonical authority. Physical execution uses one startup-sized in-memory custody table and ordinary scans; dormant Sessions retain no execution slot. Idle machinery sleeps except for existing event/deadline obligations, including the bounded retry poll. OnePage does not retain a second Session Ledger, reducer image, continuation blob, or resident Session graph. The approved Host Runtime streams variable request and response content through bounded memory windows to non-authoritative unlinked scratch, then imports sealed evidence through one shared validation workspace.
-
 ## Current status
 
 The redesigned V1 must support Linux and macOS. The current implementation and existing build instructions remain macOS-specific; Linux support is not yet implemented or qualified. The [platform contract decision](https://github.com/DivyanshGolyan/onepage/issues/126) evaluates every macOS-only assumption and the mechanisms and evidence required on both systems.
@@ -116,4 +110,4 @@ The newest foundational decisions are:
 - [ADR-0026: Operations own current execution and final results](docs/adr/0026-let-operations-own-current-execution-and-final-results.md)
 - [ADR-0027: native exact Edit replaces Git-backed Patch](docs/adr/0027-use-an-in-process-exact-edit-module.md)
 
-The complete ADR, research, spike, measurement, and historical-design collections live under [`docs/`](docs/).
+The complete ADR, research, spike, measurement, and historical-design collections live under [`docs/`](docs).

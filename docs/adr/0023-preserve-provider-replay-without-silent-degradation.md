@@ -4,6 +4,8 @@ status: accepted
 
 # Preserve provider continuation without duplicate replay authority
 
+For implementation, read the consolidated [model-output contract](../../ARCHITECTURE.md#model-output-and-multiple-tool-calls) and [execution ownership](../architecture/execution.md). The record below preserves the original decision and later amendments; superseded wording is historical.
+
 ## Accepted amendment — System Instructions in Conversation
 
 The [Session decision](https://github.com/DivyanshGolyan/onepage/issues/101#issuecomment-5550876667) adds System Instruction as a fifth Conversation Entry kind. Appended instructions are visible alongside user messages, assistant replies, and tool results, with immutable ordering and content. They are host/operator inputs, not model-output projections, and grant no Action Authorization. Provider-only reasoning remains private Completion-owned content. First inclusion commits atomically with its assistant-response request; exact storage/wire encoding remains implementation work. This supersedes only the four-kind enumeration in the original decision below; the continuation ownership and no-duplicate-content rules remain in force.
@@ -26,4 +28,4 @@ OnePage never silently drops reasoning, asks a provider to drop incompatible blo
 
 ## Accepted amendment — Operation-owned execution and results
 
-[ADR-0026](0026-let-operations-own-current-execution-and-final-results.md) supersedes historical Attempt/Completion authority, separate Resolution identity and Completion-owned final-content bindings in this record. Operations own current execution/retry facts, immutable final Resolution values and required final content by reference. Existing effect-specific uncertainty, request freezing, accepted continuation, public replay and bounded-memory guarantees remain in force. The original text remains historical decision evidence; the current [execution contract](../../ARCHITECTURE.md#host-runtime-execution-and-settlement) and [verification requirements](../../VERIFICATION.md#operations-attempts-and-recovery) govern implementation.
+[ADR-0026](0026-let-operations-own-current-execution-and-final-results.md) supersedes this record’s per-try authority and final-content ownership. Use the current [execution contract](../architecture/execution.md) and [verification](../verification/execution.md); retain the original wording as history.

@@ -4,6 +4,8 @@ status: accepted
 
 # Version model-visible context sparsely
 
+For implementation, read the consolidated [context contract](../../ARCHITECTURE.md#sparse-context-and-exact-model-requests) and [verification](../../VERIFICATION.md#context-and-model-requests). The record below preserves the original decision and later amendments; superseded wording is historical.
+
 ## Accepted amendment — request construction
 
 The [Session and workflow decision](https://github.com/DivyanshGolyan/onepage/issues/101#issuecomment-5550876667) supersedes the combined patch/Turn admission and Turn-wide model-setting freeze below. Session creation establishes a complete baseline; independent configuration records sparse persistent changes. Each new model request uses committed Session state at construction and freezes its selected revision, settings, and inputs in its immutable Model Request Manifest. Existing requests and retries do not reread current settings. No per-setting activation queue or Turn-wide settings copy is needed. Validity and provider compatibility remain independent checks.
@@ -24,4 +26,4 @@ OnePage records persistent Session context as typed sparse revisions, resolves o
 
 ## Accepted amendment — Operation-owned execution and results
 
-[ADR-0026](0026-let-operations-own-current-execution-and-final-results.md) supersedes historical Attempt/Completion authority, separate Resolution identity and Completion-owned final-content bindings in this record. Operations own current execution/retry facts, immutable final Resolution values and required final content by reference. Existing effect-specific uncertainty, request freezing, accepted continuation, public replay and bounded-memory guarantees remain in force. The original text remains historical decision evidence; the current [execution contract](../../ARCHITECTURE.md#host-runtime-execution-and-settlement) and [verification requirements](../../VERIFICATION.md#operations-attempts-and-recovery) govern implementation.
+[ADR-0026](0026-let-operations-own-current-execution-and-final-results.md) supersedes this record’s per-try authority and final-content ownership. Use the current [execution contract](../architecture/execution.md) and [verification](../verification/execution.md); retain the original wording as history.

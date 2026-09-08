@@ -4,10 +4,12 @@ status: accepted
 
 # Capture Run inspection before delivery
 
+For implementation, read the consolidated [inspection contract](../architecture/workflows.md#run-interface) and [verification](../verification/workflows.md#run-interface). The record below preserves the original decision and later amendments; superseded wording is historical.
+
 Accepted 5 September 2026. This amends ADR-0022's inspection rules and ADR-0021's
 private-scratch transaction boundary. The owning contracts are in
-[ARCHITECTURE.md](../../ARCHITECTURE.md#run-interface) and
-[VERIFICATION.md](../../VERIFICATION.md#run-interface); neither the HTTP interface
+[ARCHITECTURE.md](../architecture/workflows.md#run-interface) and
+[VERIFICATION.md](../verification/workflows.md#run-interface); neither the HTTP interface
 nor this capture path is implemented by this decision.
 
 The sole Storage Owner captures a complete report of one Run through bounded

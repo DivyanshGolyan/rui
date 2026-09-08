@@ -16,7 +16,7 @@ Reuse one 16 KiB I/O window across matching/copying where ownership permits, str
 
 Preserve exact intent before Authorization, preimage/expected-postimage references, target identity, permission provenance, effect-aware cancellation and uncertain-effect reconciliation. Preparing the replacement does not authorize applying it. Loss of custody still makes a matching postimage an observation rather than proof OnePage performed the mutation. This does not add atomic filesystem compare-and-swap or change inode semantics through an implicit rename.
 
-The [Native Edit module](../../ARCHITECTURE.md#native-edit-module), [product behavior](../../PRODUCT.md#exact-file-edits), [Edit Intent](../../CONTEXT.md) and [verification](../../VERIFICATION.md#native-edit-verification) own the detailed contracts.
+The [Native Edit module](../architecture/execution.md#native-edit-module), [product behavior](../../PRODUCT.md#exact-file-edits), [Edit Intent](../../CONTEXT.md) and [verification](../verification/execution.md#native-edit-verification) own the detailed contracts.
 
 ## Why
 
