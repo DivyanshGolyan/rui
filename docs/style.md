@@ -27,6 +27,14 @@ A change violates this rule when it adds a Session Ledger, reducer image, contin
 
 During the design phase, normative documents own accepted requirements and open decision/research issues own unanswered questions. Amend the owning document when a decision is accepted; retain historical discussions and experiments as evidence. Do not maintain speculative implementation tickets as another copy of the design. Once the V1 contract is aligned, create bounded implementation slices with links to the contract and concrete verification. Exact schema/encoding mechanics may be chosen during implementation where behavior is already determined. A superseded planning ticket is not completed implementation.
 
+## Enforce contracts at their owner
+
+An adapter owns delivery and cleanup for one physical execution; the Host owns retry policy, semantic acceptance and durable recovery. Make local lifecycle guarantees enforceable and test them through that interface instead of retaining historical records to compensate for ambiguous delivery. Preserve explicit uncertainty where an owner cannot guarantee external truth, including remote billing and subprocess effects.
+
+Every durable execution fact must name a recovery consumer or concrete product promise. Diagnostic usefulness alone does not require permanent failed-try history. Preserve consumed allowances, exact admitted inputs and authorization, accepted results and provider continuation; preserve the accepted recovery traces when implementing Operation-owned current facts and immutable final results. See [required execution guarantees](../ARCHITECTURE.md#required-execution-and-recovery-guarantees).
+
+Keep diagnostic history independent of execution authority. Default local summaries and explicit detailed capture follow the [local diagnostic contract](../ARCHITECTURE.md#local-diagnostics-and-application-state); expiry or logging failure must not change recovery or accepted meaning. This is separate from the deferred retention of canonical application state.
+
 ## Freeze at the boundary
 
 - Record persistent model-visible defaults as sparse Session Context Revisions.
@@ -54,16 +62,16 @@ Keep context components typed and closed for current consumers. Do not store a m
 - Reserve one content-free in-memory Physical Custody record before opening the dispatching write transaction; its occupancy is the Active Credit, not a second allocation. Use the startup-sized table and ordinary bounded scans, without a duplicate SQLite slot table, free list, or active-record index. Return rolled-back reservations and retain occupied records through physical cleanup; exact identity checks reject stale events after reuse.
 - Commit Attempt admission before physical launch.
 - Return a one-shot Dispatch Permit only to the invocation that observed the Attempt commit; never reconstruct or store it.
-- Keep SQLite transactions closed during request materialization, network or subprocess I/O, filesystem mutation, and response streaming. The sole exception is the inspection read transaction spanning its private report-scratch writes under [ADR-0024](adr/0024-capture-run-inspection-before-delivery.md); delivery remains outside the transaction.
+- Keep SQLite transactions closed during request materialization, network or subprocess I/O, filesystem mutation, and response streaming. The read-only capture exceptions are inspection writes to private report scratch under [ADR-0024](adr/0024-capture-run-inspection-before-delivery.md) and workflow writes to private visibility metadata under [Workflow Runs](../ARCHITECTURE.md#workflow-runs). Result-body materialization and network delivery remain outside those transactions.
 - Stream variable content through fixed borrowed windows to dynamically charged, immediately unlinked scratch.
 - Parse complete output only after terminal seal in the one shared serial validation/import workspace.
-- Treat Completion as observed evidence and Resolution as selected meaning.
-- Normally commit content, the single Completion, Resolution, and semantic consequence atomically. Permit Completion without Resolution only for a retryable model result committed with immutable retry eligibility.
-- Reconcile according to effect: model retry with explicit duplicate risk, no automatic Bash replay, exact patch preimage/postimage observation.
+- Treat Execution Evidence as transient observed evidence and the Operation-owned Resolution value as immutable selected meaning.
+- Normally commit content, the Operation's previously absent Resolution value and required final evidence, and semantic consequences atomically. Retryable model evidence instead atomically updates current retry facts and eligibility without a Resolution. Never reset consumed allowance or reuse an Attempt identity.
+- Reconcile according to effect: model retry with explicit duplicate risk, no automatic Bash replay, exact edit preimage/postimage observation.
 - Keep User role, Caller identity, Principal, Authority, Authorization, and Permission Mode separate.
-- Do not add a Workspace fence, quiescence promise, global Action serialization, or isolation claim. Bash and Patch share the closed Action lifecycle and may execute concurrently under Active Capacity.
+- Do not add a Workspace fence, quiescence promise, global Action serialization, or isolation claim. Bash and Edit share the closed Action lifecycle and may execute concurrently under Active Capacity.
 
-Every SQLite command follows:
+Every semantic mutation follows:
 
 ```text
 bounded syntax ──► BEGIN IMMEDIATE ──► bounded Decision Snapshot
@@ -71,7 +79,7 @@ bounded syntax ──► BEGIN IMMEDIATE ──► bounded Decision Snapshot
                ──► exact row counts ──► COMMIT ──► release consequence
 ```
 
-The same bounded loader and classifier serve inspection and advancement. A post-commit preparation failure records evidence for the admitted Attempt; it cannot erase durable authority. Retry eligibility uses only the bounded SQLite poll. Other intra-Host wakes may request a rescan of live Physical Custody, but never carry semantic facts or trigger delayed retries. Sleep when no work or required deadline/poll is due; do not add an empty-table scan timer. Before starting another queued inspection, give ready controls and ordinary settlement/advancement work bounded turns through the existing driving path, without draining either class indefinitely. Encode and escape report fields through fixed-size windows and block writes; permitted strings may span windows. Keep a capture already in progress atomic as a read view; no extra scheduler or reader is implied.
+The same bounded loader and classifier serve inspection and advancement. A post-commit preparation failure records evidence for the admitted Attempt; it cannot erase durable authority. Retry eligibility uses only the bounded SQLite poll. Other intra-Host wakes may request a rescan of live Physical Custody, but never carry semantic facts or trigger delayed retries. Sleep when no work or required deadline/poll is due; do not add an empty-custody-table scan timer. Workflow discovery uses the accepted asynchronous pull loop: check again after evaluation cleanup, or after one shared one-second idle timer when no workflow is eligible. It introduces no per-Run timer or completion hook; query work still needs bounded ownership and measured service time. Before starting another queued inspection, give ready controls and ordinary settlement/advancement work bounded turns through the existing driving path, without draining either class indefinitely. Encode and escape report fields through fixed-size windows and block writes; permitted strings may span windows. Keep a capture already in progress atomic as a read view; no extra scheduler or reader is implied.
 
 ## Deep modules
 
@@ -80,7 +88,8 @@ The same bounded loader and classifier serve inspection and advancement. A post-
 | Storage Owner | SQLite, canonical transactions, bounded content reads/writes, and no domain-policy delegation to callers. |
 | Host Runtime | Expose the narrow typed Run API; derive Turn Condition; drive legal quanta through the Storage Owner, one multiplexed I/O Reactor, temporary Action executors, and content-free custody. |
 | Provider adapter | Authentication, derived replay-input projection, request lowering, transport grammar, and direct streaming between scratch descriptors and the provider; no SQLite access or semantic admission. |
-| Action adapter | Execute one immutable admitted Bash or Patch Attempt under temporary custody and return sealed evidence; select no permission, retry, or recovery policy. |
+| Action adapter | Execute one immutable admitted Bash or Edit Attempt under temporary custody and return sealed evidence; select no permission, retry, or recovery policy. |
+| Edit module | Own literal matching, streamed preparation, file mutation and reconciliation observations behind the Action adapter. Use no SQLite or provider credentials; leave admission and canonical outcomes to the Host. Run in-process with bounded service turns and owned reusable buffers. |
 | Workflow Evaluator | Evaluate one immutable Generation and return one terminal outcome; retain nothing across a durable barrier. |
 
 An interface is deep when callers provide semantic intent and cannot construct the owner's internal facts, storage rows, lifecycle phases, or capabilities.
@@ -97,6 +106,19 @@ An interface is deep when callers provide semantic intent and cannot construct t
 - Backpressure before allocation failure. Capacity exhaustion is not a semantic Session state.
 - Separate OnePage orchestration memory from model-requested workload memory.
 - Report whole-process RSS and the slope of every population independently.
+
+## Constraint evidence
+
+Use the [accepted vocabulary](../CONTEXT.md#constraints) from [#88](https://github.com/DivyanshGolyan/onepage/issues/88#issuecomment-5523637847). Each constraint belongs to the deepest owner of its protected resource or exact consumer; add no central registry, generic enforcement engine or universal exhaustion result. “Bounded” names a derivation or Resource Budget and its failure behavior.
+
+| Kind | Required justification |
+| --- | --- |
+| Invariant | Authoritative owner, construction, violation result and invariant test. |
+| Fixed Boundary | Protected operation, unit/scope, exact derivation or source, enforcement point, typed failure and boundary test. |
+| Resource Budget | Owner, unit/scope, accounting/release, configuration/default, exhaustion, population multiplier and measurement. |
+| Verification Target | Workload, metric, pass condition and measurement method; no runtime enforcement. |
+
+The [combined matrix](../ARCHITECTURE.md#v1-limit-matrix) supplies subsequently accepted policy defaults and distinguishes their required qualification from existing measurements. An unmeasured accepted default is not a demonstrated production result. Delete, consolidate or demote unsupported numbers; when an old guard still protects a fixed representation, replace and verify that representation before removing the guard. Preserve recursion, allocation, representability and atomic-publication safety. Do not silently truncate semantic input or partially commit an atomic admission.
 
 ## Validation and trust
 
