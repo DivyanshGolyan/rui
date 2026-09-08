@@ -2,6 +2,8 @@
 
 This is part of the normative [VERIFICATION.md](../../VERIFICATION.md) contract. [Corresponding architecture](../architecture/workflows.md) supplies the governing rules.
 
+For evaluator construction or lifetime changes, also run the [evaluator lifecycle checks](../../VERIFICATION.md#evaluator-lifecycle).
+
 ## Workflow replay
 
 Required workflow fixtures must use the production QuickJS boundary and the proposed `export default async function workflow({ createSession, configureSession, sendMessage }, args)` signature (configuration naming and acknowledgement shape remain to be finalized). The revised API is not implemented yet; these are required checks, not passing evidence. They cover:

@@ -2,6 +2,8 @@
 
 This is part of the normative [VERIFICATION.md](../../VERIFICATION.md) contract. [Corresponding architecture](../architecture/execution.md) supplies the governing rules.
 
+For Tool Result or spillover changes, also run the [model-result settlement and spillover checks](../../VERIFICATION.md#model-result-settlement-and-spillover).
+
 ## Operations, Attempts, and recovery
 
 Attempt is a physical-try concept whose current admission is recorded on its Operation. Resolution is an immutable value owned directly by that Operation; neither is a separate result identity or historical per-try ledger. Fixtures exercise the real Store and adapter interfaces against the following boundaries.
