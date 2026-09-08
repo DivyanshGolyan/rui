@@ -4,10 +4,12 @@ status: accepted
 
 # Capture Run inspection before delivery
 
+For implementation, read the consolidated [inspection contract](../architecture/workflows.md#run-interface) and [verification](../verification/workflows.md#run-interface). The record below preserves the original decision and later amendments; superseded wording is historical.
+
 Accepted 5 September 2026. This amends ADR-0022's inspection rules and ADR-0021's
 private-scratch transaction boundary. The owning contracts are in
-[ARCHITECTURE.md](../../ARCHITECTURE.md#run-interface) and
-[VERIFICATION.md](../../VERIFICATION.md#run-interface); neither the HTTP interface
+[ARCHITECTURE.md](../architecture/workflows.md#run-interface) and
+[VERIFICATION.md](../verification/workflows.md#run-interface); neither the HTTP interface
 nor this capture path is implemented by this decision.
 
 The sole Storage Owner captures a complete report of one Run through bounded
@@ -37,12 +39,15 @@ explicitly incomplete, never a successful partial inventory.
 
 Before starting another queued inspection capture, give already-ready controls and ordinary settlement/advancement work bounded turns through the existing Host driving path. Do not drain an inspection backlog ahead of either class, or drain either class indefinitely ahead of inspection. A capture already in progress retains its complete committed view and is not preempted between private batches. This adds no separate scheduler, priority-queue subsystem, second reader, WAL requirement, or public snapshot mechanism. The service quantum, maximum acceptable delay from one capture, and sustained-load fairness remain with the existing work/resource decisions.
 
-The 6 September 2026 refinement extends between-capture turns to ordinary ready settlement and advancement, and requires fixed-window encoding/escaping with block writes. Permitted strings may span windows; neither the experimental buffer nor field size becomes a limit. The single read view, connection, and scratch lifetime remain unchanged. Cooperative time/byte abort policies and their report-availability tradeoff remain undecided in #95; a check between batches cannot guarantee a deadline during a blocked write.
+The 6 September 2026 refinement extends between-capture turns to ordinary ready settlement and advancement, and requires fixed-window encoding/escaping with block writes. Permitted strings may span windows; neither the experimental buffer nor field size becomes a limit. The single read view, connection, and scratch lifetime remain unchanged. The 7 September scope split moves inspection query shape, read ownership and responsiveness to [Choose inspection queries and read ownership for responsive controls](https://github.com/DivyanshGolyan/onepage/issues/115), starting from the existing complete report with no elapsed-time abort. A check between batches cannot guarantee a deadline during a blocked write; any later behavior or ownership amendment needs an explicit decision.
 
 The [accepted execution-control simplification](../design/execution-control-simplicity.md) records the supporting native contention experiment. The accepted rule concerns scheduling between captures; it does not promise a fixed response time or select a record-count limit.
 
-Issues #68 and #95 own numerical budgets, admission/fairness, capture work,
-temporary disk, descriptors, memory, and failure behavior. Completed reports for
+[Set Host Runtime admission controls and budgets](https://github.com/DivyanshGolyan/onepage/issues/68) and
+[Choose SQLite storage and command-work limits](https://github.com/DivyanshGolyan/onepage/issues/95)
+own Host admission/resources and SQLite settings, import and non-inspection command work.
+[Choose inspection queries and read ownership for responsive controls](https://github.com/DivyanshGolyan/onepage/issues/115)
+owns inspection access shape, read ownership and capture/control fairness. Completed reports for
 slow clients are a separately charged population. Measure actual queries and
 encoding, whole-Host command delay under repeated polling, and memory after
 capture/delivery churn. No benchmark row count or batch size becomes a product
@@ -61,3 +66,12 @@ backup and replication machinery are not selected for OnePage.
 - [Historical Run API planning](https://github.com/DivyanshGolyan/onepage/issues/39)
 - [Host budgets](https://github.com/DivyanshGolyan/onepage/issues/68)
 - [SQLite work and settings](https://github.com/DivyanshGolyan/onepage/issues/95)
+- [Choose inspection queries and read ownership for responsive controls](https://github.com/DivyanshGolyan/onepage/issues/115)
+
+## V1 ownership resolution — 8 September 2026
+
+The user accepted retaining the existing single Storage Owner for V1 in [Choose inspection queries and read ownership for responsive controls](https://github.com/DivyanshGolyan/onepage/issues/115). Complete capture finishes before other database work; ready controls and settlements receive service before another capture. No additional throwaway prototype is required to settle ownership.
+
+Current-fact query measurements support avoiding resolved-history scans, but do not certify the complete classifier or sustained-load responsiveness. Integrated queries, encoding, shared admissions, competing arrivals, slow delivery and aggregate scratch remain implementation verification obligations in VERIFICATION.md. The existing p95 acknowledgement target remains a workload qualification target, not a deadline for arbitrarily large reports. Exact indexes and service quanta belong to implementation; a failure to qualify requires an explicit design review, not silent truncation, quotas or another reader. Earlier measurements and investigation notes retain their historical scope.
+
+The [combined resource resolution](https://github.com/DivyanshGolyan/onepage/issues/89#issuecomment-5578432698) closes the earlier maximum-capture-delay question by retaining no hard capture deadline and qualifying the defined-workload p95 target. It does not leave a numerical maximum awaiting selection.

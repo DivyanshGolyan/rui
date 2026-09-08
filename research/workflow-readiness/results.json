@@ -1,0 +1,285 @@
+{
+  "sqlite": "3.53.4",
+  "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "unrelated_waiters": 100000,
+  "repeats": 7,
+  "cases": [
+    {
+      "dependents": 0,
+      "samples_ms": {
+        "result_only": [
+          0.411125,
+          0.524167,
+          0.387125,
+          0.392625,
+          0.367583,
+          0.388458,
+          0.327
+        ],
+        "result_and_ready": [
+          0.393333,
+          0.503834,
+          0.422459,
+          0.409583,
+          0.444167,
+          0.496334,
+          0.466958
+        ],
+        "targeted_first": [
+          0.013542,
+          0.0075,
+          0.006208,
+          0.005791,
+          0.005791,
+          0.005625,
+          0.005792
+        ],
+        "derived_first": [
+          4.594875,
+          4.366417,
+          4.534625,
+          4.553209,
+          4.426625,
+          4.397625,
+          4.535125
+        ],
+        "ready_first": [
+          0.040583,
+          0.009292,
+          0.009458,
+          0.006208,
+          0.006208,
+          0.00575,
+          0.005667
+        ]
+      },
+      "plans": {
+        "targeted_first": [
+          "SEARCH dependency USING COVERING INDEX by_work (work_id=?)"
+        ],
+        "derived_first": [
+          "SCAN d",
+          "SEARCH w USING INTEGER PRIMARY KEY (rowid=?)"
+        ],
+        "ready_first": [
+          "SCAN ready"
+        ]
+      },
+      "median_ms": {
+        "result_only": 0.3885,
+        "result_and_ready": 0.4442,
+        "targeted_first": 0.0058,
+        "derived_first": 4.5346,
+        "ready_first": 0.0062
+      }
+    },
+    {
+      "dependents": 1,
+      "samples_ms": {
+        "result_only": [
+          0.603833,
+          0.388,
+          0.353583,
+          0.398458,
+          0.451416,
+          0.524125,
+          0.561541
+        ],
+        "result_and_ready": [
+          0.525292,
+          0.573709,
+          0.356917,
+          0.360084,
+          0.478125,
+          0.425375,
+          0.490291
+        ],
+        "targeted_first": [
+          0.013375,
+          0.007084,
+          0.006208,
+          0.006708,
+          0.006625,
+          0.006666,
+          0.005958
+        ],
+        "derived_first": [
+          4.516583,
+          4.313208,
+          4.346625,
+          4.257542,
+          4.250292,
+          4.325667,
+          4.352959
+        ],
+        "ready_first": [
+          0.019125,
+          0.007833,
+          0.00675,
+          0.00625,
+          0.006083,
+          0.006,
+          0.006
+        ]
+      },
+      "plans": {
+        "targeted_first": [
+          "SEARCH dependency USING COVERING INDEX by_work (work_id=?)"
+        ],
+        "derived_first": [
+          "SCAN d",
+          "SEARCH w USING INTEGER PRIMARY KEY (rowid=?)"
+        ],
+        "ready_first": [
+          "SCAN ready"
+        ]
+      },
+      "median_ms": {
+        "result_only": 0.4514,
+        "result_and_ready": 0.4781,
+        "targeted_first": 0.0067,
+        "derived_first": 4.3257,
+        "ready_first": 0.0063
+      }
+    },
+    {
+      "dependents": 1000,
+      "samples_ms": {
+        "result_only": [
+          0.546541,
+          0.477625,
+          0.434875,
+          0.506208,
+          0.459208,
+          0.521709,
+          0.466375
+        ],
+        "result_and_ready": [
+          0.902375,
+          0.803916,
+          0.764708,
+          0.726334,
+          0.770875,
+          0.659541,
+          0.710542
+        ],
+        "targeted_first": [
+          0.01525,
+          0.006709,
+          0.006375,
+          0.006375,
+          0.00625,
+          0.006209,
+          0.005917
+        ],
+        "derived_first": [
+          4.510375,
+          4.580167,
+          4.399667,
+          4.530666,
+          4.38625,
+          4.415959,
+          4.561125
+        ],
+        "ready_first": [
+          0.02,
+          0.008291,
+          0.006459,
+          0.0065,
+          0.006125,
+          0.005833,
+          0.005584
+        ]
+      },
+      "plans": {
+        "targeted_first": [
+          "SEARCH dependency USING COVERING INDEX by_work (work_id=?)"
+        ],
+        "derived_first": [
+          "SCAN d",
+          "SEARCH w USING INTEGER PRIMARY KEY (rowid=?)"
+        ],
+        "ready_first": [
+          "SCAN ready"
+        ]
+      },
+      "median_ms": {
+        "result_only": 0.4776,
+        "result_and_ready": 0.7647,
+        "targeted_first": 0.0064,
+        "derived_first": 4.5104,
+        "ready_first": 0.0065
+      }
+    },
+    {
+      "dependents": 100000,
+      "samples_ms": {
+        "result_only": [
+          0.644166,
+          0.457208,
+          0.374166,
+          0.334084,
+          0.335833,
+          0.345292,
+          0.332792
+        ],
+        "result_and_ready": [
+          19.2465,
+          18.607083,
+          18.155875,
+          18.064834,
+          18.2045,
+          18.091458,
+          18.217667
+        ],
+        "targeted_first": [
+          0.0245,
+          0.008709,
+          0.007416,
+          0.006625,
+          0.006292,
+          0.006375,
+          0.006667
+        ],
+        "derived_first": [
+          7.090209,
+          6.857333,
+          6.862,
+          6.78675,
+          6.696583,
+          6.813833,
+          7.177833
+        ],
+        "ready_first": [
+          0.028792,
+          0.008125,
+          0.006917,
+          0.006792,
+          0.007,
+          0.00625,
+          0.006125
+        ]
+      },
+      "plans": {
+        "targeted_first": [
+          "SEARCH dependency USING COVERING INDEX by_work (work_id=?)"
+        ],
+        "derived_first": [
+          "SCAN d",
+          "BLOOM FILTER ON w (id=?)",
+          "SEARCH w USING INTEGER PRIMARY KEY (rowid=?)"
+        ],
+        "ready_first": [
+          "SCAN ready"
+        ]
+      },
+      "median_ms": {
+        "result_only": 0.3453,
+        "result_and_ready": 18.2045,
+        "targeted_first": 0.0067,
+        "derived_first": 6.8573,
+        "ready_first": 0.0069
+      }
+    }
+  ]
+}

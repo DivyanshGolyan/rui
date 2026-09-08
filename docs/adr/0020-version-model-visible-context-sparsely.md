@@ -4,6 +4,8 @@ status: accepted
 
 # Version model-visible context sparsely
 
+For implementation, read the consolidated [context contract](../../ARCHITECTURE.md#sparse-context-and-exact-model-requests) and [verification](../../VERIFICATION.md#context-and-model-requests). The record below preserves the original decision and later amendments; superseded wording is historical.
+
 ## Accepted amendment — request construction
 
 The [Session and workflow decision](https://github.com/DivyanshGolyan/onepage/issues/101#issuecomment-5550876667) supersedes the combined patch/Turn admission and Turn-wide model-setting freeze below. Session creation establishes a complete baseline; independent configuration records sparse persistent changes. Each new model request uses committed Session state at construction and freezes its selected revision, settings, and inputs in its immutable Model Request Manifest. Existing requests and retries do not reread current settings. No per-setting activation queue or Turn-wide settings copy is needed. Validity and provider compatibility remain independent checks.
@@ -21,3 +23,7 @@ Host resource controls belong to the Host, evaluator limits to the Workflow Run/
 ## Original decision
 
 OnePage records persistent Session context as typed sparse revisions, resolves one immutable Turn Contract when ordinary User input starts a Turn, and binds one immutable exact Model Request Manifest to each model Operation. The only V1 mutation path after the complete baseline is an authorized closed Session Context Patch supplied to Turn admission for an idle Session; the new revision, Turn, Contract, and initiating entry commit atomically. Unchanged model, Instruction Set, Tool Catalog, context policy, and reasoning defaults continue by reference; Turn-local runtime facts such as date and Workspace observations live only in the Turn Contract. Replacement Attempts reuse the same manifest while credentials and transport remain late-bound. This preserves historical meaning without copying a monolithic system prompt or depending on ambient provider state and amends ADR-0012 and ADR-0015.
+
+## Accepted amendment — Operation-owned execution and results
+
+[ADR-0026](0026-let-operations-own-current-execution-and-final-results.md) supersedes this record’s per-try authority and final-content ownership. Use the current [execution contract](../architecture/execution.md) and [verification](../verification/execution.md); retain the original wording as history.

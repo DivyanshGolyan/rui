@@ -4,6 +4,15 @@ status: amended by ADR-0021 and ADR-0022
 
 # Make simplicity a V1 requirement
 
+## Accepted baseline amendment — 8 September 2026
+
+[ADR-0022](0022-expose-runs-through-the-host-runtime-api.md) and the [keyed Session-operation amendments to ADR-0014](0014-use-ephemeral-quickjs-for-workflow-evaluation.md#accepted-amendment--keyed-session-operations) supersede the original CLI-only JSON, `agent()`-only intrinsic and blanket daemon exclusion below. The explicitly started Host owns the local HTTP adapter; the CLI renders its committed facts, and workflows compose creation, configuration and messages. The [open architecture redesign](https://github.com/DivyanshGolyan/onepage/issues/116) evaluates external embedding and replacement module boundaries; it has not selected a public SDK, ABI or new module decomposition.
+
+## Accepted native Edit amendment — 6 September 2026
+
+[ADR-0027](0027-use-an-in-process-exact-edit-module.md) replaces Git-backed unified Patch with the in-process exact Edit module behind the Action adapter. The closed executable inventory is `bash` and `edit`. Preserve permissions, exact preimage/postimage intent, uncertainty and recovery; Host authority stays separate from edit mechanics. Git-specific helper/scratch requirements and old Patch names below are historical where superseded. The current [Edit contract](../architecture/execution.md#native-edit-module) and [verification](../verification/execution.md#native-edit-verification) govern implementation; this is not production certification.
+
+
 OnePage treats architectural simplicity as a correctness constraint for V1. Every subsystem must directly support a current product guarantee, an external-effect boundary, or evidence required for the release claim. A hypothetical second consumer does not justify a framework, registry, pool, durable representation, background owner, or extension point.
 
 The project prefers established dependencies for mechanisms while retaining policy and authority inside its existing deep modules. SQLite owns physical database transactions, Git owns patch parsing and application, and narrow HTTP, TLS, browser, and OS credential-store dependencies may supply mechanisms for the provider-specific Codex authorization path. OnePage does not duplicate those mechanisms unless their contract cannot preserve its authority boundary.

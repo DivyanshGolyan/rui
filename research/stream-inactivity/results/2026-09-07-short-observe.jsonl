@@ -1,0 +1,14 @@
+{"kind":"experiment","model":"gpt-6-astra","case":"short","effort":"high","receive_timeout_s":300,"lifetime_s":900,"transport":"python-http.client-HTTP1.1-SSE"}
+{"kind":"start","utc":"2026-09-07T06:32:45.847567+00:00"}
+{"kind":"headers","elapsed_s":0.9698711659293622,"http_status":200,"content_type":""}
+{"kind":"chunk","elapsed_s":0.9699542080052197,"gap_s":0.9699542080052197,"bytes":955}
+{"kind":"chunk","elapsed_s":0.97002808295656,"gap_s":7.387495134025812e-05,"bytes":1369}
+{"kind":"chunk","elapsed_s":0.9701275409897789,"gap_s":9.945803321897984e-05,"bytes":224}
+{"kind":"chunk","elapsed_s":2.2902295829262584,"gap_s":1.3201020419364795,"bytes":282}
+{"kind":"chunk","elapsed_s":2.3234671249520034,"gap_s":0.033237542025744915,"bytes":1051}
+{"kind":"chunk","elapsed_s":2.331236624973826,"gap_s":0.007769500021822751,"bytes":259}
+{"kind":"chunk","elapsed_s":2.359104249975644,"gap_s":0.02786762500181794,"bytes":259}
+{"kind":"chunk","elapsed_s":2.5455214580288157,"gap_s":0.18641720805317163,"bytes":904}
+{"kind":"chunk","elapsed_s":2.551793416030705,"gap_s":0.006271958001889288,"bytes":1364}
+{"kind":"chunk","elapsed_s":2.551940790959634,"gap_s":0.00014737492892891169,"bytes":673}
+{"kind":"summary","http_status":200,"content_type":"","outcome":"response.completed","duration_s":2.5521846659248695,"first_body_chunk_s":0.9699542080052197,"largest_between_body_chunks_s":1.3201020419364795,"chunks":10,"bytes":7340,"terminal_event":"response.completed"}

@@ -4,6 +4,11 @@ status: amended by ADR-0022 and ADR-0023
 
 # Use two executable tools and bounded model dispositions
 
+## Accepted native Edit amendment — 6 September 2026
+
+[ADR-0027](0027-use-an-in-process-exact-edit-module.md) replaces Git-backed unified Patch with the in-process exact Edit module behind the Action adapter. The closed executable inventory is `bash` and `edit`. Preserve permissions, exact preimage/postimage intent, uncertainty and recovery; Host authority stays separate from edit mechanics. Git-specific helper/scratch requirements and old Patch names below are historical where superseded. The current [Edit contract](../architecture/execution.md#native-edit-module) and [verification](../verification/execution.md#native-edit-verification) govern implementation; this is not production certification.
+
+
 ## Accepted ownership amendment — 5 September 2026
 
 [ADR-0020's ownership amendment](0020-version-model-visible-context-sparsely.md#accepted-ownership-amendment--5-september-2026) removes the separate Turn Contract. Current Session settings are selected independently at model request or Action admission, with exact historical inputs/permissions retained there. Permission Mode persists on the Session and may change; existing Authorizations are unchanged. Runtime information and retained resource limits stay with their actual consumers/scopes. Numeric limits remain with their assigned decisions. The older Turn-local settings and permission language below is historical where it conflicts with these amendments.

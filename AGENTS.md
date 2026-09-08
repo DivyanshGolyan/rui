@@ -7,9 +7,9 @@ OnePage is a resource-bounded, crash-resumable local runtime for programmable co
 - [README.md](README.md): project orientation, implementation status, prerequisites, and build entry points. Read when starting unfamiliar work.
 - [PRODUCT.md](PRODUCT.md): promised behavior and V1 scope. Read before changing a user flow or assessing completeness.
 - [CONTEXT.md](CONTEXT.md): canonical domain language. Read the relevant definitions before changing entities, names, or ownership.
-- [ARCHITECTURE.md](ARCHITECTURE.md): authority, execution, recovery, and resource contracts. Read the affected sections and their accepted ADRs before designing or implementing changes.
+- [ARCHITECTURE.md](ARCHITECTURE.md): authority, execution, recovery, and resource contracts. Follow its execution, workflow or resource topic links and affected ADRs before designing or implementing changes.
 - [docs/style.md](docs/style.md): implementation discipline. Read before editing production code.
-- [VERIFICATION.md](VERIFICATION.md): required evidence. Read the affected sections before choosing tests or claiming a guarantee.
+- [VERIFICATION.md](VERIFICATION.md): required evidence. Follow the matching topic contract before choosing tests or claiming a guarantee.
 
 Load the sections needed for the task; follow their references when the decision depends on them. Keep detailed contracts in these owning documents.
 

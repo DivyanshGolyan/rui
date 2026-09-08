@@ -1,5 +1,11 @@
 # Bound V1 configuration and trust established mechanisms
 
+For implementation, read the consolidated [context](../../ARCHITECTURE.md#sparse-context-and-exact-model-requests) and [permission](../../ARCHITECTURE.md#tools-and-permission) contracts. The record below preserves the original decision and later amendments; superseded wording is historical.
+
+## Accepted resource-policy amendment — 8 September 2026
+
+The [combined resource resolution](https://github.com/DivyanshGolyan/onepage/issues/89#issuecomment-5578432698) and [provider/tool policy](https://github.com/DivyanshGolyan/onepage/issues/91#issuecomment-5567420830) supersede the original public-configuration restrictions and pending Turn-budget choice below. There is no Turn-wide request allowance or deadline. Host startup configuration owns the selected execution, scratch, client, diagnostic, retry/inactivity, Bash-default and excerpt controls; Bash also permits its admitted per-call timeout. Internal derived workspaces and SQLite settings are not extra public knobs. [ARCHITECTURE.md](../architecture/resources.md#v1-limit-matrix) owns the accepted values and scope; Session configuration acknowledgements and supported mutable fields remain open in #101. [ADR-0027](0027-use-an-in-process-exact-edit-module.md) supersedes Git-backed editing.
+
 ## Accepted ownership amendment — 5 September 2026
 
 [ADR-0020's ownership amendment](0020-version-model-visible-context-sparsely.md#accepted-ownership-amendment--5-september-2026) removes the separate Turn Contract. Current Session settings are selected independently at model request or Action admission, with exact historical inputs/permissions retained there. Permission Mode persists on the Session and may change; existing Authorizations are unchanged. Runtime information and retained resource limits stay with their actual consumers/scopes. Numeric limits remain with their assigned decisions. The older Turn-local settings and permission language below is historical where it conflicts with these amendments.
