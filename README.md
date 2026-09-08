@@ -12,9 +12,8 @@ Session
   ├── sparse Session Context revisions
   └── Turns
        └── Operations
-            ├── Attempts
-            │    └── at most one Completion
-            └── Resolution
+            ├── current execution / retry facts
+            └── immutable final Resolution and content references
 ```
 
 A Caller supplies a JavaScript Workflow Definition and stable Run Key. One native Zig Host Runtime owns Workflow Runs, reusable Sessions, Turns, providers, tools, permissions, recovery, capacities, and one SQLite Host Store. QuickJS is a disposable workflow evaluator, not another agent runtime.
@@ -27,7 +26,9 @@ SQLite rows and constraints are canonical authority. Physical execution uses one
 
 ## Current status
 
-The production source still implements the historical deterministic single-Session runtime, SQLite Host Store, provider-neutral model path, Codex subscription adapter, permissioned Bash and one-file patch execution, effect-specific recovery, and disposable QuickJS evaluator kernel. It does not yet implement the relational Session/Turn or disk-first Host Runtime decisions.
+The redesigned V1 must support Linux and macOS. The current implementation and existing build instructions remain macOS-specific; Linux support is not yet implemented or qualified. The [platform contract decision](https://github.com/DivyanshGolyan/onepage/issues/126) evaluates every macOS-only assumption and the mechanisms and evidence required on both systems.
+
+The production source still implements the historical deterministic single-Session runtime, SQLite Host Store, provider-neutral model path, Codex subscription adapter, permissioned Bash and one-file patch execution, effect-specific recovery, and disposable QuickJS evaluator kernel. It does not yet implement the relational Session/Turn or disk-first Host Runtime decisions. The accepted native exact Edit module also remains design work: it replaces Git-based patch preparation/application, but production source still uses the historical tool.
 
 The remaining V1 work replaces the historical terminal-Session/ledger implementation with relational reusable Sessions and Turns, adds sparse model-context versioning, and then carries the proven components through durable Workflow Runs. [V1 design readiness](https://github.com/DivyanshGolyan/onepage/issues/2) indexes the remaining decisions and research; it is not an implementation checklist.
 
@@ -80,6 +81,8 @@ The live repair is opt-in and not part of `zig build check`. Credentials are not
 
 ## Requirements
 
+These are prerequisites for the current implementation, not the redesigned V1 platform scope:
+
 - macOS on Apple Silicon
 - Zig 0.16.0
 - `/usr/bin/git`
@@ -109,5 +112,7 @@ The newest foundational decisions are:
 - [ADR-0022: Runs use the Host Runtime's narrow typed API](docs/adr/0022-expose-runs-through-the-host-runtime-api.md)
 - [ADR-0023: provider continuation has no duplicate replay authority](docs/adr/0023-preserve-provider-replay-without-silent-degradation.md)
 - [ADR-0024: capture Run inspection before delivery](docs/adr/0024-capture-run-inspection-before-delivery.md)
+- [ADR-0025: enforce execution contracts without historical result replay](docs/adr/0025-enforce-execution-contracts-without-historical-replay.md)
+- [ADR-0026: Operations own current execution and final results](docs/adr/0026-let-operations-own-current-execution-and-final-results.md)
 
 The complete ADR, research, spike, measurement, and historical-design collections live under [`docs/`](docs/).
