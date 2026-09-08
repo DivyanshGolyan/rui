@@ -1,0 +1,4 @@
+{"kind":"experiment","model":"gpt-6-astra","case":"short","effort":"high","receive_timeout_s":300,"lifetime_s":900,"transport":"python-http.client-HTTP1.1-SSE"}
+{"kind":"start","utc":"2026-09-07T06:32:24.232586+00:00"}
+{"kind":"headers","elapsed_s":0.8684659580467269,"http_status":200,"content_type":""}
+{"kind":"summary","http_status":200,"content_type":"","outcome":"unexpected_content_type","duration_s":0.868822667049244,"first_body_chunk_s":null,"largest_between_body_chunks_s":null,"chunks":0,"bytes":0,"terminal_event":null}
