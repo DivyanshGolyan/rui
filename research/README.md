@@ -19,6 +19,8 @@ Historical contract snapshots and longer reports are available at [commit 4ee987
 
 ## Bounded TLA+ models
 
+- [Session continuation](session-continuation-model/SessionContinuation.tla): `python3 research/session-continuation-model/check.py --jar /path/to/tla2tools.jar --output /tmp/unique-continuation-results`. Pins TLA+ v1.7.4 by SHA-256. One Session, two Turns, three messages, one cancelling Run and another caller; explores one/two crashes. Checks input retention/exclusion, fixed failed outcomes/wait targets and no propagation after cancellation completion. Three broken variants must violate their named invariants; a witness must reach continuation of retained input after completed idle cancellation. [Recorded results](session-continuation-model/results/summary.json) include model/config/tool hashes and logs. Atomic transactions, unique admissions, ordered projection, effect settlement and provider validity are assumed; sets omit content/order/storage, and the model makes no liveness, SQLite, transport or provider claim.
+
 These models assume atomic durable transitions. Their finite states and checker-only histories are not proposed tables or proofs for arbitrary workloads. Correct configurations must pass; deliberately broken configurations must produce the expected counterexample. Witness configurations intentionally violate a “never reaches this state” assertion to prove reachability.
 
 - [Session replay](session-replay-model/SessionReplay.tla): one Session, two messages, up to one/two crashes. Negative controls cover duplicate admission, retargeted answers and stranded messages. It includes a keyless external caller and explicit resume, which are historical assumptions.

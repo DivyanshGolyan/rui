@@ -1,0 +1,82 @@
+{
+  "recorded_at": "2026-09-10T11:34:01.850638+00:00",
+  "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "java_version": "openjdk version \"17.0.19\" 2026-04-21\nOpenJDK Runtime Environment Homebrew (build 17.0.19+0)\nOpenJDK 64-Bit Server VM Homebrew (build 17.0.19+0, mixed mode, sharing)",
+  "jar_source": "https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar",
+  "jar_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model_sha256": "a48fbf1d4a7aa95ec30c4f24fbe79139805869605e375bd8f291ccc6c465bc97",
+  "cases": {
+    "correct": {
+      "expected_violation": null,
+      "actual_violation": null,
+      "exit_code": 0,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        1945,
+        1149,
+        0
+      ],
+      "config_sha256": "938e32716ba9b5674126da0919d291424cf4c920b657ce4444acdd2c3fb0f702"
+    },
+    "correct-two-crashes": {
+      "expected_violation": null,
+      "actual_violation": null,
+      "exit_code": 0,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        3817,
+        2218,
+        0
+      ],
+      "config_sha256": "a94ecbcb4eb88130090354aa7503d2b3fc2688fe76d29e9a0947dadba38087b6"
+    },
+    "broken-drop": {
+      "expected_violation": "NoInputLoss",
+      "actual_violation": "NoInputLoss",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        9,
+        9,
+        6
+      ],
+      "config_sha256": "2969700891d07e5cfa36ab2e282fc31f495c65997d5c462775b8ebd4104f9d7c"
+    },
+    "broken-result": {
+      "expected_violation": "OriginalResultStable",
+      "actual_violation": "OriginalResultStable",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        48,
+        40,
+        26
+      ],
+      "config_sha256": "3347f572264a304abd85ce640c54858075a8bc973d52217323eaad99164903ca"
+    },
+    "broken-wait": {
+      "expected_violation": "WaitPinned",
+      "actual_violation": "WaitPinned",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        327,
+        240,
+        114
+      ],
+      "config_sha256": "102691f36b14ab5b4aae26014d708f7ca8a2e4d6310c0c4270930b7d8028832b"
+    },
+    "witness-idle-continuation": {
+      "expected_violation": "NoIdleContinuationWitness",
+      "actual_violation": "NoIdleContinuationWitness",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        430,
+        309,
+        139
+      ],
+      "config_sha256": "8662db477aa3f892a59f0ca8137c4721de7fbd676443d8abb14eb4bacbbd0e71"
+    }
+  }
+}
