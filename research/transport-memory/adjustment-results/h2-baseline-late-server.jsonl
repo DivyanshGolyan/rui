@@ -1,0 +1,3 @@
+{"ready": true, "ssl": "OpenSSL 3.6.3 9 Jun 2026"}
+{"connection": 1, "resumed": false, "tls_version": "TLSv1.3"}
+{"requests_per_burst": [1000], "connections": 1, "resumed_connections": 0, "full_handshakes": 1, "streams_max": 1000}

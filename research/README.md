@@ -34,6 +34,9 @@ These models assume atomic durable transitions. Their finite states and checker-
 
 [Capture and reuse](transport-memory/capture-README.md): `python3 research/transport-memory/capture_run.py --output /tmp/new-capture-results`. Joint slow/stalled capture, local control RTT, memory and repeated TLS bursts; callback, between-call and bounded-worker comparisons with complete capture checks. Mac-only prototype; local echo is not durable control acknowledgement.
 
+[Transport adjustments](transport-memory/adjustment-README.md): `python3 research/transport-memory/paced_run.py --output /tmp/new-paced-results`; `asymmetric_run.py` varies staged request sizes and shaped upload delivery independently. Full SSE capture, output cadence, upload buffers, context growth, stall/reuse and phase costs; failed HTTP/1.1 capacity probes remain explicit. Mac-only synthetic evidence, not production or WAN qualification.
+
+
 [Turbopuffer source reading](turbopuffer-resource-evidence.md) records first-party URLs, sections and talk timestamps inspected on 2026-09-10. It compares storage-backed metadata and local ownership with OnePage; it supplies no local filesystem, resource-bound or retry qualification.
 
 | Artifact and reproduction | What it tests; limits |
