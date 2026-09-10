@@ -1,0 +1,46 @@
+{
+  "passed": [
+    "complete Responses envelope matches independent existing replay golden",
+    "streamed tool results preserve call order despite reverse completion",
+    "compaction request appends trigger after complete input",
+    "escaped omitted key, oversized unknown key, nested unknown field preserved",
+    "complete request compaction slice includes trailing object and later suffix",
+    "message arriving during compaction follows base using admission cutoff",
+    "scratch exhaustion closes incomplete request and releases reader",
+    "large opaque request matches independently streamed byte digest after process reopen",
+    "32x payload growth does not grow Python allocation peak by 256 KiB",
+    "mid-read and final-integrity failures expose no complete request",
+    "scratch write failure closes incomplete request"
+  ],
+  "measurements": [
+    {
+      "sha256": "a5fd57c3ed8d205bc040ea7a9959c000b14abdcb8544ba21dddf2b45f645a513",
+      "peak_python_bytes": 155361,
+      "max_chunk": 4096,
+      "input_bytes": 131201
+    },
+    {
+      "sha256": "82a436c91ed3740bf254fd25b802e43de9b33560590face39a5cb9cca083bf6d",
+      "peak_python_bytes": 169514,
+      "max_chunk": 4096,
+      "input_bytes": 4194431
+    }
+  ],
+  "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "python": "3.14.6",
+  "sqlite": "3.53.4",
+  "source_sha256": {
+    "adapter.py": "8e1eafdfc792d1a855b885a5f8e016eae61566d2e1cbf41c826e26f2d4aa986c",
+    "core.py": "63e0b51c4b45ad879d6addd1fc42ee5bdc0d973ab53cfd0de55f5f9881ccb232",
+    "stream_probe.py": "08f4bc27df7ccdc7eec74935970f3a4465186b0ee9a231cd4d44e3bf313e1c00",
+    "probe.py": "6bd606c54c4bb075b8222945d1cac8002b571f19332f9db0245d2f47223560cf",
+    "streaming.py": "84a79e7f007690723922d2d28c7c6019bbfb0b8995d5a98b9eec1cfe82733014"
+  },
+  "limits": [
+    "Synthetic Responses envelope; no network, live encryption or production provider integration.",
+    "Lexical copier trusts already-validated canonical JSON; it is not an input validator.",
+    "tracemalloc measures Python allocations, not SQLite native allocations, RSS or whole-Host bounds.",
+    "One Session, prior applicability and compaction coverage assumed; no crash/power-loss claim.",
+    "Prepare returns sealed-by-convention scratch; real dispatch permit/cancellation/cleanup integration remains unqualified."
+  ]
+}
