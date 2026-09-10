@@ -104,7 +104,7 @@ provenance = dict(platform=platform.platform(), machine=platform.machine(),
     compiler=subprocess.check_output(['cc', '--version'], text=True),
     source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
     hashes={str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in
-        [HERE / 'probe.c', HERE / 'run.py', ROOT / 'ARCHITECTURE.md', ROOT / 'CONTEXT.md', ROOT / 'build.zig']},
+        [HERE / 'probe.c', HERE / 'run.py', ROOT / 'ARCHITECTURE.md', ROOT / 'build.zig']},
     cases=results)
 (report_dir / 'results.json').write_text(json.dumps(provenance, indent=2) + '\n')
 (report_dir / 'query-plans.txt').write_text('\n'.join(plans))

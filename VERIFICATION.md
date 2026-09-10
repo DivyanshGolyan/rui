@@ -1,265 +1,135 @@
-# OnePage verification contract
+# Verification
 
-This document defines evidence required for V1 claims. Tests use production interfaces and fresh-process reopen. An interrupted suite is reported as interrupted, not green.
-
-
-## Topic contracts
-
-Read the relevant branch before changing its behavior; these files are part of this normative contract.
-
-| Branch | Read for |
-| --- | --- |
-| [Execution](docs/verification/execution.md) | Attempt admission, settlement, retries, tool output, Bash and Edit recovery. |
-| [Workflows](docs/verification/workflows.md) | Workflow replay, evaluator lifetime, Run controls and inspection. |
-| [Resources](docs/verification/resources.md) | Memory, temporary retention, limit defaults and qualification. |
-
-## Platform qualification
-
-The redesigned V1 must qualify on both Linux and macOS under the [platform contract](ARCHITECTURE.md#platform-contract). Record the selected OS/distribution versions, CPU architectures, deployment environments and dependency builds. Compilation or a successful macOS run alone cannot establish Linux support.
-
-Run the applicable production build and behavioral gates on each supported target, including direct Session and workflow execution, storage/recovery, permissions, provider fixtures, Bash/Edit behavior, cancellation and physical cleanup, local-client ownership, and temporary retention/spillover. Exercise the selected credential mechanism in the supported interactive or headless environment without exposing credentials. Live provider checks remain opt-in; deterministic fixtures do not prove untested live compatibility.
-
-Qualify resource enforcement, failure behavior and whole-Host memory/control-response targets separately on each platform. Define what each platform's counters measure; do not equate a Linux counter with macOS physical footprint or report an unavailable counter as zero. Platform-specific tooling may differ, but every required claim needs identified evidence. A missing equivalent, skipped required platform test or unverified fallback is an unresolved qualification gap.
-
-The [portability audit](https://github.com/DivyanshGolyan/onepage/issues/125) and [platform contract decision](https://github.com/DivyanshGolyan/onepage/issues/126) identify required design amendments and evidence. Their resolution is design readiness, not passing production qualification. Historical macOS-only CI and measurement results remain historical evidence.
-
-## Domain authority
-
-| Claim | Required evidence |
-| --- | --- |
-| SQLite is sole authority | Recreate every Decision Snapshot and Run Snapshot from canonical relational rows with no Session Ledger, reducer image, continuation blob, or resident cache. |
-| Session is linear and reusable | Complete two Turns in one Session, prove immutable ordered Conversation entries, and reject branching and a concurrent second Turn. Ordinary Session messages use current state without a caller historical revision guard; workflow replay recovers its original binding/result. |
-| Turns settle; Sessions do not | Completion, failure, and cancellation fixtures commit one Turn Outcome and release Session occupancy atomically. Failure-code and Operation-uncertainty fixtures remain orthogonal to terminality. Releasing transient Host resources changes no Session or Turn meaning. |
-| Conditions are derived | Rebuild the exact Turn partition—runnable, waiting for permission, in flight, completed, failed, and cancelled—plus Session dormancy and Run `permission_required` from relational rows after dropping every rebuildable index. Prove current future retry eligibility derives in flight without a live effect. |
-| Causality is explicit | Every User Message, Conversation entry, Operation, current Attempt identity, Operation-owned Resolution, Permission Request, Permission Decision, and output resolves to its exact Turn and causal parent without relying on insertion order alone. |
-| Pre-V1 is a flag day | Schema tests reject obsolete ledger/reducer formats; no compatibility reader, alias, migration, or dual-write path exists. |
-
-## Context and model requests
-
-| Claim | Required evidence |
-| --- | --- |
-| Context revisions are sparse | Create a Session and its complete baseline atomically, reject a Session without one, change one component, and prove every unchanged component resolves to its earlier immutable reference. |
-| Revisions are atomic | Independently configure a compatible sparse change; the settings and workflow replay result commit together. Lose acknowledgement, apply a later update, and replay the earlier operation without reverting that update. A later message failure leaves configuration committed. A newly constructed request within ongoing work selects the later committed revision. |
-| Model settings freeze per request | Construct request A from revision r1, configure r2, then prove A and its retries retain r1 while newly constructed request B uses r2, including within the same Turn. No second Turn-wide model-setting authority exists. Preserve exact Action and Authorization targets; verify runtime information and retained limits on their actual scopes without a Turn Contract. |
-| Model request is exact | Persist one Model Request Manifest for each model Operation and reconstruct the same frozen request semantics after fresh-process reopen. |
-| Retry does not drift | Replacement Attempts reuse the same manifest while credentials and transport are refreshed independently. A changed component requires a new model Operation. |
-| Historical requests remain explainable | After changing ambient model, instructions, tools, or defaults, explain each earlier Operation from its frozen manifest and content references. |
-| Provider cache is optional | Disable or lose provider-side conversation/cache identity and produce the same request from the locally retained replay recipe. |
-| Provider continuation is lossless | Preserve completed ordered Model Output Items, including exact opaque or encrypted reasoning, signatures, compaction items, and extension fields, outside generic Conversation content. After restart, derive the same replay-input meaning and exact preserved field bytes from the frozen manifest without a second replay copy or stored request body. |
-| Continuity never degrades silently | Missing, corrupt, unsupported, or incompatible replay material prevents dispatch with `continuation_unavailable`; no path drops private reasoning or reconstructs from visible Conversation alone. |
-| Unknown output fails closed | Preserve unknown open fields inside known records. Preserve a bounded typed rejection and producing-request/causal provenance for an unknown consequential union variant, resolve it as `unsupported_provider_output`, and publish no Conversation, continuation, or effect consequence. |
-
-The accepted append-only context direction additionally requires successive-request fixtures: retain a response with opaque continuation, change Session instructions, and prove the next request appends the update without rewriting the earlier prefix. Preserve that position and rendering across restart and retries. Cover an update while tool results are pending, two updates before first inclusion, and supported compaction across an applied update. System Instruction is selected as a distinct Conversation Entry kind. Required history fixtures distinguish it from user messages and tool results, preserve exact ordering/content on replay, and ensure provider output cannot manufacture operator authority. First inclusion commits atomically with its assistant-response request; exact storage/wire encoding remains implementation work. These are required checks, not passing evidence.
-
-Execute the [System Instruction boundary traces](docs/design/system-instruction-first-inclusion.md) against production storage and advancement. Cover unchanged instruction content across a new revision; A -> B -> C and A -> B -> A both before and after B was included; atomic instruction/projection/Operation/manifest rollback; lost acknowledgement before dispatch; mode-only updates; pending tools; configuration during compaction; last-applied instructions covered by a base; and predicted versus already-admitted provider overflow. Retry must reuse the original entry without rereading current settings. No production run of these new fixtures is claimed.
-
-Required sparse-context fixture:
-
-```text
-r1: model=A, instructions=I1, tools=T1
-r2: tools=T2
-r3: instructions=I2
-
-Request 1 binds r1
-Request 2 binds r2
-Request 3 binds r3
-
-Request 3 resolves model=A, instructions=I2, tools=T2
-```
-
-The fixture restarts between each revision and verifies exact content references and manifest digests. Include multiple requests within one Turn, two settings updates before preparation (only the latest value is selected), changes after manifest commit but before dispatch, and failed preparation followed by later settings changes. Configuration alone must create no model work. These are required scenarios, not completed runtime evidence.
-
-## Model output and tools
-
-One model response fixture emits assistant text plus three Tool Calls. Admission must:
-
-1. validate the complete ordered candidate before mutation;
-2. commit every Tool Call and child Action Operation atomically;
-3. reject the complete candidate for a duplicate call identity, unknown Tool Key, malformed arguments, or invalid member;
-4. execute children independently under Active Capacity with no Workspace fence or isolation claim;
-5. survive independent permission, denial, failure, cancellation, and uncertain-effect outcomes; and
-6. construct the next Model Request Manifest with every Tool Result in original call order regardless of completion order.
-
-Permute physical completion order and prove that Conversation, the next model request, Turn Output, and Workflow topology remain identical.
-
-Tool visibility and execution authority remain separate. Arbitrary provider-neutral Tool Keys round-trip as data, but only admitted `bash` and `edit` bindings execute. Permission Decisions bind exact Principal, request, Operation, descriptor digest, and decision.
-
-## Operations, Attempts, and recovery
-
-Read [Operations, Attempts, and recovery](docs/verification/execution.md#operations-attempts-and-recovery) for this contract and its required evidence.
-
-## Local diagnostics
-
-Verify that default diagnostic summaries persist across ordinary restart, correlate failures with the affected execution, and remain within the configurable 128 MiB default history cap as the oldest records are replaced. Exercise a smaller test cap through the same path; verify ordinary restart preserves retained history and the allowance, and low traffic causes no separate age-based expiry. Delete or expire diagnostics, lose an unwritten crash tail and inject diagnostic-write failure: effect-specific recovery, accepted results, permission decisions, consumed allowance and retry eligibility must remain unchanged. Canonical storage failures retain their existing failure behavior; this is not authority to ignore a failed semantic write.
-
-Verify explicit bounded detailed capture and user-controlled export of recent diagnostics without automatic upload. Default summaries and exports exclude credentials; generic content reads continue to exclude private provider continuation. Capture and export use bounded memory and storage. Unsupported rejected provider output preserves a typed rejection and necessary producing-request/causal provenance without requiring permanent raw payloads; removing its diagnostic bytes cannot introduce Conversation, continuation or effect consequences. Accepted replayable output still preserves its required bytes, ordering, unknown fields and provenance independently of diagnostic capture. Missing raw diagnostic bytes are an investigation limitation, not a promise of reproducibility or complete crash history.
-
-At fixed active concurrency, vary failed-try count and retained diagnostic bytes through quota and rotation; exercise explicit large-payload capture and export. Verify no resident-memory slope with historical tries or total diagnostic payload size. Report whole-process RSS, diagnostic workspace high-water, SQLite heap/cache/spill, filesystem-cache/writeback pressure, disk usage and command/settlement latency alongside the existing density and churn checks. A fixed disk quota is not a resident-memory budget; measure actual integration before claiming an improvement.
-
-Verify at most 16 size-rotated files, including the active file, with per-file maximum floor(cap / 16), encoded-byte accounting and deletion before growth. Test exact boundaries, a 4 KiB record, worst-case escaping, optional-text omission, rejected too-small configuration, partial writes, incomplete crash tails and deletion failure without quota overrun or a memory queue. Verify detail shares the cap and missing chunks mark incomplete captures. During slow export, rotate source files and verify bounded copy turns release source handles, gaps are reported, copies count in scratch and scratch-full exports fail explicitly. Restart with a smaller cap must prune before growth or disable growth on failure. These are selected requirements, not passing production evidence.
-
-## User Messages and permission
-
-Fixtures prove:
-
-- Session creation and baseline commit without model work; message admission separately starts or joins current work, with workflow key/input/result binding committed atomically where applicable and no direct caller key;
-- initiating admission atomically creates the User Message and its Conversation Entry;
-- later User Message admission creates an immutable `user_messages` row without a Conversation Entry or change to an already-admitted Model Request Manifest;
-- the next assistant-response model-Operation admission transaction projects every applicable unprojected message in admission order and freezes the manifest, while an intervening compaction model Operation uses only already-applied context and leaves them pending;
-- both SQLite commit orders around assistant-only settlement produce the documented result: message-first retains ordinary assistant text and requires a later model Operation; settlement-first commits Final Answer and prevents attachment to that Turn;
-- a sealed User Message source and its first semantic reference become authoritative together, with exact length and digest verification and no payload-sized resident allocation;
-- one Permission Decision binds the exact Principal, request, Operation, descriptor digest, and decision;
-- identical Permission Decision replay is idempotent, while a conflicting, stale, inapplicable, unknown, or unauthorized decision fails without mutation;
-- Session creation defaults Permission Mode to `ask`; only explicit Local Owner configuration selects `bypass`, and configuration replay does not reapply an old mode;
-- child Action admission atomically binds the current mode and sparse configuration provenance with the exact descriptor and either an immutable Permission Request or bypass Authorization;
-- ask-to-bypass leaves an existing request pending, while newly admitted actions use bypass; bypass-to-ask leaves an already-authorized but not-yet-started action authorized, while newly admitted actions require decisions;
-- mode changes during an in-flight model request affect later Action admissions without changing that model request or already-admitted actions; siblings admitted in one transaction select the same configuration view;
-- both commit orders of configuration versus Action admission, rollback before admission, lost acknowledgement, crash/reopen, and configuration replay preserve the selected permission facts without retargeting or duplicate requests/Authorizations;
-- running actions are not interrupted by configuration; ordinary stops and cancellation still prevent inapplicable permission decisions or Attempts;
-- a generic response batch and conversational Input Request do not exist;
-- a terminal Turn has no applicable User Message or actionable Permission Request;
-- definitive failure may commit with still-unprojected User Messages only after all other semantic obligations are resolved; the failed Outcome itself makes them inapplicable and releases logical Session occupancy atomically;
-- pre-request `ResourceExceeded` creates no fake Operation, manifest, Attempt, or message projection; Operation-derived terminal failure instead references the same Turn's accepted Resolution;
-- ordinary Tool errors, retryable model failures, recoverable overflow, and direct interruption do not independently authorize Turn failure;
-- both failure/admission commit orders preserve intent: message-first retains not-applied input on the old Turn; Session-current admission after failure begins new work, while an exact stale Turn target rejects;
-- excluded input stays readable with its causal reason but never enters a later request without a new explicit admission; existing projections are not relabeled as proof of provider consumption;
-- rollback/storage failure claims no committed outcome or occupancy release, while reopen after lost acknowledgment recovers the one immutable outcome without another provider call;
-- unresolved Operations, effects, permissions, and required Tool Result publication block failure settlement; late evidence cannot overwrite accepted Resolution/Outcome facts;
-- failure disposition derives from existing rows without a new failure-intent table, message phase, withdrawal record, or resident queue.
-
-`permission_required` appears in a Run Snapshot only when at least one Permission Request is actionable and no other member Turn can progress.
-
-## Bash timeout policy
-
-Read [Bash timeout policy](docs/verification/execution.md#bash-timeout-policy) for this contract and its required evidence.
-
-## Model retry and inactivity policy
-
-Read [Model retry and inactivity policy](docs/verification/execution.md#model-retry-and-inactivity-policy) for this contract and its required evidence.
-
-## Runtime information and limit ownership
-
-The [Turn Contract removal trace](docs/design/turn-contract-removal.md) requires:
-
-- no separate contract row or generic runtime-facts snapshot at Turn admission;
-- a changed clock or filesystem after request admission leaving that request's instruction content/rendering inputs and replacement Attempts unchanged;
-- later supplied instruction changes using the existing append-only first-inclusion path, with no automatic refresh policy implied;
-- Session Workspace identity, admitted Action descriptors, and earlier Tool Results retaining their original meaning after external Workspace changes;
-- Host resource admission on restart respecting current capacities without rewriting admitted model/Action inputs;
-- no aggregate Turn model-request count limit or whole-Turn deadline; permission/capacity waiting and Host downtime cannot expire work through such a limit;
-- pre-request failure retaining selected configuration/input provenance in the existing outcome, without a fake request or Turn Contract; and
-- compaction and workflow replay recovering their respective request and evaluator bindings without the removed grouping.
-
-These are production verification obligations. Removing the grouping does not select limits or bypass #89's pre-implementation gate.
-
-## Workflow replay
-
-Read [Workflow replay](docs/verification/workflows.md#workflow-replay) for this contract and its required evidence.
-
-## Run interface
-
-Read [Run interface](docs/verification/workflows.md#run-interface) for this contract and its required evidence.
-
-## Server lifecycle and local command boundary
-
-Use production Unix-socket HTTP and fresh server/client processes to verify:
-
-- simultaneous server starts, supported equivalent Store paths, and distinct Stores yield one live owner per Store; unsupported aliases reject rather than split authority;
-- missing server, wrong Store/version, inaccessible peer, long socket path, stale socket, unexpected file at the endpoint, and restart races never cause client auto-start, client SQLite access, or blind unlink;
-- disconnecting every client leaves eligible work advancing; a later client observes it without treating live Attempts as abandoned;
-- server stop/crash before and after admission, dispatch, scratch seal, and commit preserves exact request bindings and remaining retry allowances on explicit restart; uncertain Bash is not replayed and Edit reconciles;
-- stop with an active model stream, Bash, Edit, and delayed retry fences dispatch promptly, retains safe cleanup, and fabricates no semantic cancellation/interruption merely because transport closes;
-- direct keyless submission reports uncertainty after lost acknowledgement and sends no automatic repeat; Run/workflow replay with original key and inputs recovers the committed fact after terminality/restart, and changed inputs conflict;
-- Session waits select work once; later Session reuse cannot extend the wait indefinitely or substitute a newer result for a workflow's recorded answer;
-- recent/kind/after history reads and separate unapplied-input reads preserve exact content and reasons without loading all history on every inspection;
-- truncated/slow uploads publish no content or semantic reference; malformed headers, version failures, incomplete report framing, slow readers, saturation, and connection churn produce typed failure or bounded pressure without hidden resident populations;
-- one request/response per connection bounds retained uploads/reports, rejects pipelined work, and leaves no idle keep-alive population; ordinary-transfer saturation preserves classification and short-control headroom within the total connection bound;
-- Session stop, Run cancellation, exact Model Interruption and Permission Decision admission each retain bounded protected access under ordinary-transfer saturation; completion waits and large reports cannot consume that headroom, and successful control acknowledgement still follows semantic commit rather than implying physical cleanup;
-- header byte and total-time bounds reject oversized or trickled incomplete headers; upload/download inactivity releases stalled connections and scratch, while healthy slow transfers and Host processing/backpressure are not misclassified as client inactivity; include stalled control-response readers, concurrent controls, connection churn, and commit followed by timeout without automatic mutation replay;
-- public operations use exact domain targets, with no per-client ACL, generic command journal, public scheduling requirement, or independent content upload lifecycle; and
-- stdout contains only the selected data format, stderr carries diagnostics, and delivered workflow failure is a valid zero-exit protocol result while invocation/access/infrastructure/rendering failure is nonzero.
-
-Qualify the accepted initial defaults: 128 total connections, at most 120 ordinary with 8 places for classification/short controls; 16 KiB combined request line/headers; 8 KiB short-control bodies and acknowledgement/error responses; 10 seconds total header completion and 60 seconds client transfer inactivity. Compiled wire fixtures must fit every supported short control, including valid maximum identifiers/decisions and bounded errors; amend an incompatible bound explicitly rather than truncate semantic data. Verify oversized rejection before mutation, timeout attribution under Host contention, concurrent controls, stalled acknowledgement readers, and independent connection/scratch saturation. These are policy choices, not measured traffic needs or passing release evidence. Validate configuration at startup; configuration changes take effect on restart.
-
-## Shared syntax and representation
-
-Verify each field at its actual consumer: SQLite INTEGER boundaries and checked overflow without imposing that range on differently represented opaque IDs; exact 32-byte SHA-256 values and rejection of invalid textual decoding; OS path and derived Unix socket boundaries including terminators/suffixes; embedded-NUL rejection and ordinary permitted Edit paths. Keep authorized target and Store-ownership checks independent of path length. Golden wire fixtures own public identifier spellings.
-
-For names, media/schema types and diagnostics, distinguish unsupported semantic values from invalid encoding and resource exhaustion. Qualify replacements for historical fixed arrays using values beyond the old capacities where the supported provider/consumer and owning resources permit. Do not fabricate provider support to satisfy a size fixture. Cover safe JSON/header/rendering reuse, complete rejection before semantic mutation, and no truncation. Existing buffer checks may be removed only with verified bounded replacement handling; document remaining aggregate workspace requirements under their Host/SQLite owners.
-
-## Provider and evaluator integration
-
-Provider fixtures cover post-commit request-materialization failure, provably-not-started and may-have-started dispatch, auth refresh/account continuity, DNS/TLS, arbitrary SSE fragmentation, terminal provider records, disconnect, cancellation, delayed retry, long-lived concurrency, deterministic incompatibility, and storage failure. Resume uses the persisted provider binding rather than silently attaching a fixture. Only opt-in live checks contact the provider; deterministic equivalents traverse the same production owners.
-
-OAuth syntax fixtures round-trip every JSON-required control byte and exact legal boundaries through device polling and stored credentials. Prove worst-case escaping capacity, reject missing/extra/empty compact-token segments, reject unsafe token/account header bytes at construction and libcurl reuse, and preserve exact account binding on refresh. Exercise account values beyond the historical 128-byte buffer and tokens beyond the historical 16 KiB buffer when actual authentication resources permit; preserve exact account binding without UUID grammar or normalization. Test resource exhaustion separately from invalid syntax, with no truncation or credential leakage. The historical source findings in the [cleanup record](docs/design/planning-cleanup-2026-09-05.md) are not passing evidence.
-
-### Evaluator lifecycle
-
-Evaluator lifecycle checks prove descriptor isolation through construction and close-on-exec with three stdio pipes, only the selected read-only completed-input descriptors and an empty environment, no JavaScript-visible descriptor capabilities, and disabled core dumps. Verify writable input handles are closed before spawn, the child cannot open paths or access SQLite, and native positional reads stay confined to the inherited snapshot handles. Verify no numeric `RLIMIT_NOFILE` scan and no whole-capacity exit-time overwrite/free of process-lifetime input/output/bridge mappings. Compare at least five real evaluator invocations at the default descriptor limit and at `ulimit -n 256`, reporting median wall time and maximum RSS; there must be no latency proportional to the numeric descriptor ceiling. Run the existing workflow and canonical gates. The containment decision still owns the limits; archived timings do not certify the eventual implementation.
-
-## Compaction
-
-Compaction tests preserve every source Conversation byte while selecting one exact derived Compaction Base plus a complete compatible suffix. They cover:
-
-- a soft approximate Compaction Trigger that never rejects, splits, or truncates a User Message;
-- provider-reported usage plus estimation of only newly appended model-visible content;
-- every User Message admitted between consecutive model-Operation admissions remaining distinct in SQLite and entering the next manifest together;
-- deterministic approximate Compaction Trigger crossing, exact configured output reservation, and authoritative provider-overflow handling;
-- intact Tool Call/Tool Result boundaries;
-- source change during summarization;
-- invalid, empty, oversized, stale, corrupt, and incomplete compaction results;
-- complete source-manifest coverage and current-lineage selection;
-- acknowledgement loss after compaction settlement;
-- repeated compaction;
-- exactly one canonical replacement output owned by the accepted compaction Operation, with no Compaction Checkpoint relation or semantic-handoff alternative;
-- Core structural replay validation and adapter-owned provider compatibility composed from immutable source and target facts rather than a persisted validity flag;
-- complete total ordered suffix replay through accepted model Resolutions and canonical host inputs, including opaque reasoning and known extension fields;
-- unknown consequential union variants retained as evidence but rejected as `unsupported_provider_output` before continuation publication;
-- explicit `continuation_unavailable` for missing or incompatible replay material, including unsupported model or replay-format changes demonstrated by adapter fixtures;
-- rejection or deferral of incompatible context change without provider dispatch;
-- provider overflow resolving the old model Operation, followed by compaction and a new model Operation rather than a changed-manifest Attempt;
-- Session Context Revision, exact instruction/rendering inputs, Model Request Manifest, complete covered frontier, lineage, and model provenance derived through the Compaction Base's creating model Operation, without a Turn Contract;
-- newest accepted base selection before compatibility validation, with failed or unresolved compaction unable to displace it and missing, corrupt, unsupported, or incompatible selected material unable to trigger an older-base search; and
-- `ResourceExceeded` after the allowed valid Attempts cannot produce a fitting request.
-
-### Model-result settlement and spillover
-
-Model-result settlement tests prove that one transaction publishes immutable Operation-owned Model Output Items, that Operation's final Resolution value with producing-request/execution provenance, and every applicable Conversation projection without a duplicate replay object. Adapter tests derive replay inputs by removing response-only fields while retaining exact provider-only continuation bytes. Raw scratch is deleted after canonical import. Partial, interrupted, failed, cancelled, and late streams publish no continuation input. Large tool output produces a Spillover Tool Result with the original command outcome, bounded excerpt, omission notice and temporary-output reference; it does not fail solely for exceeding the inline excerpt size or ask the Agent to rerun merely to reduce output. Verify the default tail excerpt includes no more than 10,000 UTF-8 bytes of rendered output text across the entire Tool Result, without an independent line-count quota. Cover output below, at and above the bound, a single long line, multibyte characters at the cut, and combined stdout/stderr allowance. Short output remains complete; command status and bounded omission/reference metadata remain present. Full tool output has no per-call capture-size ceiling; OnePage-produced bytes count through active capture and retained-name ownership. External mutation or post-removal external retention is outside the published-spillover allowance. Verify selected-output retrieval through an ordinary absolute path and the existing Bash tool using grep, tail and sed, without a new read tool or inserting the entire file into Model Context. Apply ordinary Bash permissions, timeout and excerpt rules. Cover removal before open, a reader overlapping FIFO cleanup, attempted mutation/growth through the exposed path, and Host-exit/restart cleanup. Prove the [scoped temporary accounting](docs/verification/resources.md#memory-and-density), bounded Host metadata/handles and that the Host never reuses a saved path for other output. External path changes are ordinary filesystem behavior, not authenticated spillover reads. Explicit unavailability after lost spillover must leave the saved result unchanged and never automatically replay the old command. A fresh model-requested call uses ordinary authorization. Storage exhaustion remains explicit failure; required recovery evidence is never discarded as spillover.
-
-## Memory and density
-
-Read [Memory and density](docs/verification/resources.md#memory-and-density) for this contract and its required evidence.
-
-## Native Edit verification
-
-Read [Native Edit verification](docs/verification/execution.md#native-edit-verification) for this contract and its required evidence.
-
-## Accepted Host qualification targets
-
-Read [Accepted Host qualification targets](docs/verification/resources.md#accepted-host-qualification-targets) for this contract and its required evidence.
-
-## Limit replacement verification
-
-Read [Limit replacement verification](docs/verification/resources.md#limit-replacement-verification) for this contract and its required evidence.
-
-## Release evidence and residual audit
-
-Package the demonstrations specified in PRODUCT.md through production interfaces, with exact expected observations and checked-in measurements/calculations. Finalize the project name before packaging so examples and later audits use the same identity. Demonstrate explicit server start, no-client progress, server interruption and restart, keyed fan-out/fan-in, direct Session use, separate creation/configuration/messages, multiple ordered tool calls, uncertain Bash, Edit divergence, and shared-Session cancellation. Do not retain historical exact-Turn public examples or fixture-only state machines as the V1 experience.
-
-After integration, audit only residual gaps in domain authority, context/request/compaction integrity, workflow replay, permission/cancellation, SQLite schema identity and atomic content/reference publication, corruption/I/O behavior, endpoint ownership, and external-effect uncertainty. Each invariant names its owning table/constraint/transaction and a relevant recovery fixture. Canonical content and its first reference commit together, leaving no V1 orphan-cleanup requirement. Rely on SQLite's guarantees directly; do not recreate a generic ledger audit or duplicate an already-proven fault campaign. Unsupported platform behavior is a release blocker, not a reason for hidden fallback.
-
-Compiler-backed declaration discovery covers the final ReleaseSafe and ReleaseSmall production graphs. Classify test-only, fixture-only, conditional, and intentionally unused declarations; prove obsolete Job, Step, ledger/reducer, terminal-Session, duplicate schema, and compatibility APIs are removed rather than merely unreachable. Public types must agree across the native API, Unix-socket HTTP adapter, and CLI rendering. No declaration exists solely for an unselected future provider, protocol, workflow engine, or migration.
+[ARCHITECTURE.md](ARCHITECTURE.md) defines behavior; this document defines evidence required to claim it. Exercise production interfaces, real SQLite transactions and independent expected results. Crash tests terminate a fixture process and reopen in a fresh process; injected returned errors are fault tests, not crash evidence. Record tested revision, machine, dependency versions, inputs and measurements. Prototypes, source inspection, compilation and accepted decisions are not production qualification; [research evidence](research/README.md) retains their scope and limitations.
 
 ## Canonical gates
 
-`zig build check` is the local and CI gate: source formatting/validation, native ReleaseSafe tests and ReleaseSmall deliverables. Evaluator, private evaluator protocol, QuickJS dependency or evaluator build-graph changes also run `zig build workflow-check`. Dependency, build, persisted-format and CI-bootstrap changes additionally run the canonical gate from a clean empty cache. Confirm definitions in `build.zig`.
+Confirm commands in [build.zig](build.zig). `zig build check` covers source validation, native ReleaseSafe tests and ReleaseSmall deliverables. Evaluator/protocol/QuickJS/build-graph changes also run `zig build workflow-check`, including applicable sanitizer, mutation/property, fuzz and leak checks. Dependency, build, persisted-format and CI-bootstrap changes additionally run from an empty cache. Documentation-only changes check references, consistency and `git diff --check`.
 
-Before V1 release:
+Release evidence includes deterministic Session, model, tool, permission, context, compaction, workflow and server fixtures; hard-termination recovery at each distinct acknowledgement/effect boundary; compiler-backed discovery of both production graphs; and the opt-in live Codex repair through those same owners. Classify intentionally unused/conditional/test declarations and remove obsolete interfaces rather than hiding them. Never label interrupted/unrun checks passed. Live provider calls remain opt-in.
 
-- deterministic model, Bash, Edit, User Message, permission, multi-tool, context-revision, compaction, workflow, and Run fixtures pass;
-- hard-termination fixtures pass from fresh processes at every distinct acknowledgement and external-effect boundary;
-- ReleaseSafe tests and ReleaseSmall build pass;
-- evaluator protocol, JavaScript conversion, sanitizer, mutation/property, and leak gates pass on their supported platforms;
-- compiler-backed declaration discovery reaches the completed source graph;
-- `git diff --check` passes; and
-- the opt-in Codex repair completes through the same Model Request Manifest, Operation, tool, permission, and Turn paths used by deterministic fixtures.
+## Platform qualification
+
+Run applicable behavior, recovery and resource gates on the available Mac. For Linux, record portable-API/dependency evidence, cross-compilation and unexecuted assumptions separately; no distribution/CPU runtime fleet is required. Known incompatibility needs an explicit response, not hidden fallback. Identify local Store support, accessible scratch and known memory-backed or unknown backing. Verify reproducible pinned dependencies, selected credential backend, locked/unavailable stores, access checks, account-preserving refresh and failed atomic save without plaintext fallback or credential inheritance. Linux plaintext storage does not imply protection from same-user Bash. Unavailable platform counters are not zero.
+
+## Authority, Session identity and admission
+
+- Reconstruct observations from owning canonical rows without resident Session state, historical Attempt/Completion entities or cross-owner table access. Operation owns current execution/retry facts and immutable Resolution/content; its ID identifies the result. Reject overwritten/cleared resolutions, foreign references, wrong digests, overflow and stale execution identities.
+- First complete configuration atomically creates Session, baseline, Workspace/access scope and original request answer; incomplete configuration and messages to unknown keys reject without partial Sessions. Configuration starts no model work. Later mutable updates apply linearly without comparing the original baseline; immutable-field changes reject. Omitted settings retain earlier references.
+- Direct and workflow configuration/messages share request identity semantics. Matching retries recover the original acceptance or definite rejection before reconsidering current conditions; changed inputs conflict. Lost replies, later initialization/configuration, terminality and restart cannot turn rejection into acceptance, reapply old settings or retarget a message to newer work. Multiple message keys sharing a Turn return its same original schema-bound outcome. Distinct keys preserve intentional identical requests; malformed envelopes without usable identity and uncommitted failures promise no saved answer.
+- Pure `session(name)` creates no durable state or core request. Full Session keys remain exact, opaque and unchanged across Runs; distinguish Session key, Run key, Run-scoped call/request identity and internal Turn ID. Test namespace ambiguity, long/prefix/non-ASCII keys, case and differently encoded Unicode without normalization.
+- Complete successive Turns in one linear Session; reject concurrent second Turns and branching. Initiating messages create their entry atomically; later messages remain unprojected until the next assistant-response admission includes all applicable messages in order. Compaction leaves pending messages untouched. Race message admission against assistant-only settlement in both commit orders. Failed/stopped work makes remaining inputs inapplicable and readable with reasons, without deleting them or applying them to later work.
+- Turn outcomes release Session occupancy atomically after all effect, permission and ordered-result obligations settle. Pre-request failure creates no fake Operation/manifest/Attempt/projection; Operation-derived failure references the same Turn's Resolution. Preserve explicit causal identities and derived runnable/permission/in-flight/terminal conditions; retry waiting remains in-flight without live custody.
+
+## Context, provider output and compaction
+
+Freeze exact request semantics, schema, instructions, tool catalog, ordered replay inputs and provenance at model Operation admission. Change settings, credentials, transport or filesystem afterward; retries retain the same manifest, fresh requests use current settings, and historical requests remain explainable. No Turn-wide model-setting snapshot, model-request counter or absolute deadline substitutes for the owning scopes. Resume preserves the saved provider binding without fixture substitution.
+
+Exercise instructions A→B→C, A→B→A and fresh A→A before another request: retain every explicit update in order, including values never used alone. Same-request retry and patches omitting instructions add nothing. Content deduplication cannot coalesce updates. Test changes during model/tool waits and compaction, entries already covered by compaction, and atomic entries/projections/Operation/manifest rollback. Failed request preparation leaves updates pending; committed requests/retries include them once. Instruction placement preserves tool pairs and operator authority; provider-produced lookalikes gain none; inclusion is not provider consumption.
+
+Through real provider interpretation and settlement, cover:
+
+- authentication refresh/account continuity, DNS/TLS, fragmentation at every SSE/JSON boundary, escaping, terminal records, partial/disconnected/late streams, cancellation, post-commit materialization failure and deterministic incompatibility;
+- optional schema absence producing text, supported structured output, schema changes/clearing after request admission, unsupported schemas, invalid output, refusal and incomplete generation; no prose conversion, fabricated success, schema revalidation against later settings or automatic model repair;
+- assistant text plus three ordered calls; malformed final call, duplicate identity, unknown tool or invalid arguments rejects the complete candidate. Child Operations/permissions and output publish atomically; independent Bash/Edit execution and arbitrary completion order preserve call-ordered results without Workspace isolation or sibling head-of-line blocking;
+- a new message before assistant-only settlement preventing premature Final Answer; permission mode changes affecting Action admission rather than fixed decoding; stop before acceptance rejecting late consequences;
+- immutable Operation-owned output with exact opaque/encrypted reasoning, signatures, continuation and unknown fields inside supported open records, stored once. Derived replay drops only response-only fields. Unknown consequential unions retain bounded rejection/provenance without Conversation/continuation/effects or mandatory permanent raw payload;
+- loss of provider caches causing equivalent local reconstruction; corrupt/missing/incompatible continuation failing explicitly without dropping private meaning or rebuilding from visible text alone.
+
+Parse sealed provider output once using the serial workspace and one sequential metadata file. Vary bytes, item count and nesting independently; verify bounded state, immutable source/range lifetime, scratch charging and no per-item file/resident list or queue of prepared responses. Late validation, source-read, allocation, scratch or import failure publishes no partial content/reference or semantic consequence. Fixed-content checks cannot decide current permissions, retry eligibility or Turn completion. Ordinary sequential parsing and atomic SQLite publication may block; measure both rather than requiring a worker or manually resumable parser.
+
+Compaction fixtures cover approximate trigger/output reservation, provider usage plus newly appended estimates, repeated compaction, intact call/result pairs, source changes during summarization, acknowledgement loss, malformed/empty/oversized/stale/incomplete results and complete lineage/frontier coverage. Never reject/truncate messages solely at the soft trigger. Select the newest accepted base, then validate structural/provider compatibility; unresolved compaction cannot replace it and an invalid selected base cannot trigger an older-base search. Preserve canonical Conversation and exact ordered suffix/continuation. Confirmed overflow resolves the old Operation, then compacts and creates a new manifest; exhaustion fails explicitly without silently dropping history.
+
+## Execution, retries and permission
+
+Terminate before/after reservation, Attempt admission, dispatch, scratch seal, retry settlement, final settlement and observation. Before admission rollback, no new identity, consumed allowance or permit survives. After commit, recover exact current facts and conservative uncertainty without recreating the one-shot Dispatch Permit. Lost scratch/preparation is not durable evidence. Final resolution, required content and consequences commit together. Retry settlement updates current failure/eligibility/accounting while leaving Resolution absent; fresh admission revalidates everything and cannot duplicate a stale due selection.
+
+Preserve allowance and frozen inputs across failed A, admitted B and restart, including diagnostic deletion and arithmetic exhaustion. At most one terminal delivery escapes the effect owner, none after detachment; stale/duplicate callbacks cannot touch reused custody or replace meaning. Logical completion does not release physical resources still draining. No transaction spans external execution/delivery; denial, validation failure and interruption resolve without fabricated Attempts/evidence. Saved authorization without an Attempt remains eligible; admitted uncertain Bash/Edit becomes indeterminate with no replay or mandatory inspection, even for unchanged, expected-result, divergent, missing or unreadable targets. Subsequent investigation is model-selected ordinary work.
+
+Verify one initial model Attempt plus at most **three retries**, default **2/4/8-second** waits, longer valid Retry-After taking precedence and shorter values not reducing waits. Temporary connection/rate-limit/server/inactivity failures share this per-Operation allowance; permanent authentication/invalid requests, storage and deterministic continuation failures do not blindly retry. New Operations have independent allowance. Uncertain transport retains possible duplicate billing.
+
+Provider inactivity defaults to **five minutes** before first body data and between chunks; body/heartbeat data resets it, Host preparation does not consume it, and a progressing stream may run longer. Bash defaults to **five minutes** elapsed execution: permission/capacity waits do not consume it and output does not reset it. Explicit positive finite representable overrides, including longer durations, replace the default without arbitrary ceilings; overflow rejects rather than clamps. Timeout preserves evidence/custody and does not prove remote cancellation. Test configured retry/wait/inactivity/Bash/excerpt defaults and restart without changing admitted facts.
+
+Permission fixtures cover default ask, explicit bypass, exact principal/request/Operation/descriptor binding, repeated equal decisions and conflicting/stale/inapplicable/unauthorized decisions. Ask→bypass leaves existing requests pending; bypass→ask preserves prior authorization. Both configuration/Action admission orders preserve selected mode/provenance; running Actions are unaffected by configuration. No generic response batch or conversational input request is accepted.
+
+## Exact Edit
+
+Test proposal-only preview/admission without target reads or execution custody. After authorization and Attempt admission, require an existing eligible file; creation remains Bash. Cover relative/absolute paths, symlinks, hard links, files outside Workspace/Git and ordinary access failures. Approval never relocates or searches for another match.
+
+Use independent exact-byte expectations for nonempty lists of 1-based `[start,end)` ranges: insertion, deletion, adjacent ranges, rejected overlap, insertion inside/at a replacement boundary and repeated insertion positions. Cover empty files `[1,1)`, EOF `N+1`, LF/CRLF, UTF-8/BOM, unterminated final lines, no phantom trailing line and no implicit newline. Mixed growth/shrinkage retains original coordinates; late mismatch rejects every edit before target mutation. Extra matches elsewhere are irrelevant; unrelated execution-state bytes remain unchanged without a concurrent-writer guarantee.
+
+Build complete output in charged unlinked scratch, then copy through the same opened target handle, set final length afterward and flush; hard-link/open-handle observers retain the file object. Reject pathname reopening, rename publication or success from incomplete scratch. Vary file/line/range/expected/replacement sizes across the reusable **16 KiB** copy window without whole-value residency or an inherited search quota/three-file layout.
+
+Inject cancellation, read/mismatch/scratch failures before mutation, partial/short writes, length/flush failures and crashes before/after result commit. Empty-output truncation is a mutation. Not-applied requires established absence of mutation; write failure/cancellation is not rollback. Retain custody through safe cleanup; lost outcome is indeterminate without replay, target inspection, restoration or scratch-based recovery. Edit inherits neither Bash nor provider timeout and adds no timer. Measure large/slow/erroring filesystem work and bounded resources; windows do not prove latency or native-crash isolation.
+
+## Workflow replay and cancellation
+
+Exercise public Workflow Runtime with private fixed-input evaluation: no live core connection, caller-managed evaluator or native Promise/dependency graph. Test no/partial/all results, caught failures, empty fan-out and nested staged joins. `Promise.all`/`allSettled` work; `race`/`any` are absent. Stable scanner/finding keys preserve identity when B-only then A+B results change branch order; completion-sensitive reuse with changed inputs fails complete prevalidation before new intents. Capture call inputs before later JavaScript mutation. This does not detect accidental new keys or prove arbitrary mutable JavaScript deterministic.
+
+Crash before/after saved submission intent, core commit and workflow answer recording. Recover unanswered calls through ordinary core requests; no integrated transaction, privileged table reads or core Run fence. Snapshot only workflow-saved original results and retain captured content through materialization; arrivals during capture/materialization/evaluation stay absent until later evaluation. Test missing/null/failure distinctions, invalid ranges/short reads/lost content, on-demand selective/sequential/parallel lookup, independent object values across equal calls and identity on repeated awaits of one Promise. User-held values and native indexes remain charged.
+
+Retain committed call prefixes after late failure/crash; atomically publish complete pending dependencies or terminal outcome. A fulfilled root still submits encountered unawaited calls before success, but does not wait for them; later completion cannot reopen the Run and unawaited continuations do not survive exit. Root rejection, prevalidation failure, cancellation and stale generations cannot publish false success.
+
+The #114 loop selects oldest eligible Runs with stable ties; partial dependency progress may reevaluate a join. Recheck immediately after complete lifecycle cleanup and ordinary service; arm one **one-second** asynchronous timer only after an empty query. Test new, newly eligible and interrupted Runs at startup; interrupted evaluation uses fresh current saved results, preserves calls and fences old publication. Results arriving before dependency publication remain discoverable; considered results alone do not loop. No waiting heap/callback/per-Run timer, missed-tick backlog, resident ready set or completion-hook dependency is required. Measure actual SQLite selection work across empty, direct-only, waiting, shared-result, historical-growth and sustained-pipeline populations; overload promises no starvation bound.
+
+Cancellation fences new calls, recovers every unanswered saved submission, then stops distinct Sessions from accepted messages. Previously undelivered calls may now configure/start work before stop; configuration is not rolled back and configuration/declaration/read-only use adds no stop target. Test rejection, unavailable core/storage and crashes before/between/after stops. Unfinished cancellation may repeat successful/idle stops and affect newer shared work; completed cancellation never propagates again. No unanswered call or required stop can be forgotten.
+
+## Controls, inspection and local server
+
+Race exact Model Interruption/Session stop against admission, pre/post-launch, retry waiting, live streams and sealed output. First committed authority wins; repeated equal controls recover their answer, conflicting inputs and invalid Action/resolved/inaccessible targets reject without a whole-Run revision precondition. Stop acknowledgement differs from completion; model custody may drain afterward, tools retain ordered results/cleanup, idle stops complete immediately and a slow Session cannot block later stops. Shared Runs/Turns do not gain exclusive ownership or automatic sibling cancellation.
+
+Inspect all associated durable Sessions from accepted configuration/messages, including configured-only Sessions; declarations/rejections alone add none. Show exact full keys and existing identifying context. Inspect W1 then type its chosen key directly into W2: share current state/history using W2 request identities, without output metadata, previous-Run plumbing or snapshot cloning; W1's bound results remain unchanged. Recover lost acceptance before relying on association.
+
+Composed inspection may span committed moments without global revision/cross-owner reads. Test stale permission indicators with current exact-target controls, complete collections without logical caps or public paging, bounded windows/escaping, larger-than-window strings, interrupted/truncated capture/delivery and scratch cleanup. Release database resources before slow delivery. Measure workflow/core query, encoding, scratch, queue and total latency under history growth, repeated polls and concurrent controls/settlements; each class must progress despite non-preemptible calls.
+
+Fresh server/client processes cover competing starts, equivalent/unsupported Store aliases, distinct Stores, stale/unexpected/long sockets, wrong version, inaccessible peers and restart races without auto-start, client SQLite or blind unlink. All clients detaching leaves work advancing; waits select work once and history supports recent/kind/after reads plus unapplied inputs. SIGINT/timeout/output failure detaches without cancellation. Verify stdout framing, stderr diagnostics and workflow-failure versus invocation-failure exit semantics.
+
+Qualify **128 connections: 120 ordinary + 8 classification/short-control places**, one request/response each, no idle keepalive/pipelining. Exercise **16 KiB** combined request-line/headers, **8 KiB** short-control bodies/answers/errors, **10-second** header deadline and **60-second** transfer inactivity. Healthy slow transfers/Host backpressure must not look inactive. Test trickled headers, slow acknowledgements, saturation/churn, oversized rejection before mutation and lost replies recovered by same-key admission retry. Waits/reports cannot consume protected control places. All valid controls must fit without truncation.
+
+Compiled types/golden fixtures pin fields, tags, omissions and `u64`-class string encodings; CLI Markdown adds no facts. Test integer/SQL/wire overflow, exact SHA-256, OS path/socket expansion, NUL/header safety, recursive values as immutable content and untrusted text separated from controls. OAuth tests cover JSON control-byte escaping, malformed compact tokens, long legal account/token values and account continuity without normalization or leakage.
+
+## Execution tracking and waiting
+
+Allocate exactly `active_capacity` neutral records at startup or fail startup. Full-array traversal, reservation rollback, completion and delayed cleanup preserve neutral+occupied=capacity; neutral work creates no durable fact/resource. Measure record size/alignment/allocation independently from libraries and effects. No free list or durable slot registry is required.
+
+At capacity, eligible work waits in SQLite without Attempt, permit, consumed allowance, scratch or resident waiter. After release, select oldest eligible Operation with stable ties; permission/retry/restart do not reset age. Verify indexed selection under growing history, atomic revalidation and no uncertain-tool redispatch. Controls proceed without execution credit.
+
+Test OS waits with client/provider/subprocess/cleanup events and timers, including due retry without external activity and approval while full starting after release. Startup scans before waiting; pending progress cannot sleep; arrivals across the wait transition cannot disappear. Measure idle/wakeup and completion bursts, service between individual settlements/socket events, stale readiness after removal/reuse and non-preemptible import/callback delay.
+
+## Resources and accepted Host qualification targets
+
+Record allocation owner, multiplier, maximum, ordinary occupancy and release boundary. Before enabling configuration, derive checked complete workspace/descriptor requirements, including transient spawn and retained-file populations. Vary durable Sessions/Turns, active execution, clients, retained files/history and payload/cardinality independently. Measure allocator-live/reserved bytes, RSS/physical/private-dirty footprint, native/engine/SQLite high-water, threads/stacks, descriptors, kernel/socket resources, cache/writeback and temporary disk separately; explain unavailable/double-counted counters.
+
+Required populations: **0/100/1,000/10,000 Dormant Sessions** at fixed capacity; **1/10/50/100/1,000 Active Capacity** at fixed population. Run model/Bash/Edit-heavy and mixed loads, repeated 0→capacity→0 churn, unopened/Store-open/Host-started cold/retained idle, capacity zero where supported and separate CLI cost. Use representative Conversation/content; record latency, throughput, overhead and raw inputs/calculations.
+
+| Qualification target | Required measurement |
+| --- | --- |
+| **≤256 MiB** aggregate OnePage-owned process physical footprint | Planned 1,000-operation mixed/specialized loads and cold/retained idle, including evaluator/helpers; stable churn and no dormant/history-driven resident growth. Model-selected workloads remain separately observed. |
+| **<1% of one core** idle CPU | Include retry/workflow polling and idle waits. |
+| **≤2 cores** average model-fixture CPU | 1,000 streams × 100 small SSE events/second each, short requests and bounded terminal bursts; exclude fixture server, report tool/mixed CPU separately. |
+| **p95 durable control acknowledgement ≤1 second** | Saturated load including inspection/import contention; record maximum, queue/service time and physical cleanup separately. No real-time termination/billing promise. |
+| Retry discovery **≤2 seconds after due** | Free capacity/light load; one indexed poll/second, no per-Operation timer or catch-up backlog; separate discovery/admission/launch. |
+
+A miss requires explicit attribution/design or target review; do not exclude helpers or add pools/controllers to conceal it.
+
+Verify **8 GiB** default aggregate logical scratch using smaller exhaustion fixtures across requests, captures/metadata, Edit, ingress, reports/exports and spillover. Reserve growth before I/O; cover overflow, sparse gaps, partial writes, overwrites, truncation, ownership transfer and concurrent reservations without double/refunded charges. Include real disk-full, empty-file/handle populations, failed cleanup and protected I/O. FIFO reclaims oldest eligible spillover only after saved result publication; failure/all-protected cases cannot oversubscribe or spin. External readers may retain removed files and mutate published paths outside Host accounting; report that physical usage honestly. No reuse of saved output paths, hidden reader tracking or replay after loss.
+
+Tool output tests preserve outcome plus default **10,000 UTF-8-byte** combined tail, omission notice and ordinary Bash-readable path. Cover exact boundaries, long lines, multibyte cuts, stdout/stderr sharing, retrieval/removal races and restart loss without changing saved results. No line/total-capture quota or rerun solely for truncation.
+
+SQLite evidence records effective journal/synchronous/page/mmap/temp/busy/hardening settings, heap enforcement, cache/spill pages and high-water on pinned builds. Compare spill-enabled larger-than-cache imports with a spill-disabled diagnostic control. Derive finite heap/windows against the Host target; no artificial database quota/emergency reserve. Prepare every supported statement/schema shape. Distinguish compiled-program preparation limits from execution time and allocation failure. Inject busy, full, corrupt/foreign content, wrong digest, preparation/import/commit/rollback failure: no partial relation/content, unsaved acknowledgement/occupancy release or dispatch. Canonical faults stop dispatch and require safe shutdown/restart; diagnostic failure alone does not.
+
+## Evaluator lifecycle and limit replacement
+
+Run one complete lifecycle at a time, including validation/publication and child/pipe cleanup. Test **1,000 tiny evaluations**, runaway then ordinary work, controls/I/O during waits and queue delay separately. Enforce **16 MiB engine heap**, **one-second process CPU** including native decoding/compilation/jobs/encoding, and **five-second parent lifetime** from successful spawn through output/exit. Test stopped/non-cooperative children, output-close without exit, truncation and exhaustion without partial success; reap before reuse and classify unexplained signals/OS overshoot honestly.
+
+Verify empty environment, three stdio pipes, only selected read-only completed-input descriptors, closed writable handles, no JS filesystem/process/network/clock/random/credential/storage capabilities and disabled core dumps. Native input reads stay in range. No numeric descriptor scan, process pool, fixed 64 MiB address-space/RSS killer or exit-time wiping. Compare at least **five invocations** at default descriptor limit and `ulimit -n 256`, recording median time/max RSS without descriptor-ceiling slope.
+
+Exceed obsolete source/argument/result/entry/request/field buffers within actual budgets before removing guards. Include finite **10,000-await** and endless-job cases, full-result selective/parallel decoding, outputs above **64 KiB/512 KiB**, native workspace reuse without stale references, exact repeated keys, strict types/prototypes/accessors/cycles, depth/stack/representability and explicit allocation/scratch/time failure. No dropped requests, truncated success, whole-output copies, decoded cache or retained waiting heap. Audit every surviving cap against its owner/derivation; remove obsolete constants, formats, quota tests and compatibility paths together after replacement safety is demonstrated.
+
+## Diagnostics
+
+Verify configurable **128 MiB** retained history, at most **16 files** including active, each ≤floor(cap/16), and **4 KiB** record boundaries/escaping. Test deletion-before-growth, small/reduced caps, omitted optional text, rotation, partial writes/crash tails, failed deletion and no age expiry/memory queue. Detail shares the cap; exports charge scratch, release source handles, report rotated/missing chunks and fail explicitly when full. Delete/fail diagnostics without changing recovery, retry accounting, permissions or required accepted/rejection provenance. Exclude credentials and keep private provider continuation out of generic content reads; preserve bounded opt-in detail and no automatic upload; vary tries/history bytes independently of active work.
+
+Package under the approved final project identity; verify executable/package names, state and credential identifiers, build/distribution references and fixtures without losing existing user data.
+
+Release demonstrations cover explicit start, no-client progress, restart, direct Sessions, first configuration, cross-Run inspected-key reuse, fan-out/joins, permissions, ordered tools, uncertain Bash/Edit and shared cancellation. Independent native/Cloudflare walkthroughs may expose hidden coupling; they add no embedding/cloud release requirement. Keep evidence attached to the real owners and label remaining gaps before claiming release readiness.
