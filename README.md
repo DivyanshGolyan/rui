@@ -22,7 +22,7 @@ Start one local server explicitly, then use direct CLI/script calls or JavaScrip
 
 V1 excludes conversation branching/editing, attachments, automatic provider fallback, incompatible model switching, multi-host execution, plugins/dynamic tools, MCP execution, retained workflow VMs, storage migration, public event-stream/watch/webhook/push interfaces, TUI/editor/Web UI and a separate daemon manager. Native embedding and Durable Objects are design probes, not initial supported deployments.
 
-[Issue #2](https://github.com/DivyanshGolyan/onepage/issues/2) owns readiness. Remaining provider wire evidence, Session/client choices and integrated interface review stay open there. Create implementation slices when the contract is aligned; retired planning tickets do not mean implementation is complete.
+[Issue #2](https://github.com/DivyanshGolyan/onepage/issues/2) owns readiness. Provider wire research and Session/client decisions are resolved; remaining interface review and final readiness stay open there. Production and live-provider qualification remain required. Create implementation slices when the contract is aligned; retired planning tickets do not mean implementation is complete.
 
 ## Build and try the current implementation
 
