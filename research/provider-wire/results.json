@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "kind": "synthetic_deterministic_fixture",
+  "passed": [
+    "ordered_exact_golden_replay_and_nested_open_fields",
+    "synthetic_tool_result_exact_call_id_and_output_golden",
+    "missing_private_continuation_fails_closed",
+    "fresh_process_sqlite_reopen_identical_replay",
+    "requested_served_correlation_preserved",
+    "toy_generic_read_excludes_private_items",
+    "twelve_unknown_discriminator_or_host_authority_atomic_rejections",
+    "missing_required_text_typed_rejection",
+    "missing_corrupt_and_unproved_model_change_fail_closed",
+    "retained_host_refs_then_response_owned_compaction_and_complete_suffix",
+    "empty_duplicate_or_effectful_compaction_rejected_no_projection",
+    "synthetic_byte_count_depth_limits_fail_explicitly",
+    "no_stored_replay_request_or_checkpoint_copy"
+  ],
+  "fixture_limits_not_product_limits": {
+    "bytes": 65536,
+    "items": 32,
+    "depth": 12,
+    "rejection_bytes": 256
+  },
+  "environment": {
+    "python": "3.14.6",
+    "sqlite": "3.53.4",
+    "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+    "base_revision": "d375f5ec86f0bbfe3028f68d47cea05ea12b8d39"
+  },
+  "sha256": {
+    "probe.py": "b7f2939daa42e192324629b9da8f7331190427f9e8ab9f7f4c12da6bb5136054",
+    "fixtures.json": "f0fc6b64fcb1fc5261fcf6e5dcc1328401a4c48497e13d93e3fed54149d28f8a"
+  },
+  "limitations": [
+    "No provider calls, credentials, real encrypted payloads, or compatibility proof.",
+    "Toy SQLite graceful subprocess reopen, not production restart, crash or power-loss qualification.",
+    "Toy projection access check, not production storage/privacy integration.",
+    "Bounded in-memory synthetic JSON; not production streaming or resource qualification."
+  ]
+}
