@@ -2,15 +2,63 @@
 
 This is the accepted V1 contract, not implementation evidence. [README.md](README.md) owns product/status; [VERIFICATION.md](VERIFICATION.md) owns required evidence.
 
+## A piece of work from start to finish
+
+Suppose a caller wants an agent to investigate a failing test. The caller explicitly starts the Host, names a Session, configures its Workspace and sends a message. The model asks to run Bash. With the default permission mode, OnePage saves the proposed action and asks for approval. Once approved and admitted for execution, Bash runs; OnePage saves its result and asks the model for the final answer.
+
+The caller can disconnect while this work continues. If the Host instead crashes during Bash, recovery reports an indeterminate tool result: the command may have run, so OnePage does not automatically run it again. The model can investigate through fresh calls. The sections below define the exact admission, permission and recovery boundaries behind this example.
+
+```mermaid
+flowchart TD
+    configure["Configure Session"] --> message["Admit message"]
+    message --> model["Request model output"]
+    model --> action["Proposed Bash action"]
+    action --> permission["Permission granted"]
+    permission --> execution["Admit and execute Bash"]
+    execution --> result["Save Tool Result"]
+    result --> next["Next model request"]
+    next --> answer["Final answer"]
+```
+
+Read in that order, or go directly to the owning contract:
+
+- [Owners and identities](#owners-and-identities): who owns conversations and workflows.
+- [Admission](#admission-and-public-requests) and [conversation/settings](#conversation-and-current-settings): configure, submit and recover replies.
+- [Model requests](#model-requests-continuation-and-compaction): freeze inputs, retain output and compact context.
+- [Tools and permission](#model-output-tools-and-permission), including [Exact Edit](#exact-edit).
+- [Execution and recovery](#transactions-execution-and-recovery), then [stops and outcomes](#stops-and-terminal-outcomes).
+- [Workflows](#workflow-evaluation-and-cancellation) and their [evaluator containment](#evaluator-containment).
+- [Inspection and local protocol](#inspection-and-local-protocol): observe, wait and control work.
+- [Host lifetime/platforms](#platforms-and-server-lifetime) and [resources/storage](#resources-storage-and-diagnostics).
+- [Remaining decisions](#remaining-decisions): implementation choices and qualification still outstanding.
+
 ## Owners and identities
 
-The explicitly started **Host** server contains **Session core**, owning conversations/execution, and **Workflow Runtime**, owning workflow execution through the ordinary core API. Runtime’s private disposable JavaScript evaluator computes requested calls from supplied facts. Core/workflow transactions are independent; neither reads the other’s tables. They may share a Store/process; database-file count is unspecified.
+The explicitly started **Host** server contains **Session core**, owning conversations/execution, and **Workflow Runtime**, owning workflow execution through the ordinary core API. Runtime’s private disposable JavaScript evaluator computes requested calls from supplied facts.
 
-```text
-Direct clients ─────────────────► Session core
-Workflow Runtime ──────────────► Session core
-  ├── durable Run/call records     ├── SQLite facts and content
-  └── private evaluator           └── execution loop → provider / Bash / Edit
+Core/workflow transactions are independent; neither reads the other’s tables. They may share a Store/process; database-file count is unspecified.
+
+```mermaid
+flowchart TD
+    clients["Direct clients"] --> core
+    subgraph host["Host"]
+        subgraph runtime["Workflow Runtime"]
+            workflow["Workflow execution"]
+            records["Durable Run and call records"]
+            evaluator["Private disposable evaluator"]
+            workflow --- records
+            workflow --- evaluator
+        end
+        subgraph session["Session core"]
+            core["Ordinary core API"]
+            facts["SQLite facts and content"]
+            loop["Execution loop"]
+            core --- facts
+            core --> loop
+        end
+        workflow --> core
+    end
+    loop --> effects["Provider / Bash / Edit"]
 ```
 
 The **Host Store** contains canonical facts/content. The **Storage Owner** exclusively accesses core tables. **Content References** identify complete immutable bytes with length/digest and bounded reads. Credentials and diagnostics cannot determine semantic recovery.
@@ -22,69 +70,123 @@ The **Host Store** contains canonical facts/content. The **Storage Owner** exclu
 | Session / Session key | One reusable linear conversation, Workspace and access scope. Its opaque caller-provided key addresses it within a Store. Sessions have no terminal outcome or persisted lifecycle phase. |
 | Workspace | Working-directory context for relative tool paths, not a sandbox or allowed-path boundary. |
 | Turn | Work from one initiating User Message through a Final Answer or typed terminal outcome. At most one Turn is nonterminal per Session; callers need no Turn key. |
-| Operation | One model request or Action, owning its exact descriptor, causal source, current execution/retry facts and optional immutable final Resolution. Its ID also identifies its result. |
-| Attempt / Execution Evidence | An Attempt is one physical try, identified by Operation and fresh ordinal. Execution Evidence is its transient terminal delivery. Neither requires durable per-try history. |
-| Request Identity | Caller key binding one core configuration/message submission, complete inputs and original committed answer, including rejection. Distinct messages can share one Turn result. |
-| Run Key / Workflow Run | A caller Run Key creates or reattaches one Run when exact inputs match. The Run binds source, arguments, Workspace, semantics, limits, calls, evaluations and outcome. |
-| Call key | Author-provided configuration/message key unique within one Run. Runtime scopes it by Run identity to form a core Request Identity. It is distinct from Session identity. |
 
 Each fact has one authority; each resident allocation has an owner, bounded population and release boundary. Use direct transactions and deep effect modules. Native embedding and Cloudflare Durable Objects are design probes, not SDK/ABI/deployment commitments. Abstractions need concrete consumers or invariants.
 
-## Platforms and server lifetime
-
-Target Linux/macOS on x86-64/ARM64 through capabilities, not distribution allowlists. Minimum OS/kernel/libc follows build/API requirements; incompatibility rejects. Run checks on the available Mac; elsewhere use source/API/dependency/cross-compilation evidence, labeling unexecuted assumptions. No Linux runtime fleet/matrix is required. Crash tests do not certify power loss; keep platform memory metrics and unavailable counters distinct.
-
-| Owner | Selected mechanism |
-| --- | --- |
-| Transport | Bundle pinned libcurl and OpenSSL, selecting stable versions deliberately rather than floating build-time dependencies; supported asynchronous resolver. Use Apple SecTrust on macOS, host CA certificates on Linux, and explicit CA-file configuration where needed. Missing trust/capabilities fail; never disable verification. Transport owns initialization, resolver lifetime and cleanup. |
-| Storage | Bundle pinned thread-safe SQLite with single-owner access and native VFS. Use local filesystems; network/shared-mounted Stores are unsupported. Enable macOS fullfsync. |
-| Evaluator | Bundle pinned QuickJS; child-scoped CPU/stack protection and parent termination/reaping on both systems. Disable core dumps with `RLIMIT_CORE=0`; Linux also sets `PR_SET_DUMPABLE=0` after exec, before sensitive input. Failure prevents evaluation. |
-| Credentials | macOS Keychain; explicitly configured Linux Secret Service or explicitly selected owner-only plaintext file. Check ownership/access, preserve account binding and atomically persist refresh. No silent fallback. Plaintext is readable by same-user programs, including authorized Bash; it is never copied into semantic data, logs or child environments. |
-| Files/processes | Configurable disk-backed scratch and installed Bash with optional executable path. Report known memory-backed scratch as incompatible with disk-first guarantees; unknown backing is a deployment assumption. Process-group cleanup promises neither detached-descendant containment nor rollback. |
-
-`onepage serve` acquires an exclusive OS-held Store lock before recovery, stale-endpoint reclamation or dispatch, retaining ownership until no dispatch or semantic writes remain possible. Locking and pathname Unix-socket discovery share one bounded canonical Store selector: equivalent supported paths cannot create two owners; unsupported aliases and unrepresentable derived paths reject. Do not use Linux abstract sockets. Close-on-exec prevents descendants inheriting ownership. PID metadata, socket existence, timeout and absent results prove neither ownership nor effect termination.
-
-Protect socket/parent directory; validate Store identity/wire version before mutation. Reclaim only the expected stale socket after ownership. Unavailable/inaccessible/competing owners reject. Clients never auto-start or access SQLite; disconnects/timeouts do not cancel work.
-
-Infrastructure shutdown promptly fences dispatch, interrupts supported effects and safely collects evidence/cleans up without awaiting model completion or inventing user stops/cancellation. Explicit restart preserves recovery allowance; remote effects and duplicate model cost remain possible.
-
 ## Admission and public requests
+
+### Naming and configuring a Session
 
 Constructing a Session reference is caller-side naming: no existence check, core round trip or generated-ID discovery. Workflow `session(name)` deterministically scopes a short name by Run identity: replay retains it; a fresh Run differs. Core operations accept an exact full Session key unchanged, including from another Run. Key possession does not grant access.
 
-The first complete valid configuration for an unknown key atomically establishes Session, baseline, Workspace, access scope and request answer. Later configurations apply supplied mutable fields in admission order; omitted fields remain unchanged. Enforce immutable Workspace/access constraints and continuation compatibility, without initial-baseline equality comparisons. Incomplete initialization and messages to unknown keys reject without partial Sessions. Message admission checks all locally decidable continuation preconditions without provider I/O. Configuration starts no Turn/model work. No separate creation, reservation, attachment or must-be-new operation is selected.
+The first complete valid configuration for an unknown key atomically establishes Session, baseline, Workspace, access scope and request answer.
 
-Configuration and messages use the same Request Identity protocol for direct and workflow callers. Atomically bind operation kind, complete canonical inputs and first committed acceptance or definite rejection with the corresponding mutation. Recover a matching existing answer before reevaluating current admission conditions; changed inputs conflict without replacement. A fresh intended submission needs a fresh identity, even for equal input. Retrying old configuration cannot revert later settings; retrying a message cannot attach it to a newer Turn. A rejection before Session initialization remains rejected afterward. Malformed envelopes without usable identity and failed commits cannot promise a recorded answer.
+Later configurations apply supplied mutable fields in admission order; omitted fields remain unchanged. Enforce immutable Workspace/access constraints and continuation compatibility, without initial-baseline equality comparisons.
 
-Acknowledgment follows durable commit, without provider dispatch or final-answer delay. Configuration completes at admission. Message acceptance binds work whose final result may remain pending. Observation by Request Identity returns absent, original rejection, or original acceptance and its bound result. Scalar observations suffice; batching is optional. Wait/read correctness cannot require every notification. Direct clients retain exact identity and inputs before transmission; uncertain replies are recovered with that identity, not guessed from content.
+Incomplete initialization and messages to unknown keys reject without partial Sessions. Message admission checks all locally decidable continuation preconditions without provider I/O. Configuration starts no Turn/model work.
+
+No separate creation, reservation, attachment or must-be-new operation is selected.
+
+### Recovering a submission after a lost reply
+
+A **Request Identity** is a caller key binding one core configuration/message submission, complete inputs and original committed admission answer: acceptance or definite rejection. For an accepted message, that answer binds the submission to the Turn whose eventual outcome it observes. Distinct messages can share one Turn result.
+
+Configuration and messages use the same Request Identity protocol for direct and workflow callers. Atomically bind operation kind, complete canonical inputs and first committed acceptance or definite rejection with the corresponding mutation.
+
+Recover a matching existing admission answer before reevaluating current admission conditions; changed inputs conflict without replacement. A fresh intended submission needs a fresh identity, even for equal input.
+
+Retrying old configuration cannot revert later settings; retrying a message cannot attach it to a newer Turn. A rejection before Session initialization remains rejected afterward.
+
+Malformed envelopes without usable identity and failed commits cannot promise a recorded answer.
+
+Acknowledgment follows durable commit, without provider dispatch or final-answer delay. Configuration completes at admission. Message acceptance binds work whose final result may remain pending.
+
+Observation by Request Identity returns absent, original rejection, or original acceptance and its bound result. Scalar observations suffice; batching is optional. Wait/read correctness cannot require every notification. Direct clients retain exact identity and inputs before transmission; uncertain replies are recovered with that identity, not guessed from content.
 
 Runtime saves exact submission identity/inputs before core invocation and records the answer independently; resubmit after lost replies. Core knows no Run membership/cancellation. This provides recoverable admission, not exactly-once effects. Other controls keep domain-specific repeat/conflict rules.
 
+### Example: acceptance and answer arrive separately
+
+A caller submits “Investigate the failing test” with request identity `message-1`. Core commits acceptance, but the connection closes before the reply arrives. Resending the same identity and inputs recovers that acceptance and its original work; it does not submit another message. The final answer may still be pending. Even after the Session has done newer work, `message-1` remains bound to its original result. A deliberate second submission uses a new identity.
+
+The [workflow identity example](#example-conversation-run-and-call-identities) shows how Runtime supplies these identities for workflow calls.
+
 ## Conversation and current settings
 
-Conversation has five immutable entry kinds: User text, assistant text, Tool Call, Tool Result and System Instruction. Each records exact causal source and Turn. No edit, deletion or compaction rewrites history.
+### Conversation entries and pending messages
 
-An idle Session's message admission atomically creates its Turn, initiating message and Conversation projection. Pending messages retained after failed work are projected first in admission order in that same transaction. When active and admissible, later messages join that Turn as immutable ordered admissions without immediately changing Conversation or a frozen model request. Before the next assistant-response model Operation, one transaction projects all applicable pending messages in admission order. Each admission has at most one projection. Compaction uses already-applied context and leaves pending messages alone. No model-created conversational Input Request exists; permission decisions are separate control facts, not messages. Successful settlement requires no pending applicable message, actionable permission, unresolved Operation or admitted effect, and atomically releases occupancy.
+**Conversation** is the immutable ordered history of User text, assistant text, Tool Calls, Tool Results and System Instructions. Each entry records exact causal source and Turn. No edit, deletion or compaction rewrites history. An admitted User Message and its Conversation entry are distinct: **projection** means appending the admitted message to this history. Admission can precede projection, as the pending-message rules below specify.
+
+An idle Session's message admission atomically creates its Turn, initiating message and Conversation projection. Pending messages retained after failed work are projected first in admission order in that same transaction. When active and admissible, later messages join that Turn as immutable ordered admissions without immediately changing Conversation or a frozen model request. Before the next assistant-response model Operation, one transaction projects all applicable pending messages in admission order. Each admission has at most one projection.
+
+Compaction uses already-applied context and leaves pending messages alone. No model-created conversational Input Request exists; permission decisions are separate control facts, not messages. Successful settlement requires no pending applicable message, actionable permission, unresolved Operation or admitted effect, and atomically releases occupancy.
+
+### Selecting current settings
 
 A **Session Context Revision** records sparse persistent configuration. Component kinds are model binding, instructions, Tool Catalog, context policy, reasoning defaults, optional output schema, Permission Mode and default output limits. Supported Session settings are mutable unless a change would alter Session identity, Workspace/access scope or invalidate saved conversation continuity. Validate supported values and reject known incompatibility atomically; provider compatibility requires adapter evidence. Host settings remain outside Session configuration under their startup rules. This rule does not add new supported fields or provider capabilities.
 
 New requests select one committed revision and resolve settings at or before it. No Turn-wide configuration copy, temporary override layer, cross-call lock or historical revision precondition exists. Configuration and subsequent messages can interleave with other clients; later message failure does not roll back configuration.
 
+### Including instruction updates
+
 Every successfully admitted explicit instruction update is preserved in model-visible history, including intermediate reversals and fresh equal values: A→B→A includes B and the second A; A→A is an update. Matching request replay adds nothing; omitting instructions creates no update. Identical bytes may share content storage without collapsing distinct updates.
 
-At fresh assistant-response request admission, select all not-yet-included instruction updates through that transaction's configuration view. After preceding Tool Results and applicable User Message projections, append them in configuration order at the fixed provider-supported position. Validate replay and commit entries, projections, Operation and manifest together. Inclusion derives from canonical originating-update references and initial baseline, including compaction-covered entries, not text equality or a separate queue/applied flag/receipt. Rollback leaves admitted updates pending. Already-admitted requests and retries retain frozen inputs; inclusion does not prove provider consumption. Keep the initial instruction prefix stable rather than rendering prior positions from current settings. This specifies placement, not global wall-clock interleaving with messages.
+At fresh assistant-response request admission, select all not-yet-included instruction updates through that transaction's configuration view. After preceding Tool Results and applicable User Message projections, append them in configuration order at the fixed provider-supported position.
+
+Validate replay and commit entries, projections, Operation and manifest together. Inclusion derives from canonical originating-update references and initial baseline, including compaction-covered entries, not text equality or a separate queue/applied flag/receipt. Rollback leaves admitted updates pending. Already-admitted requests and retries retain frozen inputs; inclusion does not prove provider consumption.
+
+Keep the initial instruction prefix stable rather than rendering prior positions from current settings. This specifies placement, not global wall-clock interleaving with messages.
 
 Model-visible time/date/timezone/Workspace binds immutable initial/appended instruction rendering; tool observations belong to results. No automatic polling/clock refresh or Turn-environment reconstruction on retry.
+
+### Text and structured answers
 
 An optional persistent **Output Schema** selects a model-generated structured Final Answer; absence selects text. The producing request freezes it. The adapter translates to a supported provider mechanism and validates response/schema in the bounded validation path; workflows receive that value without a second interpretation. Unsupported schemas, refusal, incomplete generation and invalid output fail explicitly. No prose conversion, repair call, per-caller schema or reinterpretation under later settings is permitted.
 
 ## Model requests, continuation and compaction
 
+### Operations and frozen requests
+
+An **Operation** is one model request or Action, owning its exact descriptor, causal source and current execution/retry facts. Its optional **Resolution** is its immutable final result; the Operation ID also identifies that result. A retry is another [Attempt](#admitting-an-attempt) of the same Operation; a model request admitted against new context or settings is a new Operation.
+
 Each model Operation owns one immutable **Model Request Manifest** binding its protocol operation, requested concrete model, historical Session settings and input view, reasoning/output limits and output contract. References/digests identify canonical content; runtime facts retain their original rendering references. Session facts and Operation admission share one committed per-Session order on their owning records, without a duplicate payload log. The Operation's admission position fixes its historical boundary. Accepted output becomes available at its acceptance position, not its producing Operation's earlier admission position. Historical visibility does not bypass pending-input applicability or change Conversation/tool-call order.
 
 Replacement Attempts retain that historical view. With unchanged adapter rules, they reconstruct equivalent request semantics; meaningless JSON spelling need not match. The caller may deliberately change adapter selection/rendering rules between Attempts, so identical requests across such a change are not promised. This does not mutate historical Session settings, provider binding, output contract, saved effect authorization or retry accounting, or permit unsupported continuation. No frozen adapter implementation/version is required. Credentials, endpoints, sockets, transport and nonsemantic headers remain late-bound.
 
+### Retaining accepted output
+
+Retain accepted model output losslessly in provider order as immutable **Model Output Items** owned by the resolved Operation. Store semantic, private continuation and required response-evidence fields once with producing request/Attempt provenance. Commit Resolution, items and applicable Conversation projections atomically. Derive replay input by stripping response-only/non-replayable fields; persist neither a second replay copy nor a serialized request body. Preserve unknown open fields within known items. Private reasoning, encrypted material, signatures and compaction items remain opaque and inaccessible through generic content reads.
+
+Unknown consequential discriminators—item, content block, Action subtype, compaction variant or terminal status—produce `unsupported_provider_output` with bounded typed rejection and necessary request/causal provenance, without Conversation, continuation or effects. Complete rejected payloads are optional diagnostic detail, not mandatory permanent history. Raw HTTP/SSE framing, token deltas and partial/interrupted/late output remain scratch, never continuation authority.
+
+### Choosing and validating compacted context
+
 **Model Context** is an optional selected Compaction Base followed by one complete ordered suffix of canonical host input and accepted model Operation results, with the binding-specific retained inputs below. A **Compaction Base** is the derived role of an accepted compaction result selected within a later Operation's view. Its producing Operation's admission position is the covered frontier: compaction uses that Operation's historical view, and later applicable inputs form the suffix. The result's ownership identifies this boundary without a separate input list or coverage record. Derive prior bases within that view; retain no copied request body, checkpoint row or permanent history of failed Attempts. Provider caches/previous-response IDs are optional only when their loss permits local reconstruction.
+
+User Messages have no token-admission quota and are never silently split or truncated. The configured **Compaction Trigger** estimates pressure, anchoring on provider usage where available and estimating newly appended content; it is not a content ceiling. Before pending input is applied, compaction may cover only existing context; afterward, the next assistant-response request includes all pending messages and instructions, including arrivals during compaction.
+
+Provider-confirmed context overflow before accepted output/effects resolves the rejected request with its already-applied input intact. Compaction covers that context; continuation uses a new Operation/manifest, not an equal-manifest retry. There is no separate compaction-attempt limit, aggregate Turn model-request allowance or whole-Turn deadline. Select the newest accepted base in the current lineage first, then validate that exact base and complete suffix. Core checks lineage, completeness, content/digests and stored format; the adapter checks demonstrated wire compatibility. Both must pass; persist no validity flag. Failed/unresolved compaction cannot displace the base. Missing/corrupt/unsupported/incompatible selected material fails `continuation_unavailable`, without older-base fallback or reconstruction from visible Conversation.
+
+Reject configuration known to invalidate continuity atomically; request preparation separately validates its selected recipe. Codex initially restricts continuation to the same requested model binding and records requested/served-model evidence; actual provider qualification and broader compatibility need adapter evidence, not a permanent core equality rule. If no fitting compatible request can be produced, fail with `ResourceExceeded` under terminal-settlement rules. Never discard pending instructions to fit or impose a durable-history limit.
+
+### Example: compaction coverage and availability
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Core as Session core
+    participant Provider
+    Note over Core: 1. Admit compaction C against already-applied context
+    Core->>Provider: Request compaction using C's frozen view
+    Caller->>Core: 2. Admit new message M
+    Note over Core: M remains pending
+    Provider-->>Core: Complete compaction output
+    Note over Core: 3. Accept C's result and make its base available
+    Note over Core: 4. Apply M for the next assistant-response request
+    Core->>Provider: Request with C's base, retained inputs and later suffix
+```
+
+C covers the historical view fixed at step 1. Acceptance at step 3 makes the base usable; it does not expand coverage to include M. The [Codex recipe](#response-owned-compaction) specifies which covered host inputs and output items the provider request retains.
 
 ### Adapter historical reads
 
@@ -92,17 +194,9 @@ Core supplies one read-only view for request preparation, already bound to the O
 
 Use closed semantic variants and opaque view-scoped handles, not storage rows or a generic query language. Generic content access cannot open private continuation; the provider view grants the appropriate private reads without implying wire compatibility. One preparation owner drives the view. Borrowed record metadata expires on reader advance; opaque handles remain stable until view release, and payload reads use bounded caller buffers. Bound live readers and scratch by preparation resources, close readers before releasing the view, and release preparation resources on every failure. No SQLite transaction spans adapter processing or network activity. Historical retention must preserve referenced versions through required recovery; an expired or foreign handle is programmer misuse, while missing/corrupt content and resource/storage failures are explicit failures.
 
-Materialize the complete provider request into charged unlinked scratch before transport can consume it. Stream large strings, opaque objects and unknown open fields; do not decode complete payloads or retain an item-count-sized collection. Preserve required values while removing only demonstrated non-replayable fields. Source integrity and output completion must succeed before handing scratch to transport. Partial read, write or capacity failure closes incomplete scratch and yields preparation failure for the admitted Attempt; no incomplete request is dispatchable. Transport retains the completed scratch through its cleanup boundary. The [adapter-view experiments](research/README.md#provider-wire-contract) support this shape, not production qualification.
+Materialize the complete provider request into charged unlinked scratch before transport can consume it. Stream large strings, opaque objects and unknown open fields; do not decode complete payloads or retain an item-count-sized collection. Preserve required values while removing only demonstrated non-replayable fields. Source integrity and output completion must succeed before handing scratch to transport. Partial read, write or capacity failure closes incomplete scratch and yields preparation failure for the admitted Attempt; no incomplete request is dispatchable.
 
-Retain accepted model output losslessly in provider order as immutable **Model Output Items** owned by the resolved Operation. Store semantic, private continuation and required response-evidence fields once with producing request/Attempt provenance. Commit Resolution, items and applicable Conversation projections atomically. Derive replay input by stripping response-only/non-replayable fields; persist neither a second replay copy nor a serialized request body. Preserve unknown open fields within known items. Private reasoning, encrypted material, signatures and compaction items remain opaque and inaccessible through generic content reads.
-
-Unknown consequential discriminators—item, content block, Action subtype, compaction variant or terminal status—produce `unsupported_provider_output` with bounded typed rejection and necessary request/causal provenance, without Conversation, continuation or effects. Complete rejected payloads are optional diagnostic detail, not mandatory permanent history. Raw HTTP/SSE framing, token deltas and partial/interrupted/late output remain scratch, never continuation authority.
-
-User Messages have no token-admission quota and are never silently split or truncated. The configured **Compaction Trigger** estimates pressure, anchoring on provider usage where available and estimating newly appended content; it is not a content ceiling. Before pending input is applied, compaction may cover only existing context; afterward, the next assistant-response request includes all pending messages and instructions, including arrivals during compaction.
-
-Provider-confirmed context overflow before accepted output/effects resolves the rejected request with its already-applied input intact. Compaction covers that context; continuation uses a new Operation/manifest, not an equal-manifest retry. There is no separate compaction-attempt limit, aggregate Turn model-request allowance or whole-Turn deadline. Select the newest accepted base in the current lineage first, then validate that exact base and complete suffix. Core checks lineage, completeness, content/digests and stored format; the adapter checks demonstrated wire compatibility. Both must pass; persist no validity flag. Failed/unresolved compaction cannot displace the base. Missing/corrupt/unsupported/incompatible selected material fails `continuation_unavailable`, without older-base fallback or reconstruction from visible Conversation.
-
-Reject configuration known to invalidate continuity atomically; request preparation separately validates its selected recipe. Codex initially restricts continuation to the same requested model binding and records requested/served-model evidence; actual provider qualification and broader compatibility need adapter evidence, not a permanent core equality rule. If no fitting compatible request can be produced, fail with `ResourceExceeded` under terminal-settlement rules. Never discard pending instructions to fit or impose a durable-history limit.
+Transport retains the completed scratch through its cleanup boundary. The [adapter-view experiments](research/README.md#provider-wire-contract) support this shape, not production qualification.
 
 ### Codex wire binding
 
@@ -129,29 +223,83 @@ Requested identity and served identity are separate facts. Retain the exact requ
 
 V1 selects the current Codex client's evidenced response route: a compaction Operation appends a request-only `{"type":"compaction_trigger"}` to its frozen complete context and uses ordinary Responses streaming. The trigger is derived from the manifest's protocol operation, never a Conversation entry or accepted output item. The source demonstrates this path; absence of a standalone call in that client does not prove that the subscription server rejects `/responses/compact`. Generic API documentation does not establish subscription endpoint availability. V1 depends on neither that endpoint nor automatic `context_management` support.
 
-Require a completed response with exactly one nonempty supported compaction item for explicit compaction. Store the complete ordered output once on that Operation. The base anchor is its Operation ID and the compaction item's ordinal within that canonical output. Derive the replacement recipe from the covered original host User/System Instruction inputs in their original order, then the slice from that item through the end of the same output, then the complete later suffix. Retained host inputs are existing canonical references recovered through the source recipe, including earlier bases; never copies or a newly stored request body. This derives from the subscription client's retained user/developer input shape; retaining every host input without truncation is OnePage policy awaiting live qualification. It avoids assuming that the encrypted item alone replaces those inputs. If retained inputs cannot fit, fail explicitly. No separate replay object, checkpoint relation or copied compacted window is needed. A compaction Operation produces no tool execution or Conversation projection; an unexpected Action rejects the candidate. Its producing Operation's admission position fixes the covered frontier, including the prior base and all already-applied inputs/results within that historical view. Result acceptance determines when the new base becomes available, not what it covered. Pending messages and later instruction updates remain outside that frontier and appear once in subsequent context.
+Require a completed response with exactly one nonempty supported compaction item for explicit compaction. Store the complete ordered output once on that Operation. The base anchor is its Operation ID and the compaction item's ordinal within that canonical output.
+
+Derive the replacement recipe from the covered original host User/System Instruction inputs in their original order, then the slice from that item through the end of the same output, then the complete later suffix. Retained host inputs are existing canonical references recovered through the source recipe, including earlier bases; never copies or a newly stored request body. This derives from the subscription client's retained user/developer input shape; retaining every host input without truncation is OnePage policy awaiting live qualification. It avoids assuming that the encrypted item alone replaces those inputs. If retained inputs cannot fit, fail explicitly.
+
+No separate replay object, checkpoint relation or copied compacted window is needed. A compaction Operation produces no tool execution or Conversation projection; an unexpected Action rejects the candidate. Its producing Operation's admission position fixes the covered frontier, including the prior base and all already-applied inputs/results within that historical view. Result acceptance determines when the new base becomes available, not what it covered. Pending messages and later instruction updates remain outside that frontier and appear once in subsequent context.
 
 Keep call/result pairs intact when selecting the frontier. Missing/duplicate compaction, unknown compaction variants, truncated output and unresolved/failed compaction cannot advance it. If a supported assistant-response protocol later enables automatic compaction, its base must likewise be a slice of that producing Operation, retaining every item after the anchor; it cannot invent a separate compaction result or drop later calls. That route needs its own capability evidence before enablement. Do not copy another client's message truncation, local-summary or model-fallback policy. The encrypted item is provider-produced compressed context, not a promise of verbatim model recall; canonical Conversation remains unchanged.
 
 ## Model output, tools and permission
 
+### Accepting an answer or tool calls
+
 A valid model response contains assistant-only output or an optional assistant-text prefix with ordered Tool Calls. Validate the entire candidate and all descriptors before atomic admission; one invalid member rejects all. Append prefix and calls in order. Assistant-only nonempty output is a Final Answer only if settlement finds no earlier applicable pending User Message. A message committed first requires further model work; settlement committed first ends that Turn. SQLite commit order resolves this race.
 
-Each Tool Call creates one child **Action Operation**, linked to its model parent and stable call ordinal. No Step/group entity is required. Children run and settle independently, including within one Workspace. Once every child resolves, one transaction appends typed Tool Results in call order; only then may the next model Operation start. Physical completion order cannot reorder Conversation. Denial, failure, cancellation and uncertainty all produce results.
+A **Tool Call** is the model's proposed invocation of a tool. Each accepted Tool Call creates one child **Action Operation**, the unit of work whose permission and result core owns, linked to its model parent and stable call ordinal. No Step/group entity is required. Children run and settle independently, including within one Workspace.
 
-The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority. The closed executable mapping is `bash` and `edit`; Session configuration selects the offered subset. **Authorization** durably permits one exact validated Action. At child admission select current Session Permission Mode, default `ask`, and save descriptor plus configuration provenance. `ask` creates one immutable Permission Request; explicit `bypass` directly creates Authorization. Siblings admitted together share that view. Permission Decisions allow once or deny one exact request/Operation/descriptor under Local Owner authority; server access never implies bypass.
+Once every child resolves, one transaction appends typed Tool Results in call order; only then may the next model Operation start. Physical completion order cannot reorder Conversation. Denial, failure, cancellation and uncertainty all produce results.
+
+### Authorizing exact actions
+
+The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority. The closed executable mapping is `bash` and `edit`; Session configuration selects the offered subset.
+
+**Authorization** durably permits one exact validated Action. At child admission select current Session Permission Mode, default `ask`, and save descriptor plus configuration provenance.
+
+`ask` creates one immutable Permission Request; explicit `bypass` directly creates Authorization. Siblings admitted together share that view. Permission Decisions allow once or deny one exact request/Operation/descriptor under Local Owner authority; server access never implies bypass.
 
 Later mode changes neither answer pending requests, revoke existing authorizations nor stop running actions. Model-request settings do not authorize later Actions. Recovery reuses saved permission facts, not current mode; rollback creates none. Authorization may wait for capacity without an Attempt. No Workspace isolation, global Action serialization or concurrent-writer coordination is promised.
 
+### Exact Edit
+
+#### Proposal and line coordinates
+
+`edit` accepts one existing-file path and a nonempty replacement list. Each entry supplies one-based start-inclusive/end-exclusive whole-line coordinates, expected text and replacement text, all against the same execution-input state. Reject overlap; adjacent nonempty ranges are allowed. Combine insertions sharing a position or lying inside/at another replacement boundary. No search, relocation, fuzzy matching, replace-all, multi-file batch, file creation/deletion/rename/mode change or whole-file freshness guard exists. Empty replacement deletes text, not the file.
+
+LF separates lines; CR in CRLF remains exact. An empty file has zero lines; a final nonempty unterminated segment is a line; trailing LF adds none. For N lines require `1 <= start <= end <= N+1`. `[4,7)` selects lines 4–6; `[4,4)` inserts before 4 with empty expected text; `[N+1,N+1)` appends, including `[1,1)` in an empty file. Expected text includes selected terminators. Replacement bytes are literal: no normalization or implicit newline; appending to an unterminated line joins it unless replacement begins with LF. Insertion checks position only; replace adjacent context to demand text freshness.
+
+#### Preview and authorization
+
+Save/display the submitted proposal after shape validation without reading target. Preview is proposed snippets/coordinates, not verified current content. Authorization binds exact path/ranges/text. Bash supplies reads and file/directory creation: number before slicing to preserve coordinates (`cat -n -- file | sed -n '40,80p'`); display numbers are not expected bytes and truncated output is no snapshot. Missing Edit targets fail. Ordinary absolute/relative filesystem access applies without Git tracking, repository membership or Workspace containment rules.
+
+#### Checked copyback and cleanup
+
+After authorization and Attempt admission, open existing target without create/truncate. Validate eligibility and every expected slice while streaming complete edited output into charged immediately unlinked scratch. Any mismatch/read/scratch failure before completion leaves target untouched. Only then copy output through the same opened target, set final length afterward and flush. Never pretruncate or rename-replace the inode. Empty output makes truncation the first mutation. Partial write/truncate/flush failure may change bytes; report actual evidence/uncertainty, never rollback or false success.
+
+The canonical descriptor is read-only. Keep its readers, the same target handle and the one output scratch through their final consumers and pending I/O, closing before custody release. Completed scratch is copyback input only. Cancellation/partial copyback cannot release a buffer still used by I/O; read failures after mutation cannot claim not-applied.
+
+Edit owns target/scratch/buffers/offsets/cleanup within one trusted in-process module, with bounded service turns and no worker pool or separate timeout. No complete line/file/edit-list residence, source snapshot or durable replay backup is required. Preserve opened-target semantics and safe handle eligibility, not guessed universal inode identity; concurrent writers/path replacement remain caller-coordinated. Unselected content is preserved from execution input, not isolated against later writers. Core owns permission/outcome; Edit has no SQLite/credentials or retry policy. After custody loss, discard scratch and return indeterminate without automatic inspection, replay or repair.
+
 ## Transactions, execution and recovery
+
+### Canonical state and transactions
 
 Relational constraints enforce identities, parentage, ordering, message projection uniqueness, one active Turn per Session, one terminal Turn outcome, one optional final Resolution per Operation, exact request bindings and content publication with its first durable reference. No ledger/reducer image, permanent Completion, separate Resolution ID, cached lifecycle phase or shadow frontier duplicates authority. Unreleased databases/fixtures are recreated: no migration, compatibility reader, dual-write or alias layer.
 
 One meaningful mutation owns one cohesive function: bounded syntax/content validation; reserve custody if admitting execution; `BEGIN IMMEDIATE`; bounded current-state checks and guarded writes; verify affected rows; commit; release consequence. State-dependent checks stay inside. Rollback releases unused reservation and grants no dispatch. Private helpers may simplify calculation/query mechanics without a mandatory classifier framework.
 
-Unresolved Operations distinguish no Attempt, admitted uncertainty, and retryable model failure with future eligibility. Admission atomically checks applicability, absent Resolution and due policy, records fresh ordinal, consumes allowance and replaces eligibility with uncertainty. Retryable settlement saves current failure/accounting/eligibility. Final Resolution/content is immutable; further admission/acceptance rejects. Denial, validation, stop or interruption need no invented Attempt. Diagnostics require no permanent failed-try history.
+### Admitting an attempt
 
-Only the invocation committing fresh Attempt admission receives a volatile one-shot **Dispatch Permit**. Recovery cannot recreate it. **Physical Custody** is the content-free record retaining execution resources through safe cleanup; it carries no semantic authority. The local owner orders completion/interruption, fences further result publication and suppresses an unconsumed permit or detaches active transport. Preserve callback context until safe cleanup. Terminal evidence delivery is at most once; suppress duplicate/stale delivery before custody reuse, without historical-payload comparison or a generic late-result arbiter.
+An **Attempt** is one admitted physical try of an Operation, identified by that Operation and a fresh ordinal. Its admission does not prove preparation or launch occurred. **Execution Evidence** is the transient terminal delivery from the local execution owner; it is not a saved Resolution. Neither requires durable per-try history.
+
+Unresolved Operations distinguish no Attempt, admitted uncertainty, and retryable model failure with future eligibility.
+
+Admission atomically checks applicability, absent Resolution and due policy, records fresh ordinal, consumes allowance and replaces eligibility with uncertainty. Retryable settlement saves current failure/accounting/eligibility.
+
+Final Resolution/content is immutable; further admission/acceptance rejects. Denial, validation, stop or interruption need no invented Attempt. Diagnostics require no permanent failed-try history.
+
+For example, denying a proposed Bash action resolves its Action Operation without an Attempt. A temporary model failure can settle one Attempt while leaving the Operation unresolved and eligible for another Attempt. Neither that failed try nor the later retry creates a new Operation. A Resolution ends the Operation; the Turn may still need other Operations before it can finish.
+
+### Launching once and retaining cleanup ownership
+
+Committing an Attempt records that execution may happen. Only the invocation committing fresh Attempt admission receives the volatile one-shot **Dispatch Permit** that allows it to launch. Recovery cannot recreate that permit: the previous process may already have launched the effect.
+
+**Physical Custody** is the content-free record retaining execution resources through safe cleanup; it carries no semantic authority.
+
+The local owner orders completion/interruption, fences further result publication and suppresses an unconsumed permit or detaches active transport. Preserve callback context until safe cleanup. Terminal evidence delivery is at most once; suppress duplicate/stale delivery before custody reuse, without historical-payload comparison or a generic late-result arbiter.
+
+### Effect interfaces and evidence
 
 One reactor multiplexes provider streams and subprocess pipes. Effect modules own handles, bounded windows and charged scratch, never SQLite or permission/retry policy. After commit, adapters materialize outbound requests from manifests/content into unlinked scratch; execution streams output to scratch. No transaction spans request construction, provider/process execution, target mutation or delivery. Only private report-scratch and workflow visibility-metadata writes may occur under their owning read transactions; finish them before delivery/evaluation.
 
@@ -166,11 +314,19 @@ Core invokes private provider/Bash/Edit interfaces through closed effect-specifi
 
 Local execution ownership supplies Operation/Attempt provenance; provider IDs and payload fields cannot retarget evidence. Use distinct evidence variants for sealed output, known failure and effect-specific outcomes, carrying only fields meaningful to that case. Preserve available observations needed for classification, including valid Retry-After, without converting them into retry authority. Core checks the still-current unresolved Attempt and applicable stop/interruption facts at settlement. Rejected or stale delivery has no semantic consequence; its local owner still completes cleanup. Transport and tools cannot resend or relaunch an Operation behind core's retry accounting.
 
-After terminal seal, one shared serial validation/import workspace parses complete output sequentially. No validation worker or manually yielding parser is selected without measured need. Variable items use ranges into sealed source and one sequential unlinked metadata file, traversed through fixed windows, not resident item collections or per-item files. Charge metadata growth; retain source/metadata through cleanup. Post-commit request-materialization failure remains evidence for the admitted Attempt. Complete provider validation precedes incremental atomic import of content, Resolution/current retry facts and consequences. Late validation/import failure cannot publish partial success. Caller content enters as a sealed source at its first semantic reference: import verifies length/digest/type/stable bytes; there is no independent public content-publication operation or staged Content Reference. Bounded memory does not bound SQLite/import or validation elapsed time.
+### Validating and importing output
+
+After terminal seal, one shared serial validation/import workspace parses complete output sequentially. No validation worker or manually yielding parser is selected without measured need. Variable items use ranges into sealed source and one sequential unlinked metadata file, traversed through fixed windows, not resident item collections or per-item files.
+
+Charge metadata growth; retain source/metadata through cleanup. Post-commit request-materialization failure remains evidence for the admitted Attempt. Complete provider validation precedes incremental atomic import of content, Resolution/current retry facts and consequences. Late validation/import failure cannot publish partial success.
+
+Caller content enters as a sealed source at its first semantic reference: import verifies length/digest/type/stable bytes; there is no independent public content-publication operation or staged Content Reference. Bounded memory does not bound SQLite/import or validation elapsed time.
 
 Sealed-source handoff grants bounded read access, not mutation or publication. The producer stops writes and fixes the captured extent/integrity; validation then establishes complete protocol meaning. Keep the source immutable through its last range read and import commit/rollback. Validation metadata contains source-bound ranges, never independent content handles, and expires with the serial workspace. Partial capture, failed seal or terminal disagreement permits only typed failure handling, never promotion of fragments as complete output.
 
 Captures waiting for the serial workspace remain with occupied execution custody, without another growing payload queue. Import creates canonical Content References only at commit; it does not make scratch durable authority. Scratch closes after its final consumer, while callbacks may retain custody longer. Interruption/rejection fences publication before cleanup; late callbacks cannot reopen sealed sources or write through released handles.
+
+### Commit boundaries and crash recovery
 
 The committing owner alone publishes semantic consequences. Attempt admission transfers one-shot launch authority, not ownership of canonical state, to the reserved local execution owner. Terminal delivery hands sealed evidence to core validation/import while physical custody and scratch charges remain held through their last consumer and safe cleanup. Sealing, successful transport or target mutation is not acceptance. A live owner can report a known failure before launch; after custody loss, recovery uses committed uncertainty even if launch never happened. No scratch scan or caller-supplied evidence can restore a Dispatch Permit or substitute for settlement.
 
@@ -190,55 +346,156 @@ The committing owner alone publishes semantic consequences. Attempt admission tr
 
 External bytes cannot prove authorship. Uncertainty alone requires neither User intervention nor Turn termination; SQLite cannot transact external effects.
 
+### Retries and timeouts
+
+Retry temporary connection failures, body inactivity, rate limits and temporary server failures within frozen-request allowance. Permanent requests/output errors, unfixable authentication, canonical storage and deterministic continuation failures are not blind-retry candidates. Overflow uses compaction, never repeated compaction that cannot make input fit. Local admission/preparation time is not provider-response inactivity. Persist used allowance and eligibility; restart/configuration/compaction cannot reset accounting or rewrite admitted timeout/saved results. Provider timeout ends local waiting, not remote processing. Retry exhaustion obeys Turn-settlement obligations. Host policies load at startup, with no live reload. Bash expiry initiates cleanup and yields a typed timeout result, without rollback, descendant-stop certainty or automatic replay; permission/capacity waits consume no Bash execution time.
+
+Timeout and retry values live in the [resource table](#resources-storage-and-diagnostics).
+
+### Example: a crash between launch and saved result
+
+```mermaid
+flowchart TD
+    A["A: Attempt commits"] --> B["B: Local owner launches Bash"]
+    B --> C["C: Bash exits"]
+    C --> D["D: Result commits"]
+    D --> cleanup["Cleanup ends"]
+    A -. "crash before result commit" .-> uncertain["Indeterminate result; no automatic replay"]
+    B -. "crash before result commit" .-> uncertain
+    C -. "crash before result commit" .-> uncertain
+    D -. "crash" .-> saved["Saved result remains authoritative"]
+```
+
+A crash at A, B or C leaves an admitted Attempt without a saved result. Recovery cannot distinguish those points from the committed facts, so Bash receives an indeterminate result and is not automatically replayed. At D, the saved result is authoritative even if cleanup was unfinished. A live owner that establishes a pre-launch failure can report that evidence; it becomes a recovery fact only when core saves it. Model replacement follows the retry policy above and may incur duplicate cost.
+
 ## Stops and terminal outcomes
 
+### Stopping selected work
+
 A **Session stop** selects current work once, fences advancement and acknowledges saved intent separately from completion. Idle stops complete immediately. Completion requires that selected work's terminal outcome and atomic occupancy release, including Action settlement and ordered Tool Results; it does not follow future work or prove provider/billing termination. Model transport cleanup may continue under retained custody. A stop cannot rewrite an earlier committed result. Direct Session stops have no caller-retained Request Identity and are not automatically retried. After a lost acknowledgment, another Session-addressed stop selects current work again and may stop newer work; completion of the already-admitted stop still follows only its selected work. Callers coordinate Session reuse.
+
+### Interrupting one model operation
 
 An exact **Model Interruption** targets one unresolved model Operation, validates owner, parentage and applicability, and commits an `Interrupted` Resolution with exact target/provenance. It does not stop the Session or decide its next Operation. Continue only for independently admitted applicable messages; otherwise derive cancelled Turn outcome. Actions have no independent interruption command. Session stop instead interrupts unresolved model work with causal stop provenance. Neither path accepts partial/late continuation or retries interrupted work.
 
 Stop resolves unattempted Actions without execution. Active Bash receives best-effort process-group interruption. Edit can stop without changes before mutation; afterward retain custody for safe execution, observation and cleanup, without rollback promises. Lost custody yields indeterminate result. Every accepted Tool Call still receives its ordered result. Pending messages/permissions selected by stop/cancellation become inapplicable through those facts, not per-item lifecycle flags.
 
+### Failing and continuing a Turn
+
 A definitive inability to continue fails a Turn only after no unresolved Operation/effect, actionable permission or required result publication can change its meaning. Pending unprojected messages alone do not prevent failure. Atomically save the unique typed outcome and release Session occupancy; failure leaves those messages pending without starting more work. No earlier failure-intent stage is needed. Pre-request failure creates no fake Operation/manifest/Attempt: retain selected configuration revision and canonical input frontier as cause. An Operation-caused failure references that resolved Operation rather than copying evidence. Tool errors, retryable failures, recoverable overflow and direct interruption do not automatically fail the Turn.
 
-New input continues a failed Session from its saved conversation, including earlier pending messages before the new input. The new submission starts a new Turn; original message admissions, failed call results and resolved Operations remain unchanged. This is continuation, not automatic replay of failed or uncertain effects. Required missing/corrupt/incompatible continuation must still be repaired before work can proceed; new input cannot bypass validation.
+New input continues a Session after a failed Turn from its saved conversation, including earlier pending messages before the new input. The new submission starts a new Turn; original message admissions, failed call results and resolved Operations remain unchanged. This is continuation, not automatic replay of failed or uncertain effects.
+
+Required missing/corrupt/incompatible continuation must still be repaired before work can proceed; new input cannot bypass validation.
+
+### Reading message applicability
 
 Inspection derives message `applied` from projection, `not applied` from absent projection plus applicable stop/cancellation authority, otherwise `pending`. Application means entry into model context, not provider consumption. Keep unapplied content and reason inspectable. Stopped/cancelled messages do not revive in later Turns; failed work's pending messages need no resubmission. A message committed before failure retains its original Turn/result binding even when later included by continuation; a new submission after occupancy release binds the new Turn. A command fixed to the old Turn rejects. Crash alone is neither failure nor cancellation.
 
+### Example: pending input after failure or stop
+
+Suppose message B joins a Turn while its model request is running, and B has not yet entered model context:
+
+| What happens to that Turn? | What happens when message C later starts a new Turn? |
+| --- | --- |
+| The Turn fails, leaving B pending. | B is projected before C. B's original submission still returns the earlier failed Turn's result. |
+| A stop or cancellation excludes B. | B remains readable as not applied; C does not revive it. |
+
+These cases follow the applicability rules above. A crash by itself selects neither outcome.
+
 ## Workflow evaluation and cancellation
+
+### Run identity and saved calls
+
+A caller **Run Key** creates or reattaches one **Workflow Run** when exact inputs match. The Run binds source, arguments, Workspace, semantics, limits, calls, evaluations and outcome.
+
+A **Call key** is an author-provided configuration/message key unique within one Run. Runtime scopes it by Run identity to form a core Request Identity. It is distinct from Session identity.
 
 Run creation commits the Run Key and complete bound inputs before acknowledgment or evaluation. A client retains that key and inputs before transmission; repeating creation with equal inputs attaches to the same Run, including after terminal completion or Host restart. Changed inputs conflict without replacing it. A lost reply is not a reason to choose a fresh Run Key. Attachment observes saved work; it neither restarts a terminal Run nor retains an evaluator or connection on its behalf.
 
 Workflow Runtime owns Run inputs, generations, saved calls/results, cancellation and output. Call keys preserve exact text and use an unambiguous Run-identity namespace, not workflow name/content, invocation counter, code location or input hash. Authors derive stable keys/inputs/order from arguments and original result identities or positions, not branch completion order. Equal-key conflicts are detected; accidental new keys cannot always be distinguished from intentional work. No arbitrary shared-mutation determinism, static policing or historical Promise-delivery replay is promised.
 
-An **Evaluation Generation** binds source, arguments, semantics, limits and a fixed **Visibility Snapshot** of Runtime-recorded results/failures. Evaluate from source, return all encountered calls plus root waiting/value/failure, then discard the heap. No live core replies, retained Promise graph, bytecode, continuations or second dependency interpreter exists. Functions, loops, helpers, `Promise.all` and `Promise.allSettled` compose work; `Promise.race`/`Promise.any` cannot expose physical completion order. References/calculation/awaits need no separate keys. Configuration Promises acknowledge commit; message Promises return their originally bound final outcome. Awaited configuration is a real dependency that may need another evaluation.
+### Example: conversation, Run and call identities
+
+A workflow Run with key `review-42` uses `session("reviewer")` and a message call keyed `review-tests`:
+
+| Identity | What it selects in this example |
+| --- | --- |
+| Session key | The reusable reviewer conversation. `session("reviewer")` derives its full key within this Run. |
+| Run Key `review-42` | This execution of the workflow with its exact source and inputs. |
+| Call key `review-tests` | This message submission within the Run. Runtime scopes it to form the core Request Identity. |
+
+Reevaluation recovers the same Session and submission. A fresh Run derives a different Session key from the same short name; to reuse the earlier conversation, pass its inspected full key unchanged. Reusing a Session does not reuse an earlier submission or restart its Run.
+
+### Reevaluating from saved results
+
+An **Evaluation Generation** binds source, arguments, semantics, limits and a fixed **Visibility Snapshot** of Runtime-recorded results/failures. Evaluate from source, return all encountered calls plus root waiting/value/failure, then discard the heap.
+
+No live core replies, retained Promise graph, bytecode, continuations or second dependency interpreter exists.
+
+Functions, loops, helpers, `Promise.all` and `Promise.allSettled` compose work; `Promise.race`/`Promise.any` cannot expose physical completion order. References/calculation/awaits need no separate keys. Configuration Promises acknowledge commit; message Promises return their originally bound final outcome. Awaited configuration is a real dependency that may need another evaluation.
 
 The returned root determines completion. Fulfilled roots need not wait for unrelated calls, but encountered calls must undergo validation/admission before success publication. Their admitted Session work may outlive the Run without reopening it; unawaited JS continuations disappear. Pending roots publish their complete encountered unresolved-call set, without Promise-reachability analysis. Rejected roots follow failure handling; prior admissions remain real.
 
 For example, a workflow configures two named Sessions, awaits both acknowledgments, then submits keyed review messages and joins their Promises in input order. If only the second answer is visible, reevaluation recovers the same calls and the join remains pending. Once both are visible, a keyed summary message consumes those original answers, even if either Session has since done newer work. A rejected message follows ordinary JavaScript catch/allSettled behavior or rejects the root; rejection alone does not invoke Run cancellation or stop other admitted work. Runtime supplies recorded facts; only the evaluator executes the author's join and branch logic.
 
+### Validating and publishing encountered calls
+
 Capture each call's inputs at invocation, before later JS mutation, with strict-data checks. Validate complete evaluator output, known bindings and repeated-key consistency before new intents. Equal replay is read-only; new calls retain encounter order and independently recheck generation/cancellation before intent commit. Core checks request identity/access/Session state independently. Preserve committed prefixes after failure/crash; never claim batch rollback. Atomically publish complete dependencies or terminal output with final generation/cancellation checks. Dependencies unresolved in the live snapshot remain recorded even if results arrive during evaluation/publication.
 
-Run one asynchronous pull loop. Select oldest eligible Run by creation order with stable tiebreak: new Runs, interrupted generations, or suspended Runs with any newly available unresolved dependency. A whole join need not finish before reevaluation. Revalidate terminality/cancellation/generation. Finish one evaluation's outcome handling and physical cleanup, service ready host work, immediately recheck; only no eligible work arms one shared one-second timer. Do not queue missed ticks. No completion hook, ready queue, subscription registry or per-waiter callback/payload is required. On crash, abandon interrupted calculations and capture current original results in a fresh generation; retain committed calls, fence stale publication, never reconstruct historical first visibility. Terminal Runs do not reevaluate.
+### Selecting the next evaluation
 
-Within Runtime's own read transaction, capture available keys, tags and immutable result references into charged private metadata scratch; this read view defines visibility. End it before result-body materialization and evaluation. Materialize captured references through their owning bounded interfaces, finishing DB access before each scratch write and servicing other work between windows. No core-table join or new lease is required. Native lookup reads only prepared immutable descriptors, decodes on demand and releases its reference after handoff. Separate invocations produce separate decoded values; reawaiting one Promise keeps JS identity. No bridge decoded-answer cache is required. Missing, successful null and failure are distinct; malformed ranges, missing captured content, short read or decoding errors fail evaluation. User-held decoded values still consume heap.
+Run one asynchronous pull loop.
 
-Runtime owns prepared input and captured output through the evaluation lifecycle. Preparation streams into charged scratch with no descriptor/file per visible result or call. Derive a bounded descriptor set for the selected representation; traverse ranges/metadata through windows as result count grows. Finish input writes/integrity checks before spawning with completed read-only input. Partial preparation releases its artifacts and starts no child.
+Select oldest eligible Run by creation order with stable tiebreak: new Runs, interrupted generations, or suspended Runs with any newly available unresolved dependency. A whole join need not finish before reevaluation. Revalidate terminality/cancellation/generation. Finish one evaluation's outcome handling and physical cleanup, service ready host work, immediately recheck; only no eligible work arms one shared one-second timer. Do not queue missed ticks. No completion hook, ready queue, subscription registry or per-waiter callback/payload is required. On crash, abandon interrupted calculations and capture current original results in a fresh generation; retain committed calls, fence stale publication, never reconstruct historical first visibility. Terminal Runs do not reevaluate.
+
+### Preparing a fixed visibility snapshot
+
+Within Runtime's own read transaction, capture available keys, tags and immutable result references into charged private metadata scratch; this read view defines visibility. End it before result-body materialization and evaluation.
+
+Materialize captured references through their owning bounded interfaces, finishing DB access before each scratch write and servicing other work between windows. No core-table join or new lease is required. Native lookup reads only prepared immutable descriptors, decodes on demand and releases its reference after handoff. Separate invocations produce separate decoded values; reawaiting one Promise keeps JS identity. No bridge decoded-answer cache is required. Missing, successful null and failure are distinct; malformed ranges, missing captured content, short read or decoding errors fail evaluation. User-held decoded values still consume heap.
+
+### Owning evaluator input and output
+
+Runtime owns prepared input and captured output through the evaluation lifecycle. Preparation streams into charged scratch with no descriptor/file per visible result or call. Derive a bounded descriptor set for the selected representation; traverse ranges/metadata through windows as result count grows.
+
+Finish input writes/integrity checks before spawning with completed read-only input. Partial preparation releases its artifacts and starts no child.
 
 Parent-owned output remains untrusted until protocol/exit checks and full validation succeed; child exit, pipe closure or apparent root value alone cannot publish success. Keep output and validation ranges through the last intent and dependency/outcome transaction. On cancellation, stale generation, failure or shutdown, terminate/reap as needed and close pipes/input/output/metadata after pending I/O ends. Restart discards abandoned artifacts and evaluates fresh saved facts; scratch cannot recover unsaved calls or outcomes.
+
+### Cancelling a Run
 
 Run cancellation durably fences new evaluation/calls, recovers every unanswered saved submission with original inputs, and records all answers. This may newly configure Sessions or start work before stopping it; that effect/cost window is accepted, not rollback. Then promptly request ordinary stops through bounded traversal of distinct Sessions from accepted message calls, before awaiting all completions. References, configuration and reads alone add no stop targets. Core has no Run fence. Do not finish cancellation while submissions or required stops remain unresolved.
 
 After crash, unfinished passes repeat, possibly stopping newer shared work even after prior successful/idle stops; callers coordinate reuse. Saved intent/outcome suffice, without propagation receipts, durable cursors or idle-check records. Committed completion ends propagation. Other Runs observe stops without becoming cancelled.
 
+### Evaluator containment
+
+One evaluator lifecycle includes child execution, output validation/publication or failure handling, and child/pipe cleanup before another begins. Model/tool work and controls remain concurrent; waiting Runs retain no evaluator.
+
+Give the child an empty environment, three explicit stdio pipes and only selected read-only prepared-input descriptors; close writable input handles first and enforce inheritance through construction/close-on-exec. Native bridge may positional-read those descriptors; JS gets no paths, raw descriptors, imports, FFI, filesystem, network, processes, storage, credentials, clock or randomness. No pathname opens or SQLite access are allowed. This is not protection after arbitrary native-code execution.
+
+CPU protection covers native decoding, compilation, JS/job draining and encoding. Elapsed lifetime spans successful spawn through protocol completion and exit; queue wait, external work and parent preparation/publication have their own ownership. Derive cooperative checks and kernel backstop from policy/OS granularity. Deadline expiry begins termination; retain resources until pipes close and child is reaped. Unexplained signals are not specific resource diagnoses. Exhaustion cannot publish partial success.
+
+Bound native allocations/stack separately from engine heap; reuse temporary storage only after references expire. Source may need contiguous storage within budget. Workflow Output is a streamed strict-data value without a separate serialized-size cap. No independent source/argument/result-byte, entry/request-count or microtask quotas merely to preserve fixed tables; use bounded allocation/transfer and CPU/lifetime checks. Retain strict type/prototype/accessor/cycle, duplicate-key, exact-binding, arithmetic, recursion and diagnostic checks. No process pool, numeric descriptor-ceiling scan, exit-time whole-buffer wiping, fixed address-space quota or RSS polling killer is selected. Internal capacities must qualify promised workloads, not silently redefine them.
+
 ## Inspection and local protocol
+
+### Public operations
 
 The adapter exposes Session configuration/messages, observations/history/wait, permission, exact Model Interruption and stops, plus Run create/attach/inspect/cancel. Driving is internal, not public `advance`. Direct CLI is Session-addressed; message text is positional and `-` reads complete stdin. Final command spellings remain implementation work.
 
+### Inspecting Sessions associated with a Run
+
 Run inspection combines Runtime records with ordinary core observations; owners maintain their own consistent observations, but the report may briefly lag and has no global cross-Session revision. It is not evaluator visibility or cancellation authority. List exact full keys and identifying context for associated durable Sessions derived from accepted configuration/messages; unused declarations and rejections establish no association. Recover lost submission answers before relying on association. Configuration-only Sessions are visible even though absent from cancellation's stop set. An agent can inspect W1 and type a selected key unchanged in W2: no output metadata, previous-Run argument, lookup machinery, attachment or snapshot restore. Reuse continues current state.
+
+### Capturing and delivering reports
 
 Capture complete reports with bounded traversal/encoding and charged scratch, releasing each owner's DB resources before delivery. A slow client holds no transaction. Service controls and settlement between queued reports without starving inspection; individual calls/captures/imports remain non-preemptible. No collection cap, public pagination/cursor, hard capture deadline or successful partial report is permitted. Include every actionable permission and logical collection member with observed state. Larger strings stream through fixed windows/block writes; scratch/window size is not a field limit.
 
 The report owner retains completed scratch through delivery; the connection borrows bounded reads. Capture failure releases incomplete scratch and returns an observation error. Partial writes continue at the unsent offset; disconnect/timeout/delivery failure closes the exchange and releases scratch after pending I/O ends. Slow delivery retains ordinary client capacity and scratch, with no detached report queue or execution credit. Restart discards captures; new inspection observes current committed facts.
+
+### Work state and wait conditions
 
 Message-call work summaries have precedence: terminal outcome; otherwise admitted execution or future retry eligibility is `in_flight`; otherwise actionable permission without progress is `waiting_for_permission`; otherwise `runnable`. Terminal categories are `completed`, `failed`, `cancelled`. Run `permission_required` means actionable permission exists and no member work can currently progress. Preserve original message-result bindings as Sessions advance. Direct waits select current work once, not indefinitely following later work. History supports recent entries, kind filters and after-position reads; unapplied input/reasons remain separately reachable.
 
@@ -246,29 +503,57 @@ A Session wait observes without starting or resuming work. The default returns w
 
 Ordinary Session inspection shows pending-message count alongside work state or the latest outcome, including after failure. Pending input is normal Session state, not an abandoned-input warning; stop/cancellation-excluded input remains distinguishable as not applied. Full input content and reasons are available through the separate message reads.
 
+### Outcomes and observation errors
+
 Inspection and terminal-state waits return observed outcomes, including failure/cancellation, as data. Failure to obtain an observation is a separate error, not evidence that the work failed or a submission was rejected. Configuration/message admission returns its committed acceptance or rejection under the Request Identity protocol; communication loss leaves that answer uncertain until recovered. Workflow message Promises instead deliver the bound answer or reject with the recorded failure/cancellation under the workflow contract. These are distinct interfaces to the same authoritative facts.
 
+### Wire format and command output
+
 HTTP owns closed versioned JSON; CLI defaults to deterministic Markdown over the same facts, with explicit JSON rendering. Compiled public types and exhaustive golden fixtures own fields, unions, omissions and integer encodings; `u64`-class values are JSON strings. No handwritten duplicate schema or generic native command/result union. Stdout is selected data, stderr diagnostics. Delivered workflow failure is a valid zero-exit result; invocation/access/infrastructure/rendering failure is nonzero. Truncated delivery fails explicitly.
+
+### Connection capacity and control headroom
 
 Connections serve one exchange then close, without pipelining/idle keepalive. Seal/validate charged ingress; incomplete uploads publish nothing. Preserve short-control headroom for Session stop, Run cancellation, Model Interruption and Permission Decision acknowledgments; waits/reports/transfers use ordinary capacity. Transfer inactivity excludes host processing/backpressure; progressing transfers have no minimum rate/total deadline. Timeout releases temporary connection state, not committed work. Floods/OS exhaustion remain possible.
 
 Control headroom permits admission and durable acknowledgment, not a connection held until stop/cancellation completion. Observe completion through ordinary-capacity reads after acknowledgment. If even control capacity is unavailable or the reply is lost, the caller cannot infer whether a control committed. Follow the control's domain rules: exact-target controls retain their supplied target, while Session-stop resubmission follows the current-work selection rule above. Reconnection obtains a fresh complete observation, not a continuation of a partially delivered report.
 
+### Ingress ownership through admission
+
 Ingress remains connection-owned through the receiving core/Runtime owner's import or rejection. Disconnect before complete capture releases it without mutation; once admission is in progress, disconnect cannot revoke it or close its source before commit/rollback and the last read. Complete upload alone is not admission. A lost configuration/message reply recovers through Request Identity; Run creation uses its Run Key, and controls follow their domain rules. Restart never imports leftover ingress.
 
-## Evaluator containment
+## Platforms and server lifetime
 
-One evaluator lifecycle includes child execution, output validation/publication or failure handling, and child/pipe cleanup before another begins. Model/tool work and controls remain concurrent; waiting Runs retain no evaluator. Give the child an empty environment, three explicit stdio pipes and only selected read-only prepared-input descriptors; close writable input handles first and enforce inheritance through construction/close-on-exec. Native bridge may positional-read those descriptors; JS gets no paths, raw descriptors, imports, FFI, filesystem, network, processes, storage, credentials, clock or randomness. No pathname opens or SQLite access are allowed. This is not protection after arbitrary native-code execution.
+### Platform capabilities
 
-CPU protection covers native decoding, compilation, JS/job draining and encoding. Elapsed lifetime spans successful spawn through protocol completion and exit; queue wait, external work and parent preparation/publication have their own ownership. Derive cooperative checks and kernel backstop from policy/OS granularity. Deadline expiry begins termination; retain resources until pipes close and child is reaped. Unexplained signals are not specific resource diagnoses. Exhaustion cannot publish partial success.
+Target Linux/macOS on x86-64/ARM64 through capabilities, not distribution allowlists. Minimum OS/kernel/libc follows build/API requirements; incompatibility rejects. Run checks on the available Mac; elsewhere use source/API/dependency/cross-compilation evidence, labeling unexecuted assumptions. No Linux runtime fleet/matrix is required. Crash tests do not certify power loss; keep platform memory metrics and unavailable counters distinct.
 
-Bound native allocations/stack separately from engine heap; reuse temporary storage only after references expire. Source may need contiguous storage within budget. Workflow Output is a streamed strict-data value without a separate serialized-size cap. No independent source/argument/result-byte, entry/request-count or microtask quotas merely to preserve fixed tables; use bounded allocation/transfer and CPU/lifetime checks. Retain strict type/prototype/accessor/cycle, duplicate-key, exact-binding, arithmetic, recursion and diagnostic checks. No process pool, numeric descriptor-ceiling scan, exit-time whole-buffer wiping, fixed address-space quota or RSS polling killer is selected. Internal capacities must qualify promised workloads, not silently redefine them.
+| Owner | Selected mechanism |
+| --- | --- |
+| Transport | Bundle pinned libcurl and OpenSSL, selecting stable versions deliberately rather than floating build-time dependencies; supported asynchronous resolver. Use Apple SecTrust on macOS, host CA certificates on Linux, and explicit CA-file configuration where needed. Missing trust/capabilities fail; never disable verification. Transport owns initialization, resolver lifetime and cleanup. |
+| Storage | Bundle pinned thread-safe SQLite with single-owner access and native VFS. Use local filesystems; network/shared-mounted Stores are unsupported. Enable macOS fullfsync. |
+| Evaluator | Bundle pinned QuickJS; child-scoped CPU/stack protection and parent termination/reaping on both systems. Disable core dumps with `RLIMIT_CORE=0`; Linux also sets `PR_SET_DUMPABLE=0` after exec, before sensitive input. Failure prevents evaluation. |
+| Credentials | macOS Keychain; explicitly configured Linux Secret Service or explicitly selected owner-only plaintext file. Check ownership/access, preserve account binding and atomically persist refresh. No silent fallback. Plaintext is readable by same-user programs, including authorized Bash; it is never copied into semantic data, logs or child environments. |
+| Files/processes | Configurable disk-backed scratch and installed Bash with optional executable path. Report known memory-backed scratch as incompatible with disk-first guarantees; unknown backing is a deployment assumption. Process-group cleanup promises neither detached-descendant containment nor rollback. |
+
+### Exclusive Store ownership
+
+`onepage serve` acquires an exclusive OS-held Store lock before recovery, stale-endpoint reclamation or dispatch, retaining ownership until no dispatch or semantic writes remain possible. Locking and pathname Unix-socket discovery share one bounded canonical Store selector: equivalent supported paths cannot create two owners; unsupported aliases and unrepresentable derived paths reject. Do not use Linux abstract sockets. Close-on-exec prevents descendants inheriting ownership. PID metadata, socket existence, timeout and absent results prove neither ownership nor effect termination.
+
+Protect socket/parent directory; validate Store identity/wire version before mutation. Reclaim only the expected stale socket after ownership. Unavailable/inaccessible/competing owners reject. Clients never auto-start or access SQLite; disconnects/timeouts do not cancel work.
+
+### Infrastructure shutdown
+
+Infrastructure shutdown promptly fences dispatch, interrupts supported effects and safely collects evidence/cleans up without awaiting model completion or inventing user stops/cancellation. Explicit restart preserves recovery allowance; remote effects and duplicate model cost remain possible.
 
 ## Resources, storage and diagnostics
+
+### Capacity and fair selection
 
 **Active Capacity** is one startup-fixed array of content-free custody records. Neutral entries are no-ops; scan the full array, without free/active lists or durable slots. One occupied record is one Active Credit from reservation through execution and safe cleanup, not a second pool. No per-waiter execution resources or permanent Edit lane. Permission waits retain only durable facts; Edit validation/build/copyback acquires shared capacity after authorization.
 
 When capacity is unavailable, keep eligible work in SQLite without Attempt, allowance consumption, request materialization or wait flag. Select oldest eligible Operation by durable admission order and stable tiebreak, filtering blocked permission/retry work first. Approval/retry/restart do not reset age. Revalidate at Attempt admission. Handle events, save results, release safely and fill capacity before OS/event-library wait for client/provider/process/cleanup/deadline activity. Register/recheck without losing wakeups; the local writer rechecks after writes, not a SQLite watcher. Required retry polling occurs once per second with indexed due queries, bounded service and no missed-tick backlog. Full capacity or an empty array is no reason to spin. Service ready controls and due cleanup between individual settlements, socket events and completed-transfer notifications, outside library callbacks; ordinary settlement and inspection must also progress.
+
+### Memory ownership and configured bounds
 
 Every large value travels through bounded windows and explicitly owned scratch/content stages, not payload-sized resident copies. Dormant Sessions, terminal Turns and waiting Runs retain no resident graph, worker, socket or credit. Library/transport/evaluator allocations remain separately bounded; static custody is not whole-process static allocation. Measure allocator-live, retained allocations and physical footprint separately; release need not lower RSS immediately. Model-requested subprocess memory is separately observed workload; OnePage helpers count as orchestration.
 
@@ -288,15 +573,19 @@ Every large value travels through bounded windows and explicitly owned scratch/c
 | Diagnostics | Startup default 128 MiB, at most 16 files, each floor(cap/16), 4 KiB encoded record. Detail shares cap; exports consume scratch. |
 | Qualification, not admission | Whole OnePage footprint ≤256 MiB at defined 1,000-operation model/Bash/Edit/mixed fixtures, including evaluator/helpers; same cold/retained-idle ceiling. Idle CPU <1% one core; model reference ≤2 cores average; p95 durable control acknowledgment ≤1 s; light/free-capacity retry discovery ≤2 s after due. |
 
-Retry temporary connection failures, body inactivity, rate limits and temporary server failures within frozen-request allowance. Permanent requests/output errors, unfixable authentication, canonical storage and deterministic continuation failures are not blind-retry candidates. Overflow uses compaction, never repeated compaction that cannot make input fit. Local admission/preparation time is not provider-response inactivity. Persist used allowance and eligibility; restart/configuration/compaction cannot reset accounting or rewrite admitted timeout/saved results. Provider timeout ends local waiting, not remote processing. Retry exhaustion obeys Turn-settlement obligations. Host policies load at startup, with no live reload. Bash expiry initiates cleanup and yields a typed timeout result, without rollback, descendant-stop certainty or automatic replay; permission/capacity waits consume no Bash execution time.
+### Qualification measurements
 
 Qualify stable memory across churn/history growth. Model CPU fixture: 1,000 streams ×100 small SSE events/s, short requests, bounded terminal bursts; exclude fixture server. Measure tool/mixed CPU separately. Include capture/import contention; report maximum delays and cleanup separately from p95 acknowledgment, discovery separately from dispatch. Misses require explicit implementation/default/target review, not helper exclusion or RSS killing.
 
 ### Scratch, tool output and accounting
 
+#### Shared scratch ownership
+
 One shared temporary owner covers request/response/metadata, ingress, reports, exports, Edit output and retained spillover. Canonical SQLite and persistent diagnostics are separate; temporary copies count. Model request/response files may overlap; Bash has separate stdout/stderr and optional input files; client ingress/outgoing roles may overlap. These derive accounting, not file quotas. Ownership transfer preserves charges. Protect current work/publication/delivery/I/O. Release files with no later consumer; optional **Spillover Output** becomes disposable after its excerpt/result is saved and execution releases it. Evict oldest eligible retained files to satisfy reservations, not LRU, a background expiry service or per-tool pool.
 
 Reserve growth before I/O with checked arithmetic and serialized owner accounting. Charge sparse gaps and simultaneous copies; overwrites need no new charge. Return unused reservation after short/error writes. Private scratch charge survives unlink and pending I/O, releasing only after successful shrink or safe final closure. No writable alias may bypass accounting; no per-write heap allocation, directory scan, SQLite transaction or global lock across disk I/O. Logical bytes do not model block rounding/cache/compression or reserve real disk space.
+
+#### Retained output and its index
 
 Published spillover is an ordinary absolute path, never reused by OnePage for different output. Charge OnePage-produced bytes while its name is retained. External additions/links and bytes held by external readers after retained-name removal are outside that allowance. Successful removal plus closure of OnePage handles releases retention charge; unknown external readers neither pin FIFO eligibility nor require a registry. Optional retained files retain neither execution credits nor open per-file handles. The temporary owner keeps their retention index on disk and reads it through bounded windows; no history-sized resident file list or separate tracking-space quota is selected.
 
@@ -304,7 +593,11 @@ Charge the retention index, including unfinished writes and unreclaimed records,
 
 The selected index representation must support incremental append, oldest-entry traversal and reclamation with bounded memory/open handles, including at a full allowance. Reclaim or reuse consumed metadata without an ever-growing deletion history or requiring a full-index copy to make space. Charge any overlapping storage before creating it. Derive the maximum retained-file population from the scratch allowance and the representation's minimum per-file record cost; add active/protected file populations from their fixed owners. This bounds logical population, not filesystem metadata, real disk availability or cleanup latency: measure those costs and handle OS exhaustion explicitly under the existing failure policy. The index carries disposable retention information only; restart may discard it with its owned spillover and never uses it to settle or replay an Operation.
 
+#### Tool excerpts and full output
+
 Tool output has no per-call total capture cap. Short output is complete; larger output saves status, tail excerpt, omission notice and path, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing. Failed full capture cannot masquerade as successful preservation. Full output is read through ordinary Bash permissions/timeouts/excerpts, not a new Read tool or whole-file context injection. FIFO or Host exit/crash may remove it; unavailability leaves saved results unchanged and never authorizes replay. Canonical permission, Edit intent and outcome evidence are not disposable spillover.
+
+#### Exhaustion and cleanup
 
 If safe reclamation cannot provide space before admission, wait without Attempt. Exhaustion after admission stops the affected execution safely and returns explicit storage failure: no RAM fallback, silent truncation, indefinite quota-holding wait or redispatch. Retain custody/evidence through settlement. Real volume exhaustion is independent of the configured cap. Small controls need no execution credit or content scratch, but still need canonical writes.
 
@@ -318,9 +611,13 @@ Failed shrink/removal/closure cannot be recorded as reclaimed capacity. Keep unr
 
 Enforce a finite internal SQLite heap, deriving cache/window/statement capacities against whole-Host targets; no separate caller SQLite tuning or artificial database/page-count quota/emergency reserve. Large incremental imports must not retain payload-sized dirty-page memory. Verify effective spill/cache/heap enforcement, not merely setter success. Use DELETE/EXTRA, mmap off, file-backed temporary work, immediate `busy_timeout=0`, foreign keys, defensive/untrusted-schema configuration and disabled unused attachment/extension/trigger/worker features. Required features need concrete consumers.
 
+#### Canonical content reads and retention
+
 A canonical Content Reference is a durable identity, not an open file or transferable SQLite handle. Its owning interface opens read-only access into bounded caller-owned buffers; closing the reader invalidates its handle, not the copied bytes or reference. Close readers before their parent view. Scratch ranges/view-scoped handles cannot be stored as canonical references. Runtime materializes core-owned results through the ordinary core interface; adapters/evaluators receive no SQLite connection. Private continuation access remains exclusive to the Operation-bound provider view.
 
 Committed content remains available for saved requests, historical Operation views, workflow materialization and recovery. Temporary cleanup cannot invalidate it; V1 selects no canonical-content garbage collection or new lease. Read failures cannot masquerade as EOF/successful prefixes; missing/corrupt required content follows the Host-wide storage-fault boundary. Trusted local facts need no repeated external-syntax validation.
+
+#### Connection recovery and representation bounds
 
 After transaction error, resolve rollback and confirm autocommit before reuse; uncertain connections cannot continue. Bound query work through indexes and service between transactions, not window-size assumptions. `SQLITE_LIMIT_VDBE_OP` limits compiled size, not runtime; its `SQLITE_NOMEM` is not necessarily physical exhaustion.
 
@@ -330,29 +627,21 @@ Keys preserve exact text without trimming, case folding, Unicode normalization o
 
 ### Diagnostics and authentication
 
+#### Diagnostic records and export
+
 Use one bounded append writer for newline-delimited diagnostic records with identity, timing, classification and available versions. Rotate oldest closed files before growth; framing/active file count. Preserve mandatory fields, mark optional-text omission, or omit a record that cannot fit. Reject a cap unable to fit one record per file. No age-based expiry, compression or separate diagnostic DB. Restart preserves records, drops incomplete tail, and prunes reduced caps before growth. Per-record fsync is unnecessary. Failed write/deletion stops or drops diagnostic writes with bounded notice, never semantic failure, false reclaimed space or a RAM backlog.
 
 Explicit payload detail uses bounded chunks with capture identity/order/completeness in the same files; missing chunks never imply complete capture. Export recent complete records in bounded turns into charged scratch, recording cutoff/rotation gaps. Close source handles between turns so slow export cannot pin deleted logs. Scratch failure is explicit. Diagnostics never authorize effects, choose recovery or replace accepted/private continuation; absent detail may require reproduction. No automatic upload exists.
 
 The append writer alone mutates diagnostic files. Partial writes leave incomplete records for tail repair/chunk-completeness handling. Export capture/delivery uses ordinary client capacity and report-scratch ownership, including failure release after pending I/O. Derive source-handle population from the writer and current bounded export reads, including rotation overlap.
 
+#### Authentication and transport lifetime
+
 Codex is a private authentication/transport adapter, not a CLI/SDK dependency or SQLite/Conversation/retry owner. Resume uses persisted provider binding, without fixture/provider substitution. Refresh preserves account binding; decoded trusted-TLS-peer token claims are routing metadata, not independently verified identity. Encode provider strings with one bounded JSON encoder including all required control escapes and worst-case expansion. Before header reuse reject NUL/CR/LF/other ASCII controls and non-ASCII token/account bytes. Consumed compact access tokens require three nonempty dot-separated segments and validated claim encoding/shape. Account IDs are nonempty opaque exact strings, not UUIDs. No independent token/account length quota, JWT verification/JWKS/discovery or generic OAuth framework; bounded credential/encoding owners fail explicitly on exhaustion.
 
-The credential owner serializes mutation of the selected backend and hands transport a read-only credential value whose lifetime covers its final header consumer. Refresh must validate account continuity and atomically save replacement credentials before handing them out; failed load, refresh or save returns an explicit authentication/backend failure without a model request or alternate backend. Release private credential buffers after their last consumer. Credential preparation does not grant another model dispatch: HTTP authentication rejection returns evidence to core under the ordinary failure policy. DNS/TLS/library/capture failures likewise retain their distinct cause and launch uncertainty; cancellation requests local teardown without asserting remote termination. Transport owns callback/header/request lifetimes through teardown and exposes neither credentials nor native mutable handles to core settlement.
+The credential owner serializes mutation of the selected backend and hands transport a read-only credential value whose lifetime covers its final header consumer. Refresh must validate account continuity and atomically save replacement credentials before handing them out; failed load, refresh or save returns an explicit authentication/backend failure without a model request or alternate backend. Release private credential buffers after their last consumer.
 
-## Exact Edit
-
-`edit` accepts one existing-file path and a nonempty replacement list. Each entry supplies one-based start-inclusive/end-exclusive whole-line coordinates, expected text and replacement text, all against the same execution-input state. Reject overlap; adjacent nonempty ranges are allowed. Combine insertions sharing a position or lying inside/at another replacement boundary. No search, relocation, fuzzy matching, replace-all, multi-file batch, file creation/deletion/rename/mode change or whole-file freshness guard exists. Empty replacement deletes text, not the file.
-
-LF separates lines; CR in CRLF remains exact. An empty file has zero lines; a final nonempty unterminated segment is a line; trailing LF adds none. For N lines require `1 <= start <= end <= N+1`. `[4,7)` selects lines 4–6; `[4,4)` inserts before 4 with empty expected text; `[N+1,N+1)` appends, including `[1,1)` in an empty file. Expected text includes selected terminators. Replacement bytes are literal: no normalization or implicit newline; appending to an unterminated line joins it unless replacement begins with LF. Insertion checks position only; replace adjacent context to demand text freshness.
-
-Save/display the submitted proposal after shape validation without reading target. Preview is proposed snippets/coordinates, not verified current content. Authorization binds exact path/ranges/text. Bash supplies reads and file/directory creation: number before slicing to preserve coordinates (`cat -n -- file | sed -n '40,80p'`); display numbers are not expected bytes and truncated output is no snapshot. Missing Edit targets fail. Ordinary absolute/relative filesystem access applies without Git tracking, repository membership or Workspace containment rules.
-
-After authorization and Attempt admission, open existing target without create/truncate. Validate eligibility and every expected slice while streaming complete edited output into charged immediately unlinked scratch. Any mismatch/read/scratch failure before completion leaves target untouched. Only then copy output through the same opened target, set final length afterward and flush. Never pretruncate or rename-replace the inode. Empty output makes truncation the first mutation. Partial write/truncate/flush failure may change bytes; report actual evidence/uncertainty, never rollback or false success.
-
-The canonical descriptor is read-only. Keep its readers, the same target handle and the one output scratch through their final consumers and pending I/O, closing before custody release. Completed scratch is copyback input only. Cancellation/partial copyback cannot release a buffer still used by I/O; read failures after mutation cannot claim not-applied.
-
-Edit owns target/scratch/buffers/offsets/cleanup within one trusted in-process module, with bounded service turns and no worker pool or separate timeout. No complete line/file/edit-list residence, source snapshot or durable replay backup is required. Preserve opened-target semantics and safe handle eligibility, not guessed universal inode identity; concurrent writers/path replacement remain caller-coordinated. Unselected content is preserved from execution input, not isolated against later writers. Core owns permission/outcome; Edit has no SQLite/credentials or retry policy. After custody loss, discard scratch and return indeterminate without automatic inspection, replay or repair.
+Credential preparation does not grant another model dispatch: HTTP authentication rejection returns evidence to core under the ordinary failure policy. DNS/TLS/library/capture failures likewise retain their distinct cause and launch uncertainty; cancellation requests local teardown without asserting remote termination. Transport owns callback/header/request lifetimes through teardown and exposes neither credentials nor native mutable handles to core settlement.
 
 ## Remaining decisions
 
