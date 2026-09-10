@@ -1,5 +1,9 @@
 # Session creation and existing references
 
+## Accepted amendments — 10 September 2026
+
+The accepted [Session initialization and reuse decision](session-initialization-proposal.md) supersedes separate creation, generated-ID discovery and implicit first-message initialization: callers construct references locally; first complete configuration establishes the Session; exact full keys from Run-state inspection can be used unchanged in later workflows. The [shared request contract](shared-request-identity.md) gives direct and workflow configuration/message submissions the same stable acceptance/rejection replay, with independent workflow bookkeeping. The original discussion below is historical where it differs.
+
 > **Historical design exploration, published 6 September 2026.** The [normative architecture](../../ARCHITECTURE.md) and [product contract](../../PRODUCT.md) own the current design. Earlier signatures, issue ownership, status statements, and unselected alternatives below retain their original context; they are not a second current specification.
 
 Status: historical comparison, 5 September 2026. Separate creation was accepted; the later accepted surface is `createSession({ key })` returning a plain ID and `sendMessage(id, message, { key })`. The handle/get syntax below was not selected. No implementation is claimed. Completes the next question in [Choose replay-stable Session continuation from agent results](https://github.com/DivyanshGolyan/onepage/issues/101), after selection of `send(): Promise<Answer>`.
@@ -45,7 +49,7 @@ The creation result must be visible to a later disposable evaluation as a small 
 ## Existing contract and source evidence
 
 - [Version model-visible Session context and bind exact model requests](https://github.com/DivyanshGolyan/onepage/issues/59) currently explicitly forbids empty Sessions. [Direct CLI exploration](direct-session-cli.md) also assumes creation with a first message. Separate creation needs an explicit amendment, not an inference that the rule has already changed.
-- [Architecture](../../ARCHITECTURE.md#workflow-runs) and [product contract](../../PRODUCT.md) describe an older combined first-message admission. The context requirement that Session and its complete baseline commit together can be preserved with separate creation.
+- [Architecture](../architecture/workflows.md#workflow-runs) and [product contract](../../PRODUCT.md) describe an older combined first-message admission. The context requirement that Session and its complete baseline commit together can be preserved with separate creation.
 - [Session glossary](../../CONTEXT.md) requires reusable linear Conversation, not a minimum message count.
 - [Current Session implementation](../../src/session.zig) uses the earlier ledger runtime: `create` requires root task content, and `openExisting` reads storage, binds scratch, validates Workspace, and claims ownership. It is not the proposed lightweight `get(id)` wrapper.
 - [Evaluator source](../../src/workflow_evaluator.zig) currently supplies only `agent()` and one pending/recorded-result Promise. Neither creation alternative is an implemented workflow API.

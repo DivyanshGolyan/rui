@@ -1,5 +1,9 @@
 # Keep execution control simple
 
+## Subsequent ownership amendment — 10 September 2026
+
+The [direct transactional operation](transactional-operations.md), [independent workflow](shared-request-identity.md) and [observation](two-session-workflow-trace.md#observation-and-permission) decisions amend the earlier integrated-classifier and globally atomic Run-capture assumptions. Preserve single-owner serialization and physical custody until cleanup, while Workflow Runtime observes core status through its API. Earlier contention measurements remain evidence for their tested mechanism, not certification of the revised composition.
+
 > **Dated decision trace, published 6 September 2026.** The [normative architecture](../../ARCHITECTURE.md) and [product contract](../../PRODUCT.md) own the current design. Earlier signatures, issue ownership, status statements, and unselected alternatives below retain their original context; they are not a second current specification.
 
 Accepted 5 September 2026 after the user reviewed the experiments and explicitly requested updates to the issues and docs. These decisions amend the proposed Host Runtime, not its implementation. Numeric budgets and production certification remain outstanding.

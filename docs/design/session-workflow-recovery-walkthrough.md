@@ -1,5 +1,9 @@
 # Session workflow recovery walkthrough
 
+## Accepted amendments — 10 September 2026
+
+The accepted [Session initialization and reuse decision](session-initialization-proposal.md) supersedes separate creation, generated-ID discovery and implicit first-message initialization: callers construct references locally; first complete configuration establishes the Session; exact full keys from Run-state inspection can be used unchanged in later workflows. The [shared request contract](shared-request-identity.md) gives direct and workflow configuration/message submissions the same stable acceptance/rejection replay, with independent workflow bookkeeping. The original discussion below is historical where it differs.
+
 > **Historical design exploration, published 6 September 2026.** The [normative architecture](../../ARCHITECTURE.md) and [product contract](../../PRODUCT.md) own the current design. Earlier signatures, issue ownership, status statements, and unselected alternatives below retain their original context; they are not a second current specification.
 
 Status: decision walkthrough, 5 September 2026. The sequence below exercises accepted Session/workflow behavior. The configuration return value remains proposed. The user accepted that workflow cancellation composes ordinary Session-stop completion, regardless of who submitted the stopped work; ordinary stop completion now means the selected work's durable terminal outcome and atomic Session occupancy release. This is a paper trace, not an executed recovery test or production implementation.

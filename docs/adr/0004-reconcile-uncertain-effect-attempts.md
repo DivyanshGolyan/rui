@@ -4,6 +4,10 @@ status: amended by ADR-0021
 
 # Reconcile uncertain effect attempts instead of replaying operations
 
+## Accepted amendment — Unified uncertain-tool recovery (10 September 2026)
+
+Bash and Edit share the [no-replay rule](../design/unified-tool-recovery.md): if an admitted execution may have started and its outcome cannot be established, save an indeterminate Tool Result without mandatory Edit target inspection or comparison. The Agent may investigate with new ordinary tool calls. Preserve exact authorization, live effect cleanup and the separate model replacement policy. [ADR-0026](0026-let-operations-own-current-execution-and-final-results.md) continues to own current execution facts and final Resolution; old per-try authority and automatic reconciliation below are superseded.
+
 ## Accepted native Edit amendment — 6 September 2026
 
 [ADR-0027](0027-use-an-in-process-exact-edit-module.md) replaces Git-backed unified Patch with the in-process exact Edit module behind the Action adapter. The closed executable inventory is `bash` and `edit`. Preserve permissions, exact preimage/postimage intent, uncertainty and recovery; Host authority stays separate from edit mechanics. Git-specific helper/scratch requirements and old Patch names below are historical where superseded. The current [Edit contract](../architecture/execution.md#native-edit-module) and [verification](../verification/execution.md#native-edit-verification) govern implementation; this is not production certification.

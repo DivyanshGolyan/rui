@@ -4,6 +4,10 @@ status: accepted
 
 # Use one disk-first bounded Host Runtime
 
+## Accepted amendment — Direct operations, bounded tracking and independent workflows (10 September 2026)
+
+Use [direct transactional operations](../design/transactional-operations.md): validate content before the transaction, check current saved state and mutate within it, dispatch effects after commit. No mandatory pure classifier/interpreter remains. Complete response validation stays sequential with bounded windows; a worker requires measured justification. [Fixed tracking](../design/fixed-execution-tracking.md) preallocates exactly active_capacity content-free neutral/occupied records, selects oldest eligible durable work, retains custody until safe cleanup and waits on OS events/deadlines when idle. [Shared keyed requests](../design/shared-request-identity.md) separate core transactions from Workflow Runtime bookkeeping; progress observations need no globally atomic cross-Session view. [Unified recovery](../design/unified-tool-recovery.md) and [exact Edit](../design/fixed-location-edit-approval.md) supersede post-crash target reconciliation and pre-approval whole-file preparation. Preserve Operation-owned current execution/results from ADR-0026 and the selected resource bounds; [platform evidence](../design/platform-contract-review.md) distinguishes tested Mac behavior from unexecuted compatibility assumptions.
+
 For implementation, read the consolidated [execution](../architecture/execution.md), [resources](../architecture/resources.md) and their linked verification contracts. The record below preserves the original decision and later amendments; superseded wording is historical.
 
 ## Accepted resource and visibility closeout — 8 September 2026

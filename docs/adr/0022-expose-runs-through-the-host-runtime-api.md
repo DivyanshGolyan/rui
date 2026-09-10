@@ -4,6 +4,10 @@ status: accepted
 
 # Expose Runs through the Host Runtime API
 
+## Accepted amendment — Caller keys and Workflow Runtime ownership (10 September 2026)
+
+The Session core exposes the same keyed configuration/message admission and original-answer replay to direct callers and [Workflow Runtime](../design/evaluator-coordinator-boundary.md). Runtime owns Run state and its private evaluator; [saved submissions](../design/shared-request-identity.md) recover across independent core/workflow transactions. Caller-owned Session references need no round trip; first complete configuration initializes state. Run inspection exposes exact associated Session keys with identifying context so an agent can write a selected key unchanged into another workflow. Reuse continues current Session state, without output metadata or attachment machinery. Core admission acknowledges commit before provider dispatch; workflow message Promises still return the original bound final result. Older keyless, separate-creation and integrated-transaction passages are superseded.
+
 For implementation, read the consolidated [Run interface](../architecture/workflows.md#run-interface) and [verification](../verification/workflows.md#run-interface). The record below preserves the original decision and later amendments; superseded wording is historical.
 
 ## Accepted client/server and Session amendment — 5 September 2026

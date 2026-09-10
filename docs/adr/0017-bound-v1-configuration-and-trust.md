@@ -1,5 +1,9 @@
 # Bound V1 configuration and trust established mechanisms
 
+## Accepted amendment — Platform and Session configuration (10 September 2026)
+
+The accepted [platform contract](../design/platform-contract-review.md) retains macOS Keychain and permits explicit Linux Secret Service or owner-only plaintext credential storage, never silent fallback; same-user readability of plaintext is an accepted tradeoff. Pinned bundled libcurl/OpenSSL, local Store, disk-backed scratch and configured trust replace old platform assumptions. [Session configuration](../design/session-initialization-proposal.md) acknowledges its durable commit without provider work, with the first complete configuration establishing state. Supported mutable fields remain with the owning contract; acknowledgment timing is no longer open.
+
 For implementation, read the consolidated [context](../../ARCHITECTURE.md#sparse-context-and-exact-model-requests) and [permission](../../ARCHITECTURE.md#tools-and-permission) contracts. The record below preserves the original decision and later amendments; superseded wording is historical.
 
 ## Accepted resource-policy amendment — 8 September 2026

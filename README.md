@@ -16,13 +16,15 @@ Session
             └── immutable final Resolution and content references
 ```
 
-A Caller supplies a JavaScript Workflow Definition and stable Run Key. One native Zig Host Runtime owns Workflow Runs, reusable Sessions, Turns, providers, tools, permissions, recovery, capacities, and one SQLite Host Store. QuickJS is a disposable workflow evaluator, not another agent runtime.
+A Caller supplies a JavaScript Workflow Definition and stable Run Key. The Session core owns reusable conversations and execution; Workflow Runtime owns Runs and uses the ordinary core API with recoverable keyed submissions. Its private disposable QuickJS evaluator computes from fixed inputs and returns requested work. Both fit within the local Host server without sharing each other’s transaction ownership or requiring separate deployments.
+
+Session references are caller-owned keys. First configuration establishes durable Session state, later changes apply in order, and messages are separate admissions. Run inspection reveals associated Session keys so an agent can continue selected conversations in a later workflow. The [consolidated architecture](docs/design/consolidated-architecture.md) links the accepted decisions and remaining readiness work.
 
 ## Current status
 
-The redesigned V1 must support Linux and macOS. The current implementation and existing build instructions remain macOS-specific; Linux support is not yet implemented or qualified. The [platform contract decision](https://github.com/DivyanshGolyan/onepage/issues/126) evaluates every macOS-only assumption and the mechanisms and evidence required on both systems.
+The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through explicit required capabilities. The current implementation and build instructions remain macOS-specific. The accepted [platform contract](docs/design/platform-contract-review.md) uses runtime evidence from the available Mac and source/API/cross-compilation evidence elsewhere; unexecuted target behavior remains an assumption. External native consumers and Durable Object hosting are design probes, not initial support commitments.
 
-The production source still implements the historical deterministic single-Session runtime, SQLite Host Store, provider-neutral model path, Codex subscription adapter, permissioned Bash and one-file patch execution, effect-specific recovery, and disposable QuickJS evaluator kernel. It does not yet implement the relational Session/Turn or disk-first Host Runtime decisions. The accepted native exact Edit module also remains design work: it replaces Git-based patch preparation/application, but production source still uses the historical tool.
+The production source still implements the historical deterministic single-Session runtime, SQLite Host Store, provider-neutral model path, Codex subscription adapter, permissioned Bash and one-file patch execution, effect-specific recovery, and disposable QuickJS evaluator kernel. It does not yet implement the relational Session/Turn or disk-first Host Runtime decisions. The accepted native exact Edit module also remains design work: approved whole-line replacements are checked together, prepared in bounded scratch and copied through the same opened target; uncertain Bash and Edit effects are never automatically replayed. Production source still uses the historical tool.
 
 The remaining V1 work replaces the historical terminal-Session/ledger implementation with relational reusable Sessions and Turns, adds sparse model-context versioning, and integrates the existing components into durable Workflow Runs with new production verification. [V1 design readiness](https://github.com/DivyanshGolyan/onepage/issues/2) indexes the remaining decisions and research; it is not an implementation checklist.
 
@@ -44,7 +46,7 @@ Readiness requires the V1 behavior decisions, provider evidence, and minimal res
 
 The superseded Run Snapshot and Interaction Response Batch schemas were deleted rather than migrated. The replacement HTTP/CLI contract must publish its exact closed JSON fields, unions, omission rules, and integer encodings through compiled public types and golden fixtures; no new handwritten schema is accepted in advance of that implementation.
 
-Accepted ADRs are normative subject to their explicit amendments; superseded passages retain historical meaning. The [accepted-baseline reconciliation](docs/design/accepted-baseline-2026-09-08.md) traces issue resolutions to their owners and distinguishes the open redesign from this baseline. Historical spikes, measurements, design records, and research explain how the project reached the current decisions but do not override them.
+Accepted ADRs are normative subject to their explicit amendments; superseded passages retain historical meaning. The [8 September baseline reconciliation](docs/design/accepted-baseline-2026-09-08.md) records the earlier publication. The [current decision consolidation](docs/design/consolidated-architecture.md) records its subsequent amendments and distinguishes accepted design from final readiness. Historical spikes, measurements, design records, and research explain how the project reached the current decisions but do not override them.
 
 ## Deterministic fixtures
 
@@ -59,7 +61,7 @@ These use the same provider-neutral Conversation, Attempt admission, permission,
 
 ## Codex subscription
 
-OnePage is its own Codex client. It does not invoke the Codex CLI or load an OpenAI SDK. Authorization uses OpenAI's browser/device flow and stores access, refresh, and account binding only in macOS Keychain.
+OnePage is its own Codex client. It does not invoke the Codex CLI or load an OpenAI SDK. The current implementation uses OpenAI’s browser/device flow and stores access, refresh, and account binding only in macOS Keychain. The redesigned platform contract additionally permits explicitly configured Linux Secret Service or owner-only plaintext storage, with no silent fallback; that design is not implemented by these commands.
 
 ```sh
 zig build

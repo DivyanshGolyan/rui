@@ -1,6 +1,12 @@
-> Current status: [ADR-0027](../adr/0027-use-an-in-process-exact-edit-module.md) supersedes the Git helper design below with native in-process Edit. The earlier audit and probes remain historical evidence. The [Host closeout](https://github.com/DivyanshGolyan/onepage/issues/68#issuecomment-5578368447) settles search policy and target eligibility; the [current matrix](host-resource-matrix.md) retains complete implementation derivations and qualification. No four-Edit cap is accepted.
+> Current status: [ADR-0027](../adr/0027-use-an-in-process-exact-edit-module.md) supersedes the Git helper design below with native in-process Edit. The earlier audit and probes remain historical evidence. The [Host closeout](https://github.com/DivyanshGolyan/onepage/issues/68#issuecomment-5578368447) settles search policy and target eligibility; the [historical matrix](host-resource-matrix.md) retains earlier derivations subject to the subsequent amendment below. No four-Edit cap is accepted.
 
 # Host resource owner audit
+
+## Superseded Edit derivations — 10 September 2026
+
+The [whole-line Edit decision](fixed-location-edit-approval.md) and [physical writing mechanism](edit-file-writing-proposal.md) supersede the literal-search policy, 16 KiB decoded-search cap, pre-authorization target preparation and three-scratch-role accounting below. The retained 16 KiB copy window is a different implementation workspace; it is not a limit on expected text, a line, a replacement or a file. Current execution streams exact approved ranges, builds complete output in charged unlinked scratch and copies back through the same opened target. It requires neither a full source snapshot nor post-crash target reconciliation.
+
+The old scan/search formulas, three-role descriptor totals and associated memory examples remain evidence for their tested historical representation, not current admission formulas or production proof. Re-derive simultaneous scratch/descriptor and bounded input/comparison costs for the selected representation, count each owned resource once and retain the shared resource/cleanup guarantees. Current [resource requirements](../architecture/resources.md) and [verification](../../VERIFICATION.md) govern implementation. No new numeric expected-text cap or worker pool follows from these amendments.
 
 6 September 2026. Design audit for [Set Host Runtime admission controls and budgets](https://github.com/DivyanshGolyan/onepage/issues/68), following acceptance of the [policy package](host-final-recommendations.md). This is not production certification.
 

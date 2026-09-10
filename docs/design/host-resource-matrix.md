@@ -1,5 +1,11 @@
 # Host resource accounting — design input
 
+## Superseded Edit derivations — 10 September 2026
+
+The [whole-line Edit decision](fixed-location-edit-approval.md) and [physical writing mechanism](edit-file-writing-proposal.md) supersede the literal-search policy, 16 KiB decoded-search cap, pre-authorization target preparation and three-scratch-role accounting below. The retained 16 KiB copy window is a different implementation workspace; it is not a limit on expected text, a line, a replacement or a file. Current execution streams exact approved ranges, builds complete output in charged unlinked scratch and copies back through the same opened target. It requires neither a full source snapshot nor post-crash target reconciliation.
+
+The old scan/search formulas, three-role descriptor totals and associated memory examples remain evidence for their tested historical representation, not current admission formulas or production proof. Re-derive simultaneous scratch/descriptor and bounded input/comparison costs for the selected representation, count each owned resource once and retain the shared resource/cleanup guarantees. Current [resource requirements](../architecture/resources.md) and [verification](../../VERIFICATION.md) govern implementation. No new numeric expected-text cap or worker pool follows from these amendments.
+
 6 September 2026. For [Set Host Runtime admission controls and budgets](https://github.com/DivyanshGolyan/onepage/issues/68), feeding [Approve the minimal V1 limit matrix and removal sequence](https://github.com/DivyanshGolyan/onepage/issues/89). Accepted values come from the [policy package](host-final-recommendations.md) and ARCHITECTURE.md. Updated 8 September 2026: the Host policy and owner coverage are settled; the combined [V1 limit matrix](../../ARCHITECTURE.md#v1-limit-matrix) now consolidates these accepted policies. This is not a complete numeric implementation total or production qualification.
 
 ## Accepted controls and targets

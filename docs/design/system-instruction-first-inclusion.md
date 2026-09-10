@@ -1,5 +1,9 @@
 # System Instruction first inclusion and recovery
 
+## Accepted instruction-history amendment — 10 September 2026
+
+[Every explicit instruction update is preserved](instruction-update-history.md), including B and the second A in A -> B -> A and a fresh equal-value A -> A update. Matching request-key replay adds nothing again; omitting instructions creates no update. The historical net-content/coalescing rule below is superseded. Canonical admission/inclusion identity, not text equality, determines pending updates. Operation-owned request/result authority and the current owning context contract remain in force.
+
 > **Dated decision trace, published 6 September 2026.** The [normative architecture](../../ARCHITECTURE.md) and [product contract](../../PRODUCT.md) own the current design. Earlier signatures, issue ownership, status statements, and unselected alternatives below retain their original context; they are not a second current specification.
 
 Status: selected mapping for appended System Instructions, 5 September 2026. This elaborates the accepted Session history and request-construction decisions in [issue 101](https://github.com/DivyanshGolyan/onepage/issues/101#issuecomment-5550876667). It is a design trace against the documented transaction contracts, not a production implementation, executed SQLite test, provider probe, or formal model-checking result.

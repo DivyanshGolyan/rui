@@ -4,6 +4,10 @@ status: accepted
 
 # Version model-visible context sparsely
 
+## Accepted amendment — Ordered configuration and instruction history (10 September 2026)
+
+The [initialization decision](../design/session-initialization-proposal.md) replaces separate creation: the first complete keyed configuration establishes the caller-named Session and later changes apply in admission order. Configuration commit needs no provider work or generated identity; old replies recover through the [shared request protocol](../design/shared-request-identity.md). [Every explicit instruction update](../design/instruction-update-history.md) enters model-visible history in order, including A -> B -> A and fresh equal-value updates. There is no net-content suppression or original-baseline equality policy; frozen model requests and compaction lineage remain unchanged.
+
 For implementation, read the consolidated [context contract](../../ARCHITECTURE.md#sparse-context-and-exact-model-requests) and [verification](../../VERIFICATION.md#context-and-model-requests). The record below preserves the original decision and later amendments; superseded wording is historical.
 
 ## Accepted amendment — request construction

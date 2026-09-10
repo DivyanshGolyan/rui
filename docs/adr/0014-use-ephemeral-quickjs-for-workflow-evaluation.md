@@ -1,5 +1,9 @@
 # ADR-0014: Use ephemeral QuickJS for workflow evaluation
 
+## Accepted amendment — Workflow Runtime and private evaluation (10 September 2026)
+
+One [Workflow Runtime](../design/evaluator-coordinator-boundary.md) owns the Run lifecycle and its private disposable evaluator, using the Session core API through independently recoverable [request submissions](../design/shared-request-identity.md). Evaluation has fixed inputs and emits calls/root outcome; it receives no live Session replies and creates no public evaluator lifecycle or second dependency interpreter. Preserve child-process containment, all selected limits, fresh-generation crash recovery and #114 oldest-eligible asynchronous pull. Caller-owned references, first-configuration initialization and exact-key reuse from Run inspection replace creation-result discovery; they do not change ordinary JavaScript dependencies.
+
 Status: accepted
 
 For implementation, read the consolidated [workflow contract](../architecture/workflows.md) and [verification](../verification/workflows.md). The record below preserves the original decision and later amendments; superseded wording is historical.

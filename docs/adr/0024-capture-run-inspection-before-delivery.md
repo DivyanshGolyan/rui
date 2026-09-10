@@ -4,6 +4,10 @@ status: accepted
 
 # Capture Run inspection before delivery
 
+## Accepted amendment — Independent observations and reusable Session keys (10 September 2026)
+
+Workflow Runtime composes its own saved Run/call records with ordinary Session core observations. Progress can briefly lag and need not come from one globally atomic cross-Session read view; this supersedes that requirement below and does not permit reading core tables. Each live evaluator instead receives a fixed set of recorded results, and cancellation completion follows saved submissions and required stops. Inspection exposes the full keys of associated durable Sessions with enough context for an agent to choose one and write that exact key into another workflow. It requires no workflow-output metadata or previous-Run lookup code and continues current Session state. Preserve bounded capture/encoding, charged scratch, cleanup, explicit incomplete reports and service for controls/settlement. The historical single-view measurements do not certify this revised composition. See [the walkthrough](../design/two-session-workflow-trace.md).
+
 For implementation, read the consolidated [inspection contract](../architecture/workflows.md#run-interface) and [verification](../verification/workflows.md#run-interface). The record below preserves the original decision and later amendments; superseded wording is historical.
 
 Accepted 5 September 2026. This amends ADR-0022's inspection rules and ADR-0021's

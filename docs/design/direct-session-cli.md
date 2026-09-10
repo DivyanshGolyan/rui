@@ -1,5 +1,9 @@
 # Direct Session CLI: revised proposal
 
+## Accepted amendments — 10 September 2026
+
+The accepted [Session initialization and reuse decision](session-initialization-proposal.md) supersedes separate creation, generated-ID discovery and implicit first-message initialization: callers construct references locally; first complete configuration establishes the Session; exact full keys from Run-state inspection can be used unchanged in later workflows. The [shared request contract](shared-request-identity.md) gives direct and workflow configuration/message submissions the same stable acceptance/rejection replay, with independent workflow bookkeeping. The original discussion below is historical where it differs.
+
 > **Historical design exploration, published 6 September 2026.** The [normative architecture](../../ARCHITECTURE.md) and [product contract](../../PRODUCT.md) own the current design. Earlier signatures, issue ownership, status statements, and unselected alternatives below retain their original context; they are not a second current specification.
 
 > Subsequent design direction: keep Turns internal to ordinary caller interaction, read Session conversation entries, and use Session-level operations for workflows too. The older Turn-specific read/control examples below are still under revision; see the [Session workflow exploration](session-workflow-interface.md).

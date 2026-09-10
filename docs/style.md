@@ -34,30 +34,34 @@ Use explicit Session, Turn, Operation, Attempt and cause identities; numeric ide
 
 ## External effects
 
-Implement [execution and settlement](architecture/execution.md#host-runtime-execution-and-settlement) through the existing owners. Prepare exact immutable descriptors, reserve custody, commit Attempt admission, then release its one-shot Dispatch Permit. Retain custody through physical cleanup and reject stale identities after reuse. Reconcile uncertainty according to the effect.
+Implement [execution and settlement](architecture/execution.md#host-runtime-execution-and-settlement) through the existing owners. Prepare exact immutable descriptors, reserve custody, commit Attempt admission, then release its one-shot Dispatch Permit. Retain custody through physical cleanup and reject stale identities after reuse. Never automatically replay an uncertain tool Attempt or require Edit target reconciliation after custody loss. Model requests retain their distinct frozen-input retry policy.
 
 Keep transactions closed during external effects and delivery. The only private scratch-write read-transaction exceptions are [inspection capture](architecture/workflows.md#run-interface) and [workflow visibility metadata](architecture/workflows.md#workflow-runs); result-body materialization follows the latter transaction.
 
 Every semantic mutation follows:
 
 ```text
-bounded syntax ──► BEGIN IMMEDIATE ──► bounded Decision Snapshot
-               ──► pure total classification ──► fixed mutation
-               ──► exact row counts ──► COMMIT ──► release consequence
+bounded syntax/content validation ──► BEGIN IMMEDIATE
+    ──► bounded saved-state checks and mutation
+    ──► exact row counts ──► COMMIT ──► release consequence
 ```
 
-Use the same bounded loader and classifier for inspection and advancement. A post-commit preparation failure records evidence for the admitted Attempt rather than erasing authority. Keep notifications as rescan hints; use committed facts for semantic acknowledgement. [Run service](architecture/workflows.md#run-interface) owns fairness between controls, settlement and inspection; [workflow discovery](architecture/workflows.md#workflow-runs) and [model retry](architecture/execution.md#model-retries-and-inactivity) own their distinct polls.
+One meaningful operation owns one cohesive transactional function. Do not require a pure classifier, public Decision Snapshot or mutation interpreter. Keep state-dependent decisions inside the transaction; extract private calculations only when they simplify concrete reuse or testing. Workflow bookkeeping and core admission have independent transactions connected by durable intents and stable request answers. A post-commit preparation failure records evidence for the admitted Attempt rather than erasing authority. Keep notifications as rescan hints; use committed facts for semantic acknowledgement. [Run service](architecture/workflows.md#run-interface) owns fairness between controls, settlement and inspection; [workflow discovery](architecture/workflows.md#workflow-runs) and [model retry](architecture/execution.md#model-retries-and-inactivity) own their distinct polls.
 
 ## Deep modules
 
 | Owner | Responsibility |
 | --- | --- |
 | Storage Owner | SQLite, canonical transactions, bounded content reads/writes, and no domain-policy delegation to callers. |
-| Host Runtime | Expose the narrow typed Run API; derive Turn Condition; drive legal quanta through the Storage Owner, one multiplexed I/O Reactor, temporary Action executors, and content-free custody. |
+| Session core | Own Session configuration, messages, permissions and Operation resolution through transactional functions; expose admission/observation/control without leaking storage policy. |
+| Host execution | Drive eligible work and safe cleanup through one multiplexed I/O Reactor and fixed content-free custody; own local execution ordering and sleeping when idle. |
 | Provider adapter | Authentication, derived replay-input projection, request lowering, transport grammar, and direct streaming between scratch descriptors and the provider; no SQLite access or semantic admission. |
 | Action adapter | Execute one immutable admitted Bash or Edit Attempt under temporary custody and return sealed evidence; select no permission, retry, or recovery policy. |
-| Edit module | Own literal matching, streamed preparation, file mutation and reconciliation observations behind the Action adapter. Use no SQLite or provider credentials; leave admission and canonical outcomes to the Host. Run in-process with bounded service turns and owned reusable buffers. |
-| Workflow Evaluator | Evaluate one immutable Generation and return one terminal outcome; retain nothing across a durable barrier. |
+| Edit module | Validate exact whole-line ranges, construct checked scratch output and mutate through the same opened target handle behind the Action adapter. Use no SQLite or credentials; leave admission and canonical outcomes to core. Retain bounded service turns and owned reusable buffers. |
+| Workflow Runtime | Own Run lifecycle, durable request intents/results, observation, cancellation and private evaluator lifetime; consume the ordinary core API. |
+| Private evaluator | Compute encountered calls and root outcome against fixed supplied facts; JavaScript owns branches/joins. No live core replies, durable heap or independent public lifecycle. |
+
+Private evaluator computation retains the accepted disposable child-process containment and real-value tests; complete SQLite, crash, cancellation and resource evidence remains necessary for its surrounding Runtime. Sequential full response validation is the baseline; do not introduce parser-yield state or a worker without measured need.
 
 An interface is deep when callers provide semantic intent and cannot construct the owner's internal facts, storage rows, lifecycle phases, or capabilities.
 

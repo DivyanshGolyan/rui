@@ -4,6 +4,10 @@ status: accepted
 
 # Use an in-process exact Edit module
 
+## Accepted amendment — Fixed whole-line proposals and same-handle writing (10 September 2026)
+
+The [fixed-location decision](../design/fixed-location-edit-approval.md) supersedes search-based matching and whole-file preimage/postimage preparation: one existing target and a nonempty list of exact expected/replacement whole-line ranges, with original coordinates and explicit newline bytes. Save and display the submitted proposal before any required target read. After authorization, validate every range and build complete output in charged unlinked scratch; any pre-mutation failure leaves the target untouched. [Copy back through the same opened target](../design/edit-file-writing-proposal.md), set final length afterward and flush, with bounded service turns and honest partial-write uncertainty. No rename replacement, source snapshot, durable replay backup, Read tool or Write tool is added; Bash reads and creates files. [Unified recovery](../design/unified-tool-recovery.md) forbids automatic uncertain-tool replay and required post-crash target inspection. Preserve ordinary file access, caller coordination, resource accounting, live custody and the absence of a separate Edit timeout; historical search/reconciliation/whole-file approval requirements below are superseded.
+
 Accepted 6 September 2026 during [Set Host Runtime admission controls and budgets](https://github.com/DivyanshGolyan/onepage/issues/68).
 
 ## Decision

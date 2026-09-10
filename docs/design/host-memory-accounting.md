@@ -1,5 +1,11 @@
 # Host memory accounting from current evidence
 
+## Superseded Edit derivations — 10 September 2026
+
+The [whole-line Edit decision](fixed-location-edit-approval.md) and [physical writing mechanism](edit-file-writing-proposal.md) supersede the literal-search policy, 16 KiB decoded-search cap, pre-authorization target preparation and three-scratch-role accounting below. The retained 16 KiB copy window is a different implementation workspace; it is not a limit on expected text, a line, a replacement or a file. Current execution streams exact approved ranges, builds complete output in charged unlinked scratch and copies back through the same opened target. It requires neither a full source snapshot nor post-crash target reconciliation.
+
+The old scan/search formulas, three-role descriptor totals and associated memory examples remain evidence for their tested historical representation, not current admission formulas or production proof. Re-derive simultaneous scratch/descriptor and bounded input/comparison costs for the selected representation, count each owned resource once and retain the shared resource/cleanup guarantees. Current [resource requirements](../architecture/resources.md) and [verification](../../VERIFICATION.md) govern implementation. No new numeric expected-text cap or worker pool follows from these amendments.
+
 6 September 2026. For [Set Host Runtime admission controls and budgets](https://github.com/DivyanshGolyan/onepage/issues/68). This assembles measured costs and named allocations; it does not allocate component budgets or certify the complete Host. The accepted whole-OnePage physical-footprint target is 256 MiB at the shared 1,000-operation default.
 
 ## What can be counted today

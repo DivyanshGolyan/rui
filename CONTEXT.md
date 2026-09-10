@@ -41,12 +41,16 @@ _Avoid_: Session authority, tool capability
 ### Conversation
 
 **Session**:
-A reusable durable linear Conversation, its sparse persistent context history, one Workspace, and one access scope. A Session has no terminal outcome or persisted lifecycle phase.
+A reusable durable linear Conversation, its sparse persistent context history, one Workspace, and one access scope. Its first accepted complete configuration establishes its durable state. A Session has no terminal outcome or persisted lifecycle phase.
 _Avoid_: Turn, tree, process, controller, terminal task
 
 **Dormant Session**:
 A Session with no nonterminal Turn and no active external work.
 _Avoid_: sleeping process, closed Session, retained agent
+
+**Session Key / Session Reference**:
+An opaque caller-scoped identity accepted unchanged by the core within a Store. Constructing a reference performs no core operation, proves no durable Session exists and grants no access. Workflow `session(name)` scopes a short name by Run identity; an exact full key can directly address the same Session from another Run. First complete configuration establishes durable state. Session keys identify conversations, separately from Request Identities and internal Turn IDs.
+_Avoid_: creation receipt, Run Key, request key, live Session object
 
 **Conversation**:
 The complete immutable linear sequence of canonical semantic entries accumulated within one Session.
@@ -57,7 +61,7 @@ One immutable User text, assistant text, Tool Call, Tool Result, or System Instr
 _Avoid_: event, mutable message, provider frame
 
 **System Instruction**:
-An immutable Conversation Entry carrying an appended operator instruction or Host contextual update for the model. It preserves instruction authority and grants no Action Authorization. [First inclusion](ARCHITECTURE.md#sparse-context-and-exact-model-requests) binds it to an assistant-response request.
+An immutable Conversation Entry carrying an appended operator instruction or host-supplied contextual update for the model. Session history distinguishes it from User text, assistant output, and tool content. Every explicit instruction update is preserved in order, including intermediate values, reversals and fresh updates repeating the same text; source-update identity prevents replay duplicates. Later changes append another instruction rather than rewriting it. Its provider representation must preserve instruction authority and legal placement; it cannot grant Action Authorization. First inclusion of all pending updates commits atomically with their assistant-response request; exact storage encoding remains implementation work.
 _Avoid_: Context Update, User Message, Permission Decision, provider thinking
 
 **Conversation Revision**:
@@ -81,7 +85,7 @@ The semantic classification derived from committed facts: runnable, waiting for 
 _Avoid_: persisted phase, status cache, ready flag
 
 **Session Context Revision**:
-One atomic sparse change to persistent Session configuration, including model-visible settings and the Host-enforced Permission Mode. Unchanged components continue from earlier revisions.
+One atomic sparse update to persistent Session configuration, including model-visible settings and the Host-enforced Permission Mode. Omitted components continue from earlier revisions. An explicitly supplied Instruction Set records an update even if its bytes repeat; identical content references may be reused without coalescing the updates.
 _Avoid_: rewritten system prompt, configuration snapshot
 
 **Session Context Patch**:
@@ -177,7 +181,7 @@ The terminal observation delivered by an Attempt's effect owner for validation a
 _Avoid_: Operation Resolution, durable Completion, Turn Outcome
 
 **Operation Resolution**:
-The optional final semantic value owned directly by an Operation, absent while unresolved and immutable once committed. Its basis may be validated Execution Evidence, permission denial, validation failure, interruption, cancellation, reconciliation or recovery uncertainty; its identity is the Operation identity, not a separate result identity.
+The optional final semantic value owned directly by an Operation, absent while unresolved and immutable once committed. Its basis may be validated Execution Evidence, permission denial, validation failure, interruption, cancellation or recovery uncertainty; its identity is the Operation identity, not a separate result identity.
 _Avoid_: Execution Evidence, separate Resolution entity, Turn Outcome
 
 **Interrupted Resolution**:
@@ -189,11 +193,11 @@ An Operation Resolution stating that external state may have changed but the ter
 _Avoid_: automatic retry, User escalation, generic failure
 
 **Reconciliation**:
-Resolution of an uncertain Operation by comparing durable intent with observed external state.
+Comparison of durable intent with observed external state. Historical Edit recovery required this comparison; current tool recovery records uncertainty without mandatory inspection. A later observation does not prove which action produced the current state.
 _Avoid_: replay, generic retry, database recovery
 
 **Edit Intent**:
-The immutable one-file replacement description binding Workspace, target, exact search and replacement content, preimage, and expected postimage before Authorization.
+The immutable mutation proposal for one existing file, binding Workspace, exact target path and a nonempty list of whole-line ranges with expected and replacement text before Authorization. Lines start at 1; ranges include the start and exclude the end, with equal endpoints inserting empty expected text. All ranges refer to the same pre-edit state and must pass applicability checks before mutation. Admission requires no target read, whole-file freshness or relocation.
 _Avoid_: edit result, approval, workspace snapshot
 
 **Dispatch Permit**:
@@ -201,7 +205,7 @@ A volatile one-shot capability returned only to the invocation that committed fr
 _Avoid_: Attempt, Authorization, lease, ownership epoch
 
 **Physical Custody**:
-A bounded transient Host record owning resources for Edit preparation or a prospective/admitted Attempt. Its atomic launch boundary distinguishes suppression from cleanup after an effect may have started. It carries neither payload nor semantic authority; preparation occupancy permits no mutation.
+A bounded transient Host record owning resources for a prospective/admitted Attempt. Its atomic launch boundary distinguishes suppression from cleanup after an effect may have started. It carries neither payload nor semantic authority. Proposal-only Edit approval needs no target preparation custody.
 _Avoid_: Operation state, database authority, Session ownership
 
 ### Permission and cancellation
@@ -223,18 +227,22 @@ A request to end the current work selected in a Session, regardless of who submi
 _Avoid_: Session closure, Host shutdown, provider cancellation acknowledgement
 
 **Run Cancellation Intent**:
-Durable intent fencing one Run and stopping current work in Sessions reached through its committed message admissions. Shared Sessions remain reusable. Until the terminal Run outcome records completion, recovery may repeat stops and affect newer work. [Execution and settlement](docs/architecture/execution.md#host-runtime-execution-and-settlement) owns propagation and completion.
-_Avoid_: Turn Cancellation Intent, Permission Request, process detachment, terminal outcome
+Durable intent fencing new evaluation/call creation for one Run. Workflow Runtime first recovers saved unanswered submissions, then stops current work in Sessions reached through accepted message calls. Configuration alone is not rolled back and adds no stop target. Until the terminal Run outcome records completion, recovery may repeat stops and affect newer shared-Session work.
+_Avoid_: Turn Cancellation Intent, core Run fence, Permission Request, process detachment, terminal outcome
 
 ### Workflows and runs
 
 **Workflow Definition**:
-A bounded program that creates Sessions, composes keyed message results, and returns one Workflow Output.
+A program that names Sessions, configures them, composes keyed message results and returns one Workflow Output under evaluator resource limits.
 _Avoid_: Workflow Run, scheduler, agent runtime
 
+**Workflow Runtime**:
+The public module owning Run lifecycle, saved calls/results, replay eligibility, cancellation and submission through the Session core API. It contains the private Workflow Evaluator. Earlier references to the workflow coordinator describe this module's coordination responsibility, not a separate public component.
+_Avoid_: Session core, Host Runtime, evaluator, separate service
+
 **Workflow Evaluator**:
-A disposable Host-managed mechanism that evaluates one Workflow Definition against one immutable Evaluation Generation.
-_Avoid_: Host Runtime, retained workflow, agent runtime
+A private disposable mechanism inside Workflow Runtime that evaluates one Workflow Definition against one immutable Evaluation Generation and returns requested calls plus an outcome. It has no durable state or independently supported public lifecycle. Its process containment remains explicit.
+_Avoid_: Workflow Runtime, Host Runtime, retained workflow, agent runtime
 
 **Evaluation Generation**:
 One immutable evaluation input binding source, arguments, semantics, evaluator limits, and a Visibility Snapshot. An interrupted evaluation is abandoned after a Host crash; recovery admits a fresh generation rather than reconstructing the old view.
@@ -249,11 +257,11 @@ A Caller-supplied idempotency key that creates or reattaches one Workflow Run wh
 _Avoid_: Run identity, Agent Call Key, display name
 
 **Agent Call Key**:
-A Caller-defined identity for one Session creation, configuration change, or message submission and its recorded result within a Workflow Run. These operations share the key namespace; different messages may share a work outcome.
-_Avoid_: Turn identity, Run Key, system ID
+A Caller-defined identity for one Session configuration or message submission and its recorded result within a Workflow Run. These operations share a Run-local namespace; Workflow Runtime scopes it by Run identity to construct the core Request Identity. Different messages may share a work outcome.
+_Avoid_: Session Key, Turn identity, Run Key, system ID
 
 **Visibility Snapshot**:
-The immutable Run-local set of original operation results and stable failures visible to one Evaluation Generation. Recovery captures a fresh view. Fixed visibility uses on-demand decoding rather than a decoded-answer cache.
+The immutable run-local set of recorded operation results and stable failures visible to one Evaluation Generation. The Workflow Runtime freezes it from its own recorded results; later arrivals belong to a later generation. It is not a simultaneous cross-Session status snapshot.
 _Avoid_: live completion stream, Conversation
 
 **Blocked Workflow Run**:
@@ -269,12 +277,12 @@ The bounded strict-data value durably committed with a completed Workflow Run.
 _Avoid_: Turn Output, Final Answer
 
 **Run API**:
-The narrow typed boundary of the Host Runtime for Run and Session admissions, observation, permission, stopping, cancellation, exact Model Interruption, and content reads. Bounded driving is internal to the Host; callers do not schedule progress.
-_Avoid_: Run Service, CLI, daemon, wire protocol
+The caller-facing Run operations owned by Workflow Runtime and ordinary Session operations owned by Session core, exposed through the local adapter. These include admissions, observation, permission, stopping, cancellation, exact Model Interruption and content reads. Callers do not schedule internal progress.
+_Avoid_: Run Service, CLI, generic command dispatcher, wire protocol
 
 **Run Snapshot**:
-A complete read model captured from one committed view of canonical Run, Session, internal work, permission, and effect facts. Later progress does not invalidate that captured report; its revision grants no historical snapshot service or mutation authority.
-_Avoid_: durable authority, event stream, Harness Projection
+A complete progress read model composed from workflow records and ordinary core observations. It exposes exact full keys of associated durable Sessions and enough existing label/context to select one for reuse. It may briefly lag across owners and need not represent one global committed moment. It grants no mutation authority and is distinct from fixed evaluator visibility.
+_Avoid_: durable authority, event stream, Harness Projection, Workflow Output metadata
 
 ### Runtime and storage
 
@@ -283,23 +291,27 @@ The explicitly started local server and sole live owner coordinating Workflow Ru
 _Avoid_: Agent, Session, Storage Owner
 
 **Host Store**:
-The sole recoverable OnePage-owned semantic and content store, containing canonical relational domain rows and immutable content. OS-held credentials are non-semantic security material.
+The sole recoverable OnePage-owned semantic and content store, containing canonical relational domain rows and immutable content. Credentials in the selected credential store are non-semantic security material.
 _Avoid_: Session Ledger, blob store, Workspace
 
 **Storage Owner**:
-The exclusive gateway through which the Host Runtime reads or changes the Host Store.
+The exclusive gateway for Session core tables and content. Workflow Runtime persistence has separate logical ownership; deployment may share a Store without permitting cross-module table access.
 _Avoid_: Session owner, database connection exposed to callers
 
 **Decision Snapshot**:
-A transient bounded set of canonical rows loaded to classify one Turn. It is never persisted or treated as a second authority.
+A transient bounded query result containing facts needed for an operation. It is never persisted or treated as a second authority. This term does not require a common snapshot structure or a separate classifier layer.
 _Avoid_: Core State, checkpoint, semantic view
 
 **Active Capacity**:
-The startup-fixed maximum population of shared active Edit preparation, prospective/admitted execution, and outstanding physical cleanup. Permission and capacity waits retain no credit.
+The startup-fixed maximum population of prospective/admitted executions and outstanding physical cleanup. Permission and capacity waits retain no credit.
 _Avoid_: Session population, total RSS, preallocated resource bundle
 
+**Neutral Work**:
+The empty representation of a startup-allocated Physical Custody record. Advancing it does nothing; it owns no execution resources, has no durable Operation or Attempt, and consumes no occupied Active Credit. Safe release returns an occupied record to this representation.
+_Avoid_: queued Operation, synthetic Attempt, durable job
+
 **Active Credit**:
-One occupied Physical Custody record, charging shared concurrency through preparation/execution and safe physical cleanup. Permission waits release it; approved execution reacquires it. Semantic completion alone cannot release resources still in use.
+One occupied Physical Custody record, charging shared concurrency from reservation through execution and safe physical cleanup. Permission waits consume none. Semantic completion alone cannot release resources still in use.
 _Avoid_: Authorization, durable semaphore, Activation Slot
 
 **Orchestration Memory**:
@@ -315,7 +327,7 @@ An opaque identity for complete immutable content stored in the Host Store with 
 _Avoid_: Workspace path, preview, transient file
 
 **Binding Digest**:
-A typed domain-separated digest that binds exact bytes for one identity, content, authorization, or reconciliation role.
+A typed domain-separated digest that binds exact bytes for one identity, content or authorization role.
 _Avoid_: identifier, authentication tag, tamper proof
 
 ### Constraints
@@ -339,3 +351,11 @@ _Avoid_: Verification Target, reserved memory implied by a disk allowance
 **Verification Target**:
 A specified workload, metric and pass condition used to qualify an implementation. It never rejects production work.
 _Avoid_: runtime admission counter, passing evidence inferred from acceptance
+
+### Shared request protocol amendment
+
+**Request Identity**:
+An opaque Store-scoped identity supplied to core Session configuration or message submission. It binds exact request inputs and the first committed admission answer, including rejection. Matching repeats recover that binding; changed inputs conflict. It does not identify a tool execution attempt.
+
+**Workflow Submission Intent**:
+The workflow's durable record of a call's identity and exact inputs, saved before sending it to the core. The workflow derives identity from Run identity and its Run-local Agent Call Key and saves the core answer separately. Unanswered intents are resubmitted after interruption, including during cancellation. Core request records do not contain Run membership; workflow records own that relationship. This amends earlier integrated Host/Run descriptions without requiring separate processes.

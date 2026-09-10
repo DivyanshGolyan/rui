@@ -4,6 +4,10 @@ status: accepted
 
 # Enforce execution contracts without historical result replay
 
+## Accepted amendment — Direct transactions and unified tool recovery (10 September 2026)
+
+The [direct-operation decision](../design/transactional-operations.md) removes a mandatory pure classifier/mutation interpreter while retaining transactional applicability and actual execution-boundary tests. [Unified uncertain-tool recovery](../design/unified-tool-recovery.md) removes required Edit target reconciliation after custody loss; never replay uncertain tools, and let the Agent choose fresh investigation. This does not restore permanent Completion history or weaken live cleanup, accounting, or the [Operation-owned model](0026-let-operations-own-current-execution-and-final-results.md).
+
 The single Host and its adapters own live execution, so internal result delivery must be at most once and cease after delivery or detachment. Permanent failed-try diagnostics and exact historical Completion replay/conflict discrimination are not V1 guarantees: persist facts needed for recovery or a concrete product promise, and keep other failure detail as optional diagnostics. This trades complete failed-try investigation for a smaller required contract while preserving external-effect uncertainty, consumed retry allowances, exact authorization, accepted output/continuation and public command replay.
 
 This amends ADR-0021's historical Completion replay promise. The [behavior matrix](../architecture/execution.md#required-execution-and-recovery-guarantees) and [verification requirements](../verification/execution.md#operations-attempts-and-recovery) define the scope; the existing per-try representation remains the baseline until the execution-model comparison and selection resolve. No table deletion, output-ownership change or retention mechanism is selected here.

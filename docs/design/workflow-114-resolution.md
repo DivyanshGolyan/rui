@@ -1,6 +1,10 @@
 # Workflow eligibility decision closeout
 
-8 September 2026. This checks the accepted decisions in [#114](https://github.com/DivyanshGolyan/onepage/issues/114) against the owning [Workflow Runs contract](../../ARCHITECTURE.md#workflow-runs), [product behavior](../../PRODUCT.md) and [required verification](../../VERIFICATION.md). It is a design consistency review, not executed production evidence. The configuration acknowledgement shape and local-client choices remain with [#101](https://github.com/DivyanshGolyan/onepage/issues/101).
+## Accepted amendments — 10 September 2026
+
+The accepted [Session initialization and reuse decision](session-initialization-proposal.md) supersedes separate creation, generated-ID discovery and implicit first-message initialization: callers construct references locally; first complete configuration establishes the Session; exact full keys from Run-state inspection can be used unchanged in later workflows. The [shared request contract](shared-request-identity.md) gives direct and workflow configuration/message submissions the same stable acceptance/rejection replay, with independent workflow bookkeeping. The original discussion below is historical where it differs.
+
+8 September 2026. This checks the accepted decisions in [#114](https://github.com/DivyanshGolyan/onepage/issues/114) against the owning [Workflow Runs contract](../architecture/workflows.md#workflow-runs), [product behavior](../../PRODUCT.md) and [required verification](../../VERIFICATION.md). It is a design consistency review, not executed production evidence. The configuration acknowledgement shape and local-client choices remain with [#101](https://github.com/DivyanshGolyan/onepage/issues/101).
 
 ## End-to-end traces
 

@@ -4,6 +4,10 @@ status: accepted
 
 # Preserve provider continuation without duplicate replay authority
 
+## Accepted amendment — Preserve every explicit instruction update (10 September 2026)
+
+The accepted [instruction-history decision](../design/instruction-update-history.md) supersedes net-content comparison: all successfully admitted explicit instruction updates become model-visible entries in order, including B then A in A -> B -> A and fresh equal-value A -> A. A matching request-key retry creates no duplicate; omitted instructions create no entry. A fresh model request atomically includes all pending updates under its selected view. Already admitted requests retain frozen inputs, and compaction cannot erase canonical entries or silently discard pending updates. Inclusion follows canonical update/source identity, not text equality.
+
 For implementation, read the consolidated [model-output contract](../../ARCHITECTURE.md#model-output-and-multiple-tool-calls) and [execution ownership](../architecture/execution.md). The record below preserves the original decision and later amendments; superseded wording is historical.
 
 ## Accepted amendment — System Instructions in Conversation

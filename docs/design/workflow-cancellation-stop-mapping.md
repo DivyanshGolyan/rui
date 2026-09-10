@@ -1,5 +1,9 @@
 # Workflow cancellation and Session stop results
 
+## Independent submission amendment — 10 September 2026
+
+The [shared request protocol](shared-request-identity.md) supersedes integrated Run/core admission fences below. Workflow Runtime durably freezes new calls, resolves all saved unanswered submissions with their original identities, records their answers, then stops Sessions from accepted message admissions. Submission recovery may newly admit work before stop; this accepted effect/cost window is not rollback. Configuration-only and inspection-only associations do not join the stop set. The accepted repeatable stop pass and absence of per-Session cancellation receipts remain unchanged.
+
 > **Dated decision trace, published 6 September 2026.** The [normative architecture](../../ARCHITECTURE.md) and [product contract](../../PRODUCT.md) own the current design. Earlier signatures, issue ownership, status statements, and unselected alternatives below retain their original context; they are not a second current specification.
 
 Status: the simpler cancellation recovery contract below was accepted on 5 September 2026. The original per-Session stop-result investigation is preserved afterward as superseded design evidence. No production implementation or crash test is claimed.

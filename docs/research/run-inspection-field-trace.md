@@ -1,12 +1,16 @@
 # Run inspection field-to-fact trace
 
+## Subsequent decision — 10 September 2026
+
+The later [independent observation and reuse contract](../design/two-session-workflow-trace.md#observation-and-permission) removes globally atomic cross-Session capture. Run-state inspection also exposes exact associated Session keys for agent-authored reuse. This earlier field/source trace retains its original evidence scope.
+
 Publication note, 8 September 2026: subsequent [inspection ownership resolution](../adr/0024-capture-run-inspection-before-delivery.md#v1-ownership-resolution--8-september-2026) retained the single Storage Owner and complete capture without an elapsed-time abort. Questions below describe the research stage; measurements remain synthetic evidence, not production qualification.
 
 Research, 7 September 2026. This is an input to the SQLite command-work investigation, not a selected schema, replacement wire format, or production implementation claim. It reads the current local normative documents and live discussions linked below. No normative document or tracker item was changed.
 
 ## Authority and scope
 
-The current owners are [Run interface](../../ARCHITECTURE.md#run-interface), [canonical relational authority](../../ARCHITECTURE.md#canonical-relational-authority), [Conversation and Turns](../../ARCHITECTURE.md#conversation-and-turns), [Workflow Runs](../../ARCHITECTURE.md#workflow-runs), [domain definitions](../../CONTEXT.md), and [ADR-0024](../adr/0024-capture-run-inspection-before-delivery.md). [ADR-0026](../adr/0026-let-operations-own-current-execution-and-final-results.md) removes historical Attempt/Completion/Resolution entities as execution authority: each Operation owns current execution/retry facts and its optional immutable final Resolution.
+The current owners are [Run interface](../architecture/workflows.md#run-interface), [canonical relational authority](../../ARCHITECTURE.md#canonical-relational-authority), [Conversation and Turns](../../ARCHITECTURE.md#conversation-and-turns), [Workflow Runs](../architecture/workflows.md#workflow-runs), [domain definitions](../../CONTEXT.md), and [ADR-0024](../adr/0024-capture-run-inspection-before-delivery.md). [ADR-0026](../adr/0026-let-operations-own-current-execution-and-final-results.md) removes historical Attempt/Completion/Resolution entities as execution authority: each Operation owns current execution/retry facts and its optional immutable final Resolution.
 
 [Choose the Host Runtime Run API and serialized-exchange envelopes](https://github.com/DivyanshGolyan/onepage/issues/86#issuecomment-5524720218) selected uncapped logical collections and removed obsolete handwritten schemas. Its resource-free pull language predates ADR-0024 and does not override capture-before-delivery. [Expose durable Runs through the Host Runtime API](https://github.com/DivyanshGolyan/onepage/issues/39) is superseded planning, not completed implementation. Its [selected interface comment](https://github.com/DivyanshGolyan/onepage/issues/39#issuecomment-5549471085) supports exact actionable identities and descriptor digests; its older revision-invalidation rule was subsequently superseded. [Finalize Session configuration and local client contracts](https://github.com/DivyanshGolyan/onepage/issues/101#issuecomment-5550876667) confirms shared work, original keyed results, and fresh Session observations. Exact SQL mapping and remaining wire fields are not selected by these records.
 
@@ -38,7 +42,7 @@ For each membership, using facts from the single read view:
 3. Otherwise, an actionable Permission Request gives `waiting_for_permission` only when no other progress remains.
 4. Otherwise, the nonterminal Turn is `runnable`.
 
-These are the exact category precedence in [ARCHITECTURE.md](../../ARCHITECTURE.md#run-interface) and [CONTEXT.md](../../CONTEXT.md). Future retry waiting is `in_flight` despite owning no live effect or Active Credit. A future retry can become due during a long report; the fixture must not silently invent a different category by treating a stored retry time solely as `retry_at > wall_clock_now`. The accepted wording distinguishes retry eligibility from admitted uncertainty; precise eligibility/time interpretation must remain consistent with admission and the shared classifier.
+These are the exact category precedence in [ARCHITECTURE.md](../architecture/workflows.md#run-interface) and [CONTEXT.md](../../CONTEXT.md). Future retry waiting is `in_flight` despite owning no live effect or Active Credit. A future retry can become due during a long report; the fixture must not silently invent a different category by treating a stored retry time solely as `retry_at > wall_clock_now`. The accepted wording distinguishes retry eligibility from admitted uncertainty; precise eligibility/time interpretation must remain consistent with admission and the shared classifier.
 
 An actionable request needs more than `decision IS NULL`. Its Operation must remain unresolved and ordinary stop/terminal facts must permit a decision. A later change to Session Permission Mode cannot retrospectively answer an existing request or revoke an admitted Authorization. A Run Cancellation Intent fences that Run and initiates ordinary Session stops; intent alone does not invalidate all permissions through historical membership.
 
