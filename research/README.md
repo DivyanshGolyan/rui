@@ -30,6 +30,8 @@ These models assume atomic durable transitions. Their finite states and checker-
 
 ## Resources and inspection
 
+- [HTTP transport alternatives](transport-client-alternatives/README.md): compare pinned libcurl, direct nghttp2/OpenSSL and AWS CRT using pinned primary sources; `python3 research/transport-client-alternatives/audit_sources.py --verify`. A small [credit probe](transport-client-alternatives/run_credit_probe.py) demonstrates independent HTTP/2 receive credit with byte verification and an automatic-update control. Protocol-only Mac evidence; no replacement HTTPS, Linux execution or whole-Host qualification.
+
 [Turbopuffer source reading](turbopuffer-resource-evidence.md) records first-party URLs, sections and talk timestamps inspected on 2026-09-10. It compares storage-backed metadata and local ownership with OnePage; it supplies no local filesystem, resource-bound or retry qualification.
 
 | Artifact and reproduction | What it tests; limits |
