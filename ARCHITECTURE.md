@@ -455,7 +455,7 @@ Select oldest eligible Run by creation order with stable tiebreak: new Runs, int
 
 Within Runtime's own read transaction, capture available keys, tags and immutable result references into charged private metadata scratch; this read view defines visibility. End it before result-body materialization and evaluation.
 
-Materialize captured references through their owning bounded interfaces, finishing DB access before each scratch write and servicing other work between windows. No core-table join or new lease is required. Native lookup reads only prepared immutable descriptors, decodes on demand and releases its reference after handoff. Separate invocations produce separate decoded values; reawaiting one Promise keeps JS identity. No bridge decoded-answer cache is required. Missing, successful null and failure are distinct; malformed ranges, missing captured content, short read or decoding errors fail evaluation. User-held decoded values still consume heap.
+Materialize captured references through their owning bounded interfaces, finishing DB access before each scratch write and servicing other work between windows. No core-table join or new lease is required. Native lookup reads only prepared immutable descriptors, decodes on demand and releases its reference after handoff. Construct decoded values with own data properties without invoking author-defined accessors during decoding. Separate invocations produce separate decoded values; reawaiting one Promise keeps JS identity. No bridge decoded-answer cache is required. Missing, successful null and failure are distinct; malformed ranges, missing captured content, short read or decoding errors fail evaluation. User-held decoded values still consume heap.
 
 ### Owning evaluator input and output
 

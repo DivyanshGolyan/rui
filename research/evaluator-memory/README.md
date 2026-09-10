@@ -2,6 +2,8 @@
 
 This is evidence for the accepted on-demand decoding direction, not an implementation of Workflow Runtime or a new input-format contract. The smallest supported improvement is to avoid a complete resident serialized result while constructing its final JS value. Keep separate mutable objects per invocation and one resolved identity per Promise. A decoded-answer cache is neither needed nor tested.
 
+The [UTF-8 reader follow-up](string-reader/README.md) qualifies an explicit interface, broader string/object/key cases and complete backing-allocation overlap against a public-API baseline. It does not expand the claims of these earlier measurements.
+
 ## Reproduce
 
 From the repository root:
