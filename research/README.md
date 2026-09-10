@@ -32,6 +32,8 @@ These models assume atomic durable transitions. Their finite states and checker-
 
 [Pinned transport memory](transport-memory/README.md): `python3 research/transport-memory/build.py` then `python3 research/transport-memory/run.py --output /tmp/new-transport-results`. Local verified TLS, 1/100/1,000 transfers, upload/receive buffers, HTTP/2 pauses, cache cleanup and delayed capture validation; separate allocation/physical/OS evidence. Experimental dependency pins and Mac-only prototype, not production or Linux qualification.
 
+[Capture and reuse](transport-memory/capture-README.md): `python3 research/transport-memory/capture_run.py --output /tmp/new-capture-results`. Joint slow/stalled capture, local control RTT, memory and repeated TLS bursts; callback, between-call and bounded-worker comparisons with complete capture checks. Mac-only prototype; local echo is not durable control acknowledgement.
+
 [Turbopuffer source reading](turbopuffer-resource-evidence.md) records first-party URLs, sections and talk timestamps inspected on 2026-09-10. It compares storage-backed metadata and local ownership with OnePage; it supplies no local filesystem, resource-bound or retry qualification.
 
 | Artifact and reproduction | What it tests; limits |

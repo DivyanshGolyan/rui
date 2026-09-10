@@ -1,0 +1,10 @@
+{"ready": true, "ssl": "OpenSSL 3.6.3 9 Jun 2026"}
+{"connection": 1, "resumed": false}
+{"connection": 2, "resumed": false}
+{"connection": 3, "resumed": false}
+{"connection": 4, "resumed": false}
+{"connection": 5, "resumed": false}
+{"connection": 6, "resumed": false}
+{"connection": 7, "resumed": false}
+{"connection": 8, "resumed": false}
+{"requests_per_burst": [8], "connections": 8, "resumed_connections": 0, "full_handshakes": 8, "streams_max": 0}
