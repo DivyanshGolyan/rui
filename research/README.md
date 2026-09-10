@@ -30,6 +30,8 @@ These models assume atomic durable transitions. Their finite states and checker-
 
 ## Resources and inspection
 
+[Turbopuffer source reading](turbopuffer-resource-evidence.md) records first-party URLs, sections and talk timestamps inspected on 2026-09-10. It compares storage-backed metadata and local ownership with OnePage; it supplies no local filesystem, resource-bound or retry qualification.
+
 | Artifact and reproduction | What it tests; limits |
 | --- | --- |
 | [Execution control](execution-control-experiments/run_all.py): `python3 research/execution-control-experiments/run_all.py` | Fixed-table scans, event waits, real SQLite/custody handoffs, sanitizer negative controls and inspection/stop contention. Historical schema and synthetic commands exclude full provider/tool settlement. |
