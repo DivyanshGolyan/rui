@@ -13,7 +13,7 @@ The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability
 Start one local server explicitly, then use direct CLI/script calls or JavaScript workflows. Clients can disconnect while saved work continues. Restart recovers unfinished work under its original inputs and remaining budgets.
 
 - Construct a Session key locally. First complete configuration establishes its conversation and Workspace; later configuration changes apply in order. Messages start or join its current work.
-- Use stable request keys to recover original configuration/message answers after lost replies. Configuration acknowledges commit; workflow message calls return the original work's final text or validated structured answer.
+- Use stable request keys to recover the original acceptance or rejection after a lost configuration/message reply. Configuration completes at commit; accepted messages bind to a Turn, and workflow message calls return that Turn's final text or validated structured answer.
 - Compose work with ordinary JavaScript functions, loops and deterministic Promise joins. Inspect a Run to find exact Session keys and reuse selected conversations in later workflows.
 - Approve exact Bash/Edit actions or explicitly configure permission bypass. Bash reads and creates files; Edit applies checked whole-line replacements to one existing file. Uncertain tool effects are never automatically replayed.
 - Retain immutable conversation and provider continuation in SQLite. Bound orchestration memory and temporary storage independently of model-requested subprocess memory.
