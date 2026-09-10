@@ -93,8 +93,10 @@ def database(path):
 def accept(db, key, response, covered=None):
     try:
         validate(response)
+        compactions = [i for i in response["output"] if i["type"] == "compaction"]
+        if covered is None and compactions:
+            raise Rejected("unsupported_provider_output")
         if covered is not None:
-            compactions = [i for i in response["output"] if i["type"] == "compaction"]
             if len(compactions) != 1 or not compactions[0].get("encrypted_content") or any(i["type"] == "function_call" for i in response["output"]):
                 raise Rejected("unsupported_provider_output")
     except Rejected as error:
@@ -224,6 +226,14 @@ def run():
             assert not accept(db, "bad-compact-" + str(n), bad, covered=3)
         assert db.execute("SELECT count(*) FROM projection WHERE operation_id='compact'").fetchone()[0] == 0
         passed.append("empty_duplicate_or_effectful_compaction_rejected_no_projection")
+        for n, response in enumerate((fixture["compaction_response"],
+                dict(fixture["response"], output=fixture["response"]["output"] + [fixture["compaction_response"]["output"][1]]))):
+            key = "unexpected-compaction-" + str(n)
+            assert not accept(db, key, response)
+            assert db.execute("SELECT code FROM rejection WHERE operation_id=?", (key,)).fetchone()[0] == "unsupported_provider_output"
+            assert db.execute("SELECT count(*) FROM operation WHERE id=?", (key,)).fetchone()[0] == 0
+            assert db.execute("SELECT count(*) FROM projection WHERE operation_id=?", (key,)).fetchone()[0] == 0
+        passed.append("ordinary_response_compaction_rejected_without_output_or_projection")
         for n, mode in enumerate(("bytes", "items", "depth")):
             bad = copy.deepcopy(fixture["response"])
             if mode == "bytes": bad["padding"] = "x" * LIMITS["bytes"]

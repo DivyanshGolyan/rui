@@ -13,6 +13,7 @@
     "missing_corrupt_and_unproved_model_change_fail_closed",
     "retained_host_refs_then_response_owned_compaction_and_complete_suffix",
     "empty_duplicate_or_effectful_compaction_rejected_no_projection",
+    "ordinary_response_compaction_rejected_without_output_or_projection",
     "synthetic_byte_count_depth_limits_fail_explicitly",
     "no_stored_replay_request_or_checkpoint_copy"
   ],
@@ -26,10 +27,10 @@
     "python": "3.14.6",
     "sqlite": "3.53.4",
     "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
-    "base_revision": "d375f5ec86f0bbfe3028f68d47cea05ea12b8d39"
+    "base_revision": "afa31c1c6e881a543ebbddc97c0f6faf03a54f81"
   },
   "sha256": {
-    "probe.py": "b7f2939daa42e192324629b9da8f7331190427f9e8ab9f7f4c12da6bb5136054",
+    "probe.py": "64365c7e923bc68a2214f2b37c344e80e03d020adc4211ca00534a220e709f7e",
     "fixtures.json": "f0fc6b64fcb1fc5261fcf6e5dcc1328401a4c48497e13d93e3fed54149d28f8a"
   },
   "limitations": [
