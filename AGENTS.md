@@ -1,4 +1,4 @@
-# Working on OnePage
+# Working on Latifa
 
 Build the smallest complete runtime whose rules the user can explain through ordinary work, failure and recovery. Ground design discussions in concrete caller behavior. Additional machinery must earn its complexity through necessary behavior or demonstrated cost.
 
@@ -8,7 +8,7 @@ Read [README.md](README.md) for scope/status, the affected sections of [ARCHITEC
 
 Each requirement has one home. Change the owning section and its affected verification cases. Put necessary rationale beside the contract; do not create parallel ADRs, design proposals, glossaries, summaries or amendment ledgers. Remove superseded text; Git preserves history. Keep [research/README.md](research/README.md) as a compact index of reproducible evidence, not another specification.
 
-For issue-driven work, read the live issue and relevant discussion/dependencies. [Issue #2](https://github.com/DivyanshGolyan/onepage/issues/2) owns readiness. Open issues hold unresolved decisions/research; implementation slices link accepted contracts and define their proof. Historical or closed planning issues are not implementation instructions. Resolve conflicts against the latest accepted decision. Exercise technical judgment within agreed scope; involve the user in consequential behavior or scope choices while continuing independent work. Keep settled decisions and remaining uncertainty clear.
+For issue-driven work, read the live issue and relevant discussion/dependencies. [Issue #2](https://github.com/DivyanshGolyan/latifa/issues/2) owns readiness. Open issues hold unresolved decisions/research; implementation slices link accepted contracts and define their proof. Historical or closed planning issues are not implementation instructions. Resolve conflicts against the latest accepted decision. Exercise technical judgment within agreed scope; involve the user in consequential behavior or scope choices while continuing independent work. Keep settled decisions and remaining uncertainty clear.
 
 Inspect source before claiming implementation. Keep accepted behavior, prototype evidence and passing production qualification distinct.
 

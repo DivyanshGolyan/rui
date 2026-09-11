@@ -1,12 +1,12 @@
-# OnePage architecture
+# Latifa architecture
 
 This is the accepted V1 contract, not implementation evidence. [README.md](README.md) owns product/status; [VERIFICATION.md](VERIFICATION.md) owns required evidence.
 
 ## A piece of work from start to finish
 
-Suppose a caller wants an agent to investigate a failing test. The caller explicitly starts the Host, names a Session, configures its Workspace and sends a message. The model asks to run Bash. With the default permission mode, OnePage saves the proposed action and asks for approval. Once approved and admitted for execution, Bash runs; OnePage saves its result and asks the model for the final answer.
+Suppose a caller wants an agent to investigate a failing test. The caller explicitly starts the Host, names a Session, configures its Workspace and sends a message. The model asks to run Bash. With the default permission mode, Latifa saves the proposed action and asks for approval. Once approved and admitted for execution, Bash runs; Latifa saves its result and asks the model for the final answer.
 
-The caller can disconnect while this work continues. If the Host instead crashes during Bash, recovery reports an indeterminate tool result: the command may have run, so OnePage does not automatically run it again. The model can investigate through fresh calls. The sections below define the exact admission, permission and recovery boundaries behind this example.
+The caller can disconnect while this work continues. If the Host instead crashes during Bash, recovery reports an indeterminate tool result: the command may have run, so Latifa does not automatically run it again. The model can investigate through fresh calls. The sections below define the exact admission, permission and recovery boundaries behind this example.
 
 ```mermaid
 flowchart TD
@@ -44,7 +44,7 @@ flowchart TD
     subgraph host["Host"]
         subgraph runtime["Workflow Runtime"]
             workflow["Workflow execution"]
-            records["Durable Run and call records"]
+            records["Durable Workflow and call records"]
             evaluator["Private disposable evaluator"]
             workflow --- records
             workflow --- evaluator
@@ -67,7 +67,7 @@ The **Host Store** contains canonical facts/content. The **Storage Owner** exclu
 | --- | --- |
 | Local Owner | The server/Store owner. All admitted clients act for it; no per-client ACL, delegated Principal or exclusive Session ownership exists. |
 | Caller / User / Agent | A Caller invokes APIs; User is the message role, whether person or agent; Agent is the model-driven decision-maker. These roles confer no additional authority. |
-| Session / Session key | One reusable linear conversation, Workspace and access scope. Its opaque caller-provided key addresses it within a Store. Sessions have no terminal outcome or persisted lifecycle phase. |
+| Session / Session reference | One reusable linear conversation, Workspace and access scope. Its opaque caller-provided key addresses it within a Store. Sessions have no terminal outcome or persisted lifecycle phase. |
 | Workspace | Working-directory context for relative tool paths, not a sandbox or allowed-path boundary. |
 | Turn | Work from one initiating User Message through a Final Answer or typed terminal outcome. At most one Turn is nonterminal per Session; callers need no Turn key. |
 
@@ -75,23 +75,35 @@ Each fact has one authority; each resident allocation has an owner, bounded popu
 
 ## Admission and public requests
 
+### Names, references, IDs and idempotency keys
+
+| Term | Meaning |
+| --- | --- |
+| Name | Caller-chosen stable text within a documented scope. Session names are local to a Workflow; submission names are local to a Session within a Workflow. These are not freely editable display labels: changing a name can select different work. |
+| Reference | Complete value used to address an object. A Session reference is an opaque string such as `workflow/42/reviewer`, not a live handle or lookup operation. |
+| ID | Runtime-assigned identity of a durable object, such as Store-wide Workflow ID `42`. Representation and allocation belong to the object's owner. |
+| Idempotency key | Identifies a submission across retries so its original committed answer can be recovered. The caller supplies a Workflow creation idempotency key; direct core callers supply a core idempotency key, while the coordinator derives one from Workflow ID, Session reference and submission name. This does not promise exactly-once external effects. |
+| Label | Non-identifying descriptive text. No new label field is introduced. |
+
+Use these qualified terms consistently; do not use a tracing request ID as an idempotency key or confuse a local name with its full reference. The coordinator-derived value and the author's submission name are different representations with separate size bounds.
+
 ### Naming and configuring a Session
 
-Constructing a Session reference is caller-side naming: no existence check, core round trip or generated-ID discovery. Workflow `session(name)` deterministically scopes a short name by Run identity: replay retains it; a fresh Run differs. Core operations accept an exact full Session key unchanged, including from another Run. Key possession does not grant access.
+Constructing a Session reference is caller-side naming: no existence check, core round trip or generated-ID discovery. Clients own their namespaces and encode namespace plus local name unambiguously into the full opaque Session reference. Core neither interprets namespaces nor assigns direct/workflow categories. Equal full references select the same Session across clients; namespace choice separates names, not access authority. Deliberate reuse supplies the existing full reference unchanged, without applying the receiving client's namespace again. Workflow `session(name)` deterministically scopes a short name by Workflow identity: replay retains it; a fresh Workflow differs. Core operations accept an exact full Session reference unchanged, including from another Workflow. Reference possession does not grant access.
 
-The first complete valid configuration for an unknown key atomically establishes Session, baseline, Workspace, access scope and request answer.
+The first complete valid configuration for an unknown Session reference atomically establishes Session, baseline, Workspace, access scope and request answer.
 
 Later configurations apply supplied mutable fields in admission order; omitted fields remain unchanged. Enforce immutable Workspace/access constraints and continuation compatibility, without initial-baseline equality comparisons.
 
-Incomplete initialization and messages to unknown keys reject without partial Sessions. Message admission checks all locally decidable continuation preconditions without provider I/O. Configuration starts no Turn/model work.
+Incomplete initialization and messages to unknown Session references reject without partial Sessions. Message admission checks all locally decidable continuation preconditions without provider I/O. Configuration starts no Turn/model work.
 
 No separate creation, reservation, attachment or must-be-new operation is selected.
 
 ### Recovering a submission after a lost reply
 
-A **Request Identity** is a caller key binding one core configuration/message submission, complete inputs and original committed admission answer: acceptance or definite rejection. For an accepted message, that answer binds the submission to the Turn whose eventual outcome it observes. Distinct messages can share one Turn result.
+A **core idempotency key** is a caller-provided value binding one core configuration/message submission, complete inputs and original committed admission answer: acceptance or definite rejection. For an accepted message, that answer binds the submission to the Turn whose eventual outcome it observes. Distinct messages can share one Turn result.
 
-Configuration and messages use the same Request Identity protocol for direct and workflow callers. Atomically bind operation kind, complete canonical inputs and first committed acceptance or definite rejection with the corresponding mutation.
+Configuration and messages use the same core idempotency key protocol for direct and workflow callers. Atomically bind operation kind, complete canonical inputs and first committed acceptance or definite rejection with the corresponding mutation.
 
 Recover a matching existing admission answer before reevaluating current admission conditions; changed inputs conflict without replacement. A fresh intended submission needs a fresh identity, even for equal input.
 
@@ -101,15 +113,15 @@ Malformed envelopes without usable identity and failed commits cannot promise a 
 
 Acknowledgment follows durable commit, without provider dispatch or final-answer delay. Configuration completes at admission. Message acceptance binds work whose final result may remain pending.
 
-Observation by Request Identity returns absent, original rejection, or original acceptance and its bound result. Scalar observations suffice; batching is optional. Wait/read correctness cannot require every notification. Direct clients retain exact identity and inputs before transmission; uncertain replies are recovered with that identity, not guessed from content.
+Observation by core idempotency key returns absent, original rejection, or original acceptance and its bound result. Scalar observations suffice; batching is optional. Wait/read correctness cannot require every notification. Direct clients retain exact identity and inputs before transmission; uncertain replies are recovered with that identity, not guessed from content.
 
-Runtime saves exact submission identity/inputs before core invocation and records the answer independently; resubmit after lost replies. Core knows no Run membership/cancellation. This provides recoverable admission, not exactly-once effects. Other controls keep domain-specific repeat/conflict rules.
+Runtime saves exact submission identity/inputs before core invocation and records the answer independently; resubmit after lost replies. Core knows no Workflow membership/cancellation. This provides recoverable admission, not exactly-once effects. Other controls keep domain-specific repeat/conflict rules.
 
 ### Example: acceptance and answer arrive separately
 
-A caller submits “Investigate the failing test” with request identity `message-1`. Core commits acceptance, but the connection closes before the reply arrives. Resending the same identity and inputs recovers that acceptance and its original work; it does not submit another message. The final answer may still be pending. Even after the Session has done newer work, `message-1` remains bound to its original result. A deliberate second submission uses a new identity.
+A caller submits “Investigate the failing test” with core idempotency key `message-1`. Core commits acceptance, but the connection closes before the reply arrives. Resending the same identity and inputs recovers that acceptance and its original work; it does not submit another message. The final answer may still be pending. Even after the Session has done newer work, `message-1` remains bound to its original result. A deliberate second submission uses a new identity.
 
-The [workflow identity example](#example-conversation-run-and-call-identities) shows how Runtime supplies these identities for workflow calls.
+The [workflow identity example](#example-conversation-workflow-and-call-identities) shows how Runtime supplies these identities for workflow calls.
 
 ## Conversation and current settings
 
@@ -124,6 +136,8 @@ Compaction uses already-applied context and leaves pending messages alone. No mo
 ### Selecting current settings
 
 A **Session Context Revision** records sparse persistent configuration. Component kinds are model binding, instructions, Tool Catalog, context policy, reasoning defaults, optional output schema, Permission Mode and default output limits. Supported Session settings are mutable unless a change would alter Session identity, Workspace/access scope or invalidate saved conversation continuity. Validate supported values and reject known incompatibility atomically; provider compatibility requires adapter evidence. Host settings remain outside Session configuration under their startup rules. This rule does not add new supported fields or provider capabilities.
+
+First configuration requires an explicit model and Workspace. Omitted instructions default to empty text, omitted tools offer Bash and Edit, omitted Permission Mode selects `ask`, and absent Output Schema selects text answers. An explicit empty tool list offers no tools. Apply these defaults only when establishing the Session; later omitted fields preserve their existing values. Explicit `instructions: ""` selects empty instructions, `tools: []` offers no tools, and `outputSchema: null` clears the schema to select text answers. Omission never clears a field. Settings are ordinary reusable JavaScript data: each configure invocation captures its inputs before later caller mutation, and each Session's configuration evolves independently. Sharing a settings object creates no shared configuration entity.
 
 New requests select one committed revision and resolve settings at or before it. No Turn-wide configuration copy, temporary override layer, cross-call lock or historical revision precondition exists. Configuration and subsequent messages can interleave with other clients; later message failure does not roll back configuration.
 
@@ -213,7 +227,7 @@ For the V1 text/function subset, the replay transformation is the original order
 | `function_call` | `type`, `id`, `call_id`, `name`, exact JSON-string `arguments`, `status` and supported metadata. Host-produced `function_call_output` uses that exact `call_id` and the canonical Tool Result. Item ID and call ID are distinct. |
 | `compaction` | `type`, `id`, exact nonempty `encrypted_content` and supported metadata. The item remains private. |
 
-IDs and item statuses are input-supported fields, not response-only merely because the provider supplied them. Do not turn assistant `output_text` into user `input_text`, decode/re-encode opaque strings, reorder calls, or discard annotations. The first-party SDK also removes its own `parsed`/`parsed_arguments` conveniences; OnePage receives raw wire JSON and creates none, so an unknown raw field with that name is not automatically disposable. Preserve `created_by` in canonical output even though replay omits it. Transport framing, response envelopes, usage and correlation remain producing-response evidence rather than being appended to `input`.
+IDs and item statuses are input-supported fields, not response-only merely because the provider supplied them. Do not turn assistant `output_text` into user `input_text`, decode/re-encode opaque strings, reorder calls, or discard annotations. The first-party SDK also removes its own `parsed`/`parsed_arguments` conveniences; Latifa receives raw wire JSON and creates none, so an unknown raw field with that name is not automatically disposable. Preserve `created_by` in canonical output even though replay omits it. Transport framing, response envelopes, usage and correlation remain producing-response evidence rather than being appended to `input`.
 
 The Codex source also recognizes legacy reasoning `text` and `compaction_summary` variants; V1 rejects them pending replay evidence rather than normalizing or dropping them. Close consequential variants before accepting any output: item/content type, role, phase, status, annotation variant and Action control. V1 accepts only its text/function tool catalog, not provider-hosted tools, tool programs, namespaced tools or encrypted function arguments. Known controls requesting those meanings (`caller:program`, asynchronous execution, a nonempty namespace or encrypted arguments) reject as `unsupported_provider_output`; preserving an unknown open field does not authorize an effect. Provider metadata cannot fabricate host-owned tool records, permissions, instruction updates or completed work. Reject provider-supplied `cell_id`, `executed_tool_calls` or `tool_calls_complete` in `internal_chat_message_metadata_passthrough` rather than promoting them to local authority. Preserve other open metadata privately with its provider provenance.
 
@@ -225,7 +239,7 @@ V1 selects the current Codex client's evidenced response route: a compaction Ope
 
 Require a completed response with exactly one nonempty supported compaction item for explicit compaction. Store the complete ordered output once on that Operation. The base anchor is its Operation ID and the compaction item's ordinal within that canonical output.
 
-Derive the replacement recipe from the covered original host User/System Instruction inputs in their original order, then the slice from that item through the end of the same output, then the complete later suffix. Retained host inputs are existing canonical references recovered through the source recipe, including earlier bases; never copies or a newly stored request body. This derives from the subscription client's retained user/developer input shape; retaining every host input without truncation is OnePage policy awaiting live qualification. It avoids assuming that the encrypted item alone replaces those inputs. If retained inputs cannot fit, fail explicitly.
+Derive the replacement recipe from the covered original host User/System Instruction inputs in their original order, then the slice from that item through the end of the same output, then the complete later suffix. Retained host inputs are existing canonical references recovered through the source recipe, including earlier bases; never copies or a newly stored request body. This derives from the subscription client's retained user/developer input shape; retaining every host input without truncation is Latifa policy awaiting live qualification. It avoids assuming that the encrypted item alone replaces those inputs. If retained inputs cannot fit, fail explicitly.
 
 No separate replay object, checkpoint relation or copied compacted window is needed. A compaction Operation produces no tool execution or Conversation projection; an unexpected Action rejects the candidate. Its producing Operation's admission position fixes the covered frontier, including the prior base and all already-applied inputs/results within that historical view. Result acceptance determines when the new base becomes available, not what it covered. Pending messages and later instruction updates remain outside that frontier and appear once in subsequent context.
 
@@ -276,6 +290,8 @@ Edit owns target/scratch/buffers/offsets/cleanup within one trusted in-process m
 ### Canonical state and transactions
 
 Relational constraints enforce identities, parentage, ordering, message projection uniqueness, one active Turn per Session, one terminal Turn outcome, one optional final Resolution per Operation, exact request bindings and content publication with its first durable reference. No ledger/reducer image, permanent Completion, separate Resolution ID, cached lifecycle phase or shadow frontier duplicates authority. Unreleased databases/fixtures are recreated: no migration, compatibility reader, dual-write or alias layer.
+
+Implement the redesigned runtime on a fresh branch with the old production code removed. Preserve revision `6a9b9b7aa993c853f0ff998533ab5aa3e74fe719` in Git as the reference for selective extraction; the old runtime is not a production fallback. Retain the accepted contract, verification requirements and research evidence. Assess build setup, dependency integration and tests individually against this contract rather than preserving obsolete interfaces or behavior. The first implementation slice must complete an ordinary caller flow and its failure/recovery boundaries; removing old code is preparation within that slice, not a separate completion milestone.
 
 One meaningful mutation owns one cohesive function: bounded syntax/content validation; reserve custody if admitting execution; `BEGIN IMMEDIATE`; bounded current-state checks and guarded writes; verify affected rows; commit; release consequence. State-dependent checks stay inside. Rollback releases unused reservation and grants no dispatch. Private helpers may simplify calculation/query mechanics without a mandatory classifier framework.
 
@@ -335,7 +351,7 @@ Recovery uses committed facts only; it cannot establish an outcome or permission
 | Boundary | Commit meaning and retained owner | Next consumer / recovery |
 | --- | --- | --- |
 | Validation rejects or transaction rolls back | No attempted mutation or dispatch authority survives. Input/scratch and unused reservation remain with their local owner for release. Previously committed facts remain authoritative. | Core may handle later requests after known rollback; canonical storage faults follow shutdown below. |
-| Configuration/message admission commits, reply is lost | Core owns the original request answer and its admitted configuration/work. Client connection resources confer no execution ownership. | Direct caller or Runtime repeats exact Request Identity/inputs to recover that answer. |
+| Configuration/message admission commits, reply is lost | Core owns the original request answer and its admitted configuration/work. Client connection resources confer no execution ownership. | Direct caller or Runtime repeats exact core idempotency key/inputs to recover that answer. |
 | Workflow intent commits, core reply is absent | Runtime owns exact submission intent; core independently owns any committed answer. Neither transaction rolls back the other's work. | Runtime resubmits through the ordinary core API, then saves the answer in its own transaction, including during cancellation recovery. |
 | Authorization commits, no Attempt exists | Core owns permission and eligibility; there is no permit, live effect or reserved waiting execution. | Core's ordinary capacity selection rechecks applicability before Attempt admission. |
 | Attempt commits, launch has not occurred | Core owns consumed allowance and uncertainty; only the committing invocation holds the one-shot permit and reserved custody. | That local owner may prepare/launch once or suppress launch and deliver a known failure. Fresh-process recovery cannot distinguish this boundary from lost running custody. |
@@ -374,7 +390,7 @@ A crash at A, B or C leaves an admitted Attempt without a saved result. Recovery
 
 ### Stopping selected work
 
-A **Session stop** selects current work once, fences advancement and acknowledges saved intent separately from completion. Idle stops complete immediately. Completion requires that selected work's terminal outcome and atomic occupancy release, including Action settlement and ordered Tool Results; it does not follow future work or prove provider/billing termination. Model transport cleanup may continue under retained custody. A stop cannot rewrite an earlier committed result. Direct Session stops have no caller-retained Request Identity and are not automatically retried. After a lost acknowledgment, another Session-addressed stop selects current work again and may stop newer work; completion of the already-admitted stop still follows only its selected work. Callers coordinate Session reuse.
+A **Session stop** selects current work once, fences advancement and acknowledges saved intent separately from completion. Idle stops complete immediately. Completion requires that selected work's terminal outcome and atomic occupancy release, including Action settlement and ordered Tool Results; it does not follow future work or prove provider/billing termination. Model transport cleanup may continue under retained custody. A stop cannot rewrite an earlier committed result. Direct Session stops have no caller-retained core idempotency key and are not automatically retried. After a lost acknowledgment, another Session-addressed stop selects current work again and may stop newer work; completion of the already-admitted stop still follows only its selected work. Callers coordinate Session reuse.
 
 ### Interrupting one model operation
 
@@ -407,49 +423,74 @@ These cases follow the applicability rules above. A crash by itself selects neit
 
 ## Workflow evaluation and cancellation
 
-### Run identity and saved calls
+### Workflow identity and saved calls
 
-A caller **Run Key** creates or reattaches one **Workflow Run** when exact inputs match. The Run binds source, arguments, Workspace, semantics, limits, calls, evaluations and outcome.
+A **Workflow** is one durable submitted computation, from acceptance through its terminal outcome. It owns immutable JavaScript source, arguments, Workspace, semantics and limits, together with its evolving progress, saved calls/results and outcome. Reevaluation, operation retries and Host restart continue the same Workflow. There is no separate Workflow Definition or versioned program entity; source is part of the Workflow.
 
-A **Call key** is an author-provided configuration/message key unique within one Run. Runtime scopes it by Run identity to form a core Request Identity. It is distinct from Session identity.
+A caller **Workflow creation idempotency key** creates or reattaches that Workflow when exact inputs match. Changing source or initial inputs requires a new key and a new Workflow; reusing a key with changed inputs conflicts. The new Workflow may deliberately reuse existing Sessions.
 
-Run creation commits the Run Key and complete bound inputs before acknowledgment or evaluation. A client retains that key and inputs before transmission; repeating creation with equal inputs attaches to the same Run, including after terminal completion or Host restart. Changed inputs conflict without replacing it. A lost reply is not a reason to choose a fresh Run Key. Attachment observes saved work; it neither restarts a terminal Run nor retains an evaluator or connection on its behalf.
+A **Workflow ID** is a Store-wide integer allocated when Workflow creation commits and never reassigned to another committed Workflow. Workflow Runtime uses it for stable Session-reference and submission namespacing; core receives only opaque keys and has no Workflow lookup dependency. The caller Workflow creation idempotency key recovers creation after a lost reply; it is not the internal Workflow ID. Workflow IDs use the positive signed-64 range; exact integer allocation remains an implementation choice under nonreuse.
 
-Workflow Runtime owns Run inputs, generations, saved calls/results, cancellation and output. Call keys preserve exact text and use an unambiguous Run-identity namespace, not workflow name/content, invocation counter, code location or input hash. Authors derive stable keys/inputs/order from arguments and original result identities or positions, not branch completion order. Equal-key conflicts are detected; accidental new keys cannot always be distinguished from intentional work. No arbitrary shared-mutation determinism, static policing or historical Promise-delivery replay is promised.
+The coordinator constructs Session references as `workflow/<id>/<name>`, with the Workflow ID in canonical decimal digits without leading zeros and the local name preserved exactly as the remaining suffix. Slashes within the name need no component escaping; no hashing or normalization is performed. The prefix is coordinator-owned convention, not core syntax or access authority. Other clients choosing the same full reference select the same Session. Enforce the 128 UTF-8-byte limit on the complete reference: the longest ID uses 19 digits, so its 29-byte prefix leaves 99 bytes for a local name. Shorter IDs leave correspondingly more space. Transport escaping remains separate; reuse passes the full reference unchanged.
 
-### Example: conversation, Run and call identities
+A **Submission name** is author-provided stable text scoped to one Session within one Workflow. It permits up to 128 UTF-8 bytes of exact text; reject overflow without truncation or normalization. This limit applies to the caller-provided key alone, not the complete core idempotency key. The complete call identity is Workflow ID, exact full Session reference and Submission name; Runtime derives an opaque core idempotency key from that combination. Configuration and messages share this scope: matching complete identities and inputs recover the original submission, while changed operation kind or inputs conflict. Different Sessions may use the same Submission name, and a new Workflow may reuse an existing Session with the same Submission name for new work. Two references to the same full Session reference share the same scope, regardless of local variable names. Separate intended submissions to that Session within the same Workflow require different Submission names. This does not change direct core idempotency-key scope; coordinator encoding remains to be selected.
 
-A workflow Run with key `review-42` uses `session("reviewer")` and a message call keyed `review-tests`:
+Before accepting a new Workflow, Workflow Runtime compiles the exact captured source under the selected JavaScript semantics without executing author code or admitting Session calls. Reject invalid syntax, unsupported constructs and statically provable violations of the selected entry-point/call contract with precise diagnostics; do not infer invalidity from naming style, computed keys, shadowed functions or uncertain control flow. No verb requirement or custom lint framework is selected. Runtime validation still checks actual arguments, complete generated keys and repeated-call bindings. Recover an existing matching Workflow before new-source validation; changed inputs conflict without replacing it.
+
+Pre-acceptance validation uses the bounded evaluator lifecycle owner and its applicable memory/CPU/elapsed limits, sharing its serialization with ordinary evaluations. Captured source stays ingress-owned and charged through validation and admission or rejection; release compilation state and child resources safely, retaining no VM or bytecode cache. Compilation/resource failure admits no Workflow or Session work. No database transaction is held across compilation; the creation transaction rechecks the caller key and binds the exact validated source and inputs.
+
+Workflow creation commits the Workflow creation idempotency key and complete bound inputs before acknowledgment or execution of author code. A client retains that key and inputs before transmission; repeating creation with equal inputs attaches to the same Workflow, including after terminal completion or Host restart. Changed inputs conflict without replacing it. A lost reply is not a reason to choose a fresh Workflow creation idempotency key. Attachment observes saved work; it neither restarts a terminal Workflow nor retains an evaluator or connection on its behalf.
+
+Workflow Runtime owns Workflow inputs, generations, saved calls/results, cancellation and output. Submission names preserve exact text and use an unambiguous Workflow-and-Session namespace, not workflow name/content, invocation counter, code location or input hash. Authors derive stable keys/inputs/order from arguments and original result identities or positions, not branch completion order. Equal-key conflicts are detected; accidental new keys cannot always be distinguished from intentional work. Pre-acceptance diagnostics do not prove arbitrary shared-mutation determinism or stable computed identities; historical Promise-delivery replay is not promised.
+
+### JavaScript Session functions
+
+Expose public declaration types for workflow authors, including `SessionSettings`, `ToolName` (`"bash" | "edit"`) and `PermissionMode` (`"ask" | "bypass"`). Runtime values remain plain objects, arrays and strings; no settings class, constructor or runtime enum object is required. Workspace, instructions and model identifiers are strings; Output Schema is structured data. Declaration files provide editor guidance without adding TypeScript execution or transpilation. Keep declarations aligned with the public contract rather than exposing storage/provider internals. Runtime validates actual values regardless of editor type checking.
+
+The workflow-facing functions use positional submission names:
+
+| Function | Contract |
+| --- | --- |
+| `session(name)` | Synchronously returns the full Session-reference string in the current Workflow namespace. No existence check, server call or durable mutation. Reject a derived reference exceeding 128 UTF-8 bytes. |
+| `configure(sessionReference, submissionName, settings)` | Returns a Promise resolving to `undefined` after configuration commits, or rejecting on failure. First configuration establishes the complete Session; later calls apply sparse changes. Starts no model work. |
+| `sendMessage(sessionReference, submissionName, text)` | Returns a Promise of the originally bound final text or schema-validated value, rejecting on failure/cancellation. Uses current Session settings without a per-message override; unknown Sessions reject. |
+
+Both mutating functions accept an exact full Session-reference string. To reuse a Session from another Workflow, pass its inspected key directly without calling `session()` on it. No creation, lookup or attachment helper is required. Submission names follow the Workflow-and-Session scope above; verb phrases are examples, not a validation rule. Matching replay recovers the original configuration acknowledgement or message outcome rather than reapplying settings or submitting another message. Final text and schema-validated values follow the existing output contract; a shared Turn can provide the same result to multiple submissions.
+
+### Example: conversation, Workflow and call identities
+
+A Workflow with key `review-42` uses `session("reviewer")` and a message call keyed `review-tests`:
 
 | Identity | What it selects in this example |
 | --- | --- |
-| Session key | The reusable reviewer conversation. `session("reviewer")` derives its full key within this Run. |
-| Run Key `review-42` | This execution of the workflow with its exact source and inputs. |
-| Call key `review-tests` | This message submission within the Run. Runtime scopes it to form the core Request Identity. |
+| Session reference | The reusable reviewer conversation. `session("reviewer")` derives its full reference within this Workflow. |
+| Workflow creation idempotency key `review-42` | Caller identity for creating or recovering this Workflow with its exact source and inputs. |
+| Workflow ID | Store-wide integer identifying the committed Workflow and its coordinator namespace. |
+| Submission name `review-tests` | This submission to the reviewer Session within the Workflow. Runtime combines Workflow ID, full Session reference and Submission name to form the core idempotency key. |
 
-Reevaluation recovers the same Session and submission. A fresh Run derives a different Session key from the same short name; to reuse the earlier conversation, pass its inspected full key unchanged. Reusing a Session does not reuse an earlier submission or restart its Run.
+Reevaluation recovers the same Session and submission. A fresh Workflow derives a different Session reference from the same short name; to reuse the earlier conversation, pass its inspected full reference unchanged. Reusing a Session does not reuse an earlier submission or restart its Workflow.
 
 ### Reevaluating from saved results
 
-An evaluation sees one fixed set of saved results/failures for its entire lifetime. Its **Evaluation Generation** binds source, arguments, semantics, limits and that **Visibility Snapshot**. Later results belong to a later evaluation; they do not invalidate the current one. Generation/cancellation checks still govern publication.
+An **Evaluation** is one invocation of the Workflow's JavaScript program against a fixed set of saved results/failures. Many Evaluations may advance one Workflow; an Evaluation is not a new Workflow. Each sees that fixed set for its entire lifetime. Its **Evaluation Generation** binds source, arguments, semantics, limits and that **Visibility Snapshot**. Later results belong to a later evaluation; they do not invalidate the current one. Generation/cancellation checks still govern publication.
 
 Evaluate from source, return all encountered calls plus root waiting/value/failure, then discard the heap. No retained Promise graph, bytecode, continuations or second dependency interpreter exists.
 
 Functions, loops, helpers, `Promise.all` and `Promise.allSettled` compose work; `Promise.race`/`Promise.any` cannot expose physical completion order. References/calculation/awaits need no separate keys. Configuration Promises acknowledge commit; message Promises return their originally bound final outcome. Awaited configuration is a real dependency that may need another evaluation.
 
-The returned root determines completion. Fulfilled roots need not wait for unrelated calls, but encountered calls must undergo validation/admission before success publication. Their admitted Session work may outlive the Run without reopening it; unawaited JS continuations disappear. Pending roots publish their complete encountered unresolved-call set, without Promise-reachability analysis. Rejected roots follow failure handling; prior admissions remain real.
+The returned root determines completion. Fulfilled roots need not wait for unrelated calls, but encountered calls must undergo validation/admission before success publication. Their admitted Session work may outlive the Workflow without reopening it; unawaited JS continuations disappear. Pending roots publish their complete encountered unresolved-call set, without Promise-reachability analysis. Rejected roots follow failure handling; prior admissions remain real.
 
-For example, a workflow configures two named Sessions, awaits both acknowledgments, then submits keyed review messages and joins their Promises in input order. If only the second answer is visible, reevaluation recovers the same calls and the join remains pending. Once both are visible, a keyed summary message consumes those original answers, even if either Session has since done newer work. A rejected message follows ordinary JavaScript catch/allSettled behavior or rejects the root; rejection alone does not invoke Run cancellation or stop other admitted work. Runtime supplies recorded facts; only the evaluator executes the author's join and branch logic.
+For example, a workflow configures two named Sessions, awaits both acknowledgments, then submits keyed review messages and joins their Promises in input order. If only the second answer is visible, reevaluation recovers the same calls and the join remains pending. Once both are visible, a keyed summary message consumes those original answers, even if either Session has since done newer work. A rejected message follows ordinary JavaScript catch/allSettled behavior or rejects the root; rejection alone does not invoke Workflow cancellation or stop other admitted work. Runtime supplies recorded facts; only the evaluator executes the author's join and branch logic.
 
 ### Validating and publishing encountered calls
 
-Capture each call's inputs at invocation, before later JS mutation, with strict-data checks. Validate complete evaluator output, known bindings and repeated-key consistency before new intents. Equal replay is read-only; new calls retain encounter order and independently recheck generation/cancellation before intent commit. Core checks request identity/access/Session state independently. Preserve committed prefixes after failure/crash; never claim batch rollback. Atomically publish complete dependencies or terminal output with final generation/cancellation checks. Dependencies unresolved in the Visibility Snapshot remain recorded even if results arrive during evaluation/publication.
+Capture each call's inputs at invocation, before later JS mutation, with strict-data checks. Validate complete evaluator output, known bindings and repeated complete call-identity consistency before new intents. Equal replay is read-only; new calls retain encounter order and independently recheck generation/cancellation before intent commit. Core checks core idempotency key/access/Session state independently. Preserve committed prefixes after failure/crash; never claim batch rollback. Atomically publish complete dependencies or terminal output with final generation/cancellation checks. Dependencies unresolved in the Visibility Snapshot remain recorded even if results arrive during evaluation/publication.
 
 ### Selecting the next evaluation
 
 Run one asynchronous pull loop.
 
-Select oldest eligible Run by creation order with stable tiebreak: new Runs, interrupted generations, or suspended Runs with any newly available unresolved dependency. A whole join need not finish before reevaluation. Revalidate terminality/cancellation/generation. Finish one evaluation's outcome handling and physical cleanup, service ready host work, immediately recheck; only no eligible work arms one shared one-second timer. Do not queue missed ticks. No completion hook, ready queue, subscription registry or per-waiter callback/payload is required. On crash, abandon interrupted calculations and capture current original results in a fresh generation; retain committed calls, fence stale publication, never reconstruct historical first visibility. Terminal Runs do not reevaluate.
+Select oldest eligible Workflow by creation order with stable tiebreak: new Workflows, interrupted generations, or suspended Workflows with any newly available unresolved dependency. A whole join need not finish before reevaluation. Revalidate terminality/cancellation/generation. Finish one evaluation's outcome handling and physical cleanup, service ready host work, immediately recheck; only no eligible work arms one shared one-second timer. Do not queue missed ticks. No completion hook, ready queue, subscription registry or per-waiter callback/payload is required. On crash, abandon interrupted calculations and capture current original results in a fresh generation; retain committed calls, fence stale publication, never reconstruct historical first visibility. Terminal Workflows do not reevaluate.
 
 ### Preparing a fixed visibility snapshot
 
@@ -465,15 +506,15 @@ Finish input writes/integrity checks before spawning with completed read-only in
 
 Parent-owned output remains untrusted until protocol/exit checks and full validation succeed; child exit, pipe closure or apparent root value alone cannot publish success. Keep output and validation ranges through the last intent and dependency/outcome transaction. On cancellation, stale generation, failure or shutdown, terminate/reap as needed and close pipes/input/output/metadata after pending I/O ends. Restart discards abandoned artifacts and evaluates fresh saved facts.
 
-### Cancelling a Run
+### Cancelling a Workflow
 
-Run cancellation durably fences new evaluation/calls, recovers every unanswered saved submission with original inputs, and records all answers. This may newly configure Sessions or start work before stopping it; that effect/cost window is accepted, not rollback. Then promptly request ordinary stops through bounded traversal of distinct Sessions from accepted message calls, before awaiting all completions. References, configuration and reads alone add no stop targets. Core has no Run fence. Do not finish cancellation while submissions or required stops remain unresolved.
+Workflow cancellation durably fences new evaluation/calls, recovers every unanswered saved submission with original inputs, and records all answers. This may newly configure Sessions or start work before stopping it; that effect/cost window is accepted, not rollback. Then promptly request ordinary stops through bounded traversal of distinct Sessions from accepted message calls, before awaiting all completions. References, configuration and reads alone add no stop targets. Core has no Workflow fence. Do not finish cancellation while submissions or required stops remain unresolved.
 
-After crash, unfinished passes repeat, possibly stopping newer shared work even after prior successful/idle stops; callers coordinate reuse. Saved intent/outcome suffice, without propagation receipts, durable cursors or idle-check records. Committed completion ends propagation. Other Runs observe stops without becoming cancelled.
+After crash, unfinished passes repeat, possibly stopping newer shared work even after prior successful/idle stops; callers coordinate reuse. Saved intent/outcome suffice, without propagation receipts, durable cursors or idle-check records. Committed completion ends propagation. Other Workflows observe stops without becoming cancelled.
 
 ### Evaluator containment
 
-One evaluator lifecycle includes child execution, output validation/publication or failure handling, and child/pipe cleanup before another begins. Model/tool work and controls remain concurrent; waiting Runs retain no evaluator.
+One evaluator lifecycle includes child execution, output validation/publication or failure handling, and child/pipe cleanup before another begins. Model/tool work and controls remain concurrent; waiting Workflows retain no evaluator.
 
 Give the child an empty environment, three explicit stdio pipes and only selected read-only prepared-input descriptors; close writable input handles first and enforce inheritance through construction/close-on-exec. Native bridge may positional-read those descriptors; JS gets no paths, raw descriptors, imports, FFI, filesystem, network, processes, storage, credentials, clock or randomness. No pathname opens or SQLite access are allowed. This is not protection after arbitrary native-code execution.
 
@@ -487,11 +528,11 @@ Bound native allocations/stack separately from engine heap; reuse temporary stor
 
 ### Public operations
 
-The adapter exposes Session configuration/messages, observations/history/wait, permission, exact Model Interruption and stops, plus Run create/attach/inspect/cancel. Driving is internal, not public `advance`. Direct CLI is Session-addressed; message text is positional and `-` reads complete stdin. Final command spellings remain implementation work.
+The adapter exposes Session configuration/messages, observations/history/wait, permission, exact Model Interruption and stops, plus Workflow create/attach/inspect/cancel. Driving is internal, not public `advance`. Direct CLI is Session-addressed; message text is positional and `-` reads complete stdin. Final command spellings remain implementation work.
 
-### Inspecting Sessions associated with a Run
+### Inspecting Sessions associated with a Workflow
 
-Run inspection combines Runtime records with ordinary core observations; owners maintain their own consistent observations, but the report may briefly lag and has no global cross-Session revision. It is not evaluator visibility or cancellation authority. List exact full keys and identifying context for associated durable Sessions derived from accepted configuration/messages; unused declarations and rejections establish no association. Recover lost submission answers before relying on association. Configuration-only Sessions are visible even though absent from cancellation's stop set. An agent can inspect W1 and type a selected key unchanged in W2: no output metadata, previous-Run argument, lookup machinery, attachment or snapshot restore. Reuse continues current state.
+Workflow inspection combines Runtime records with ordinary core observations; owners maintain their own consistent observations, but the report may briefly lag and has no global cross-Session revision. It is not evaluator visibility or cancellation authority. List exact full references and identifying context for associated durable Sessions derived from accepted configuration/messages; unused declarations and rejections establish no association. Recover lost submission answers before relying on association. Configuration-only Sessions are visible even though absent from cancellation's stop set. An agent can inspect W1 and type a selected key unchanged in W2: no output metadata, previous-Workflow argument, lookup machinery, attachment or snapshot restore. Reuse continues current state.
 
 ### Capturing and delivering reports
 
@@ -501,7 +542,7 @@ The report owner retains completed scratch through delivery; the connection borr
 
 ### Work state and wait conditions
 
-Message-call work summaries have precedence: terminal outcome; otherwise admitted execution or future retry eligibility is `in_flight`; otherwise actionable permission without progress is `waiting_for_permission`; otherwise `runnable`. Terminal categories are `completed`, `failed`, `cancelled`. Run `permission_required` means actionable permission exists and no member work can currently progress. Preserve original message-result bindings as Sessions advance. Direct waits select current work once, not indefinitely following later work. History supports recent entries, kind filters and after-position reads; unapplied input/reasons remain separately reachable.
+Message-call work summaries have precedence: terminal outcome; otherwise admitted execution or future retry eligibility is `in_flight`; otherwise actionable permission without progress is `waiting_for_permission`; otherwise `runnable`. Terminal categories are `completed`, `failed`, `cancelled`. Workflow `permission_required` means actionable permission exists and no member work can currently progress. Preserve original message-result bindings as Sessions advance. Direct waits select current work once, not indefinitely following later work. History supports recent entries, kind filters and after-position reads; unapplied input/reasons remain separately reachable.
 
 A Session wait observes without starting or resuming work. The default returns when its selected work has a terminal outcome or cannot progress without caller action (`waiting_for_permission` in V1), reporting the actionable requests. An explicit terminal-only wait returns only for the selected work's terminal outcome. Both return immediately if their condition already holds; an idle Session returns idle without waiting for future work. Later Session activity cannot retarget the wait. Notifications are hints; committed observations determine completion.
 
@@ -509,7 +550,7 @@ Ordinary Session inspection shows pending-message count alongside work state or 
 
 ### Outcomes and observation errors
 
-Inspection and terminal-state waits return observed outcomes, including failure/cancellation, as data. Failure to obtain an observation is a separate error, not evidence that the work failed or a submission was rejected. Configuration/message admission returns its committed acceptance or rejection under the Request Identity protocol; communication loss leaves that answer uncertain until recovered. Workflow message Promises instead deliver the bound answer or reject with the recorded failure/cancellation under the workflow contract. These are distinct interfaces to the same authoritative facts.
+Inspection and terminal-state waits return observed outcomes, including failure/cancellation, as data. Failure to obtain an observation is a separate error, not evidence that the work failed or a submission was rejected. Configuration/message admission returns its committed acceptance or rejection under the core idempotency key protocol; communication loss leaves that answer uncertain until recovered. Workflow message Promises instead deliver the bound answer or reject with the recorded failure/cancellation under the workflow contract. These are distinct interfaces to the same authoritative facts.
 
 ### Wire format and command output
 
@@ -517,13 +558,13 @@ HTTP owns closed versioned JSON; CLI defaults to deterministic Markdown over the
 
 ### Connection capacity and control headroom
 
-Connections serve one exchange then close, without pipelining/idle keepalive. Seal/validate charged ingress; incomplete uploads publish nothing. Preserve short-control headroom for Session stop, Run cancellation, Model Interruption and Permission Decision acknowledgments; waits/reports/transfers use ordinary capacity. Transfer inactivity excludes host processing/backpressure; progressing transfers have no minimum rate/total deadline. Timeout releases temporary connection state, not committed work. Floods/OS exhaustion remain possible.
+Connections serve one exchange then close, without pipelining/idle keepalive. Seal/validate charged ingress; incomplete uploads publish nothing. Preserve short-control headroom for Session stop, Workflow cancellation, Model Interruption and Permission Decision acknowledgments; waits/reports/transfers use ordinary capacity. Every valid control and its complete semantic response must fit its derived bound, including framing and worst-case escaping, in bounded memory without content scratch. The bound follows the supported fields; no fixed 8 KiB allowance is required. Transfer inactivity excludes host processing/backpressure; progressing transfers have no minimum rate/total deadline. Timeout releases temporary connection state, not committed work. Floods/OS exhaustion remain possible.
 
 Control headroom permits admission and durable acknowledgment, not a connection held until stop/cancellation completion. Observe completion through ordinary-capacity reads after acknowledgment. If even control capacity is unavailable or the reply is lost, the caller cannot infer whether a control committed. Follow the control's domain rules: exact-target controls retain their supplied target, while Session-stop resubmission follows the current-work selection rule above. Reconnection obtains a fresh complete observation, not a continuation of a partially delivered report.
 
 ### Ingress ownership through admission
 
-Ingress remains connection-owned through the receiving core/Runtime owner's import or rejection. Disconnect before complete capture releases it without mutation; once admission is in progress, disconnect cannot revoke it or close its source before commit/rollback and the last read. Complete upload alone is not admission. A lost configuration/message reply recovers through Request Identity; Run creation uses its Run Key, and controls follow their domain rules. Restart never imports leftover ingress.
+Ingress remains connection-owned through the receiving core/Runtime owner's import or rejection. Disconnect before complete capture releases it without mutation; once admission is in progress, disconnect cannot revoke it or close its source before commit/rollback and the last read. Complete upload alone is not admission. A lost configuration/message reply recovers through core idempotency key; Workflow creation uses its Workflow creation idempotency key, and controls follow their domain rules. Restart never imports leftover ingress.
 
 ## Platforms and server lifetime
 
@@ -541,7 +582,7 @@ Target Linux/macOS on x86-64/ARM64 through capabilities, not distribution allowl
 
 ### Exclusive Store ownership
 
-`onepage serve` acquires an exclusive OS-held Store lock before recovery, stale-endpoint reclamation or dispatch, retaining ownership until no dispatch or semantic writes remain possible. Locking and pathname Unix-socket discovery share one bounded canonical Store selector: equivalent supported paths cannot create two owners; unsupported aliases and unrepresentable derived paths reject. Do not use Linux abstract sockets. Close-on-exec prevents descendants inheriting ownership. PID metadata, socket existence, timeout and absent results prove neither ownership nor effect termination.
+`latifa serve` acquires an exclusive OS-held Store lock before recovery, stale-endpoint reclamation or dispatch, retaining ownership until no dispatch or semantic writes remain possible. Locking and pathname Unix-socket discovery share one bounded canonical Store selector: equivalent supported paths cannot create two owners; unsupported aliases and unrepresentable derived paths reject. Do not use Linux abstract sockets. Close-on-exec prevents descendants inheriting ownership. PID metadata, socket existence, timeout and absent results prove neither ownership nor effect termination.
 
 Protect socket/parent directory; validate Store identity/wire version before mutation. Reclaim only the expected stale socket after ownership. Unavailable/inaccessible/competing owners reject. Clients never auto-start or access SQLite; disconnects/timeouts do not cancel work.
 
@@ -559,14 +600,14 @@ When capacity is unavailable, keep eligible work in SQLite without Attempt, allo
 
 ### Memory ownership and configured bounds
 
-At fixed configured capacity, retained orchestration memory and open-handle populations do not grow with durable history or payload item count. Large values travel through bounded windows and owned scratch/content stages, not payload-sized resident copies. Dormant Sessions, terminal Turns and waiting Runs retain no resident graph, worker, socket or credit. User-held decoded values consume evaluator heap within its separate limit. Library/transport/evaluator allocations remain separately bounded; static custody is not whole-process static allocation. Measure allocator-live, retained allocations and physical footprint separately; release need not lower RSS immediately. Model-requested subprocess memory is separately observed workload; OnePage helpers count as orchestration.
+At fixed configured capacity, retained orchestration memory and open-handle populations do not grow with durable history or payload item count. Large values travel through bounded windows and owned scratch/content stages, not payload-sized resident copies. Dormant Sessions, terminal Turns and waiting Workflows retain no resident graph, worker, socket or credit. User-held decoded values consume evaluator heap within its separate limit. Library/transport/evaluator allocations remain separately bounded; static custody is not whole-process static allocation. Measure allocator-live, retained allocations and physical footprint separately; release need not lower RSS immediately. Model-requested subprocess memory is separately observed workload; Latifa helpers count as orchestration.
 
 | Boundary | Selected value and scope |
 | --- | --- |
 | Active Capacity | Startup default 1,000 shared model/Bash/Edit executions and cleanup; adjustable, no independent hard maximum. |
 | Shared scratch | Startup default 8 GiB logical owned bytes, including pending growth and overlapping copies; no allowance-sized allocation/reservation. |
 | Clients | Startup default 128 total, at most 120 ordinary, 8 classification/control headroom, independent of execution capacity. |
-| Exchange bounds | Request line+headers 16 KiB; short-control body and acknowledgment/error 8 KiB each. Reject before mutation. |
+| Exchange bounds | Request line+headers 16 KiB; derive short-control request, acknowledgment and error bounds separately from supported fields and their maximum encoded sizes. Reject oversized requests before mutation. |
 | Client deadlines | Startup defaults 10 s total headers; 60 s transfer inactivity excluding host processing/backpressure. |
 | Evaluator | One full lifecycle; initial 16 MiB JS allocation ceiling; 1 s process CPU and 5 s parent elapsed lifetime. Native/parent memory additional. |
 | Model retries | Startup default 3 after initial try, waits 2/4/8 s or later valid Retry-After; conserved per Operation. |
@@ -575,7 +616,7 @@ At fixed configured capacity, retained orchestration memory and open-handle popu
 | Tool excerpt | Startup default 10,000 UTF-8 bytes of tail output across the entire Tool Result, no line quota; omission/path metadata additional. |
 | Edit copy window | Reusable 16 KiB; not an expected-text/line/replacement/file limit. |
 | Diagnostics | Startup default 128 MiB, at most 16 files, each floor(cap/16), 4 KiB encoded record. Detail shares cap; exports consume scratch. |
-| Qualification, not admission | Whole OnePage footprint ≤256 MiB at defined 1,000-operation model/Bash/Edit/mixed fixtures, including evaluator/helpers; same cold/retained-idle ceiling. Idle CPU <1% one core; model reference ≤2 cores average; p95 durable control acknowledgment ≤1 s; light/free-capacity retry discovery ≤2 s after due. |
+| Qualification, not admission | Whole Latifa footprint ≤256 MiB at defined 1,000-operation model/Bash/Edit/mixed fixtures, including evaluator/helpers; same cold/retained-idle ceiling. Idle CPU <1% one core; model reference ≤2 cores average; p95 durable control acknowledgment ≤1 s; light/free-capacity retry discovery ≤2 s after due. |
 
 ### Qualification measurements
 
@@ -591,7 +632,7 @@ Reserve growth before I/O with checked arithmetic and serialized owner accountin
 
 #### Retained output and its index
 
-Published spillover is an ordinary absolute path, never reused by OnePage for different output. Charge OnePage-produced bytes while its name is retained. External additions/links and bytes held by external readers after retained-name removal are outside that allowance. Successful removal plus closure of OnePage handles releases retention charge; unknown external readers neither pin FIFO eligibility nor require a registry. Optional retained files retain neither execution credits nor open per-file handles. The temporary owner traverses a disk-backed retention index through bounded windows; no separate tracking-space quota is selected.
+Published spillover is an ordinary absolute path, never reused by Latifa for different output. Charge Latifa-produced bytes while its name is retained. External additions/links and bytes held by external readers after retained-name removal are outside that allowance. Successful removal plus closure of Latifa handles releases retention charge; unknown external readers neither pin FIFO eligibility nor require a registry. Optional retained files retain neither execution credits nor open per-file handles. The temporary owner traverses a disk-backed retention index through bounded windows; no separate tracking-space quota is selected.
 
 Charge the retention index, including unfinished writes and unreclaimed records, to shared scratch alongside the output bytes. Each retained file requires a positive-size index record identifying its owned path, charged length and FIFO order; establish the record before execution releases the file to retention. Failed handoff leaves the file with its execution cleanup owner. Active protection comes from that owner; only saved-and-released output enters the eligible index. Index access/reclamation belongs to the temporary owner, not core SQLite or a second semantic ledger. Update retention at handoff/removal, not on each streamed output write.
 
@@ -627,7 +668,7 @@ After transaction error, resolve rollback and confirm autocommit before reuse; u
 
 Derive SQL/row/parameter bounds from actual statements and pinned representation, not workload percentiles or durable-history quotas. Keep guards until replacement storage/traversal is safe. Distinguish invariants, fixed consumer boundaries, adjustable resource budgets and verification targets; only the first three reject work. Startup derives complete simultaneous memory/descriptor/file requirements with checked arithmetic and actual OS limits, including spawn overlap, evaluator input/capture, retained spillover and empty files. No extra descriptor credit pool is selected.
 
-Keys preserve exact text without trimming, case folding, Unicode normalization or arbitrary whitelist/length quota. Validate positivity/nonreuse and arithmetic for actual identity/ordinal consumers; SQLite INTEGER requires signed-64 representability where used. Binding/content SHA-256 digests are domain-separated 32-byte values, not authentication. Validate OS/API paths including NUL, complete derived suffixes and socket terminators. Finite selectors preserve supported model/tool names; media/schema/diagnostic types follow their actual consumer. No generic identifier validator or silent truncation.
+Names, references and idempotency keys preserve exact text without trimming, case folding, Unicode normalization or an arbitrary whitelist. The complete opaque Session reference has a selected maximum of 128 UTF-8 bytes, including any client namespace and component encoding; reject longer references explicitly without truncation. Clients allocate that total between their own components; core imposes no separate namespace or local-name limit and does not parse them. Count the reference value before transport escaping, whose expansion belongs to the derived wire bound. This limits reference length, not Session population. Workflow submission names independently permit 128 UTF-8 bytes within their Workflow-and-Session scope. The generated core idempotency key combines Workflow ID, full Session reference and submission name; derive its separate bound from the selected encoding, without shrinking either accepted component allowance. Other keys gain no length quota without an actual consumer requirement. Validate positivity/nonreuse and arithmetic for actual identity/ordinal consumers; SQLite INTEGER requires signed-64 representability where used. Binding/content SHA-256 digests are domain-separated 32-byte values, not authentication. Validate OS/API paths including NUL, complete derived suffixes and socket terminators. Finite selectors preserve supported model/tool names; media/schema/diagnostic types follow their actual consumer. No generic identifier validator or silent truncation.
 
 ### Diagnostics and authentication
 
