@@ -1,0 +1,7 @@
+{
+  "version": "1.70.0",
+  "version_num": "0x014600",
+  "template_url": "https://raw.githubusercontent.com/nghttp2/nghttp2/v1.70.0/lib/includes/nghttp2/nghttp2ver.h.in",
+  "template_sha256": "7f92a07886777c4f6c6f0b2f48e5e3347ee1057fd7b7313b232b5e7ea409b350",
+  "generated_header_sha256": "53b46254a82c2075b28459e0f0cd8da7369afbd5632a71560ab75d6af920c5e1"
+}

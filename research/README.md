@@ -31,6 +31,8 @@ These models assume atomic durable transitions. Their finite states and checker-
 
 ## Resources and inspection
 
+- [HTTP transport alternatives](transport-client-alternatives/README.md): compare pinned libcurl, direct nghttp2/OpenSSL and AWS CRT using pinned primary sources; `python3 research/transport-client-alternatives/audit_sources.py --verify`. A small [credit probe](transport-client-alternatives/run_credit_probe.py) demonstrates independent HTTP/2 receive credit with byte verification and an automatic-update control. Protocol-only Mac evidence; no replacement HTTPS, Linux execution or whole-Host qualification.
+
 [SQLite content memory](sqlite-memory/README.md): `python3 research/sqlite-memory/run.py` runs the pinned native large-content prototype and failure controls; `python3 research/sqlite-memory/production.py` runs the existing production Store density fixture. Records allocation/footprint, spill/retention, exact file-to-BLOB comparison and rollback/reopen evidence. Mac-only; large values extend the earlier schema experimentally and do not qualify the redesigned runtime. Both runners serialize heavy work with the sibling experiment lock.
 
 [SQLite write attribution](sqlite-memory/write-attribution.md): `python3 research/sqlite-memory/write_attribution.py` then `python3 research/sqlite-memory/write_granularity.py`. Production VFS traffic, sync-time OS counters and a filesystem-granularity control; unchanged transactions/durability, Mac-only results.

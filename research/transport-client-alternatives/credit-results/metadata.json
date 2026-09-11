@@ -1,0 +1,22 @@
+{
+  "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+  "command": [
+    "cc",
+    "-std=c11",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-O2",
+    "-I/tmp/onepage-transport-memory-build/ng/include",
+    "/Users/divyanshgolyan/.codex/worktrees/ebf3/onepage/research/transport-client-alternatives/credit_probe.c",
+    "/tmp/onepage-transport-memory-build/ng/lib/libnghttp2.a",
+    "-o",
+    "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-credit-probe-nl63x714/probe"
+  ],
+  "source_sha256": "f840c0b562a61cbabcc15cd6a22e0cab284413973f0ddb317748ca0f6fd805f9",
+  "library_sha256": "03f63d807b70ce1a252f6cee76d46466dc06e0f1d21632d189d9b13f80f0e191",
+  "binary_sha256": "8f890fae66c61db29c89cf08216815fe894440f47c29b4f4f8f1ddcfecf6f43a",
+  "scope": "in-memory HTTP/2 only; no TLS, socket, scratch, memory or latency qualification"
+}
