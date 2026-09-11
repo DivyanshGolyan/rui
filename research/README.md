@@ -1,5 +1,9 @@
 # Research evidence
 
+[Session identity evidence](session-identity-evidence.md) records SQLite integer-allocation guarantees and JavaScript integer/JSON representation limits from primary sources; no runtime qualification.
+
+[Core idempotency identity evidence](idempotency-identity-evidence.md) records AWS retry-token/outbox guidance and Stripe key, comparison and retention policies; no runtime qualification.
+
 These artifacts answer bounded questions; they are not production implementation or release certification. [ARCHITECTURE.md](../ARCHITECTURE.md) owns current behavior and [VERIFICATION.md](../VERIFICATION.md) owns required proof. Recorded native measurements are Mac-specific. Synthetic SQLite schemas, historical evaluator binaries, model assumptions and experimental limits do not establish current Linux behavior, wire compatibility or whole-Host guarantees.
 
 Run commands below from the repository root, sequentially in a disposable checkout: some runners overwrite adjacent results or generate reports. Native probes generally need macOS, Apple Clang, Python 3, Zig 0.16 and the pinned SQLite package; inspect each runner's dependency handling. Pure Python probes use the standard library unless stated. Keep source, compiler/library metadata, raw results and counterexamples together. New observations must identify their own machine/build rather than silently inheriting recorded provenance.
