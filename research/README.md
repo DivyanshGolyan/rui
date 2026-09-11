@@ -38,6 +38,7 @@ These models assume atomic durable transitions. Their finite states and checker-
 
 | Artifact and reproduction | What it tests; limits |
 | --- | --- |
+| [Evaluator decoding memory](evaluator-memory/README.md), [UTF-8 reader integration](evaluator-memory/string-reader/README.md): run the adjacent `run.py` | Whole-input, bounded-reader and public-constructor comparisons; Unicode/keys, identity, allocation overlap, exhaustion and sanitizer checks. Separate legacy-production measurements; Mac prototypes, no complete evaluator or Host qualification. |
 | [Execution control](execution-control-experiments/run_all.py): `python3 research/execution-control-experiments/run_all.py` | Fixed-table scans, event waits, real SQLite/custody handoffs, sanitizer negative controls and inspection/stop contention. Historical schema and synthetic commands exclude full provider/tool settlement. |
 | [Idle loop](idle-loop-prototype/bench.c) | Continuous scan, zero-timeout poll and blocking wait, with child-generated events. Build `clang -O2 -Wall -Wextra research/idle-loop-prototype/bench.c -o /tmp/onepage-idle`; run `/tmp/onepage-idle 64 wait idle` (modes: `scan`, `busy`, `wait`; scenarios: `idle`, `events`). Short shared-machine samples exclude child CPU and do not measure production scheduling. |
 | [HTTP memory](http-memory-probe/run.py): `python3 research/http-memory-probe/run.py` | Native nonblocking loopback TCP and Zig header-parser memory. Experimental connection/windows differ from accepted budgets; no complete HTTP server, SQLite or workflow integration. |

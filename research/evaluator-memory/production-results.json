@@ -1,0 +1,45 @@
+{
+  "revision": "b1d25138f70e6a7b4c1d27523d5b051f6de34d7a",
+  "build_command": [
+    "zig",
+    "build",
+    "-Doptimize=ReleaseSmall",
+    "-j2",
+    "--prefix",
+    "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-evaluator-production-yo_oblk2/install"
+  ],
+  "build_returncode": 0,
+  "build_stdout": "",
+  "build_stderr": "",
+  "zig": "0.16.0",
+  "runs": [
+    {
+      "payload_bytes": 65536,
+      "item_count": 1,
+      "input_frame_bytes": 65666,
+      "elapsed_seconds": 0.5773038750048727,
+      "returncode": 0,
+      "outcome_hex": "4f50574f01000003000000000000f03f",
+      "time_l": "        0.56 real         0.12 user         0.07 sys\n             4259840  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 522  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  24  voluntary context switches\n                  83  involuntary context switches\n          1955629917  instructions retired\n           626206642  cycles elapsed\n             3605248  peak memory footprint\n"
+    },
+    {
+      "payload_bytes": 262144,
+      "item_count": 1,
+      "input_frame_bytes": 262274,
+      "elapsed_seconds": 0.23045629099942744,
+      "returncode": 0,
+      "outcome_hex": "4f50574f01000003000000000000f03f",
+      "time_l": "        0.21 real         0.12 user         0.07 sys\n             4571136  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 529  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 291  voluntary context switches\n                  89  involuntary context switches\n          1983882180  instructions retired\n           631361904  cycles elapsed\n             3900096  peak memory footprint\n"
+    },
+    {
+      "payload_bytes": 262144,
+      "item_count": 1024,
+      "input_frame_bytes": 267389,
+      "elapsed_seconds": 0.2274664998985827,
+      "returncode": 0,
+      "outcome_hex": "4f50574f010000030000000000009040",
+      "time_l": "        0.21 real         0.12 user         0.07 sys\n             4718592  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 538  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 401  voluntary context switches\n                 112  involuntary context switches\n          1986966009  instructions retired\n           634598494  cycles elapsed\n             4014656  peak memory footprint\n"
+    }
+  ],
+  "executable_sha256": "67f33c417c6708959f67cb0f8894e7c088d4295b49a8a84b1ad8ab66b5c08e99"
+}
