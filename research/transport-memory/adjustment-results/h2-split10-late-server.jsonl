@@ -1,0 +1,12 @@
+{"ready": true, "ssl": "OpenSSL 3.6.3 9 Jun 2026"}
+{"connection": 1, "resumed": false, "tls_version": "TLSv1.3"}
+{"connection": 2, "resumed": true, "tls_version": "TLSv1.3"}
+{"connection": 3, "resumed": true, "tls_version": "TLSv1.3"}
+{"connection": 4, "resumed": true, "tls_version": "TLSv1.3"}
+{"connection": 5, "resumed": true, "tls_version": "TLSv1.3"}
+{"connection": 6, "resumed": true, "tls_version": "TLSv1.3"}
+{"connection": 7, "resumed": true, "tls_version": "TLSv1.3"}
+{"connection": 8, "resumed": true, "tls_version": "TLSv1.3"}
+{"connection": 9, "resumed": true, "tls_version": "TLSv1.3"}
+{"connection": 10, "resumed": true, "tls_version": "TLSv1.3"}
+{"requests_per_burst": [1000], "connections": 10, "resumed_connections": 9, "full_handshakes": 1, "streams_max": 100}

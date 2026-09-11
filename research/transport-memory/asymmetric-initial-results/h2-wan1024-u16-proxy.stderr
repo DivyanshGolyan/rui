@@ -1,0 +1,18 @@
+Unhandled exception in client_connected_cb
+transport: <_SelectorSocketTransport closed fd=7>
+Traceback (most recent call last):
+  File "/Users/divyanshgolyan/.codex/worktrees/4511/onepage/research/transport-memory/link_proxy.py", line 41, in accept
+    await asyncio.gather(forward(reader,other,0),forward(remote,writer,1))
+  File "/Users/divyanshgolyan/.codex/worktrees/4511/onepage/research/transport-memory/link_proxy.py", line 30, in forward
+    try:await asyncio.gather(*tasks)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/divyanshgolyan/.codex/worktrees/4511/onepage/research/transport-memory/link_proxy.py", line 28, in write
+    if writer.can_write_eof():writer.write_eof()
+                              ~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/streams.py", line 346, in write_eof
+    return self._transport.write_eof()
+           ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/selector_events.py", line 1171, in write_eof
+    self._sock.shutdown(socket.SHUT_WR)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+OSError: [Errno 57] Socket is not connected

@@ -1,0 +1,28 @@
+{"ready": true, "ssl": "OpenSSL 3.6.3 9 Jun 2026", "h2_connection_receive_window": 16777216, "h2_stream_receive_window": 65535}
+{"connection": 1, "resumed": false, "tls_version": "TLSv1.3"}
+{"headers_admitted_burst": 0, "count": 8, "monotonic_ns": 1146194135292000}
+{"request_complete": 1, "burst": 0, "bytes": 16384, "monotonic_ns": 1146194158282000}
+{"request_complete": 3, "burst": 0, "bytes": 16384, "monotonic_ns": 1146194170172000}
+{"request_complete": 5, "burst": 0, "bytes": 16384, "monotonic_ns": 1146194188877000}
+{"request_complete": 7, "burst": 0, "bytes": 16384, "monotonic_ns": 1146194204811000}
+{"first_sse": 1, "burst": 0, "monotonic_ns": 1146194409219000}
+{"first_sse": 3, "burst": 0, "monotonic_ns": 1146194422988000}
+{"first_sse": 5, "burst": 0, "monotonic_ns": 1146194439554000}
+{"first_sse": 7, "burst": 0, "monotonic_ns": 1146194456926000}
+{"request_complete": 6, "burst": 0, "bytes": 1048576, "monotonic_ns": 1146194909573000}
+{"first_sse": 6, "burst": 0, "monotonic_ns": 1146195161111000}
+{"request_complete": 0, "burst": 0, "bytes": 1048576, "monotonic_ns": 1146195182619000}
+{"request_complete": 2, "burst": 0, "bytes": 1048576, "monotonic_ns": 1146195190687000}
+{"request_complete": 4, "burst": 0, "bytes": 1048576, "monotonic_ns": 1146195202471000}
+{"first_sse": 0, "burst": 0, "monotonic_ns": 1146195434561000}
+{"first_sse": 2, "burst": 0, "monotonic_ns": 1146195442012000}
+{"first_sse": 4, "burst": 0, "monotonic_ns": 1146195454299000}
+{"response_complete": 1, "burst": 0, "monotonic_ns": 1146197358760000}
+{"response_complete": 3, "burst": 0, "monotonic_ns": 1146197372514000}
+{"response_complete": 5, "burst": 0, "monotonic_ns": 1146197391009000}
+{"response_complete": 7, "burst": 0, "monotonic_ns": 1146197405561000}
+{"response_complete": 6, "burst": 0, "monotonic_ns": 1146198111370000}
+{"response_complete": 0, "burst": 0, "monotonic_ns": 1146198383426000}
+{"response_complete": 2, "burst": 0, "monotonic_ns": 1146198390983000}
+{"response_complete": 4, "burst": 0, "monotonic_ns": 1146198405262000}
+{"requests_per_burst": [8], "headers_per_burst": [8], "connections": 1, "resumed_connections": 0, "full_handshakes": 1, "streams_max": 8, "max_inflight": 8, "request_bytes": 4259840, "response_bytes": 75944}

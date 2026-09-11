@@ -31,6 +31,12 @@ These models assume atomic durable transitions. Their finite states and checker-
 
 ## Resources and inspection
 
+[Pinned transport memory](transport-memory/README.md): `python3 research/transport-memory/build.py` then `python3 research/transport-memory/run.py --output /tmp/new-transport-results`. Local verified TLS, 1/100/1,000 transfers, upload/receive buffers, HTTP/2 pauses, cache cleanup and delayed capture validation; separate allocation/physical/OS evidence. Experimental dependency pins and Mac-only prototype, not production or Linux qualification.
+
+[Capture and reuse](transport-memory/capture-README.md): `python3 research/transport-memory/capture_run.py --output /tmp/new-capture-results`. Joint slow/stalled capture, local control RTT, memory and repeated TLS bursts; callback, between-call and bounded-worker comparisons with complete capture checks. Mac-only prototype; local echo is not durable control acknowledgement.
+
+[Transport adjustments](transport-memory/adjustment-README.md): `python3 research/transport-memory/paced_run.py --output /tmp/new-paced-results`; `asymmetric_run.py` varies staged request sizes and shaped upload delivery independently. Full SSE capture, output cadence, upload buffers, context growth, stall/reuse and phase costs; failed HTTP/1.1 capacity probes remain explicit. Mac-only synthetic evidence, not production or WAN qualification.
+
 - [HTTP transport alternatives](transport-client-alternatives/README.md): compare pinned libcurl, direct nghttp2/OpenSSL and AWS CRT using pinned primary sources; `python3 research/transport-client-alternatives/audit_sources.py --verify`. A small [credit probe](transport-client-alternatives/run_credit_probe.py) demonstrates independent HTTP/2 receive credit with byte verification and an automatic-update control. Protocol-only Mac evidence; no replacement HTTPS, Linux execution or whole-Host qualification.
 
 [SQLite content memory](sqlite-memory/README.md): `python3 research/sqlite-memory/run.py` runs the pinned native large-content prototype and failure controls; `python3 research/sqlite-memory/production.py` runs the existing production Store density fixture. Records allocation/footprint, spill/retention, exact file-to-BLOB comparison and rollback/reopen evidence. Mac-only; large values extend the earlier schema experimentally and do not qualify the redesigned runtime. Both runners serialize heavy work with the sibling experiment lock.

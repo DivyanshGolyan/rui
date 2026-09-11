@@ -1,0 +1,45 @@
+{"ready": true, "ssl": "OpenSSL 3.6.3 9 Jun 2026"}
+{"connection": 1, "resumed": false, "tls_version": "TLSv1.3"}
+{"admitted": 8}
+{"offer_start_ns": 1146202385744000, "record_bytes": 136, "terminal_bytes": 933, "tokens_per_event": 5, "events": 40, "hz": 20}
+{"offered_events": 1, "monotonic_ns": 1146202435828000, "deadline_ns": 1146202435744000, "lateness_ns": 84000, "offered_body_bytes": 1088, "offered_content_bytes": 160}
+{"offered_events": 2, "monotonic_ns": 1146202485855000, "deadline_ns": 1146202485744000, "lateness_ns": 111000, "offered_body_bytes": 2176, "offered_content_bytes": 320}
+{"offered_events": 3, "monotonic_ns": 1146202535934000, "deadline_ns": 1146202535744000, "lateness_ns": 190000, "offered_body_bytes": 3264, "offered_content_bytes": 480}
+{"offered_events": 4, "monotonic_ns": 1146202585902000, "deadline_ns": 1146202585744000, "lateness_ns": 158000, "offered_body_bytes": 4352, "offered_content_bytes": 640}
+{"offered_events": 5, "monotonic_ns": 1146202635823000, "deadline_ns": 1146202635744000, "lateness_ns": 79000, "offered_body_bytes": 5440, "offered_content_bytes": 800}
+{"offered_events": 6, "monotonic_ns": 1146202685826000, "deadline_ns": 1146202685744000, "lateness_ns": 82000, "offered_body_bytes": 6528, "offered_content_bytes": 960}
+{"offered_events": 7, "monotonic_ns": 1146202735941000, "deadline_ns": 1146202735744000, "lateness_ns": 197000, "offered_body_bytes": 7616, "offered_content_bytes": 1120}
+{"offered_events": 8, "monotonic_ns": 1146202788573000, "deadline_ns": 1146202785744000, "lateness_ns": 2829000, "offered_body_bytes": 8704, "offered_content_bytes": 1280}
+{"offered_events": 9, "monotonic_ns": 1146202839082000, "deadline_ns": 1146202835744000, "lateness_ns": 3338000, "offered_body_bytes": 9792, "offered_content_bytes": 1440}
+{"offered_events": 10, "monotonic_ns": 1146202886117000, "deadline_ns": 1146202885744000, "lateness_ns": 373000, "offered_body_bytes": 10880, "offered_content_bytes": 1600}
+{"offered_events": 11, "monotonic_ns": 1146202936261000, "deadline_ns": 1146202935744000, "lateness_ns": 517000, "offered_body_bytes": 11968, "offered_content_bytes": 1760}
+{"offered_events": 12, "monotonic_ns": 1146202986132000, "deadline_ns": 1146202985744000, "lateness_ns": 388000, "offered_body_bytes": 13056, "offered_content_bytes": 1920}
+{"offered_events": 13, "monotonic_ns": 1146203036017000, "deadline_ns": 1146203035744000, "lateness_ns": 273000, "offered_body_bytes": 14144, "offered_content_bytes": 2080}
+{"offered_events": 14, "monotonic_ns": 1146203086103000, "deadline_ns": 1146203085744000, "lateness_ns": 359000, "offered_body_bytes": 15232, "offered_content_bytes": 2240}
+{"offered_events": 15, "monotonic_ns": 1146203135811000, "deadline_ns": 1146203135744000, "lateness_ns": 67000, "offered_body_bytes": 16320, "offered_content_bytes": 2400}
+{"offered_events": 16, "monotonic_ns": 1146203189967000, "deadline_ns": 1146203185744000, "lateness_ns": 4223000, "offered_body_bytes": 17408, "offered_content_bytes": 2560}
+{"offered_events": 17, "monotonic_ns": 1146203235950000, "deadline_ns": 1146203235744000, "lateness_ns": 206000, "offered_body_bytes": 18496, "offered_content_bytes": 2720}
+{"offered_events": 18, "monotonic_ns": 1146203285949000, "deadline_ns": 1146203285744000, "lateness_ns": 205000, "offered_body_bytes": 19584, "offered_content_bytes": 2880}
+{"offered_events": 19, "monotonic_ns": 1146203335980000, "deadline_ns": 1146203335744000, "lateness_ns": 236000, "offered_body_bytes": 20672, "offered_content_bytes": 3040}
+{"offered_events": 20, "monotonic_ns": 1146203387903000, "deadline_ns": 1146203385744000, "lateness_ns": 2159000, "offered_body_bytes": 21760, "offered_content_bytes": 3200}
+{"offered_events": 21, "monotonic_ns": 1146203435928000, "deadline_ns": 1146203435744000, "lateness_ns": 184000, "offered_body_bytes": 22848, "offered_content_bytes": 3360}
+{"offered_events": 22, "monotonic_ns": 1146203485784000, "deadline_ns": 1146203485744000, "lateness_ns": 40000, "offered_body_bytes": 23936, "offered_content_bytes": 3520}
+{"offered_events": 23, "monotonic_ns": 1146203536013000, "deadline_ns": 1146203535744000, "lateness_ns": 269000, "offered_body_bytes": 25024, "offered_content_bytes": 3680}
+{"offered_events": 24, "monotonic_ns": 1146203585804000, "deadline_ns": 1146203585744000, "lateness_ns": 60000, "offered_body_bytes": 26112, "offered_content_bytes": 3840}
+{"offered_events": 25, "monotonic_ns": 1146203636079000, "deadline_ns": 1146203635744000, "lateness_ns": 335000, "offered_body_bytes": 27200, "offered_content_bytes": 4000}
+{"offered_events": 26, "monotonic_ns": 1146203685858000, "deadline_ns": 1146203685744000, "lateness_ns": 114000, "offered_body_bytes": 28288, "offered_content_bytes": 4160}
+{"offered_events": 27, "monotonic_ns": 1146203736129000, "deadline_ns": 1146203735744000, "lateness_ns": 385000, "offered_body_bytes": 29376, "offered_content_bytes": 4320}
+{"offered_events": 28, "monotonic_ns": 1146203786135000, "deadline_ns": 1146203785744000, "lateness_ns": 391000, "offered_body_bytes": 30464, "offered_content_bytes": 4480}
+{"offered_events": 29, "monotonic_ns": 1146203836020000, "deadline_ns": 1146203835744000, "lateness_ns": 276000, "offered_body_bytes": 31552, "offered_content_bytes": 4640}
+{"offered_events": 30, "monotonic_ns": 1146203891827000, "deadline_ns": 1146203885744000, "lateness_ns": 6083000, "offered_body_bytes": 32640, "offered_content_bytes": 4800}
+{"offered_events": 31, "monotonic_ns": 1146203936023000, "deadline_ns": 1146203935744000, "lateness_ns": 279000, "offered_body_bytes": 33728, "offered_content_bytes": 4960}
+{"offered_events": 32, "monotonic_ns": 1146203985988000, "deadline_ns": 1146203985744000, "lateness_ns": 244000, "offered_body_bytes": 34816, "offered_content_bytes": 5120}
+{"offered_events": 33, "monotonic_ns": 1146204035840000, "deadline_ns": 1146204035744000, "lateness_ns": 96000, "offered_body_bytes": 35904, "offered_content_bytes": 5280}
+{"offered_events": 34, "monotonic_ns": 1146204085919000, "deadline_ns": 1146204085744000, "lateness_ns": 175000, "offered_body_bytes": 36992, "offered_content_bytes": 5440}
+{"offered_events": 35, "monotonic_ns": 1146204135825000, "deadline_ns": 1146204135744000, "lateness_ns": 81000, "offered_body_bytes": 38080, "offered_content_bytes": 5600}
+{"offered_events": 36, "monotonic_ns": 1146204185842000, "deadline_ns": 1146204185744000, "lateness_ns": 98000, "offered_body_bytes": 39168, "offered_content_bytes": 5760}
+{"offered_events": 37, "monotonic_ns": 1146204236033000, "deadline_ns": 1146204235744000, "lateness_ns": 289000, "offered_body_bytes": 40256, "offered_content_bytes": 5920}
+{"offered_events": 38, "monotonic_ns": 1146204286005000, "deadline_ns": 1146204285744000, "lateness_ns": 261000, "offered_body_bytes": 41344, "offered_content_bytes": 6080}
+{"offered_events": 39, "monotonic_ns": 1146204337817000, "deadline_ns": 1146204335744000, "lateness_ns": 2073000, "offered_body_bytes": 42432, "offered_content_bytes": 6240}
+{"offered_events": 40, "monotonic_ns": 1146204386071000, "deadline_ns": 1146204385744000, "lateness_ns": 327000, "offered_body_bytes": 50984, "offered_content_bytes": 6400}
+{"requests_per_burst": [8], "connections": 1, "resumed_connections": 0, "full_handshakes": 1, "streams_max": 8, "sent_body_bytes": 50984, "tls_ciphertext_to_tcp_bytes": 55010, "expected_body_bytes": 50984}

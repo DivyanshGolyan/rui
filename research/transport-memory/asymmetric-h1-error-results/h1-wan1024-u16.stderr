@@ -1,0 +1,2 @@
+curl failure 55, OS error 55: Send failure: No buffer space available
+Assertion failed: ((size_t)upload == t->request_bytes), function finish_handle, file asymmetric.c, line 347.

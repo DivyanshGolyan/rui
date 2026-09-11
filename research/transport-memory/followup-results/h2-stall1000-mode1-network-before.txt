@@ -1,0 +1,10 @@
+535/4177 mbufs in use:
+	419 mbufs allocated to data
+	52 mbufs allocated to packet headers
+	64 mbufs allocated to socket names and addresses
+	3642 mbufs allocated to caches
+2/2544 mbuf 2KB clusters in use
+0/1492 mbuf 4KB clusters in use
+2/4384 mbuf 16KB clusters in use
+89852 KB allocated to network (2.6% in use)
+410251 requests for memory denied

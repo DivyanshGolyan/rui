@@ -1,0 +1,33 @@
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               13978.
+Pages active:                            220684.
+Pages inactive:                          224890.
+Pages speculative:                         4003.
+Pages throttled:                              0.
+Pages wired down:                        236355.
+Pages purgeable:                           3365.
+"Translation faults":               21796970538.
+Pages copy-on-write:                 1190360598.
+Pages zero filled:                  10504399858.
+Pages reactivated:                   4957453380.
+Pages purged:                         392683395.
+File-backed pages:                       122567.
+Anonymous pages:                         327010.
+Pages stored in compressor:             2212386.
+Pages occupied by compressor:            307409.
+Decompressions:                      4378396396.
+Compressions:                        4978162448.
+Pageins:                              621130743.
+Pageouts:                               9151790.
+Swapins:                               22293938.
+Swapouts:                              25903290.
+530/2027 mbufs in use:
+	414 mbufs allocated to data
+	52 mbufs allocated to packet headers
+	64 mbufs allocated to socket names and addresses
+	1497 mbufs allocated to caches
+1/2224 mbuf 2KB clusters in use
+0/1240 mbuf 4KB clusters in use
+0/1745 mbuf 16KB clusters in use
+43840 KB allocated to network (2.5% in use)
+410503 requests for memory denied
