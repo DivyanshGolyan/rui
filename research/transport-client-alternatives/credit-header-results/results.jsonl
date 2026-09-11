@@ -1,0 +1,6 @@
+{"nghttp2":"1.70.0"}
+{"manual":1,"phase":"withheld","received":[16384,16384]}
+{"manual":1,"phase":"release_stream_1","received":[32768,16384]}
+{"manual":1,"phase":"complete_verified","received":[262144,262144]}
+{"manual":0,"phase":"withheld","received":[262144,262144]}
+{"manual":0,"phase":"complete_verified","received":[262144,262144]}
