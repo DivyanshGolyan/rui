@@ -44,6 +44,19 @@ def audit(matrix, checks):
                     'Custody or owned descriptors survived cleanup')
         require(s['closed']['own_live'] == s['closed']['curl_live'] == 0,
                 'Tracked allocation survived final closure')
+        if case['kind'] == 'model' and case['variant'] == 'early':
+            before, after = s['sealed_waiting'], s['delayed_validation']
+            require(0 <= after['curl_live'] < before['curl_live'],
+                    'Early model must demonstrate libcurl release before validation')
+            # These counts follow this fixture's one request and one capture file
+            # per execution, not libcurl's platform-dependent internal allocations.
+            require(before['owned_fds'] == 2 * case['count'] and
+                    after['owned_fds'] == case['count'],
+                    'Early model must retain only capture descriptors')
+            capture_bytes = case['count'] * case['payload_bytes']
+            require(before['scratch_logical'] == capture_bytes + 128 * case['count'] and
+                    after['scratch_logical'] == capture_bytes,
+                    'Early model must retain complete capture bytes and release request bytes')
         if case['kind'] == 'bash':
             require(s['sealed_waiting']['children_observed'] == case['count'],
                     'Missing subprocess observation at sealed capture')
