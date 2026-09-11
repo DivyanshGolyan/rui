@@ -32,3 +32,10 @@ else:
     if path.exists(): raise SystemExit('refusing to overwrite evidence')
     path.write_text(json.dumps(dict(retrieved_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(), sources=rows), indent=2)+'\n')
 print(f'Checked {len(rows)} pinned primary-source files')
+
+pin=json.loads(path.with_name('header-pin.json').read_text())
+template=urllib.request.urlopen(pin['template_url'], timeout=30).read()
+assert hashlib.sha256(template).hexdigest() == pin['template_sha256'], 'version template changed'
+generated=template.replace(b'@PACKAGE_VERSION@', pin['version'].encode()).replace(b'@PACKAGE_VERSION_NUM@', pin['version_num'].encode())
+assert hashlib.sha256(generated).hexdigest() == pin['generated_header_sha256'], 'generated version header differs'
+print('Checked pinned template and generated nghttp2 version header')
