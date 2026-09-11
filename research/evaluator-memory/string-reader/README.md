@@ -4,7 +4,7 @@ Use the synchronous reader interface in [onepage_string_reader.h](onepage_string
 
 The comparison justifies this small extension over collecting public-API string chunks and joining them. A 4 MiB ASCII prefix followed by `中` has a measured simultaneous backing-allocation peak of **8,622,640 bytes** with the reader, **12,849,712 bytes** with whole-input staging, and **24,129,584 bytes** with public constructors plus `join`. All three produce the same value under the same 16 MiB QuickJS setting. These are forced-moving allocator measurements, including old/new overlap, not predictions that every system realloc will move. [Derived measurements](measurements.md) keep process memory separate.
 
-This selects a research integration interface, not a production dependency change or a complete evaluator rewrite. Accepted behavior still belongs to [ARCHITECTURE.md](../../../ARCHITECTURE.md#preparing-a-fixed-visibility-snapshot). The original [legacy-source audit and measurements](../README.md) remain historical production evidence; this follow-up does not make that bridge implement the redesigned contract.
+This experiment selected a research integration interface; it did not change the production dependency or rewrite the evaluator. The subsequent decision to maintain the pinned extension is accepted in [ARCHITECTURE.md](../../../ARCHITECTURE.md#evaluator-containment); production integration and platform qualification remain outstanding. The original [legacy-source audit and measurements](../README.md) remain historical production evidence; this follow-up does not make that bridge implement the redesigned contract.
 
 ## Reproduce and verify
 
@@ -34,7 +34,7 @@ The callable ownership/error rules are in the header. The implementation has one
 
 Input immutability across the two passes is already required by the prepared-input contract. The constructor detects short reads, invalid UTF-8 and a changed width/count before an out-of-bounds write. It does not hash two passes to detect arbitrary same-width content changes; that would duplicate the existing immutable-input guarantee. The callback can return failure for I/O or cooperative cancellation. End-to-end cancellation/publication fences remain outside this prototype.
 
-Production adoption would require maintaining this narrow private extension at the existing exact dependency pin, or obtaining a suitable upstream interface. That dependency-maintenance choice remains for the production implementation slice; this experiment does not silently approve a rolling engine fork. On **every pin/compiler/configuration update**:
+The experiment established the compatibility work needed to maintain this narrow private extension at the exact dependency pin. The [accepted maintenance contract](../../../ARCHITECTURE.md#evaluator-containment) now commits to that approach, with compatibility checks on upgrades. This acceptance does not qualify the prototype as production integration. On **every pin/compiler/configuration update**:
 
 - Re-audit `js_alloc_string`, `JSString`/`str8`/`str16`, `JS_STRING_LEN_MAX`, value tagging and refcount cleanup. Do not mechanically relax a failed hash check or apply fuzzy offsets.
 - Rebuild the separate consumer against the pinned public header and rerun Unicode, key atomization, allocation-failure and teardown checks on both target OSes. Keep the extension compiled in the same configuration as the engine.
