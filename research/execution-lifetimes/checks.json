@@ -1,0 +1,53 @@
+{
+  "positive": {
+    "pending_cleanup_rejected": true,
+    "delayed_callback_drained": true,
+    "cancelled_publication_suppressed": true,
+    "failed_capture_not_sealed": true,
+    "released_after_join": true,
+    "settled_credit_held_through_callback": true,
+    "sealed_source_not_written": true
+  },
+  "negative_exit": -6,
+  "negative_diagnostic": "=================================================================\n==51856==ERROR: AddressSanitizer: heap-use-after-free on address 0x629000000200 at pc 0x000100755720 bp 0x00016f732eb0 sp 0x00016f732ea8\nREAD of size 1 at 0x629000000200 thread T1\n    #0 0x00010075571c in callback failures.c:23\n    #1 0x00010100e4a4 in asan_thread_start(void*)+0x4c (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x3a4a4)\n    #2 0x00018b4e3bc4 in _pthread_start+0x84 (libsystem_pthread.dylib:arm64e+0x6bc4)\n    #3 0x00018b4deb7c in thread_start+0x4 (libsystem_pthread.dylib:arm64e+0x1b7c)\n\n0x629000000200 is located 0 bytes inside of 16384-byte region [0x629000000200,0x629000004200)\nfreed by thread T0 here:\n    #0 0x000101011480 in free+0x7c (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x3d480)\n    #1 0x000100754a6c in main failures.c:57\n    #2 0x00018b142b94  (<unknown module>)\n\npreviously allocated by thread T0 here:\n    #0 0x00010101138c in malloc+0x78 (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x3d38c)\n    #1 0x0001007549a0 in main failures.c:48\n    #2 0x00018b142b94  (<unknown module>)\n\nThread T1 created by T0 here:\n    #0 0x000101009b04 in pthread_create+0x5c (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x35b04)\n    #1 0x0001007549dc in main failures.c:53\n    #2 0x00018b142b94  (<unknown module>)\n\nSUMMARY: AddressSanitizer: heap-use-after-free failures.c:23 in callback\nShadow bytes around the buggy address:\n  0x628fffffff80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n  0x629000000000: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x629000000080: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x629000000100: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x629000000180: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n=>0x629000000200:[fd]fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd\n  0x629000000280: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd\n  0x629000000300: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd\n  0x629000000380: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd\n  0x629000000400: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd\n  0x629000000480: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd\nShadow byte legend (one shadow byte represents 8 application bytes):\n  Addressable:           00\n  Partially addressable: 01 02 03 04 05 06 07 \n  Heap left redzone:       fa\n  Freed heap region:       fd\n  Stack left redzone:      f1\n  Stack mid redzone:       f2\n  Stack right redzone:     f3\n  Stack after return:      f5\n  Stack use after scope:   f8\n  Global redzone:          f9\n  Global init order:       f6\n  Poisoned by user:        f7\n  Container overflow:      fc\n  Array cookie:            ac\n  Intra object redzone:    bb\n  ASan internal:           fe\n  Left alloca redzone:     ca\n  Right alloca redzone:    cb\n==51856==ABORTING\n",
+  "production_bash": {
+    "scope": "production Bash, one completed execution",
+    "status": "success",
+    "stdout_bytes": 65536,
+    "allocator_peak": 84144,
+    "held_live": 65536,
+    "released_live": 0,
+    "cold_physical": 885312,
+    "held_physical": 1246016,
+    "idle_physical": 1246016
+  },
+  "production_capture": [
+    {
+      "scope": "production Capture parser only; no transport or publication",
+      "count": 1,
+      "capture_size": 5880,
+      "text_bytes_each": 4096,
+      "initial_live": 5880,
+      "allocator_peak": 13964,
+      "held_live": 13830,
+      "released_live": 0,
+      "cold_physical": 918080,
+      "held_physical": 934464,
+      "idle_physical": 934464
+    },
+    {
+      "scope": "production Capture parser only; no transport or publication",
+      "count": 100,
+      "capture_size": 5880,
+      "text_bytes_each": 4096,
+      "initial_live": 588000,
+      "allocator_peak": 1383134,
+      "held_live": 1383000,
+      "released_live": 0,
+      "cold_physical": 1098368,
+      "held_physical": 2802560,
+      "idle_physical": 2884480
+    }
+  ],
+  "zig": "0.16.0"
+}
