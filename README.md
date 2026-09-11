@@ -12,9 +12,10 @@ The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability
 
 Start one local server explicitly, then use direct CLI/script calls or JavaScript workflows. Clients can disconnect while saved work continues. Restart recovers unfinished work under its original inputs and remaining budgets.
 
-- Construct a Session key locally. First complete configuration establishes its conversation and Workspace; later configuration changes apply in order. Messages start or join its current work.
-- Use stable request keys to recover the original acceptance or rejection after a lost configuration/message reply. Configuration completes at commit; accepted messages bind to a Turn, and workflow message calls return that Turn's final text or validated structured answer.
-- Compose work with ordinary JavaScript functions, loops and deterministic Promise joins. Inspect a Run to find exact Session keys and reuse selected conversations in later workflows.
+- Construct a Session reference locally. First complete configuration establishes its conversation and Workspace; later configuration changes apply in order. Messages start or join its current work.
+- Workflow authors name submissions; Runtime saves an internal UUIDv4 with each durable intent for delivery retries. Direct callers and Workflow launchers retain their request keys and captured inputs before sending.
+- Use stable idempotency keys to recover the original acceptance or rejection after a lost configuration/message reply. Configuration completes at commit; accepted messages bind to a Turn, and workflow message calls return that Turn's final text or validated structured answer.
+- Compose work with ordinary JavaScript functions, loops and deterministic Promise joins. Inspect a Workflow to find exact Session references and reuse selected conversations in later workflows.
 - Approve exact Bash/Edit actions or explicitly configure permission bypass. Bash reads and creates files; Edit applies checked whole-line replacements to one existing file. Uncertain tool effects are never automatically replayed.
 - Retain immutable conversation and provider continuation in SQLite. Bound orchestration memory and temporary storage independently of model-requested subprocess memory.
 
