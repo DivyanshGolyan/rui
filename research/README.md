@@ -1,8 +1,8 @@
 # Research evidence
 
-[Session identity evidence](session-identity-evidence.md) compares SQLite integer allocation, JavaScript integer transport and tuple selectors through primary sources. It selects no contract and contains no runtime qualification.
+[Session identity evidence](session-identity-evidence.md) records SQLite integer-allocation guarantees and JavaScript integer/JSON representation limits from primary sources; no runtime qualification.
 
-[Core idempotency identity evidence](idempotency-identity-evidence.md) compares saved retry tokens with composite encodings using AWS and Stripe guidance. It recommends a candidate, without changing the accepted contract or qualifying an implementation.
+[Core idempotency identity evidence](idempotency-identity-evidence.md) records AWS retry-token/outbox guidance and Stripe key, comparison and retention policies; no runtime qualification.
 
 These artifacts answer bounded questions; they are not production implementation or release certification. [ARCHITECTURE.md](../ARCHITECTURE.md) owns current behavior and [VERIFICATION.md](../VERIFICATION.md) owns required proof. Recorded native measurements are Mac-specific. Synthetic SQLite schemas, historical evaluator binaries, model assumptions and experimental limits do not establish current Linux behavior, wire compatibility or whole-Host guarantees.
 
