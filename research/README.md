@@ -30,6 +30,10 @@ These models assume atomic durable transitions. Their finite states and checker-
 
 ## Resources and inspection
 
+[SQLite content memory](sqlite-memory/README.md): `python3 research/sqlite-memory/run.py` runs the pinned native large-content prototype and failure controls; `python3 research/sqlite-memory/production.py` runs the existing production Store density fixture. Records allocation/footprint, spill/retention, exact file-to-BLOB comparison and rollback/reopen evidence. Mac-only; large values extend the earlier schema experimentally and do not qualify the redesigned runtime. Both runners serialize heavy work with the sibling experiment lock.
+
+[SQLite write attribution](sqlite-memory/write-attribution.md): `python3 research/sqlite-memory/write_attribution.py` then `python3 research/sqlite-memory/write_granularity.py`. Production VFS traffic, sync-time OS counters and a filesystem-granularity control; unchanged transactions/durability, Mac-only results.
+
 [Turbopuffer source reading](turbopuffer-resource-evidence.md) records first-party URLs, sections and talk timestamps inspected on 2026-09-10. It compares storage-backed metadata and local ownership with OnePage; it supplies no local filesystem, resource-bound or retry qualification.
 
 | Artifact and reproduction | What it tests; limits |
