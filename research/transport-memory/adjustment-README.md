@@ -97,7 +97,23 @@ The successful evidence validators passed for 55 capacity cases across 65 bursts
 
 ## Reproduction and review boundary
 
-Build the pinned dependencies using the baseline instructions. Runners require empty output directories, snapshot sources/hashes and acquire the shared OS lock to avoid overlapping load tests. For example:
+Build the pinned dependencies using the baseline instructions. Run these commands from the repository root. Runners require empty output directories, snapshot sources/hashes and acquire the shared OS lock to avoid overlapping load tests.
+
+The initial cohort uses its [frozen runner](adjustment-results/sources/adjustment_run.py), which resolves the original C harness, uncached server and control generator beside itself. This selects the ten recorded baseline/receive-buffer/rate/partition cases and the recorded peer-cap probe:
+
+```sh
+python3 research/transport-memory/adjustment-results/sources/adjustment_run.py --match '^h2-((baseline|recv1k|rate32k|rate128k|split10)-(burst|late)|peer100-burst)$' --output /tmp/adjustments-initial
+```
+
+The recorded `h2-peer100-burst` case cannot reach the all-active barrier and times out; the frozen runner then exits nonzero after saving its results. That is an expected failed capacity probe, not a successful benchmark. The original run stopped there, so `h2-peer100-late` has no recorded result and is deliberately excluded. Run the verifier separately after the runner exits; do not join these commands with `&&`:
+
+```sh
+python3 research/transport-memory/adjustment_summarize.py --groups /tmp/adjustments-initial --expected-failures h2-peer100-burst --output /tmp/adjustments-initial-summary.csv
+```
+
+The verifier checks that the named probe actually failed below capacity and excludes it from performance rows. A different failure must be investigated; do not add it to the exception list. For a short build/fixture check, the same frozen runner accepts `--quick --output /tmp/adjustments-initial-smoke`; this runs eight transfers and does not reproduce capacity or the peer-cap failure.
+
+The current runner covers the later unknown-length, long-response and reuse cases; it does not recreate the initial cohort. Other current matrices run as follows:
 
 ```sh
 python3 research/transport-memory/adjustment_run.py --output /tmp/adjustments
