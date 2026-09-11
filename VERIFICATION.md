@@ -147,7 +147,7 @@ Required populations: **0/100/1,000/10,000 Dormant Sessions** at fixed capacity;
 
 | Qualification target | Required measurement |
 | --- | --- |
-| **≤256 MiB** aggregate OnePage-owned process physical footprint | Planned 1,000-operation mixed/specialized loads and cold/retained idle, including evaluator/helpers; stable churn and no dormant/history-driven resident growth. Model-selected workloads remain separately observed. |
+| **≤256 MiB** aggregate Latifa-owned process physical footprint | Planned 1,000-operation mixed/specialized loads and cold/retained idle, including evaluator/helpers; stable churn and no dormant/history-driven resident growth. Model-selected workloads remain separately observed. |
 | **<1% of one core** idle CPU | Include retry/workflow polling and idle waits. |
 | **≤2 cores** average model-fixture CPU | 1,000 streams × 100 small SSE events/second each, short requests and bounded terminal bursts; exclude fixture server, report tool/mixed CPU separately. |
 | **p95 durable control acknowledgement ≤1 second** | Saturated load including inspection/import contention; record maximum, queue/service time and physical cleanup separately. No real-time termination/billing promise. |
@@ -183,6 +183,6 @@ Verify configurable **128 MiB** retained history, at most **16 files** including
 
 Hold export delivery open across diagnostic rotation and inject partial record/chunk writes. Source handles close between bounded export turns; exported scratch stays charged through its last pending delivery read. Count concurrent exports against ordinary client capacity, including failed construction and rotation overlap. Fail export scratch and log deletion independently: neither changes committed execution, and neither reports incomplete output as complete.
 
-Package under the approved final project identity; verify executable/package names, state and credential identifiers, build/distribution references and fixtures without losing existing user data.
+Package under the Latifa identity; verify executable/package names, state and credential identifiers, build/distribution references and fixtures without losing existing user data.
 
 Release demonstrations cover explicit start, no-client progress, restart, direct Sessions, first configuration, cross-Run inspected-key reuse, fan-out/joins, permissions, ordered tools, uncertain Bash/Edit and shared cancellation. Independent native/Cloudflare walkthroughs may expose hidden coupling; they add no embedding/cloud release requirement. Keep evidence attached to the real owners and label remaining gaps before claiming release readiness.
