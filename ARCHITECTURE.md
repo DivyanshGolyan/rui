@@ -1,12 +1,12 @@
-# OnePage architecture
+# Latifa architecture
 
 This is the accepted V1 contract, not implementation evidence. [README.md](README.md) owns product/status; [VERIFICATION.md](VERIFICATION.md) owns required evidence.
 
 ## A piece of work from start to finish
 
-Suppose a caller wants an agent to investigate a failing test. The caller explicitly starts the Host, names a Session, configures its Workspace and sends a message. The model asks to run Bash. With the default permission mode, OnePage saves the proposed action and asks for approval. Once approved and admitted for execution, Bash runs; OnePage saves its result and asks the model for the final answer.
+Suppose a caller wants an agent to investigate a failing test. The caller explicitly starts the Host, names a Session, configures its Workspace and sends a message. The model asks to run Bash. With the default permission mode, Latifa saves the proposed action and asks for approval. Once approved and admitted for execution, Bash runs; Latifa saves its result and asks the model for the final answer.
 
-The caller can disconnect while this work continues. If the Host instead crashes during Bash, recovery reports an indeterminate tool result: the command may have run, so OnePage does not automatically run it again. The model can investigate through fresh calls. The sections below define the exact admission, permission and recovery boundaries behind this example.
+The caller can disconnect while this work continues. If the Host instead crashes during Bash, recovery reports an indeterminate tool result: the command may have run, so Latifa does not automatically run it again. The model can investigate through fresh calls. The sections below define the exact admission, permission and recovery boundaries behind this example.
 
 ```mermaid
 flowchart TD
@@ -213,7 +213,7 @@ For the V1 text/function subset, the replay transformation is the original order
 | `function_call` | `type`, `id`, `call_id`, `name`, exact JSON-string `arguments`, `status` and supported metadata. Host-produced `function_call_output` uses that exact `call_id` and the canonical Tool Result. Item ID and call ID are distinct. |
 | `compaction` | `type`, `id`, exact nonempty `encrypted_content` and supported metadata. The item remains private. |
 
-IDs and item statuses are input-supported fields, not response-only merely because the provider supplied them. Do not turn assistant `output_text` into user `input_text`, decode/re-encode opaque strings, reorder calls, or discard annotations. The first-party SDK also removes its own `parsed`/`parsed_arguments` conveniences; OnePage receives raw wire JSON and creates none, so an unknown raw field with that name is not automatically disposable. Preserve `created_by` in canonical output even though replay omits it. Transport framing, response envelopes, usage and correlation remain producing-response evidence rather than being appended to `input`.
+IDs and item statuses are input-supported fields, not response-only merely because the provider supplied them. Do not turn assistant `output_text` into user `input_text`, decode/re-encode opaque strings, reorder calls, or discard annotations. The first-party SDK also removes its own `parsed`/`parsed_arguments` conveniences; Latifa receives raw wire JSON and creates none, so an unknown raw field with that name is not automatically disposable. Preserve `created_by` in canonical output even though replay omits it. Transport framing, response envelopes, usage and correlation remain producing-response evidence rather than being appended to `input`.
 
 The Codex source also recognizes legacy reasoning `text` and `compaction_summary` variants; V1 rejects them pending replay evidence rather than normalizing or dropping them. Close consequential variants before accepting any output: item/content type, role, phase, status, annotation variant and Action control. V1 accepts only its text/function tool catalog, not provider-hosted tools, tool programs, namespaced tools or encrypted function arguments. Known controls requesting those meanings (`caller:program`, asynchronous execution, a nonempty namespace or encrypted arguments) reject as `unsupported_provider_output`; preserving an unknown open field does not authorize an effect. Provider metadata cannot fabricate host-owned tool records, permissions, instruction updates or completed work. Reject provider-supplied `cell_id`, `executed_tool_calls` or `tool_calls_complete` in `internal_chat_message_metadata_passthrough` rather than promoting them to local authority. Preserve other open metadata privately with its provider provenance.
 
@@ -225,7 +225,7 @@ V1 selects the current Codex client's evidenced response route: a compaction Ope
 
 Require a completed response with exactly one nonempty supported compaction item for explicit compaction. Store the complete ordered output once on that Operation. The base anchor is its Operation ID and the compaction item's ordinal within that canonical output.
 
-Derive the replacement recipe from the covered original host User/System Instruction inputs in their original order, then the slice from that item through the end of the same output, then the complete later suffix. Retained host inputs are existing canonical references recovered through the source recipe, including earlier bases; never copies or a newly stored request body. This derives from the subscription client's retained user/developer input shape; retaining every host input without truncation is OnePage policy awaiting live qualification. It avoids assuming that the encrypted item alone replaces those inputs. If retained inputs cannot fit, fail explicitly.
+Derive the replacement recipe from the covered original host User/System Instruction inputs in their original order, then the slice from that item through the end of the same output, then the complete later suffix. Retained host inputs are existing canonical references recovered through the source recipe, including earlier bases; never copies or a newly stored request body. This derives from the subscription client's retained user/developer input shape; retaining every host input without truncation is Latifa policy awaiting live qualification. It avoids assuming that the encrypted item alone replaces those inputs. If retained inputs cannot fit, fail explicitly.
 
 No separate replay object, checkpoint relation or copied compacted window is needed. A compaction Operation produces no tool execution or Conversation projection; an unexpected Action rejects the candidate. Its producing Operation's admission position fixes the covered frontier, including the prior base and all already-applied inputs/results within that historical view. Result acceptance determines when the new base becomes available, not what it covered. Pending messages and later instruction updates remain outside that frontier and appear once in subsequent context.
 
@@ -541,7 +541,7 @@ Target Linux/macOS on x86-64/ARM64 through capabilities, not distribution allowl
 
 ### Exclusive Store ownership
 
-`onepage serve` acquires an exclusive OS-held Store lock before recovery, stale-endpoint reclamation or dispatch, retaining ownership until no dispatch or semantic writes remain possible. Locking and pathname Unix-socket discovery share one bounded canonical Store selector: equivalent supported paths cannot create two owners; unsupported aliases and unrepresentable derived paths reject. Do not use Linux abstract sockets. Close-on-exec prevents descendants inheriting ownership. PID metadata, socket existence, timeout and absent results prove neither ownership nor effect termination.
+`latifa serve` acquires an exclusive OS-held Store lock before recovery, stale-endpoint reclamation or dispatch, retaining ownership until no dispatch or semantic writes remain possible. Locking and pathname Unix-socket discovery share one bounded canonical Store selector: equivalent supported paths cannot create two owners; unsupported aliases and unrepresentable derived paths reject. Do not use Linux abstract sockets. Close-on-exec prevents descendants inheriting ownership. PID metadata, socket existence, timeout and absent results prove neither ownership nor effect termination.
 
 Protect socket/parent directory; validate Store identity/wire version before mutation. Reclaim only the expected stale socket after ownership. Unavailable/inaccessible/competing owners reject. Clients never auto-start or access SQLite; disconnects/timeouts do not cancel work.
 
@@ -559,7 +559,7 @@ When capacity is unavailable, keep eligible work in SQLite without Attempt, allo
 
 ### Memory ownership and configured bounds
 
-At fixed configured capacity, retained orchestration memory and open-handle populations do not grow with durable history or payload item count. Large values travel through bounded windows and owned scratch/content stages, not payload-sized resident copies. Dormant Sessions, terminal Turns and waiting Runs retain no resident graph, worker, socket or credit. User-held decoded values consume evaluator heap within its separate limit. Library/transport/evaluator allocations remain separately bounded; static custody is not whole-process static allocation. Measure allocator-live, retained allocations and physical footprint separately; release need not lower RSS immediately. Model-requested subprocess memory is separately observed workload; OnePage helpers count as orchestration.
+At fixed configured capacity, retained orchestration memory and open-handle populations do not grow with durable history or payload item count. Large values travel through bounded windows and owned scratch/content stages, not payload-sized resident copies. Dormant Sessions, terminal Turns and waiting Runs retain no resident graph, worker, socket or credit. User-held decoded values consume evaluator heap within its separate limit. Library/transport/evaluator allocations remain separately bounded; static custody is not whole-process static allocation. Measure allocator-live, retained allocations and physical footprint separately; release need not lower RSS immediately. Model-requested subprocess memory is separately observed workload; Latifa helpers count as orchestration.
 
 | Boundary | Selected value and scope |
 | --- | --- |
@@ -575,7 +575,7 @@ At fixed configured capacity, retained orchestration memory and open-handle popu
 | Tool excerpt | Startup default 10,000 UTF-8 bytes of tail output across the entire Tool Result, no line quota; omission/path metadata additional. |
 | Edit copy window | Reusable 16 KiB; not an expected-text/line/replacement/file limit. |
 | Diagnostics | Startup default 128 MiB, at most 16 files, each floor(cap/16), 4 KiB encoded record. Detail shares cap; exports consume scratch. |
-| Qualification, not admission | Whole OnePage footprint ≤256 MiB at defined 1,000-operation model/Bash/Edit/mixed fixtures, including evaluator/helpers; same cold/retained-idle ceiling. Idle CPU <1% one core; model reference ≤2 cores average; p95 durable control acknowledgment ≤1 s; light/free-capacity retry discovery ≤2 s after due. |
+| Qualification, not admission | Whole Latifa footprint ≤256 MiB at defined 1,000-operation model/Bash/Edit/mixed fixtures, including evaluator/helpers; same cold/retained-idle ceiling. Idle CPU <1% one core; model reference ≤2 cores average; p95 durable control acknowledgment ≤1 s; light/free-capacity retry discovery ≤2 s after due. |
 
 ### Qualification measurements
 
@@ -591,7 +591,7 @@ Reserve growth before I/O with checked arithmetic and serialized owner accountin
 
 #### Retained output and its index
 
-Published spillover is an ordinary absolute path, never reused by OnePage for different output. Charge OnePage-produced bytes while its name is retained. External additions/links and bytes held by external readers after retained-name removal are outside that allowance. Successful removal plus closure of OnePage handles releases retention charge; unknown external readers neither pin FIFO eligibility nor require a registry. Optional retained files retain neither execution credits nor open per-file handles. The temporary owner traverses a disk-backed retention index through bounded windows; no separate tracking-space quota is selected.
+Published spillover is an ordinary absolute path, never reused by Latifa for different output. Charge Latifa-produced bytes while its name is retained. External additions/links and bytes held by external readers after retained-name removal are outside that allowance. Successful removal plus closure of Latifa handles releases retention charge; unknown external readers neither pin FIFO eligibility nor require a registry. Optional retained files retain neither execution credits nor open per-file handles. The temporary owner traverses a disk-backed retention index through bounded windows; no separate tracking-space quota is selected.
 
 Charge the retention index, including unfinished writes and unreclaimed records, to shared scratch alongside the output bytes. Each retained file requires a positive-size index record identifying its owned path, charged length and FIFO order; establish the record before execution releases the file to retention. Failed handoff leaves the file with its execution cleanup owner. Active protection comes from that owner; only saved-and-released output enters the eligible index. Index access/reclamation belongs to the temporary owner, not core SQLite or a second semantic ledger. Update retention at handoff/removal, not on each streamed output write.
 

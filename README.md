@@ -1,6 +1,6 @@
-# OnePage
+# Latifa
 
-OnePage is a resource-bounded, crash-resumable local runtime for programmable coding-agent workflows. JavaScript coordinates reusable conversations; native Zig owns execution, permissions, recovery and SQLite storage. Codex subscription is the first live provider.
+Latifa (formerly OnePage) is a resource-bounded, crash-resumable local runtime for programmable coding-agent workflows. JavaScript coordinates reusable conversations; native Zig owns execution, permissions, recovery and SQLite storage. Codex subscription is the first live provider.
 
 ## Status
 
@@ -22,9 +22,11 @@ Start one local server explicitly, then use direct CLI/script calls or JavaScrip
 
 V1 excludes conversation branching/editing, attachments, automatic provider fallback, incompatible model switching, multi-host execution, plugins/dynamic tools, MCP execution, retained workflow VMs, storage migration, public event-stream/watch/webhook/push interfaces, TUI/editor/Web UI and a separate daemon manager. Native embedding and Durable Objects are design probes, not initial supported deployments.
 
-[Issue #2](https://github.com/DivyanshGolyan/onepage/issues/2) owns readiness. Provider wire research, Session/client decisions and interface walkthroughs are resolved in the contract; final readiness stays open there. Production and live-provider qualification remain required. Create implementation slices when the contract is aligned; retired planning tickets do not mean implementation is complete.
+[Issue #2](https://github.com/DivyanshGolyan/latifa/issues/2) owns readiness. Provider wire research, Session/client decisions and interface walkthroughs are resolved in the contract; final readiness stays open there. Production and live-provider qualification remain required. Create implementation slices when the contract is aligned; retired planning tickets do not mean implementation is complete.
 
 ## Build and try the current implementation
+
+The current build still produces `onepage` and `onepage-workflow-evaluator`; the commands below use those names.
 
 Requirements: macOS on Apple Silicon, Zig 0.16.0, `/usr/bin/git`, and system libcurl 7.85.0 or newer with HTTPS, asynchronous DNS and thread-safe global initialization. SQLite and QuickJS sources are pinned by the build.
 
@@ -38,7 +40,7 @@ zig build fixture-repair -Doptimize=ReleaseSmall
 
 Fixtures use the same model, permission and recovery paths as the current live adapter. See [verification gates](VERIFICATION.md#canonical-gates) for checks appropriate to a change.
 
-OnePage is its own Codex client; it invokes neither the Codex CLI nor an OpenAI SDK. Login uses OpenAI's browser/device flow and stores credentials in macOS Keychain. Live checks are opt-in:
+Latifa is its own Codex client; it invokes neither the Codex CLI nor an OpenAI SDK. Login uses OpenAI's browser/device flow and stores credentials in macOS Keychain. Live checks are opt-in:
 
 ```sh
 ./zig-out/bin/onepage --codex-login

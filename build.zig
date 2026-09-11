@@ -235,7 +235,7 @@ pub fn build(b: *std.Build) void {
         "--fixture-response",
         "Bash inspected the real worktree; its typed result became turn-two context.",
         "--fixture-bash-command",
-        "grep -n '^# OnePage' README.md; test -f build.zig; git status --short",
+        "grep -n '^# Latifa' README.md; test -f build.zig; git status --short",
         "--dangerously-bypass-permissions",
         "Inspect this repository with Bash.",
     });
