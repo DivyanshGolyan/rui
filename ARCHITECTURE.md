@@ -479,6 +479,8 @@ Give the child an empty environment, three explicit stdio pipes and only selecte
 
 CPU protection covers native decoding, compilation, JS/job draining and encoding. Elapsed lifetime spans successful spawn through protocol completion and exit; queue wait, external work and parent preparation/publication have their own ownership. Derive cooperative checks and kernel backstop from policy/OS granularity. Deadline expiry begins termination; retain resources until pipes close and child is reaped. Unexplained signals are not specific resource diagnoses. Exhaustion cannot publish partial success.
 
+Maintain a small extension at the pinned QuickJS revision for bounded UTF-8 string construction. Keep engine-layout access behind its native reader interface and require compatibility checks on dependency or build-configuration upgrades. This maintenance choice is accepted; the research prototype is not production integration or platform qualification.
+
 Bound native allocations/stack separately from engine heap; reuse temporary storage only after references expire. Source may need contiguous storage within budget. Workflow Output is a streamed strict-data value without a separate serialized-size cap. No independent source/argument/result-byte, entry/request-count or microtask quotas merely to preserve fixed tables; use bounded allocation/transfer and CPU/lifetime checks. Retain strict type/prototype/accessor/cycle, duplicate-key, exact-binding, arithmetic, recursion and diagnostic checks. No process pool, numeric descriptor-ceiling scan, exit-time whole-buffer wiping, fixed address-space quota or RSS polling killer is selected. Internal capacities must qualify promised workloads, not silently redefine them.
 
 ## Inspection and local protocol
