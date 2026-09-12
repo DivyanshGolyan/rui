@@ -1,5 +1,7 @@
 # Research evidence
 
+[Output retention prior art](output-retention-prior-art.md) compares byte/count budgets, disk-backed FIFO bookkeeping and cleanup behavior in primary sources; design evidence only, with no accepted contract change or runtime qualification.
+
 [Session identity evidence](session-identity-evidence.md) records SQLite integer-allocation guarantees and JavaScript integer/JSON representation limits from primary sources; no runtime qualification.
 
 [Core idempotency identity evidence](idempotency-identity-evidence.md) records AWS retry-token/outbox guidance and Stripe key, comparison and retention policies; no runtime qualification.
