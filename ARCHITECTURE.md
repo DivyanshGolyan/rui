@@ -36,7 +36,7 @@ Read in that order, or go directly to the owning contract:
 
 The explicitly started **Host** server contains **Session core**, owning conversations/execution, and **Workflow Runtime**, owning workflow execution through the ordinary core API. Runtime’s private disposable JavaScript evaluator computes requested calls from supplied facts.
 
-Core/workflow transactions are independent; neither reads the other’s tables. They may share a Store/process; database-file count is unspecified.
+Core/workflow transactions are independent; neither reads the other’s tables. They may share a Store/process; database-file count is unspecified. V1 deliberately keeps Runtime an ordinary core client: core admission does not participate in a caller-owned transaction. Saved intents, idempotent resubmission and separate answer recording are the accepted cost, including cancellation's possible submit-before-stop window. No shared local admission mode is supported. This separation does not provide independent fault containment; required canonical storage failures fence the Host.
 
 ```mermaid
 flowchart TD
