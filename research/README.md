@@ -42,7 +42,7 @@ These models assume atomic durable transitions. Their finite states and checker-
 
 ## Resources and inspection
 
-[Configuration admission](configuration-admission/measure.py): `zig build measure-admission`. Measures the production issue-170 Host at 0/100/1,000/10,000 dormant Sessions with fixed active capacity 1,000, plus one direct-client peak RSS. The run is macOS-only and sequential; it does not qualify concurrent connections, complete Stage 1 workloads, Linux runtime behavior or power loss.
+[Configuration admission](configuration-admission/measure.py): `zig build measure-admission`; [recorded results](configuration-admission/results.json). Measures the production issue-170 Host at 0/100/1,000/10,000 dormant Sessions with fixed active capacity 1,000, plus one direct-client peak RSS. The run is macOS-only and sequential; it does not qualify concurrent connections, complete Stage 1 workloads, Linux runtime behavior or power loss.
 
 [Pinned transport memory](transport-memory/README.md): `python3 research/transport-memory/build.py` then `python3 research/transport-memory/run.py --output /tmp/new-transport-results`. Local verified TLS, 1/100/1,000 transfers, upload/receive buffers, HTTP/2 pauses, cache cleanup and delayed capture validation; separate allocation/physical/OS evidence. Experimental dependency pins and Mac-only prototype, not production or Linux qualification.
 
