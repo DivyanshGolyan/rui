@@ -14,6 +14,7 @@ pub const Faults = struct {
     content_read: bool = false,
     before_commit: bool = false,
     startup_cleanup: bool = false,
+    shutdown_after_accept: bool = false,
 };
 
 const Host = struct {
@@ -130,6 +131,7 @@ pub fn serve(
             continue;
         };
         thread.detach();
+        if (host.faults.shutdown_after_accept) return error.InjectedListenerFailure;
     }
 }
 
