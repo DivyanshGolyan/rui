@@ -475,7 +475,7 @@ const Parser = struct {
         var sink = ContentSink{
             .io = self.options.io,
             .file = writer,
-            .maximum_write = if (self.options.fault_content_short_write) 7 else content_window_bytes,
+            .inject_short_writes = self.options.fault_content_short_write,
         };
         try self.readJsonString(&sink);
         if (self.options.fault_content_write) return error.InjectedContentWriteFailure;
@@ -490,10 +490,10 @@ const Parser = struct {
         sealed = try std.Io.Dir.openFileAbsolute(self.options.io, path, .{});
         writer.close(self.options.io);
         writer_open = false;
-        std.Io.Dir.deleteFileAbsolute(self.options.io, path) catch |err| {
-            self.options.cleanup_failed.* = true;
-            return err;
-        };
+        // The errdefer owns the final retry and records retained cleanup only
+        // if that retry also fails. A transient first unlink failure must not
+        // leave a phantom scratch charge after the name is removed.
+        try std.Io.Dir.deleteFileAbsolute(self.options.io, path);
         field.file = sealed.?;
         transferred = true;
     }
@@ -615,7 +615,8 @@ const ContentSink = struct {
     length: u64 = 0,
     hash: std.crypto.hash.sha2.Sha256 = contentHasher(),
     utf8: Utf8State = .{},
-    maximum_write: usize = content_window_bytes,
+    inject_short_writes: bool = false,
+    partial_returns: usize = 0,
 
     fn write(self: *ContentSink, bytes: []const u8) !void {
         try self.utf8.feed(bytes);
@@ -643,11 +644,22 @@ const ContentSink = struct {
         if (self.used == 0) return;
         var offset: usize = 0;
         while (offset < self.used) {
-            const end = @min(self.used, offset + self.maximum_write);
-            try self.file.writeStreamingAll(self.io, self.buffer[offset..end]);
-            offset = end;
+            const remaining = self.buffer[offset..self.used];
+            const count = try self.writeSome(remaining);
+            if (count == 0) return error.ContentWriteMadeNoProgress;
+            if (count < remaining.len) self.partial_returns += 1;
+            offset += count;
         }
         self.used = 0;
+    }
+
+    fn writeSome(self: *ContentSink, bytes: []const u8) !usize {
+        // This controlled writer returns a genuine partial count to flush;
+        // writeStreamingAll only certifies the prefix that the injected lower
+        // layer accepted.
+        const count = if (self.inject_short_writes) @min(bytes.len, 7) else bytes.len;
+        try self.file.writeStreamingAll(self.io, bytes[0..count]);
+        return count;
     }
 };
 
@@ -756,4 +768,24 @@ test "captured content cleanup closes sealed custody" {
     var content: ContentField = .{ .state = .value, .file = file };
     try removeContent(&content, std.testing.io);
     try std.testing.expect(!content.hasFile());
+}
+
+test "content sink completes after controlled short returns" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "short-writes", .{ .read = true });
+    defer file.close(std.testing.io);
+    const expected = "short-return-data" ** 300;
+    var sink = ContentSink{
+        .io = std.testing.io,
+        .file = file,
+        .inject_short_writes = true,
+    };
+    try sink.write(expected);
+    try sink.endString();
+    try sink.finish();
+    try std.testing.expect(sink.partial_returns > 0);
+    var actual: [expected.len]u8 = undefined;
+    try std.testing.expectEqual(expected.len, try file.readPositionalAll(std.testing.io, &actual, 0));
+    try std.testing.expectEqualSlices(u8, expected, &actual);
 }
