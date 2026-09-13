@@ -46,10 +46,16 @@ case "$target" in
         ;;
 esac
 
-build_root="$prefix-build"
+build_root=$(mktemp -d "${TMPDIR:-/tmp}/latifa-transport.XXXXXX")
 openssl_build="$build_root/openssl"
 curl_build="$build_root/curl"
 log="$build_root/build.log"
+
+cleanup() {
+    rm -rf "$build_root"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 mkdir -p "$openssl_build" "$curl_build" "$prefix"
 : >"$log"
