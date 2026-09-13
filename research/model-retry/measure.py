@@ -14,6 +14,9 @@ import tempfile
 import threading
 import time
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
+from host_process import start_ready_process, stop_process
+
 
 CAPACITY = 16
 OPERATIONS_PER_ROUND = 32
@@ -108,7 +111,7 @@ def run(binary, *args):
 
 
 def start_host(binary, store, endpoint, capacity, *extra):
-    host = subprocess.Popen(
+    return start_ready_process(
         [
             str(binary),
             "serve",
@@ -122,20 +125,15 @@ def start_host(binary, store, endpoint, capacity, *extra):
             "50,100,150",
             *extra,
         ],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        required_fields={
+            "custody_record_bytes": None,
+            "execution_slot_bytes": None,
+        },
     )
-    ready = host.stdout.readline().strip()
-    if not ready.startswith("ready "):
-        raise RuntimeError(host.stderr.read())
-    return host, dict(value.split("=", 1) for value in ready.split()[1:])
 
 
 def stop_host(host):
-    if host.poll() is None:
-        host.kill()
-    host.wait(timeout=10)
+    stop_process(host)
 
 
 def configure(binary, root, store, key, session):
