@@ -95,5 +95,5 @@ zig build measure-model-dispatch
 zig build measure-model-output
 ```
 
-The measurement steps are opt-in macOS resource runs. Provider authentication, automatic retry/recovery of interrupted Attempts, tool execution and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The measurement steps are opt-in macOS resource runs. Provider authentication, structured-answer validation, automatic retry/recovery of interrupted Attempts, tool execution and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 `check` exercises both the ReleaseSafe production gate and the default Debug artifact shown above; `cross-check` compiles ReleaseSmall deliverables.

@@ -36,9 +36,11 @@ pub const Faults = struct {
     request_scratch_limit_bytes: u64 = scratch_limit_bytes,
     request_unlink: bool = false,
     response_acquire: bool = false,
+    response_unlink: bool = false,
     response_write: bool = false,
     response_seal: bool = false,
     response_metadata: bool = false,
+    response_metadata_unlink: bool = false,
     response_read: bool = false,
     response_import: bool = false,
     response_commit: bool = false,
@@ -216,12 +218,13 @@ pub fn serve(
 }
 
 const ExecutionSlot = struct {
-    state: enum { free, transport, cleanup, retained_scratch } = .free,
+    state: enum { free, transport, cleanup, retained_scratch, retained_metadata } = .free,
     token: execution.CustodyToken = undefined,
     binding: store_module.AttemptBinding = undefined,
     transfer: provider.Transfer = undefined,
     cleanup_ticks: u32 = 0,
     retained_scratch: provider.RetainedScratch = undefined,
+    retained_metadata: store_module.RetainedOutputMetadata = undefined,
 };
 
 const AdmissionProgress = enum { no_work, retry_later, admitted };
@@ -324,12 +327,22 @@ fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) A
         finishCustodyNow(host, token);
         return .admitted;
     };
+    var retained_response: ?provider.RetainedScratch = null;
     slot.transfer.start(host.provider_endpoint.?, request, binding, .{
         .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
         .response_acquire_fault = host.faults.response_acquire,
+        .response_unlink_fault = host.faults.response_unlink,
         .response_write_fault = host.faults.response_write,
-    }, host.lease.paths.scratch.slice(), request_budget) catch |err| {
+    }, host.lease.paths.scratch.slice(), request_budget, &retained_response) catch |err| {
         request.deinit();
+        if (retained_response) |retained| {
+            slot.state = .retained_scratch;
+            slot.token = token;
+            slot.binding = binding;
+            slot.retained_scratch = retained;
+            retainDispatchFence(host, "response scratch unlink", err);
+            return .admitted;
+        }
         std.debug.print("latifa: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         if (err == error.ResponseCaptureAcquisitionFailed) {
             settleAttemptFailure(host, token, binding, "response_capture_failed");
@@ -398,6 +411,7 @@ fn completeTransfer(
 }
 
 fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
+    const structured_output = slot.transfer.hasStructuredOutput();
     slot.transfer.response.seal(host.faults.response_seal) catch |err| {
         std.debug.print("latifa: response seal failed for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, slot.token, slot.binding, "response_seal_failed");
@@ -405,10 +419,18 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
         beginCleanup(host, slot);
         return;
     };
+    if (structured_output) {
+        settleAttemptFailure(host, slot.token, slot.binding, "unsupported_output_schema");
+        slot.transfer.deinit();
+        beginCleanup(host, slot);
+        return;
+    }
     var request_id: protocol.Bounded(256) = .{};
     request_id.set(slot.transfer.requestId()) catch unreachable;
-    var header_model: protocol.Bounded(protocol.max_model_bytes) = .{};
-    header_model.set(slot.transfer.servedModel()) catch unreachable;
+    var openai_model: protocol.Bounded(protocol.max_model_bytes) = .{};
+    openai_model.set(slot.transfer.openaiModel()) catch unreachable;
+    var x_openai_model: protocol.Bounded(protocol.max_model_bytes) = .{};
+    x_openai_model.set(slot.transfer.xOpenaiModel()) catch unreachable;
     var response = slot.transfer.takeResponse();
     slot.transfer.deinit();
     defer response.deinit();
@@ -418,13 +440,22 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
         slot.binding.operation_id,
         slot.binding.attempt_ordinal,
     }) catch unreachable;
+    var retained_metadata: ?store_module.RetainedOutputMetadata = null;
     var metadata = store_module.OutputMetadataWriter.init(
         host.io,
         host.lease.paths.scratch.slice(),
         metadata_name,
         &host.scratch_used,
         host.faults.request_scratch_limit_bytes,
+        host.faults.response_metadata_unlink,
+        &retained_metadata,
     ) catch |err| {
+        if (retained_metadata) |retained| {
+            slot.state = .retained_metadata;
+            slot.retained_metadata = retained;
+            retainDispatchFence(host, "response metadata unlink", err);
+            return;
+        }
         std.debug.print("latifa: response metadata acquisition failed for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, slot.token, slot.binding, "response_metadata_exhausted");
         beginCleanup(host, slot);
@@ -439,10 +470,11 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
         beginCleanup(host, slot);
         return;
     };
-    var served_model = validated.evidence.served_model;
-    if (served_model.len == 0) {
-        served_model = header_model;
-    } else if (header_model.len != 0 and !served_model.eql(header_model.slice())) {
+    if (!modelObservationsAgree(
+        validated.evidence.served_model.slice(),
+        openai_model.slice(),
+        x_openai_model.slice(),
+    )) {
         settleAttemptFailure(host, slot.token, slot.binding, "contradictory_provider_output");
         beginCleanup(host, slot);
         return;
@@ -459,7 +491,9 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
         .answer_length = validated.answer_length,
         .answer_digest = validated.answer_digest,
         .response_id = validated.evidence.response_id,
-        .served_model = served_model,
+        .body_model = validated.evidence.served_model,
+        .openai_model = openai_model,
+        .x_openai_model = x_openai_model,
         .request_id = request_id,
     }, .{
         .output_read = host.faults.response_read,
@@ -467,6 +501,18 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
         .output_commit = host.faults.response_commit,
     }) catch |err| fenceDispatch(host, "model output import", err);
     beginCleanup(host, slot);
+}
+
+fn modelObservationsAgree(body: []const u8, openai: []const u8, x_openai: []const u8) bool {
+    const values = [_][]const u8{ body, openai, x_openai };
+    var observed: ?[]const u8 = null;
+    for (values) |value| {
+        if (value.len == 0) continue;
+        if (observed) |prior| {
+            if (!std.mem.eql(u8, prior, value)) return false;
+        } else observed = value;
+    }
+    return true;
 }
 
 fn beginCleanup(host: *Host, slot: *ExecutionSlot) void {
@@ -503,7 +549,15 @@ fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []Execution
         },
         .retained_scratch => {
             slot.retained_scratch.cleanup() catch |err| {
-                std.debug.print("latifa: retained named request scratch after cleanup failure: {s}\n", .{@errorName(err)});
+                std.debug.print("latifa: retained named scratch after cleanup failure: {s}\n", .{@errorName(err)});
+                continue;
+            };
+            host.custody.detach(slot.token) catch unreachable;
+            host.custody.cleanupComplete(slot.token) catch unreachable;
+        },
+        .retained_metadata => {
+            slot.retained_metadata.cleanup() catch |err| {
+                std.debug.print("latifa: retained named response metadata after cleanup failure: {s}\n", .{@errorName(err)});
                 continue;
             };
             host.custody.detach(slot.token) catch unreachable;
@@ -1010,7 +1064,7 @@ fn renderSessionObservation(
     } else {
         try response.append("null");
     }
-    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"retry_and_restart_resolution\"]}}}}", .{
+    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\",\"retry_and_restart_resolution\"]}}}}", .{
         observation.pending_messages,
         if (execution_observation.dispatch_fenced) "true" else "false",
         execution_observation.custody_occupied,

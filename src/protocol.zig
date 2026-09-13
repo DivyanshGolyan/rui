@@ -723,7 +723,7 @@ pub const max_response_bytes =
     "\"},\"output_schema\":{\"bytes\":\"".len + 20 +
     "\",\"sha256\":\"".len + 64 +
     "\"}},\"pending_messages\":\"".len + 20 +
-    "\",\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"18446744073709551615\",\"scratch_used_bytes\":\"18446744073709551615\",\"unavailable\":[\"retry_and_restart_resolution\"]}}".len;
+    "\",\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"18446744073709551615\",\"scratch_used_bytes\":\"18446744073709551615\",\"unavailable\":[\"structured_output\",\"retry_and_restart_resolution\"]}}".len;
 
 pub const ResponseBuffer = struct {
     bytes: [max_response_bytes]u8 = undefined,

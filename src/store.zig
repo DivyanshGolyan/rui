@@ -41,6 +41,7 @@ pub const ConfigurationRejection = enum {
     incomplete_initial_configuration,
     invalid_workspace,
     workspace_is_immutable,
+    continuation_model_incompatible,
     revision_exhausted,
 };
 
@@ -216,7 +217,10 @@ pub const OutputMetadataWriter = struct {
         name: []const u8,
         used: *std.atomic.Value(u64),
         limit: u64,
+        fail_unlink: bool,
+        retained: *?RetainedOutputMetadata,
     ) !OutputMetadataWriter {
+        retained.* = null;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
         const file = try scratch.createFile(io, name, .{
@@ -224,9 +228,14 @@ pub const OutputMetadataWriter = struct {
             .exclusive = true,
             .permissions = .fromMode(0o600),
         });
-        errdefer file.close(io);
-        errdefer scratch.deleteFile(io, name) catch {};
-        try scratch.deleteFile(io, name);
+        if (fail_unlink) {
+            retained.* = retainedOutputMetadata(io, file, scratch_path, name, used);
+            return error.InjectedMetadataUnlinkFailure;
+        }
+        scratch.deleteFile(io, name) catch |err| {
+            retained.* = retainedOutputMetadata(io, file, scratch_path, name, used);
+            return err;
+        };
         return .{ .io = io, .file = file, .used = used, .limit = limit };
     }
 
@@ -268,6 +277,43 @@ pub const OutputMetadataWriter = struct {
         self.* = undefined;
     }
 };
+
+pub const RetainedOutputMetadata = struct {
+    io: std.Io,
+    file: std.Io.File,
+    scratch_path: protocol.Bounded(protocol.max_store_bytes + 64),
+    name: protocol.Bounded(96),
+    used: *std.atomic.Value(u64),
+    charged: u64 = 0,
+
+    pub fn cleanup(self: *RetainedOutputMetadata) !void {
+        var scratch = try std.Io.Dir.cwd().openDir(self.io, self.scratch_path.slice(), .{});
+        defer scratch.close(self.io);
+        try scratch.deleteFile(self.io, self.name.slice());
+        self.file.close(self.io);
+        releaseAtomic(self.used, self.charged);
+        self.* = undefined;
+    }
+};
+
+fn retainedOutputMetadata(
+    io: std.Io,
+    file: std.Io.File,
+    scratch_path: []const u8,
+    name: []const u8,
+    used: *std.atomic.Value(u64),
+) RetainedOutputMetadata {
+    var retained = RetainedOutputMetadata{
+        .io = io,
+        .file = file,
+        .scratch_path = .{},
+        .name = .{},
+        .used = used,
+    };
+    retained.scratch_path.set(scratch_path) catch unreachable;
+    retained.name.set(name) catch unreachable;
+    return retained;
+}
 
 pub const OutputMetadataReader = struct {
     io: std.Io,
@@ -322,7 +368,9 @@ pub const ValidatedOutput = struct {
     answer_length: u64,
     answer_digest: [32]u8,
     response_id: protocol.Bounded(256),
-    served_model: protocol.Bounded(protocol.max_model_bytes),
+    body_model: protocol.Bounded(protocol.max_model_bytes),
+    openai_model: protocol.Bounded(protocol.max_model_bytes),
+    x_openai_model: protocol.Bounded(protocol.max_model_bytes),
     request_id: protocol.Bounded(256),
 };
 
@@ -527,6 +575,12 @@ pub const Store = struct {
         if (created and (configuration.workspace.state != .value or configuration.model.state != .value)) {
             return try self.saveConfigurationRejection(command, &digest, .incomplete_initial_configuration, faults);
         }
+        if (!created and configuration.model.state == .value and
+            !current.?.model.eql(configuration.model.value.slice()) and
+            try self.sessionHasContinuationRisk(command.session.slice()))
+        {
+            return try self.saveConfigurationRejection(command, &digest, .continuation_model_incompatible, faults);
+        }
 
         var next = current orelse CurrentConfiguration{};
         if (configuration.workspace.state == .value) {
@@ -626,6 +680,21 @@ pub const Store = struct {
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
         return .{ .rejected = .{ .replayed = false, .code = code } };
+    }
+
+    fn sessionHasContinuationRisk(self: *Store, session_ref: []const u8) !bool {
+        const statement = try prepare(
+            self.database,
+            "SELECT 1 FROM model_output_item WHERE session_ref=?1 UNION ALL " ++
+                "SELECT 1 FROM model_operation WHERE session_ref=?1 AND resolution_code IS NULL LIMIT 1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => true,
+            c.SQLITE_DONE => false,
+            else => error.ContinuationReadFailed,
+        };
     }
 
     pub fn submitMessage(
@@ -1015,8 +1084,8 @@ pub const Store = struct {
             const insert = try prepare(
                 self.database,
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                    "admission_position,attempt_ordinal,allowance_used,uncertain,resolution_code,resolution_content_id,response_id,served_model,request_id,usage_content_id) " ++
-                    "VALUES(?1,?2,?3,?4,?5,?6,1,1,1,NULL,NULL,NULL,NULL,NULL,NULL)",
+                    "admission_position,attempt_ordinal,allowance_used,uncertain,resolution_code,resolution_content_id,response_id,body_model,openai_model,x_openai_model,request_id,usage_content_id) " ++
+                    "VALUES(?1,?2,?3,?4,?5,?6,1,1,1,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)",
             );
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, operation_id);
@@ -1352,18 +1421,20 @@ pub const Store = struct {
         {
             const update = try prepare(
                 self.database,
-                "UPDATE model_operation SET uncertain=0,resolution_code=?2,resolution_content_id=?3,response_id=?4,served_model=?5,request_id=?6,usage_content_id=?7 " ++
-                    "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?8",
+                "UPDATE model_operation SET uncertain=0,resolution_code=?2,resolution_content_id=?3,response_id=?4,body_model=?5,openai_model=?6,x_openai_model=?7,request_id=?8,usage_content_id=?9 " ++
+                    "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?10",
             );
             defer _ = c.sqlite3_finalize(update);
             try bindU64(update, 1, binding.operation_id);
             try bindText(update, 2, resolution_code);
             try bindI64(update, 3, answer_id);
-            try bindText(update, 4, output.response_id.slice());
-            try bindText(update, 5, output.served_model.slice());
-            try bindText(update, 6, output.request_id.slice());
-            try bindNullableI64(update, 7, usage_id);
-            try bindU64(update, 8, binding.attempt_ordinal);
+            try bindOptionalText(update, 4, output.response_id.slice());
+            try bindOptionalText(update, 5, output.body_model.slice());
+            try bindOptionalText(update, 6, output.openai_model.slice());
+            try bindOptionalText(update, 7, output.x_openai_model.slice());
+            try bindOptionalText(update, 8, output.request_id.slice());
+            try bindNullableI64(update, 9, usage_id);
+            try bindU64(update, 10, binding.attempt_ordinal);
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
         }
@@ -2091,7 +2162,9 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ resolution_code TEXT CHECK(resolution_code IS NULL OR length(CAST(resolution_code AS BLOB)) BETWEEN 1 AND 96),
         \\ resolution_content_id INTEGER REFERENCES content(content_id),
         \\ response_id TEXT CHECK(response_id IS NULL OR length(CAST(response_id AS BLOB))<=256),
-        \\ served_model TEXT CHECK(served_model IS NULL OR length(CAST(served_model AS BLOB))<=256),
+        \\ body_model TEXT CHECK(body_model IS NULL OR length(CAST(body_model AS BLOB))<=256),
+        \\ openai_model TEXT CHECK(openai_model IS NULL OR length(CAST(openai_model AS BLOB))<=256),
+        \\ x_openai_model TEXT CHECK(x_openai_model IS NULL OR length(CAST(x_openai_model AS BLOB))<=256),
         \\ request_id TEXT CHECK(request_id IS NULL OR length(CAST(request_id AS BLOB))<=256),
         \\ usage_content_id INTEGER REFERENCES content(content_id),
         \\ FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),
@@ -2243,6 +2316,12 @@ fn bindText(statement: *c.sqlite3_stmt, index: c_int, value: []const u8) !void {
     if (c.sqlite3_bind_text64(statement, index, value.ptr, value.len, null, c.SQLITE_UTF8) != c.SQLITE_OK) {
         return error.BindFailed;
     }
+}
+
+fn bindOptionalText(statement: *c.sqlite3_stmt, index: c_int, value: []const u8) !void {
+    if (value.len == 0) {
+        if (c.sqlite3_bind_null(statement, index) != c.SQLITE_OK) return error.BindFailed;
+    } else try bindText(statement, index, value);
 }
 
 fn bindBlob(statement: *c.sqlite3_stmt, index: c_int, value: []const u8) !void {
@@ -3028,7 +3107,12 @@ test "one committed selection freezes its settings and input prefix" {
     try update.session.set("direct/dispatch");
     update.configuration.model.state = .value;
     try update.configuration.model.value.set("model-b");
-    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    const active_update = storage.configure(&update, .{});
+    try std.testing.expect(active_update == .rejected);
+    try std.testing.expectEqual(
+        ConfigurationRejection.continuation_model_incompatible,
+        active_update.rejected.code,
+    );
 
     var view = try storage.openHistoricalView(binding);
     defer view.close();
@@ -3051,6 +3135,9 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqualStrings("provider_http_422", failed.failure.slice());
     try std.testing.expect((try storage.observeCommand("dispatch-3")).message.?.status == .queued);
     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/dispatch")).pending_messages);
+
+    try update.key.set("configure-after-failure");
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
 
     const later = (try storage.admitNextModelAttempt(.{})).?;
     var later_view = try storage.openHistoricalView(later.permit.binding);
