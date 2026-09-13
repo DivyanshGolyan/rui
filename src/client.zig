@@ -179,7 +179,9 @@ const Capture = struct {
     fn abort(self: *Capture) void {
         if (!self.active) return;
         if (self.file_open) self.file.close(self.io);
-        if (!self.published) self.parent.deleteFile(self.io, self.temporary_name.slice()) catch {};
+        if (!self.published) self.parent.deleteFile(self.io, self.temporary_name.slice()) catch |err| {
+            std.debug.print("latifa: retained caller capture after cleanup failure: {s}\n", .{@errorName(err)});
+        };
         self.parent.close(self.io);
         self.active = false;
     }

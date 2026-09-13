@@ -10,11 +10,16 @@ mkdir -m 700 "$records"
 ready="$state/ready"
 server_log="$state/server.log"
 host_pid=
+extra_pid=
 
 cleanup() {
     if [ -n "$host_pid" ]; then
         kill -9 "$host_pid" 2>/dev/null || true
         wait "$host_pid" 2>/dev/null || true
+    fi
+    if [ -n "$extra_pid" ]; then
+        kill -9 "$extra_pid" 2>/dev/null || true
+        wait "$extra_pid" 2>/dev/null || true
     fi
     rm -rf "$state"
 }
@@ -328,3 +333,50 @@ if "$latifa" observe-command --store "$store" --key first-key >"$state/no-host.o
     echo "client auto-started an absent Host" >&2
     exit 1
 fi
+
+# Access is checked before ownership, and an incompatible Store is rejected
+# before its stale socket is reclaimed.
+insecure_store="$state/insecure-store"
+mkdir -m 755 "$insecure_store"
+if "$latifa" serve --store "$insecure_store" >"$state/insecure.out" 2>"$state/insecure.err"; then
+    echo "Host accepted an insecure Store directory" >&2
+    exit 1
+fi
+contains "$(cat "$state/insecure.err")" "InsecureDirectoryPermissions"
+
+wire_store="$state/wire-store"
+wire_ready="$state/wire-ready"
+wire_error="$state/wire-error"
+"$latifa" serve --store "$wire_store" >"$wire_ready" 2>"$wire_error" &
+extra_pid=$!
+attempts=0
+while ! grep -q '^ready ' "$wire_ready"; do
+    if ! kill -0 "$extra_pid" 2>/dev/null; then
+        cat "$wire_error" >&2
+        exit 1
+    fi
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 500 ]; then
+        echo "wire-version fixture Host did not become ready" >&2
+        exit 1
+    fi
+    sleep 0.01
+done
+wire_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$wire_ready")
+kill -9 "$extra_pid"
+wait "$extra_pid" 2>/dev/null || true
+extra_pid=
+test -S "$wire_socket"
+python3 - "$wire_store/latifa.sqlite3" <<'PY'
+import sqlite3, sys
+database = sqlite3.connect(sys.argv[1])
+database.execute("UPDATE store_meta SET value='future' WHERE key='wire_version'")
+database.commit()
+database.close()
+PY
+if "$latifa" serve --store "$wire_store" >"$state/wrong-wire.out" 2>"$state/wrong-wire.err"; then
+    echo "Host accepted an incompatible wire version" >&2
+    exit 1
+fi
+contains "$(cat "$state/wrong-wire.err")" "WrongStoreVersion"
+test -S "$wire_socket"

@@ -68,7 +68,11 @@ pub fn serve(
     const address = try std.Io.net.UnixAddress.init(lease.paths.socket.slice());
     var listener = try address.listen(io, .{ .kernel_backlog = max_clients });
     defer listener.deinit(io);
-    defer std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
+        // The lock still protects this failed cleanup. A later startup will
+        // remove the owned socket or refuse to serve if it cannot do so.
+        std.debug.print("latifa: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
+    };
     var socket_path: [257:0]u8 = undefined;
     const socket_z = try std.fmt.bufPrintZ(&socket_path, "{s}", .{lease.paths.socket.slice()});
     if (std.c.chmod(socket_z, 0o600) != 0) return error.SocketProtectionFailed;
@@ -134,8 +138,10 @@ fn connectionMain(connection: *Connection) void {
     const stream = connection.stream;
     defer {
         stream.close(host.io);
-        host.clientFinished();
         host.allocator.destroy(connection);
+        // This is the last Host access: drain may release the stack owner as
+        // soon as the active population reaches zero.
+        host.clientFinished();
     }
     handleConnection(host, stream.socket.handle) catch |err| {
         sendStatic(host.io, stream.socket.handle, 400, "invocation_error", @errorName(err)) catch {};
@@ -178,7 +184,9 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
     var release_scratch = true;
     defer if (release_scratch) releaseScratch(host, header.content_length);
 
-    const request_number = host.request_counter.fetchAdd(1, .acq_rel);
+    const request_number = nextRequestNumber(host) catch {
+        return respondStatic(host.io, fd, 500, "invocation_error", "request_identity_exhausted");
+    };
     var cleanup_failed = false;
     var request = protocol.parseRequest(.{
         .io = host.io,
@@ -224,7 +232,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            writeHttp(host.io, fd, status, response.slice()) catch {};
+            deliverResponse(host.io, fd, status, response.slice());
         },
         .message => |*command| {
             const result = host.store.rejectMessage(command, .{
@@ -239,7 +247,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
-            writeHttp(host.io, fd, status, response.slice()) catch {};
+            deliverResponse(host.io, fd, status, response.slice());
         },
         .observe_command => |command| {
             const observation = host.store.observeCommand(command.key.slice()) catch {
@@ -247,7 +255,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
             };
             var response: protocol.ResponseBuffer = .{};
             try renderCommandObservation(&response, command.key.slice(), observation);
-            writeHttp(host.io, fd, 200, response.slice()) catch {};
+            deliverResponse(host.io, fd, 200, response.slice());
         },
         .inspect_session => |request_value| {
             const observation = host.store.inspectSession(request_value.session.slice()) catch {
@@ -255,7 +263,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
             };
             var response: protocol.ResponseBuffer = .{};
             try renderSessionObservation(&response, observation);
-            writeHttp(host.io, fd, 200, response.slice()) catch {};
+            deliverResponse(host.io, fd, 200, response.slice());
         },
     }
 }
@@ -273,6 +281,15 @@ fn reserveScratch(host: *Host, amount: u64) !bool {
 fn releaseScratch(host: *Host, amount: u64) void {
     const prior = host.scratch_used.fetchSub(amount, .acq_rel);
     std.debug.assert(prior >= amount);
+}
+
+fn nextRequestNumber(host: *Host) !u64 {
+    var current = host.request_counter.load(.acquire);
+    while (true) {
+        if (current == std.math.maxInt(u64)) return error.RequestIdentityExhausted;
+        current = host.request_counter.cmpxchgWeak(current, current + 1, .acq_rel, .acquire) orelse
+            return current;
+    }
 }
 
 fn readHeader(io: std.Io, fd: std.posix.fd_t) !Header {
@@ -507,6 +524,12 @@ fn sendStatic(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, cod
 
 fn respondStatic(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8) void {
     sendStatic(io, fd, status, kind, code) catch {};
+}
+
+fn deliverResponse(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) void {
+    // A delivery failure leaves the saved semantic answer recoverable. Never
+    // append a second HTTP message to an already-started response.
+    writeHttp(io, fd, status, body) catch {};
 }
 
 fn writeHttp(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) !void {
