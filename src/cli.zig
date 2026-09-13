@@ -33,22 +33,41 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             active_capacity = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
         } else if (std.mem.eql(u8, arg, "--fault")) {
             const fault = try takeValue(args, &index);
-            if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else if (std.mem.eql(u8, fault, "attempt-before-commit")) faults.attempt_before_commit = true else if (std.mem.eql(u8, fault, "result-before-commit")) faults.result_before_commit = true else if (std.mem.eql(u8, fault, "request-first-step")) faults.request_first_step = true else if (std.mem.eql(u8, fault, "request-write")) faults.request_write = true else if (std.mem.eql(u8, fault, "request-seal")) faults.request_seal = true else if (std.mem.eql(u8, fault, "request-scratch-acquire")) faults.request_scratch_acquire = true else if (std.mem.eql(u8, fault, "request-unlink")) faults.request_unlink = true else if (std.mem.eql(u8, fault, "response-acquire")) faults.response_acquire = true else if (std.mem.eql(u8, fault, "response-unlink")) faults.response_unlink = true else if (std.mem.eql(u8, fault, "response-write")) faults.response_write = true else if (std.mem.eql(u8, fault, "response-seal")) faults.response_seal = true else if (std.mem.eql(u8, fault, "response-metadata")) faults.response_metadata = true else if (std.mem.eql(u8, fault, "response-metadata-unlink")) faults.response_metadata_unlink = true else if (std.mem.eql(u8, fault, "response-read")) faults.response_read = true else if (std.mem.eql(u8, fault, "response-import")) faults.response_import = true else if (std.mem.eql(u8, fault, "response-commit")) faults.response_commit = true else return error.UnknownFault;
+            if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else if (std.mem.eql(u8, fault, "attempt-before-commit")) faults.attempt_before_commit = true else if (std.mem.eql(u8, fault, "result-before-commit")) faults.result_before_commit = true else if (std.mem.eql(u8, fault, "request-first-step")) faults.request_first_step = true else if (std.mem.eql(u8, fault, "request-write")) faults.request_write = true else if (std.mem.eql(u8, fault, "request-seal")) faults.request_seal = true else if (std.mem.eql(u8, fault, "request-scratch-acquire")) faults.request_scratch_acquire = true else if (std.mem.eql(u8, fault, "request-unlink")) faults.request_unlink = true else if (std.mem.eql(u8, fault, "provider-prepare")) faults.provider_prepare = true else if (std.mem.eql(u8, fault, "response-acquire")) faults.response_acquire = true else if (std.mem.eql(u8, fault, "response-unlink")) faults.response_unlink = true else if (std.mem.eql(u8, fault, "response-write")) faults.response_write = true else if (std.mem.eql(u8, fault, "response-seal")) faults.response_seal = true else if (std.mem.eql(u8, fault, "response-metadata")) faults.response_metadata = true else if (std.mem.eql(u8, fault, "response-metadata-unlink")) faults.response_metadata_unlink = true else if (std.mem.eql(u8, fault, "response-read")) faults.response_read = true else if (std.mem.eql(u8, fault, "response-import")) faults.response_import = true else if (std.mem.eql(u8, fault, "response-commit")) faults.response_commit = true else return error.UnknownFault;
         } else if (std.mem.eql(u8, arg, "--test-cleanup-delay-ms")) {
             faults.cleanup_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
             if (faults.cleanup_delay_ms < 0 or faults.cleanup_delay_ms > 60_000) return error.InvalidCleanupDelay;
         } else if (std.mem.eql(u8, arg, "--test-provider-inactivity-seconds")) {
             faults.provider_inactivity_seconds = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
-            if (faults.provider_inactivity_seconds < 1 or faults.provider_inactivity_seconds > 300) return error.InvalidProviderInactivity;
+            if (faults.provider_inactivity_seconds < 1) return error.InvalidProviderInactivity;
+            _ = std.math.mul(i64, faults.provider_inactivity_seconds, std.time.ns_per_s) catch
+                return error.InvalidProviderInactivity;
+        } else if (std.mem.eql(u8, arg, "--test-retry-waits-ms")) {
+            faults.retry_waits_ms = try parseRetryWaits(try takeValue(args, &index));
         } else if (std.mem.eql(u8, arg, "--test-before-launch-delay-ms")) {
             faults.before_launch_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
             if (faults.before_launch_delay_ms < 0 or faults.before_launch_delay_ms > 10_000) return error.InvalidLaunchDelay;
+        } else if (std.mem.eql(u8, arg, "--test-before-result-delay-ms")) {
+            faults.before_result_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
+            if (faults.before_result_delay_ms < 0 or faults.before_result_delay_ms > 10_000) return error.InvalidResultDelay;
         } else if (std.mem.eql(u8, arg, "--test-request-scratch-limit")) {
             faults.request_scratch_limit_bytes = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
         } else return error.UnknownArgument;
         index += 1;
     }
     return server.serve(io, std.heap.c_allocator, store_path orelse return usage(), active_capacity, faults, provider_endpoint);
+}
+
+fn parseRetryWaits(value: []const u8) ![3]u64 {
+    var waits: [3]u64 = undefined;
+    var parts = std.mem.splitScalar(u8, value, ',');
+    for (&waits) |*wait| {
+        const part = parts.next() orelse return error.InvalidRetryWaits;
+        wait.* = std.fmt.parseInt(u64, part, 10) catch return error.InvalidRetryWaits;
+        if (wait.* == 0 or wait.* > std.math.maxInt(i64)) return error.InvalidRetryWaits;
+    }
+    if (parts.next() != null) return error.InvalidRetryWaits;
+    return waits;
 }
 
 fn configure(io: std.Io, args: []const []const u8) !void {

@@ -162,6 +162,15 @@ pub fn build(b: *std.Build) void {
         "Measure macOS model-output bytes, item counts, storage, and retained memory",
     );
     measure_output_step.dependOn(&measure_output.step);
+
+    const measure_retry = b.addSystemCommand(&.{"python3"});
+    measure_retry.addFileArg(b.path("research/model-retry/measure.py"));
+    measure_retry.addArtifactArg(release);
+    const measure_retry_step = b.step(
+        "measure-model-retry",
+        "Measure macOS retry discovery, launch separation, churn, and custody",
+    );
+    measure_retry_step.dependOn(&measure_retry.step);
 }
 
 fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget) bool {
