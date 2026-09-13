@@ -2112,66 +2112,223 @@ def main():
         backlog_endpoint.server_close()
         backlog_thread.join(timeout=5)
 
-        # Recovery settles one exhausted Operation and its Turn per Store
-        # transition. A large restart backlog therefore releases the Store
-        # mutex between outcomes so ordinary controls continue to respond.
-        recovery_store = state / "exhausted-control-store"
-        recovery_host = start_host(recovery_store, url, "--active-capacity", "1000")
-        processes.append(recovery_host)
-        configure(
-            state,
-            recovery_store,
-            "recovery-control-config",
-            "direct/recovery-control",
-            "model-a",
+        # Exhausted recovery and admission are independent work in one Host
+        # turn. A due retry and then queued new work both receive free custody
+        # while a high-age exhausted sentinel proves the restart backlog is
+        # still unresolved; controls progress and recovery eventually drains.
+        recovery_retry_release = threading.Event()
+        recovery_new_release = threading.Event()
+        recovery_endpoint = SuccessEndpoint(
+            [
+                ResponseSpec(b"retry later", {}, 503),
+                ResponseSpec(b"sentinel retry later", {}, 503),
+                (ResponseSpec(b"retried", {}, 422), recovery_retry_release),
+                (ResponseSpec(b"new work", {}, 422), recovery_new_release),
+            ]
         )
+        recovery_thread = threading.Thread(
+            target=recovery_endpoint.serve_forever, daemon=True
+        )
+        recovery_thread.start()
+        recovery_store = state / "exhausted-control-store"
+        recovery_host = start_host(
+            recovery_store,
+            f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
+            "--fault",
+            "attempt-before-commit",
+        )
+        processes.append(recovery_host)
         stop_host(recovery_host)
         processes.remove(recovery_host)
         database = sqlite3.connect(recovery_store / "latifa.sqlite3")
         try:
             database.execute("PRAGMA foreign_keys=OFF")
             database.execute(
-                "WITH RECURSIVE sequence(value) AS (VALUES(20000) UNION ALL "
-                "SELECT value+1 FROM sequence WHERE value<24095) "
-                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id) "
-                "SELECT value,printf('recovery-%d',value),1,1,value FROM sequence"
-            )
-            database.execute(
-                "WITH RECURSIVE sequence(value) AS (VALUES(20000) UNION ALL "
-                "SELECT value+1 FROM sequence WHERE value<24095) "
+                "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL "
+                "SELECT value+1 FROM sequence WHERE value<1000) "
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
                 "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) "
-                "SELECT value,value,printf('recovery-%d',value),1,1,1,4,4,1,0 FROM sequence"
+                "SELECT value,value,printf('recovery-%d',value),1,1,1,1,1,0,9223372036854775807 "
+                "FROM sequence"
             )
             database.commit()
         finally:
             database.close()
-        recovery_host = start_host(recovery_store, url, "--active-capacity", "1000")
+        recovery_host = start_host(
+            recovery_store,
+            f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
+            "--active-capacity",
+            "2",
+            "--test-retry-waits-ms",
+            "60000,60000,60000",
+        )
         processes.append(recovery_host)
-        control_latencies = []
-        for _ in range(20):
-            control_started = time.monotonic()
-            control = command(
+        for name in ("due", "sentinel"):
+            configure(
+                state,
+                recovery_store,
+                f"recovery-{name}-config",
+                f"direct/recovery-{name}",
+                "model-a",
+            )
+            message(
+                state,
+                recovery_store,
+                f"recovery-{name}-message",
+                f"direct/recovery-{name}",
+                f"recovery-{name}",
+            )
+        wait_for(lambda: len(recovery_endpoint.requests) == 2, "recovery setup Attempts")
+        wait_for(
+            lambda: command(
                 "inspect-session",
                 "--store",
                 recovery_store,
                 "--session",
-                "direct/recovery-control",
-            )
-            control_latencies.append(time.monotonic() - control_started)
-            assert control["session"]["model"] == "model-a", control
-        control_p95 = sorted(control_latencies)[18]
-        assert control_p95 < 1.0, control_p95
+                "direct/recovery-sentinel",
+            )["execution"]["custody_occupied"]
+            == "0",
+            "recovery setup cleanup",
+        )
+        stop_host(recovery_host)
+        processes.remove(recovery_host)
+        recovery_host = start_host(
+            recovery_store,
+            f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
+            "--fault",
+            "attempt-before-commit",
+        )
+        processes.append(recovery_host)
+        configure(
+            state,
+            recovery_store,
+            "recovery-new-config",
+            "direct/recovery-new",
+            "model-a",
+        )
+        message(
+            state,
+            recovery_store,
+            "recovery-new-message",
+            "direct/recovery-new",
+            "recovery-new",
+        )
+        time.sleep(0.2)
+        assert len(recovery_endpoint.requests) == 2
         stop_host(recovery_host)
         processes.remove(recovery_host)
         database = sqlite3.connect(recovery_store / "latifa.sqlite3")
         try:
-            recovered_count = database.execute(
-                "SELECT count(*) FROM model_operation WHERE resolution_code='retry_exhausted'"
+            database.execute("PRAGMA foreign_keys=OFF")
+            due_operation = database.execute(
+                "SELECT operation_id FROM model_operation WHERE session_ref='direct/recovery-due'"
             ).fetchone()[0]
+            sentinel_operation = database.execute(
+                "SELECT operation_id FROM model_operation WHERE session_ref='direct/recovery-sentinel'"
+            ).fetchone()[0]
+            database.execute(
+                "UPDATE model_operation SET attempt_ordinal=4,allowance_used=4,uncertain=1,retry_due_at_ms=0 "
+                "WHERE operation_id<=1000 OR operation_id=?",
+                (sentinel_operation,),
+            )
+            database.execute(
+                "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?",
+                (due_operation,),
+            )
+            database.execute(
+                "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<1000) "
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id) "
+                "SELECT value+10000,printf('recovery-%d',value),1,1,value FROM sequence"
+            )
+            database.execute(
+                "UPDATE model_operation SET turn_id=operation_id+10000 WHERE operation_id<=1000"
+            )
+            database.commit()
         finally:
             database.close()
-        assert recovered_count > 0, recovered_count
+        recovery_host = start_host(
+            recovery_store,
+            f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
+            "--active-capacity",
+            "2",
+            "--test-before-launch-delay-ms",
+            "1000",
+            "--test-retry-waits-ms",
+            "60000,60000,60000",
+        )
+        processes.append(recovery_host)
+        due_admitted = wait_for(
+            lambda: (
+                value
+                if (value := observe(recovery_store, "recovery-due-message"))
+                .get("processing", {})
+                .get("attempt")
+                == "2"
+                else None
+            ),
+            "due retry admitted during exhausted recovery",
+        )
+        assert "result" not in due_admitted, due_admitted
+        unresolved_sentinel = observe(recovery_store, "recovery-sentinel-message")
+        assert unresolved_sentinel["processing"]["attempt"] == "4", unresolved_sentinel
+        assert "result" not in unresolved_sentinel, unresolved_sentinel
+        control_started = time.monotonic()
+        control = command(
+            "inspect-session",
+            "--store",
+            recovery_store,
+            "--session",
+            "direct/recovery-sentinel",
+        )
+        assert time.monotonic() - control_started < 1.0
+        assert control["execution"]["dispatch_fenced"] is False, control
+        wait_for(lambda: len(recovery_endpoint.requests) >= 3, "recovery retry launch")
+        new_admitted = wait_for(
+            lambda: (
+                value
+                if (value := observe(recovery_store, "recovery-new-message"))[
+                    "queue"
+                ]["status"]
+                == "processing"
+                else None
+            ),
+            "new admission during exhausted recovery",
+        )
+        assert new_admitted["processing"]["attempt"] == "1", new_admitted
+        assert command(
+            "inspect-session",
+            "--store",
+            recovery_store,
+            "--session",
+            "direct/recovery-new",
+        )["execution"]["custody_occupied"] == "2"
+        assert "result" not in observe(
+            recovery_store, "recovery-sentinel-message"
+        ), unresolved_sentinel
+        wait_for(lambda: len(recovery_endpoint.requests) >= 4, "recovery new launch")
+        recovery_retry_release.set()
+        recovery_new_release.set()
+        wait_for(
+            lambda: observe(recovery_store, "recovery-sentinel-message")
+            .get("result", {})
+            .get("code")
+            == "retry_exhausted",
+            "exhausted sentinel drain",
+            timeout=30,
+        )
+        stop_host(recovery_host)
+        processes.remove(recovery_host)
+        database = sqlite3.connect(recovery_store / "latifa.sqlite3")
+        try:
+            assert database.execute(
+                "SELECT count(*) FROM model_operation WHERE uncertain=1 AND allowance_used=4 "
+                "AND retry_due_at_ms=0 AND resolution_code IS NULL"
+            ).fetchone()[0] == 0
+        finally:
+            database.close()
+        recovery_endpoint.shutdown()
+        recovery_endpoint.server_close()
+        recovery_thread.join(timeout=5)
 
         # Exhaustion settles only the selected prefix. Input admitted while
         # those retries run remains unselected and receives the outcome of the
