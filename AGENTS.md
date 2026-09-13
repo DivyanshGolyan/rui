@@ -16,9 +16,13 @@ Inspect source before claiming implementation. Keep accepted behavior, prototype
 
 Inspect the working-tree diff first and preserve concurrent work. Keep reviews read-only unless fixes are requested. Complete authorized work without reopening settled choices; stay within the requested scope.
 
-Keep state, validation and transitions together under their owner. Expose semantic intent and opaque, pointer-stable resource handles, not storage rows, internal lifecycle state or generic command buses. Use closed typed variants where different cases carry different authority. Extract helpers for concrete reuse or clearer reasoning.
+Follow the [Zig 0.16 style guide](https://ziglang.org/documentation/0.16.0/#Style-Guide) and installed standard-library APIs. Use `TitleCase` for types/type-producing functions, `camelCase` for other functions, and `snake_case` for values and namespace files; files with top-level instance fields use `TitleCase`. Name declarations in their full namespace without redundant prefixes or miscellaneous utility buckets. Keep helpers with their consumer until a concrete shared responsibility warrants extraction.
+
+Keep state, validation and transitions together under their owner. Expose semantic intent and opaque, pointer-stable resource handles, not storage rows, internal lifecycle state or generic command buses. Use closed typed variants where different cases carry different authority.
 
 Every allocation and external resource needs an owner, population multiplier, bound, failure behavior and release point. Stream variable content; do not duplicate complete payloads. Derive limits from their actual consumer, retain safety checks until replacement storage is verified, and never silently truncate semantic input. Separate orchestration memory from workload memory.
+
+Make allocator dependencies explicit where allocation occurs. Document returned pointers/slices as owned or borrowed, including invalidation. Pair acquisition with `defer`/`errdefer` only when scope exit is the actual release boundary; transferred or asynchronous resources remain with their owner until cleanup is safe.
 
 Respect the architecture's transaction and effect boundaries. One owner accesses each mutable handle. Do not free callback state or recycle custody before safe cleanup. Validate external syntax and consequential meaning; treat notifications as hints and committed facts as authority. Trust already-validated local/SQLite facts within their documented boundary rather than layering redundant validation.
 
