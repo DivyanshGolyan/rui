@@ -70,7 +70,7 @@ pub const Configuration = struct {
     output_schema: ContentField = .{},
 };
 
-pub const Kind = enum { configure, message, observe_command, inspect_session };
+pub const Kind = enum { configure, message, observe_command, read_result, inspect_session };
 
 pub const ConfigureCommand = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -133,6 +133,11 @@ pub const ObserveCommand = struct {
     key: Bounded(max_key_bytes) = .{},
 };
 
+pub const ReadResult = struct {
+    store: Bounded(max_store_bytes) = .{},
+    key: Bounded(max_key_bytes) = .{},
+};
+
 pub const InspectSession = struct {
     store: Bounded(max_store_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
@@ -142,13 +147,14 @@ pub const Request = union(Kind) {
     configure: ConfigureCommand,
     message: MessageCommand,
     observe_command: ObserveCommand,
+    read_result: ReadResult,
     inspect_session: InspectSession,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .observe_command, .inspect_session => {},
+            .observe_command, .read_result, .inspect_session => {},
         }
     }
 
@@ -279,6 +285,8 @@ const Parser = struct {
             .message
         else if (kind_text.eql("observe_command"))
             .observe_command
+        else if (kind_text.eql("read_result"))
+            .read_result
         else if (kind_text.eql("inspect_session"))
             .inspect_session
         else
@@ -293,6 +301,7 @@ const Parser = struct {
             .configure => .{ .configure = try self.parseConfigure(store) },
             .message => .{ .message = try self.parseMessage(store) },
             .observe_command => .{ .observe_command = try self.parseObserve(store) },
+            .read_result => .{ .read_result = try self.parseReadResult(store) },
             .inspect_session => .{ .inspect_session = try self.parseInspect(store) },
         };
         errdefer request.removeTemporaryContent(self.options.io) catch {
@@ -371,6 +380,14 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("session");
         try self.readSmallString(&request.session);
+        return request;
+    }
+
+    fn parseReadResult(self: *Parser, store: Bounded(max_store_bytes)) !ReadResult {
+        var request = ReadResult{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("key");
+        try self.readSmallString(&request.key);
         return request;
     }
 
@@ -693,7 +710,7 @@ pub fn maximumJsonStringBytes(input_bytes: usize) usize {
     return 2 + 6 * input_bytes;
 }
 
-// The Session inspection is the largest issue-171 response. This bound uses
+// The Session inspection is the largest issue-173 response. This bound uses
 // every literal emitted by renderSessionObservation, maximum decimal u64
 // widths, both tools, a present schema, and worst-case JSON escaping.
 pub const max_response_bytes =
@@ -708,7 +725,7 @@ pub const max_response_bytes =
     "\"},\"output_schema\":{\"bytes\":\"".len + 20 +
     "\",\"sha256\":\"".len + 64 +
     "\"}},\"pending_messages\":\"".len + 20 +
-    "\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_172\"}}".len;
+    "\",\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"18446744073709551615\",\"scratch_used_bytes\":\"18446744073709551615\",\"unavailable\":[\"retry_and_restart_resolution\"]}}".len;
 
 pub const ResponseBuffer = struct {
     bytes: [max_response_bytes]u8 = undefined,

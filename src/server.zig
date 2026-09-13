@@ -2,6 +2,7 @@ const std = @import("std");
 const execution = @import("execution.zig");
 const platform = @import("platform.zig");
 const provider = @import("provider.zig");
+const provider_output = @import("provider_output.zig");
 const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
 
@@ -36,6 +37,13 @@ pub const Faults = struct {
     request_scratch_acquire: bool = false,
     request_scratch_limit_bytes: u64 = scratch_limit_bytes,
     request_unlink: bool = false,
+    response_acquire: bool = false,
+    response_write: bool = false,
+    response_seal: bool = false,
+    response_metadata: bool = false,
+    response_read: bool = false,
+    response_import: bool = false,
+    response_commit: bool = false,
     cleanup_delay_ms: i64 = 0,
     provider_inactivity_seconds: i64 = 5 * 60,
     before_launch_delay_ms: i64 = 0,
@@ -308,10 +316,15 @@ fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) A
     };
     slot.transfer.start(host.provider_endpoint.?, request, binding, .{
         .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
-    }) catch |err| {
+        .response_acquire_fault = host.faults.response_acquire,
+        .response_write_fault = host.faults.response_write,
+    }, host.lease.paths.scratch.slice(), request_budget) catch |err| {
         request.deinit();
         std.debug.print("latifa: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, token, binding, "provider_transport_failure");
+        settleAttemptFailure(host, token, binding, switch (err) {
+            error.ResponseCaptureAcquisitionFailed => "response_capture_failed",
+            else => "provider_transport_failure",
+        });
         finishCustodyNow(host, token);
         return .admitted;
     };
@@ -349,19 +362,104 @@ fn completeTransfer(
         return;
     };
     reactor.remove(&slot.transfer);
+    if (slot.transfer.responseFailureCode()) |code| {
+        settleAttemptFailure(host, slot.token, slot.binding, code);
+        slot.transfer.deinit();
+        beginCleanup(host, slot);
+        return;
+    }
     const evidence = slot.transfer.evidence(completion.result) catch |err| {
         std.debug.print("latifa: invalid provider evidence for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, slot.token, slot.binding, "provider_transport_failure");
+        slot.transfer.deinit();
         beginCleanup(host, slot);
         return;
     };
+    if (evidence.class == .success) {
+        completeSuccessfulTransfer(host, slot);
+        return;
+    }
     var code_buffer: [96]u8 = undefined;
     const code = switch (evidence.class) {
+        .success => unreachable,
         .permanent_http => std.fmt.bufPrint(&code_buffer, "provider_http_{d}", .{evidence.http_status}) catch unreachable,
         .temporary_http => std.fmt.bufPrint(&code_buffer, "provider_temporary_http_{d}", .{evidence.http_status}) catch unreachable,
         .transport_failure => "provider_transport_failure",
     };
     settleAttemptFailure(host, slot.token, slot.binding, code);
+    slot.transfer.deinit();
+    beginCleanup(host, slot);
+}
+
+fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
+    slot.transfer.response.seal(host.faults.response_seal) catch |err| {
+        std.debug.print("latifa: response seal failed for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
+        settleAttemptFailure(host, slot.token, slot.binding, "response_seal_failed");
+        slot.transfer.deinit();
+        beginCleanup(host, slot);
+        return;
+    };
+    var request_id: protocol.Bounded(256) = .{};
+    request_id.set(slot.transfer.requestId()) catch unreachable;
+    var header_model: protocol.Bounded(protocol.max_model_bytes) = .{};
+    header_model.set(slot.transfer.servedModel()) catch unreachable;
+    var response = slot.transfer.takeResponse();
+    slot.transfer.deinit();
+    defer response.deinit();
+
+    var metadata_name_buffer: [96]u8 = undefined;
+    const metadata_name = std.fmt.bufPrint(&metadata_name_buffer, "response-metadata-{d}-{d}.tmp", .{
+        slot.binding.operation_id,
+        slot.binding.attempt_ordinal,
+    }) catch unreachable;
+    var metadata = store_module.OutputMetadataWriter.init(
+        host.io,
+        host.lease.paths.scratch.slice(),
+        metadata_name,
+        &host.scratch_used,
+        host.faults.request_scratch_limit_bytes,
+    ) catch |err| {
+        std.debug.print("latifa: response metadata acquisition failed for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
+        settleAttemptFailure(host, slot.token, slot.binding, "response_metadata_exhausted");
+        beginCleanup(host, slot);
+        return;
+    };
+    defer metadata.deinit();
+    const validated = provider_output.validate(host.io, response.file, response.length, &metadata, .{
+        .metadata = host.faults.response_metadata,
+    }) catch |err| {
+        std.debug.print("latifa: provider output rejected for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
+        settleAttemptFailure(host, slot.token, slot.binding, provider_output.failureCode(err));
+        beginCleanup(host, slot);
+        return;
+    };
+    var served_model = validated.evidence.served_model;
+    if (served_model.len == 0) {
+        served_model = header_model;
+    } else if (header_model.len != 0 and !served_model.eql(header_model.slice())) {
+        settleAttemptFailure(host, slot.token, slot.binding, "contradictory_provider_output");
+        beginCleanup(host, slot);
+        return;
+    }
+    if (!host.custody.claimTerminalDelivery(slot.token)) {
+        beginCleanup(host, slot);
+        return;
+    }
+    host.store.settleModelSuccess(slot.binding, &.{
+        .source = response.file,
+        .source_length = response.length,
+        .metadata = metadata.file,
+        .item_count = validated.item_count,
+        .answer_length = validated.answer_length,
+        .answer_digest = validated.answer_digest,
+        .response_id = validated.evidence.response_id,
+        .served_model = served_model,
+        .request_id = request_id,
+    }, .{
+        .output_read = host.faults.response_read,
+        .output_import = host.faults.response_import,
+        .output_commit = host.faults.response_commit,
+    }) catch |err| fenceDispatch(host, "model output import", err);
     beginCleanup(host, slot);
 }
 
@@ -381,7 +479,6 @@ fn advanceCleanup(host: *Host, slots: []ExecutionSlot) void {
 }
 
 fn finishSlotCleanup(host: *Host, slot: *ExecutionSlot) void {
-    slot.transfer.deinit();
     host.custody.cleanupComplete(slot.token) catch unreachable;
     slot.* = .{};
 }
@@ -396,7 +493,6 @@ fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []Execution
             host.custody.cleanupComplete(slot.token) catch unreachable;
         },
         .cleanup => {
-            slot.transfer.deinit();
             host.custody.cleanupComplete(slot.token) catch unreachable;
         },
         .retained_scratch => {
@@ -480,7 +576,7 @@ fn connectionMain(connection: *Connection) void {
     };
 }
 
-const Route = enum { configure, message, observe, inspect, unsupported_control };
+const Route = enum { configure, message, observe, read_result, inspect, unsupported_control };
 const DropMode = enum { none, before_admission, during_admission, after_commit };
 
 const Header = struct {
@@ -546,6 +642,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
         .configure => header.route == .configure,
         .message => header.route == .message,
         .observe_command => header.route == .observe,
+        .read_result => header.route == .read_result,
         .inspect_session => header.route == .inspect,
     };
     if (!route_matches) {
@@ -603,6 +700,23 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
             var response: protocol.ResponseBuffer = .{};
             try renderCommandObservation(&response, command.key.slice(), observation);
             deliverResponse(host.io, fd, 200, response.slice());
+        },
+        .read_result => |command| {
+            const reference = host.store.commandResult(command.key.slice()) catch |err| switch (err) {
+                error.ResultNotFound => return respondStatic(host.io, fd, 409, "result_unavailable", "result_not_found"),
+                error.ResultNotReady => return respondStatic(host.io, fd, 409, "result_unavailable", "result_not_ready"),
+                error.ResultFailed => return respondStatic(host.io, fd, 409, "result_unavailable", "result_failed"),
+                else => {
+                    fenceDispatch(host, "result observation", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            var reader = host.store.openContent(reference) catch |err| {
+                fenceDispatch(host, "result content read", err);
+                return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+            };
+            defer reader.close();
+            deliverContent(host.io, fd, &reader) catch {};
         },
         .inspect_session => |request_value| {
             const observation = host.store.inspectSession(request_value.session.slice()) catch |err| {
@@ -688,6 +802,8 @@ fn readHeader(io: std.Io, fd: std.posix.fd_t) !Header {
         .message
     else if (std.mem.eql(u8, path, "/v1/observe-command"))
         .observe
+    else if (std.mem.eql(u8, path, "/v1/read-result"))
+        .read_result
     else if (std.mem.eql(u8, path, "/v1/inspect-session"))
         .inspect
     else if (std.mem.startsWith(u8, path, "/v1/control/"))
@@ -765,7 +881,7 @@ fn renderConfigureReply(
             if (value.created) "true" else "false",
         });
     }
-    try response.append("},\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_172\"}}");
+    try response.append("},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}");
 }
 
 fn renderMessageReply(
@@ -860,6 +976,10 @@ fn renderCommandObservation(
                 try response.append(",\"result\":{\"status\":\"failed\",\"code\":");
                 try response.appendJsonString(message.failure.slice());
                 try response.append("}");
+            } else if (message.answer) |answer| {
+                try response.append(",\"result\":{\"status\":\"completed\",\"text\":");
+                try renderContentReference(response, answer);
+                try response.append("}");
             }
         }
     }
@@ -879,7 +999,7 @@ fn renderSessionObservation(
 ) !void {
     try response.append("{\"version\":\"1\",\"type\":\"session_observation\",\"session\":");
     if (!observation.found) {
-        try response.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_172\"}}");
+        try response.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}");
         return;
     }
     try response.append("{\"reference\":");
@@ -910,7 +1030,7 @@ fn renderSessionObservation(
     } else {
         try response.append("null");
     }
-    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"successful_model_output\",\"retry_and_restart_resolution\"]}}}}", .{
+    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"retry_and_restart_resolution\"]}}}}", .{
         observation.pending_messages,
         if (execution_observation.dispatch_fenced) "true" else "false",
         execution_observation.custody_occupied,
@@ -949,6 +1069,22 @@ fn deliverResponse(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8
     // A delivery failure leaves the saved semantic answer recoverable. Never
     // append a second HTTP message to an already-started response.
     writeHttp(io, fd, status, body) catch {};
+}
+
+fn deliverContent(io: std.Io, fd: std.posix.fd_t, reader: *store_module.ContentReader) !void {
+    _ = io;
+    var header_buffer: [256]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\nX-Latifa-Wire-Version: 1\r\n\r\n", .{reader.reference.length});
+    try writeAll(fd, header);
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < reader.reference.length) {
+        const wanted: usize = @intCast(@min(reader.reference.length - offset, buffer.len));
+        const count = try reader.read(offset, buffer[0..wanted]);
+        if (count != wanted) return error.ShortCanonicalRead;
+        try writeAll(fd, buffer[0..count]);
+        offset += count;
+    }
 }
 
 fn writeHttp(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) !void {

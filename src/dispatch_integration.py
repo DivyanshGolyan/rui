@@ -77,6 +77,170 @@ class FailureHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def encode_sse(payloads, done=True):
+    body = b"".join(
+        b"data: " + json.dumps(payload, separators=(",", ":")).encode() + b"\n\n"
+        for payload in payloads
+    )
+    return body + (b"data: [DONE]\n\n" if done else b"")
+
+
+def sse_answer(response_id, reasoning_id, message_id, answer, *, extension=None):
+    reasoning = {
+        "type": "reasoning",
+        "id": reasoning_id,
+        "status": "completed",
+        "summary": [],
+        "encrypted_content": f"private-{response_id}",
+        "created_by": "response-only",
+        "extension": extension or {"preserved": response_id},
+    }
+    message_item = {
+        "type": "message",
+        "id": message_id,
+        "status": "completed",
+        "role": "assistant",
+        "phase": "final_answer",
+        "content": [
+            {
+                "type": "output_text",
+                "text": answer,
+                "annotations": [],
+                "extension": {"kept": True},
+            }
+        ],
+    }
+    payloads = [
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "reasoning", "id": reasoning_id},
+        },
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+        {
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {"type": "message", "id": message_id},
+        },
+        {"type": "response.output_item.done", "output_index": 1, "item": message_item},
+        {
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "status": "completed",
+                "model": "model-a-served",
+                "output": [reasoning, message_item],
+                "usage": {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
+            },
+        },
+    ]
+    body = encode_sse(payloads)
+    return body, reasoning, message_item
+
+
+def sse_many(response_id, reasoning_count, answer):
+    items = []
+    payloads = []
+    for index in range(reasoning_count):
+        item = {
+            "type": "reasoning",
+            "id": f"{response_id}-reasoning-{index}",
+            "summary": [],
+            "encrypted_content": f"private-{index}",
+            "extension": {"ordinal": index},
+        }
+        items.append(item)
+        payloads += [
+            {
+                "type": "response.output_item.added",
+                "output_index": index,
+                "item": {"type": "reasoning", "id": item["id"]},
+            },
+            {"type": "response.output_item.done", "output_index": index, "item": item},
+        ]
+    message_item = {
+        "type": "message",
+        "id": f"{response_id}-message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": answer, "annotations": []}],
+    }
+    items.append(message_item)
+    payloads += [
+        {
+            "type": "response.output_item.added",
+            "output_index": reasoning_count,
+            "item": {"type": "message", "id": message_item["id"]},
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": reasoning_count,
+            "item": message_item,
+        },
+        {
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "status": "completed",
+                "model": "model-a-served",
+                "output": items,
+                "usage": {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
+            },
+        },
+    ]
+    return encode_sse(payloads)
+
+
+class SuccessEndpoint(http.server.ThreadingHTTPServer):
+    allow_reuse_address = True
+
+    def __init__(self, responses):
+        super().__init__(("127.0.0.1", 0), SuccessHandler)
+        self.responses = list(responses)
+        self.requests = []
+        self.lock = threading.Lock()
+
+
+class SuccessHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        body = self.rfile.read(length)
+        with self.server.lock:
+            self.server.requests.append(body)
+            if not self.server.responses:
+                raise AssertionError("unexpected extra model request")
+            payload = self.server.responses.pop(0)
+        if isinstance(payload, tuple):
+            payload, release = payload
+            if not release.wait(10):
+                raise RuntimeError("success fixture response was never released")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("X-Request-Id", f"request-{len(self.server.requests)}")
+        self.send_header("OpenAI-Model", "model-a-served")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        # Split inside SSE field names, JSON punctuation, escapes and UTF-8.
+        offsets = (1, 2, 5, 3, 7, 4, 1, 6)
+        cursor = 0
+        index = 0
+        while cursor < len(payload):
+            size = offsets[index % len(offsets)]
+            try:
+                self.wfile.write(payload[cursor : cursor + size])
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                break
+            cursor += size
+            index += 1
+        self.close_connection = True
+
+    def log_message(self, _format, *_args):
+        pass
+
+
 def command(*args, expect=0):
     completed = subprocess.run(
         [str(LATIFA), *map(str, args)],
@@ -179,6 +343,20 @@ def observe(store, key):
     return command("observe-command", "--store", store, "--key", key)["observation"]
 
 
+def read_result(store, key):
+    completed = subprocess.run(
+        [str(LATIFA), "read-result", "--store", str(store), "--key", key],
+        capture_output=True,
+        timeout=15,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"read-result failed for {key}: {completed.returncode}\n"
+            f"stdout: {completed.stdout!r}\nstderr: {completed.stderr!r}"
+        )
+    return completed.stdout
+
+
 def wait_for(predicate, description, timeout=8):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -189,6 +367,11 @@ def wait_for(predicate, description, timeout=8):
     raise AssertionError(f"timed out waiting for {description}")
 
 
+def completed_observation(store, key):
+    value = observe(store, key)
+    return value if value.get("result", {}).get("status") == "completed" else None
+
+
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="latifa-dispatch."))
     endpoint = FailureEndpoint()
@@ -196,7 +379,448 @@ def main():
     endpoint_thread.start()
     url = f"http://127.0.0.1:{endpoint.server_port}/responses"
     processes = []
+    success_endpoint = None
+    success_thread = None
     try:
+        first_answer = 'First "answer"\n🙂'.encode()
+        second_answer = ("second answer " + "x" * 5000).encode()
+        first_sse, first_reasoning, first_message_item = sse_answer(
+            "response-1", "reasoning-1", "message-1", first_answer.decode()
+        )
+        second_sse, second_reasoning, second_message_item = sse_answer(
+            "response-2", "reasoning-2", "message-2", second_answer.decode()
+        )
+        success_endpoint = SuccessEndpoint([first_sse, second_sse])
+        success_thread = threading.Thread(target=success_endpoint.serve_forever, daemon=True)
+        success_thread.start()
+        success_url = f"http://127.0.0.1:{success_endpoint.server_port}/responses"
+        success_store = state / "success-store"
+        success_host = start_host(success_store, success_url, "--test-cleanup-delay-ms", "2000")
+        processes.append(success_host)
+        configure(state, success_store, "success-config", "direct/success", "model-a")
+        command(
+            "configure",
+            "--store",
+            success_store,
+            "--record",
+            state / "success-tools.json",
+            "--key",
+            "success-tools",
+            "--session",
+            "direct/success",
+            "--tools",
+            "none",
+        )
+        message(state, success_store, "success-first", "direct/success", "first question")
+        first_complete = wait_for(
+            lambda: completed_observation(success_store, "success-first"),
+            "first complete model answer",
+        )
+        assert first_complete["queue"]["status"] == "completed", first_complete
+        assert read_result(success_store, "success-first") == first_answer
+        cleanup_state = command(
+            "inspect-session", "--store", success_store, "--session", "direct/success"
+        )["execution"]
+        assert cleanup_state["custody_occupied"] == "1", cleanup_state
+        stop_host(success_host)
+        processes.remove(success_host)
+
+        # A fresh Host and client recover the original answer, then the same
+        # Session completes another Turn from the historical provider view.
+        success_host = start_host(success_store, success_url)
+        processes.append(success_host)
+        assert read_result(success_store, "success-first") == first_answer
+        message(state, success_store, "success-second", "direct/success", "second question")
+        wait_for(
+            lambda: completed_observation(success_store, "success-second"),
+            "second complete model answer",
+        )
+        assert read_result(success_store, "success-first") == first_answer
+        assert read_result(success_store, "success-second") == second_answer
+        wait_for(lambda: len(success_endpoint.requests) == 2, "two successful requests")
+        first_request = json.loads(success_endpoint.requests[0])
+        second_request = json.loads(success_endpoint.requests[1])
+        assert first_request["input"] == [
+            {"role": "system", "content": [{"type": "input_text", "text": ""}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
+        ]
+        expected_reasoning = dict(first_reasoning)
+        expected_reasoning.pop("created_by")
+        assert second_request["input"] == [
+            {"role": "system", "content": [{"type": "input_text", "text": ""}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
+            expected_reasoning,
+            first_message_item,
+            {"role": "user", "content": [{"type": "input_text", "text": "second question"}]},
+        ], second_request["input"]
+        database = sqlite3.connect(success_store / "latifa.sqlite3")
+        try:
+            assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 4
+            assert database.execute(
+                "SELECT count(*) FROM model_output_item item JOIN content c ON c.content_id=item.content_id WHERE c.private=1"
+            ).fetchone()[0] == 4
+            assert database.execute(
+                "SELECT attempt_ordinal,count(*) FROM model_output_item GROUP BY attempt_ordinal"
+            ).fetchall() == [(1, 4)]
+            raw_reasoning = database.execute(
+                "SELECT CAST(c.payload AS TEXT) FROM model_output_item item JOIN content c ON c.content_id=item.content_id ORDER BY item.operation_id,item.item_ordinal LIMIT 1"
+            ).fetchone()[0]
+            assert json.loads(raw_reasoning)["created_by"] == "response-only"
+            assert database.execute(
+                "SELECT response_id,served_model,request_id,resolution_code,usage_content_id IS NOT NULL FROM model_operation ORDER BY operation_id"
+            ).fetchall() == [
+                ("response-1", "model-a-served", "request-1", "completed", 1),
+                ("response-2", "model-a-served", "request-2", "completed", 1),
+            ]
+            saved_usage = database.execute(
+                "SELECT CAST(c.payload AS TEXT) FROM model_operation o JOIN content c ON c.content_id=o.usage_content_id ORDER BY o.operation_id"
+            ).fetchall()
+            assert [json.loads(row[0]) for row in saved_usage] == [
+                {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
+                {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
+            ]
+        finally:
+            database.close()
+        stop_host(success_host)
+        processes.remove(success_host)
+        offline_success = subprocess.Popen(
+            [str(LATIFA), "serve", "--store", str(success_store), "--active-capacity", "1"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        processes.append(offline_success)
+        assert offline_success.stdout.readline().startswith("ready ")
+        assert read_result(success_store, "success-first") == first_answer
+        assert read_result(success_store, "success-second") == second_answer
+        stop_host(offline_success)
+        processes.remove(offline_success)
+
+        # Input committed after the first request's cutoff is selected at the
+        # next boundary. The first complete candidate is durable history but
+        # cannot become the Turn's Final Answer while applicable input waits.
+        pending_first_sse, pending_reasoning, pending_message_item = sse_answer(
+            "pending-response-1", "pending-reasoning-1", "pending-message-1", "intermediate"
+        )
+        pending_second_sse, _, _ = sse_answer(
+            "pending-response-2", "pending-reasoning-2", "pending-message-2", "actual final"
+        )
+        first_release = threading.Event()
+        second_release = threading.Event()
+        pending_endpoint = SuccessEndpoint(
+            [(pending_first_sse, first_release), (pending_second_sse, second_release)]
+        )
+        pending_thread = threading.Thread(target=pending_endpoint.serve_forever, daemon=True)
+        pending_thread.start()
+        pending_store = state / "pending-store"
+        pending_host = start_host(
+            pending_store, f"http://127.0.0.1:{pending_endpoint.server_port}/responses"
+        )
+        processes.append(pending_host)
+        configure(state, pending_store, "pending-config", "direct/pending", "model-a")
+        command(
+            "configure",
+            "--store",
+            pending_store,
+            "--record",
+            state / "pending-tools.json",
+            "--key",
+            "pending-tools",
+            "--session",
+            "direct/pending",
+            "--tools",
+            "none",
+        )
+        message(state, pending_store, "pending-first", "direct/pending", "before cutoff")
+        wait_for(lambda: len(pending_endpoint.requests) == 1, "first frozen pending request")
+        message(state, pending_store, "pending-second", "direct/pending", "after cutoff")
+        assert observe(pending_store, "pending-second")["queue"]["status"] == "queued"
+        first_release.set()
+        wait_for(lambda: len(pending_endpoint.requests) == 2, "next input boundary request")
+        assert "result" not in observe(pending_store, "pending-first")
+        assert observe(pending_store, "pending-second")["queue"]["status"] == "processing"
+        pending_request = json.loads(pending_endpoint.requests[1])
+        expected_pending_reasoning = dict(pending_reasoning)
+        expected_pending_reasoning.pop("created_by")
+        assert pending_request["input"] == [
+            {"role": "system", "content": [{"type": "input_text", "text": ""}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
+            expected_pending_reasoning,
+            pending_message_item,
+            {"role": "user", "content": [{"type": "input_text", "text": "after cutoff"}]},
+        ]
+        second_release.set()
+        wait_for(lambda: completed_observation(pending_store, "pending-first"), "pending Turn final")
+        assert read_result(pending_store, "pending-first") == b"actual final"
+        assert read_result(pending_store, "pending-second") == b"actual final"
+        stop_host(pending_host)
+        processes.remove(pending_host)
+        pending_endpoint.shutdown()
+        pending_endpoint.server_close()
+        pending_thread.join(timeout=5)
+
+        # Completed transport is not success: the whole SSE candidate must be
+        # complete, consistent and limited to the supported text subset.
+        invalid_reasoning = {
+            "type": "reasoning",
+            "id": "invalid-reasoning",
+            "summary": [],
+            "encrypted_content": "private-invalid",
+        }
+        invalid_message = {
+            "type": "message",
+            "id": "invalid-message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "must not escape", "annotations": []}],
+        }
+        contradictory = encode_sse(
+            [
+                {"type": "response.output_item.done", "output_index": 0, "item": invalid_reasoning},
+                {"type": "response.output_item.done", "output_index": 1, "item": invalid_message},
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "contradictory",
+                        "status": "completed",
+                        "model": "model-a-served",
+                        "output": [invalid_message, invalid_reasoning],
+                    },
+                },
+            ]
+        )
+        changed_message = dict(invalid_message)
+        changed_message["content"] = [
+            {"type": "output_text", "text": "changed terminal text", "annotations": []}
+        ]
+        changed_terminal = encode_sse(
+            [
+                {"type": "response.output_item.done", "output_index": 0, "item": invalid_reasoning},
+                {"type": "response.output_item.done", "output_index": 1, "item": invalid_message},
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "changed-terminal",
+                        "status": "completed",
+                        "model": "model-a-served",
+                        "output": [invalid_reasoning, changed_message],
+                    },
+                },
+            ]
+        )
+        duplicate_message = dict(invalid_message)
+        duplicate_message["id"] = invalid_reasoning["id"]
+        duplicate_identity = encode_sse(
+            [
+                {"type": "response.output_item.done", "output_index": 0, "item": invalid_reasoning},
+                {"type": "response.output_item.done", "output_index": 1, "item": duplicate_message},
+            ],
+            done=False,
+        )
+        unsupported_tool = encode_sse(
+            [
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"type": "function_call", "id": "tool-1"},
+                }
+            ],
+            done=False,
+        )
+        late_malformed = first_sse.replace(
+            b"data: [DONE]\n\n", b"data: {malformed\n\ndata: [DONE]\n\n"
+        )
+        invalid_endpoint = SuccessEndpoint(
+            [
+                first_sse[:-1],
+                contradictory,
+                changed_terminal,
+                duplicate_identity,
+                late_malformed,
+                unsupported_tool,
+            ]
+        )
+        invalid_thread = threading.Thread(target=invalid_endpoint.serve_forever, daemon=True)
+        invalid_thread.start()
+        for index, expected_code in enumerate(
+            (
+                "malformed_provider_output",
+                "malformed_provider_output",
+                "malformed_provider_output",
+                "malformed_provider_output",
+                "malformed_provider_output",
+                "unsupported_provider_output",
+            )
+        ):
+            invalid_store = state / f"invalid-output-{index}"
+            invalid_host = start_host(
+                invalid_store, f"http://127.0.0.1:{invalid_endpoint.server_port}/responses"
+            )
+            processes.append(invalid_host)
+            configure(state, invalid_store, f"invalid-config-{index}", f"direct/invalid-{index}", "model-a")
+            message(
+                state,
+                invalid_store,
+                f"invalid-message-{index}",
+                f"direct/invalid-{index}",
+                "candidate",
+            )
+            rejected = wait_for(
+                lambda key=f"invalid-message-{index}": (
+                    value := observe(invalid_store, key)
+                ).get("result", {}).get("code")
+                and value,
+                f"invalid output {index}",
+            )
+            assert rejected["result"]["code"] == expected_code, rejected
+            database = sqlite3.connect(invalid_store / "latifa.sqlite3")
+            assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
+            assert database.execute(
+                "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
+            ).fetchone()[0] == 0
+            database.close()
+            stop_host(invalid_host)
+            processes.remove(invalid_host)
+        invalid_endpoint.shutdown()
+        invalid_endpoint.server_close()
+        invalid_thread.join(timeout=5)
+
+        fault_responses = []
+        for index in range(7):
+            fault_responses.append(
+                sse_answer(f"fault-response-{index}", f"fault-r-{index}", f"fault-m-{index}", "answer")[0]
+            )
+        output_fault_endpoint = SuccessEndpoint(fault_responses)
+        output_fault_thread = threading.Thread(
+            target=output_fault_endpoint.serve_forever, daemon=True
+        )
+        output_fault_thread.start()
+        for index, (fault, expected_code) in enumerate(
+            (
+                ("response-acquire", "response_capture_failed"),
+                ("response-write", "response_write_failed"),
+                ("response-seal", "response_seal_failed"),
+                ("response-metadata", "response_metadata_failed"),
+            )
+        ):
+            fault_store = state / f"{fault}-store"
+            fault_host = start_host(
+                fault_store,
+                f"http://127.0.0.1:{output_fault_endpoint.server_port}/responses",
+                "--fault",
+                fault,
+            )
+            processes.append(fault_host)
+            configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "model-a")
+            message(state, fault_store, f"{fault}-message", f"direct/{fault}", "fault")
+            rejected = wait_for(
+                lambda key=f"{fault}-message": (
+                    value := observe(fault_store, key)
+                ).get("result", {}).get("code")
+                and value,
+                f"{fault} rejection",
+            )
+            assert rejected["result"]["code"] == expected_code, rejected
+            stop_host(fault_host)
+            processes.remove(fault_host)
+
+        for index, fault in enumerate(("response-read", "response-import", "response-commit")):
+            fault_store = state / f"{fault}-store"
+            fault_host = start_host(
+                fault_store,
+                f"http://127.0.0.1:{output_fault_endpoint.server_port}/responses",
+                "--fault",
+                fault,
+            )
+            processes.append(fault_host)
+            configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "model-a")
+            message(state, fault_store, f"{fault}-message", f"direct/{fault}", "fault")
+            wait_for(lambda: fault_host.poll() is not None, f"{fault} fenced shutdown")
+            assert fault_host.returncode != 0
+            processes.remove(fault_host)
+            database = sqlite3.connect(fault_store / "latifa.sqlite3")
+            assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
+            assert database.execute(
+                "SELECT uncertain,resolution_code FROM model_operation"
+            ).fetchone() == (1, None)
+            database.close()
+        output_fault_endpoint.shutdown()
+        output_fault_endpoint.server_close()
+        output_fault_thread.join(timeout=5)
+
+        scratch_endpoint = SuccessEndpoint(
+            [sse_answer("scratch-response", "scratch-r", "scratch-m", "x" * (1024 * 1024))[0]]
+        )
+        scratch_thread = threading.Thread(target=scratch_endpoint.serve_forever, daemon=True)
+        scratch_thread.start()
+        scratch_store = state / "response-scratch-store"
+        scratch_host = start_host(
+            scratch_store,
+            f"http://127.0.0.1:{scratch_endpoint.server_port}/responses",
+            "--test-request-scratch-limit",
+            str(64 * 1024),
+        )
+        processes.append(scratch_host)
+        configure(state, scratch_store, "scratch-config", "direct/response-scratch", "model-a")
+        message(state, scratch_store, "scratch-message", "direct/response-scratch", "scratch")
+        rejected = wait_for(
+            lambda: (value := observe(scratch_store, "scratch-message")).get("result", {}).get("code")
+            and value,
+            "response scratch exhaustion",
+        )
+        assert rejected["result"]["code"] == "response_scratch_exhausted", rejected
+        assert command(
+            "inspect-session",
+            "--store",
+            scratch_store,
+            "--session",
+            "direct/response-scratch",
+        )["execution"]["scratch_used_bytes"] == "0"
+        stop_host(scratch_host)
+        processes.remove(scratch_host)
+        scratch_endpoint.shutdown()
+        scratch_endpoint.server_close()
+        scratch_thread.join(timeout=5)
+
+        # Item cardinality and answer bytes grow independently while execution
+        # capacity remains one and metadata/capture stay in shared scratch.
+        count_payload = sse_many("many-items", 128, "count answer")
+        large_answer = "z" * (5 * 1024 * 1024)
+        byte_payload = sse_many("large-answer", 1, large_answer)
+        growth_endpoint = SuccessEndpoint([count_payload, byte_payload])
+        growth_thread = threading.Thread(target=growth_endpoint.serve_forever, daemon=True)
+        growth_thread.start()
+        growth_store = state / "growth-store"
+        growth_host = start_host(
+            growth_store, f"http://127.0.0.1:{growth_endpoint.server_port}/responses"
+        )
+        processes.append(growth_host)
+        configure(state, growth_store, "growth-config-a", "direct/growth-a", "model-a")
+        configure(state, growth_store, "growth-config-b", "direct/growth-b", "model-a")
+        message(state, growth_store, "growth-count", "direct/growth-a", "count")
+        wait_for(lambda: completed_observation(growth_store, "growth-count"), "many item output")
+        message(state, growth_store, "growth-bytes", "direct/growth-b", "bytes")
+        wait_for(
+            lambda: completed_observation(growth_store, "growth-bytes"),
+            "large output import",
+            timeout=20,
+        )
+        assert read_result(growth_store, "growth-count") == b"count answer"
+        assert read_result(growth_store, "growth-bytes") == large_answer.encode()
+        database = sqlite3.connect(growth_store / "latifa.sqlite3")
+        assert database.execute(
+            "SELECT count(*) FROM model_output_item WHERE operation_id=1"
+        ).fetchone()[0] == 129
+        database.close()
+        resources = command(
+            "inspect-session", "--store", growth_store, "--session", "direct/growth-b"
+        )["execution"]
+        assert resources["scratch_used_bytes"] == "0", resources
+        stop_host(growth_host)
+        processes.remove(growth_host)
+        growth_endpoint.shutdown()
+        growth_endpoint.server_close()
+        growth_thread.join(timeout=5)
+
         # A committed permit launches exactly one complete frozen request. The
         # endpoint holds the response so later settings and input arrive while
         # the admitted request is demonstrably in flight.
@@ -632,6 +1256,11 @@ def main():
         endpoint.shutdown()
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
+        if success_endpoint is not None:
+            success_endpoint.shutdown()
+            success_endpoint.server_close()
+        if success_thread is not None:
+            success_thread.join(timeout=5)
         shutil.rmtree(state)
 
 

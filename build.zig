@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
     dispatch_integration.addArtifactArg(release_safe);
     const dispatch_integration_step = b.step(
         "dispatch-integration",
-        "Run frozen-request dispatch and deterministic HTTP failure cases",
+        "Run frozen-request dispatch, model-output, continuation, and failure cases",
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
@@ -130,6 +130,15 @@ pub fn build(b: *std.Build) void {
         "Measure macOS frozen-request transport, scratch, descriptors, and custody",
     );
     measure_dispatch_step.dependOn(&measure_dispatch.step);
+
+    const measure_output = b.addSystemCommand(&.{"python3"});
+    measure_output.addFileArg(b.path("research/model-output/measure.py"));
+    measure_output.addArtifactArg(release);
+    const measure_output_step = b.step(
+        "measure-model-output",
+        "Measure macOS model-output bytes, item counts, storage, and retained memory",
+    );
+    measure_output_step.dependOn(&measure_output.step);
 }
 
 fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget) bool {
