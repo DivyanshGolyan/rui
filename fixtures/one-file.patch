@@ -1,6 +1,0 @@
-diff --git a/fixtures/patch-target.txt b/fixtures/patch-target.txt
---- a/fixtures/patch-target.txt
-+++ b/fixtures/patch-target.txt
-@@ -1 +1 @@
--old
-+new
