@@ -4,7 +4,7 @@ Latifa (formerly OnePage) is a resource-bounded, crash-resumable local runtime f
 
 ## Status
 
-The source implements the first four redesigned runtime slices: an explicitly started Host, exclusive Store ownership, direct configuration/message clients, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, immutable ordered message admission and completed text-model Turns. Core selects an eligible queued prefix, freezes its historical view, launches one disk-backed Responses request, captures and validates the complete SSE response, and atomically saves ordered private provider output with the public answer. The original message key reads its complete answer after client or Host restart. A later Turn reconstructs the Session from canonical host input and private provider output without relying on provider-side storage. Automatic retry/recovery of interrupted Attempts and every Workflow, tool, permission, stop and interruption surface enter in later implementation issues.
+The source implements the first five redesigned runtime slices: an explicitly started Host, exclusive Store ownership, direct configuration/message clients, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, immutable ordered message admission, completed text-model Turns and conserved model retries after temporary failure or Host loss. Core selects an eligible queued prefix, freezes its historical view, launches disk-backed Responses Attempts, captures and validates complete SSE output, and atomically saves ordered private provider output with the public answer. The original message key reads its complete answer after client or Host restart. Replacement Attempts retain the same historical request and remaining allowance; later Turns reconstruct the Session from canonical host input and private provider output without relying on provider-side storage. Every Workflow, tool, permission, stop and interruption surface enters in later implementation issues.
 
 The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. The current build cross-compiles all four targets. Runtime and resource verification uses the available Apple Silicon Mac; the other targets remain compile-only evidence until exercised on their platforms.
 
@@ -35,6 +35,8 @@ zig build
 ```
 
 The partial development transport is opt-in so it cannot make a live provider call. To exercise this slice, start the Host with an HTTPS endpoint, or with loopback HTTP for a deterministic local fixture. The Host rejects non-loopback plaintext endpoints. No authentication is attached in this slice.
+
+Temporary connection, 408/429/5xx and body-inactivity failures receive at most three retries after the initial Attempt, with default 2/4/8-second waits. A longer valid Retry-After wins. Restart conserves the consumed allowance and may repeat remote work or billing when the prior outcome is unknown; it never recreates the old one-shot permit or imports leftover scratch.
 
 ```sh
 ./zig-out/bin/latifa serve \
@@ -93,7 +95,8 @@ zig build measure-admission
 zig build measure-message-admission
 zig build measure-model-dispatch
 zig build measure-model-output
+zig build measure-model-retry
 ```
 
-The measurement steps are opt-in macOS resource runs. Provider authentication, structured-answer validation, automatic retry/recovery of interrupted Attempts, tool execution and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The measurement steps are opt-in macOS resource runs. Provider authentication, structured-answer validation, tool execution and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 `check` exercises both the ReleaseSafe production gate and the default Debug artifact shown above; `cross-check` compiles ReleaseSmall deliverables.

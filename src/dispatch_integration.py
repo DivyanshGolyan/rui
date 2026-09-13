@@ -207,13 +207,15 @@ class SuccessEndpoint(http.server.ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), SuccessHandler)
         self.responses = list(responses)
         self.requests = []
+        self.request_times = []
         self.lock = threading.Lock()
 
 
 class ResponseSpec:
-    def __init__(self, body, headers):
+    def __init__(self, body, headers, status=200):
         self.body = body
         self.headers = headers
+        self.status = status
 
 
 class SuccessHandler(http.server.BaseHTTPRequestHandler):
@@ -224,6 +226,7 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(length)
         with self.server.lock:
             self.server.requests.append(body)
+            self.server.request_times.append(time.monotonic())
             if not self.server.responses:
                 raise AssertionError("unexpected extra model request")
             payload = self.server.responses.pop(0)
@@ -232,10 +235,12 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
             if not release.wait(10):
                 raise RuntimeError("success fixture response was never released")
         headers = {"X-Request-Id": f"request-{len(self.server.requests)}", "OpenAI-Model": "model-a-served"}
+        status = 200
         if isinstance(payload, ResponseSpec):
             headers = payload.headers
+            status = payload.status
             payload = payload.body
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(payload)))
         for name, value in headers.items():
@@ -287,6 +292,8 @@ def start_host(store, endpoint, *extra):
             "1",
             "--provider-endpoint",
             endpoint,
+            "--test-retry-waits-ms",
+            "50,100,150",
             *extra,
         ],
         text=True,
@@ -569,6 +576,200 @@ def main():
         assert read_result(success_store, "success-second") == second_answer
         stop_host(offline_success)
         processes.remove(offline_success)
+
+        # Temporary transport classes consume one shared per-Operation
+        # allowance. Retry-After may lengthen, never shorten, the frozen
+        # 2/4/8 policy (shortened here only to keep the fixture deterministic).
+        retry_sse, retry_reasoning, retry_message_item = sse_answer(
+            "retry-response", "retry-reasoning", "retry-message-item", "recovered answer"
+        )
+        retry_endpoint = SuccessEndpoint(
+            [
+                ResponseSpec(b"temporary server failure", {"Retry-After": "0"}, 503),
+                ResponseSpec(b"rate limited", {"Retry-After": "1"}, 429),
+                retry_sse,
+            ]
+        )
+        retry_thread = threading.Thread(target=retry_endpoint.serve_forever, daemon=True)
+        retry_thread.start()
+        retry_store = state / "retry-store"
+        retry_host = start_host(
+            retry_store,
+            f"http://127.0.0.1:{retry_endpoint.server_port}/responses",
+        )
+        processes.append(retry_host)
+        configure(state, retry_store, "retry-config", "direct/retry", "model-a")
+        message(state, retry_store, "retry-message", "direct/retry", "retry exactly")
+        retry_complete = wait_for(
+            lambda: completed_observation(retry_store, "retry-message"),
+            "temporary failures followed by saved answer",
+            timeout=8,
+        )
+        assert retry_complete["processing"]["attempt"] == "3", retry_complete
+        assert read_result(retry_store, "retry-message") == b"recovered answer"
+        assert len(retry_endpoint.requests) == 3
+        assert retry_endpoint.request_times[1] - retry_endpoint.request_times[0] >= 0.04
+        assert retry_endpoint.request_times[2] - retry_endpoint.request_times[1] >= 0.90
+        assert retry_endpoint.requests[0] == retry_endpoint.requests[1]
+        assert retry_endpoint.requests[1] == retry_endpoint.requests[2]
+        database = sqlite3.connect(retry_store / "latifa.sqlite3")
+        assert database.execute(
+            "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code FROM model_operation"
+        ).fetchone() == (
+            3,
+            3,
+            0,
+            None,
+            "provider_temporary_http_429",
+            "completed",
+        )
+        assert database.execute(
+            "EXPLAIN QUERY PLAN SELECT operation_id FROM model_operation INDEXED BY model_operation_retry_due "
+            "WHERE resolution_code IS NULL AND retry_due_at_ms<=0 ORDER BY operation_id"
+        ).fetchall()
+        database.close()
+        stop_host(retry_host)
+        processes.remove(retry_host)
+        retry_endpoint.shutdown()
+        retry_endpoint.server_close()
+        retry_thread.join(timeout=5)
+
+        # A permanent request/authentication-class HTTP failure is terminal
+        # after one Attempt and is never blindly retried.
+        permanent_endpoint = SuccessEndpoint(
+            [ResponseSpec(b"authentication rejected", {}, 401)]
+        )
+        permanent_thread = threading.Thread(
+            target=permanent_endpoint.serve_forever, daemon=True
+        )
+        permanent_thread.start()
+        permanent_store = state / "permanent-store"
+        permanent_host = start_host(
+            permanent_store,
+            f"http://127.0.0.1:{permanent_endpoint.server_port}/responses",
+        )
+        processes.append(permanent_host)
+        configure(
+            state, permanent_store, "permanent-config", "direct/permanent", "model-a"
+        )
+        message(
+            state,
+            permanent_store,
+            "permanent-message",
+            "direct/permanent",
+            "do not retry",
+        )
+        permanent_failure = wait_for(
+            lambda: (
+                value := observe(permanent_store, "permanent-message")
+            ).get("result", {}).get("code")
+            and value,
+            "permanent provider failure",
+        )
+        assert permanent_failure["result"]["code"] == "provider_http_401"
+        time.sleep(1.2)
+        assert len(permanent_endpoint.requests) == 1
+        stop_host(permanent_host)
+        processes.remove(permanent_host)
+        permanent_endpoint.shutdown()
+        permanent_endpoint.server_close()
+        permanent_thread.join(timeout=5)
+
+        # A replacement Attempt reuses the exact historical view, including
+        # private continuation, even after newer settings and input commit.
+        continued_first, continued_reasoning, continued_message = sse_answer(
+            "continued-first", "continued-r-1", "continued-m-1", "first answer"
+        )
+        continued_retry, _, _ = sse_answer(
+            "continued-retry", "continued-r-2", "continued-m-2", "second answer"
+        )
+        continued_later, _, _ = sse_answer(
+            "continued-later", "continued-r-3", "continued-m-3", "later answer"
+        )
+        continued_endpoint = SuccessEndpoint(
+            [
+                continued_first,
+                ResponseSpec(b"temporary", {}, 503),
+                continued_retry,
+                continued_later,
+            ]
+        )
+        continued_thread = threading.Thread(
+            target=continued_endpoint.serve_forever, daemon=True
+        )
+        continued_thread.start()
+        continued_store = state / "continued-retry-store"
+        continued_host = start_host(
+            continued_store,
+            f"http://127.0.0.1:{continued_endpoint.server_port}/responses",
+        )
+        processes.append(continued_host)
+        configure(
+            state,
+            continued_store,
+            "continued-config",
+            "direct/continued-retry",
+            "model-a",
+            instructions="original instructions",
+        )
+        message(
+            state,
+            continued_store,
+            "continued-first-message",
+            "direct/continued-retry",
+            "first input",
+        )
+        wait_for(
+            lambda: completed_observation(continued_store, "continued-first-message"),
+            "first continuation source",
+        )
+        message(
+            state,
+            continued_store,
+            "continued-second-message",
+            "direct/continued-retry",
+            "historical retry input",
+        )
+        wait_for(lambda: len(continued_endpoint.requests) == 2, "first continued Attempt")
+        configure(
+            state,
+            continued_store,
+            "continued-new-instructions",
+            "direct/continued-retry",
+            "model-a",
+            instructions="new instructions",
+        )
+        message(
+            state,
+            continued_store,
+            "continued-later-message",
+            "direct/continued-retry",
+            "unselected later input",
+        )
+        wait_for(lambda: len(continued_endpoint.requests) == 3, "replacement continued Attempt")
+        assert continued_endpoint.requests[1] == continued_endpoint.requests[2]
+        frozen_retry = json.loads(continued_endpoint.requests[2])
+        expected_private = dict(continued_reasoning)
+        expected_private.pop("created_by")
+        assert expected_private in frozen_retry["input"], frozen_retry["input"]
+        assert continued_message in frozen_retry["input"], frozen_retry["input"]
+        assert not any(
+            item.get("role") == "system"
+            and item.get("content", [{}])[0].get("text") == "new instructions"
+            for item in frozen_retry["input"]
+        )
+        wait_for(
+            lambda: completed_observation(continued_store, "continued-later-message"),
+            "later input successor Turn boundary",
+        )
+        assert read_result(continued_store, "continued-second-message") == b"later answer"
+        assert read_result(continued_store, "continued-later-message") == b"later answer"
+        assert len(continued_endpoint.requests) == 4
+        stop_host(continued_host)
+        processes.remove(continued_host)
+        continued_endpoint.shutdown()
+        continued_endpoint.server_close()
+        continued_thread.join(timeout=5)
 
         evidence_cases = (
             ("body-only", "model-a-served", {}, ("model-a-served", None, None, None)),
@@ -1239,6 +1440,470 @@ def main():
         stop_host(offline)
         processes.remove(offline)
 
+        # A known live preparation failure saves future eligibility. Killing
+        # the process before such a failure can settle leaves conservative
+        # uncertainty instead. Neither path refunds Attempt 1; both recover
+        # through a freshly admitted Attempt 2.
+        preparation_sse = sse_answer(
+            "preparation-recovered",
+            "preparation-r",
+            "preparation-m",
+            "prepared after restart",
+        )[0]
+        preparation_endpoint = SuccessEndpoint([preparation_sse])
+        preparation_thread = threading.Thread(
+            target=preparation_endpoint.serve_forever, daemon=True
+        )
+        preparation_thread.start()
+        preparation_store = state / "known-preparation-store"
+        preparation_host = start_host(
+            preparation_store,
+            f"http://127.0.0.1:{preparation_endpoint.server_port}/responses",
+            "--fault",
+            "provider-prepare",
+        )
+        processes.append(preparation_host)
+        configure(
+            state,
+            preparation_store,
+            "preparation-config",
+            "direct/preparation",
+            "model-a",
+        )
+        message(
+            state,
+            preparation_store,
+            "preparation-message",
+            "direct/preparation",
+            "known preparation failure",
+        )
+
+        def saved_preparation_failure():
+            database = sqlite3.connect(preparation_store / "latifa.sqlite3")
+            try:
+                row = database.execute(
+                    "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code FROM model_operation"
+                ).fetchone()
+                return row if row and row[2] == 0 and row[3] > 0 else None
+            finally:
+                database.close()
+
+        preparation_fact = wait_for(saved_preparation_failure, "saved preparation failure")
+        assert preparation_fact[:3] == (1, 1, 0), preparation_fact
+        assert preparation_fact[3] > 0, preparation_fact
+        assert preparation_fact[4] == "provider_transport_failure", preparation_fact
+        assert preparation_endpoint.requests == []
+        stop_host(preparation_host)
+        processes.remove(preparation_host)
+        preparation_host = start_host(
+            preparation_store,
+            f"http://127.0.0.1:{preparation_endpoint.server_port}/responses",
+        )
+        processes.append(preparation_host)
+        wait_for(
+            lambda: completed_observation(preparation_store, "preparation-message"),
+            "known preparation retry",
+        )
+        assert observe(preparation_store, "preparation-message")["processing"]["attempt"] == "2"
+        assert len(preparation_endpoint.requests) == 1
+        stop_host(preparation_host)
+        processes.remove(preparation_host)
+        preparation_endpoint.shutdown()
+        preparation_endpoint.server_close()
+        preparation_thread.join(timeout=5)
+
+        # Fresh processes are terminated after committed Attempt admission,
+        # launch, sealed validation input, and final result commit. Only the
+        # committed boundary is recovered; old permits and scratch never are.
+        prelaunch_sse = sse_answer(
+            "prelaunch-recovered", "prelaunch-r", "prelaunch-m", "prelaunch answer"
+        )[0]
+        prelaunch_endpoint = SuccessEndpoint([prelaunch_sse])
+        prelaunch_thread = threading.Thread(
+            target=prelaunch_endpoint.serve_forever, daemon=True
+        )
+        prelaunch_thread.start()
+        prelaunch_store = state / "crash-prelaunch-store"
+        prelaunch_host = start_host(
+            prelaunch_store,
+            f"http://127.0.0.1:{prelaunch_endpoint.server_port}/responses",
+            "--test-before-launch-delay-ms",
+            "5000",
+        )
+        processes.append(prelaunch_host)
+        configure(
+            state, prelaunch_store, "prelaunch-config", "direct/prelaunch", "model-a"
+        )
+        message(
+            state,
+            prelaunch_store,
+            "prelaunch-message",
+            "direct/prelaunch",
+            "crash before launch",
+        )
+
+        def prelaunch_admitted():
+            database = sqlite3.connect(prelaunch_store / "latifa.sqlite3")
+            try:
+                return database.execute(
+                    "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code FROM model_operation"
+                ).fetchone()
+            finally:
+                database.close()
+
+        assert wait_for(prelaunch_admitted, "prelaunch Attempt admission") == (1, 1, 1, None)
+        stop_host(prelaunch_host)
+        processes.remove(prelaunch_host)
+        assert prelaunch_endpoint.requests == []
+        prelaunch_host = start_host(
+            prelaunch_store,
+            f"http://127.0.0.1:{prelaunch_endpoint.server_port}/responses",
+        )
+        processes.append(prelaunch_host)
+        wait_for(
+            lambda: completed_observation(prelaunch_store, "prelaunch-message"),
+            "prelaunch replacement",
+        )
+        assert observe(prelaunch_store, "prelaunch-message")["processing"]["attempt"] == "2"
+        assert len(prelaunch_endpoint.requests) == 1
+        stop_host(prelaunch_host)
+        processes.remove(prelaunch_host)
+        prelaunch_endpoint.shutdown()
+        prelaunch_endpoint.server_close()
+        prelaunch_thread.join(timeout=5)
+
+        launched_release = threading.Event()
+        launched_lost = sse_answer(
+            "launched-lost", "launched-lost-r", "launched-lost-m", "lost answer"
+        )[0]
+        launched_recovered = sse_answer(
+            "launched-recovered",
+            "launched-recovered-r",
+            "launched-recovered-m",
+            "launched answer",
+        )[0]
+        launched_endpoint = SuccessEndpoint(
+            [(launched_lost, launched_release), launched_recovered]
+        )
+        launched_thread = threading.Thread(
+            target=launched_endpoint.serve_forever, daemon=True
+        )
+        launched_thread.start()
+        launched_store = state / "crash-launched-store"
+        launched_host = start_host(
+            launched_store,
+            f"http://127.0.0.1:{launched_endpoint.server_port}/responses",
+        )
+        processes.append(launched_host)
+        configure(
+            state, launched_store, "launched-config", "direct/launched", "model-a"
+        )
+        message(
+            state,
+            launched_store,
+            "launched-message",
+            "direct/launched",
+            "crash after launch",
+        )
+        wait_for(lambda: len(launched_endpoint.requests) == 1, "launched Attempt")
+        stop_host(launched_host)
+        processes.remove(launched_host)
+        launched_release.set()
+        launched_host = start_host(
+            launched_store,
+            f"http://127.0.0.1:{launched_endpoint.server_port}/responses",
+        )
+        processes.append(launched_host)
+        wait_for(
+            lambda: completed_observation(launched_store, "launched-message"),
+            "launched replacement",
+        )
+        assert read_result(launched_store, "launched-message") == b"launched answer"
+        assert len(launched_endpoint.requests) == 2
+        stop_host(launched_host)
+        processes.remove(launched_host)
+        launched_endpoint.shutdown()
+        launched_endpoint.server_close()
+        launched_thread.join(timeout=5)
+
+        sealed_lost = sse_answer(
+            "sealed-lost", "sealed-lost-r", "sealed-lost-m", "lost sealed answer"
+        )[0]
+        sealed_recovered = sse_answer(
+            "sealed-recovered", "sealed-r", "sealed-m", "sealed answer"
+        )[0]
+        sealed_endpoint = SuccessEndpoint([sealed_lost, sealed_recovered])
+        sealed_thread = threading.Thread(target=sealed_endpoint.serve_forever, daemon=True)
+        sealed_thread.start()
+        sealed_store = state / "crash-sealed-store"
+        sealed_host = start_host(
+            sealed_store,
+            f"http://127.0.0.1:{sealed_endpoint.server_port}/responses",
+            "--test-before-result-delay-ms",
+            "5000",
+        )
+        processes.append(sealed_host)
+        configure(state, sealed_store, "sealed-config", "direct/sealed", "model-a")
+        message(
+            state,
+            sealed_store,
+            "sealed-message",
+            "direct/sealed",
+            "crash after seal",
+        )
+        wait_for(lambda: len(sealed_endpoint.requests) == 1, "sealed response delivery")
+        time.sleep(0.5)
+        database = sqlite3.connect(sealed_store / "latifa.sqlite3")
+        assert database.execute(
+            "SELECT attempt_ordinal,uncertain,resolution_code FROM model_operation"
+        ).fetchone() == (1, 1, None)
+        assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
+        database.close()
+        stop_host(sealed_host)
+        processes.remove(sealed_host)
+        sealed_host = start_host(
+            sealed_store,
+            f"http://127.0.0.1:{sealed_endpoint.server_port}/responses",
+        )
+        processes.append(sealed_host)
+        wait_for(
+            lambda: completed_observation(sealed_store, "sealed-message"),
+            "sealed replacement",
+        )
+        assert read_result(sealed_store, "sealed-message") == b"sealed answer"
+        assert len(sealed_endpoint.requests) == 2
+        stop_host(sealed_host)
+        processes.remove(sealed_host)
+        sealed_endpoint.shutdown()
+        sealed_endpoint.server_close()
+        sealed_thread.join(timeout=5)
+
+        committed_sse = sse_answer(
+            "committed-response", "committed-r", "committed-m", "committed answer"
+        )[0]
+        committed_endpoint = SuccessEndpoint([committed_sse])
+        committed_thread = threading.Thread(
+            target=committed_endpoint.serve_forever, daemon=True
+        )
+        committed_thread.start()
+        committed_store = state / "crash-committed-store"
+        committed_host = start_host(
+            committed_store,
+            f"http://127.0.0.1:{committed_endpoint.server_port}/responses",
+            "--test-cleanup-delay-ms",
+            "5000",
+        )
+        processes.append(committed_host)
+        configure(
+            state, committed_store, "committed-config", "direct/committed", "model-a"
+        )
+        message(
+            state,
+            committed_store,
+            "committed-message",
+            "direct/committed",
+            "crash after result commit",
+        )
+        wait_for(
+            lambda: completed_observation(committed_store, "committed-message"),
+            "committed result",
+        )
+        stop_host(committed_host)
+        processes.remove(committed_host)
+        committed_host = start_host(
+            committed_store,
+            f"http://127.0.0.1:{committed_endpoint.server_port}/responses",
+        )
+        processes.append(committed_host)
+        assert read_result(committed_store, "committed-message") == b"committed answer"
+        time.sleep(1.2)
+        assert len(committed_endpoint.requests) == 1
+        stop_host(committed_host)
+        processes.remove(committed_host)
+        committed_endpoint.shutdown()
+        committed_endpoint.server_close()
+        committed_thread.join(timeout=5)
+
+        # Full execution capacity leaves later work as only a durable queued
+        # admission: no Attempt, request scratch, or resident waiter appears.
+        # Releasing custody is sufficient to make progress without a new
+        # message or notification.
+        capacity_release = threading.Event()
+        capacity_answer = sse_answer(
+            "capacity-release-response",
+            "capacity-release-r",
+            "capacity-release-m",
+            "capacity released",
+        )[0]
+        capacity_endpoint = SuccessEndpoint(
+            [
+                (ResponseSpec(b"permanent", {}, 422), capacity_release),
+                capacity_answer,
+            ]
+        )
+        capacity_thread = threading.Thread(
+            target=capacity_endpoint.serve_forever, daemon=True
+        )
+        capacity_thread.start()
+        durable_wait_store = state / "durable-capacity-wait-store"
+        durable_wait_host = start_host(
+            durable_wait_store,
+            f"http://127.0.0.1:{capacity_endpoint.server_port}/responses",
+            "--test-cleanup-delay-ms",
+            "1500",
+        )
+        processes.append(durable_wait_host)
+        configure(
+            state,
+            durable_wait_store,
+            "capacity-wait-config-a",
+            "direct/capacity-wait-a",
+            "model-a",
+        )
+        configure(
+            state,
+            durable_wait_store,
+            "capacity-wait-config-b",
+            "direct/capacity-wait-b",
+            "model-a",
+        )
+        message(
+            state,
+            durable_wait_store,
+            "capacity-wait-message-a",
+            "direct/capacity-wait-a",
+            "occupy capacity",
+        )
+        wait_for(lambda: len(capacity_endpoint.requests) == 1, "occupied capacity")
+        scratch_before = command(
+            "inspect-session",
+            "--store",
+            durable_wait_store,
+            "--session",
+            "direct/capacity-wait-a",
+        )["execution"]["scratch_used_bytes"]
+        message(
+            state,
+            durable_wait_store,
+            "capacity-wait-message-b",
+            "direct/capacity-wait-b",
+            "wait durably",
+        )
+        scratch_after = command(
+            "inspect-session",
+            "--store",
+            durable_wait_store,
+            "--session",
+            "direct/capacity-wait-b",
+        )["execution"]["scratch_used_bytes"]
+        assert scratch_after == scratch_before
+        database = sqlite3.connect(durable_wait_store / "latifa.sqlite3")
+        assert database.execute("SELECT count(*) FROM model_operation").fetchone()[0] == 1
+        assert database.execute(
+            "SELECT turn_id FROM message_admission WHERE command_key='capacity-wait-message-b'"
+        ).fetchone()[0] is None
+        database.close()
+        assert len(capacity_endpoint.requests) == 1
+        capacity_release.set()
+        wait_for(
+            lambda: completed_observation(
+                durable_wait_store, "capacity-wait-message-b"
+            ),
+            "capacity release progress without notification",
+            timeout=8,
+        )
+        assert read_result(
+            durable_wait_store, "capacity-wait-message-b"
+        ) == b"capacity released"
+        assert len(capacity_endpoint.requests) == 2
+        stop_host(durable_wait_host)
+        processes.remove(durable_wait_host)
+        capacity_endpoint.shutdown()
+        capacity_endpoint.server_close()
+        capacity_thread.join(timeout=5)
+
+        # Exhaustion settles only the selected prefix. Input admitted while
+        # those retries run remains unselected and receives the outcome of the
+        # successor Turn that eventually takes it.
+        exhaustion_release = threading.Event()
+        exhaustion_answer = sse_answer(
+            "exhaustion-success",
+            "exhaustion-success-r",
+            "exhaustion-success-m",
+            "later input answer",
+        )[0]
+        exhaustion_endpoint = SuccessEndpoint(
+            [
+                (ResponseSpec(b"temporary-1", {}, 503), exhaustion_release),
+                ResponseSpec(b"temporary-2", {}, 503),
+                ResponseSpec(b"temporary-3", {}, 503),
+                ResponseSpec(b"temporary-4", {}, 503),
+                exhaustion_answer,
+            ]
+        )
+        exhaustion_thread = threading.Thread(
+            target=exhaustion_endpoint.serve_forever, daemon=True
+        )
+        exhaustion_thread.start()
+        exhaustion_store = state / "retry-exhaustion-store"
+        exhaustion_host = start_host(
+            exhaustion_store,
+            f"http://127.0.0.1:{exhaustion_endpoint.server_port}/responses",
+        )
+        processes.append(exhaustion_host)
+        configure(
+            state,
+            exhaustion_store,
+            "exhaustion-config",
+            "direct/exhaustion",
+            "model-a",
+        )
+        message(
+            state,
+            exhaustion_store,
+            "exhaustion-first",
+            "direct/exhaustion",
+            "selected first",
+        )
+        wait_for(lambda: len(exhaustion_endpoint.requests) == 1, "first exhaustion Attempt")
+        message(
+            state,
+            exhaustion_store,
+            "exhaustion-later",
+            "direct/exhaustion",
+            "unselected later",
+        )
+        assert observe(exhaustion_store, "exhaustion-later")["queue"]["status"] == "queued"
+        exhaustion_release.set()
+        exhausted = wait_for(
+            lambda: (
+                value := observe(exhaustion_store, "exhaustion-first")
+            ).get("result", {}).get("code")
+            == "retry_exhausted"
+            and value,
+            "retry exhaustion",
+            timeout=10,
+        )
+        assert exhausted["processing"]["attempt"] == "4", exhausted
+        wait_for(
+            lambda: completed_observation(exhaustion_store, "exhaustion-later"),
+            "unselected input successor",
+            timeout=8,
+        )
+        assert observe(exhaustion_store, "exhaustion-first")["result"]["code"] == "retry_exhausted"
+        assert read_result(exhaustion_store, "exhaustion-later") == b"later input answer"
+        database = sqlite3.connect(exhaustion_store / "latifa.sqlite3")
+        assert database.execute(
+            "SELECT attempt_ordinal,allowance_used,resolution_code FROM model_operation ORDER BY operation_id"
+        ).fetchall() == [(4, 4, "retry_exhausted"), (1, 1, "completed")]
+        database.close()
+        assert len(exhaustion_endpoint.requests) == 5
+        stop_host(exhaustion_host)
+        processes.remove(exhaustion_host)
+        exhaustion_endpoint.shutdown()
+        exhaustion_endpoint.server_close()
+        exhaustion_thread.join(timeout=5)
+
         # One reactor fills two fixed custody records without allocating a
         # worker per Session. Both requests reach the endpoint before either
         # response is released.
@@ -1473,12 +2138,13 @@ def main():
         message(state, stall_store, "stall-message", "direct/stall", "stall")
         stalled = wait_for(
             lambda: (value := observe(stall_store, "stall-message")).get("result", {}).get("code")
-            == "provider_transport_failure"
+            == "retry_exhausted"
             and value,
             "stalled response inactivity failure",
-            timeout=8,
+            timeout=16,
         )
         assert stalled["queue"]["status"] == "failed"
+        assert stalled["processing"]["attempt"] == "4", stalled
         stop_host(host)
         processes.remove(host)
 

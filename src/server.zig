@@ -7,6 +7,7 @@ const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
 
 pub const default_active_capacity = 1000;
+pub const default_retry_waits_ms = [3]u64{ 2_000, 4_000, 8_000 };
 pub const scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
 pub const max_clients = 128;
 pub const max_ordinary_clients = 120;
@@ -37,6 +38,7 @@ pub const Faults = struct {
     request_scratch_acquire: bool = false,
     request_scratch_limit_bytes: u64 = scratch_limit_bytes,
     request_unlink: bool = false,
+    provider_prepare: bool = false,
     response_acquire: bool = false,
     response_unlink: bool = false,
     response_write: bool = false,
@@ -48,7 +50,9 @@ pub const Faults = struct {
     response_commit: bool = false,
     cleanup_delay_ms: i64 = 0,
     provider_inactivity_seconds: i64 = 5 * 60,
+    retry_waits_ms: [3]u64 = default_retry_waits_ms,
     before_launch_delay_ms: i64 = 0,
+    before_result_delay_ms: i64 = 0,
 };
 
 const Host = struct {
@@ -104,6 +108,7 @@ pub fn serve(
     defer lease.release();
     var storage = try store_module.Store.open(io, lease.paths.database.slice(), lease.paths.store.slice());
     defer storage.close() catch |err| std.debug.print("latifa: Store close failed: {s}\n", .{@errorName(err)});
+    try storage.validateRetryWaits(faults.retry_waits_ms);
     try lease.prepareForServing(faults.startup_cleanup);
 
     const address = try std.Io.net.UnixAddress.init(lease.paths.socket.slice());
@@ -233,12 +238,33 @@ fn executionMain(host: *Host) void {
     defer reactor.deinit();
     defer shutdownExecution(host, &reactor, slots);
 
+    var last_retry_scan: ?std.Io.Clock.Timestamp = null;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
         var found_work = false;
+        const now = std.Io.Clock.Timestamp.now(host.io, .awake);
+        const scan_retries = if (last_retry_scan) |last|
+            last.durationTo(now).raw.nanoseconds >= std.time.ns_per_s
+        else
+            true;
+        if (scan_retries) last_retry_scan = now;
         if (!host.dispatch_fenced.load(.acquire)) {
+            if (scan_retries) {
+                const active_slots = ActiveSlots{ .slots = slots };
+                const active_filter = store_module.ActiveOperationFilter{
+                    .context = &active_slots,
+                    .containsFn = activeOperationContains,
+                    .maximum_exclusions = slots.len,
+                };
+                for (0..@max(slots.len, 1)) |_| {
+                    if (!(host.store.recoverOneExhaustedModelAttemptForHost(active_filter) catch |err| {
+                        fenceDispatch(host, "exhausted retry recovery", err);
+                        break;
+                    })) break;
+                }
+            }
             for (slots) |*slot| {
                 if (slot.state != .free) continue;
-                switch (admitAttempt(host, &reactor, slot)) {
+                switch (admitAttempt(host, &reactor, slots, slot, scan_retries)) {
                     .admitted => found_work = true,
                     .no_work, .retry_later => break,
                 }
@@ -259,11 +285,36 @@ fn executionMain(host: *Host) void {
     }
 }
 
-fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) AdmissionProgress {
+const ActiveSlots = struct {
+    slots: []const ExecutionSlot,
+};
+
+fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
+    const active: *const ActiveSlots = @ptrCast(@alignCast(context));
+    for (active.slots) |slot| {
+        if (slot.state != .free and slot.binding.operation_id == operation_id) return true;
+    }
+    return false;
+}
+
+fn admitAttempt(
+    host: *Host,
+    reactor: *provider.Reactor,
+    slots: []const ExecutionSlot,
+    slot: *ExecutionSlot,
+    scan_retries: bool,
+) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitNextModelAttempt(.{
-        .attempt_before_commit = host.faults.attempt_before_commit,
-    }) catch |err| {
+    const active = ActiveSlots{ .slots = slots };
+    var admission = host.store.admitNextModelAttemptForHost(
+        .{
+            .context = &active,
+            .containsFn = activeOperationContains,
+            .maximum_exclusions = slots.len,
+        },
+        scan_retries,
+        .{ .attempt_before_commit = host.faults.attempt_before_commit },
+    ) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         if (err != error.InjectedAttemptCommitFailure) {
             fenceDispatch(host, "Attempt admission", err);
@@ -313,11 +364,17 @@ fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) A
             finishCustodyNow(host, token);
             return .admitted;
         }
-        settleAttemptFailure(host, token, binding, preparationFailureCode(err));
+        settleAttemptFailure(host, token, binding, preparationFailureCode(err), false, null);
         finishCustodyNow(host, token);
         return .admitted;
     };
     var retained_response: ?provider.RetainedScratch = null;
+    if (host.faults.provider_prepare) {
+        request.deinit();
+        settleAttemptFailure(host, token, binding, "provider_transport_failure", true, null);
+        finishCustodyNow(host, token);
+        return .admitted;
+    }
     slot.transfer.start(host.provider_endpoint.?, request, binding, .{
         .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
         .response_acquire_fault = host.faults.response_acquire,
@@ -334,10 +391,18 @@ fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) A
             return .admitted;
         }
         std.debug.print("latifa: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, token, binding, switch (err) {
+        const code = switch (err) {
             error.ResponseCaptureAcquisitionFailed => "response_capture_failed",
             else => "provider_transport_failure",
-        });
+        };
+        settleAttemptFailure(
+            host,
+            token,
+            binding,
+            code,
+            err != error.ResponseCaptureAcquisitionFailed,
+            null,
+        );
         finishCustodyNow(host, token);
         return .admitted;
     };
@@ -352,7 +417,7 @@ fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) A
             finishCustodyNow(host, token);
             return .admitted;
         }
-        settleAttemptFailure(host, token, binding, "provider_transport_failure");
+        settleAttemptFailure(host, token, binding, "provider_transport_failure", true, null);
         finishCustodyNow(host, token);
         return .admitted;
     };
@@ -376,14 +441,14 @@ fn completeTransfer(
     };
     reactor.remove(&slot.transfer);
     if (slot.transfer.responseFailureCode()) |code| {
-        settleAttemptFailure(host, slot.token, slot.binding, code);
+        settleAttemptFailure(host, slot.token, slot.binding, code, false, null);
         slot.transfer.deinit();
         beginCleanup(host, slot);
         return;
     }
     const evidence = slot.transfer.evidence(completion.result) catch |err| {
         std.debug.print("latifa: invalid provider evidence for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, "provider_transport_failure");
+        settleAttemptFailure(host, slot.token, slot.binding, "provider_transport_failure", true, null);
         slot.transfer.deinit();
         beginCleanup(host, slot);
         return;
@@ -399,7 +464,14 @@ fn completeTransfer(
         .temporary_http => std.fmt.bufPrint(&code_buffer, "provider_temporary_http_{d}", .{evidence.http_status}) catch unreachable,
         .transport_failure => "provider_transport_failure",
     };
-    settleAttemptFailure(host, slot.token, slot.binding, code);
+    settleAttemptFailure(
+        host,
+        slot.token,
+        slot.binding,
+        code,
+        evidence.class != .permanent_http,
+        evidence.retry_after_ms,
+    );
     slot.transfer.deinit();
     beginCleanup(host, slot);
 }
@@ -408,13 +480,13 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
     const structured_output = slot.transfer.hasStructuredOutput();
     slot.transfer.response.seal(host.faults.response_seal) catch |err| {
         std.debug.print("latifa: response seal failed for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, "response_seal_failed");
+        settleAttemptFailure(host, slot.token, slot.binding, "response_seal_failed", false, null);
         slot.transfer.deinit();
         beginCleanup(host, slot);
         return;
     };
     if (structured_output) {
-        settleAttemptFailure(host, slot.token, slot.binding, "unsupported_output_schema");
+        settleAttemptFailure(host, slot.token, slot.binding, "unsupported_output_schema", false, null);
         slot.transfer.deinit();
         beginCleanup(host, slot);
         return;
@@ -451,7 +523,7 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
             return;
         }
         std.debug.print("latifa: response metadata acquisition failed for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, "response_metadata_exhausted");
+        settleAttemptFailure(host, slot.token, slot.binding, "response_metadata_exhausted", false, null);
         beginCleanup(host, slot);
         return;
     };
@@ -460,7 +532,7 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
         .metadata = host.faults.response_metadata,
     }) catch |err| {
         std.debug.print("latifa: provider output rejected for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, provider_output.failureCode(err));
+        settleAttemptFailure(host, slot.token, slot.binding, provider_output.failureCode(err), false, null);
         beginCleanup(host, slot);
         return;
     };
@@ -469,9 +541,12 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
         openai_model.slice(),
         x_openai_model.slice(),
     )) {
-        settleAttemptFailure(host, slot.token, slot.binding, "contradictory_provider_output");
+        settleAttemptFailure(host, slot.token, slot.binding, "contradictory_provider_output", false, null);
         beginCleanup(host, slot);
         return;
+    }
+    if (host.faults.before_result_delay_ms != 0) {
+        _ = host.io.sleep(.fromMilliseconds(host.faults.before_result_delay_ms), .awake) catch {};
     }
     if (!host.custody.claimTerminalDelivery(slot.token)) {
         beginCleanup(host, slot);
@@ -580,11 +655,29 @@ fn settleAttemptFailure(
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
     code: []const u8,
+    retryable: bool,
+    retry_after_ms: ?u64,
 ) void {
     if (!host.custody.claimTerminalDelivery(token)) return;
-    host.store.settleModelFailure(binding, code, .{
-        .before_commit = host.faults.result_before_commit,
-    }) catch |err| fenceDispatch(host, "model failure save", err);
+    if (retryable) {
+        host.store.settleRetryableModelFailure(
+            binding,
+            code,
+            retryWaitForAttempt(host, binding.attempt_ordinal),
+            retry_after_ms,
+            .{ .before_commit = host.faults.result_before_commit },
+        ) catch |err| fenceDispatch(host, "model retry save", err);
+    } else {
+        host.store.settleModelFailure(binding, code, .{
+            .before_commit = host.faults.result_before_commit,
+        }) catch |err| fenceDispatch(host, "model failure save", err);
+    }
+}
+
+fn retryWaitForAttempt(host: *const Host, attempt_ordinal: u64) u64 {
+    std.debug.assert(attempt_ordinal >= 1 and attempt_ordinal <= store_module.maximum_model_attempts);
+    const index: usize = @intCast(@min(attempt_ordinal - 1, host.faults.retry_waits_ms.len - 1));
+    return host.faults.retry_waits_ms[index];
 }
 
 fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
@@ -1084,7 +1177,7 @@ fn renderSessionObservation(
     } else {
         try response.append("null");
     }
-    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\",\"retry_and_restart_resolution\"]}}}}", .{
+    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\"]}}}}", .{
         observation.pending_messages,
         if (execution_observation.dispatch_fenced) "true" else "false",
         execution_observation.custody_occupied,
@@ -1178,6 +1271,15 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
 test "connection populations preserve eight control places" {
     try std.testing.expectEqual(max_clients, max_ordinary_clients + control_headroom);
     try std.testing.expectEqual(@as(usize, 128 * 1024 * 1024), maximum_connection_stack_reservation_bytes);
+}
+
+test "model retry and inactivity defaults match the owning resource contract" {
+    try std.testing.expectEqual([3]u64{ 2_000, 4_000, 8_000 }, default_retry_waits_ms);
+    try std.testing.expectEqual(@as(i64, 5 * 60), (Faults{}).provider_inactivity_seconds);
+    try std.testing.expectEqual(
+        store_module.maximum_model_attempts,
+        @as(u64, default_retry_waits_ms.len + 1),
+    );
 }
 
 test "Session observation buffer covers worst-case JSON escaping" {
