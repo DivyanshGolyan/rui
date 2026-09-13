@@ -228,6 +228,10 @@ def main():
         configure(state, store, "config-b", "direct/main", "model-b")
         message(state, store, "message-b", "direct/main", "later message")
         assert len(endpoint.requests) == 1
+        resources = command(
+            "inspect-session", "--store", store, "--session", "direct/main"
+        )["execution"]
+        assert int(resources["scratch_used_bytes"]) == len(endpoint.requests[0]), resources
         endpoint.release.set()
         failed = wait_for(
             lambda: (value := observe(store, "message-a"))["status"] == "accepted"
@@ -387,6 +391,14 @@ def main():
             )
             assert failed["processing"]["attempt"] == "1", failed
             assert endpoint.requests == []
+            resources = command(
+                "inspect-session",
+                "--store",
+                fault_store,
+                "--session",
+                f"direct/{fault}",
+            )["execution"]
+            assert resources["scratch_used_bytes"] == "0", resources
             stop_host(host)
             processes.remove(host)
 
@@ -428,10 +440,9 @@ def main():
         stop_host(offline)
         processes.remove(offline)
 
-        # Per-input framing participates in scratch reservation. Forty empty
-        # messages exceed the old fixed allowance: the successful run remains
-        # fully charged, and one byte below the observed complete request is
-        # rejected before HTTP rather than oversubscribing the shared budget.
+        # Exact emitted request bytes, including the framing around many empty
+        # inputs, are the complete reservation. The exact observed limit passes
+        # while one byte below it fails before HTTP.
         endpoint.requests.clear()
         endpoint.release.clear()
         framing_store = state / "framing-store"
@@ -449,13 +460,62 @@ def main():
         resources = command(
             "inspect-session", "--store", framing_store, "--session", "direct/framing"
         )["execution"]
-        assert int(resources["scratch_used_bytes"]) >= actual_request_bytes, resources
+        assert int(resources["scratch_used_bytes"]) == actual_request_bytes, resources
         endpoint.release.set()
         wait_for(
             lambda: observe(framing_store, "framing-0").get("result", {}).get("code")
             == "provider_http_422",
             "many-input permanent failure",
         )
+        stop_host(host)
+        processes.remove(host)
+
+        endpoint.requests.clear()
+        endpoint.release.clear()
+        framing_exact_store = state / "framing-exact-store"
+        host = start_host(framing_exact_store, url, "--fault", "attempt-before-commit")
+        processes.append(host)
+        configure(state, framing_exact_store, "exact-config", "direct/framing-exact", "model-a")
+        for index in range(40):
+            message(state, framing_exact_store, f"exact-{index}", "direct/framing-exact", "")
+        stop_host(host)
+        processes.remove(host)
+        host = start_host(
+            framing_exact_store,
+            url,
+            "--test-request-scratch-limit",
+            str(actual_request_bytes),
+        )
+        processes.append(host)
+        wait_for(lambda: len(endpoint.requests) == 1, "exact request capacity")
+        assert len(endpoint.requests[0]) == actual_request_bytes
+        resources = command(
+            "inspect-session",
+            "--store",
+            framing_exact_store,
+            "--session",
+            "direct/framing-exact",
+        )["execution"]
+        assert int(resources["scratch_used_bytes"]) == actual_request_bytes, resources
+        endpoint.release.set()
+        exact_result = wait_for(
+            lambda: (value := observe(framing_exact_store, "exact-0"))
+            .get("result", {})
+            .get("code")
+            and value,
+            "exact-capacity result",
+        )
+        # The request itself fits exactly and reaches HTTP. Its held charge
+        # intentionally leaves no shared scratch for the fixture response.
+        assert exact_result["result"]["code"] == "response_scratch_exhausted", exact_result
+        resources = command(
+            "inspect-session",
+            "--store",
+            framing_exact_store,
+            "--session",
+            "direct/framing-exact",
+        )["execution"]
+        assert resources["scratch_used_bytes"] == "0", resources
         stop_host(host)
         processes.remove(host)
 
@@ -484,6 +544,14 @@ def main():
         )
         assert limited["processing"]["attempt"] == "1", limited
         assert endpoint.requests == []
+        resources = command(
+            "inspect-session",
+            "--store",
+            framing_limit_store,
+            "--session",
+            "direct/framing-limit",
+        )["execution"]
+        assert resources["scratch_used_bytes"] == "0", resources
         stop_host(host)
         processes.remove(host)
 
@@ -644,8 +712,9 @@ def main():
         stop_host(repaired)
         processes.remove(repaired)
 
-        # If initial unlink fails, the live owner keeps the named scratch,
-        # charge and custody while fencing later dispatch. A fresh owner removes
+        # If initial unlink fails, the live owner keeps both descriptors and
+        # named scratch while fencing later dispatch. No bytes have yet been
+        # emitted, so logical scratch charge remains zero. A fresh owner removes
         # the identifiable leftover before serving.
         unlink_store = state / "unlink-store"
         host = start_host(unlink_store, url, "--fault", "request-unlink")
@@ -661,7 +730,7 @@ def main():
         )["execution"]
         assert resources["dispatch_fenced"] is True, resources
         assert resources["custody_occupied"] == "1", resources
-        assert int(resources["scratch_used_bytes"]) > 0, resources
+        assert resources["scratch_used_bytes"] == "0", resources
         assert endpoint.requests == []
         stop_host(host)
         processes.remove(host)
