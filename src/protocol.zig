@@ -210,7 +210,10 @@ pub const ParseOptions = struct {
     content_length: u64,
     scratch_path: []const u8,
     request_number: u64,
+    fault_content_acquire: bool = false,
     fault_content_write: bool = false,
+    fault_content_short_write: bool = false,
+    fault_content_seal: bool = false,
     cleanup_failed: *bool,
     scratch_budget: ?ScratchBudget = null,
 };
@@ -455,6 +458,7 @@ const Parser = struct {
 
     fn readContentString(self: *Parser, field: *ContentField) !void {
         self.content_ordinal += 1;
+        if (self.options.fault_content_acquire) return error.InjectedContentAcquireFailure;
         var path_buffer: [max_store_bytes + 128]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buffer, "{s}/request-{d}-{d}.tmp", .{
             self.options.scratch_path,
@@ -487,6 +491,7 @@ const Parser = struct {
         if (self.options.fault_content_write) return error.InjectedContentWriteFailure;
         try sink.finish();
         writer.sync(self.options.io) catch return error.ContentSyncFailed;
+        if (self.options.fault_content_seal) return error.InjectedContentSealFailure;
         field.length = sink.length;
         field.digest = sink.hash.finalResult();
         // Seal custody before admission; the charge follows the read-only file.
@@ -619,6 +624,7 @@ const ContentSink = struct {
     length: u64 = 0,
     hash: std.crypto.hash.sha2.Sha256 = contentHasher(),
     utf8: Utf8State = .{},
+    maximum_write: usize = content_window_bytes,
 
     fn write(self: *ContentSink, bytes: []const u8) !void {
         const next_length = std.math.add(u64, self.length, bytes.len) catch return error.ContentTooLarge;
@@ -687,7 +693,7 @@ pub fn maximumJsonStringBytes(input_bytes: usize) usize {
     return 2 + 6 * input_bytes;
 }
 
-// The Session inspection is the largest issue-170 response. This bound uses
+// The Session inspection is the largest issue-171 response. This bound uses
 // every literal emitted by renderSessionObservation, maximum decimal u64
 // widths, both tools, a present schema, and worst-case JSON escaping.
 pub const max_response_bytes =
@@ -701,7 +707,8 @@ pub const max_response_bytes =
     "\",\"sha256\":\"".len + 64 +
     "\"},\"output_schema\":{\"bytes\":\"".len + 20 +
     "\",\"sha256\":\"".len + 64 +
-    "\"}},\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_171\"}}".len;
+    "\"}},\"pending_messages\":\"".len + 20 +
+    "\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_172\"}}".len;
 
 pub const ResponseBuffer = struct {
     bytes: [max_response_bytes]u8 = undefined,
