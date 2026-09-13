@@ -12,6 +12,7 @@ pub const CustodyRecord = struct {
     state: std.atomic.Value(State) = .init(.free),
     generation: std.atomic.Value(u64) = .init(0),
     delivered: std.atomic.Value(bool) = .init(false),
+    launch_available: std.atomic.Value(bool) = .init(false),
     binding: store.AttemptBinding = undefined,
 };
 
@@ -41,8 +42,27 @@ pub const CustodyPool = struct {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
         record.binding = attempt_binding;
+        record.launch_available.store(true, .release);
         if (record.state.cmpxchgStrong(.reserved, .attached, .release, .acquire) != null) {
             return error.InvalidCustodyTransition;
+        }
+    }
+
+    pub fn consumeLaunchAuthority(
+        self: *CustodyPool,
+        token: CustodyToken,
+        attempt_binding: store.AttemptBinding,
+    ) !void {
+        const record = try self.current(token);
+        if (record.state.load(.acquire) != .attached or
+            record.binding.turn_id != attempt_binding.turn_id or
+            record.binding.operation_id != attempt_binding.operation_id or
+            record.binding.attempt_ordinal != attempt_binding.attempt_ordinal)
+        {
+            return error.ForeignLaunchAuthority;
+        }
+        if (record.launch_available.cmpxchgStrong(true, false, .acq_rel, .acquire) != null) {
+            return error.DispatchPermitConsumed;
         }
     }
 
@@ -100,6 +120,15 @@ test "custody remains occupied through detachment and rejects late delivery afte
     var pool = CustodyPool.initialize(&records);
     const first = pool.reserve().?;
     try pool.attach(first, .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 });
+    try pool.consumeLaunchAuthority(first, .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 });
+    try std.testing.expectError(
+        error.DispatchPermitConsumed,
+        pool.consumeLaunchAuthority(first, .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 }),
+    );
+    try std.testing.expectError(
+        error.ForeignLaunchAuthority,
+        pool.consumeLaunchAuthority(first, .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 }),
+    );
     try std.testing.expect(pool.claimTerminalDelivery(first));
     try std.testing.expect(!pool.claimTerminalDelivery(first));
     try pool.detach(first);

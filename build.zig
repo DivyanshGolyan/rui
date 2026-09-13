@@ -1,9 +1,9 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const pinned_transport = addPinnedTransport(b);
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const pinned_transport = addPinnedTransport(b, target);
 
     const latifa = addLatifa(b, target, optimize, "latifa", pinned_transport);
     b.installArtifact(latifa);
@@ -98,6 +98,10 @@ pub fn build(b: *std.Build) void {
     };
     for (targets) |query| {
         const resolved = b.resolveTargetQuery(query);
+        const cross_transport = if (sameTransportTarget(target, resolved))
+            pinned_transport
+        else
+            addPinnedTransport(b, resolved);
         const executable = addLatifa(
             b,
             resolved,
@@ -106,27 +110,9 @@ pub fn build(b: *std.Build) void {
                 @tagName(resolved.result.cpu.arch),
                 @tagName(resolved.result.os.tag),
             }),
-            pinned_transport,
+            cross_transport,
         );
         cross_step.dependOn(&executable.step);
-        const transport_api = b.addObject(.{
-            .name = b.fmt("transport-api-{s}-{s}", .{
-                @tagName(resolved.result.cpu.arch),
-                @tagName(resolved.result.os.tag),
-            }),
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/provider_api_check.zig"),
-                .target = resolved,
-                .optimize = .ReleaseSmall,
-            }),
-        });
-        transport_api.root_module.link_libc = true;
-        transport_api.root_module.addIncludePath(b.dependency("sqlite", .{}).path("."));
-        transport_api.root_module.addIncludePath(b.dependency("curl", .{}).path("include"));
-        const transport_api_options = b.addOptions();
-        transport_api_options.addOption(bool, "enabled", true);
-        transport_api.root_module.addOptions("transport_options", transport_api_options);
-        cross_step.dependOn(&transport_api.step);
     }
 
     const measure = b.addSystemCommand(&.{
@@ -163,6 +149,12 @@ pub fn build(b: *std.Build) void {
     measure_dispatch_step.dependOn(&measure_dispatch.step);
 }
 
+fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget) bool {
+    return a.result.cpu.arch == b.result.cpu.arch and
+        a.result.os.tag == b.result.os.tag and
+        a.result.abi == b.result.abi;
+}
+
 fn addLatifa(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -188,14 +180,20 @@ const PinnedTransport = struct {
     output: std.Build.LazyPath,
 };
 
-fn addPinnedTransport(b: *std.Build) PinnedTransport {
+fn addPinnedTransport(b: *std.Build, target: std.Build.ResolvedTarget) PinnedTransport {
     const openssl = b.dependency("openssl", .{});
     const curl = b.dependency("curl", .{});
     const build_transport = b.addSystemCommand(&.{"sh"});
     build_transport.addFileArg(b.path("src/build_transport.sh"));
     build_transport.addDirectoryArg(openssl.path("."));
     build_transport.addDirectoryArg(curl.path("."));
-    const output = build_transport.addOutputDirectoryArg("pinned-transport-aarch64-macos");
+    const target_name = b.fmt("{s}-{s}", .{
+        @tagName(target.result.cpu.arch),
+        @tagName(target.result.os.tag),
+    });
+    const output = build_transport.addOutputDirectoryArg(b.fmt("pinned-transport-{s}", .{target_name}));
+    build_transport.addArg(target_name);
+    build_transport.addArg(b.graph.zig_exe);
     return .{ .output = output };
 }
 
@@ -205,12 +203,8 @@ fn configureTransport(
     target: std.Build.ResolvedTarget,
     pinned: PinnedTransport,
 ) void {
-    const enabled = target.query.cpu_arch == null and
-        target.query.os_tag == null and
-        target.result.os.tag == .macos and
-        target.result.cpu.arch == .aarch64 and
-        b.graph.host.result.os.tag == .macos and
-        b.graph.host.result.cpu.arch == .aarch64;
+    const enabled = (target.result.os.tag == .macos or target.result.os.tag == .linux) and
+        (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64);
     const options = b.addOptions();
     options.addOption(bool, "enabled", enabled);
     compile.root_module.addOptions("transport_options", options);
@@ -222,9 +216,16 @@ fn configureTransport(
     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libcurl.a"));
     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libcrypto.a"));
-    compile.root_module.linkFramework("Security", .{});
-    compile.root_module.linkFramework("CoreFoundation", .{});
-    compile.root_module.linkFramework("SystemConfiguration", .{});
+    if (target.result.os.tag == .macos) {
+        compile.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+        compile.root_module.linkFramework("Security", .{});
+        compile.root_module.linkFramework("CoreFoundation", .{});
+        compile.root_module.linkFramework("CoreServices", .{});
+        compile.root_module.linkFramework("SystemConfiguration", .{});
+    } else {
+        compile.root_module.linkSystemLibrary("pthread", .{});
+        compile.root_module.linkSystemLibrary("dl", .{});
+    }
 }
 
 fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {

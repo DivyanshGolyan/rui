@@ -28,6 +28,16 @@ def footprint_bytes(report, name):
     return round(float(match.group(1)) * scale)
 
 
+def cpu_seconds(pid):
+    fields = command("ps", "-o", "time=", "-p", str(pid)).split(":")
+    seconds = float(fields[-1])
+    if len(fields) >= 2:
+        seconds += int(fields[-2]) * 60
+    if len(fields) == 3:
+        seconds += int(fields[0]) * 3600
+    return seconds
+
+
 def sample(pid):
     rss_kib, virtual_kib = map(int, command("ps", "-o", "rss=,vsz=", "-p", str(pid)).split())
     report = command("/usr/bin/footprint", "-p", str(pid))
@@ -73,6 +83,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def run(binary, *args):
     return subprocess.check_output([str(binary), *map(str, args)], text=True)
+
+
+def execution(binary, store, session):
+    return json.loads(run(binary, "inspect-session", "--store", store, "--session", session))[
+        "execution"
+    ]
 
 
 def start_host(binary, store, endpoint, capacity, cleanup_ms=0):
@@ -141,11 +157,21 @@ def idle_capacity(binary, root, endpoint):
     for capacity in CAPACITIES:
         host, ready = start_host(binary, root / f"idle-{capacity}", endpoint, capacity)
         try:
-            time.sleep(0.1)
+            cpu_before = cpu_seconds(host.pid)
+            started = time.monotonic()
+            time.sleep(2)
+            elapsed = time.monotonic() - started
+            cpu_percent = 100 * (cpu_seconds(host.pid) - cpu_before) / elapsed
+            if cpu_percent >= 1:
+                raise RuntimeError(
+                    f"idle capacity {capacity} consumed {cpu_percent:.3f}% of one core"
+                )
             rows.append({
                 "active_capacity": capacity,
                 "custody_record_bytes": int(ready["custody_record_bytes"]),
                 "execution_slot_bytes": int(ready["execution_slot_bytes"]),
+                "idle_cpu_percent_one_core": round(cpu_percent, 3),
+                "idle_cpu_sample_seconds": round(elapsed, 3),
                 **sample(host.pid),
             })
         finally:
@@ -168,16 +194,19 @@ def request_growth(binary, root, endpoint_server, endpoint):
                 lambda: request_count_or_host_error(endpoint_server, host, 1),
                 "request materialization",
             )
+            in_flight_execution = execution(binary, store, session)
             in_flight = sample(host.pid)
             endpoint_server.release.set()
             time.sleep(0.15)
+            delayed_cleanup_execution = execution(binary, store, session)
             delayed_cleanup = sample(host.pid)
             rows.append({
                 "input_bytes": size,
                 "endpoint_request_bytes": endpoint_server.requests[0],
                 "scratch_limit_bytes": int(ready["scratch_limit_bytes"]),
-                "expected_occupied_custody": 1,
+                "in_flight_execution": in_flight_execution,
                 "in_flight": in_flight,
+                "saved_failure_delayed_cleanup_execution": delayed_cleanup_execution,
                 "saved_failure_delayed_cleanup": delayed_cleanup,
             })
         finally:
@@ -201,7 +230,7 @@ def overlap(binary, root, endpoint_server, endpoint):
         return {
             "active_capacity": capacity,
             "endpoint_requests": len(endpoint_server.requests),
-            "expected_occupied_custody": capacity,
+            "execution": execution(binary, store, "measure/overlap-0"),
             "custody_record_bytes": int(ready["custody_record_bytes"]),
             "execution_slot_bytes": int(ready["execution_slot_bytes"]),
             **sample(host.pid),
@@ -241,7 +270,8 @@ def main():
                 "limits": [
                     "macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only",
                     "endpoint is deterministic loopback HTTP and qualifies no TLS trust store or live provider behavior",
-                    "occupied custody is derived from blocked endpoint requests and the fixed-capacity invariant, not an exported runtime counter",
+                    "idle CPU is process CPU-time growth over a two-second quiet interval and must remain below 1% of one core",
+                    "custody and scratch use are exported runtime counters sampled through inspect-session",
                     "lsof rows include libraries and SQLite descriptors; request-named rows identify already-unlinked request scratch still held by a descriptor",
                     "process termination is crash evidence, not power-loss qualification",
                 ],
