@@ -1,10 +1,11 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const pinned_transport = addPinnedTransport(b);
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const latifa = addLatifa(b, target, optimize, "latifa");
+    const latifa = addLatifa(b, target, optimize, "latifa", pinned_transport);
     b.installArtifact(latifa);
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 
@@ -18,12 +19,13 @@ pub fn build(b: *std.Build) void {
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
     configureSqlite(b, tests);
+    configureTransport(b, tests, target, pinned_transport);
     const run_tests = b.addRunArtifact(tests);
 
     const test_step = b.step("test", "Run unit, Store, and protocol tests");
     test_step.dependOn(&run_tests.step);
 
-    const release_safe = addLatifa(b, target, .ReleaseSafe, "latifa-release-safe-check");
+    const release_safe = addLatifa(b, target, .ReleaseSafe, "latifa-release-safe-check", pinned_transport);
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("src/admission_integration.sh"));
     integration.addArtifactArg(release_safe);
@@ -33,7 +35,16 @@ pub fn build(b: *std.Build) void {
     );
     integration_step.dependOn(&integration.step);
 
-    const debug = addLatifa(b, target, .Debug, "latifa-debug-check");
+    const dispatch_integration = b.addSystemCommand(&.{"python3"});
+    dispatch_integration.addFileArg(b.path("src/dispatch_integration.py"));
+    dispatch_integration.addArtifactArg(release_safe);
+    const dispatch_integration_step = b.step(
+        "dispatch-integration",
+        "Run frozen-request dispatch and deterministic HTTP failure cases",
+    );
+    dispatch_integration_step.dependOn(&dispatch_integration.step);
+
+    const debug = addLatifa(b, target, .Debug, "latifa-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("src/admission_integration.sh"));
     debug_integration.addArtifactArg(debug);
@@ -58,9 +69,10 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&format.step);
     check_step.dependOn(&run_tests.step);
     check_step.dependOn(&integration.step);
+    check_step.dependOn(&dispatch_integration.step);
     check_step.dependOn(&debug_integration.step);
 
-    const release = addLatifa(b, target, .ReleaseSmall, "latifa-release-small-check");
+    const release = addLatifa(b, target, .ReleaseSmall, "latifa-release-small-check", pinned_transport);
     check_step.dependOn(&release.step);
 
     const cross_step = b.step(
@@ -83,8 +95,27 @@ pub fn build(b: *std.Build) void {
                 @tagName(resolved.result.cpu.arch),
                 @tagName(resolved.result.os.tag),
             }),
+            pinned_transport,
         );
         cross_step.dependOn(&executable.step);
+        const transport_api = b.addObject(.{
+            .name = b.fmt("transport-api-{s}-{s}", .{
+                @tagName(resolved.result.cpu.arch),
+                @tagName(resolved.result.os.tag),
+            }),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/provider_api_check.zig"),
+                .target = resolved,
+                .optimize = .ReleaseSmall,
+            }),
+        });
+        transport_api.root_module.link_libc = true;
+        transport_api.root_module.addIncludePath(b.dependency("sqlite", .{}).path("."));
+        transport_api.root_module.addIncludePath(b.dependency("curl", .{}).path("include"));
+        const transport_api_options = b.addOptions();
+        transport_api_options.addOption(bool, "enabled", true);
+        transport_api.root_module.addOptions("transport_options", transport_api_options);
+        cross_step.dependOn(&transport_api.step);
     }
 
     const measure = b.addSystemCommand(&.{"python3"});
@@ -104,6 +135,15 @@ pub fn build(b: *std.Build) void {
         "Measure macOS message admission and observation scaling",
     );
     measure_messages_step.dependOn(&measure_messages.step);
+
+    const measure_dispatch = b.addSystemCommand(&.{"python3"});
+    measure_dispatch.addFileArg(b.path("research/model-dispatch/measure.py"));
+    measure_dispatch.addArtifactArg(release);
+    const measure_dispatch_step = b.step(
+        "measure-model-dispatch",
+        "Measure macOS frozen-request transport, scratch, descriptors, and custody",
+    );
+    measure_dispatch_step.dependOn(&measure_dispatch.step);
 }
 
 fn addLatifa(
@@ -111,6 +151,7 @@ fn addLatifa(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
+    pinned_transport: PinnedTransport,
 ) *std.Build.Step.Compile {
     const executable = b.addExecutable(.{
         .name = name,
@@ -122,7 +163,51 @@ fn addLatifa(
     });
     executable.root_module.link_libc = true;
     configureSqlite(b, executable);
+    configureTransport(b, executable, target, pinned_transport);
     return executable;
+}
+
+const PinnedTransport = struct {
+    output: std.Build.LazyPath,
+};
+
+fn addPinnedTransport(b: *std.Build) PinnedTransport {
+    const openssl = b.dependency("openssl", .{});
+    const curl = b.dependency("curl", .{});
+    const build_transport = b.addSystemCommand(&.{"sh"});
+    build_transport.addFileArg(b.path("src/build_transport.sh"));
+    build_transport.addDirectoryArg(openssl.path("."));
+    build_transport.addDirectoryArg(curl.path("."));
+    const output = build_transport.addOutputDirectoryArg("pinned-transport-aarch64-macos");
+    return .{ .output = output };
+}
+
+fn configureTransport(
+    b: *std.Build,
+    compile: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    pinned: PinnedTransport,
+) void {
+    const enabled = target.query.cpu_arch == null and
+        target.query.os_tag == null and
+        target.result.os.tag == .macos and
+        target.result.cpu.arch == .aarch64 and
+        b.graph.host.result.os.tag == .macos and
+        b.graph.host.result.cpu.arch == .aarch64;
+    const options = b.addOptions();
+    options.addOption(bool, "enabled", enabled);
+    compile.root_module.addOptions("transport_options", options);
+    compile.root_module.addIncludePath(if (enabled)
+        pinned.output.path(b, "include")
+    else
+        b.dependency("curl", .{}).path("include"));
+    if (!enabled) return;
+    compile.root_module.addObjectFile(pinned.output.path(b, "lib/libcurl.a"));
+    compile.root_module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
+    compile.root_module.addObjectFile(pinned.output.path(b, "lib/libcrypto.a"));
+    compile.root_module.linkFramework("Security", .{});
+    compile.root_module.linkFramework("CoreFoundation", .{});
+    compile.root_module.linkFramework("SystemConfiguration", .{});
 }
 
 fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
