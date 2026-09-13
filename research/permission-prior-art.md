@@ -38,4 +38,4 @@ The subsequent [user decision](https://github.com/DivyanshGolyan/latifa/issues/1
 
 ## Reproduction and limits
 
-Use the pinned revisions and linked owning files in each report. References were checked against local Git objects for source existence and line bounds, with key approval, disconnect and scope claims reread. No upstream tests, binaries, providers, sandbox experiments or crash tests were run. `git diff --check` checks these documentation edits only. No production source or accepted contract changed.
+Use the pinned revisions and linked owning files in each report. References were checked against local Git objects for source existence and line bounds, with key approval, disconnect and scope claims reread. No upstream tests, binaries, providers, sandbox experiments or crash tests were run. `git diff --check` checks these documentation edits only. No production source changed. This report owns evidence, not the contract; the accompanying ARCHITECTURE.md update records the accepted permission-policy decision, with required cases in VERIFICATION.md.
