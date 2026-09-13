@@ -208,34 +208,62 @@ def timing_measurement(binary, root, endpoint_server, endpoint):
         store,
         endpoint,
         1,
-        "--test-before-launch-delay-ms",
-        "250",
+        "--test-retry-waits-ms",
+        "600000,600000,600000",
     )
     try:
         configure(binary, root, store, "timing-config", "measure/timing")
         message(binary, root, store, "timing-message", "measure/timing", marker)
+        wait_for(
+            lambda: endpoint_server.counts.get(marker) == 1,
+            "initial temporary response",
+        )
+        wait_for(
+            lambda: inspect_execution(binary, store, "measure/timing")[
+                "custody_occupied"
+            ]
+            == "0",
+            "initial Attempt cleanup",
+        )
+    finally:
+        stop_host(host)
 
-        def retry_due():
-            database = sqlite3.connect(store / "latifa.sqlite3")
-            try:
-                row = database.execute(
-                    "SELECT attempt_ordinal,retry_due_at_ms FROM model_operation"
-                ).fetchone()
-                return row[1] if row and row[0] == 1 and row[1] > 0 else None
-            finally:
-                database.close()
+    due_at_ms = time.time_ns() // 1_000_000 + 250
+    database = sqlite3.connect(store / "latifa.sqlite3")
+    try:
+        row = database.execute(
+            "SELECT operation_id,attempt_ordinal,allowance_used,uncertain,resolution_code "
+            "FROM model_operation"
+        ).fetchone()
+        if row is None or row[1:] != (1, 1, 0, None):
+            raise RuntimeError(f"unexpected initial retry facts: {row}")
+        database.execute(
+            "UPDATE model_operation SET retry_due_at_ms=? WHERE operation_id=?",
+            (due_at_ms, row[0]),
+        )
+        database.commit()
+    finally:
+        database.close()
 
-        due_at_ms = wait_for(retry_due, "saved retry due time")
-
+    started_ms = time.time_ns() // 1_000_000
+    host, _ = start_host(
+        binary,
+        store,
+        endpoint,
+        1,
+        "--test-before-launch-delay-ms",
+        "250",
+        "--test-retry-waits-ms",
+        "600000,600000,600000",
+    )
+    try:
         def replacement_admitted():
-            database = sqlite3.connect(store / "latifa.sqlite3")
-            try:
-                row = database.execute(
-                    "SELECT attempt_ordinal,allowance_used,uncertain FROM model_operation"
-                ).fetchone()
-                return time.time_ns() // 1_000_000 if row == (2, 2, 1) else None
-            finally:
-                database.close()
+            execution = inspect_execution(binary, store, "measure/timing")
+            return (
+                time.time_ns() // 1_000_000
+                if execution["custody_occupied"] == "1"
+                else None
+            )
 
         discovered_at_ms = wait_for(replacement_admitted, "replacement admission")
         wait_for(
@@ -244,20 +272,34 @@ def timing_measurement(binary, root, endpoint_server, endpoint):
         )
         launched_at_ms = endpoint_server.launches[marker][1]
         wait_for(
-            lambda: endpoint_server.counts.get(marker) == 2,
+            lambda: inspect_execution(binary, store, "measure/timing")[
+                "custody_occupied"
+            ]
+            == "0",
             "permanent replacement settlement",
         )
-        return {
-            "retry_due_at_unix_ms": due_at_ms,
-            "replacement_admitted_at_unix_ms": discovered_at_ms,
-            "replacement_launched_at_unix_ms": launched_at_ms,
-            "discovery_after_due_ms": discovered_at_ms - due_at_ms,
-            "launch_after_discovery_ms": launched_at_ms - discovered_at_ms,
-            "configured_prelaunch_delay_ms": 250,
-            "endpoint_attempts": endpoint_server.counts[marker],
-        }
     finally:
         stop_host(host)
+
+    database = sqlite3.connect(store / "latifa.sqlite3")
+    try:
+        facts = database.execute(
+            "SELECT attempt_ordinal,allowance_used,resolution_code FROM model_operation"
+        ).fetchone()
+    finally:
+        database.close()
+    if facts != (2, 2, "provider_http_422"):
+        raise RuntimeError(f"unexpected timing retry facts: {facts}")
+    return {
+        "retry_due_at_unix_ms": due_at_ms,
+        "host_started_at_unix_ms": started_ms,
+        "replacement_admitted_at_unix_ms": discovered_at_ms,
+        "replacement_launched_at_unix_ms": launched_at_ms,
+        "discovery_after_due_ms": discovered_at_ms - due_at_ms,
+        "launch_after_discovery_ms": launched_at_ms - discovered_at_ms,
+        "configured_prelaunch_delay_ms": 250,
+        "endpoint_attempts": endpoint_server.counts[marker],
+    }
 
 
 def unresolved_history_measurement(binary, root, endpoint_server, endpoint):
@@ -330,20 +372,21 @@ def unresolved_history_measurement(binary, root, endpoint_server, endpoint):
             store,
             endpoint,
             CAPACITY,
+            "--test-before-launch-delay-ms",
+            "250",
             "--test-retry-waits-ms",
             "600000,600000,600000",
         )
         try:
             def replacement_admitted():
-                database = sqlite3.connect(store / "latifa.sqlite3")
-                try:
-                    row = database.execute(
-                        "SELECT attempt_ordinal,allowance_used FROM model_operation WHERE operation_id=?",
-                        (target_operation,),
-                    ).fetchone()
-                    return time.time_ns() // 1_000_000 if row == (2, 2) else None
-                finally:
-                    database.close()
+                execution = inspect_execution(
+                    binary, store, f"measure/history-{target_history - 1}"
+                )
+                return (
+                    time.time_ns() // 1_000_000
+                    if execution["custody_occupied"] == "1"
+                    else None
+                )
 
             admitted_ms = wait_for(
                 replacement_admitted,
@@ -354,31 +397,35 @@ def unresolved_history_measurement(binary, root, endpoint_server, endpoint):
                 f"history target {target_history} launch",
             )
             launched_ms = endpoint_server.launches[target_marker][1]
-            def resolved_facts():
-                database = sqlite3.connect(store / "latifa.sqlite3")
-                try:
-                    facts = database.execute(
-                        "SELECT attempt_ordinal,allowance_used,resolution_code FROM model_operation WHERE operation_id=?",
-                        (target_operation,),
-                    ).fetchone()
-                    return facts if facts and facts[2] is not None else None
-                finally:
-                    database.close()
-
-            facts = wait_for(resolved_facts, f"history target {target_history} settlement")
-            if facts != (2, 2, "provider_http_422"):
-                raise RuntimeError(f"unexpected history target facts: {facts}")
-            rows.append(
-                {
-                    "model_operations": target_history,
-                    "older_unresolved_future_retries": unresolved_future,
-                    "replacement_admitted_after_start_ms": admitted_ms - started_ms,
-                    "replacement_launched_after_start_ms": launched_ms - started_ms,
-                    "database_bytes": os.path.getsize(store / "latifa.sqlite3"),
-                }
+            wait_for(
+                lambda: inspect_execution(
+                    binary, store, f"measure/history-{target_history - 1}"
+                )["custody_occupied"]
+                == "0",
+                f"history target {target_history} settlement",
             )
         finally:
             stop_host(host)
+        database = sqlite3.connect(store / "latifa.sqlite3")
+        try:
+            facts = database.execute(
+                "SELECT attempt_ordinal,allowance_used,resolution_code "
+                "FROM model_operation WHERE operation_id=?",
+                (target_operation,),
+            ).fetchone()
+        finally:
+            database.close()
+        if facts != (2, 2, "provider_http_422"):
+            raise RuntimeError(f"unexpected history target facts: {facts}")
+        rows.append(
+            {
+                "model_operations": target_history,
+                "older_unresolved_future_retries": unresolved_future,
+                "replacement_admitted_after_start_ms": admitted_ms - started_ms,
+                "replacement_launched_after_start_ms": launched_ms - started_ms,
+                "database_bytes": os.path.getsize(store / "latifa.sqlite3"),
+            }
+        )
         created = target_history
     return {
         "stages": rows,
@@ -444,14 +491,6 @@ def churn_measurement(binary, root, endpoint_server, endpoint):
                 }
             )
 
-        database = sqlite3.connect(store / "latifa.sqlite3")
-        attempt_rows = database.execute(
-            "SELECT attempt_ordinal,allowance_used,resolution_code,count(*) "
-            "FROM model_operation GROUP BY attempt_ordinal,allowance_used,resolution_code"
-        ).fetchall()
-        database.close()
-        if attempt_rows != [(2, 2, "provider_http_422", ROUNDS * OPERATIONS_PER_ROUND)]:
-            raise RuntimeError(f"unexpected churn retry facts: {attempt_rows}")
         if any(count != 2 for marker, count in endpoint_server.counts.items() if marker.startswith("churn-operation-")):
             raise RuntimeError("a churn Operation did not launch exactly twice")
 
@@ -461,20 +500,31 @@ def churn_measurement(binary, root, endpoint_server, endpoint):
         idle_elapsed = time.monotonic() - idle_started
         idle_cpu = 100 * (cpu_seconds(host.pid) - cpu_before) / idle_elapsed
         retained_idle = sample(host.pid)
-        return {
-            "active_capacity": CAPACITY,
-            "operations_per_round": OPERATIONS_PER_ROUND,
-            "rounds": rows,
-            "baseline": baseline,
-            "custody_record_bytes": int(ready["custody_record_bytes"]),
-            "execution_slot_bytes": int(ready["execution_slot_bytes"]),
-            "idle_cpu_percent_one_core": round(idle_cpu, 3),
-            "idle_cpu_sample_seconds": round(idle_elapsed, 3),
-            "retained_idle": retained_idle,
-            "attempt_fact_groups": attempt_rows,
-        }
     finally:
         stop_host(host)
+
+    database = sqlite3.connect(store / "latifa.sqlite3")
+    try:
+        attempt_rows = database.execute(
+            "SELECT attempt_ordinal,allowance_used,resolution_code,count(*) "
+            "FROM model_operation GROUP BY attempt_ordinal,allowance_used,resolution_code"
+        ).fetchall()
+    finally:
+        database.close()
+    if attempt_rows != [(2, 2, "provider_http_422", ROUNDS * OPERATIONS_PER_ROUND)]:
+        raise RuntimeError(f"unexpected churn retry facts: {attempt_rows}")
+    return {
+        "active_capacity": CAPACITY,
+        "operations_per_round": OPERATIONS_PER_ROUND,
+        "rounds": rows,
+        "baseline": baseline,
+        "custody_record_bytes": int(ready["custody_record_bytes"]),
+        "execution_slot_bytes": int(ready["execution_slot_bytes"]),
+        "idle_cpu_percent_one_core": round(idle_cpu, 3),
+        "idle_cpu_sample_seconds": round(idle_elapsed, 3),
+        "retained_idle": retained_idle,
+        "attempt_fact_groups": attempt_rows,
+    }
 
 
 def main():
@@ -513,7 +563,7 @@ def main():
                     "macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only",
                     "deterministic loopback HTTP classifies no TLS trust store or live-provider behavior",
                     "a 250 ms fixture delay separates committed retry discovery from provider launch",
-                    "external 10 ms SQLite observation adds sampling delay and is not a Runtime clock",
+                    "10 ms inspect-session observation adds sampling delay and is not a Runtime clock",
                     "two production-store stages put 31 then 126 older unresolved future retries before one due replacement",
                     "five 32-Operation rounds exercise 0-to-capacity-to-0 custody churn with 250 ms delayed cleanup",
                     "process termination evidence is not power-loss qualification",
