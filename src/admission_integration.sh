@@ -11,6 +11,7 @@ ready="$state/ready"
 server_log="$state/server.log"
 host_pid=
 extra_pid=
+client_pid=
 
 cleanup() {
     if [ -n "$host_pid" ]; then
@@ -20,6 +21,10 @@ cleanup() {
     if [ -n "$extra_pid" ]; then
         kill -9 "$extra_pid" 2>/dev/null || true
         wait "$extra_pid" 2>/dev/null || true
+    fi
+    if [ -n "$client_pid" ]; then
+        kill -9 "$client_pid" 2>/dev/null || true
+        wait "$client_pid" 2>/dev/null || true
     fi
     rm -rf "$state"
 }
@@ -66,6 +71,57 @@ if "$latifa" serve --store "$store" >"$state/competing.out" 2>"$state/competing.
     exit 1
 fi
 contains "$(cat "$state/competing.err")" "StoreAlreadyOwned"
+
+# A listener failure stops new dispatch but keeps the Store lock and Host stack
+# alive until a transferred client finishes its body read.
+drain_store="$state/drain-store"
+drain_ready="$state/drain-ready"
+drain_error="$state/drain-error"
+"$latifa" serve --store "$drain_store" --fault shutdown-after-accept >"$drain_ready" 2>"$drain_error" &
+extra_pid=$!
+attempts=0
+while ! grep -q '^ready ' "$drain_ready"; do
+    if ! kill -0 "$extra_pid" 2>/dev/null; then
+        cat "$drain_error" >&2
+        exit 1
+    fi
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 500 ]; then
+        echo "drain fixture Host did not become ready" >&2
+        exit 1
+    fi
+    sleep 0.01
+done
+drain_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$drain_ready")
+python3 - "$drain_socket" <<'PY' &
+import socket, sys, time
+client = socket.socket(socket.AF_UNIX)
+client.connect(sys.argv[1])
+client.sendall(
+    b"POST /v1/configure HTTP/1.1\r\n"
+    b"Host: local\r\n"
+    b"Content-Type: application/json\r\n"
+    b"Content-Length: 1024\r\n"
+    b"X-Latifa-Wire-Version: 1\r\n\r\n{"
+)
+time.sleep(0.5)
+client.close()
+PY
+client_pid=$!
+sleep 0.05
+kill -0 "$extra_pid"
+if "$latifa" serve --store "$drain_store" >"$state/drain-competing.out" 2>"$state/drain-competing.err"; then
+    echo "draining Host released its Store lock early" >&2
+    exit 1
+fi
+contains "$(cat "$state/drain-competing.err")" "StoreAlreadyOwned"
+wait "$client_pid"
+client_pid=
+if wait "$extra_pid"; then
+    echo "injected listener failure exited successfully" >&2
+    exit 1
+fi
+extra_pid=
 
 # Fill all ordinary places with sealed headers and incomplete bodies. A short
 # control classification still receives its explicit development response;

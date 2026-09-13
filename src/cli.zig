@@ -29,7 +29,7 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             active_capacity = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
         } else if (std.mem.eql(u8, arg, "--fault")) {
             const fault = try takeValue(args, &index);
-            if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else return error.UnknownFault;
+            if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else return error.UnknownFault;
         } else return error.UnknownArgument;
         index += 1;
     }
