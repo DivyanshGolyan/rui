@@ -252,7 +252,7 @@ fn executionMain(host: *Host) void {
     var last_retry_poll: ?std.Io.Clock.Timestamp = null;
     var capacity_was_full = slots.len == 0;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
-        var immediate_progress = false;
+        var made_progress = false;
         const now = std.Io.Clock.Timestamp.now(host.io, .awake);
         const free_slots = countFreeSlots(slots);
         const capacity_released = capacity_was_full and free_slots != 0;
@@ -275,35 +275,33 @@ fn executionMain(host: *Host) void {
                     break;
                 };
                 if (recovered) {
-                    immediate_progress = true;
+                    made_progress = true;
                     last_retry_poll = null;
                 } else {
-                    may_admit_new = true;
                     last_retry_poll = now;
-                    if (free_slots != 0) {
-                        for (slots) |*slot| {
-                            if (slot.state != .free) continue;
-                            switch (admitRetryAttempt(host, &reactor, slot, active_filter)) {
-                                .admitted => {
-                                    immediate_progress = true;
-                                    last_retry_poll = null;
-                                },
-                                .no_work => {},
-                                .retry_later => {
-                                    may_admit_new = false;
-                                    last_retry_poll = null;
-                                },
-                            }
-                            break;
+                }
+                if (free_slots != 0) {
+                    for (slots) |*slot| {
+                        if (slot.state != .free) continue;
+                        switch (admitRetryAttempt(host, &reactor, slot, active_filter)) {
+                            .admitted => {
+                                made_progress = true;
+                                last_retry_poll = null;
+                            },
+                            .no_work => may_admit_new = true,
+                            .retry_later => {
+                                last_retry_poll = null;
+                            },
                         }
+                        break;
                     }
                 }
             }
-            if (may_admit_new and !immediate_progress) {
+            if (may_admit_new) {
                 for (slots) |*slot| {
                     if (slot.state != .free) continue;
                     switch (admitNewAttempt(host, &reactor, slot)) {
-                        .admitted => immediate_progress = true,
+                        .admitted => made_progress = true,
                         .no_work, .retry_later => {},
                     }
                     break;
@@ -312,11 +310,11 @@ fn executionMain(host: *Host) void {
         }
         capacity_was_full = countFreeSlots(slots) == 0;
         if (hasTransport(slots)) {
-            reactor.drive(if (immediate_progress) 0 else 25) catch |err| {
+            reactor.drive(if (made_progress) 0 else 25) catch |err| {
                 fenceDispatch(host, "transport reactor", err);
                 break;
             };
-        } else if (!immediate_progress) {
+        } else if (!made_progress) {
             _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {};
         }
         while (reactor.nextCompletion()) |completion| {
