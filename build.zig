@@ -33,6 +33,16 @@ pub fn build(b: *std.Build) void {
     );
     integration_step.dependOn(&integration.step);
 
+    const debug = addLatifa(b, target, .Debug, "latifa-debug-check");
+    const debug_integration = b.addSystemCommand(&.{"sh"});
+    debug_integration.addFileArg(b.path("src/admission_integration.sh"));
+    debug_integration.addArtifactArg(debug);
+    const debug_integration_step = b.step(
+        "admission-debug-integration",
+        "Run the documented Debug artifact through configuration recovery",
+    );
+    debug_integration_step.dependOn(&debug_integration.step);
+
     const check_step = b.step(
         "check",
         "Check formatting, tests, and configuration recovery",
@@ -48,6 +58,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&format.step);
     check_step.dependOn(&run_tests.step);
     check_step.dependOn(&integration.step);
+    check_step.dependOn(&debug_integration.step);
 
     const release = addLatifa(b, target, .ReleaseSmall, "latifa-release-small-check");
     check_step.dependOn(&release.step);

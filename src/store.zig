@@ -76,6 +76,11 @@ pub const CommandObservation = struct {
     created: bool = false,
 };
 
+pub const ContentReference = struct {
+    length: u64,
+    digest: [32]u8,
+};
+
 pub const SessionObservation = struct {
     found: bool = false,
     session: protocol.Bounded(protocol.max_session_bytes) = .{},
@@ -84,11 +89,24 @@ pub const SessionObservation = struct {
     revision: u64 = 0,
     tools_mask: u8 = 0,
     permission_mode: protocol.Bounded(16) = .{},
-    instructions_length: u64 = 0,
-    instructions_digest: [32]u8 = [_]u8{0} ** 32,
-    output_schema_present: bool = false,
-    output_schema_length: u64 = 0,
-    output_schema_digest: [32]u8 = [_]u8{0} ** 32,
+    instructions: ContentReference = .{ .length = 0, .digest = [_]u8{0} ** 32 },
+    output_schema: ?ContentReference = null,
+};
+
+pub const ContentReader = struct {
+    store: *Store,
+    reference: ContentReference,
+    active: bool = true,
+
+    pub fn read(self: *ContentReader, start: u64, destination: []u8) !usize {
+        std.debug.assert(self.active);
+        return self.store.readContentRange(self.reference, start, destination);
+    }
+
+    pub fn close(self: *ContentReader) void {
+        std.debug.assert(self.active);
+        self.active = false;
+    }
 };
 
 const CurrentConfiguration = struct {
@@ -237,7 +255,7 @@ pub const Store = struct {
             return try self.saveConfigurationRejection(command, &digest, .invalid_model, faults);
         }
         if (configuration.output_schema.state == .value and
-            !try validateJsonFile(self.io, configuration.output_schema.path.slice()))
+            !try validateJsonFile(self.io, configuration.output_schema.file orelse return error.MissingContentCustody))
         {
             return try self.saveConfigurationRejection(command, &digest, .invalid_output_schema, faults);
         }
@@ -411,15 +429,17 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const existing = try self.readExistingCommand(key) orelse return .{ .status = .absent };
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const existing = self.readExistingCommand(key) catch |err| return self.fenceReadFailure(err);
+        const command = existing orelse return .{ .status = .absent };
         var observation = CommandObservation{
-            .status = if (existing.accepted) .accepted else .rejected,
-            .kind = existing.kind,
-            .revision = existing.revision,
-            .created = existing.created,
+            .status = if (command.accepted) .accepted else .rejected,
+            .kind = command.kind,
+            .revision = command.revision,
+            .created = command.created,
         };
-        observation.target = existing.target;
-        observation.code = existing.code;
+        observation.target = command.target;
+        observation.code = command.code;
         return observation;
     }
 
@@ -427,7 +447,9 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const current = try self.readSession(session_ref) orelse return .{};
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const maybe_current = self.readSession(session_ref) catch |err| return self.fenceReadFailure(err);
+        const current = maybe_current orelse return .{};
         var observation = SessionObservation{
             .found = true,
             .revision = current.revision,
@@ -438,22 +460,28 @@ pub const Store = struct {
         observation.model = current.model;
         try observation.permission_mode.set(if (current.permission_mode == 0) "ask" else "bypass");
         if (current.instructions_id) |content_id| {
-            const metadata = try self.readContentMetadata(content_id);
-            observation.instructions_length = metadata.length;
-            observation.instructions_digest = metadata.digest;
+            const metadata = self.readContentMetadata(content_id) catch |err| return self.fenceReadFailure(err);
+            observation.instructions = .{ .length = metadata.length, .digest = metadata.digest };
         }
         if (current.output_schema_id) |content_id| {
-            const metadata = try self.readContentMetadata(content_id);
-            observation.output_schema_present = true;
-            observation.output_schema_length = metadata.length;
-            observation.output_schema_digest = metadata.digest;
+            const metadata = self.readContentMetadata(content_id) catch |err| return self.fenceReadFailure(err);
+            observation.output_schema = .{ .length = metadata.length, .digest = metadata.digest };
         }
         return observation;
     }
 
-    pub fn readContentRange(
+    pub fn openContent(self: *Store, reference: ContentReference) !ContentReader {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        _ = self.resolveContentReference(reference) catch |err| return self.fenceReadFailure(err);
+        return .{ .store = self, .reference = reference };
+    }
+
+    fn readContentRange(
         self: *Store,
-        content_id: i64,
+        reference: ContentReference,
         start: u64,
         destination: []u8,
     ) !usize {
@@ -461,20 +489,26 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const metadata = try self.readContentMetadata(content_id);
-        if (start > metadata.length) return error.RangeOutOfBounds;
-        const wanted: u64 = @min(destination.len, metadata.length - start);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const content_id = self.resolveContentReference(reference) catch |err| return self.fenceReadFailure(err);
+        if (start > reference.length) return error.RangeOutOfBounds;
+        const wanted: u64 = @min(destination.len, reference.length - start);
         if (wanted == 0) return 0;
         if (start > std.math.maxInt(c_int)) return error.RangeOutOfBounds;
         var blob: ?*c.sqlite3_blob = null;
         if (c.sqlite3_blob_open(self.database, "main", "content", "payload", content_id, 0, &blob) != c.SQLITE_OK) {
-            return error.ContentReadFailed;
+            return self.fenceReadFailure(error.ContentReadFailed);
         }
         defer _ = c.sqlite3_blob_close(blob);
         if (c.sqlite3_blob_read(blob, destination.ptr, @intCast(wanted), @intCast(start)) != c.SQLITE_OK) {
-            return error.ContentReadFailed;
+            return self.fenceReadFailure(error.ContentReadFailed);
         }
         return @intCast(wanted);
+    }
+
+    fn fenceReadFailure(self: *Store, err: anyerror) anyerror {
+        self.fenced.store(true, .release);
+        return err;
     }
 
     const ExistingCommand = struct {
@@ -621,6 +655,13 @@ pub const Store = struct {
 
     fn importContent(self: *Store, content: *const protocol.ContentField, faults: Faults) !i64 {
         std.debug.assert(content.state == .value);
+        if (content.file) |source| {
+            try verifyExternalContent(self.io, source, content.length, &content.digest, faults);
+        } else if (content.length != 0 or
+            !std.mem.eql(u8, &protocol.contentDigest(""), &content.digest))
+        {
+            return error.MissingContentCustody;
+        }
         const find = try prepare(self.database, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2");
         defer _ = c.sqlite3_finalize(find);
         try bindBlob(find, 1, &content.digest);
@@ -642,8 +683,6 @@ pub const Store = struct {
         if (content_id <= 0) return error.ContentWriteFailed;
 
         if (content.length == 0) {
-            if (faults.content_read) return error.InjectedContentReadFailure;
-            if (!std.mem.eql(u8, &protocol.contentDigest(""), &content.digest)) return error.ContentChanged;
             return content_id;
         }
         var blob: ?*c.sqlite3_blob = null;
@@ -651,30 +690,19 @@ pub const Store = struct {
             return error.ContentWriteFailed;
         }
         defer _ = c.sqlite3_blob_close(blob);
-        var file = try std.Io.Dir.openFileAbsolute(self.io, content.path.slice(), .{});
-        defer file.close(self.io);
+        const file = content.file orelse return error.MissingContentCustody;
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var offset: u64 = 0;
-        var hash = protocol.contentHasher();
         while (offset < content.length) {
             const wanted: usize = @intCast(@min(content.length - offset, buffer.len));
-            const count = try file.readStreaming(self.io, &.{buffer[0..wanted]});
+            const count = try file.readPositionalAll(self.io, buffer[0..wanted], offset);
             if (count != wanted) return error.ContentReadFailed;
-            if (faults.content_read) return error.InjectedContentReadFailure;
-            hash.update(buffer[0..count]);
             if (offset > std.math.maxInt(c_int)) return error.ContentTooLarge;
             if (c.sqlite3_blob_write(blob, buffer[0..count].ptr, @intCast(count), @intCast(offset)) != c.SQLITE_OK) {
                 return error.ContentWriteFailed;
             }
             offset += count;
         }
-        var trailing: [1]u8 = undefined;
-        const trailing_count = file.readStreaming(self.io, &.{&trailing}) catch |err| switch (err) {
-            error.EndOfStream => 0,
-            else => return err,
-        };
-        if (trailing_count != 0) return error.ContentChanged;
-        if (!std.mem.eql(u8, &hash.finalResult(), &content.digest)) return error.ContentChanged;
         return content_id;
     }
 
@@ -689,6 +717,17 @@ pub const Store = struct {
         if (length < 0) return error.CorruptStore;
         return .{ .length = @intCast(length), .digest = try readDigest(statement, 1) };
     }
+
+    fn resolveContentReference(self: *Store, reference: ContentReference) !i64 {
+        const statement = try prepare(self.database, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindBlob(statement, 1, &reference.digest);
+        try bindU64(statement, 2, reference.length);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        const content_id = c.sqlite3_column_int64(statement, 0);
+        if (content_id <= 0) return error.CorruptStore;
+        return content_id;
+    }
 };
 
 fn validateWorkspace(io: std.Io, supplied: []const u8, destination: anytype) !void {
@@ -701,11 +740,31 @@ fn validateWorkspace(io: std.Io, supplied: []const u8, destination: anytype) !vo
     try destination.set(canonical[0..length]);
 }
 
-fn validateJsonFile(io: std.Io, path: []const u8) !bool {
-    var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
-    defer file.close(io);
+fn verifyExternalContent(
+    io: std.Io,
+    file: std.Io.File,
+    expected_length: u64,
+    expected_digest: *const [32]u8,
+    faults: Faults,
+) !void {
+    if (try file.length(io) != expected_length) return error.ContentChanged;
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    var hash = protocol.contentHasher();
+    while (offset < expected_length) {
+        const wanted: usize = @intCast(@min(expected_length - offset, buffer.len));
+        const count = try file.readPositionalAll(io, buffer[0..wanted], offset);
+        if (count != wanted) return error.ContentReadFailed;
+        if (faults.content_read) return error.InjectedContentReadFailure;
+        hash.update(buffer[0..count]);
+        offset += count;
+    }
+    if (!std.mem.eql(u8, &hash.finalResult(), expected_digest)) return error.ContentChanged;
+}
+
+fn validateJsonFile(io: std.Io, file: std.Io.File) !bool {
     var read_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var file_reader = file.readerStreaming(io, &read_buffer);
+    var file_reader = file.reader(io, &read_buffer);
     var json_reader = std.json.Reader.init(std.heap.c_allocator, &file_reader.interface);
     defer json_reader.deinit();
     try json_reader.ensureTotalStackCapacity(protocol.max_json_depth);
@@ -975,11 +1034,18 @@ test "configuration answers replay without reverting newer settings" {
     try std.testing.expectEqual(@as(u64, 2), observation.revision);
     try std.testing.expectEqual(@as(u8, 3), observation.tools_mask);
     try std.testing.expectEqualStrings("ask", observation.permission_mode.slice());
-    try std.testing.expectEqual(@as(u64, 0), observation.instructions_length);
+    try std.testing.expectEqual(@as(u64, 0), observation.instructions.length);
     var empty_digest: [32]u8 = undefined;
     empty_digest = protocol.contentDigest("");
-    try std.testing.expectEqualSlices(u8, &empty_digest, &observation.instructions_digest);
-    try std.testing.expect(!observation.output_schema_present);
+    try std.testing.expectEqualSlices(u8, &empty_digest, &observation.instructions.digest);
+    try std.testing.expect(observation.output_schema == null);
+
+    var reader = try storage.openContent(observation.instructions);
+    defer reader.close();
+    var content_window: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try reader.read(0, &content_window));
+    try std.testing.expectError(error.RangeOutOfBounds, reader.read(1, &content_window));
+    try std.testing.expect((try storage.observeCommand("first")).status == .accepted);
 
     first.configuration.model.value.len = 0;
     try first.configuration.model.value.set("model-c");
@@ -1090,4 +1156,86 @@ test "existing Store rejects a different canonical identity" {
         error.WrongStoreIdentity,
         Store.open(std.testing.io, database, "/different/canonical/store"),
     );
+}
+
+test "canonical observation failure fences later admission" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("create", "direct/corrupt", workspace, "model-a");
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+
+    try exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try exec(storage.database, "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref='direct/corrupt'");
+    try exec(storage.database, "PRAGMA foreign_keys=ON");
+    try std.testing.expectError(error.CorruptStore, storage.inspectSession("direct/corrupt"));
+
+    var later = try completeConfiguration("later", "direct/later", workspace, "model-a");
+    try std.testing.expect(storage.configure(&later, .{}) == .infrastructure_failure);
+    try std.testing.expectError(error.StoreFenced, storage.observeCommand("later"));
+}
+
+test "external content import follows sealed descriptor custody" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const captured = "captured instructions";
+    const replacement = "pathname replacement";
+    const file = try tmp.dir.createFile(std.testing.io, "ingress", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, captured);
+    try file.sync(std.testing.io);
+    try tmp.dir.deleteFile(std.testing.io, "ingress");
+    var replacement_file = try tmp.dir.createFile(std.testing.io, "ingress", .{});
+    try replacement_file.writeStreamingAll(std.testing.io, replacement);
+    replacement_file.close(std.testing.io);
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("sealed", "direct/sealed", workspace, "model-a");
+    command.configuration.instructions = .{
+        .state = .value,
+        .file = file,
+        .length = captured.len,
+        .digest = protocol.contentDigest(captured),
+    };
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+
+    const observation = try storage.inspectSession("direct/sealed");
+    var reader = try storage.openContent(observation.instructions);
+    defer reader.close();
+    var bytes: [captured.len]u8 = undefined;
+    try std.testing.expectEqual(captured.len, try reader.read(0, &bytes));
+    try std.testing.expectEqualStrings(captured, &bytes);
+}
+
+test "external content identity is verified before canonical import" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const captured = "captured instructions";
+    const file = try tmp.dir.createFile(std.testing.io, "changed", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, captured);
+    try file.sync(std.testing.io);
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("changed", "direct/changed", workspace, "model-a");
+    command.configuration.instructions = .{
+        .state = .value,
+        .file = file,
+        .length = captured.len,
+        .digest = protocol.contentDigest("different bytes"),
+    };
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+
+    try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
+    try std.testing.expectError(error.StoreFenced, storage.observeCommand("changed"));
 }

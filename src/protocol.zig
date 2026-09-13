@@ -44,12 +44,14 @@ pub fn OptionalBounded(comptime capacity: usize) type {
 
 pub const ContentField = struct {
     state: enum { omitted, value, explicit_null } = .omitted,
-    path: Bounded(max_store_bytes + 128) = .{},
+    // A parsed request owns an unlinked file descriptor. The Store imports
+    // through this sealed custody; no pathname can be swapped after capture.
+    file: ?std.Io.File = null,
     length: u64 = 0,
     digest: [32]u8 = [_]u8{0} ** 32,
 
     pub fn hasFile(self: *const ContentField) bool {
-        return self.state == .value;
+        return self.file != null;
     }
 };
 
@@ -158,11 +160,8 @@ pub const Request = union(Kind) {
 };
 
 fn removeContent(content: *ContentField, io: std.Io) !void {
-    if (!content.hasFile()) return;
-    std.Io.Dir.deleteFileAbsolute(io, content.path.slice()) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
+    if (content.file) |file| file.close(io);
+    content.file = null;
     content.state = .omitted;
 }
 
@@ -456,27 +455,38 @@ const Parser = struct {
             self.options.request_number,
             self.content_ordinal,
         });
-        try field.path.set(path);
-        var file = try std.Io.Dir.createFileAbsolute(self.options.io, path, .{
+        const writer = try std.Io.Dir.createFileAbsolute(self.options.io, path, .{
             .read = true,
             .exclusive = true,
             .permissions = .fromMode(0o600),
         });
-        errdefer {
-            file.close(self.options.io);
-            // The enclosing request owner retries cleanup and records failure;
-            // this first attempt only shortens the common error path.
-            std.Io.Dir.deleteFileAbsolute(self.options.io, path) catch {};
-        }
-        var sink = ContentSink{ .io = self.options.io, .file = file };
+        var writer_open = true;
+        errdefer if (writer_open) writer.close(self.options.io);
+        errdefer std.Io.Dir.deleteFileAbsolute(self.options.io, path) catch {
+            self.options.cleanup_failed.* = true;
+        };
+        var transferred = false;
+        var sealed: ?std.Io.File = null;
+        errdefer if (!transferred) if (sealed) |file| file.close(self.options.io);
+        var sink = ContentSink{ .io = self.options.io, .file = writer };
         try self.readJsonString(&sink);
         if (self.options.fault_content_write) return error.InjectedContentWriteFailure;
         try sink.finish();
-        file.sync(self.options.io) catch return error.ContentSyncFailed;
-        file.close(self.options.io);
+        writer.sync(self.options.io) catch return error.ContentSyncFailed;
         field.length = sink.length;
         field.digest = sink.hash.finalResult();
         if (field.length > max_sqlite_content_bytes) return error.ContentTooLarge;
+        // Downgrade custody at seal: retain a read-only descriptor, close the
+        // sole writer, then unlink the name before admission can observe it.
+        sealed = try std.Io.Dir.openFileAbsolute(self.options.io, path, .{});
+        writer.close(self.options.io);
+        writer_open = false;
+        std.Io.Dir.deleteFileAbsolute(self.options.io, path) catch |err| {
+            self.options.cleanup_failed.* = true;
+            return err;
+        };
+        field.file = sealed.?;
+        transferred = true;
     }
 
     fn readJsonString(self: *Parser, sink: anytype) !void {
@@ -652,8 +662,28 @@ const Utf8State = struct {
     }
 };
 
+pub fn maximumJsonStringBytes(input_bytes: usize) usize {
+    return 2 + 6 * input_bytes;
+}
+
+// The Session inspection is the largest issue-170 response. This bound uses
+// every literal emitted by renderSessionObservation, maximum decimal u64
+// widths, both tools, a present schema, and worst-case JSON escaping.
+pub const max_response_bytes =
+    "{\"version\":\"1\",\"type\":\"session_observation\",\"session\":{\"reference\":".len +
+    maximumJsonStringBytes(max_session_bytes) +
+    ",\"workspace\":".len + maximumJsonStringBytes(max_workspace_bytes) +
+    ",\"model\":".len + maximumJsonStringBytes(max_model_bytes) +
+    ",\"revision\":\"".len + 20 +
+    "\",\"tools\":[\"bash\",\"edit\"],\"permission_mode\":".len + maximumJsonStringBytes(16) +
+    ",\"instructions\":{\"bytes\":\"".len + 20 +
+    "\",\"sha256\":\"".len + 64 +
+    "\"},\"output_schema\":{\"bytes\":\"".len + 20 +
+    "\",\"sha256\":\"".len + 64 +
+    "\"}},\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_171\"}}".len;
+
 pub const ResponseBuffer = struct {
-    bytes: [16 * 1024]u8 = undefined,
+    bytes: [max_response_bytes]u8 = undefined,
     len: usize = 0,
 
     pub fn append(self: *ResponseBuffer, value: []const u8) !void {
@@ -703,13 +733,11 @@ test "semantic digest distinguishes omission, null, and value" {
     try std.testing.expect(!std.mem.eql(u8, &null_schema.semanticDigest(), &value_schema.semanticDigest()));
 }
 
-test "failed temporary cleanup retains its ownership marker" {
+test "captured content cleanup closes sealed custody" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buffer: [max_store_bytes]u8 = undefined;
-    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
-    var content: ContentField = .{ .state = .value };
-    try content.path.set(root_buffer[0..root_length]);
-    try std.testing.expectError(error.IsDir, removeContent(&content, std.testing.io));
-    try std.testing.expect(content.hasFile());
+    const file = try tmp.dir.createFile(std.testing.io, "content", .{ .read = true });
+    var content: ContentField = .{ .state = .value, .file = file };
+    try removeContent(&content, std.testing.io);
+    try std.testing.expect(!content.hasFile());
 }

@@ -60,3 +60,4 @@ zig build measure-admission
 ```
 
 `measure-admission` is an opt-in macOS resource run. Model/provider authentication and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+`check` exercises both the ReleaseSafe production gate and the default Debug artifact shown above; `cross-check` compiles ReleaseSmall deliverables.

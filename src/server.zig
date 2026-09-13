@@ -8,6 +8,12 @@ pub const scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
 pub const max_clients = 128;
 pub const max_ordinary_clients = 120;
 pub const control_headroom = 8;
+// The complete Debug request -> SQLite -> response path exceeds 512 KiB.
+// One MiB is the next fixed tested bound; at 128 clients the maximum virtual
+// stack reservation is therefore 128 MiB, while physical use remains on the
+// production resource-measurement path.
+pub const connection_stack_bytes = 1024 * 1024;
+pub const maximum_connection_stack_reservation_bytes = max_clients * connection_stack_bytes;
 
 pub const Faults = struct {
     content_write: bool = false,
@@ -123,7 +129,7 @@ pub fn serve(
             continue;
         };
         connection.* = .{ .host = &host, .stream = stream };
-        const thread = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, connectionMain, .{connection}) catch {
+        const thread = std.Thread.spawn(.{ .stack_size = connection_stack_bytes }, connectionMain, .{connection}) catch {
             allocator.destroy(connection);
             _ = host.classification_clients.fetchSub(1, .acq_rel);
             host.clientFinished();
@@ -494,12 +500,12 @@ fn renderSessionObservation(
     }
     try response.append("],\"permission_mode\":");
     try response.appendJsonString(observation.permission_mode.slice());
-    try response.appendFmt(",\"instructions\":{{\"bytes\":\"{d}\",\"sha256\":\"", .{observation.instructions_length});
-    try appendHex(response, &observation.instructions_digest);
+    try response.appendFmt(",\"instructions\":{{\"bytes\":\"{d}\",\"sha256\":\"", .{observation.instructions.length});
+    try appendHex(response, &observation.instructions.digest);
     try response.append("\"},\"output_schema\":");
-    if (observation.output_schema_present) {
-        try response.appendFmt("{{\"bytes\":\"{d}\",\"sha256\":\"", .{observation.output_schema_length});
-        try appendHex(response, &observation.output_schema_digest);
+    if (observation.output_schema) |reference| {
+        try response.appendFmt("{{\"bytes\":\"{d}\",\"sha256\":\"", .{reference.length});
+        try appendHex(response, &reference.digest);
         try response.append("\"}");
     } else {
         try response.append("null");
@@ -570,6 +576,28 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
 
 test "connection populations preserve eight control places" {
     try std.testing.expectEqual(max_clients, max_ordinary_clients + control_headroom);
+    try std.testing.expectEqual(@as(usize, 128 * 1024 * 1024), maximum_connection_stack_reservation_bytes);
+}
+
+test "Session observation buffer covers worst-case JSON escaping" {
+    var observation: store_module.SessionObservation = .{ .found = true };
+    try observation.session.set(&([_]u8{0x1f} ** protocol.max_session_bytes));
+    try observation.workspace.set(&([_]u8{0x1f} ** protocol.max_workspace_bytes));
+    try observation.model.set(&([_]u8{0x1f} ** protocol.max_model_bytes));
+    try observation.permission_mode.set("bypass");
+    observation.revision = std.math.maxInt(u64);
+    observation.tools_mask = 3;
+    observation.instructions = .{
+        .length = std.math.maxInt(u64),
+        .digest = [_]u8{0xff} ** 32,
+    };
+    observation.output_schema = .{
+        .length = std.math.maxInt(u64),
+        .digest = [_]u8{0xff} ** 32,
+    };
+    var response: protocol.ResponseBuffer = .{};
+    try renderSessionObservation(&response, observation);
+    try std.testing.expect(response.len <= protocol.max_response_bytes);
 }
 
 fn finishTestClient(host: *Host, release: *std.atomic.Value(bool), completed: *std.atomic.Value(bool)) void {
