@@ -60,7 +60,12 @@ def start_ready_process(args, *, timeout=10, required_fields=None):
                 raise _start_error("Host readiness timed out", process, stdout, stderr_tail)
             for key, _ in selector.select(min(remaining, 0.1)):
                 try:
-                    chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+                    read_limit = (
+                        64 * 1024
+                        if key.data == "stderr"
+                        else READINESS_LIMIT + 1 - len(stdout)
+                    )
+                    chunk = os.read(key.fileobj.fileno(), read_limit)
                 except BlockingIOError:
                     continue
                 if not chunk:

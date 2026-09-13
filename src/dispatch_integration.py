@@ -306,7 +306,7 @@ def start_host(store, endpoint, *extra):
         required_fields=(
             {"execution": "enabled", "curl": "8.22.0"}
             if endpoint is not None
-            else None
+            else {"execution": "unavailable"}
         ),
     )
     return process
