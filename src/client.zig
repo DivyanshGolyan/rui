@@ -35,18 +35,33 @@ pub const MessageInput = struct {
     drop_reply: ?[]const u8 = null,
 };
 
-pub fn configure(io: std.Io, input: ConfigureInput) !u16 {
+pub const ReplyBuffer = protocol.ResponseBuffer;
+
+pub const CommandReply = struct {
+    status: u16,
+    // Borrowed from the caller's ReplyBuffer until that buffer is reused.
+    body: []const u8,
+};
+
+pub const ResultReply = union(enum) {
+    answer: struct { bytes: u64 },
+    command: CommandReply,
+};
+
+pub fn configure(io: std.Io, input: ConfigureInput, reply_buffer: *ReplyBuffer) !CommandReply {
+    reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, input.store);
     try validateIdentityInputs(input.key, input.session);
     try captureConfigure(io, &paths, input);
-    return sendRecord(io, &paths, input.record, "/v1/configure", input.drop_reply);
+    return sendRecord(io, &paths, input.record, "/v1/configure", input.drop_reply, reply_buffer);
 }
 
-pub fn message(io: std.Io, input: MessageInput) !u16 {
+pub fn message(io: std.Io, input: MessageInput, reply_buffer: *ReplyBuffer) !CommandReply {
+    reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, input.store);
     try validateIdentityInputs(input.key, input.session);
     try captureMessage(io, &paths, input);
-    return sendRecord(io, &paths, input.record, "/v1/message", input.drop_reply);
+    return sendRecord(io, &paths, input.record, "/v1/message", input.drop_reply, reply_buffer);
 }
 
 pub fn retry(
@@ -54,7 +69,9 @@ pub fn retry(
     store_path: []const u8,
     record: []const u8,
     kind: []const u8,
-) !u16 {
+    reply_buffer: *ReplyBuffer,
+) !CommandReply {
+    reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, store_path);
     const route = if (std.mem.eql(u8, kind, "configure"))
         "/v1/configure"
@@ -62,10 +79,16 @@ pub fn retry(
         "/v1/message"
     else
         return error.InvalidRetryKind;
-    return sendRecord(io, &paths, record, route, null);
+    return sendRecord(io, &paths, record, route, null, reply_buffer);
 }
 
-pub fn observeCommand(io: std.Io, store_path: []const u8, key: []const u8) !u16 {
+pub fn observeCommand(
+    io: std.Io,
+    store_path: []const u8,
+    key: []const u8,
+    reply_buffer: *ReplyBuffer,
+) !CommandReply {
+    reply_buffer.len = 0;
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     const paths = try platform.resolveClientPaths(io, store_path);
     var body: protocol.ResponseBuffer = .{};
@@ -74,10 +97,17 @@ pub fn observeCommand(io: std.Io, store_path: []const u8, key: []const u8) !u16 
     try body.append(",\"key\":");
     try body.appendJsonString(key);
     try body.append("}");
-    return sendBytes(io, &paths, "/v1/observe-command", body.slice(), null);
+    return sendBytes(io, &paths, "/v1/observe-command", body.slice(), null, reply_buffer);
 }
 
-pub fn readResult(io: std.Io, store_path: []const u8, key: []const u8) !u16 {
+pub fn readResult(
+    io: std.Io,
+    store_path: []const u8,
+    key: []const u8,
+    destination: std.Io.File,
+    reply_buffer: *ReplyBuffer,
+) !ResultReply {
+    reply_buffer.len = 0;
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     const paths = try platform.resolveClientPaths(io, store_path);
     var body: protocol.ResponseBuffer = .{};
@@ -94,10 +124,16 @@ pub fn readResult(io: std.Io, store_path: []const u8, key: []const u8) !u16 {
     const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/read-result HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Latifa-Wire-Version: 1\r\n\r\n", .{body.len});
     try writeAll(fd, header);
     try writeAll(fd, body.slice());
-    return readStreamingResponse(io, fd);
+    return readResultResponse(io, fd, destination, reply_buffer);
 }
 
-pub fn inspectSession(io: std.Io, store_path: []const u8, session: []const u8) !u16 {
+pub fn inspectSession(
+    io: std.Io,
+    store_path: []const u8,
+    session: []const u8,
+    reply_buffer: *ReplyBuffer,
+) !CommandReply {
+    reply_buffer.len = 0;
     if (session.len == 0 or session.len > protocol.max_session_bytes or
         !std.unicode.utf8ValidateSlice(session)) return error.InvalidSession;
     const paths = try platform.resolveClientPaths(io, store_path);
@@ -107,7 +143,7 @@ pub fn inspectSession(io: std.Io, store_path: []const u8, session: []const u8) !
     try body.append(",\"session\":");
     try body.appendJsonString(session);
     try body.append("}");
-    return sendBytes(io, &paths, "/v1/inspect-session", body.slice(), null);
+    return sendBytes(io, &paths, "/v1/inspect-session", body.slice(), null, reply_buffer);
 }
 
 fn validateIdentityInputs(key: []const u8, session: []const u8) !void {
@@ -369,11 +405,12 @@ fn sendRecord(
     record: []const u8,
     route: []const u8,
     drop_reply: ?[]const u8,
-) !u16 {
+    reply_buffer: *ReplyBuffer,
+) !CommandReply {
     var file = try std.Io.Dir.cwd().openFile(io, record, .{});
     defer file.close(io);
     const length = try file.length(io);
-    return sendSource(io, paths, route, length, &file, null, drop_reply);
+    return sendSource(io, paths, route, length, &file, null, drop_reply, reply_buffer);
 }
 
 fn sendBytes(
@@ -382,8 +419,9 @@ fn sendBytes(
     route: []const u8,
     body: []const u8,
     drop_reply: ?[]const u8,
-) !u16 {
-    return sendSource(io, paths, route, body.len, null, body, drop_reply);
+    reply_buffer: *ReplyBuffer,
+) !CommandReply {
+    return sendSource(io, paths, route, body.len, null, body, drop_reply, reply_buffer);
 }
 
 fn sendSource(
@@ -394,7 +432,8 @@ fn sendSource(
     file: ?*std.Io.File,
     bytes: ?[]const u8,
     drop_reply: ?[]const u8,
-) !u16 {
+    reply_buffer: *ReplyBuffer,
+) !CommandReply {
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
     const stream = try address.connect(io);
     defer stream.close(io);
@@ -416,14 +455,22 @@ fn sendSource(
             sent += count;
         }
     } else try writeAll(fd, bytes.?);
-    return readResponse(io, fd);
+    return readCommandResponse(fd, reply_buffer);
 }
 
-fn readResponse(io: std.Io, fd: std.posix.fd_t) !u16 {
-    return readResponseWithInactivity(io, fd, 60_000);
+const ResponseKind = enum { command_json, result_text };
+
+const ResponseHead = struct {
+    status: u16,
+    content_length: u64,
+    kind: ResponseKind,
+};
+
+fn readResponseHead(fd: std.posix.fd_t) !ResponseHead {
+    return readResponseHeadWithInactivity(fd, 60_000);
 }
 
-fn readResponseWithInactivity(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32) !u16 {
+fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !ResponseHead {
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
     const first_count = try std.posix.read(fd, header_buffer[0..1]);
     if (first_count == 0) return error.TruncatedResponse;
@@ -440,52 +487,9 @@ fn readResponseWithInactivity(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32
     var parts = std.mem.splitScalar(u8, status_line, ' ');
     if (!std.mem.eql(u8, parts.next() orelse return error.InvalidResponse, "HTTP/1.1")) return error.InvalidResponse;
     const status = try std.fmt.parseInt(u16, parts.next() orelse return error.InvalidResponse, 10);
-    var length: ?usize = null;
-    var wire_ok = false;
-    while (lines.next()) |line| {
-        if (line.len == 0) break;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidResponse;
-        const name = std.mem.trim(u8, line[0..colon], " \t");
-        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
-            if (length != null) return error.InvalidResponse;
-            length = try std.fmt.parseInt(usize, value, 10);
-        } else if (std.ascii.eqlIgnoreCase(name, "X-Latifa-Wire-Version")) {
-            wire_ok = std.mem.eql(u8, value, protocol.wire_version);
-        }
-    }
-    if (!wire_ok) return error.WrongWireVersion;
-    const body_length = length orelse return error.InvalidResponse;
-    if (body_length > protocol.max_response_bytes) return error.ResponseTooLarge;
-    var body: [protocol.max_response_bytes]u8 = undefined;
-    var offset: usize = 0;
-    while (offset < body_length) {
-        if (!try waitReadable(fd, inactivity_ms)) return error.ResponseInactive;
-        const count = try std.posix.read(fd, body[offset..body_length]);
-        if (count == 0) return error.TruncatedResponse;
-        offset += count;
-    }
-    try std.Io.File.stdout().writeStreamingAll(io, body[0..body_length]);
-    try std.Io.File.stdout().writeStreamingAll(io, "\n");
-    return status;
-}
-
-fn readStreamingResponse(io: std.Io, fd: std.posix.fd_t) !u16 {
-    var header_buffer: [protocol.max_header_bytes]u8 = undefined;
-    var used: usize = 0;
-    while (used < header_buffer.len) {
-        if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
-        const count = try std.posix.read(fd, header_buffer[used .. used + 1]);
-        if (count == 0) return error.TruncatedResponse;
-        used += count;
-        if (used >= 4 and std.mem.eql(u8, header_buffer[used - 4 .. used], "\r\n\r\n")) break;
-    } else return error.ResponseHeaderTooLarge;
-    var lines = std.mem.splitSequence(u8, header_buffer[0..used], "\r\n");
-    var parts = std.mem.splitScalar(u8, lines.next() orelse return error.InvalidResponse, ' ');
-    if (!std.mem.eql(u8, parts.next() orelse return error.InvalidResponse, "HTTP/1.1")) return error.InvalidResponse;
-    const status = try std.fmt.parseInt(u16, parts.next() orelse return error.InvalidResponse, 10);
     var length: ?u64 = null;
     var wire_ok = false;
+    var kind: ?ResponseKind = null;
     while (lines.next()) |line| {
         if (line.len == 0) break;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidResponse;
@@ -496,20 +500,71 @@ fn readStreamingResponse(io: std.Io, fd: std.posix.fd_t) !u16 {
             length = try std.fmt.parseInt(u64, value, 10);
         } else if (std.ascii.eqlIgnoreCase(name, "X-Latifa-Wire-Version")) {
             wire_ok = std.mem.eql(u8, value, protocol.wire_version);
+        } else if (std.ascii.eqlIgnoreCase(name, "Content-Type")) {
+            if (kind != null) return error.InvalidResponse;
+            kind = if (std.ascii.eqlIgnoreCase(value, "application/json"))
+                .command_json
+            else if (std.ascii.eqlIgnoreCase(value, "text/plain; charset=utf-8"))
+                .result_text
+            else
+                return error.InvalidResponse;
         }
     }
     if (!wire_ok) return error.WrongWireVersion;
-    var remaining = length orelse return error.InvalidResponse;
+    return .{
+        .status = status,
+        .content_length = length orelse return error.InvalidResponse,
+        .kind = kind orelse return error.InvalidResponse,
+    };
+}
+
+fn readCommandResponse(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer) !CommandReply {
+    reply_buffer.len = 0;
+    const head = try readResponseHead(fd);
+    if (head.kind != .command_json) return error.InvalidResponse;
+    return readCommandBody(fd, head, reply_buffer);
+}
+
+fn readResultResponse(
+    io: std.Io,
+    fd: std.posix.fd_t,
+    destination: std.Io.File,
+    reply_buffer: *ReplyBuffer,
+) !ResultReply {
+    reply_buffer.len = 0;
+    const head = try readResponseHead(fd);
+    if (head.status != 200) {
+        if (head.kind != .command_json) return error.InvalidResponse;
+        return .{ .command = try readCommandBody(fd, head, reply_buffer) };
+    }
+    if (head.kind != .result_text) return error.InvalidResponse;
+    var remaining = head.content_length;
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     while (remaining != 0) {
         if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
         const wanted: usize = @intCast(@min(remaining, buffer.len));
         const count = try std.posix.read(fd, buffer[0..wanted]);
         if (count == 0) return error.TruncatedResponse;
-        try std.Io.File.stdout().writeStreamingAll(io, buffer[0..count]);
+        try destination.writeStreamingAll(io, buffer[0..count]);
         remaining -= count;
     }
-    return status;
+    return .{ .answer = .{ .bytes = head.content_length } };
+}
+
+fn readCommandBody(fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer) !CommandReply {
+    reply_buffer.len = 0;
+    errdefer reply_buffer.len = 0;
+    if (head.content_length > protocol.max_response_bytes) return error.ResponseTooLarge;
+    const body_length: usize = @intCast(head.content_length);
+    var offset: usize = 0;
+    while (offset < body_length) {
+        if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
+        const count = try std.posix.read(fd, reply_buffer.bytes[offset..body_length]);
+        if (count == 0) return error.TruncatedResponse;
+        offset += count;
+    }
+    reply_buffer.len = body_length;
+    return .{ .status = head.status, .body = reply_buffer.slice() };
 }
 
 fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) !bool {
@@ -570,9 +625,6 @@ fn responseTestOperate(userdata: ?*anyopaque, operation: std.Io.Operation) std.I
 }
 
 test "Host processing wait does not consume response transfer inactivity" {
-    var vtable = std.testing.io.vtable.*;
-    vtable.operate = responseTestOperate;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     const sockets = try socketPair();
     defer std.debug.assert(std.c.close(sockets[0]) == 0);
     const writer = try std.Thread.spawn(.{}, delayedResponse, .{
@@ -582,13 +634,12 @@ test "Host processing wait does not consume response transfer inactivity" {
         empty_test_response,
     });
     defer writer.join();
-    try std.testing.expectEqual(@as(u16, 200), try readResponse(io, sockets[0]));
+    var buffer: ReplyBuffer = .{};
+    const reply = try readCommandResponse(sockets[0], &buffer);
+    try std.testing.expectEqual(@as(u16, 200), reply.status);
 }
 
 test "response transfer inactivity begins after the first byte" {
-    var vtable = std.testing.io.vtable.*;
-    vtable.operate = responseTestOperate;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     const sockets = try socketPair();
     defer std.debug.assert(std.c.close(sockets[0]) == 0);
     const writer = try std.Thread.spawn(.{}, delayedResponse, .{
@@ -601,29 +652,27 @@ test "response transfer inactivity begins after the first byte" {
     try writeAll(sockets[1], empty_test_response[0..1]);
     try std.testing.expectError(
         error.ResponseInactive,
-        readResponseWithInactivity(io, sockets[0], 10),
+        readResponseHeadWithInactivity(sockets[0], 10),
     );
 }
 
 test "response closure and truncation stay explicit" {
-    var vtable = std.testing.io.vtable.*;
-    vtable.operate = responseTestOperate;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     {
         const sockets = try socketPair();
-        defer std.debug.assert(std.c.close(sockets[0]) == 0);
-        std.debug.assert(std.c.close(sockets[1]) == 0);
-        try std.testing.expectError(error.TruncatedResponse, readResponse(io, sockets[0]));
+        defer std.posix.close(sockets[0]);
+        std.posix.close(sockets[1]);
+        try std.testing.expectError(error.TruncatedResponse, readResponseHead(sockets[0]));
     }
     {
         const sockets = try socketPair();
         defer std.debug.assert(std.c.close(sockets[0]) == 0);
         try writeAll(
             sockets[1],
-            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Latifa-Wire-Version: 1\r\n\r\nx",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Latifa-Wire-Version: 1\r\n\r\nx",
         );
-        std.debug.assert(std.c.close(sockets[1]) == 0);
-        try std.testing.expectError(error.TruncatedResponse, readResponse(io, sockets[0]));
+        std.posix.close(sockets[1]);
+        var buffer: ReplyBuffer = .{};
+        try std.testing.expectError(error.TruncatedResponse, readCommandResponse(sockets[0], &buffer));
     }
 }
 
@@ -811,4 +860,177 @@ test "stdin capture uses the same decoded bound before publication" {
             try std.testing.expectEqualStrings("\"a\\nb\"", bytes[0..count]);
         }
     }
+}
+fn testPipe() ![2]std.posix.fd_t {
+    var descriptors: [2]std.posix.fd_t = undefined;
+    if (std.c.pipe(&descriptors) != 0) return error.TestPipeFailed;
+    return descriptors;
+}
+
+fn closeTestDescriptor(fd: std.posix.fd_t) void {
+    _ = std.c.close(fd);
+}
+
+fn writeTestResponse(fd: std.posix.fd_t, response: []const u8) !void {
+    defer closeTestDescriptor(fd);
+    try writeAll(fd, response);
+}
+
+test "command reply borrows the caller buffer" {
+    const descriptors = try testPipe();
+    defer closeTestDescriptor(descriptors[0]);
+    try writeTestResponse(
+        descriptors[1],
+        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Latifa-Wire-Version: 1\r\n\r\n{\"status\":\"error\"}",
+    );
+    var buffer: ReplyBuffer = .{};
+    const reply = try readCommandResponse(descriptors[0], &buffer);
+    try std.testing.expectEqual(@as(u16, 409), reply.status);
+    try std.testing.expectEqualStrings("{\"status\":\"error\"}", reply.body);
+    try std.testing.expectEqual(@intFromPtr(buffer.bytes[0..].ptr), @intFromPtr(reply.body.ptr));
+}
+
+test "response parsing rejects truncated head and command body" {
+    {
+        const descriptors = try testPipe();
+        defer closeTestDescriptor(descriptors[0]);
+        try writeTestResponse(descriptors[1], "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n");
+        var buffer: ReplyBuffer = .{};
+        try std.testing.expectError(error.TruncatedResponse, readCommandResponse(descriptors[0], &buffer));
+    }
+    {
+        const descriptors = try testPipe();
+        defer closeTestDescriptor(descriptors[0]);
+        try writeTestResponse(
+            descriptors[1],
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4\r\nX-Latifa-Wire-Version: 1\r\n\r\n{}",
+        );
+        var buffer: ReplyBuffer = .{};
+        try std.testing.expectError(error.TruncatedResponse, readCommandResponse(descriptors[0], &buffer));
+        try std.testing.expectEqual(@as(usize, 0), buffer.len);
+    }
+}
+
+const LargeResponseContext = struct {
+    fd: std.posix.fd_t,
+    length: u64,
+    failure: ?anyerror = null,
+};
+
+fn testPattern(buffer: []u8, offset: u64) void {
+    for (buffer, 0..) |*byte, index| byte.* = @intCast((offset + index) % 251);
+}
+
+fn writeLargeTestResponse(context: *LargeResponseContext) void {
+    defer closeTestDescriptor(context.fd);
+    var header_buffer: [256]u8 = undefined;
+    const header = std.fmt.bufPrint(
+        &header_buffer,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nX-Latifa-Wire-Version: 1\r\n\r\n",
+        .{context.length},
+    ) catch |err| {
+        context.failure = err;
+        return;
+    };
+    writeAll(context.fd, header) catch |err| {
+        context.failure = err;
+        return;
+    };
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < context.length) {
+        const count: usize = @intCast(@min(context.length - offset, buffer.len));
+        testPattern(buffer[0..count], offset);
+        writeAll(context.fd, buffer[0..count]) catch |err| {
+            context.failure = err;
+            return;
+        };
+        offset += count;
+    }
+}
+
+test "result response streams eight MiB into an explicit file" {
+    const result_bytes = 8 * 1024 * 1024;
+    const descriptors = try testPipe();
+    var context = LargeResponseContext{ .fd = descriptors[1], .length = result_bytes };
+    const writer = try std.Thread.spawn(.{}, writeLargeTestResponse, .{&context});
+    var writer_joined = false;
+    defer {
+        closeTestDescriptor(descriptors[0]);
+        if (!writer_joined) writer.join();
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destination = try tmp.dir.createFile(std.testing.io, "answer", .{ .read = true });
+    defer destination.close(std.testing.io);
+    var reply_buffer: ReplyBuffer = .{};
+    const reply = try readResultResponse(std.testing.io, descriptors[0], destination, &reply_buffer);
+    writer.join();
+    writer_joined = true;
+    switch (reply) {
+        .answer => |answer| try std.testing.expectEqual(@as(u64, result_bytes), answer.bytes),
+        .command => return error.ExpectedAnswer,
+    }
+    try std.testing.expectEqual(@as(usize, 0), reply_buffer.len);
+    try std.testing.expectEqual(@as(u64, result_bytes), try destination.length(std.testing.io));
+
+    var expected_hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var actual_hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var expected_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var actual_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < result_bytes) {
+        const count: usize = @intCast(@min(result_bytes - offset, expected_buffer.len));
+        testPattern(expected_buffer[0..count], offset);
+        expected_hash.update(expected_buffer[0..count]);
+        const actual = try destination.readPositionalAll(std.testing.io, actual_buffer[0..count], offset);
+        try std.testing.expectEqual(count, actual);
+        actual_hash.update(actual_buffer[0..actual]);
+        offset += count;
+    }
+    try std.testing.expectEqual(expected_hash.finalResult(), actual_hash.finalResult());
+    try std.testing.expect(context.failure == null);
+}
+
+test "read result returns bounded command errors without touching destination" {
+    const descriptors = try testPipe();
+    defer closeTestDescriptor(descriptors[0]);
+    try writeTestResponse(
+        descriptors[1],
+        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Latifa-Wire-Version: 1\r\n\r\n{\"status\":\"error\"}",
+    );
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destination = try tmp.dir.createFile(std.testing.io, "answer", .{ .read = true });
+    defer destination.close(std.testing.io);
+    var buffer: ReplyBuffer = .{};
+    const reply = try readResultResponse(std.testing.io, descriptors[0], destination, &buffer);
+    switch (reply) {
+        .answer => return error.ExpectedCommandReply,
+        .command => |command| {
+            try std.testing.expectEqual(@as(u16, 409), command.status);
+            try std.testing.expectEqualStrings("{\"status\":\"error\"}", command.body);
+        },
+    }
+    try std.testing.expectEqual(@as(u64, 0), try destination.length(std.testing.io));
+}
+
+test "truncated result body leaves only an unsuccessful destination prefix" {
+    const descriptors = try testPipe();
+    defer closeTestDescriptor(descriptors[0]);
+    try writeTestResponse(
+        descriptors[1],
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 4\r\nX-Latifa-Wire-Version: 1\r\n\r\nab",
+    );
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destination = try tmp.dir.createFile(std.testing.io, "answer", .{ .read = true });
+    defer destination.close(std.testing.io);
+    var buffer: ReplyBuffer = .{};
+    try std.testing.expectError(
+        error.TruncatedResponse,
+        readResultResponse(std.testing.io, descriptors[0], destination, &buffer),
+    );
+    try std.testing.expectEqual(@as(u64, 2), try destination.length(std.testing.io));
 }

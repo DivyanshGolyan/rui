@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import http.server
+import hashlib
 import json
 import os
 import pathlib
@@ -1539,7 +1540,48 @@ def main():
             timeout=20,
         )
         assert read_result(growth_store, "growth-count") == b"count answer"
-        assert read_result(growth_store, "growth-bytes") == large_answer.encode()
+        # A failed caller destination may retain a prefix, but it cannot make
+        # the read successful or consume the saved keyed answer. A fresh read
+        # streams the complete bytes again without inventing a newline.
+        read_fd, write_fd = os.pipe()
+        failed_destination = subprocess.Popen(
+            [
+                str(LATIFA),
+                "read-result",
+                "--store",
+                str(growth_store),
+                "--key",
+                "growth-bytes",
+            ],
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+        )
+        os.close(write_fd)
+        prefix = os.read(read_fd, 4096)
+        os.close(read_fd)
+        _, failure_stderr = failed_destination.communicate(timeout=15)
+        assert failed_destination.returncode != 0, failure_stderr
+        assert 0 < len(prefix) < len(large_answer), len(prefix)
+        complete_path = state / "growth-answer.bin"
+        with complete_path.open("wb") as complete_destination:
+            completed_read = subprocess.run(
+                [
+                    str(LATIFA),
+                    "read-result",
+                    "--store",
+                    str(growth_store),
+                    "--key",
+                    "growth-bytes",
+                ],
+                stdout=complete_destination,
+                stderr=subprocess.PIPE,
+                timeout=15,
+            )
+        assert completed_read.returncode == 0, completed_read.stderr
+        assert complete_path.stat().st_size == len(large_answer)
+        with complete_path.open("rb") as complete_source:
+            actual_digest = hashlib.file_digest(complete_source, "sha256").digest()
+        assert actual_digest == hashlib.sha256(large_answer.encode()).digest()
         database = sqlite3.connect(growth_store / "latifa.sqlite3")
         assert database.execute(
             "SELECT count(*) FROM model_output_item WHERE operation_id=1"

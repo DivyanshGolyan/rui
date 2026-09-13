@@ -7,4 +7,5 @@ test {
     _ = @import("execution.zig");
     _ = @import("provider.zig");
     _ = @import("provider_output.zig");
+    _ = @import("client.zig");
 }
