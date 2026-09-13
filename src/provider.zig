@@ -14,7 +14,6 @@ pub const curl_version = "8.22.0";
 pub const openssl_version = "OpenSSL/3.6.3";
 pub const request_scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
 pub const max_endpoint_bytes = 2048;
-const per_input_framing_charge: u64 = 128;
 
 pub const PreparationFaults = struct {
     first_step: bool = false,
@@ -89,13 +88,29 @@ pub const RetainedScratch = struct {
 const RequestWriter = struct {
     io: std.Io,
     file: std.Io.File,
+    budget: ScratchBudget,
     offset: u64 = 0,
+    charged: u64 = 0,
     fail_write: bool,
 
     pub fn write(self: *RequestWriter, bytes: []const u8) !void {
-        if (self.fail_write) return error.InjectedRequestWriteFailure;
+        const next_offset = std.math.add(u64, self.offset, bytes.len) catch
+            return error.RequestLengthOverflow;
+        const next_charged = std.math.add(u64, self.charged, bytes.len) catch
+            return error.RequestLengthOverflow;
+        if (!self.budget.reserve(bytes.len)) return error.RequestScratchExhausted;
+        // The complete slice is charged before the OS write. A partial/error
+        // write retains that full reservation until both file aliases close.
+        self.charged = next_charged;
+        if (self.fail_write and self.offset != 0) return error.InjectedRequestWriteFailure;
         try self.file.writeStreamingAll(self.io, bytes);
-        self.offset = try std.math.add(u64, self.offset, bytes.len);
+        self.offset = next_offset;
+    }
+
+    fn deinit(self: *RequestWriter) void {
+        self.file.close(self.io);
+        self.budget.release(self.charged);
+        self.* = undefined;
     }
 
     fn jsonString(self: *RequestWriter, value: []const u8) !void {
@@ -172,22 +187,6 @@ pub fn materialize(
     retained.* = null;
     if (faults.first_step) return error.InjectedFirstPreparationFailure;
     const settings = try view.settings();
-    var maximum: u64 = 1024;
-    maximum = try addEscapedMaximum(maximum, settings.model.len);
-    if (settings.output_schema) |schema| maximum = try std.math.add(u64, maximum, schema.length);
-    maximum = try addEscapedMaximum(maximum, settings.baseline_instructions.length);
-    var after_position: u64 = 0;
-    while (try view.nextEntry(after_position)) |entry| {
-        maximum = if (entry.kind == .provider_output)
-            try std.math.add(u64, maximum, entry.content.length)
-        else
-            try addEscapedMaximum(maximum, entry.content.length);
-        maximum = try std.math.add(u64, maximum, per_input_framing_charge);
-        after_position = entry.position;
-    }
-    if (!budget.reserve(maximum)) return error.RequestScratchExhausted;
-    var budget_owned = true;
-    errdefer if (budget_owned) budget.release(maximum);
 
     var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
     defer scratch.close(io);
@@ -196,68 +195,61 @@ pub fn materialize(
         view.binding.operation_id,
         view.binding.attempt_ordinal,
     });
-    const file = try scratch.createFile(io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-    var file_owned = true;
-    errdefer if (file_owned) file.close(io);
+    const file = try scratch.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    const readonly = scratch.openFile(io, name, .{}) catch |err| {
+        retained.* = retainedNamedScratch(io, file, null, scratch_path, name, budget, 0);
+        return err;
+    };
     if (faults.unlink) {
-        var owned = RetainedScratch{
-            .io = io,
-            .file = file,
-            .scratch_path = .{},
-            .name = .{},
-            .charged = maximum,
-            .budget = budget,
-        };
-        owned.scratch_path.set(scratch_path) catch unreachable;
-        owned.name.set(name) catch unreachable;
-        retained.* = owned;
-        file_owned = false;
-        budget_owned = false;
+        retained.* = retainedNamedScratch(io, file, readonly, scratch_path, name, budget, 0);
         return error.InjectedRequestUnlinkFailure;
     }
     scratch.deleteFile(io, name) catch |err| {
-        var owned = RetainedScratch{
-            .io = io,
-            .file = file,
-            .scratch_path = .{},
-            .name = .{},
-            .charged = maximum,
-            .budget = budget,
-        };
-        owned.scratch_path.set(scratch_path) catch unreachable;
-        owned.name.set(name) catch unreachable;
-        retained.* = owned;
-        file_owned = false;
-        budget_owned = false;
+        retained.* = retainedNamedScratch(io, file, readonly, scratch_path, name, budget, 0);
         return err;
     };
 
-    var writer = RequestWriter{ .io = io, .file = file, .fail_write = faults.write };
+    var writer = RequestWriter{
+        .io = io,
+        .file = file,
+        .budget = budget,
+        .fail_write = faults.write,
+    };
+    var writer_owned = true;
+    errdefer if (writer_owned) writer.deinit();
+    // Error defers run in reverse order: close the read alias before the
+    // writer owner releases any charged growth.
+    var readonly_owned = true;
+    errdefer if (readonly_owned) readonly.close(io);
     try writer.write("{\"model\":");
     try writer.jsonString(settings.model.slice());
     try writer.write(",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[");
     var input_comma = false;
     try writer.write("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
-    var baseline = try view.openContent(settings.baseline_instructions);
-    try writer.jsonContent(&baseline);
-    baseline.close();
+    {
+        var baseline = try view.openContent(settings.baseline_instructions);
+        defer baseline.close();
+        try writer.jsonContent(&baseline);
+    }
     try writer.write("}]}");
     input_comma = true;
-    after_position = 0;
+    var after_position: u64 = 0;
     while (try view.nextEntry(after_position)) |entry| {
         if (input_comma) try writer.write(",");
-        var content = try view.openContent(entry.content);
-        if (entry.kind == .provider_output) {
-            try provider_output.writeReplayItem(&content, &writer);
-        } else {
-            try writer.write(if (entry.kind == .user)
-                "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":"
-            else
-                "{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
-            try writer.jsonContent(&content);
-            try writer.write("}]}");
+        {
+            var content = try view.openContent(entry.content);
+            defer content.close();
+            if (entry.kind == .provider_output) {
+                try provider_output.writeReplayItem(&content, &writer);
+            } else {
+                try writer.write(if (entry.kind == .user)
+                    "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":"
+                else
+                    "{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
+                try writer.jsonContent(&content);
+                try writer.write("}]}");
+            }
         }
-        content.close();
         input_comma = true;
         after_position = entry.position;
     }
@@ -274,30 +266,28 @@ pub fn materialize(
     try writer.write("]");
     if (settings.output_schema) |schema_reference| {
         try writer.write(",\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"latifa_output\",\"strict\":true,\"schema\":");
-        var schema = try view.openContent(schema_reference);
-        try writer.rawContent(&schema);
-        schema.close();
+        {
+            var schema = try view.openContent(schema_reference);
+            defer schema.close();
+            try writer.rawContent(&schema);
+        }
         try writer.write("}}");
     }
     try writer.write("}");
     if (faults.seal) return error.InjectedRequestSealFailure;
-    try file.sync(io);
-    if (try file.length(io) != writer.offset) return error.RequestSealFailed;
-    if (writer.offset > maximum) return error.RequestScratchAccountingFailure;
-    file_owned = false;
-    budget_owned = false;
+    try writer.file.sync(io);
+    if (try readonly.length(io) != writer.offset) return error.RequestSealFailed;
+    writer.file.close(io);
+    writer_owned = false;
+    readonly_owned = false;
     return .{
         .io = io,
-        .file = file,
+        .file = readonly,
         .length = writer.offset,
-        .charged = maximum,
+        .charged = writer.charged,
         .budget = budget,
         .structured_output = settings.output_schema != null,
     };
-}
-
-fn addEscapedMaximum(current: u64, bytes: u64) !u64 {
-    return std.math.add(u64, current, try std.math.mul(u64, bytes, 6));
 }
 
 pub const TransportDisposition = enum {
@@ -882,6 +872,40 @@ test "scratch reservation is bounded and releases exact charge" {
     try std.testing.expect(budget.reserve(7));
     try std.testing.expect(!budget.reserve(4));
     budget.release(7);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "request writer charges exact growth and seals through a readonly descriptor" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 7 };
+    const file = try tmp.dir.createFile(std.testing.io, "request", .{ .exclusive = true });
+    const readonly = try tmp.dir.openFile(std.testing.io, "request", .{});
+    try tmp.dir.deleteFile(std.testing.io, "request");
+    var writer = RequestWriter{
+        .io = std.testing.io,
+        .file = file,
+        .budget = budget,
+        .fail_write = true,
+    };
+    var writer_owned = true;
+    defer if (writer_owned) writer.deinit();
+    var readonly_owned = true;
+    defer if (readonly_owned) readonly.close(std.testing.io);
+    try writer.write("abc");
+    try std.testing.expectError(error.InjectedRequestWriteFailure, writer.write("defg"));
+    try std.testing.expectEqual(@as(u64, 3), writer.offset);
+    try std.testing.expectEqual(@as(u64, 7), writer.charged);
+    try std.testing.expectEqual(@as(u64, 7), used.load(.acquire));
+    try writer.file.sync(std.testing.io);
+    try std.testing.expectEqual(@as(u64, 3), try readonly.length(std.testing.io));
+    try std.testing.expectError(error.NotOpenForWriting, readonly.writeStreamingAll(std.testing.io, "x"));
+    readonly.close(std.testing.io);
+    readonly_owned = false;
+    writer.deinit();
+    writer_owned = false;
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
