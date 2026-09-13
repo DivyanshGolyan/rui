@@ -25,6 +25,7 @@ pub const PreparationFaults = struct {
 
 pub const TransportOptions = struct {
     inactivity_seconds: i64 = 5 * 60,
+    request_read_fault: bool = false,
     response_acquire_fault: bool = false,
     response_unlink_fault: bool = false,
     response_write_fault: bool = false,
@@ -294,10 +295,20 @@ pub fn materialize(
     };
 }
 
-pub const TransportClass = enum { success, permanent_http, temporary_http, transport_failure };
+pub const TransportDisposition = enum {
+    success,
+    permanent_http,
+    temporary_http,
+    temporary_connection,
+    permanent_transport,
+    authentication_failure,
+    tls_verification_failure,
+    invalid_headers,
+    request_read_failure,
+};
 
 pub const TransportEvidence = struct {
-    class: TransportClass,
+    disposition: TransportDisposition,
     http_status: u16 = 0,
     response_bytes: u64 = 0,
     retry_after_ms: ?u64 = null,
@@ -381,6 +392,7 @@ const ReadContext = struct {
     file: std.Io.File,
     offset: u64 = 0,
     length: u64,
+    fail: bool = false,
     failed: bool = false,
 };
 
@@ -513,6 +525,7 @@ const TimeoutContext = struct {
     last_download: c.curl_off_t = 0,
     last_progress: std.Io.Clock.Timestamp = undefined,
     armed: bool = false,
+    expired: bool = false,
 };
 
 pub const Transfer = struct {
@@ -570,7 +583,12 @@ pub const Transfer = struct {
             .easy = easy,
             .headers = headers,
             .request = request,
-            .read_context = .{ .io = request.io, .file = request.file, .length = request.length },
+            .read_context = .{
+                .io = request.io,
+                .file = request.file,
+                .length = request.length,
+                .fail = options.request_read_fault,
+            },
             .response = response,
             .binding = binding,
             .timeout_context = .{
@@ -607,13 +625,19 @@ pub const Transfer = struct {
     }
 
     pub fn evidence(self: *Transfer, result: c.CURLcode) !TransportEvidence {
-        if (result != c.CURLE_OK or self.read_context.failed or self.header_context.invalid) {
-            return .{
-                .class = .transport_failure,
-                .response_bytes = self.response.length,
-                .retry_after_ms = self.header_context.retry_after_ms,
-            };
-        }
+        const disposition: TransportDisposition = if (self.read_context.failed)
+            .request_read_failure
+        else if (self.header_context.invalid)
+            .invalid_headers
+        else if (result != c.CURLE_OK)
+            curlFailureDisposition(result, self.timeout_context.expired)
+        else
+            .success;
+        if (disposition != .success) return .{
+            .disposition = disposition,
+            .response_bytes = self.response.length,
+            .retry_after_ms = self.header_context.retry_after_ms,
+        };
         var response_code: c_long = 0;
         if (c.curl_easy_getinfo(self.easy, c.CURLINFO_RESPONSE_CODE, &response_code) != c.CURLE_OK or
             response_code < 100 or response_code > 599)
@@ -621,16 +645,14 @@ pub const Transfer = struct {
             return error.InvalidHttpEvidence;
         }
         const status: u16 = @intCast(response_code);
-        const class: TransportClass = if (status >= 200 and status < 300)
+        const http_disposition: TransportDisposition = if (status >= 200 and status < 300)
             .success
         else if (status == 408 or status == 429 or status >= 500)
             .temporary_http
-        else if (status >= 400)
-            .permanent_http
         else
-            .transport_failure;
+            .permanent_http;
         return .{
-            .class = class,
+            .disposition = http_disposition,
             .http_status = status,
             .response_bytes = self.response.length,
             .retry_after_ms = self.header_context.retry_after_ms,
@@ -640,6 +662,7 @@ pub const Transfer = struct {
     fn armTimeout(self: *Transfer) void {
         self.timeout_context.last_progress = std.Io.Clock.Timestamp.now(self.timeout_context.io, .awake);
         self.timeout_context.armed = true;
+        self.timeout_context.expired = false;
     }
 
     pub fn deinit(self: *Transfer) void {
@@ -699,6 +722,10 @@ pub fn launch(
 
 fn readCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopaque) callconv(.c) usize {
     const context: *ReadContext = @ptrCast(@alignCast(context_pointer orelse return c.CURL_READFUNC_ABORT));
+    if (context.fail) {
+        context.failed = true;
+        return c.CURL_READFUNC_ABORT;
+    }
     const capacity = std.math.mul(usize, size, count) catch return c.CURL_READFUNC_ABORT;
     const remaining = context.length - context.offset;
     const wanted: usize = @intCast(@min(remaining, capacity));
@@ -730,7 +757,34 @@ fn xferInfoCallback(
         context.last_progress = now;
         return 0;
     }
-    return if (context.last_progress.durationTo(now).raw.nanoseconds >= context.inactivity_ns) 1 else 0;
+    if (context.last_progress.durationTo(now).raw.nanoseconds >= context.inactivity_ns) {
+        context.expired = true;
+        return 1;
+    }
+    return 0;
+}
+
+fn curlFailureDisposition(result: c.CURLcode, inactivity_expired: bool) TransportDisposition {
+    if (inactivity_expired and result == c.CURLE_ABORTED_BY_CALLBACK) return .temporary_connection;
+    return switch (result) {
+        c.CURLE_COULDNT_RESOLVE_PROXY,
+        c.CURLE_COULDNT_RESOLVE_HOST,
+        c.CURLE_COULDNT_CONNECT,
+        c.CURLE_SEND_ERROR,
+        c.CURLE_RECV_ERROR,
+        c.CURLE_GOT_NOTHING,
+        c.CURLE_PARTIAL_FILE,
+        c.CURLE_OPERATION_TIMEDOUT,
+        c.CURLE_HTTP2,
+        c.CURLE_HTTP2_STREAM,
+        c.CURLE_HTTP3,
+        c.CURLE_QUIC_CONNECT_ERROR,
+        c.CURLE_SSL_CONNECT_ERROR,
+        => .temporary_connection,
+        c.CURLE_LOGIN_DENIED => .authentication_failure,
+        c.CURLE_PEER_FAILED_VERIFICATION => .tls_verification_failure,
+        else => .permanent_transport,
+    };
 }
 
 fn writeCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopaque) callconv(.c) usize {
@@ -914,4 +968,27 @@ test "Retry-After accepts delay seconds and dates without unchecked arithmetic" 
     );
     try std.testing.expect(retryAfterMilliseconds("invalid", 1_700_000_000) == null);
     try std.testing.expect(retryAfterMilliseconds("18446744073709551615", 1_700_000_000) == null);
+}
+
+test "curl disposition retries only temporary connection and explicit inactivity failures" {
+    try std.testing.expectEqual(
+        TransportDisposition.temporary_connection,
+        curlFailureDisposition(c.CURLE_COULDNT_CONNECT, false),
+    );
+    try std.testing.expectEqual(
+        TransportDisposition.temporary_connection,
+        curlFailureDisposition(c.CURLE_ABORTED_BY_CALLBACK, true),
+    );
+    try std.testing.expectEqual(
+        TransportDisposition.permanent_transport,
+        curlFailureDisposition(c.CURLE_ABORTED_BY_CALLBACK, false),
+    );
+    try std.testing.expectEqual(
+        TransportDisposition.authentication_failure,
+        curlFailureDisposition(c.CURLE_LOGIN_DENIED, false),
+    );
+    try std.testing.expectEqual(
+        TransportDisposition.tls_verification_failure,
+        curlFailureDisposition(c.CURLE_PEER_FAILED_VERIFICATION, false),
+    );
 }

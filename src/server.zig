@@ -35,6 +35,7 @@ pub const Faults = struct {
     request_seal: bool = false,
     request_scratch_acquire: bool = false,
     request_scratch_limit_bytes: u64 = scratch_limit_bytes,
+    request_read: bool = false,
     request_unlink: bool = false,
     provider_prepare: bool = false,
     response_acquire: bool = false,
@@ -241,6 +242,11 @@ fn executionMain(host: *Host) void {
     };
     defer host.allocator.free(slots);
     for (slots) |*slot| slot.* = .{};
+    const retry_candidates = host.allocator.alloc(store_module.RetryCandidate, slots.len) catch |err| {
+        fenceDispatch(host, "retry discovery workspace allocation", err);
+        return;
+    };
+    defer host.allocator.free(retry_candidates);
     var reactor = provider.Reactor.init() catch |err| {
         fenceDispatch(host, "transport reactor initialization", err);
         return;
@@ -249,22 +255,25 @@ fn executionMain(host: *Host) void {
     defer shutdownExecution(host, &reactor, slots);
 
     var last_retry_scan: ?std.Io.Clock.Timestamp = null;
+    var retry_scan: store_module.RetryScan = .{};
+    var retry_candidate_count: usize = 0;
+    var retry_candidates_ready = false;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
         var found_work = false;
         const now = std.Io.Clock.Timestamp.now(host.io, .awake);
-        const scan_retries = if (last_retry_scan) |last|
+        const begin_retry_scan = !retry_scan.started and !retry_candidates_ready and (if (last_retry_scan) |last|
             last.durationTo(now).raw.nanoseconds >= std.time.ns_per_s
         else
-            true;
-        if (scan_retries) last_retry_scan = now;
+            true);
+        if (begin_retry_scan) last_retry_scan = now;
         if (!host.dispatch_fenced.load(.acquire)) {
-            if (scan_retries) {
-                const active_slots = ActiveSlots{ .slots = slots };
-                const active_filter = store_module.ActiveOperationFilter{
-                    .context = &active_slots,
-                    .containsFn = activeOperationContains,
-                    .maximum_exclusions = slots.len,
-                };
+            const active_slots = ActiveSlots{ .slots = slots };
+            const active_filter = store_module.ActiveOperationFilter{
+                .context = &active_slots,
+                .containsFn = activeOperationContains,
+                .maximum_exclusions = slots.len,
+            };
+            if (begin_retry_scan) {
                 for (0..@max(slots.len, 1)) |_| {
                     if (!(host.store.recoverOneExhaustedModelAttemptForHost(active_filter) catch |err| {
                         fenceDispatch(host, "exhausted retry recovery", err);
@@ -272,13 +281,44 @@ fn executionMain(host: *Host) void {
                     })) break;
                 }
             }
-            for (slots) |*slot| {
-                if (slot.state != .free) continue;
-                switch (admitAttempt(host, &reactor, slots, slot, scan_retries)) {
-                    .admitted => found_work = true,
-                    .no_work, .retry_later => break,
+            if (slots.len != 0 and (begin_retry_scan or retry_scan.started)) {
+                const progress = host.store.discoverDueModelRetries(
+                    active_filter,
+                    &retry_scan,
+                    retry_candidates,
+                    &retry_candidate_count,
+                    @max(slots.len, 64),
+                ) catch |err| {
+                    fenceDispatch(host, "retry discovery", err);
+                    break;
+                };
+                retry_candidates_ready = progress == .complete;
+            }
+            if (retry_candidates_ready) {
+                for (slots) |*slot| {
+                    if (slot.state != .free or retry_candidate_count == 0) continue;
+                    const candidate = popRetryCandidate(retry_candidates, &retry_candidate_count);
+                    switch (admitRetryAttempt(host, &reactor, slot, candidate, retry_scan.snapshot_ms)) {
+                        .admitted => found_work = true,
+                        .no_work => continue,
+                        .retry_later => break,
+                    }
+                    if (host.dispatch_fenced.load(.acquire)) break;
                 }
-                if (host.dispatch_fenced.load(.acquire)) break;
+                if (retry_candidate_count == 0) {
+                    retry_scan.reset();
+                    retry_candidates_ready = false;
+                }
+            }
+            if (!retry_scan.started and !retry_candidates_ready) {
+                for (slots) |*slot| {
+                    if (slot.state != .free) continue;
+                    switch (admitNewAttempt(host, &reactor, slot)) {
+                        .admitted => found_work = true,
+                        .no_work, .retry_later => break,
+                    }
+                    if (host.dispatch_fenced.load(.acquire)) break;
+                }
             }
         }
         reactor.drive(if (hasTransport(slots)) 25 else 0) catch |err| {
@@ -295,6 +335,19 @@ fn executionMain(host: *Host) void {
     }
 }
 
+fn popRetryCandidate(
+    candidates: []store_module.RetryCandidate,
+    candidate_count: *usize,
+) store_module.RetryCandidate {
+    std.debug.assert(candidate_count.* > 0 and candidate_count.* <= candidates.len);
+    const candidate = candidates[0];
+    for (candidates[1..candidate_count.*], 0..) |remaining, index| {
+        candidates[index] = remaining;
+    }
+    candidate_count.* -= 1;
+    return candidate;
+}
+
 const ActiveSlots = struct {
     slots: []const ExecutionSlot,
 };
@@ -307,24 +360,15 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
     return false;
 }
 
-fn admitAttempt(
+fn admitNewAttempt(
     host: *Host,
     reactor: *provider.Reactor,
-    slots: []const ExecutionSlot,
     slot: *ExecutionSlot,
-    scan_retries: bool,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    const active = ActiveSlots{ .slots = slots };
-    var admission = host.store.admitNextModelAttemptForHost(
-        .{
-            .context = &active,
-            .containsFn = activeOperationContains,
-            .maximum_exclusions = slots.len,
-        },
-        scan_retries,
-        .{ .attempt_before_commit = host.faults.attempt_before_commit },
-    ) catch |err| {
+    const admission = host.store.admitNextModelAttempt(.{
+        .attempt_before_commit = host.faults.attempt_before_commit,
+    }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         if (err != error.InjectedAttemptCommitFailure) {
             fenceDispatch(host, "Attempt admission", err);
@@ -334,6 +378,42 @@ fn admitAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
+    return beginAdmittedAttempt(host, reactor, slot, token, admission);
+}
+
+fn admitRetryAttempt(
+    host: *Host,
+    reactor: *provider.Reactor,
+    slot: *ExecutionSlot,
+    candidate: store_module.RetryCandidate,
+    snapshot_ms: i64,
+) AdmissionProgress {
+    const token = host.custody.reserve() orelse return .no_work;
+    const admission = host.store.admitDiscoveredModelRetry(
+        candidate,
+        snapshot_ms,
+        .{ .attempt_before_commit = host.faults.attempt_before_commit },
+    ) catch |err| {
+        host.custody.releaseUnused(token) catch unreachable;
+        if (err != error.InjectedAttemptCommitFailure) {
+            fenceDispatch(host, "retry Attempt admission", err);
+        }
+        return .retry_later;
+    } orelse {
+        host.custody.releaseUnused(token) catch unreachable;
+        return .no_work;
+    };
+    return beginAdmittedAttempt(host, reactor, slot, token, admission);
+}
+
+fn beginAdmittedAttempt(
+    host: *Host,
+    reactor: *provider.Reactor,
+    slot: *ExecutionSlot,
+    token: execution.CustodyToken,
+    admitted: store_module.AttemptAdmission,
+) AdmissionProgress {
+    var admission = admitted;
     const binding = admission.permit.consume() catch unreachable;
     host.custody.attach(token, binding) catch unreachable;
 
@@ -387,6 +467,7 @@ fn admitAttempt(
     }
     slot.transfer.start(host.provider_endpoint.?, request, binding, .{
         .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
+        .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,
         .response_unlink_fault = host.faults.response_unlink,
         .response_write_fault = host.faults.response_write,
@@ -401,18 +482,11 @@ fn admitAttempt(
             return .admitted;
         }
         std.debug.print("latifa: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
-        const code = switch (err) {
-            error.ResponseCaptureAcquisitionFailed => "response_capture_failed",
-            else => "provider_transport_failure",
-        };
-        settleAttemptFailure(
-            host,
-            token,
-            binding,
-            code,
-            err != error.ResponseCaptureAcquisitionFailed,
-            null,
-        );
+        if (err == error.ResponseCaptureAcquisitionFailed) {
+            settleAttemptFailure(host, token, binding, "response_capture_failed", false, null);
+        } else {
+            fenceDispatch(host, "provider preparation", err);
+        }
         finishCustodyNow(host, token);
         return .admitted;
     };
@@ -422,12 +496,7 @@ fn admitAttempt(
     provider.launch(reactor, &slot.transfer, &host.custody, token, host.store) catch |err| {
         slot.transfer.deinit();
         std.debug.print("latifa: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
-        if (host.store.isFenced()) {
-            fenceDispatch(host, "dispatch handoff", err);
-            finishCustodyNow(host, token);
-            return .admitted;
-        }
-        settleAttemptFailure(host, token, binding, "provider_transport_failure", true, null);
+        fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
         return .admitted;
     };
@@ -458,28 +527,41 @@ fn completeTransfer(
     }
     const evidence = slot.transfer.evidence(completion.result) catch |err| {
         std.debug.print("latifa: invalid provider evidence for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, "provider_transport_failure", true, null);
+        fenceDispatch(host, "provider evidence", err);
         slot.transfer.deinit();
         beginCleanup(host, slot);
         return;
     };
-    if (evidence.class == .success) {
+    if (evidence.disposition == .request_read_failure) {
+        fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed);
+        slot.transfer.deinit();
+        beginCleanup(host, slot);
+        return;
+    }
+    if (evidence.disposition == .success) {
         completeSuccessfulTransfer(host, slot);
         return;
     }
     var code_buffer: [96]u8 = undefined;
-    const code = switch (evidence.class) {
+    const code = switch (evidence.disposition) {
         .success => unreachable,
         .permanent_http => std.fmt.bufPrint(&code_buffer, "provider_http_{d}", .{evidence.http_status}) catch unreachable,
         .temporary_http => std.fmt.bufPrint(&code_buffer, "provider_temporary_http_{d}", .{evidence.http_status}) catch unreachable,
-        .transport_failure => "provider_transport_failure",
+        .temporary_connection => "provider_transport_failure",
+        .permanent_transport => "provider_transport_permanent",
+        .authentication_failure => "provider_authentication_failed",
+        .tls_verification_failure => "provider_tls_verification_failed",
+        .invalid_headers => "invalid_provider_headers",
+        .request_read_failure => unreachable,
     };
+    const retryable = evidence.disposition == .temporary_http or
+        evidence.disposition == .temporary_connection;
     settleAttemptFailure(
         host,
         slot.token,
         slot.binding,
         code,
-        evidence.class != .permanent_http,
+        retryable,
         evidence.retry_after_ms,
     );
     slot.transfer.deinit();

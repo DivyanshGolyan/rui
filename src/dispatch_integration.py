@@ -252,7 +252,8 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(payload)))
-        for name, value in headers.items():
+        header_items = headers.items() if hasattr(headers, "items") else headers
+        for name, value in header_items:
             self.send_header(name, value)
         self.send_header("Connection", "close")
         self.end_headers()
@@ -632,10 +633,14 @@ def main():
             "provider_temporary_http_429",
             "completed",
         )
-        assert database.execute(
+        retry_plan = database.execute(
             "EXPLAIN QUERY PLAN SELECT operation_id FROM model_operation INDEXED BY model_operation_retry_due "
-            "WHERE resolution_code IS NULL AND retry_due_at_ms<=0 ORDER BY operation_id"
+            "WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=0 "
+            "AND (retry_due_at_ms,operation_id)>(0,0) "
+            "ORDER BY retry_due_at_ms,operation_id LIMIT 64"
         ).fetchall()
+        assert any("model_operation_retry_due" in row[-1] for row in retry_plan), retry_plan
+        assert all("TEMP B-TREE" not in row[-1] for row in retry_plan), retry_plan
         database.close()
         stop_host(retry_host)
         processes.remove(retry_host)
@@ -683,6 +688,116 @@ def main():
         permanent_endpoint.shutdown()
         permanent_endpoint.server_close()
         permanent_thread.join(timeout=5)
+
+        # Redirects are disabled and contradictory provider headers are
+        # deterministic response failures. Neither is a connection retry.
+        invalid_header_sse = sse_answer(
+            "invalid-header-response",
+            "invalid-header-reasoning",
+            "invalid-header-message",
+            "must not publish",
+        )[0]
+        disposition_cases = (
+            ("redirect", ResponseSpec(b"", {}, 302), "provider_http_302"),
+            (
+                "invalid-headers",
+                ResponseSpec(
+                    invalid_header_sse,
+                    [("OpenAI-Model", "served-a"), ("OpenAI-Model", "served-b")],
+                ),
+                "invalid_provider_headers",
+            ),
+        )
+        disposition_endpoint = SuccessEndpoint([case[1] for case in disposition_cases])
+        disposition_thread = threading.Thread(
+            target=disposition_endpoint.serve_forever, daemon=True
+        )
+        disposition_thread.start()
+        for case_index, (name, _, expected_code) in enumerate(disposition_cases, 1):
+            disposition_store = state / f"{name}-store"
+            disposition_host = start_host(
+                disposition_store,
+                f"http://127.0.0.1:{disposition_endpoint.server_port}/responses",
+            )
+            processes.append(disposition_host)
+            configure(
+                state,
+                disposition_store,
+                f"{name}-config",
+                f"direct/{name}",
+                "model-a",
+            )
+            message(
+                state,
+                disposition_store,
+                f"{name}-message",
+                f"direct/{name}",
+                "do not retry deterministic transport evidence",
+            )
+            failure = wait_for(
+                lambda store=disposition_store, key=f"{name}-message": (
+                    value := observe(store, key)
+                ).get("result", {}).get("code")
+                and value,
+                f"{name} permanent disposition",
+            )
+            assert failure["result"]["code"] == expected_code, failure
+            assert failure["processing"]["attempt"] == "1", failure
+            time.sleep(0.3)
+            assert len(disposition_endpoint.requests) == case_index
+            stop_host(disposition_host)
+            processes.remove(disposition_host)
+        disposition_endpoint.shutdown()
+        disposition_endpoint.server_close()
+        disposition_thread.join(timeout=5)
+
+        # A local read failure while curl owns the request is a Host fault,
+        # not provider evidence. Fence dispatch, retain uncertainty and avoid
+        # a same-process retry.
+        local_read_endpoint = SuccessEndpoint(
+            [sse_answer("local-read", "local-read-r", "local-read-m", "unused")[0]]
+        )
+        local_read_thread = threading.Thread(
+            target=local_read_endpoint.serve_forever, daemon=True
+        )
+        local_read_thread.start()
+        local_read_store = state / "local-read-store"
+        local_read_host = start_host(
+            local_read_store,
+            f"http://127.0.0.1:{local_read_endpoint.server_port}/responses",
+            "--fault",
+            "request-read",
+        )
+        processes.append(local_read_host)
+        configure(
+            state,
+            local_read_store,
+            "local-read-config",
+            "direct/local-read",
+            "model-a",
+        )
+        message(
+            state,
+            local_read_store,
+            "local-read-message",
+            "direct/local-read",
+            "fence local scratch failure",
+        )
+        wait_for(
+            lambda: local_read_host.poll() is not None,
+            "local request-read fenced shutdown",
+        )
+        assert local_read_host.returncode != 0
+        processes.remove(local_read_host)
+        database = sqlite3.connect(local_read_store / "latifa.sqlite3")
+        assert database.execute(
+            "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code FROM model_operation"
+        ).fetchone() == (1, 1, 1, None)
+        database.close()
+        assert len(local_read_endpoint.requests) <= 1
+        local_read_endpoint.shutdown()
+        local_read_endpoint.server_close()
+        local_read_thread.join(timeout=5)
 
         # A replacement Attempt reuses the exact historical view, including
         # private continuation, even after newer settings and input commit.
@@ -1579,7 +1694,11 @@ def main():
             finally:
                 database.close()
 
-        preparation_fact = wait_for(saved_preparation_failure, "saved preparation failure")
+        preparation_fact = wait_for(
+            saved_preparation_failure,
+            "saved preparation failure",
+            timeout=15,
+        )
         assert preparation_fact[:3] == (1, 1, 0), preparation_fact
         assert preparation_fact[3] > 0, preparation_fact
         assert preparation_fact[4] == "provider_transport_failure", preparation_fact
