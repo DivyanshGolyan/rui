@@ -1028,47 +1028,43 @@ pub const Store = struct {
     ) !?AcceptedMessageQueue {
         const statement = try prepare(
             self.database,
-            "SELECT m.admission_id,m.turn_id,t.operation_id,t.outcome_code,o.attempt_ordinal,t.outcome_content_id " ++
+            "SELECT m.session_ref,m.content_id,m.admission_id,m.turn_id,t.operation_id,t.outcome_code,o.attempt_ordinal,t.outcome_content_id " ++
                 "FROM message_admission m " ++
                 "LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
                 "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
-                "WHERE m.command_key=?1 AND m.session_ref=?2 AND m.content_id=?3",
+                "WHERE m.command_key=?1",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, command_key);
-        try bindText(statement, 2, session_ref);
-        try bindI64(statement, 3, content_id);
         const step = c.sqlite3_step(statement);
-        if (!accepted) {
-            if (step != c.SQLITE_DONE) return error.CorruptStore;
-            return null;
-        }
+        if (step == c.SQLITE_DONE) return if (accepted) error.CorruptStore else null;
         if (step != c.SQLITE_ROW) return error.CorruptStore;
-        const admission_id = c.sqlite3_column_int64(statement, 0);
+        if (!accepted) return error.CorruptStore;
+        var actual_session: protocol.Bounded(protocol.max_session_bytes) = .{};
+        readText(statement, 0, &actual_session) catch return error.CorruptStore;
+        if (!actual_session.eql(session_ref)) return error.CorruptStore;
+        const actual_content_id = c.sqlite3_column_int64(statement, 1);
+        if (actual_content_id <= 0 or actual_content_id != content_id) return error.CorruptStore;
+        const admission_id = c.sqlite3_column_int64(statement, 2);
         if (admission_id <= 0) return error.CorruptStore;
-        const turn_id = try readNullablePositiveI64(statement, 1);
-        if (turn_id == null) {
-            if (c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL or
-                c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL or
-                c.sqlite3_column_type(statement, 4) != c.SQLITE_NULL or
-                c.sqlite3_column_type(statement, 5) != c.SQLITE_NULL) return error.CorruptStore;
+        const turn_id = try readNullablePositiveI64(statement, 3);
+        if (turn_id == null)
             return .{ .admission_id = @intCast(admission_id), .state = .queued };
-        }
         const binding = AttemptBinding{
             .turn_id = @intCast(turn_id.?),
-            .operation_id = @intCast(try readNullablePositiveI64(statement, 2) orelse
+            .operation_id = @intCast(try readNullablePositiveI64(statement, 4) orelse
                 return error.CorruptStore),
-            .attempt_ordinal = @intCast(try readNullablePositiveI64(statement, 4) orelse
+            .attempt_ordinal = @intCast(try readNullablePositiveI64(statement, 6) orelse
                 return error.CorruptStore),
         };
-        if (c.sqlite3_column_type(statement, 3) == c.SQLITE_NULL) {
-            if (c.sqlite3_column_type(statement, 5) != c.SQLITE_NULL) return error.CorruptStore;
+        if (c.sqlite3_column_type(statement, 5) == c.SQLITE_NULL) {
+            if (c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL) return error.CorruptStore;
             return .{ .admission_id = @intCast(admission_id), .state = .{ .processing = binding } };
         }
         var outcome: protocol.Bounded(96) = .{};
-        try readText(statement, 3, &outcome);
+        try readText(statement, 5, &outcome);
         if (outcome.eql("completed")) {
-            const answer_id = try readNullablePositiveI64(statement, 5) orelse return error.CorruptStore;
+            const answer_id = try readNullablePositiveI64(statement, 7) orelse return error.CorruptStore;
             const answer = try self.readContentMetadata(answer_id);
             return .{
                 .admission_id = @intCast(admission_id),
@@ -1078,7 +1074,7 @@ pub const Store = struct {
                 } },
             };
         }
-        if (outcome.len == 0 or c.sqlite3_column_type(statement, 5) != c.SQLITE_NULL)
+        if (outcome.len == 0 or c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL)
             return error.CorruptStore;
         return .{
             .admission_id = @intCast(admission_id),
@@ -3496,6 +3492,76 @@ test "message rejections replay before current Session checks without retained i
     const observed = try storage.observeCommand("rejected-message");
     try std.testing.expect(observed.status == .rejected);
     try std.testing.expect(observed.message == null);
+}
+
+test "message observation validates accepted admission references independently" {
+    const corruptions = [_]enum { session, content }{ .session, .content };
+    for (corruptions) |corruption| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+        var primary_configuration = try completeConfiguration(
+            "reference-primary-configure",
+            "direct/reference-primary",
+            workspace,
+            "model-a",
+        );
+        try std.testing.expect(storage.configure(&primary_configuration, .{}) == .accepted);
+        var other_configuration = try completeConfiguration(
+            "reference-other-configure",
+            "direct/reference-other",
+            workspace,
+            "model-a",
+        );
+        try std.testing.expect(storage.configure(&other_configuration, .{}) == .accepted);
+
+        const primary_file = try tmp.dir.createFile(std.testing.io, "reference-primary-message", .{ .read = true });
+        try primary_file.writeStreamingAll(std.testing.io, "primary input");
+        try primary_file.sync(std.testing.io);
+        var primary_message = try completeMessage(
+            "reference-primary-message",
+            "direct/reference-primary",
+            primary_file,
+            "primary input",
+        );
+        defer primary_message.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(storage.submitMessage(&primary_message, .{}) == .accepted);
+
+        const other_file = try tmp.dir.createFile(std.testing.io, "reference-other-message", .{ .read = true });
+        try other_file.writeStreamingAll(std.testing.io, "other input");
+        try other_file.sync(std.testing.io);
+        var other_message = try completeMessage(
+            "reference-other-message",
+            "direct/reference-other",
+            other_file,
+            "other input",
+        );
+        defer other_message.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(storage.submitMessage(&other_message, .{}) == .accepted);
+
+        switch (corruption) {
+            .session => try exec(
+                storage.database,
+                "UPDATE message_admission SET session_ref='direct/reference-other' " ++
+                    "WHERE command_key='reference-primary-message'",
+            ),
+            .content => try exec(
+                storage.database,
+                "UPDATE message_admission SET content_id=(" ++
+                    "SELECT content_id FROM message_admission WHERE command_key='reference-other-message') " ++
+                    "WHERE command_key='reference-primary-message'",
+            ),
+        }
+        try std.testing.expectError(
+            error.CorruptStore,
+            storage.observeCommand("reference-primary-message"),
+        );
+        try std.testing.expect(storage.isFenced());
+    }
 }
 
 test "message observation rejects an answer attached to processing durable facts" {
