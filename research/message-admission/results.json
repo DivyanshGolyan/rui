@@ -1,0 +1,131 @@
+{
+  "scope": "issue-171 production Host message admission and observation",
+  "status": "passed",
+  "tested_revision": "5b745266a9a0056aa4d995a0e5746737931bd32a",
+  "working_tree_dirty": false,
+  "binary": "/Users/divyanshgolyan/.codex/worktrees/11ee/latifa/.zig-cache/o/654e9dc934197da7f1a1e110c40bbf20/latifa-release-small-check",
+  "binary_sha256": "fe8c80de3d96d077761d0bc34615acdc3c2da8c473f0d467f22b371474ea1277",
+  "zig": "0.16.0",
+  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+  "active_capacity": 1000,
+  "client_capacity": {
+    "total": 128,
+    "ordinary": 120,
+    "control_headroom": 8
+  },
+  "content_window_bytes": 4096,
+  "sqlite_heap_limit_bytes": 16777216,
+  "payload_growth": [
+    {
+      "payload_bytes": 0,
+      "queued_messages": 1,
+      "admission_elapsed_ms": 14.94,
+      "observation_elapsed_ms": 0.425,
+      "rss_bytes": 2834432,
+      "virtual_bytes": 420282974208,
+      "physical_footprint_bytes": 1819648,
+      "lifetime_peak_physical_footprint_bytes": 1983488,
+      "database_logical_bytes": 57344,
+      "database_allocated_bytes": 57344
+    },
+    {
+      "payload_bytes": 4096,
+      "queued_messages": 2,
+      "admission_elapsed_ms": 14.62,
+      "observation_elapsed_ms": 0.39,
+      "rss_bytes": 3178496,
+      "virtual_bytes": 420292411392,
+      "physical_footprint_bytes": 2180096,
+      "lifetime_peak_physical_footprint_bytes": 2343936,
+      "database_logical_bytes": 61440,
+      "database_allocated_bytes": 61440
+    },
+    {
+      "payload_bytes": 8388608,
+      "queued_messages": 3,
+      "admission_elapsed_ms": 259.691,
+      "observation_elapsed_ms": 0.424,
+      "rss_bytes": 7749632,
+      "virtual_bytes": 420427677696,
+      "physical_footprint_bytes": 6767616,
+      "lifetime_peak_physical_footprint_bytes": 6931456,
+      "database_logical_bytes": 8458240,
+      "database_allocated_bytes": 8458240
+    },
+    {
+      "payload_bytes": 33554432,
+      "queued_messages": 4,
+      "admission_elapsed_ms": 946.869,
+      "observation_elapsed_ms": 0.506,
+      "rss_bytes": 7831552,
+      "virtual_bytes": 420561895424,
+      "physical_footprint_bytes": 6865920,
+      "lifetime_peak_physical_footprint_bytes": 7029760,
+      "database_logical_bytes": 42045440,
+      "database_allocated_bytes": 43061248
+    }
+  ],
+  "queued_history_growth": [
+    {
+      "queued_messages": 0,
+      "last_admission_elapsed_ms": null,
+      "session_observation_elapsed_ms": 0.452,
+      "rss_bytes": 2818048,
+      "virtual_bytes": 420282974208,
+      "physical_footprint_bytes": 1819648,
+      "lifetime_peak_physical_footprint_bytes": 1983488,
+      "database_logical_bytes": 57344,
+      "database_allocated_bytes": 57344
+    },
+    {
+      "queued_messages": 100,
+      "last_admission_elapsed_ms": 14.534,
+      "session_observation_elapsed_ms": 0.618,
+      "oldest_observation_elapsed_ms": 0.503,
+      "newest_observation_elapsed_ms": 0.496,
+      "rss_bytes": 5537792,
+      "virtual_bytes": 421271781376,
+      "physical_footprint_bytes": 4670464,
+      "lifetime_peak_physical_footprint_bytes": 4834304,
+      "database_logical_bytes": 65536,
+      "database_allocated_bytes": 65536
+    },
+    {
+      "queued_messages": 1000,
+      "last_admission_elapsed_ms": 15.073,
+      "session_observation_elapsed_ms": 0.609,
+      "oldest_observation_elapsed_ms": 0.49,
+      "newest_observation_elapsed_ms": 0.484,
+      "rss_bytes": 6406144,
+      "virtual_bytes": 421271781376,
+      "physical_footprint_bytes": 5538816,
+      "lifetime_peak_physical_footprint_bytes": 5702656,
+      "database_logical_bytes": 270336,
+      "database_allocated_bytes": 327680
+    },
+    {
+      "queued_messages": 10000,
+      "last_admission_elapsed_ms": 11.907,
+      "session_observation_elapsed_ms": 0.752,
+      "oldest_observation_elapsed_ms": 0.406,
+      "newest_observation_elapsed_ms": 0.406,
+      "rss_bytes": 8175616,
+      "virtual_bytes": 421288558592,
+      "physical_footprint_bytes": 7848960,
+      "lifetime_peak_physical_footprint_bytes": 8012800,
+      "database_logical_bytes": 2121728,
+      "database_allocated_bytes": 2162688
+    }
+  ],
+  "elapsed_seconds": 146.98,
+  "limits": [
+    "macOS-only runtime and physical-footprint evidence on the available Apple Silicon host",
+    "Linux and other macOS targets are compile-only in this checkout",
+    "payload and history grow in separate fresh Stores at fixed configured capacities",
+    "measurement-client payload construction is outside the measured Host process",
+    "sequential one-exchange connections do not qualify simultaneous 128-client behavior beyond the process integration gate",
+    "allocator-live, private-dirty, descriptor and SQLite high-water counters are unavailable here",
+    "model processing is intentionally unavailable; no provider or execution resources are measured",
+    "process termination is crash evidence, not power-loss qualification"
+  ]
+}
