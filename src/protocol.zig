@@ -624,7 +624,8 @@ const ContentSink = struct {
     length: u64 = 0,
     hash: std.crypto.hash.sha2.Sha256 = contentHasher(),
     utf8: Utf8State = .{},
-    maximum_write: usize = content_window_bytes,
+    inject_short_writes: bool = false,
+    partial_returns: usize = 0,
 
     fn write(self: *ContentSink, bytes: []const u8) !void {
         const next_length = std.math.add(u64, self.length, bytes.len) catch return error.ContentTooLarge;
