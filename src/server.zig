@@ -1,5 +1,7 @@
 const std = @import("std");
+const execution = @import("execution.zig");
 const platform = @import("platform.zig");
+const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
 
@@ -26,6 +28,13 @@ pub const Faults = struct {
     before_commit: bool = false,
     startup_cleanup: bool = false,
     shutdown_after_accept: bool = false,
+    attempt_before_commit: bool = false,
+    result_before_commit: bool = false,
+    request_first_step: bool = false,
+    request_write: bool = false,
+    request_seal: bool = false,
+    request_scratch_acquire: bool = false,
+    cleanup_delay_ms: i64 = 0,
 };
 
 const Host = struct {
@@ -34,6 +43,10 @@ const Host = struct {
     lease: *platform.StoreLease,
     store: *store_module.Store,
     faults: Faults,
+    provider_endpoint: ?[]const u8 = null,
+    custody: execution.CustodyPool = .{ .records = &.{} },
+    execution_shutdown: std.atomic.Value(bool) = .init(false),
+    dispatch_fenced: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
     active_clients: std.atomic.Value(usize) = .init(0),
     classification_clients: std.atomic.Value(usize) = .init(0),
@@ -70,6 +83,7 @@ pub fn serve(
     store_path: []const u8,
     active_capacity: usize,
     faults: Faults,
+    provider_endpoint: ?[]const u8,
 ) !void {
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
@@ -89,22 +103,46 @@ pub fn serve(
     const socket_z = try std.fmt.bufPrintZ(&socket_path, "{s}", .{lease.paths.socket.slice()});
     if (std.c.chmod(socket_z, 0o600) != 0) return error.SocketProtectionFailed;
 
+    const custody_records = try allocator.alloc(execution.CustodyRecord, active_capacity);
+    defer allocator.free(custody_records);
     var host = Host{
         .io = io,
         .allocator = allocator,
         .lease = &lease,
         .store = &storage,
         .faults = faults,
+        .provider_endpoint = provider_endpoint,
+        .custody = execution.CustodyPool.initialize(custody_records),
     };
     // The listener stops accepting before this defer runs; draining keeps the
     // stack-owned Host, Store and lock alive through every transferred Stream.
     defer host.drain();
+    var execution_thread: ?std.Thread = null;
+    if (provider_endpoint) |endpoint| {
+        try provider.validateEndpoint(endpoint);
+        try provider.initialize();
+        errdefer provider.deinitialize();
+        execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
+    }
+    defer if (execution_thread) |thread| {
+        host.execution_shutdown.store(true, .release);
+        thread.join();
+        provider.deinitialize();
+    };
     var ready: protocol.ResponseBuffer = .{};
-    try ready.appendFmt("ready store={s} socket={s} active_capacity={d}\n", .{
+    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} custody_record_bytes={d} execution_slot_bytes={d} scratch_limit_bytes={d} execution={s}", .{
         lease.paths.store.slice(),
         lease.paths.socket.slice(),
         active_capacity,
+        @sizeOf(execution.CustodyRecord),
+        @sizeOf(ExecutionSlot),
+        scratch_limit_bytes,
+        if (provider_endpoint != null) "enabled" else "unavailable",
     });
+    if (provider_endpoint != null) {
+        try ready.appendFmt(" curl={s} openssl={s}", .{ provider.curl_version, provider.openssl_version });
+    }
+    try ready.append("\n");
     try std.Io.File.stdout().writeStreamingAll(io, ready.slice());
 
     while (true) {
@@ -144,6 +182,214 @@ pub fn serve(
         thread.detach();
         if (host.faults.shutdown_after_accept) return error.InjectedListenerFailure;
     }
+}
+
+const ExecutionSlot = struct {
+    state: enum { free, transport, cleanup } = .free,
+    token: execution.CustodyToken = undefined,
+    binding: store_module.AttemptBinding = undefined,
+    transfer: provider.Transfer = undefined,
+    cleanup_ticks: u32 = 0,
+};
+
+fn executionMain(host: *Host) void {
+    const slots = host.allocator.alloc(ExecutionSlot, host.custody.records.len) catch |err| {
+        fenceDispatch(host, "execution workspace allocation", err);
+        return;
+    };
+    defer host.allocator.free(slots);
+    for (slots) |*slot| slot.* = .{};
+    var reactor = provider.Reactor.init() catch |err| {
+        fenceDispatch(host, "transport reactor initialization", err);
+        return;
+    };
+    defer reactor.deinit();
+    defer shutdownExecution(host, &reactor, slots);
+
+    while (!host.execution_shutdown.load(.acquire) and !host.dispatch_fenced.load(.acquire)) {
+        var found_work = false;
+        for (slots) |*slot| {
+            if (slot.state != .free) continue;
+            found_work = admitAttempt(host, &reactor, slot) or found_work;
+            if (host.dispatch_fenced.load(.acquire)) break;
+        }
+        reactor.drive(if (hasTransport(slots)) 25 else 0) catch |err| {
+            fenceDispatch(host, "transport reactor", err);
+            break;
+        };
+        while (reactor.nextCompletion()) |completion| {
+            completeTransfer(host, &reactor, slots, completion);
+        }
+        advanceCleanup(host, slots);
+        if (!found_work and !hasTransport(slots)) {
+            _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {};
+        }
+    }
+}
+
+fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) bool {
+    const token = host.custody.reserve() orelse return false;
+    var admission = host.store.admitNextModelAttempt(.{
+        .attempt_before_commit = host.faults.attempt_before_commit,
+    }) catch |err| {
+        host.custody.releaseUnused(token) catch unreachable;
+        if (err != error.InjectedAttemptCommitFailure) {
+            fenceDispatch(host, "Attempt admission", err);
+        }
+        return false;
+    } orelse {
+        host.custody.releaseUnused(token) catch unreachable;
+        return false;
+    };
+    const binding = admission.permit.consume() catch unreachable;
+    host.custody.attach(token, binding) catch unreachable;
+
+    var view = host.store.openHistoricalView(binding) catch |err| {
+        fenceDispatch(host, "historical view", err);
+        finishCustodyNow(host, token);
+        return true;
+    };
+    defer view.close();
+    const request_budget = provider.ScratchBudget{
+        .used = &host.scratch_used,
+        .limit = if (host.faults.request_scratch_acquire) 0 else scratch_limit_bytes,
+    };
+    var request = provider.materialize(
+        host.io,
+        &view,
+        host.lease.paths.scratch.slice(),
+        request_budget,
+        .{
+            .first_step = host.faults.request_first_step,
+            .write = host.faults.request_write,
+            .seal = host.faults.request_seal,
+        },
+    ) catch |err| {
+        settleAttemptFailure(host, token, binding, preparationFailureCode(err));
+        finishCustodyNow(host, token);
+        return true;
+    };
+    slot.transfer.start(host.provider_endpoint.?, request) catch |err| {
+        request.deinit();
+        std.debug.print("latifa: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        settleAttemptFailure(host, token, binding, "provider_transport_failure");
+        finishCustodyNow(host, token);
+        return true;
+    };
+    reactor.add(&slot.transfer) catch |err| {
+        slot.transfer.deinit();
+        std.debug.print("latifa: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        settleAttemptFailure(host, token, binding, "provider_transport_failure");
+        finishCustodyNow(host, token);
+        return true;
+    };
+    slot.state = .transport;
+    slot.token = token;
+    slot.binding = binding;
+    return true;
+}
+
+fn completeTransfer(
+    host: *Host,
+    reactor: *provider.Reactor,
+    slots: []ExecutionSlot,
+    completion: provider.Completion,
+) void {
+    const slot = for (slots) |*candidate| {
+        if (candidate.state == .transport and candidate.transfer.easy == completion.easy) break candidate;
+    } else {
+        fenceDispatch(host, "unknown transport completion", error.UnknownTransportCompletion);
+        return;
+    };
+    reactor.remove(&slot.transfer);
+    const evidence = slot.transfer.evidence(completion.result) catch |err| {
+        std.debug.print("latifa: invalid provider evidence for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
+        settleAttemptFailure(host, slot.token, slot.binding, "provider_transport_failure");
+        beginCleanup(host, slot);
+        return;
+    };
+    var code_buffer: [96]u8 = undefined;
+    const code = switch (evidence.class) {
+        .permanent_http => std.fmt.bufPrint(&code_buffer, "provider_http_{d}", .{evidence.http_status}) catch unreachable,
+        .temporary_http => std.fmt.bufPrint(&code_buffer, "provider_temporary_http_{d}", .{evidence.http_status}) catch unreachable,
+        .transport_failure => "provider_transport_failure",
+    };
+    settleAttemptFailure(host, slot.token, slot.binding, code);
+    beginCleanup(host, slot);
+}
+
+fn beginCleanup(host: *Host, slot: *ExecutionSlot) void {
+    host.custody.detach(slot.token) catch unreachable;
+    slot.state = .cleanup;
+    slot.cleanup_ticks = @intCast(@divFloor(host.faults.cleanup_delay_ms + 24, 25));
+    if (slot.cleanup_ticks == 0) finishSlotCleanup(host, slot);
+}
+
+fn advanceCleanup(host: *Host, slots: []ExecutionSlot) void {
+    for (slots) |*slot| {
+        if (slot.state != .cleanup or slot.cleanup_ticks == 0) continue;
+        slot.cleanup_ticks -= 1;
+        if (slot.cleanup_ticks == 0) finishSlotCleanup(host, slot);
+    }
+}
+
+fn finishSlotCleanup(host: *Host, slot: *ExecutionSlot) void {
+    slot.transfer.deinit();
+    host.custody.cleanupComplete(slot.token) catch unreachable;
+    slot.* = .{};
+}
+
+fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot) void {
+    for (slots) |*slot| switch (slot.state) {
+        .free => {},
+        .transport => {
+            reactor.remove(&slot.transfer);
+            slot.transfer.deinit();
+            host.custody.detach(slot.token) catch unreachable;
+            host.custody.cleanupComplete(slot.token) catch unreachable;
+        },
+        .cleanup => {
+            slot.transfer.deinit();
+            host.custody.cleanupComplete(slot.token) catch unreachable;
+        },
+    };
+}
+
+fn hasTransport(slots: []const ExecutionSlot) bool {
+    for (slots) |slot| if (slot.state == .transport) return true;
+    return false;
+}
+
+fn preparationFailureCode(err: anyerror) []const u8 {
+    return switch (err) {
+        error.InjectedFirstPreparationFailure => "request_preparation_failed",
+        error.RequestScratchExhausted => "request_scratch_exhausted",
+        error.InjectedRequestWriteFailure => "request_write_failed",
+        error.InjectedRequestSealFailure, error.RequestSealFailed => "request_seal_failed",
+        else => "request_preparation_failed",
+    };
+}
+
+fn settleAttemptFailure(
+    host: *Host,
+    token: execution.CustodyToken,
+    binding: store_module.AttemptBinding,
+    code: []const u8,
+) void {
+    if (!host.custody.claimTerminalDelivery(token)) return;
+    host.store.settleModelFailure(binding, code, .{
+        .before_commit = host.faults.result_before_commit,
+    }) catch |err| fenceDispatch(host, "model failure save", err);
+}
+
+fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
+    host.custody.detach(token) catch unreachable;
+    host.custody.cleanupComplete(token) catch unreachable;
+}
+
+fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
+    host.dispatch_fenced.store(true, .release);
+    std.debug.print("latifa: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
 }
 
 fn connectionMain(connection: *Connection) void {
@@ -477,7 +723,7 @@ fn renderMessageReply(
         },
         .conflict, .infrastructure_failure => {},
     }
-    try response.append(",\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_172\"}}");
+    try response.append(",\"execution\":{\"status\":\"queued\"}}");
 }
 
 fn renderCommandObservation(
@@ -513,6 +759,18 @@ fn renderCommandObservation(
                     @tagName(message.status),
                     admission_id,
                 });
+            }
+            if (message.turn_id) |turn_id| {
+                try response.appendFmt(",\"processing\":{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+                    turn_id,
+                    message.operation_id.?,
+                    message.attempt_ordinal.?,
+                });
+            }
+            if (message.failure.len != 0) {
+                try response.append(",\"result\":{\"status\":\"failed\",\"code\":");
+                try response.appendJsonString(message.failure.slice());
+                try response.append("}");
             }
         }
     }
@@ -556,7 +814,7 @@ fn renderSessionObservation(
     } else {
         try response.append("null");
     }
-    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_172\"}}}}", .{observation.pending_messages});
+    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"partial\",\"unavailable\":[\"successful_model_output\",\"retry_and_restart_resolution\"]}}}}", .{observation.pending_messages});
 }
 
 fn renderContentReference(response: *protocol.ResponseBuffer, reference: store_module.ContentReference) !void {
