@@ -1,53 +1,53 @@
 {
   "scope": "issue-170 production Host configuration admission",
   "status": "passed",
-  "tested_revision": "35d22dd25bd3d826aa67366fc413520dc937a664",
+  "tested_revision": "06125d95ca5402d1abf67d4c60470914d5cc76da",
   "working_tree_dirty": false,
-  "binary": "/Users/divyanshgolyan/.codex/worktrees/5bdd/latifa/.zig-cache/o/56d7852802085fc4b3982ecc2021897d/latifa-release-small-check",
-  "binary_sha256": "c4b8e9b69e488881a7e47ca4b591a23aecc3255ca3ee928a74c25e4dec9bbe11",
+  "binary": "/Users/divyanshgolyan/.codex/worktrees/5bdd/latifa/.zig-cache/o/451b167fbaa8d1191c4b7a3582d82882/latifa-release-small-check",
+  "binary_sha256": "9675f132e34d418a26f828f1ea46af0497f280029560fe612115a69ad5a1d966",
   "zig": "0.16.0",
   "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
   "active_capacity": 1000,
   "stages": [
     {
       "dormant_sessions": 0,
-      "rss_bytes": 2408448,
-      "virtual_bytes": 420140367872,
-      "physical_footprint_bytes": 1393664,
-      "lifetime_peak_physical_footprint_bytes": 1393664,
+      "rss_bytes": 2310144,
+      "virtual_bytes": 419995648000,
+      "physical_footprint_bytes": 1246208,
+      "lifetime_peak_physical_footprint_bytes": 1246208,
       "database_logical_bytes": 45056,
       "database_allocated_bytes": 45056
     },
     {
       "dormant_sessions": 100,
-      "rss_bytes": 5914624,
-      "virtual_bytes": 421288558592,
-      "physical_footprint_bytes": 5030912,
-      "lifetime_peak_physical_footprint_bytes": 5243904,
+      "rss_bytes": 5685248,
+      "virtual_bytes": 421288542208,
+      "physical_footprint_bytes": 4801536,
+      "lifetime_peak_physical_footprint_bytes": 4965376,
       "database_logical_bytes": 77824,
-      "database_allocated_bytes": 131072
+      "database_allocated_bytes": 135168
     },
     {
       "dormant_sessions": 1000,
-      "rss_bytes": 6324224,
-      "virtual_bytes": 421288558592,
-      "physical_footprint_bytes": 5866496,
-      "lifetime_peak_physical_footprint_bytes": 6079488,
+      "rss_bytes": 6766592,
+      "virtual_bytes": 421288542208,
+      "physical_footprint_bytes": 5882880,
+      "lifetime_peak_physical_footprint_bytes": 6046720,
       "database_logical_bytes": 454656,
-      "database_allocated_bytes": 458752
+      "database_allocated_bytes": 462848
     },
     {
       "dormant_sessions": 10000,
-      "rss_bytes": 7864320,
-      "virtual_bytes": 421288558592,
+      "rss_bytes": 9207808,
+      "virtual_bytes": 421288542208,
       "physical_footprint_bytes": 10485760,
       "lifetime_peak_physical_footprint_bytes": 10485760,
       "database_logical_bytes": 4136960,
-      "database_allocated_bytes": 4259840
+      "database_allocated_bytes": 4198400
     }
   ],
-  "direct_client_peak_rss_bytes": 1507328,
-  "elapsed_seconds": 147.604,
+  "direct_client_peak_rss_bytes": 1622016,
+  "elapsed_seconds": 145.556,
   "limits": [
     "macOS-only physical-footprint evidence on the available Apple Silicon host",
     "sequential configuration then idle sampling; not concurrent connection qualification",
