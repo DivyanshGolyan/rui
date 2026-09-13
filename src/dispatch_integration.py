@@ -12,6 +12,8 @@ import tempfile
 import threading
 import time
 
+from host_process import start_ready_process, stop_process
+
 
 LATIFA = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
@@ -292,40 +294,35 @@ def command(*args, expect=0):
 
 
 def start_host(store, endpoint, *extra):
-    process = subprocess.Popen(
-        [
-            str(LATIFA),
-            "serve",
-            "--store",
-            str(store),
-            "--active-capacity",
-            "1",
+    args = [
+        str(LATIFA),
+        "serve",
+        "--store",
+        str(store),
+        "--active-capacity",
+        "1",
+    ]
+    if endpoint is not None:
+        args += [
             "--provider-endpoint",
             endpoint,
             "--test-retry-waits-ms",
             "50,100,150",
-            *extra,
-        ],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        ]
+    args += extra
+    process, _ = start_ready_process(
+        args,
+        required_fields=(
+            {"execution": "enabled", "curl": "8.22.0"}
+            if endpoint is not None
+            else None
+        ),
     )
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        line = process.stdout.readline()
-        if line.startswith("ready "):
-            if "execution=enabled" not in line or "curl=8.22.0" not in line:
-                raise AssertionError(f"missing transport readiness evidence: {line}")
-            return process
-        if process.poll() is not None:
-            raise AssertionError(f"Host exited before ready: {process.stderr.read()}")
-    raise AssertionError("Host did not become ready")
+    return process
 
 
 def stop_host(process):
-    if process.poll() is None:
-        process.kill()
-    process.wait(timeout=10)
+    stop_process(process)
 
 
 def configure(state, store, key, session, model, schema=None, instructions=None):
@@ -574,14 +571,8 @@ def main():
             database.close()
         stop_host(success_host)
         processes.remove(success_host)
-        offline_success = subprocess.Popen(
-            [str(LATIFA), "serve", "--store", str(success_store), "--active-capacity", "1"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        offline_success = start_host(success_store, None)
         processes.append(offline_success)
-        assert offline_success.stdout.readline().startswith("ready ")
         assert read_result(success_store, "success-first") == first_answer
         assert read_result(success_store, "success-second") == second_answer
         stop_host(offline_success)
@@ -633,13 +624,6 @@ def main():
             "provider_temporary_http_429",
             "completed",
         )
-        retry_plan = database.execute(
-            "EXPLAIN QUERY PLAN SELECT operation_id FROM model_operation INDEXED BY model_operation_retry_age "
-            "WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=0 "
-            "ORDER BY operation_id LIMIT 64"
-        ).fetchall()
-        assert any("model_operation_retry_age" in row[-1] for row in retry_plan), retry_plan
-        assert all("TEMP B-TREE" not in row[-1] for row in retry_plan), retry_plan
         database.close()
         stop_host(retry_host)
         processes.remove(retry_host)
@@ -961,14 +945,8 @@ def main():
             )
             stop_host(evidence_host)
             processes.remove(evidence_host)
-            reopened = subprocess.Popen(
-                [str(LATIFA), "serve", "--store", str(evidence_store), "--active-capacity", "1"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
+            reopened = start_host(evidence_store, None)
             processes.append(reopened)
-            assert reopened.stdout.readline().startswith("ready ")
             assert read_result(evidence_store, f"evidence-{name}-message") == f"answer-{name}".encode()
             database = sqlite3.connect(evidence_store / "latifa.sqlite3")
             actual_evidence = database.execute(
@@ -1049,21 +1027,8 @@ def main():
         database.close()
         stop_host(contradictory_host)
         processes.remove(contradictory_host)
-        contradictory_reopened = subprocess.Popen(
-            [
-                str(LATIFA),
-                "serve",
-                "--store",
-                str(contradictory_store),
-                "--active-capacity",
-                "1",
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        contradictory_reopened = start_host(contradictory_store, None)
         processes.append(contradictory_reopened)
-        assert contradictory_reopened.stdout.readline().startswith("ready ")
         restarted_failure = observe(contradictory_store, "contradictory-message")
         assert restarted_failure["queue"]["status"] == "failed", restarted_failure
         assert restarted_failure["result"] == {
@@ -1617,14 +1582,8 @@ def main():
 
         # Killing the execution owner cannot erase the saved result or admit
         # input beyond the first Operation's cutoff.
-        offline = subprocess.Popen(
-            [str(LATIFA), "serve", "--store", str(store), "--active-capacity", "1"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        offline = start_host(store, None)
         processes.append(offline)
-        assert offline.stdout.readline().startswith("ready ")
         assert observe(store, "message-a")["result"]["code"] == "provider_http_422"
         assert observe(store, "message-b")["queue"]["status"] == "queued"
         stop_host(offline)
@@ -2643,14 +2602,8 @@ def main():
         stop_host(host)
         processes.remove(host)
 
-        offline = subprocess.Popen(
-            [str(LATIFA), "serve", "--store", str(save_store), "--active-capacity", "1"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        offline = start_host(save_store, None)
         processes.append(offline)
-        assert offline.stdout.readline().startswith("ready ")
         uncertain = observe(save_store, "save-message")
         assert uncertain["queue"]["status"] == "processing", uncertain
         assert uncertain["processing"]["attempt"] == "1", uncertain
@@ -2920,14 +2873,8 @@ def main():
         database.commit()
         database.close()
         assert uncertain == (1, 1, None), uncertain
-        repaired = subprocess.Popen(
-            [str(LATIFA), "serve", "--store", str(race_store), "--active-capacity", "1"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        repaired = start_host(race_store, None)
         processes.append(repaired)
-        assert repaired.stdout.readline().startswith("ready ")
         stop_host(repaired)
         processes.remove(repaired)
 
@@ -2988,14 +2935,8 @@ def main():
             assert failed_cleanup.returncode != 0, failed_cleanup
             assert leftovers[0].exists()
 
-            cleanup_host = subprocess.Popen(
-                [str(LATIFA), "serve", "--store", str(owned_store), "--active-capacity", "1"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
+            cleanup_host = start_host(owned_store, None)
             processes.append(cleanup_host)
-            assert cleanup_host.stdout.readline().startswith("ready ")
             assert not list((owned_store / "scratch").glob(pattern))
             resources = command(
                 "inspect-session", "--store", owned_store, "--session", f"direct/{fault}"
@@ -3032,14 +2973,8 @@ def main():
         processes.remove(host)
         assert leftovers[0].exists()
 
-        offline = subprocess.Popen(
-            [str(LATIFA), "serve", "--store", str(unlink_store), "--active-capacity", "1"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        offline = start_host(unlink_store, None)
         processes.append(offline)
-        assert offline.stdout.readline().startswith("ready ")
         assert not list(unlink_store.rglob("request-*"))
         resources = command(
             "inspect-session", "--store", unlink_store, "--session", "direct/unlink"

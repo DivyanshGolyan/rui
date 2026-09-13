@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
     dispatch_integration.addArtifactArg(release_safe);
     const dispatch_integration_step = b.step(
         "dispatch-integration",
-        "Run frozen-request dispatch, model-output, continuation, and failure cases",
+        "Run the targeted model dispatch, output, retry, and recovery shortcut",
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
 
     const check_step = b.step(
         "check",
-        "Check formatting, tests, and configuration/message recovery",
+        "Run the canonical formatting, test, integration, and production-build gates",
     );
     const format = b.addSystemCommand(&.{
         b.graph.zig_exe,
@@ -71,6 +71,10 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&integration.step);
     check_step.dependOn(&dispatch_integration.step);
     check_step.dependOn(&debug_integration.step);
+
+    const host_process_test = b.addSystemCommand(&.{"python3"});
+    host_process_test.addFileArg(b.path("src/host_process_test.py"));
+    check_step.dependOn(&host_process_test.step);
 
     const release = addLatifa(b, target, .ReleaseSmall, "latifa-release-small-check", pinned_transport);
     check_step.dependOn(&release.step);
