@@ -47,5 +47,8 @@ jobs:
       - name: Check source and artifacts
         run: zig build check --summary all
 
+      - name: Cross-compile supported targets
+        run: zig build cross-check --summary all
+
       - name: Check repository whitespace
         run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD --

@@ -4,9 +4,9 @@ Latifa (formerly OnePage) is a resource-bounded, crash-resumable local runtime f
 
 ## Status
 
-The source currently implements the earlier single-Session runtime, SQLite Store, Codex adapter, permissioned Bash and Git-backed patch execution, and a disposable QuickJS evaluator. Reusable Sessions/Turns, durable Workflow Runtime, the disk-first Host and native exact Edit are accepted designs awaiting implementation. Documentation and research results are not release certification.
+The source implements the first redesigned runtime slice: an explicitly started Host, exclusive Store ownership, the direct configuration client, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, basic observations and bounded SQLite/content ingress. Model processing and every Workflow, tool, permission, stop and interruption surface enter in later implementation issues; the current message command reports that development limitation explicitly.
 
-The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. Current build instructions support macOS on Apple Silicon. Runtime verification uses the available Mac; source/API evidence and cross-compilation support other targets, whose unexecuted behavior remains unverified.
+The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. The current build cross-compiles all four targets. Runtime and resource verification uses the available Apple Silicon Mac; the other targets remain compile-only evidence until exercised on their platforms.
 
 ## Intended experience
 
@@ -27,26 +27,36 @@ V1 excludes conversation branching/editing, attachments, automatic provider fall
 
 ## Build and try the current implementation
 
-The current build still produces `onepage` and `onepage-workflow-evaluator`; the commands below use those names.
-
-Requirements: macOS on Apple Silicon, Zig 0.16.0, `/usr/bin/git`, and system libcurl 7.85.0 or newer with HTTPS, asynchronous DNS and thread-safe global initialization. SQLite and QuickJS sources are pinned by the build.
+Requirements: Zig 0.16.0 and Python 3 for the process-level verification fixture. SQLite is pinned by the build.
 
 ```sh
 zig build
-zig build fixture-answer -Doptimize=ReleaseSmall
-zig build fixture-bash -Doptimize=ReleaseSmall
-zig build fixture-patch-deny -Doptimize=ReleaseSmall
-zig build fixture-repair -Doptimize=ReleaseSmall
+./zig-out/bin/latifa serve --store /absolute/path/to/private-store
 ```
 
-Fixtures use the same model, permission and recovery paths as the current live adapter. See [verification gates](VERIFICATION.md#canonical-gates) for checks appropriate to a change.
-
-Latifa is its own Codex client; it invokes neither the Codex CLI nor an OpenAI SDK. Login uses OpenAI's browser/device flow and stores credentials in macOS Keychain. Live checks are opt-in:
+In another shell, configure a Session. The record path must be in a private directory; retry reuses that durable capture after a lost reply or client restart.
 
 ```sh
-./zig-out/bin/onepage --codex-login
-zig build codex-live-repair
-./zig-out/bin/onepage --codex-logout
+./zig-out/bin/latifa configure \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/configure.json \
+  --key configure-1 \
+  --session direct/reviewer \
+  --workspace /absolute/path/to/workspace \
+  --model gpt-6-astra
+
+./zig-out/bin/latifa retry \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/configure.json \
+  --kind configure
 ```
 
-Credentials stay out of SQLite, repository files, conversations and child-tool environments. The designed Linux credential mechanisms are not implemented by these commands. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The applicable gates are:
+
+```sh
+zig build check
+zig build cross-check
+zig build measure-admission
+```
+
+`measure-admission` is an opt-in macOS resource run. Model/provider authentication and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
