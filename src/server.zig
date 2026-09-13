@@ -1253,31 +1253,39 @@ fn renderCommandObservation(
         if (observation.message) |message| {
             try response.append(",\"input\":");
             try renderContentReference(response, message.content);
-            if (message.admission_id) |admission_id| {
+            if (message.queue) |accepted| {
                 try response.appendFmt(",\"queue\":{{\"status\":\"{s}\",\"admission\":\"{d}\"}}", .{
-                    @tagName(message.status),
-                    admission_id,
+                    @tagName(accepted.state),
+                    accepted.admission_id,
                 });
-            }
-            if (message.turn_id) |turn_id| {
-                try response.appendFmt(",\"processing\":{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
-                    turn_id,
-                    message.operation_id.?,
-                    message.attempt_ordinal.?,
-                });
-            }
-            if (message.failure.len != 0) {
-                try response.append(",\"result\":{\"status\":\"failed\",\"code\":");
-                try response.appendJsonString(message.failure.slice());
-                try response.append("}");
-            } else if (message.answer) |answer| {
-                try response.append(",\"result\":{\"status\":\"completed\",\"text\":");
-                try renderContentReference(response, answer);
-                try response.append("}");
+                switch (accepted.state) {
+                    .queued => {},
+                    .processing => |binding| try renderProcessingBinding(response, binding),
+                    .completed => |completed| {
+                        try renderProcessingBinding(response, completed.binding);
+                        try response.append(",\"result\":{\"status\":\"completed\",\"text\":");
+                        try renderContentReference(response, completed.answer);
+                        try response.append("}");
+                    },
+                    .failed => |failed| {
+                        try renderProcessingBinding(response, failed.binding);
+                        try response.append(",\"result\":{\"status\":\"failed\",\"code\":");
+                        try response.appendJsonString(failed.code.slice());
+                        try response.append("}");
+                    },
+                }
             }
         }
     }
     try response.append("}}");
+}
+
+fn renderProcessingBinding(response: *protocol.ResponseBuffer, binding: store_module.AttemptBinding) !void {
+    try response.appendFmt(",\"processing\":{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+        binding.turn_id,
+        binding.operation_id,
+        binding.attempt_ordinal,
+    });
 }
 
 const ExecutionObservation = struct {
@@ -1448,6 +1456,71 @@ test "Session observation buffer covers worst-case JSON escaping" {
     var response: protocol.ResponseBuffer = .{};
     try renderSessionObservation(&response, observation, .{});
     try std.testing.expect(response.len <= protocol.max_response_bytes);
+}
+
+test "message observation renders every closed queue state without fabricated rejection state" {
+    const zero_digest = "0000000000000000000000000000000000000000000000000000000000000000";
+    const full_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    const input = ",\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ zero_digest ++ "\"}";
+    const accepted_prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\"" ++ input;
+    const binding = ",\"processing\":{\"turn\":\"2\",\"operation\":\"3\",\"attempt\":\"4\"}";
+    const Expect = struct {
+        fn rendered(observation: store_module.CommandObservation, expected: []const u8) !void {
+            var response: protocol.ResponseBuffer = .{};
+            try renderCommandObservation(&response, "k", observation);
+            try std.testing.expectEqualStrings(expected, response.slice());
+        }
+    };
+
+    const content = store_module.ContentReference{ .length = 3, .digest = [_]u8{0} ** 32 };
+    const processing = store_module.AttemptBinding{
+        .turn_id = 2,
+        .operation_id = 3,
+        .attempt_ordinal = 4,
+    };
+    var rejected = store_module.CommandObservation{
+        .status = .rejected,
+        .kind = .message,
+        .message = .{ .content = content },
+    };
+    try rejected.target.set("s");
+    try rejected.code.set("unknown_session");
+    try Expect.rendered(
+        rejected,
+        "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\",\"code\":\"unknown_session\"" ++ input ++ "}}",
+    );
+
+    var observation = rejected;
+    observation.status = .accepted;
+    observation.code.len = 0;
+    observation.message.?.queue = .{ .admission_id = 1, .state = .queued };
+    try Expect.rendered(
+        observation,
+        accepted_prefix ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"1\"}}}",
+    );
+
+    observation.message.?.queue.?.state = .{ .processing = processing };
+    try Expect.rendered(
+        observation,
+        accepted_prefix ++ ",\"queue\":{\"status\":\"processing\",\"admission\":\"1\"}" ++ binding ++ "}}",
+    );
+
+    observation.message.?.queue.?.state = .{ .completed = .{
+        .binding = processing,
+        .answer = .{ .length = 6, .digest = [_]u8{0xff} ** 32 },
+    } };
+    try Expect.rendered(
+        observation,
+        accepted_prefix ++ ",\"queue\":{\"status\":\"completed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"6\",\"sha256\":\"" ++ full_digest ++ "\"}}}}",
+    );
+
+    var code: protocol.Bounded(96) = .{};
+    try code.set("provider_http_422");
+    observation.message.?.queue.?.state = .{ .failed = .{ .binding = processing, .code = code } };
+    try Expect.rendered(
+        observation,
+        accepted_prefix ++ ",\"queue\":{\"status\":\"failed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}}}",
+    );
 }
 
 fn finishTestClient(host: *Host, release: *std.atomic.Value(bool), completed: *std.atomic.Value(bool)) void {

@@ -113,14 +113,26 @@ pub const ContentReference = struct {
 };
 
 pub const MessageObservation = struct {
-    admission_id: ?u64,
-    status: enum { queued, processing, completed, failed },
     content: ContentReference,
-    turn_id: ?u64 = null,
-    operation_id: ?u64 = null,
-    attempt_ordinal: ?u64 = null,
-    failure: protocol.Bounded(96) = .{},
-    answer: ?ContentReference = null,
+    queue: ?AcceptedMessageQueue = null,
+};
+
+pub const AcceptedMessageQueue = struct {
+    admission_id: u64,
+    state: State,
+
+    pub const State = union(enum) {
+        queued,
+        processing: AttemptBinding,
+        completed: struct {
+            binding: AttemptBinding,
+            answer: ContentReference,
+        },
+        failed: struct {
+            binding: AttemptBinding,
+            code: protocol.Bounded(96),
+        },
+    };
 };
 
 pub const AttemptBinding = struct {
@@ -978,31 +990,26 @@ pub const Store = struct {
                 return self.fenceReadFailure(error.CorruptStore);
             const metadata = self.readContentMetadata(content_id) catch |err|
                 return self.fenceReadFailure(err);
-            if (command.accepted) {
-                observation.message = self.readMessageObservation(
+            observation.message = .{
+                .content = .{ .length = metadata.length, .digest = metadata.digest },
+                .queue = self.readMessageQueue(
                     key,
                     command.target.slice(),
                     content_id,
-                    .{ .length = metadata.length, .digest = metadata.digest },
-                ) catch |err| return self.fenceReadFailure(err);
-            } else {
-                observation.message = .{
-                    .admission_id = null,
-                    .status = .queued,
-                    .content = .{ .length = metadata.length, .digest = metadata.digest },
-                };
-            }
+                    command.accepted,
+                ) catch |err| return self.fenceReadFailure(err),
+            };
         }
         return observation;
     }
 
-    fn readMessageObservation(
+    fn readMessageQueue(
         self: *Store,
         command_key: []const u8,
         session_ref: []const u8,
         content_id: i64,
-        content: ContentReference,
-    ) !MessageObservation {
+        accepted: bool,
+    ) !?AcceptedMessageQueue {
         const statement = try prepare(
             self.database,
             "SELECT m.admission_id,m.turn_id,t.operation_id,t.outcome_code,o.attempt_ordinal,t.outcome_content_id " ++
@@ -1015,41 +1022,52 @@ pub const Store = struct {
         try bindText(statement, 1, command_key);
         try bindText(statement, 2, session_ref);
         try bindI64(statement, 3, content_id);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        const step = c.sqlite3_step(statement);
+        if (!accepted) {
+            if (step != c.SQLITE_DONE) return error.CorruptStore;
+            return null;
+        }
+        if (step != c.SQLITE_ROW) return error.CorruptStore;
         const admission_id = c.sqlite3_column_int64(statement, 0);
         if (admission_id <= 0) return error.CorruptStore;
-        var result = MessageObservation{
-            .admission_id = @intCast(admission_id),
-            .status = .queued,
-            .content = content,
-        };
         const turn_id = try readNullablePositiveI64(statement, 1);
-        if (turn_id) |actual_turn| {
-            result.turn_id = @intCast(actual_turn);
-            const operation_id = try readNullablePositiveI64(statement, 2) orelse
-                return error.CorruptStore;
-            result.operation_id = @intCast(operation_id);
-            const attempt = c.sqlite3_column_int64(statement, 4);
-            if (attempt <= 0) return error.CorruptStore;
-            result.attempt_ordinal = @intCast(attempt);
-            if (c.sqlite3_column_type(statement, 3) == c.SQLITE_NULL) {
-                result.status = .processing;
-            } else {
-                var outcome: protocol.Bounded(96) = .{};
-                try readText(statement, 3, &outcome);
-                if (outcome.eql("completed")) {
-                    const answer_id = try readNullablePositiveI64(statement, 5) orelse return error.CorruptStore;
-                    const answer = try self.readContentMetadata(answer_id);
-                    result.status = .completed;
-                    result.answer = .{ .length = answer.length, .digest = answer.digest };
-                } else {
-                    result.failure = outcome;
-                    if (result.failure.len == 0) return error.CorruptStore;
-                    result.status = .failed;
-                }
-            }
+        if (turn_id == null) {
+            if (c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL or
+                c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL or
+                c.sqlite3_column_type(statement, 4) != c.SQLITE_NULL or
+                c.sqlite3_column_type(statement, 5) != c.SQLITE_NULL) return error.CorruptStore;
+            return .{ .admission_id = @intCast(admission_id), .state = .queued };
         }
-        return result;
+        const binding = AttemptBinding{
+            .turn_id = @intCast(turn_id.?),
+            .operation_id = @intCast(try readNullablePositiveI64(statement, 2) orelse
+                return error.CorruptStore),
+            .attempt_ordinal = @intCast(try readNullablePositiveI64(statement, 4) orelse
+                return error.CorruptStore),
+        };
+        if (c.sqlite3_column_type(statement, 3) == c.SQLITE_NULL) {
+            if (c.sqlite3_column_type(statement, 5) != c.SQLITE_NULL) return error.CorruptStore;
+            return .{ .admission_id = @intCast(admission_id), .state = .{ .processing = binding } };
+        }
+        var outcome: protocol.Bounded(96) = .{};
+        try readText(statement, 3, &outcome);
+        if (outcome.eql("completed")) {
+            const answer_id = try readNullablePositiveI64(statement, 5) orelse return error.CorruptStore;
+            const answer = try self.readContentMetadata(answer_id);
+            return .{
+                .admission_id = @intCast(admission_id),
+                .state = .{ .completed = .{
+                    .binding = binding,
+                    .answer = .{ .length = answer.length, .digest = answer.digest },
+                } },
+            };
+        }
+        if (outcome.len == 0 or c.sqlite3_column_type(statement, 5) != c.SQLITE_NULL)
+            return error.CorruptStore;
+        return .{
+            .admission_id = @intCast(admission_id),
+            .state = .{ .failed = .{ .binding = binding, .code = outcome } },
+        };
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
@@ -3434,8 +3452,9 @@ test "message admissions remain queued in order and retain bounded canonical con
     try std.testing.expect(observed.status == .accepted);
     try std.testing.expect(observed.kind == .message);
     try std.testing.expect(observed.message != null);
-    try std.testing.expectEqual(first_reply.accepted.admission_id, observed.message.?.admission_id.?);
-    try std.testing.expect(observed.message.?.status == .queued);
+    const accepted_observation = observed.message.?.queue.?;
+    try std.testing.expectEqual(first_reply.accepted.admission_id, accepted_observation.admission_id);
+    try std.testing.expect(accepted_observation.state == .queued);
 
     var reader = try storage.openContent(observed.message.?.content);
     var actual: [first_text.len]u8 = undefined;
@@ -3452,7 +3471,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const restarted = try storage.observeCommand("message-1");
-    try std.testing.expectEqual(first_reply.accepted.admission_id, restarted.message.?.admission_id.?);
+    try std.testing.expectEqual(first_reply.accepted.admission_id, restarted.message.?.queue.?.admission_id);
     try std.testing.expectEqual(@as(u64, 2), (try storage.inspectSession("direct/messages")).pending_messages);
 }
 
@@ -3486,7 +3505,56 @@ test "message rejections retain input and replay before current Session checks" 
     const observed = try storage.observeCommand("rejected-message");
     try std.testing.expect(observed.status == .rejected);
     try std.testing.expect(observed.message != null);
-    try std.testing.expect(observed.message.?.admission_id == null);
+    try std.testing.expect(observed.message.?.queue == null);
+
+    try exec(
+        storage.database,
+        "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
+            "SELECT 1,target,command_key,primary_content_id,NULL FROM core_command " ++
+            "WHERE command_key='rejected-message'",
+    );
+    try std.testing.expectError(error.CorruptStore, storage.observeCommand("rejected-message"));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "message observation rejects an answer attached to processing durable facts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration(
+        "corrupt-observation-configure",
+        "direct/corrupt-observation",
+        workspace,
+        "model-a",
+    );
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+    const file = try tmp.dir.createFile(std.testing.io, "corrupt-observation-message", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, "input");
+    try file.sync(std.testing.io);
+    var message = try completeMessage(
+        "corrupt-observation-message",
+        "direct/corrupt-observation",
+        file,
+        "input",
+    );
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    try exec(
+        storage.database,
+        "UPDATE turn SET outcome_content_id=(" ++
+            "SELECT content_id FROM message_admission WHERE command_key='corrupt-observation-message')",
+    );
+
+    try std.testing.expectError(
+        error.CorruptStore,
+        storage.observeCommand("corrupt-observation-message"),
+    );
+    try std.testing.expect(storage.isFenced());
 }
 
 test "message conflicts and failed commits cannot create another admission" {
@@ -3599,7 +3667,9 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
     {
         var storage = try testingStore(&tmp, std.testing.io);
         try std.testing.expect((try storage.observeCommand("rollback-configure")).status == .accepted);
-        try std.testing.expect((try storage.observeCommand("rollback-message")).message.?.status == .queued);
+        try std.testing.expect(
+            (try storage.observeCommand("rollback-message")).message.?.queue.?.state == .queued,
+        );
         {
             const partial = try prepare(
                 storage.database,
@@ -3637,12 +3707,15 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
     {
         var storage = try testingStore(&tmp, std.testing.io);
         defer storage.close() catch unreachable;
-        const observation = (try storage.observeCommand("rollback-message")).message.?;
-        try std.testing.expect(observation.status == .processing);
-        try std.testing.expectEqual(binding.operation_id, observation.operation_id.?);
+        const observation = (try storage.observeCommand("rollback-message")).message.?.queue.?;
+        const observed_binding = switch (observation.state) {
+            .processing => |value| value,
+            else => return error.ExpectedProcessingObservation,
+        };
+        try std.testing.expectEqual(binding.operation_id, observed_binding.operation_id);
         try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
         try std.testing.expect(
-            (try storage.observeCommand("rollback-message")).message.?.status == .failed,
+            (try storage.observeCommand("rollback-message")).message.?.queue.?.state == .failed,
         );
     }
 }
@@ -3822,19 +3895,27 @@ test "one committed selection freezes its settings and input prefix" {
         error.InjectedAttemptCommitFailure,
         storage.admitNextModelAttempt(.{ .attempt_before_commit = true }),
     );
-    try std.testing.expect((try storage.observeCommand("dispatch-1")).message.?.status == .queued);
+    try std.testing.expect(
+        (try storage.observeCommand("dispatch-1")).message.?.queue.?.state == .queued,
+    );
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
     try std.testing.expectError(error.DispatchPermitConsumed, admitted.permit.consume());
-    const first_observation = (try storage.observeCommand("dispatch-1")).message.?;
-    const second_observation = (try storage.observeCommand("dispatch-2")).message.?;
-    try std.testing.expect(first_observation.status == .processing);
-    try std.testing.expect(second_observation.status == .processing);
-    try std.testing.expectEqual(binding.turn_id, first_observation.turn_id.?);
-    try std.testing.expectEqual(binding.turn_id, second_observation.turn_id.?);
-    try std.testing.expectEqual(binding.operation_id, first_observation.operation_id.?);
-    try std.testing.expectEqual(binding.operation_id, second_observation.operation_id.?);
+    const first_observation = (try storage.observeCommand("dispatch-1")).message.?.queue.?;
+    const second_observation = (try storage.observeCommand("dispatch-2")).message.?.queue.?;
+    const first_binding = switch (first_observation.state) {
+        .processing => |value| value,
+        else => return error.ExpectedProcessingObservation,
+    };
+    const second_binding = switch (second_observation.state) {
+        .processing => |value| value,
+        else => return error.ExpectedProcessingObservation,
+    };
+    try std.testing.expectEqual(binding.turn_id, first_binding.turn_id);
+    try std.testing.expectEqual(binding.turn_id, second_binding.turn_id);
+    try std.testing.expectEqual(binding.operation_id, first_binding.operation_id);
+    try std.testing.expectEqual(binding.operation_id, second_binding.operation_id);
 
     const third_file = try tmp.dir.createFile(std.testing.io, "dispatch-third", .{ .read = true });
     try third_file.writeStreamingAll(std.testing.io, "later");
@@ -3868,10 +3949,15 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqualStrings("first", &actual);
 
     try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
-    const failed = (try storage.observeCommand("dispatch-1")).message.?;
-    try std.testing.expect(failed.status == .failed);
-    try std.testing.expectEqualStrings("provider_http_422", failed.failure.slice());
-    try std.testing.expect((try storage.observeCommand("dispatch-3")).message.?.status == .queued);
+    const failed = (try storage.observeCommand("dispatch-1")).message.?.queue.?;
+    const failure = switch (failed.state) {
+        .failed => |value| value,
+        else => return error.ExpectedFailedObservation,
+    };
+    try std.testing.expectEqualStrings("provider_http_422", failure.code.slice());
+    try std.testing.expect(
+        (try storage.observeCommand("dispatch-3")).message.?.queue.?.state == .queued,
+    );
     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/dispatch")).pending_messages);
 
     try update.key.set("configure-after-failure");
@@ -3958,7 +4044,7 @@ test "continued accepted output keeps model continuation incompatible" {
         .decoded_length = "answer".len,
     });
     try metadata.sealForRead();
-    try storage.settleModelSuccess(binding, &.{
+    const output = ValidatedOutput{
         .source = source,
         .source_length = source_bytes.len,
         .metadata = metadata.file,
@@ -3970,7 +4056,8 @@ test "continued accepted output keeps model continuation incompatible" {
         .openai_model = .{},
         .x_openai_model = .{},
         .request_id = .{},
-    }, .{});
+    };
+    try storage.settleModelSuccess(binding, &output, .{});
     {
         const resolution = try prepare(
             storage.database,
@@ -3994,6 +4081,21 @@ test "continued accepted output keeps model continuation incompatible" {
     try std.testing.expectEqual(
         ConfigurationRejection.continuation_model_incompatible,
         rejected.rejected.code,
+    );
+
+    const completion_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelSuccess(completion_binding, &output, .{});
+    const completed = (try storage.observeCommand("continued-first")).message.?.queue.?;
+    const completion = switch (completed.state) {
+        .completed => |value| value,
+        else => return error.ExpectedCompletedObservation,
+    };
+    try std.testing.expectEqual(completion_binding, completion.binding);
+    try std.testing.expectEqual(@as(u64, "answer".len), completion.answer.length);
+    try std.testing.expectEqualSlices(
+        u8,
+        &protocol.contentDigest("answer"),
+        &completion.answer.digest,
     );
 }
 
@@ -4028,18 +4130,25 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
     {
         var storage = try testingStore(&tmp, std.testing.io);
         defer storage.close() catch unreachable;
-        const observation = (try storage.observeCommand("failure-message")).message.?;
-        try std.testing.expect(observation.status == .processing);
-        try std.testing.expectEqual(@as(u64, 1), observation.attempt_ordinal.?);
+        const observation = (try storage.observeCommand("failure-message")).message.?.queue.?;
+        const observed_binding = switch (observation.state) {
+            .processing => |value| value,
+            else => return error.ExpectedProcessingObservation,
+        };
+        try std.testing.expectEqual(@as(u64, 1), observed_binding.attempt_ordinal);
         var replacement = (try admitRetryForTesting(&storage)).?;
         const replacement_binding = try replacement.permit.consume();
         try std.testing.expectEqual(@as(u64, 2), replacement_binding.attempt_ordinal);
         try std.testing.expectEqual(
             replacement_binding.operation_id,
-            observation.operation_id.?,
+            observed_binding.operation_id,
         );
-        const recovered = (try storage.observeCommand("failure-message")).message.?;
-        try std.testing.expectEqual(@as(u64, 2), recovered.attempt_ordinal.?);
+        const recovered = (try storage.observeCommand("failure-message")).message.?.queue.?;
+        const recovered_binding = switch (recovered.state) {
+            .processing => |value| value,
+            else => return error.ExpectedProcessingObservation,
+        };
+        try std.testing.expectEqual(@as(u64, 2), recovered_binding.attempt_ordinal);
 
         {
             const force_exhausted = try prepare(
@@ -4067,9 +4176,12 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
         try std.testing.expect(
             try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()),
         );
-        const exhausted = (try storage.observeCommand("failure-message")).message.?;
-        try std.testing.expect(exhausted.status == .failed);
-        try std.testing.expectEqualStrings("retry_exhausted", exhausted.failure.slice());
+        const exhausted = (try storage.observeCommand("failure-message")).message.?.queue.?;
+        const failure = switch (exhausted.state) {
+            .failed => |value| value,
+            else => return error.ExpectedFailedObservation,
+        };
+        try std.testing.expectEqualStrings("retry_exhausted", failure.code.slice());
     }
 }
 
@@ -4154,9 +4266,12 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
         .{},
     );
 
-    const observation = (try storage.observeCommand("retry-message")).message.?;
-    try std.testing.expect(observation.status == .failed);
-    try std.testing.expectEqualStrings("retry_exhausted", observation.failure.slice());
+    const observation = (try storage.observeCommand("retry-message")).message.?.queue.?;
+    const failure = switch (observation.state) {
+        .failed => |value| value,
+        else => return error.ExpectedFailedObservation,
+    };
+    try std.testing.expectEqualStrings("retry_exhausted", failure.code.slice());
     try std.testing.expect((try admitRetryForTesting(&storage)) == null);
     const statement = try prepare(
         storage.database,
