@@ -6,11 +6,12 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 1;
+pub const schema_version: u32 = 2;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 
 pub const Faults = struct {
     content_read: bool = false,
+    content_import: bool = false,
     before_commit: bool = false,
 };
 
@@ -46,14 +47,23 @@ pub const ConfigureReply = union(enum) {
 pub const MessageRejection = enum {
     invalid_session_reference,
     unknown_session,
-    model_processing_unavailable_in_issue_170,
+};
+
+pub const AcceptedMessage = struct {
+    replayed: bool,
+    admission_id: u64,
+    content: ContentReference,
+};
+
+pub const RejectedMessage = struct {
+    replayed: bool,
+    code: MessageRejection,
+    content: ContentReference,
 };
 
 pub const MessageReply = union(enum) {
-    rejected: struct {
-        replayed: bool,
-        code: MessageRejection,
-    },
+    accepted: AcceptedMessage,
+    rejected: RejectedMessage,
     conflict,
     infrastructure_failure,
 };
@@ -74,11 +84,18 @@ pub const CommandObservation = struct {
     code: protocol.Bounded(96) = .{},
     revision: u64 = 0,
     created: bool = false,
+    message: ?MessageObservation = null,
 };
 
 pub const ContentReference = struct {
     length: u64,
     digest: [32]u8,
+};
+
+pub const MessageObservation = struct {
+    admission_id: ?u64,
+    status: enum { queued },
+    content: ContentReference,
 };
 
 pub const SessionObservation = struct {
@@ -91,6 +108,7 @@ pub const SessionObservation = struct {
     permission_mode: protocol.Bounded(16) = .{},
     instructions: ContentReference = .{ .length = 0, .digest = [_]u8{0} ** 32 },
     output_schema: ?ContentReference = null,
+    pending_messages: u64 = 0,
 };
 
 pub const ContentReader = struct {
@@ -369,7 +387,7 @@ pub const Store = struct {
         return .{ .rejected = .{ .replayed = false, .code = code } };
     }
 
-    pub fn rejectMessage(
+    pub fn submitMessage(
         self: *Store,
         command: *const protocol.MessageCommand,
         faults: Faults,
@@ -378,14 +396,14 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return .infrastructure_failure;
-        return self.rejectMessageLocked(command, faults) catch {
+        return self.submitMessageLocked(command, faults) catch {
             rollback(self.database);
             self.fenced.store(true, .release);
             return .infrastructure_failure;
         };
     }
 
-    fn rejectMessageLocked(
+    fn submitMessageLocked(
         self: *Store,
         command: *const protocol.MessageCommand,
         faults: Faults,
@@ -398,19 +416,50 @@ pub const Store = struct {
             if (existing.kind != .message or
                 !std.mem.eql(u8, existing.target.slice(), command.session.slice()) or
                 !std.mem.eql(u8, &existing.digest, &digest)) return .conflict;
-            if (existing.accepted) return error.CorruptStore;
-            const code = std.meta.stringToEnum(MessageRejection, existing.code.slice()) orelse return error.CorruptStore;
-            return .{ .rejected = .{ .replayed = true, .code = code } };
+            const content_id = existing.primary_content_id orelse return error.CorruptStore;
+            const metadata = try self.readContentMetadata(content_id);
+            const content = ContentReference{ .length = metadata.length, .digest = metadata.digest };
+            if (existing.accepted) {
+                const admission_id = try self.readMessageAdmission(
+                    command.key.slice(),
+                    command.session.slice(),
+                    content_id,
+                );
+                return .{ .accepted = .{
+                    .replayed = true,
+                    .admission_id = admission_id,
+                    .content = content,
+                } };
+            }
+            const code = std.meta.stringToEnum(MessageRejection, existing.code.slice()) orelse
+                return error.CorruptStore;
+            return .{ .rejected = .{ .replayed = true, .code = code, .content = content } };
         }
-        var answer = StoredAnswer{ .accepted = false };
-        const code: MessageRejection = if (command.session.len == 0)
+        const text_id = try self.importContent(&command.text, faults);
+        const metadata = try self.readContentMetadata(text_id);
+        const content = ContentReference{ .length = metadata.length, .digest = metadata.digest };
+        const code: ?MessageRejection = if (command.session.len == 0)
             .invalid_session_reference
         else if (try self.readSession(command.session.slice()) == null)
             .unknown_session
         else
-            .model_processing_unavailable_in_issue_170;
-        const text_id = try self.importContent(&command.text, faults);
-        try answer.code.set(@tagName(code));
+            null;
+        if (code) |rejection| {
+            var answer = StoredAnswer{ .accepted = false };
+            try answer.code.set(@tagName(rejection));
+            try self.insertCommand(
+                command.key.slice(),
+                .message,
+                command.session.slice(),
+                &digest,
+                text_id,
+                null,
+                answer,
+            );
+            if (faults.before_commit) return error.InjectedCommitFailure;
+            try exec(self.database, "COMMIT");
+            return .{ .rejected = .{ .replayed = false, .code = rejection, .content = content } };
+        }
         try self.insertCommand(
             command.key.slice(),
             .message,
@@ -418,11 +467,20 @@ pub const Store = struct {
             &digest,
             text_id,
             null,
-            answer,
+            .{ .accepted = true },
+        );
+        const admission_id = try self.insertMessageAdmission(
+            command.session.slice(),
+            command.key.slice(),
+            text_id,
         );
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
-        return .{ .rejected = .{ .replayed = false, .code = code } };
+        return .{ .accepted = .{
+            .replayed = false,
+            .admission_id = admission_id,
+            .content = content,
+        } };
     }
 
     pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
@@ -440,6 +498,21 @@ pub const Store = struct {
         };
         observation.target = command.target;
         observation.code = command.code;
+        if (command.kind == .message) {
+            const content_id = command.primary_content_id orelse
+                return self.fenceReadFailure(error.CorruptStore);
+            const metadata = self.readContentMetadata(content_id) catch |err|
+                return self.fenceReadFailure(err);
+            observation.message = .{
+                .admission_id = if (command.accepted)
+                    self.readMessageAdmission(key, command.target.slice(), content_id) catch |err|
+                        return self.fenceReadFailure(err)
+                else
+                    null,
+                .status = .queued,
+                .content = .{ .length = metadata.length, .digest = metadata.digest },
+            };
+        }
         return observation;
     }
 
@@ -467,6 +540,8 @@ pub const Store = struct {
             const metadata = self.readContentMetadata(content_id) catch |err| return self.fenceReadFailure(err);
             observation.output_schema = .{ .length = metadata.length, .digest = metadata.digest };
         }
+        observation.pending_messages = self.countPendingMessages(session_ref) catch |err|
+            return self.fenceReadFailure(err);
         return observation;
     }
 
@@ -519,10 +594,11 @@ pub const Store = struct {
         code: protocol.Bounded(96),
         revision: u64,
         created: bool,
+        primary_content_id: ?i64,
     };
 
     fn readExistingCommand(self: *Store, key: []const u8) !?ExistingCommand {
-        const statement = try prepare(self.database, "SELECT kind,target,input_digest,accepted,code,revision,created FROM core_command WHERE command_key=?1");
+        const statement = try prepare(self.database, "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, key);
         const step_result = c.sqlite3_step(statement);
@@ -545,6 +621,7 @@ pub const Store = struct {
         if (revision_value < 0) return error.CorruptStore;
         const created_value = c.sqlite3_column_int(statement, 6);
         if (created_value != 0 and created_value != 1) return error.CorruptStore;
+        const primary_content_id = readNullablePositiveI64(statement, 7) catch return error.CorruptStore;
         return .{
             .kind = kind,
             .target = target,
@@ -553,7 +630,40 @@ pub const Store = struct {
             .code = code,
             .revision = @intCast(revision_value),
             .created = created_value == 1,
+            .primary_content_id = primary_content_id,
         };
+    }
+
+    fn readMessageAdmission(
+        self: *Store,
+        command_key: []const u8,
+        session_ref: []const u8,
+        content_id: i64,
+    ) !u64 {
+        const statement = try prepare(self.database, "SELECT admission_id,session_ref,content_id FROM message_admission WHERE command_key=?1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, command_key);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        const admission_id = c.sqlite3_column_int64(statement, 0);
+        var stored_session: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(statement, 1, &stored_session);
+        if (admission_id <= 0 or
+            !stored_session.eql(session_ref) or
+            c.sqlite3_column_int64(statement, 2) != content_id)
+        {
+            return error.CorruptStore;
+        }
+        return @intCast(admission_id);
+    }
+
+    fn countPendingMessages(self: *Store, session_ref: []const u8) !u64 {
+        const statement = try prepare(self.database, "SELECT count(*) FROM message_admission WHERE session_ref=?1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.MessageAdmissionReadFailed;
+        const count = c.sqlite3_column_int64(statement, 0);
+        if (count < 0) return error.CorruptStore;
+        return @intCast(count);
     }
 
     fn readSession(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
@@ -647,6 +757,34 @@ pub const Store = struct {
         try expectDone(statement);
     }
 
+    fn insertMessageAdmission(
+        self: *Store,
+        session_ref: []const u8,
+        command_key: []const u8,
+        content_id: i64,
+    ) !u64 {
+        const latest = try prepare(self.database, "SELECT admission_id FROM message_admission ORDER BY admission_id DESC LIMIT 1");
+        defer _ = c.sqlite3_finalize(latest);
+        const latest_result = c.sqlite3_step(latest);
+        const admission_id: u64 = if (latest_result == c.SQLITE_DONE)
+            1
+        else if (latest_result == c.SQLITE_ROW) blk: {
+            const prior = c.sqlite3_column_int64(latest, 0);
+            if (prior <= 0 or prior == std.math.maxInt(i64)) {
+                return error.MessageAdmissionIdentityExhausted;
+            }
+            break :blk @intCast(prior + 1);
+        } else return error.MessageAdmissionReadFailed;
+        const statement = try prepare(self.database, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id) VALUES(?1,?2,?3,?4)");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, admission_id);
+        try bindText(statement, 2, session_ref);
+        try bindText(statement, 3, command_key);
+        try bindI64(statement, 4, content_id);
+        try expectDone(statement);
+        return admission_id;
+    }
+
     fn importEmptyContent(self: *Store) !i64 {
         var empty: protocol.ContentField = .{ .state = .value };
         empty.digest = protocol.contentDigest("");
@@ -701,6 +839,7 @@ pub const Store = struct {
             if (c.sqlite3_blob_write(blob, buffer[0..count].ptr, @intCast(count), @intCast(offset)) != c.SQLITE_OK) {
                 return error.ContentWriteFailed;
             }
+            if (faults.content_import) return error.InjectedContentImportFailure;
             offset += count;
         }
         return content_id;
@@ -827,9 +966,16 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ output_schema_content_id INTEGER REFERENCES content(content_id),
         \\ PRIMARY KEY(session_ref,revision)
         \\) STRICT, WITHOUT ROWID;
+        \\CREATE TABLE message_admission(
+        \\ admission_id INTEGER PRIMARY KEY CHECK(admission_id>0),
+        \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
+        \\ command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key) DEFERRABLE INITIALLY DEFERRED,
+        \\ content_id INTEGER NOT NULL REFERENCES content(content_id)
+        \\) STRICT;
+        \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,admission_id);
     );
     try exec(database, "PRAGMA application_id=1280591409");
-    try exec(database, "PRAGMA user_version=1");
+    try exec(database, "PRAGMA user_version=2");
     const statement = try prepare(database, "INSERT INTO store_meta(key,value) VALUES('wire_version','1'),('store_selector',?1)");
     defer _ = c.sqlite3_finalize(statement);
     try bindText(statement, 1, selector);
@@ -844,8 +990,9 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
         const statement = try prepare(
             database,
             "SELECT count(*) FROM sqlite_schema WHERE " ++
-                "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision')) OR " ++
-                "(type='index' AND (sql IS NOT NULL OR tbl_name NOT IN ('store_meta','content','session','core_command','session_revision'))) OR " ++
+                "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission')) OR " ++
+                "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission')) OR " ++
+                "(sql IS NOT NULL AND (name!='message_admission_session_order' OR tbl_name!='message_admission')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -996,6 +1143,24 @@ fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace: []
     return command;
 }
 
+fn completeMessage(
+    key: []const u8,
+    session_ref: []const u8,
+    file: std.Io.File,
+    text: []const u8,
+) !protocol.MessageCommand {
+    var command: protocol.MessageCommand = .{};
+    try command.key.set(key);
+    try command.session.set(session_ref);
+    command.text = .{
+        .state = .value,
+        .file = file,
+        .length = text.len,
+        .digest = protocol.contentDigest(text),
+    };
+    return command;
+}
+
 fn canonicalCwd(io: std.Io, buffer: []u8) ![]const u8 {
     var directory = try std.Io.Dir.cwd().openDir(io, ".", .{});
     defer directory.close(io);
@@ -1121,6 +1286,168 @@ test "failed commit saves neither answer nor partial Session" {
         try std.testing.expect(!(try storage.inspectSession("direct/fault")).found);
         try std.testing.expect(storage.configure(&command, .{}) == .accepted);
     }
+}
+
+test "message admissions remain queued in order and retain bounded canonical content" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration("configure", "direct/messages", workspace, "model-a");
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+
+    const first_text = "first message\n" ++ ("abcdef" ** 700) ++ "🙂";
+    const first_file = try tmp.dir.createFile(std.testing.io, "first-message", .{ .read = true });
+    try first_file.writeStreamingAll(std.testing.io, first_text);
+    try first_file.sync(std.testing.io);
+    var first = try completeMessage("message-1", "direct/messages", first_file, first_text);
+    defer first.removeTemporaryContent(std.testing.io) catch unreachable;
+    const first_reply = storage.submitMessage(&first, .{});
+    try std.testing.expect(first_reply == .accepted);
+    try std.testing.expect(!first_reply.accepted.replayed);
+    try std.testing.expectEqual(@as(u64, 1), first_reply.accepted.admission_id);
+
+    const second_text = "second";
+    const second_file = try tmp.dir.createFile(std.testing.io, "second-message", .{ .read = true });
+    try second_file.writeStreamingAll(std.testing.io, second_text);
+    try second_file.sync(std.testing.io);
+    var second = try completeMessage("message-2", "direct/messages", second_file, second_text);
+    defer second.removeTemporaryContent(std.testing.io) catch unreachable;
+    const second_reply = storage.submitMessage(&second, .{});
+    try std.testing.expect(second_reply == .accepted);
+    try std.testing.expect(first_reply.accepted.admission_id < second_reply.accepted.admission_id);
+
+    const replay = storage.submitMessage(&first, .{});
+    try std.testing.expect(replay == .accepted);
+    try std.testing.expect(replay.accepted.replayed);
+    try std.testing.expectEqual(first_reply.accepted.admission_id, replay.accepted.admission_id);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(first_text), &replay.accepted.content.digest);
+
+    const session = try storage.inspectSession("direct/messages");
+    try std.testing.expectEqual(@as(u64, 2), session.pending_messages);
+    const observed = try storage.observeCommand("message-1");
+    try std.testing.expect(observed.status == .accepted);
+    try std.testing.expect(observed.kind == .message);
+    try std.testing.expect(observed.message != null);
+    try std.testing.expectEqual(first_reply.accepted.admission_id, observed.message.?.admission_id.?);
+    try std.testing.expect(observed.message.?.status == .queued);
+
+    var reader = try storage.openContent(observed.message.?.content);
+    var actual: [first_text.len]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < actual.len) {
+        const count = try reader.read(offset, actual[offset..@min(actual.len, offset + 31)]);
+        try std.testing.expect(count != 0);
+        offset += count;
+    }
+    reader.close();
+    try std.testing.expectEqualSlices(u8, first_text, &actual);
+
+    try storage.close();
+    storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const restarted = try storage.observeCommand("message-1");
+    try std.testing.expectEqual(first_reply.accepted.admission_id, restarted.message.?.admission_id.?);
+    try std.testing.expectEqual(@as(u64, 2), (try storage.inspectSession("direct/messages")).pending_messages);
+}
+
+test "message rejections retain input and replay before current Session checks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const text = "rejected input";
+    const file = try tmp.dir.createFile(std.testing.io, "rejected-message", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, text);
+    try file.sync(std.testing.io);
+    var message = try completeMessage("rejected-message", "direct/later", file, text);
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    const rejected = storage.submitMessage(&message, .{});
+    try std.testing.expect(rejected == .rejected);
+    try std.testing.expectEqual(MessageRejection.unknown_session, rejected.rejected.code);
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration("configure-later", "direct/later", workspace, "model-a");
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+    const replay = storage.submitMessage(&message, .{});
+    try std.testing.expect(replay == .rejected);
+    try std.testing.expect(replay.rejected.replayed);
+    try std.testing.expectEqual(MessageRejection.unknown_session, replay.rejected.code);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &replay.rejected.content.digest);
+    try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/later")).pending_messages);
+
+    const observed = try storage.observeCommand("rejected-message");
+    try std.testing.expect(observed.status == .rejected);
+    try std.testing.expect(observed.message != null);
+    try std.testing.expect(observed.message.?.admission_id == null);
+}
+
+test "message conflicts and failed commits cannot create another admission" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration("configure", "direct/conflict", workspace, "model-a");
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+
+    const text = "one admission";
+    const file = try tmp.dir.createFile(std.testing.io, "message", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, text);
+    try file.sync(std.testing.io);
+    var message = try completeMessage("message", "direct/conflict", file, text);
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&message, .{ .before_commit = true }) == .infrastructure_failure);
+    try storage.close();
+
+    storage = try testingStore(&tmp, std.testing.io);
+    try std.testing.expect((try storage.observeCommand("message")).status == .absent);
+    try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/conflict")).pending_messages);
+    const accepted = storage.submitMessage(&message, .{});
+    try std.testing.expect(accepted == .accepted);
+
+    var retargeted = message;
+    retargeted.text.file = null;
+    try retargeted.session.set("direct/other");
+    try std.testing.expect(storage.submitMessage(&retargeted, .{}) == .conflict);
+    var changed = message;
+    changed.text.file = null;
+    changed.text.length += 1;
+    try std.testing.expect(storage.submitMessage(&changed, .{}) == .conflict);
+    var changed_kind = try completeConfiguration("message", "direct/conflict", workspace, "model-a");
+    try std.testing.expect(storage.configure(&changed_kind, .{}) == .conflict);
+    try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/conflict")).pending_messages);
+    try storage.close();
+}
+
+test "failed message import rolls back content command and admission" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration("configure", "direct/import", workspace, "model-a");
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+    const text = "larger than an empty import";
+    const file = try tmp.dir.createFile(std.testing.io, "import-message", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, text);
+    try file.sync(std.testing.io);
+    var message = try completeMessage("message-import", "direct/import", file, text);
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&message, .{ .content_import = true }) == .infrastructure_failure);
+    try storage.close();
+
+    storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try std.testing.expect((try storage.observeCommand("message-import")).status == .absent);
+    try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/import")).pending_messages);
+    try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
 }
 
 test "production Store applies finite durable SQLite settings" {

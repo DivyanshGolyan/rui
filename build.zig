@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     integration.addArtifactArg(release_safe);
     const integration_step = b.step(
         "admission-integration",
-        "Run fresh-process configuration admission and recovery cases",
+        "Run fresh-process configuration/message admission and recovery cases",
     );
     integration_step.dependOn(&integration.step);
 
@@ -39,13 +39,13 @@ pub fn build(b: *std.Build) void {
     debug_integration.addArtifactArg(debug);
     const debug_integration_step = b.step(
         "admission-debug-integration",
-        "Run the documented Debug artifact through configuration recovery",
+        "Run the documented Debug artifact through configuration/message recovery",
     );
     debug_integration_step.dependOn(&debug_integration.step);
 
     const check_step = b.step(
         "check",
-        "Check formatting, tests, and configuration recovery",
+        "Check formatting, tests, and configuration/message recovery",
     );
     const format = b.addSystemCommand(&.{
         b.graph.zig_exe,
@@ -95,6 +95,15 @@ pub fn build(b: *std.Build) void {
         "Measure macOS Host and direct-client memory for configuration admission",
     );
     measure_step.dependOn(&measure.step);
+
+    const measure_messages = b.addSystemCommand(&.{"python3"});
+    measure_messages.addFileArg(b.path("research/message-admission/measure.py"));
+    measure_messages.addArtifactArg(release);
+    const measure_messages_step = b.step(
+        "measure-message-admission",
+        "Measure macOS message admission and observation scaling",
+    );
+    measure_messages_step.dependOn(&measure_messages.step);
 }
 
 fn addLatifa(
