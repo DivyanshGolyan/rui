@@ -273,6 +273,10 @@ Once every child resolves, one transaction appends typed Tool Results in call or
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority. The closed executable mapping is `bash` and `edit`; Session configuration selects the offered subset. Validate proposed Tool Calls against the proposing model Operation's frozen Tool Catalog, not the latest Session configuration. Removing Bash while that model request runs changes future model requests, not the validity of its Bash proposal. Execution still requires the exact Action authorization below.
 
+Core owns and enforces Permission Mode per Session. Workflow Runtime configures the Sessions it uses through the ordinary Session configuration API, as other authorized clients do; clients present exact Permission Requests and submit decisions. Mode persists across client disconnect, Host restart and later Session reuse until explicitly changed. Bypass therefore permits unattended progress without a connected approver; ask retains unanswered requests durably for a later client, without a resident client or per-Session worker.
+
+Sharing a Session shares its permission policy under ordinary configuration ordering. Concurrent use by multiple Workflows is allowed but is not an expected V1 flow; it adds no Workflow-local grant, policy copy or lifetime. One retained policy and one application boundary keep unattended work explainable without coupling authority to connection lifetime.
+
 **Authorization** durably permits one exact validated Action. At child admission select current Session Permission Mode, default `ask`, and save descriptor plus configuration provenance.
 
 `ask` creates one immutable Permission Request; explicit `bypass` directly creates Authorization. Siblings admitted together share that view. Permission Decisions allow once or deny one exact request/Operation/descriptor under Local Owner authority; server access never implies bypass.
