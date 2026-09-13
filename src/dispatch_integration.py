@@ -634,12 +634,11 @@ def main():
             "completed",
         )
         retry_plan = database.execute(
-            "EXPLAIN QUERY PLAN SELECT operation_id FROM model_operation INDEXED BY model_operation_retry_due "
+            "EXPLAIN QUERY PLAN SELECT operation_id FROM model_operation INDEXED BY model_operation_retry_age "
             "WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=0 "
-            "AND (retry_due_at_ms,operation_id)>(0,0) "
-            "ORDER BY retry_due_at_ms,operation_id LIMIT 64"
+            "ORDER BY operation_id LIMIT 64"
         ).fetchall()
-        assert any("model_operation_retry_due" in row[-1] for row in retry_plan), retry_plan
+        assert any("model_operation_retry_age" in row[-1] for row in retry_plan), retry_plan
         assert all("TEMP B-TREE" not in row[-1] for row in retry_plan), retry_plan
         database.close()
         stop_host(retry_host)
@@ -2106,89 +2105,164 @@ def main():
         stale_endpoint.server_close()
         stale_thread.join(timeout=5)
 
-        # A due snapshot larger than one discovery page is serviced between
-        # event-loop turns without adding a 100 ms sleep per page. Deadline
-        # order is deliberately opposite Operation age; the oldest valid
-        # Operation still launches first.
-        paging_release = threading.Event()
-        paging_endpoint = SuccessEndpoint(
+        # The smallest age-indexed selector keeps no scan state. With one live
+        # transport and one free slot it still finds a due Operation behind
+        # 10,000 older future retries within the light-discovery target.
+        backlog_stall_release = threading.Event()
+        backlog_retry_release = threading.Event()
+        backlog_endpoint = SuccessEndpoint(
             [
                 ResponseSpec(b"initial temporary failure", {}, 503),
-                (ResponseSpec(b"paged retry", {}, 422), paging_release),
+                (ResponseSpec(b"stalled live request", {}, 422), backlog_stall_release),
+                (ResponseSpec(b"selected retry", {}, 422), backlog_retry_release),
             ]
         )
-        paging_thread = threading.Thread(target=paging_endpoint.serve_forever, daemon=True)
-        paging_thread.start()
-        paging_store = state / "retry-paging-store"
-        paging_host = start_host(
-            paging_store,
-            f"http://127.0.0.1:{paging_endpoint.server_port}/responses",
-            "--test-retry-waits-ms",
-            "60000,60000,60000",
+        backlog_thread = threading.Thread(target=backlog_endpoint.serve_forever, daemon=True)
+        backlog_thread.start()
+        backlog_store = state / "retry-age-backlog-store"
+        backlog_host = start_host(
+            backlog_store,
+            f"http://127.0.0.1:{backlog_endpoint.server_port}/responses",
+            "--fault",
+            "attempt-before-commit",
         )
-        processes.append(paging_host)
-        configure(state, paging_store, "paging-config", "direct/paging", "model-a")
+        processes.append(backlog_host)
+        configure(state, backlog_store, "backlog-config", "direct/backlog", "model-a")
         message(
             state,
-            paging_store,
-            "paging-message",
-            "direct/paging",
-            "oldest-paged-retry",
+            backlog_store,
+            "backlog-message",
+            "direct/backlog",
+            "due-behind-future-history",
         )
-
-        def paging_waiting():
-            database = sqlite3.connect(paging_store / "latifa.sqlite3")
-            try:
-                row = database.execute(
-                    "SELECT retry_due_at_ms FROM model_operation WHERE operation_id=1"
-                ).fetchone()
-                return row is not None and row[0] > 0
-            finally:
-                database.close()
-
-        wait_for(paging_waiting, "paged retry wait")
-        stop_host(paging_host)
-        processes.remove(paging_host)
-        database = sqlite3.connect(paging_store / "latifa.sqlite3")
+        time.sleep(0.2)
+        assert backlog_endpoint.requests == []
+        stop_host(backlog_host)
+        processes.remove(backlog_host)
+        database = sqlite3.connect(backlog_store / "latifa.sqlite3")
         try:
             database.execute("PRAGMA foreign_keys=OFF")
-            database.execute("UPDATE model_operation SET retry_due_at_ms=1024 WHERE operation_id=1")
             database.execute(
-                "WITH RECURSIVE sequence(value) AS (VALUES(1000) UNION ALL "
-                "SELECT value+1 FROM sequence WHERE value<2023) "
+                "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL "
+                "SELECT value+1 FROM sequence WHERE value<10000) "
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
                 "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) "
-                "SELECT value,value,printf('paging-%d',value),1,1,1,1,1,0,1 FROM sequence"
+                "SELECT value,value,printf('future-%d',value),1,1,1,1,1,0,9223372036854775807 FROM sequence"
             )
             database.commit()
         finally:
             database.close()
-        paging_started = time.monotonic()
-        paging_host = start_host(
-            paging_store,
-            f"http://127.0.0.1:{paging_endpoint.server_port}/responses",
+        backlog_host = start_host(
+            backlog_store,
+            f"http://127.0.0.1:{backlog_endpoint.server_port}/responses",
+            "--active-capacity",
+            "2",
             "--test-retry-waits-ms",
-            "60000,60000,60000",
+            "2000,60000,60000",
         )
-        processes.append(paging_host)
-        wait_for(lambda: len(paging_endpoint.requests) == 2, "bounded paged retry launch")
-        paging_elapsed = time.monotonic() - paging_started
-        assert paging_elapsed < 1.0, paging_elapsed
-        paged_request = json.loads(paging_endpoint.requests[1])
-        paged_user_text = next(
+        processes.append(backlog_host)
+        wait_for(lambda: len(backlog_endpoint.requests) == 1, "future-backlog initial Attempt")
+        configure(
+            state,
+            backlog_store,
+            "backlog-stall-config",
+            "direct/backlog-stall",
+            "model-a",
+        )
+        message(
+            state,
+            backlog_store,
+            "backlog-stall-message",
+            "direct/backlog-stall",
+            "occupy-one-slot",
+        )
+        wait_for(lambda: len(backlog_endpoint.requests) == 2, "stalled live backlog request")
+        wait_for(
+            lambda: len(backlog_endpoint.requests) == 3,
+            "due retry behind future history",
+            timeout=5,
+        )
+        discovery_upper_bound = (
+            backlog_endpoint.request_times[2] - backlog_endpoint.request_times[0] - 2.0
+        )
+        assert discovery_upper_bound < 2.0, discovery_upper_bound
+        selected_request = json.loads(backlog_endpoint.requests[2])
+        selected_user_text = next(
             content["text"]
-            for item in paged_request["input"]
+            for item in selected_request["input"]
             if item.get("role") == "user"
             for content in item["content"]
             if content.get("type") == "input_text"
         )
-        assert paged_user_text == "oldest-paged-retry", paged_user_text
-        stop_host(paging_host)
-        processes.remove(paging_host)
-        paging_release.set()
-        paging_endpoint.shutdown()
-        paging_endpoint.server_close()
-        paging_thread.join(timeout=5)
+        assert selected_user_text == "due-behind-future-history", selected_user_text
+        backlog_retry_release.set()
+        backlog_stall_release.set()
+        stop_host(backlog_host)
+        processes.remove(backlog_host)
+        backlog_endpoint.shutdown()
+        backlog_endpoint.server_close()
+        backlog_thread.join(timeout=5)
+
+        # Recovery settles one exhausted Operation and its Turn per Store
+        # transition. A large restart backlog therefore releases the Store
+        # mutex between outcomes so ordinary controls continue to respond.
+        recovery_store = state / "exhausted-control-store"
+        recovery_host = start_host(recovery_store, url, "--active-capacity", "1000")
+        processes.append(recovery_host)
+        configure(
+            state,
+            recovery_store,
+            "recovery-control-config",
+            "direct/recovery-control",
+            "model-a",
+        )
+        stop_host(recovery_host)
+        processes.remove(recovery_host)
+        database = sqlite3.connect(recovery_store / "latifa.sqlite3")
+        try:
+            database.execute("PRAGMA foreign_keys=OFF")
+            database.execute(
+                "WITH RECURSIVE sequence(value) AS (VALUES(20000) UNION ALL "
+                "SELECT value+1 FROM sequence WHERE value<24095) "
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id) "
+                "SELECT value,printf('recovery-%d',value),1,1,value FROM sequence"
+            )
+            database.execute(
+                "WITH RECURSIVE sequence(value) AS (VALUES(20000) UNION ALL "
+                "SELECT value+1 FROM sequence WHERE value<24095) "
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) "
+                "SELECT value,value,printf('recovery-%d',value),1,1,1,4,4,1,0 FROM sequence"
+            )
+            database.commit()
+        finally:
+            database.close()
+        recovery_host = start_host(recovery_store, url, "--active-capacity", "1000")
+        processes.append(recovery_host)
+        control_latencies = []
+        for _ in range(20):
+            control_started = time.monotonic()
+            control = command(
+                "inspect-session",
+                "--store",
+                recovery_store,
+                "--session",
+                "direct/recovery-control",
+            )
+            control_latencies.append(time.monotonic() - control_started)
+            assert control["session"]["model"] == "model-a", control
+        control_p95 = sorted(control_latencies)[18]
+        assert control_p95 < 1.0, control_p95
+        stop_host(recovery_host)
+        processes.remove(recovery_host)
+        database = sqlite3.connect(recovery_store / "latifa.sqlite3")
+        try:
+            recovered_count = database.execute(
+                "SELECT count(*) FROM model_operation WHERE resolution_code='retry_exhausted'"
+            ).fetchone()[0]
+        finally:
+            database.close()
+        assert recovered_count > 0, recovered_count
 
         # Exhaustion settles only the selected prefix. Input admitted while
         # those retries run remains unselected and receives the outcome of the

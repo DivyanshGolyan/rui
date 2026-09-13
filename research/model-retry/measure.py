@@ -302,6 +302,73 @@ def timing_measurement(binary, root, endpoint_server, endpoint):
     }
 
 
+def measure_due_history_replacement(
+    binary,
+    store,
+    endpoint_server,
+    endpoint,
+    session,
+    target_operation,
+    target_marker,
+    model_operations,
+    unresolved_future,
+):
+    started_ms = time.time_ns() // 1_000_000
+    host, _ = start_host(
+        binary,
+        store,
+        endpoint,
+        CAPACITY,
+        "--test-before-launch-delay-ms",
+        "250",
+        "--test-retry-waits-ms",
+        "600000,600000,600000",
+    )
+    try:
+        def replacement_admitted():
+            execution = inspect_execution(binary, store, session)
+            return (
+                time.time_ns() // 1_000_000
+                if execution["custody_occupied"] == "1"
+                else None
+            )
+
+        admitted_ms = wait_for(
+            replacement_admitted,
+            f"replacement behind {unresolved_future} future retries",
+        )
+        wait_for(
+            lambda: endpoint_server.counts.get(target_marker) == 2,
+            f"history target {model_operations} launch",
+        )
+        launched_ms = endpoint_server.launches[target_marker][1]
+        wait_for(
+            lambda: inspect_execution(binary, store, session)["custody_occupied"]
+            == "0",
+            f"history target {model_operations} settlement",
+        )
+    finally:
+        stop_host(host)
+    database = sqlite3.connect(store / "latifa.sqlite3")
+    try:
+        facts = database.execute(
+            "SELECT attempt_ordinal,allowance_used,resolution_code "
+            "FROM model_operation WHERE operation_id=?",
+            (target_operation,),
+        ).fetchone()
+    finally:
+        database.close()
+    if facts != (2, 2, "provider_http_422"):
+        raise RuntimeError(f"unexpected history target facts: {facts}")
+    return {
+        "model_operations": model_operations,
+        "older_unresolved_future_retries": unresolved_future,
+        "replacement_admitted_after_start_ms": admitted_ms - started_ms,
+        "replacement_launched_after_start_ms": launched_ms - started_ms,
+        "database_bytes": os.path.getsize(store / "latifa.sqlite3"),
+    }
+
+
 def unresolved_history_measurement(binary, root, endpoint_server, endpoint):
     store = root / "history-store"
     created = 0
@@ -366,69 +433,116 @@ def unresolved_history_measurement(binary, root, endpoint_server, endpoint):
         finally:
             database.close()
 
-        started_ms = time.time_ns() // 1_000_000
-        host, _ = start_host(
-            binary,
-            store,
-            endpoint,
-            CAPACITY,
-            "--test-before-launch-delay-ms",
-            "250",
-            "--test-retry-waits-ms",
-            "600000,600000,600000",
-        )
-        try:
-            def replacement_admitted():
-                execution = inspect_execution(
-                    binary, store, f"measure/history-{target_history - 1}"
-                )
-                return (
-                    time.time_ns() // 1_000_000
-                    if execution["custody_occupied"] == "1"
-                    else None
-                )
-
-            admitted_ms = wait_for(
-                replacement_admitted,
-                f"replacement behind {unresolved_future} future retries",
-            )
-            wait_for(
-                lambda: endpoint_server.counts.get(target_marker) == 2,
-                f"history target {target_history} launch",
-            )
-            launched_ms = endpoint_server.launches[target_marker][1]
-            wait_for(
-                lambda: inspect_execution(
-                    binary, store, f"measure/history-{target_history - 1}"
-                )["custody_occupied"]
-                == "0",
-                f"history target {target_history} settlement",
-            )
-        finally:
-            stop_host(host)
-        database = sqlite3.connect(store / "latifa.sqlite3")
-        try:
-            facts = database.execute(
-                "SELECT attempt_ordinal,allowance_used,resolution_code "
-                "FROM model_operation WHERE operation_id=?",
-                (target_operation,),
-            ).fetchone()
-        finally:
-            database.close()
-        if facts != (2, 2, "provider_http_422"):
-            raise RuntimeError(f"unexpected history target facts: {facts}")
         rows.append(
-            {
-                "model_operations": target_history,
-                "older_unresolved_future_retries": unresolved_future,
-                "replacement_admitted_after_start_ms": admitted_ms - started_ms,
-                "replacement_launched_after_start_ms": launched_ms - started_ms,
-                "database_bytes": os.path.getsize(store / "latifa.sqlite3"),
-            }
+            measure_due_history_replacement(
+                binary,
+                store,
+                endpoint_server,
+                endpoint,
+                f"measure/history-{target_history - 1}",
+                target_operation,
+                target_marker,
+                target_history,
+                unresolved_future,
+            )
         )
         created = target_history
+
+    database = sqlite3.connect(store / "latifa.sqlite3")
+    try:
+        database.execute("PRAGMA foreign_keys=OFF")
+        database.execute(
+            "WITH RECURSIVE sequence(value) AS (VALUES(129) UNION ALL "
+            "SELECT value+1 FROM sequence WHERE value<10128) "
+            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
+            "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) "
+            "SELECT value,value,printf('synthetic-future-%d',value),1,1,1,1,1,0,9223372036854775807 "
+            "FROM sequence"
+        )
+        database.commit()
+    finally:
+        database.close()
+
+    host, _ = start_host(
+        binary,
+        store,
+        endpoint,
+        CAPACITY,
+        "--test-retry-waits-ms",
+        "600000,600000,600000",
+    )
+    try:
+        cpu_before = cpu_seconds(host.pid)
+        idle_started = time.monotonic()
+        time.sleep(2)
+        idle_elapsed = time.monotonic() - idle_started
+        future_idle_cpu = 100 * (cpu_seconds(host.pid) - cpu_before) / idle_elapsed
+        configure(
+            binary,
+            root,
+            store,
+            "history-config-10128",
+            "measure/history-10128",
+        )
+        message(
+            binary,
+            root,
+            store,
+            "history-message-10128",
+            "measure/history-10128",
+            "history-operation-10128",
+        )
+        wait_for(
+            lambda: endpoint_server.counts.get("history-operation-10128") == 1,
+            "10,000-row history initial Attempt",
+        )
+        wait_for(
+            lambda: inspect_execution(binary, store, "measure/history-10128")[
+                "custody_occupied"
+            ]
+            == "0",
+            "10,000-row history cleanup",
+        )
+    finally:
+        stop_host(host)
+
+    database = sqlite3.connect(store / "latifa.sqlite3")
+    try:
+        target_operation = database.execute(
+            "SELECT operation_id FROM model_operation WHERE session_ref=?",
+            ("measure/history-10128",),
+        ).fetchone()[0]
+        database.execute(
+            "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?",
+            (target_operation,),
+        )
+        database.commit()
+        unresolved_future = database.execute(
+            "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL "
+            "AND retry_due_at_ms>CAST(unixepoch('subsec')*1000 AS INTEGER)"
+        ).fetchone()[0]
+        model_operations = database.execute(
+            "SELECT count(*) FROM model_operation"
+        ).fetchone()[0]
+    finally:
+        database.close()
+    rows.append(
+        measure_due_history_replacement(
+            binary,
+            store,
+            endpoint_server,
+            endpoint,
+            "measure/history-10128",
+            target_operation,
+            "history-operation-10128",
+            model_operations,
+            unresolved_future,
+        )
+    )
     return {
         "stages": rows,
+        "future_only_idle_cpu_percent_one_core": round(future_idle_cpu, 3),
+        "future_only_idle_cpu_sample_seconds": round(idle_elapsed, 3),
         "qualification_limit_ms": 2000,
     }
 
@@ -564,7 +678,8 @@ def main():
                     "deterministic loopback HTTP classifies no TLS trust store or live-provider behavior",
                     "a 250 ms fixture delay separates committed retry discovery from provider launch",
                     "10 ms inspect-session observation adds sampling delay and is not a Runtime clock",
-                    "two production-store stages put 31 then 126 older unresolved future retries before one due replacement",
+                    "three production-store stages put 31, 126, then 10,126 older future retries before one due replacement",
+                    "the 10,126-row future-only stage measures the simple age-index baseline without a deadline probe",
                     "five 32-Operation rounds exercise 0-to-capacity-to-0 custody churn with 250 ms delayed cleanup",
                     "process termination evidence is not power-loss qualification",
                 ],

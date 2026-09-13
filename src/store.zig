@@ -165,55 +165,6 @@ pub const ActiveOperationFilter = struct {
     }
 };
 
-pub const RetryCandidate = struct {
-    binding: AttemptBinding,
-};
-
-// One wall-clock snapshot is paged in deadline order for bounded SQLite work.
-// The caller admits nothing until completion, so the retained oldest bindings
-// still implement Operation-age selection across every retry due at snapshot.
-pub const RetryScan = struct {
-    snapshot_ms: i64 = 0,
-    after_due_at_ms: i64 = 0,
-    after_operation_id: u64 = 0,
-    last_query_rows: usize = 0,
-    last_query_vm_steps: u64 = 0,
-    started: bool = false,
-
-    pub fn reset(self: *RetryScan) void {
-        self.* = .{};
-    }
-};
-
-pub const RetryScanProgress = enum { more, complete };
-
-pub const ExhaustedRecovery = struct {
-    settled: usize,
-    examined_rows: usize,
-    progress: RetryScanProgress,
-};
-
-fn retainOldestRetryCandidate(
-    candidates: []RetryCandidate,
-    candidate_count: *usize,
-    candidate: RetryCandidate,
-) void {
-    var destination = candidate_count.*;
-    if (destination == candidates.len) {
-        if (candidate.binding.operation_id >= candidates[destination - 1].binding.operation_id) return;
-        destination -= 1;
-    } else {
-        candidate_count.* += 1;
-    }
-    while (destination > 0 and
-        candidates[destination - 1].binding.operation_id > candidate.binding.operation_id)
-    {
-        candidates[destination] = candidates[destination - 1];
-        destination -= 1;
-    }
-    candidates[destination] = candidate;
-}
-
 pub const HistoricalSettings = struct {
     model: protocol.Bounded(protocol.max_model_bytes),
     baseline_instructions: HistoricalContent,
@@ -1223,62 +1174,53 @@ pub const Store = struct {
         };
     }
 
-    pub fn discoverDueModelRetries(
+    pub fn tryAdmitNextModelRetry(
         self: *Store,
         active: ?ActiveOperationFilter,
-        scan: *RetryScan,
-        candidates: []RetryCandidate,
-        candidate_count: *usize,
-        maximum_rows: usize,
-    ) !RetryScanProgress {
-        if (candidates.len == 0 or candidate_count.* > candidates.len or maximum_rows == 0 or
-            maximum_rows > std.math.maxInt(i64)) return error.InvalidRetryScan;
+        faults: Faults,
+    ) !?AttemptAdmission {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.discoverDueModelRetriesLocked(
-            active,
-            scan,
-            candidates,
-            candidate_count,
-            maximum_rows,
-        ) catch |err| return self.fenceReadFailure(err);
+        return self.tryAdmitNextModelRetryLocked(active, faults) catch |err| {
+            rollback(self.database);
+            if (err != error.InjectedAttemptCommitFailure) self.fenced.store(true, .release);
+            return err;
+        };
     }
 
-    fn discoverDueModelRetriesLocked(
+    fn tryAdmitNextModelRetryLocked(
         self: *Store,
         active: ?ActiveOperationFilter,
-        scan: *RetryScan,
-        candidates: []RetryCandidate,
-        candidate_count: *usize,
-        maximum_rows: usize,
-    ) !RetryScanProgress {
-        if (!scan.started) {
-            scan.* = .{
-                .snapshot_ms = try readUnixMilliseconds(self.database),
-                .started = true,
-            };
-            candidate_count.* = 0;
-        }
+        faults: Faults,
+    ) !?AttemptAdmission {
+        try exec(self.database, "BEGIN IMMEDIATE");
+        errdefer rollback(self.database);
+        const snapshot_ms = try readUnixMilliseconds(self.database);
+        const selection_limit = try std.math.add(
+            usize,
+            if (active) |filter| filter.maximum_exclusions else 0,
+            1,
+        );
+        if (selection_limit > std.math.maxInt(i64)) return error.RetrySelectionLimitExceeded;
         const select = try prepare(
             self.database,
             "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation " ++
-                "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND allowance_used<4 " ++
-                "AND retry_due_at_ms<=?1 AND (retry_due_at_ms,operation_id)>(?2,?3) " ++
-                "ORDER BY retry_due_at_ms,operation_id LIMIT ?4",
+                "INDEXED BY model_operation_retry_age WHERE resolution_code IS NULL AND allowance_used<4 " ++
+                "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2",
         );
-        defer _ = c.sqlite3_finalize(select);
-        try bindI64(select, 1, scan.snapshot_ms);
-        try bindI64(select, 2, scan.after_due_at_ms);
-        try bindU64(select, 3, scan.after_operation_id);
-        try bindI64(select, 4, @as(i64, @intCast(maximum_rows)));
-        var rows: usize = 0;
+        var select_open = true;
+        defer {
+            if (select_open) _ = c.sqlite3_finalize(select);
+        }
+        try bindI64(select, 1, snapshot_ms);
+        try bindI64(select, 2, @as(i64, @intCast(selection_limit)));
+        var selected: ?AttemptBinding = null;
         while (true) {
             const result = c.sqlite3_step(select);
             if (result == c.SQLITE_DONE) break;
             if (result != c.SQLITE_ROW) return error.RetrySelectionFailed;
-            rows += 1;
             const turn_id = c.sqlite3_column_int64(select, 0);
             const operation_id = c.sqlite3_column_int64(select, 1);
             const attempt_ordinal = c.sqlite3_column_int64(select, 2);
@@ -1286,56 +1228,31 @@ pub const Store = struct {
             const due_at_ms = c.sqlite3_column_int64(select, 4);
             if (turn_id <= 0 or operation_id <= 0 or attempt_ordinal <= 0 or
                 allowance_used != attempt_ordinal or allowance_used >= maximum_model_attempts or
-                due_at_ms < 0 or due_at_ms > scan.snapshot_ms)
+                due_at_ms < 0 or due_at_ms > snapshot_ms)
             {
                 return error.CorruptStore;
             }
-            scan.after_due_at_ms = due_at_ms;
-            scan.after_operation_id = @intCast(operation_id);
             if (active) |filter| {
                 if (filter.contains(@intCast(operation_id))) continue;
             }
-            retainOldestRetryCandidate(candidates, candidate_count, .{ .binding = .{
+            selected = .{
                 .turn_id = @intCast(turn_id),
                 .operation_id = @intCast(operation_id),
                 .attempt_ordinal = @intCast(attempt_ordinal),
-            } });
+            };
+            break;
         }
-        scan.last_query_rows = rows;
-        const vm_steps = c.sqlite3_stmt_status(select, c.SQLITE_STMTSTATUS_VM_STEP, 0);
-        if (vm_steps < 0) return error.RetrySelectionFailed;
-        scan.last_query_vm_steps = @intCast(vm_steps);
-        return if (rows < maximum_rows) .complete else .more;
-    }
+        if (c.sqlite3_finalize(select) != c.SQLITE_OK) return error.RetrySelectionFailed;
+        select_open = false;
 
-    pub fn admitDiscoveredModelRetry(
-        self: *Store,
-        candidate: RetryCandidate,
-        snapshot_ms: i64,
-        faults: Faults,
-    ) !?AttemptAdmission {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.admitDiscoveredModelRetryLocked(candidate, snapshot_ms, faults) catch |err| {
-            rollback(self.database);
-            if (err != error.InjectedAttemptCommitFailure) self.fenced.store(true, .release);
-            return err;
+        // Eligibility exists only inside this Store transition. No selected
+        // candidate or time snapshot survives rollback, capacity loss or exit.
+        const current = selected orelse {
+            try exec(self.database, "ROLLBACK");
+            return null;
         };
-    }
-
-    fn admitDiscoveredModelRetryLocked(
-        self: *Store,
-        candidate: RetryCandidate,
-        snapshot_ms: i64,
-        faults: Faults,
-    ) !?AttemptAdmission {
-        const current = candidate.binding;
         if (current.attempt_ordinal >= maximum_model_attempts) return error.CorruptStore;
         const replacement_ordinal = current.attempt_ordinal + 1;
-        try exec(self.database, "BEGIN IMMEDIATE");
-        errdefer rollback(self.database);
         const update = try prepare(
             self.database,
             "UPDATE model_operation SET attempt_ordinal=?2,allowance_used=?2,uncertain=1,retry_due_at_ms=0 " ++
@@ -1654,38 +1571,34 @@ pub const Store = struct {
     }
 
     pub fn recoverOneExhaustedModelAttempt(self: *Store) !bool {
-        var candidate: [1]RetryCandidate = undefined;
-        return (try self.recoverExhaustedModelAttemptsForHost(null, &candidate)).settled != 0;
+        return self.recoverOneExhaustedModelAttemptForHost(null);
     }
 
-    pub fn recoverExhaustedModelAttemptsForHost(
+    pub fn recoverOneExhaustedModelAttemptForHost(
         self: *Store,
         active: ?ActiveOperationFilter,
-        candidates: []RetryCandidate,
-    ) !ExhaustedRecovery {
-        if (candidates.len == 0) return error.InvalidRetryScan;
+    ) !bool {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.recoverExhaustedModelAttemptsLocked(active, candidates) catch |err| {
+        return self.recoverOneExhaustedModelAttemptLocked(active) catch |err| {
             rollback(self.database);
             self.fenced.store(true, .release);
             return err;
         };
     }
 
-    fn recoverExhaustedModelAttemptsLocked(
+    fn recoverOneExhaustedModelAttemptLocked(
         self: *Store,
         active: ?ActiveOperationFilter,
-        candidates: []RetryCandidate,
-    ) !ExhaustedRecovery {
+    ) !bool {
         const scan_limit = try std.math.add(
             usize,
             if (active) |filter| filter.maximum_exclusions else 0,
-            candidates.len,
+            1,
         );
-        if (scan_limit > std.math.maxInt(i64)) return error.RetryScanLimitExceeded;
+        if (scan_limit > std.math.maxInt(i64)) return error.RetrySelectionLimitExceeded;
         const select = try prepare(
             self.database,
             "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted " ++
@@ -1697,44 +1610,31 @@ pub const Store = struct {
             if (select_open) _ = c.sqlite3_finalize(select);
         }
         try bindI64(select, 1, @as(i64, @intCast(scan_limit)));
-        var examined_rows: usize = 0;
-        var candidate_count: usize = 0;
-        var truncated = false;
+        var selected: ?AttemptBinding = null;
         while (true) {
             const result = c.sqlite3_step(select);
             if (result == c.SQLITE_DONE) break;
             if (result != c.SQLITE_ROW) return error.RetryRecoveryFailed;
-            examined_rows += 1;
             const turn_id = c.sqlite3_column_int64(select, 0);
             const operation_id = c.sqlite3_column_int64(select, 1);
             if (turn_id <= 0 or operation_id <= 0) return error.CorruptStore;
             if (active) |filter| {
                 if (filter.contains(@intCast(operation_id))) continue;
             }
-            if (candidate_count == candidates.len) {
-                truncated = true;
-                break;
-            }
-            candidates[candidate_count] = .{ .binding = .{
+            selected = .{
                 .turn_id = @intCast(turn_id),
                 .operation_id = @intCast(operation_id),
                 .attempt_ordinal = maximum_model_attempts,
-            } };
-            candidate_count += 1;
+            };
+            break;
         }
         if (c.sqlite3_finalize(select) != c.SQLITE_OK) return error.RetryRecoveryFailed;
         select_open = false;
-        const progress: RetryScanProgress = if (truncated or examined_rows == scan_limit) .more else .complete;
-        if (candidate_count == 0) return .{
-            .settled = 0,
-            .examined_rows = examined_rows,
-            .progress = progress,
-        };
+        const binding = selected orelse return false;
 
         try exec(self.database, "BEGIN IMMEDIATE");
         errdefer rollback(self.database);
-        for (candidates[0..candidate_count]) |candidate| {
-            const binding = candidate.binding;
+        {
             const update_operation = try prepare(
                 self.database,
                 "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='retry_exhausted' " ++
@@ -1745,7 +1645,8 @@ pub const Store = struct {
             try bindU64(update_operation, 2, maximum_model_attempts);
             try expectDone(update_operation);
             if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
-
+        }
+        {
             const update_turn = try prepare(
                 self.database,
                 "UPDATE turn SET outcome_code='retry_exhausted' " ++
@@ -1758,11 +1659,7 @@ pub const Store = struct {
             if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
         }
         try exec(self.database, "COMMIT");
-        return .{
-            .settled = candidate_count,
-            .examined_rows = examined_rows,
-            .progress = progress,
-        };
+        return true;
     }
 
     pub fn settleModelSuccess(
@@ -2682,7 +2579,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id);
         \\CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL;
         \\CREATE INDEX model_operation_runnable ON model_operation(resolution_code,operation_id);
-        \\CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND allowance_used<4;
+        \\CREATE INDEX model_operation_retry_age ON model_operation(operation_id) WHERE resolution_code IS NULL AND allowance_used<4;
         \\CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0;
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
         \\CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
@@ -2705,7 +2602,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry','model_output_item','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry','model_output_item','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','turn_one_active_per_session','model_operation_runnable','model_operation_retry_due','model_operation_retry_exhausted','conversation_entry_history','model_output_history')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','turn_one_active_per_session','model_operation_runnable','model_operation_retry_age','model_operation_retry_exhausted','conversation_entry_history','model_output_history')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -2946,18 +2843,7 @@ fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
 }
 
 fn admitRetryForTesting(storage: *Store) !?AttemptAdmission {
-    var scan: RetryScan = .{};
-    var candidates: [1]RetryCandidate = undefined;
-    var candidate_count: usize = 0;
-    while (try storage.discoverDueModelRetries(
-        null,
-        &scan,
-        &candidates,
-        &candidate_count,
-        64,
-    ) == .more) {}
-    if (candidate_count == 0) return null;
-    return storage.admitDiscoveredModelRetry(candidates[0], scan.snapshot_ms, .{});
+    return storage.tryAdmitNextModelRetry(null, .{});
 }
 
 test "configuration answers replay without reverting newer settings" {
@@ -3726,13 +3612,11 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
             }
         };
         const active_operation = replacement_binding.operation_id;
-        var candidates: [1]RetryCandidate = undefined;
-        const recovery = try storage.recoverExhaustedModelAttemptsForHost(.{
+        try std.testing.expect(!try storage.recoverOneExhaustedModelAttemptForHost(.{
             .context = &active_operation,
             .containsFn = Active.contains,
             .maximum_exclusions = 1,
-        }, &candidates);
-        try std.testing.expectEqual(@as(usize, 0), recovery.settled);
+        }));
         try std.testing.expect(try storage.recoverOneExhaustedModelAttempt());
         const exhausted = (try storage.observeCommand("failure-message")).message.?;
         try std.testing.expect(exhausted.status == .failed);
@@ -3879,7 +3763,7 @@ test "content reader metadata and decode window remain bounded" {
     try std.testing.expect(@sizeOf(HistoricalReader) <= projection_read_window_bytes + 1024);
 }
 
-test "retry discovery and exhausted recovery avoid temporary sorting" {
+test "retry admission and exhausted recovery use age indexes without temporary sorting" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -3888,11 +3772,10 @@ test "retry discovery and exhausted recovery avoid temporary sorting" {
     const queries = [_]struct { sql: [:0]const u8, index: []const u8 }{
         .{
             .sql = "EXPLAIN QUERY PLAN SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms " ++
-                "FROM model_operation INDEXED BY model_operation_retry_due " ++
+                "FROM model_operation INDEXED BY model_operation_retry_age " ++
                 "WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=99 " ++
-                "AND (retry_due_at_ms,operation_id)>(0,0) " ++
-                "ORDER BY retry_due_at_ms,operation_id LIMIT 64",
-            .index = "model_operation_retry_due",
+                "ORDER BY operation_id LIMIT 64",
+            .index = "model_operation_retry_age",
         },
         .{
             .sql = "EXPLAIN QUERY PLAN SELECT turn_id,operation_id FROM model_operation " ++
@@ -3922,7 +3805,7 @@ test "retry discovery and exhausted recovery avoid temporary sorting" {
     }
 }
 
-test "retry polling bounds query work across future and exhausted history" {
+test "retry transitions preserve age and settle one exhausted outcome per call" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -3931,104 +3814,113 @@ test "retry polling bounds query work across future and exhausted history" {
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
     try exec(
         storage.database,
-        "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<4160) " ++
+        "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<5097) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
             "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
             "SELECT value,value,printf('retry-%d',value),1,1,1,1,1,0," ++
-            "CASE WHEN value<=4096 THEN 9223372036854775807 ELSE 4161-value END FROM sequence",
+            "CASE WHEN value<=4096 THEN 9223372036854775807 ELSE 1 END FROM sequence",
     );
 
     const Active = struct {
+        const Context = struct {
+            operation_ids: *const [1000]u64,
+            comparisons: *usize,
+        };
+
         fn contains(context: *const anyopaque, operation_id: u64) bool {
-            const active_operation: *const u64 = @ptrCast(@alignCast(context));
-            return operation_id == active_operation.*;
+            const active: *const Context = @ptrCast(@alignCast(context));
+            for (active.operation_ids) |active_id| {
+                active.comparisons.* += 1;
+                if (operation_id == active_id) return true;
+            }
+            return false;
         }
     };
-    const active_operation: u64 = 4097;
-    const active_filter = ActiveOperationFilter{
-        .context = &active_operation,
-        .containsFn = Active.contains,
-        .maximum_exclusions = 1,
-    };
-    var scan: RetryScan = .{};
-    var candidates: [8]RetryCandidate = undefined;
-    var candidate_count: usize = 0;
-    try std.testing.expectEqual(
-        RetryScanProgress.more,
-        try storage.discoverDueModelRetries(
-            active_filter,
-            &scan,
-            &candidates,
-            &candidate_count,
-            8,
-        ),
-    );
-    try std.testing.expectEqual(@as(usize, 8), scan.last_query_rows);
-    try std.testing.expect(scan.last_query_vm_steps <= 384);
-    try std.testing.expectEqual(@as(usize, 8), candidate_count);
-    try std.testing.expectEqual(@as(u64, 4153), candidates[0].binding.operation_id);
-
-    scan.reset();
-    candidate_count = 0;
-    while (try storage.discoverDueModelRetries(
-        active_filter,
-        &scan,
-        &candidates,
-        &candidate_count,
-        8,
-    ) == .more) {}
-    try std.testing.expectEqual(@as(usize, 8), candidate_count);
-    for (candidates[0..candidate_count], 0..) |candidate, index| {
-        try std.testing.expectEqual(@as(u64, 4098 + @as(u64, @intCast(index))), candidate.binding.operation_id);
+    var active_operations: [1000]u64 = undefined;
+    for (&active_operations, 0..) |*operation_id, index| {
+        operation_id.* = 4097 + @as(u64, @intCast(index));
     }
+    var comparisons: usize = 0;
+    const active_context = Active.Context{
+        .operation_ids = &active_operations,
+        .comparisons = &comparisons,
+    };
+    const active_filter = ActiveOperationFilter{
+        .context = &active_context,
+        .containsFn = Active.contains,
+        .maximum_exclusions = active_operations.len,
+    };
+
+    // The simple age index deliberately scans the durable future prefix. This
+    // records that real work rather than asserting a synthetic constant bound.
+    {
+        const statement = try prepare(
+            storage.database,
+            "SELECT operation_id FROM model_operation INDEXED BY model_operation_retry_age " ++
+                "WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=?1 " ++
+                "ORDER BY operation_id LIMIT 1001",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindI64(statement, 1, try readUnixMilliseconds(storage.database));
+        var rows: usize = 0;
+        while (c.sqlite3_step(statement) == c.SQLITE_ROW) rows += 1;
+        try std.testing.expectEqual(@as(usize, 1001), rows);
+        const vm_steps = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+        try std.testing.expect(vm_steps > 4096);
+    }
+
+    try std.testing.expectError(
+        error.InjectedAttemptCommitFailure,
+        storage.tryAdmitNextModelRetry(active_filter, .{ .attempt_before_commit = true }),
+    );
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(@as(usize, 501500), comparisons);
+    comparisons = 0;
+    const admitted = (try storage.tryAdmitNextModelRetry(active_filter, .{})).?;
+    try std.testing.expectEqual(@as(u64, 5097), admitted.permit.binding.operation_id);
+    try std.testing.expectEqual(@as(u64, 2), admitted.permit.binding.attempt_ordinal);
+    try std.testing.expectEqual(@as(usize, 501500), comparisons);
 
     try exec(storage.database, "DELETE FROM model_operation");
     try exec(
         storage.database,
-        "WITH RECURSIVE sequence(value) AS (VALUES(5000) UNION ALL SELECT value+1 FROM sequence WHERE value<5064) " ++
+        "WITH RECURSIVE sequence(value) AS (VALUES(6000) UNION ALL SELECT value+1 FROM sequence WHERE value<7001) " ++
             "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id) " ++
             "SELECT value,printf('exhausted-%d',value),1,1,value FROM sequence",
     );
     try exec(
         storage.database,
-        "WITH RECURSIVE sequence(value) AS (VALUES(5000) UNION ALL SELECT value+1 FROM sequence WHERE value<5064) " ++
+        "WITH RECURSIVE sequence(value) AS (VALUES(6000) UNION ALL SELECT value+1 FROM sequence WHERE value<7001) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
             "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
             "SELECT value,value,printf('exhausted-%d',value),1,1,1,4,4,1,0 FROM sequence",
     );
     try exec(storage.database, "PRAGMA foreign_keys=ON");
 
-    const ActiveMany = struct {
-        fn contains(context: *const anyopaque, operation_id: u64) bool {
-            const active_operations: *const [32]u64 = @ptrCast(@alignCast(context));
-            for (active_operations) |active_id| {
-                if (operation_id == active_id) return true;
-            }
-            return false;
-        }
+    var active_exhausted: [1000]u64 = undefined;
+    for (&active_exhausted, 0..) |*operation_id, index| operation_id.* = 6000 + @as(u64, @intCast(index));
+    var exhausted_comparisons: usize = 0;
+    const exhausted_context = Active.Context{
+        .operation_ids = &active_exhausted,
+        .comparisons = &exhausted_comparisons,
     };
-    var active_exhausted: [32]u64 = undefined;
-    for (&active_exhausted, 0..) |*operation_id, index| operation_id.* = 5000 + @as(u64, @intCast(index));
-    var exhausted_candidates: [32]RetryCandidate = undefined;
-    const recovery = try storage.recoverExhaustedModelAttemptsForHost(.{
-        .context = &active_exhausted,
-        .containsFn = ActiveMany.contains,
+    try std.testing.expect(try storage.recoverOneExhaustedModelAttemptForHost(.{
+        .context = &exhausted_context,
+        .containsFn = Active.contains,
         .maximum_exclusions = active_exhausted.len,
-    }, &exhausted_candidates);
-    try std.testing.expectEqual(@as(usize, 32), recovery.settled);
-    try std.testing.expectEqual(@as(usize, 64), recovery.examined_rows);
-    try std.testing.expectEqual(RetryScanProgress.more, recovery.progress);
+    }));
+    try std.testing.expectEqual(@as(usize, 501500), exhausted_comparisons);
     const outcomes = try prepare(
         storage.database,
-        "SELECT operation_id,resolution_code FROM model_operation WHERE operation_id IN (5000,5032) ORDER BY operation_id",
+        "SELECT operation_id,resolution_code FROM model_operation WHERE operation_id IN (7000,7001) ORDER BY operation_id",
     );
     defer _ = c.sqlite3_finalize(outcomes);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));
-    try std.testing.expectEqual(@as(i64, 5000), c.sqlite3_column_int64(outcomes, 0));
-    try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(outcomes, 1));
-    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));
-    try std.testing.expectEqual(@as(i64, 5032), c.sqlite3_column_int64(outcomes, 0));
+    try std.testing.expectEqual(@as(i64, 7000), c.sqlite3_column_int64(outcomes, 0));
     var resolution: protocol.Bounded(96) = .{};
     try readText(outcomes, 1, &resolution);
     try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));
+    try std.testing.expectEqual(@as(i64, 7001), c.sqlite3_column_int64(outcomes, 0));
+    try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(outcomes, 1));
 }
