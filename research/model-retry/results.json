@@ -1,17 +1,18 @@
 {
   "scope": "issue-174 production retry discovery and custody churn",
   "status": "passed",
-  "tested_revision": "da50b1a5720af5e88d721dc339b6ad5c57b02e41",
+  "tested_revision": "b9a4c251508d1fba98fe3cd52e6823d65d38f5aa",
   "working_tree_dirty": false,
-  "binary_sha256": "356a154f5dd7762a2be2c95ce19ca1fdfcb1416993476fc50d28c52abfdefca4",
+  "binary_sha256": "d2272b0b3cb66d861a88cfb02ef19b375a95089ecb6cf28c72fe5308ccc3fad4",
   "zig": "0.16.0",
   "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
   "timing": {
-    "retry_due_at_unix_ms": 1789311414744,
-    "replacement_admitted_at_unix_ms": 1789311415360,
-    "replacement_launched_at_unix_ms": 1789311415606,
-    "discovery_after_due_ms": 616,
-    "launch_after_discovery_ms": 246,
+    "retry_due_at_unix_ms": 1789315779494,
+    "host_started_at_unix_ms": 1789315779245,
+    "replacement_admitted_at_unix_ms": 1789315780359,
+    "replacement_launched_at_unix_ms": 1789315780620,
+    "discovery_after_due_ms": 865,
+    "launch_after_discovery_ms": 261,
     "configured_prelaunch_delay_ms": 250,
     "endpoint_attempts": 2
   },
@@ -20,18 +21,27 @@
       {
         "model_operations": 32,
         "older_unresolved_future_retries": 31,
-        "replacement_admitted_after_start_ms": 68,
-        "replacement_launched_after_start_ms": 39,
+        "replacement_admitted_after_start_ms": 43,
+        "replacement_launched_after_start_ms": 305,
         "database_bytes": 135168
       },
       {
         "model_operations": 128,
         "older_unresolved_future_retries": 126,
-        "replacement_admitted_after_start_ms": 57,
-        "replacement_launched_after_start_ms": 32,
+        "replacement_admitted_after_start_ms": 58,
+        "replacement_launched_after_start_ms": 313,
         "database_bytes": 249856
+      },
+      {
+        "model_operations": 10129,
+        "older_unresolved_future_retries": 10126,
+        "replacement_admitted_after_start_ms": 53,
+        "replacement_launched_after_start_ms": 310,
+        "database_bytes": 1056768
       }
     ],
+    "future_only_idle_cpu_percent_one_core": 0.497,
+    "future_only_idle_cpu_sample_seconds": 2.01,
     "qualification_limit_ms": 2000
   },
   "churn_and_delayed_cleanup": {
@@ -51,10 +61,10 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 14712832,
-        "virtual_bytes": 421253103616,
-        "physical_footprint_bytes": 10485760,
-        "lifetime_peak_physical_footprint_bytes": 10485760,
+        "rss_bytes": 13991936,
+        "virtual_bytes": 421395709952,
+        "physical_footprint_bytes": 9635840,
+        "lifetime_peak_physical_footprint_bytes": 9799680,
         "open_descriptor_rows": 15,
         "open_retry_scratch_descriptors": 0
       },
@@ -71,7 +81,7 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 15106048,
+        "rss_bytes": 14663680,
         "virtual_bytes": 421395709952,
         "physical_footprint_bytes": 10485760,
         "lifetime_peak_physical_footprint_bytes": 10485760,
@@ -91,7 +101,7 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 15794176,
+        "rss_bytes": 15532032,
         "virtual_bytes": 421395709952,
         "physical_footprint_bytes": 11534336,
         "lifetime_peak_physical_footprint_bytes": 11534336,
@@ -111,7 +121,7 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 16154624,
+        "rss_bytes": 15630336,
         "virtual_bytes": 421395709952,
         "physical_footprint_bytes": 11534336,
         "lifetime_peak_physical_footprint_bytes": 11534336,
@@ -131,7 +141,7 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 13811712,
+        "rss_bytes": 16121856,
         "virtual_bytes": 421395709952,
         "physical_footprint_bytes": 11534336,
         "lifetime_peak_physical_footprint_bytes": 11534336,
@@ -140,19 +150,19 @@
       }
     ],
     "baseline": {
-      "rss_bytes": 8175616,
-      "virtual_bytes": 420429463552,
-      "physical_footprint_bytes": 3752960,
-      "lifetime_peak_physical_footprint_bytes": 3752960,
+      "rss_bytes": 7864320,
+      "virtual_bytes": 420256448512,
+      "physical_footprint_bytes": 3359744,
+      "lifetime_peak_physical_footprint_bytes": 3359744,
       "open_descriptor_rows": 15,
       "open_retry_scratch_descriptors": 0
     },
     "custody_record_bytes": 40,
     "execution_slot_bytes": 9840,
-    "idle_cpu_percent_one_core": 0.0,
-    "idle_cpu_sample_seconds": 2.001,
+    "idle_cpu_percent_one_core": 0.497,
+    "idle_cpu_sample_seconds": 2.01,
     "retained_idle": {
-      "rss_bytes": 13778944,
+      "rss_bytes": 14614528,
       "virtual_bytes": 421395709952,
       "physical_footprint_bytes": 11534336,
       "lifetime_peak_physical_footprint_bytes": 11534336,
@@ -168,13 +178,14 @@
       ]
     ]
   },
-  "elapsed_seconds": 43.21,
+  "elapsed_seconds": 44.47,
   "limits": [
     "macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only",
     "deterministic loopback HTTP classifies no TLS trust store or live-provider behavior",
     "a 250 ms fixture delay separates committed retry discovery from provider launch",
-    "external 10 ms SQLite observation adds sampling delay and is not a Runtime clock",
-    "two production-store stages put 31 then 126 older unresolved future retries before one due replacement",
+    "10 ms inspect-session observation adds sampling delay and is not a Runtime clock",
+    "three production-store stages put 31, 126, then 10,126 older future retries before one due replacement",
+    "the 10,126-row future-only stage measures the simple age-index baseline without a deadline probe",
     "five 32-Operation rounds exercise 0-to-capacity-to-0 custody churn with 250 ms delayed cleanup",
     "process termination evidence is not power-loss qualification"
   ]
