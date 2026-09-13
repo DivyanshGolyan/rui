@@ -1,9 +1,9 @@
 {
   "scope": "issue-173 production model-output capture, import, and retained idle",
   "status": "passed",
-  "tested_revision": "50faaf7f850ccdc507c2e3a68b1031245348b508",
+  "tested_revision": "95455e0ef4f202dd016d24d03d423b995243fcac",
   "working_tree_dirty": false,
-  "binary_sha256": "2e460bbceb58ab44d804c7b47e36c0abb34e5f88406fe6a2b6ef7d3fcde78c41",
+  "binary_sha256": "6883accb93f6ce8f78bc84748d30b7935c31b3147a71ec9330afa58506b5d442",
   "zig": "0.16.0",
   "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
   "active_capacity": 1,
@@ -20,18 +20,18 @@
       "assistant_projections": 1,
       "database_bytes": 118784,
       "cold": {
-        "rss_bytes": 7946240,
-        "virtual_bytes": 420256448512,
-        "physical_footprint_bytes": 3539968,
-        "lifetime_peak_physical_footprint_bytes": 3539968,
+        "rss_bytes": 7864320,
+        "virtual_bytes": 420410589184,
+        "physical_footprint_bytes": 3507200,
+        "lifetime_peak_physical_footprint_bytes": 3507200,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 9076736,
-        "virtual_bytes": 420400676864,
-        "physical_footprint_bytes": 4555776,
-        "lifetime_peak_physical_footprint_bytes": 4719616,
+        "rss_bytes": 9404416,
+        "virtual_bytes": 420679598080,
+        "physical_footprint_bytes": 4932608,
+        "lifetime_peak_physical_footprint_bytes": 5080064,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
@@ -67,10 +67,10 @@
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 12140544,
-        "virtual_bytes": 420669112320,
-        "physical_footprint_bytes": 7619584,
-        "lifetime_peak_physical_footprint_bytes": 7767040,
+        "rss_bytes": 11698176,
+        "virtual_bytes": 420400676864,
+        "physical_footprint_bytes": 7144448,
+        "lifetime_peak_physical_footprint_bytes": 7308288,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
@@ -98,15 +98,15 @@
       "assistant_projections": 1,
       "database_bytes": 16912384,
       "cold": {
-        "rss_bytes": 7913472,
+        "rss_bytes": 7880704,
         "virtual_bytes": 420122230784,
-        "physical_footprint_bytes": 3458048,
-        "lifetime_peak_physical_footprint_bytes": 3458048,
+        "physical_footprint_bytes": 3425280,
+        "lifetime_peak_physical_footprint_bytes": 3425280,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 14876672,
+        "rss_bytes": 15122432,
         "virtual_bytes": 420974755840,
         "physical_footprint_bytes": 10485760,
         "lifetime_peak_physical_footprint_bytes": 10485760,
@@ -139,18 +139,18 @@
       "assistant_projections": 1,
       "database_bytes": 118784,
       "cold": {
-        "rss_bytes": 7880704,
-        "virtual_bytes": 420543758336,
-        "physical_footprint_bytes": 3507200,
-        "lifetime_peak_physical_footprint_bytes": 3507200,
+        "rss_bytes": 7815168,
+        "virtual_bytes": 420401152000,
+        "physical_footprint_bytes": 3425280,
+        "lifetime_peak_physical_footprint_bytes": 3425280,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 9322496,
-        "virtual_bytes": 420544331776,
-        "physical_footprint_bytes": 4801536,
-        "lifetime_peak_physical_footprint_bytes": 4965376,
+        "rss_bytes": 9256960,
+        "virtual_bytes": 420401725440,
+        "physical_footprint_bytes": 4719616,
+        "lifetime_peak_physical_footprint_bytes": 4883456,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
@@ -178,18 +178,18 @@
       "assistant_projections": 1,
       "database_bytes": 151552,
       "cold": {
-        "rss_bytes": 8028160,
-        "virtual_bytes": 420265885696,
-        "physical_footprint_bytes": 3589120,
-        "lifetime_peak_physical_footprint_bytes": 3589120,
+        "rss_bytes": 7913472,
+        "virtual_bytes": 420122230784,
+        "physical_footprint_bytes": 3458048,
+        "lifetime_peak_physical_footprint_bytes": 3458048,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 9256960,
-        "virtual_bytes": 420401725440,
-        "physical_footprint_bytes": 4686848,
-        "lifetime_peak_physical_footprint_bytes": 4850688,
+        "rss_bytes": 9142272,
+        "virtual_bytes": 420391239680,
+        "physical_footprint_bytes": 4572160,
+        "lifetime_peak_physical_footprint_bytes": 4736000,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
@@ -217,18 +217,18 @@
       "assistant_projections": 1,
       "database_bytes": 454656,
       "cold": {
-        "rss_bytes": 7929856,
-        "virtual_bytes": 420123279360,
-        "physical_footprint_bytes": 3490816,
-        "lifetime_peak_physical_footprint_bytes": 3490816,
+        "rss_bytes": 7979008,
+        "virtual_bytes": 420256448512,
+        "physical_footprint_bytes": 3556352,
+        "lifetime_peak_physical_footprint_bytes": 3556352,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 10059776,
+        "rss_bytes": 10387456,
         "virtual_bytes": 420822204416,
-        "physical_footprint_bytes": 5587968,
-        "lifetime_peak_physical_footprint_bytes": 5735424,
+        "physical_footprint_bytes": 5932032,
+        "lifetime_peak_physical_footprint_bytes": 6095872,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
@@ -245,7 +245,7 @@
       "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9"
     }
   ],
-  "elapsed_seconds": 7.494,
+  "elapsed_seconds": 7.429,
   "limits": [
     "macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only",
     "deterministic loopback HTTP qualifies no TLS trust store, live provider, billing, or backend continuation",
