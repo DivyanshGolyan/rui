@@ -77,6 +77,26 @@ pub fn observeCommand(io: std.Io, store_path: []const u8, key: []const u8) !u16 
     return sendBytes(io, &paths, "/v1/observe-command", body.slice(), null);
 }
 
+pub fn readResult(io: std.Io, store_path: []const u8, key: []const u8) !u16 {
+    if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
+    const paths = try platform.resolveClientPaths(io, store_path);
+    var body: protocol.ResponseBuffer = .{};
+    try body.append("{\"version\":\"1\",\"kind\":\"read_result\",\"store\":");
+    try body.appendJsonString(paths.store.slice());
+    try body.append(",\"key\":");
+    try body.appendJsonString(key);
+    try body.append("}");
+    const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
+    const stream = try address.connect(io);
+    defer stream.close(io);
+    const fd = stream.socket.handle;
+    var header_buffer: [512]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/read-result HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Latifa-Wire-Version: 1\r\n\r\n", .{body.len});
+    try writeAll(fd, header);
+    try writeAll(fd, body.slice());
+    return readStreamingResponse(io, fd);
+}
+
 pub fn inspectSession(io: std.Io, store_path: []const u8, session: []const u8) !u16 {
     if (session.len == 0 or session.len > protocol.max_session_bytes or
         !std.unicode.utf8ValidateSlice(session)) return error.InvalidSession;
@@ -447,6 +467,48 @@ fn readResponseWithInactivity(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32
     }
     try std.Io.File.stdout().writeStreamingAll(io, body[0..body_length]);
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
+    return status;
+}
+
+fn readStreamingResponse(io: std.Io, fd: std.posix.fd_t) !u16 {
+    var header_buffer: [protocol.max_header_bytes]u8 = undefined;
+    var used: usize = 0;
+    while (used < header_buffer.len) {
+        if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
+        const count = try std.posix.read(fd, header_buffer[used .. used + 1]);
+        if (count == 0) return error.TruncatedResponse;
+        used += count;
+        if (used >= 4 and std.mem.eql(u8, header_buffer[used - 4 .. used], "\r\n\r\n")) break;
+    } else return error.ResponseHeaderTooLarge;
+    var lines = std.mem.splitSequence(u8, header_buffer[0..used], "\r\n");
+    var parts = std.mem.splitScalar(u8, lines.next() orelse return error.InvalidResponse, ' ');
+    if (!std.mem.eql(u8, parts.next() orelse return error.InvalidResponse, "HTTP/1.1")) return error.InvalidResponse;
+    const status = try std.fmt.parseInt(u16, parts.next() orelse return error.InvalidResponse, 10);
+    var length: ?u64 = null;
+    var wire_ok = false;
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidResponse;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
+            if (length != null) return error.InvalidResponse;
+            length = try std.fmt.parseInt(u64, value, 10);
+        } else if (std.ascii.eqlIgnoreCase(name, "X-Latifa-Wire-Version")) {
+            wire_ok = std.mem.eql(u8, value, protocol.wire_version);
+        }
+    }
+    if (!wire_ok) return error.WrongWireVersion;
+    var remaining = length orelse return error.InvalidResponse;
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    while (remaining != 0) {
+        if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
+        const wanted: usize = @intCast(@min(remaining, buffer.len));
+        const count = try std.posix.read(fd, buffer[0..wanted]);
+        if (count == 0) return error.TruncatedResponse;
+        try std.Io.File.stdout().writeStreamingAll(io, buffer[0..count]);
+        remaining -= count;
+    }
     return status;
 }
 
