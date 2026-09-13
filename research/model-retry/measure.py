@@ -474,7 +474,7 @@ def unresolved_history_measurement(binary, root, endpoint_server, endpoint):
     try:
         cpu_before = cpu_seconds(host.pid)
         idle_started = time.monotonic()
-        time.sleep(2)
+        time.sleep(5)
         idle_elapsed = time.monotonic() - idle_started
         future_idle_cpu = 100 * (cpu_seconds(host.pid) - cpu_before) / idle_elapsed
         configure(
