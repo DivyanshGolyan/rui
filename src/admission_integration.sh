@@ -56,6 +56,26 @@ stop_host() {
     host_pid=
 }
 
+wait_host_failure() {
+    attempts=0
+    while kill -0 "$host_pid" 2>/dev/null; do
+        case $(ps -o stat= -p "$host_pid" 2>/dev/null || true) in
+            *Z*) break ;;
+        esac
+        attempts=$((attempts + 1))
+        if [ "$attempts" -gt 500 ]; then
+            echo "Host did not complete effect-aware shutdown" >&2
+            return 1
+        fi
+        sleep 0.01
+    done
+    if wait "$host_pid"; then
+        echo "effect-aware shutdown exited successfully" >&2
+        return 1
+    fi
+    host_pid=
+}
+
 contains() {
     case "$1" in
         *"$2"*) ;;
@@ -464,7 +484,7 @@ for fault in content-read content-import before-commit; do
         exit 1
     fi
     contains "$(cat "$state/fault.out")" '"code":"canonical_store_failure"'
-    stop_host
+    wait_host_failure
     start_host
     absent=$($latifa observe-command --store "$store" --key "$key")
     contains "$absent" '"status":"absent"'
@@ -481,11 +501,7 @@ if "$latifa" configure --store "$store" --record "$records/commit-fault.json" --
     exit 1
 fi
 contains "$(cat "$state/fault.out")" '"code":"canonical_store_failure"'
-if "$latifa" observe-command --store "$store" --key commit-fault >"$state/fenced.out" 2>"$state/fenced.err"; then
-    echo "fenced Host served a canonical observation" >&2
-    exit 1
-fi
-stop_host
+wait_host_failure
 start_host
 commit_retry=$($latifa retry --store "$store" --record "$records/commit-fault.json" --kind configure)
 contains "$commit_retry" '"status":"accepted"'
@@ -499,7 +515,7 @@ if "$latifa" configure --store "$store" --record "$records/read-fault.json" --ke
     echo "injected content read failure returned success" >&2
     exit 1
 fi
-stop_host
+wait_host_failure
 start_host
 read_retry=$($latifa retry --store "$store" --record "$records/read-fault.json" --kind configure)
 contains "$read_retry" '"status":"accepted"'
@@ -596,13 +612,7 @@ if "$latifa" inspect-session --store "$store" --session direct/main >"$state/cor
     exit 1
 fi
 contains "$(cat "$state/corrupt-read.out")" '"code":"canonical_store_failure"'
-if "$latifa" configure --store "$store" --record "$records/after-corruption.json" --key after-corruption --session direct/after-corruption --workspace "$root" --model model-a >"$state/corrupt-admission.out" 2>"$state/corrupt-admission.err"; then
-    echo "fenced Host admitted configuration after canonical read failure" >&2
-    exit 1
-fi
-contains "$(cat "$state/corrupt-admission.out")" '"code":"canonical_store_failure"'
-
-stop_host
+wait_host_failure
 
 # Persisted identity/journal settings remain readable after the owner closes.
 # The production client never opens this database; this is a fixture. The
@@ -614,7 +624,7 @@ expected = {
     "journal_mode": "delete",
     "mmap_size": 0,
     "application_id": 0x4C544631,
-    "user_version": 4,
+    "user_version": 5,
 }
 for name, value in expected.items():
     actual = db.execute("PRAGMA " + name).fetchone()[0]

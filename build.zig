@@ -200,7 +200,10 @@ fn configureTransport(
     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libcrypto.a"));
     if (target.result.os.tag == .macos) {
-        compile.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+        const sdk = std.mem.trimEnd(u8, b.run(&.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" }), "\r\n");
+        compile.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System/Library/Frameworks" }) });
+        compile.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
+        compile.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
         compile.root_module.linkFramework("Security", .{});
         compile.root_module.linkFramework("CoreFoundation", .{});
         compile.root_module.linkFramework("CoreServices", .{});
