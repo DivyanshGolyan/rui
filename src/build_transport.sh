@@ -54,6 +54,13 @@ log="$build_root/build.log"
 mkdir -p "$openssl_build" "$curl_build" "$prefix"
 : >"$log"
 
+if [ "${sdk:-}" ]; then
+    mkdir -p "$prefix/sdk/System/Library" "$prefix/sdk/usr"
+    ln -s "$sdk/System/Library/Frameworks" "$prefix/sdk/System/Library/Frameworks"
+    ln -s "$sdk/usr/include" "$prefix/sdk/usr/include"
+    ln -s "$sdk/usr/lib" "$prefix/sdk/usr/lib"
+fi
+
 (
     cd "$openssl_build"
     CC="$cc" AR="$zig ar" RANLIB="$zig ranlib" \
