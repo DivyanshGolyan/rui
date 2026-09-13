@@ -464,6 +464,8 @@ const Parser = struct {
         });
         errdefer {
             file.close(self.options.io);
+            // The enclosing request owner retries cleanup and records failure;
+            // this first attempt only shortens the common error path.
             std.Io.Dir.deleteFileAbsolute(self.options.io, path) catch {};
         }
         var sink = ContentSink{ .io = self.options.io, .file = file };

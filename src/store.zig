@@ -44,6 +44,7 @@ pub const ConfigureReply = union(enum) {
 };
 
 pub const MessageRejection = enum {
+    invalid_session_reference,
     unknown_session,
     model_processing_unavailable_in_issue_170,
 };
@@ -289,9 +290,10 @@ pub const Store = struct {
             .explicit_null => next.output_schema_id = null,
             .value => next.output_schema_id = command_output_schema_id,
         }
-        next.revision = if (created) 1 else std.math.add(u64, next.revision, 1) catch {
+        if (!created and next.revision == std.math.maxInt(i64)) {
             return try self.saveConfigurationRejection(command, &digest, .revision_exhausted, faults);
-        };
+        }
+        next.revision = if (created) 1 else next.revision + 1;
 
         if (created) {
             try self.insertSession(command.session.slice(), &next);
@@ -383,7 +385,9 @@ pub const Store = struct {
             return .{ .rejected = .{ .replayed = true, .code = code } };
         }
         var answer = StoredAnswer{ .accepted = false };
-        const code: MessageRejection = if (try self.readSession(command.session.slice()) == null)
+        const code: MessageRejection = if (command.session.len == 0)
+            .invalid_session_reference
+        else if (try self.readSession(command.session.slice()) == null)
             .unknown_session
         else
             .model_processing_unavailable_in_issue_170;
@@ -639,6 +643,7 @@ pub const Store = struct {
 
         if (content.length == 0) {
             if (faults.content_read) return error.InjectedContentReadFailure;
+            if (!std.mem.eql(u8, &protocol.contentDigest(""), &content.digest)) return error.ContentChanged;
             return content_id;
         }
         var blob: ?*c.sqlite3_blob = null;
@@ -650,11 +655,13 @@ pub const Store = struct {
         defer file.close(self.io);
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var offset: u64 = 0;
+        var hash = protocol.contentHasher();
         while (offset < content.length) {
             const wanted: usize = @intCast(@min(content.length - offset, buffer.len));
             const count = try file.readStreaming(self.io, &.{buffer[0..wanted]});
             if (count != wanted) return error.ContentReadFailed;
             if (faults.content_read) return error.InjectedContentReadFailure;
+            hash.update(buffer[0..count]);
             if (offset > std.math.maxInt(c_int)) return error.ContentTooLarge;
             if (c.sqlite3_blob_write(blob, buffer[0..count].ptr, @intCast(count), @intCast(offset)) != c.SQLITE_OK) {
                 return error.ContentWriteFailed;
@@ -667,6 +674,7 @@ pub const Store = struct {
             else => return err,
         };
         if (trailing_count != 0) return error.ContentChanged;
+        if (!std.mem.eql(u8, &hash.finalResult(), &content.digest)) return error.ContentChanged;
         return content_id;
     }
 
@@ -1066,4 +1074,20 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(c_int, 16 * 1024), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_SQL_LENGTH, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_ATTACHED, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_WORKER_THREADS, -1));
+}
+
+test "existing Store rejects a different canonical identity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage = try Store.open(std.testing.io, database, root);
+    try storage.close();
+    try std.testing.expectError(
+        error.WrongStoreIdentity,
+        Store.open(std.testing.io, database, "/different/canonical/store"),
+    );
 }
