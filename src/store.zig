@@ -6,8 +6,13 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 4;
+pub const schema_version: u32 = 5;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
+const runnable_probe_sql =
+    "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending " ++
+    "WHERE m.turn_id IS NULL AND NOT EXISTS(" ++
+    " SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL" ++
+    ") LIMIT 1";
 
 pub const Faults = struct {
     content_read: bool = false,
@@ -779,12 +784,7 @@ pub const Store = struct {
     }
 
     fn hasRunnableWorkLocked(self: *Store) !bool {
-        const statement = try prepare(
-            self.database,
-            "SELECT 1 FROM message_admission m WHERE m.turn_id IS NULL AND NOT EXISTS(" ++
-                " SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL" ++
-                ") LIMIT 1",
-        );
+        const statement = try prepare(self.database, runnable_probe_sql);
         defer _ = c.sqlite3_finalize(statement);
         return switch (c.sqlite3_step(statement)) {
             c.SQLITE_ROW => true,
@@ -1489,10 +1489,11 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ PRIMARY KEY(session_ref,entry_ordinal)
         \\) STRICT, WITHOUT ROWID;
         \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id);
+        \\CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL;
         \\CREATE INDEX model_operation_runnable ON model_operation(resolution_code,operation_id);
     );
     try exec(database, "PRAGMA application_id=1280591409");
-    try exec(database, "PRAGMA user_version=4");
+    try exec(database, "PRAGMA user_version=5");
     const statement = try prepare(database, "INSERT INTO store_meta(key,value) VALUES('wire_version','1'),('store_selector',?1)");
     defer _ = c.sqlite3_finalize(statement);
     try bindText(statement, 1, selector);
@@ -1509,7 +1510,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','turn_one_active_per_session','model_operation_runnable')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','turn_one_active_per_session','model_operation_runnable')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -2460,4 +2461,28 @@ test "canonical historical read failure fences dispatch without a fabricated out
     try std.testing.expectError(error.CorruptStore, view.settings());
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.settleModelFailure(binding, "request_preparation_failed", .{}));
+}
+
+test "idle runnable probe uses the pending-only admission index" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const statement = try prepare(storage.database, "EXPLAIN QUERY PLAN " ++ runnable_probe_sql);
+    defer _ = c.sqlite3_finalize(statement);
+    var uses_pending_index = false;
+    while (true) switch (c.sqlite3_step(statement)) {
+        c.SQLITE_ROW => {
+            const pointer = c.sqlite3_column_text(statement, 3) orelse return error.InvalidQueryPlan;
+            const length = c.sqlite3_column_bytes(statement, 3);
+            if (length < 0) return error.InvalidQueryPlan;
+            const detail = pointer[0..@intCast(length)];
+            uses_pending_index = uses_pending_index or
+                std.mem.indexOf(u8, detail, "message_admission_pending") != null;
+        },
+        c.SQLITE_DONE => break,
+        else => return error.InvalidQueryPlan,
+    };
+    try std.testing.expect(uses_pending_index);
 }
