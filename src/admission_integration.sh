@@ -205,10 +205,23 @@ contains "$partial" '"status":"absent"'
 
 # Messages to unknown Sessions are saved rejections and create no Session.
 printf 'hello' >"$state/message.txt"
-unknown=$($latifa message --store "$store" --record "$records/unknown-message.json" --key msg-unknown --session direct/unknown --text "$state/message.txt")
-contains "$unknown" '"code":"unknown_session"'
+if "$latifa" message --store "$store" --record "$records/unknown-message.json" --key msg-unknown --session direct/unknown --text "$state/message.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+    echo "lost unknown-Session rejection unexpectedly produced a complete reply" >&2
+    exit 1
+fi
 unknown_session=$($latifa inspect-session --store "$store" --session direct/unknown)
 contains "$unknown_session" '"session":null'
+unknown_created=$($latifa configure --store "$store" --record "$records/unknown-created.json" --key unknown-created --session direct/unknown --workspace "$root" --model model-a)
+contains "$unknown_created" '"status":"accepted"'
+stop_host
+start_host
+unknown=$($latifa retry --store "$store" --record "$records/unknown-message.json" --kind message)
+contains "$unknown" '"status":"rejected"'
+contains "$unknown" '"replayed":true'
+contains "$unknown" '"code":"unknown_session"'
+contains "$unknown" '"bytes":"5"'
+unknown_after_creation=$($latifa inspect-session --store "$store" --session direct/unknown)
+contains "$unknown_after_creation" '"pending_messages":"0"'
 
 # A lost rejection remains the original answer even after another key creates the Session.
 if "$latifa" configure --store "$store" --record "$records/incomplete.json" --key incomplete-key --session direct/rejected --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
@@ -285,13 +298,168 @@ before_retry=$($latifa retry --store "$store" --record "$records/before.json" --
 contains "$before_retry" '"status":"accepted"'
 contains "$before_retry" '"replayed":false'
 
-# Invalid schemas are definite saved rejections; a known-Session message
-# explicitly reports the later implementation surface as unavailable.
+# An incomplete message envelope with a usable key never publishes content,
+# a command answer or a queue row.
+socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$ready")
+python3 - "$socket" "$store" <<'PY'
+import json, socket, sys
+socket_path, store = sys.argv[1:]
+body = json.dumps({
+    "version": "1",
+    "kind": "message",
+    "store": store,
+    "key": "partial-message-key",
+    "session": "direct/main",
+    "text": {"state": "value", "value": "unterminated"},
+}, separators=(",", ":")).encode()
+client = socket.socket(socket.AF_UNIX)
+client.connect(socket_path)
+client.sendall(
+    ("POST /v1/message HTTP/1.1\r\n"
+     "Host: local\r\n"
+     "Content-Type: application/json\r\n"
+     f"Content-Length: {len(body) + 20}\r\n"
+     "X-Latifa-Wire-Version: 1\r\n\r\n").encode()
+)
+client.sendall(body)
+client.close()
+PY
+sleep 0.05
+partial_message=$($latifa observe-command --store "$store" --key partial-message-key)
+contains "$partial_message" '"status":"absent"'
+partial_session=$($latifa inspect-session --store "$store" --session direct/main)
+contains "$partial_session" '"pending_messages":"0"'
+
+# Invalid schemas are definite saved rejections. A known-Session message keeps
+# its original captured bytes and queue admission through lost reply, source
+# mutation, client exit and Host restart.
 printf '{invalid' >"$state/invalid-schema.json"
 invalid_schema=$($latifa configure --store "$store" --record "$records/schema.json" --key schema-key --session direct/main --output-schema "$state/invalid-schema.json")
 contains "$invalid_schema" '"code":"invalid_output_schema"'
-known_message=$($latifa message --store "$store" --record "$records/known-message.json" --key msg-known --session direct/main --text "$state/message.txt")
-contains "$known_message" '"code":"model_processing_unavailable_in_issue_170"'
+printf 'original message with "quotes", slash \\, newline\nand emoji 🙂\n' >"$state/message-source.txt"
+if "$latifa" message --store "$store" --record "$records/known-message.json" --key msg-known --session direct/main --text "$state/message-source.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+    echo "lost message acceptance unexpectedly produced a complete reply" >&2
+    exit 1
+fi
+printf 'mutated after caller capture' >"$state/message-source.txt"
+mv "$state/message-source.txt" "$state/message-source-moved.txt"
+stop_host
+start_host
+known_message=$($latifa retry --store "$store" --record "$records/known-message.json" --kind message)
+contains "$known_message" '"status":"accepted"'
+contains "$known_message" '"replayed":true'
+contains "$known_message" '"admission":"1"'
+contains "$known_message" '"status":"queued"'
+known_observation=$($latifa observe-command --store "$store" --key msg-known)
+contains "$known_observation" '"kind":"message"'
+contains "$known_observation" '"status":"queued"'
+contains "$known_observation" '"type":"text"'
+known_session=$($latifa inspect-session --store "$store" --session direct/main)
+contains "$known_session" '"pending_messages":"1"'
+
+# Complete stdin is captured into the durable caller record before transport;
+# the pipe then disappears, and a restart retry retains its second position.
+stdin_message=$(printf 'stdin line one\nstdin line two 🙂\n' | "$latifa" message --store "$store" --record "$records/stdin-message.json" --key msg-stdin --session direct/main --text -)
+contains "$stdin_message" '"status":"accepted"'
+contains "$stdin_message" '"admission":"2"'
+stop_host
+start_host
+stdin_replay=$($latifa retry --store "$store" --record "$records/stdin-message.json" --kind message)
+contains "$stdin_replay" '"replayed":true'
+contains "$stdin_replay" '"admission":"2"'
+ordered_session=$($latifa inspect-session --store "$store" --session direct/main)
+contains "$ordered_session" '"pending_messages":"2"'
+
+# The accepted message binding conflicts across target, canonical input and
+# kind without replacing or duplicating the original admission.
+retargeted_message=$($latifa message --store "$store" --record "$records/message-retargeted.json" --key msg-known --session direct/rejected --text "$state/message.txt")
+contains "$retargeted_message" '"status":"conflict"'
+changed_message=$($latifa message --store "$store" --record "$records/message-changed.json" --key msg-known --session direct/main --text "$state/message.txt")
+contains "$changed_message" '"status":"conflict"'
+message_changed_kind=$($latifa configure --store "$store" --record "$records/message-changed-kind.json" --key msg-known --session direct/main --model model-a)
+contains "$message_changed_kind" '"status":"conflict"'
+still_two=$($latifa inspect-session --store "$store" --session direct/main)
+contains "$still_two" '"pending_messages":"2"'
+
+# Closing the connection after complete ingress and sealing cannot revoke an
+# admission already using its sealed source. The Host completes the atomic
+# import even though delivery has no receiver.
+python3 - "$state/during-admission-message.txt" <<'PY'
+import pathlib, sys
+pathlib.Path(sys.argv[1]).write_bytes(b"d" * (512 * 1024))
+PY
+if "$latifa" message --store "$store" --record "$records/during-admission-message.json" --key msg-disconnected-during-admission --session direct/main --text "$state/during-admission-message.txt" --test-drop-reply during-admission >"$state/drop.out" 2>"$state/drop.err"; then
+    echo "during-admission disconnect unexpectedly produced a complete reply" >&2
+    exit 1
+fi
+attempts=0
+while :; do
+    during_observation=$($latifa observe-command --store "$store" --key msg-disconnected-during-admission)
+    case "$during_observation" in
+        *'"status":"accepted"'*) break ;;
+    esac
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 500 ]; then
+        echo "complete disconnected message did not reach admission" >&2
+        exit 1
+    fi
+    sleep 0.01
+done
+contains "$during_observation" '"status":"queued"'
+
+# Fragmented storage writes complete without truncation.
+stop_host
+start_host --fault content-short-write
+printf 'short-write message long enough to cross several injected fragments %.0s' $(seq 1 100) >"$state/short-write-message.txt"
+short_write=$($latifa message --store "$store" --record "$records/short-write-message.json" --key msg-short-write --session direct/main --text "$state/short-write-message.txt")
+contains "$short_write" '"status":"accepted"'
+contains "$short_write" '"bytes":"6800"'
+stop_host
+start_host
+
+# Ingress scratch/file acquisition, write and seal failures happen before
+# admission. Their caller captures remain retryable and acquire one admission
+# only after an ordinary restart.
+for fault in scratch-acquire content-acquire content-write content-seal; do
+    key="msg-$fault"
+    record="$records/$key.json"
+    stop_host
+    start_host --fault "$fault"
+    if "$latifa" message --store "$store" --record "$record" --key "$key" --session direct/main --text "$state/message.txt" >"$state/fault.out" 2>"$state/fault.err"; then
+        echo "injected $fault unexpectedly admitted a message" >&2
+        exit 1
+    fi
+    stop_host
+    start_host
+    absent=$($latifa observe-command --store "$store" --key "$key")
+    contains "$absent" '"status":"absent"'
+    recovered=$($latifa retry --store "$store" --record "$record" --kind message)
+    contains "$recovered" '"status":"accepted"'
+    contains "$recovered" '"replayed":false'
+done
+
+# Canonical source verification, incremental BLOB import and commit faults
+# roll back content, command binding and queue admission together, then fence
+# the unsafe Host until restart.
+for fault in content-read content-import before-commit; do
+    key="msg-$fault"
+    record="$records/$key.json"
+    printf '%s unique canonical import bytes\n' "$key" >"$state/$key.txt"
+    stop_host
+    start_host --fault "$fault"
+    if "$latifa" message --store "$store" --record "$record" --key "$key" --session direct/main --text "$state/$key.txt" >"$state/fault.out" 2>"$state/fault.err"; then
+        echo "injected $fault unexpectedly admitted a message" >&2
+        exit 1
+    fi
+    contains "$(cat "$state/fault.out")" '"code":"canonical_store_failure"'
+    stop_host
+    start_host
+    absent=$($latifa observe-command --store "$store" --key "$key")
+    contains "$absent" '"status":"absent"'
+    recovered=$($latifa retry --store "$store" --record "$record" --kind message)
+    contains "$recovered" '"status":"accepted"'
+    contains "$recovered" '"replayed":false'
+done
 
 # A failed commit is not a saved rejection or acceptance and fences the Host.
 stop_host
@@ -363,6 +531,40 @@ if "$latifa" configure --store "$store" --record "$records/too-long.json" --key 
 fi
 test ! -e "$records/too-long.json"
 
+# Message identities use the same exact decoded-byte limits while preserving
+# Unicode and transport escaping without normalization.
+message_key128=$(python3 -c 'print("é" * 64, end="")')
+printf 'bounded message with controls\t"quote"\\slash\n' >"$state/bounded-message.txt"
+bounded_message=$($latifa message --store "$store" --record "$records/bounded-message.json" --key "$message_key128" --session "$session128" --text "$state/bounded-message.txt")
+contains "$bounded_message" '"status":"accepted"'
+message_key129=$(python3 -c 'print("é" * 64 + "x", end="")')
+if "$latifa" message --store "$store" --record "$records/message-too-long.json" --key "$message_key129" --session "$session128" --text "$state/message.txt" >"$state/bounds.out" 2>"$state/bounds.err"; then
+    echo "129-byte message key was admitted" >&2
+    exit 1
+fi
+test ! -e "$records/message-too-long.json"
+
+escaped_key=$(python3 -c 'print("".join(map(chr, (34, 92, 10, 9))) * 32, end="")')
+escaped_message=$($latifa message --store "$store" --record "$records/escaped-message.json" --key "$escaped_key" --session "$session128" --text "$state/message.txt")
+contains "$escaped_message" '"status":"accepted"'
+escaped_observation=$($latifa observe-command --store "$store" --key "$escaped_key")
+python3 - "$escaped_key" "$escaped_observation" <<'PY'
+import json, sys
+expected, encoded = sys.argv[1:]
+observation = json.loads(encoded)
+if observation["key"] != expected:
+    raise SystemExit("escaped key was normalized or truncated")
+if observation["observation"]["queue"]["status"] != "queued":
+    raise SystemExit("escaped key did not recover queued admission")
+PY
+
+nfc_key=$(python3 -c 'print("é", end="")')
+nfd_key=$(python3 -c 'print("e\u0301", end="")')
+nfc_message=$($latifa message --store "$store" --record "$records/nfc-message.json" --key "$nfc_key" --session "$session128" --text "$state/message.txt")
+nfd_message=$($latifa message --store "$store" --record "$records/nfd-message.json" --key "$nfd_key" --session "$session128" --text "$state/message.txt")
+contains "$nfc_message" '"status":"accepted"'
+contains "$nfd_message" '"status":"accepted"'
+
 # A detected canonical read failure fences later admission in the same Host.
 # This fixture corrupts storage only while the production owner is stopped.
 stop_host
@@ -400,7 +602,7 @@ expected = {
     "journal_mode": "delete",
     "mmap_size": 0,
     "application_id": 0x4C544631,
-    "user_version": 1,
+    "user_version": 2,
 }
 for name, value in expected.items():
     actual = db.execute("PRAGMA " + name).fetchone()[0]

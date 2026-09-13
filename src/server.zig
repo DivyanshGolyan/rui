@@ -16,8 +16,13 @@ pub const connection_stack_bytes = 1024 * 1024;
 pub const maximum_connection_stack_reservation_bytes = max_clients * connection_stack_bytes;
 
 pub const Faults = struct {
+    content_acquire: bool = false,
     content_write: bool = false,
+    content_short_write: bool = false,
+    content_seal: bool = false,
     content_read: bool = false,
+    content_import: bool = false,
+    scratch_acquire: bool = false,
     before_commit: bool = false,
     startup_cleanup: bool = false,
     shutdown_after_accept: bool = false,
@@ -157,7 +162,7 @@ fn connectionMain(connection: *Connection) void {
 }
 
 const Route = enum { configure, message, observe, inspect, unsupported_control };
-const DropMode = enum { none, before_admission, after_commit };
+const DropMode = enum { none, before_admission, during_admission, after_commit };
 
 const Header = struct {
     route: Route,
@@ -186,7 +191,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
     if (header.route == .unsupported_control) {
         return respondStatic(host.io, fd, 501, "unsupported", "control_surface_enters_in_later_slice");
     }
-    if (!try reserveScratch(host, header.content_length)) {
+    if (host.faults.scratch_acquire or !try reserveScratch(host, header.content_length)) {
         return respondStatic(host.io, fd, 507, "invocation_error", "scratch_capacity_exhausted");
     }
     var release_scratch = true;
@@ -202,7 +207,10 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
         .content_length = header.content_length,
         .scratch_path = host.lease.paths.scratch.slice(),
         .request_number = request_number,
+        .fault_content_acquire = host.faults.content_acquire,
         .fault_content_write = host.faults.content_write,
+        .fault_content_short_write = host.faults.content_short_write,
+        .fault_content_seal = host.faults.content_seal,
         .cleanup_failed = &cleanup_failed,
     }) catch |err| {
         if (cleanup_failed) release_scratch = false;
@@ -225,11 +233,15 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
         return respondStatic(host.io, fd, 400, "invocation_error", "route_kind_mismatch");
     }
     if (header.drop == .before_admission) return;
+    if (header.drop == .during_admission and std.c.shutdown(fd, std.c.SHUT.RDWR) != 0) {
+        return error.InjectedDisconnectFailed;
+    }
 
     switch (request) {
         .configure => |*command| {
             const result = host.store.configure(command, .{
                 .content_read = host.faults.content_read,
+                .content_import = host.faults.content_import,
                 .before_commit = host.faults.before_commit,
             });
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
@@ -243,15 +255,16 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
             deliverResponse(host.io, fd, status, response.slice());
         },
         .message => |*command| {
-            const result = host.store.rejectMessage(command, .{
+            const result = host.store.submitMessage(command, .{
                 .content_read = host.faults.content_read,
+                .content_import = host.faults.content_import,
                 .before_commit = host.faults.before_commit,
             });
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             var response: protocol.ResponseBuffer = .{};
             try renderMessageReply(&response, command, result);
             const status: u16 = switch (result) {
-                .rejected => 200,
+                .accepted, .rejected => 200,
                 .conflict => 409,
                 .infrastructure_failure => 500,
             };
@@ -366,6 +379,8 @@ fn readHeader(io: std.Io, fd: std.posix.fd_t) !Header {
         } else if (std.ascii.eqlIgnoreCase(name, "X-Latifa-Test-Drop-Reply")) {
             drop = if (std.mem.eql(u8, value, "before-admission"))
                 .before_admission
+            else if (std.mem.eql(u8, value, "during-admission"))
+                .during_admission
             else if (std.mem.eql(u8, value, "after-commit"))
                 .after_commit
             else
@@ -415,7 +430,7 @@ fn renderConfigureReply(
             if (value.created) "true" else "false",
         });
     }
-    try response.append("},\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_171\"}}");
+    try response.append("},\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_172\"}}");
 }
 
 fn renderMessageReply(
@@ -426,7 +441,12 @@ fn renderMessageReply(
     try response.append("{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"");
     try response.append(@tagName(result));
     try response.append("\",\"replayed\":");
-    try response.append(if (result == .rejected and result.rejected.replayed) "true" else "false");
+    const replayed = switch (result) {
+        .accepted => |value| value.replayed,
+        .rejected => |value| value.replayed,
+        .conflict, .infrastructure_failure => false,
+    };
+    try response.append(if (replayed) "true" else "false");
     try response.append(",\"session\":");
     try response.appendJsonString(command.session.slice());
     switch (result) {
@@ -440,8 +460,24 @@ fn renderMessageReply(
         .infrastructure_failure => {
             try response.append(",\"code\":\"canonical_store_failure\"");
         },
+        .accepted => |value| {
+            try response.appendFmt(",\"admission\":\"{d}\"", .{value.admission_id});
+        },
     }
-    try response.append("},\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_171\"}}");
+    try response.append("}");
+    switch (result) {
+        .accepted => |value| {
+            try response.append(",\"input\":");
+            try renderContentReference(response, value.content);
+            try response.appendFmt(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{value.admission_id});
+        },
+        .rejected => |value| {
+            try response.append(",\"input\":");
+            try renderContentReference(response, value.content);
+        },
+        .conflict, .infrastructure_failure => {},
+    }
+    try response.append(",\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_172\"}}");
 }
 
 fn renderCommandObservation(
@@ -463,11 +499,21 @@ fn renderCommandObservation(
             try response.append(",\"code\":");
             try response.appendJsonString(observation.code.slice());
         }
-        if (observation.status == .accepted) {
+        if (observation.status == .accepted and observation.kind == .configure) {
             try response.appendFmt(",\"revision\":\"{d}\",\"created\":{s}", .{
                 observation.revision,
                 if (observation.created) "true" else "false",
             });
+        }
+        if (observation.message) |message| {
+            try response.append(",\"input\":");
+            try renderContentReference(response, message.content);
+            if (message.admission_id) |admission_id| {
+                try response.appendFmt(",\"queue\":{{\"status\":\"{s}\",\"admission\":\"{d}\"}}", .{
+                    @tagName(message.status),
+                    admission_id,
+                });
+            }
         }
     }
     try response.append("}}");
@@ -479,7 +525,7 @@ fn renderSessionObservation(
 ) !void {
     try response.append("{\"version\":\"1\",\"type\":\"session_observation\",\"session\":");
     if (!observation.found) {
-        try response.append("null,\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_171\"}}");
+        try response.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_172\"}}");
         return;
     }
     try response.append("{\"reference\":");
@@ -510,7 +556,13 @@ fn renderSessionObservation(
     } else {
         try response.append("null");
     }
-    try response.append("},\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_171\"}}");
+    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_172\"}}}}", .{observation.pending_messages});
+}
+
+fn renderContentReference(response: *protocol.ResponseBuffer, reference: store_module.ContentReference) !void {
+    try response.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{reference.length});
+    try appendHex(response, &reference.digest);
+    try response.append("\"}");
 }
 
 fn appendHex(response: *protocol.ResponseBuffer, bytes: []const u8) !void {

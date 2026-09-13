@@ -4,7 +4,7 @@ Latifa (formerly OnePage) is a resource-bounded, crash-resumable local runtime f
 
 ## Status
 
-The source implements the first redesigned runtime slice: an explicitly started Host, exclusive Store ownership, the direct configuration client, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, basic observations and bounded SQLite/content ingress. Model processing and every Workflow, tool, permission, stop and interruption surface enter in later implementation issues; the current message command reports that development limitation explicitly.
+The source implements the first two redesigned runtime slices: an explicitly started Host, exclusive Store ownership, direct configuration/message clients, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, immutable ordered message admission, queued observations and bounded SQLite/content ingress. Model processing and every Workflow, tool, permission, stop and interruption surface enter in later implementation issues; accepted messages remain visibly queued until the core-owned selection path is implemented.
 
 The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. The current build cross-compiles all four targets. Runtime and resource verification uses the available Apple Silicon Mac; the other targets remain compile-only evidence until exercised on their platforms.
 
@@ -51,13 +51,34 @@ In another shell, configure a Session. The record path must be in a private dire
   --kind configure
 ```
 
+Submit a complete message from a file or from stdin. Acceptance identifies its immutable queued admission; retry reuses the captured record and never reads the original source again.
+
+```sh
+./zig-out/bin/latifa message \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/message.json \
+  --key message-1 \
+  --session direct/reviewer \
+  --text -
+
+./zig-out/bin/latifa retry \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/message.json \
+  --kind message
+
+./zig-out/bin/latifa observe-command \
+  --store /absolute/path/to/private-store \
+  --key message-1
+```
+
 The applicable gates are:
 
 ```sh
 zig build check
 zig build cross-check
 zig build measure-admission
+zig build measure-message-admission
 ```
 
-`measure-admission` is an opt-in macOS resource run. Model/provider authentication and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The measurement steps are opt-in macOS resource runs. Model/provider authentication, processing and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 `check` exercises both the ReleaseSafe production gate and the default Debug artifact shown above; `cross-check` compiles ReleaseSmall deliverables.
