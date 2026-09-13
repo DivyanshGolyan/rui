@@ -415,8 +415,8 @@ fn readResponse(io: std.Io, fd: std.posix.fd_t) !u16 {
     }
     if (!wire_ok) return error.WrongWireVersion;
     const body_length = length orelse return error.InvalidResponse;
-    if (body_length > 16 * 1024) return error.ResponseTooLarge;
-    var body: [16 * 1024]u8 = undefined;
+    if (body_length > protocol.max_response_bytes) return error.ResponseTooLarge;
+    var body: [protocol.max_response_bytes]u8 = undefined;
     var offset: usize = 0;
     while (offset < body_length) {
         if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;

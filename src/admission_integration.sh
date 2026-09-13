@@ -363,6 +363,31 @@ if "$latifa" configure --store "$store" --record "$records/too-long.json" --key 
 fi
 test ! -e "$records/too-long.json"
 
+# A detected canonical read failure fences later admission in the same Host.
+# This fixture corrupts storage only while the production owner is stopped.
+stop_host
+python3 - "$store/latifa.sqlite3" <<'PY'
+import sqlite3, sys
+database = sqlite3.connect(sys.argv[1])
+database.execute(
+    "UPDATE session SET instructions_content_id=9223372036854775807 "
+    "WHERE session_ref='direct/main'"
+)
+database.commit()
+database.close()
+PY
+start_host
+if "$latifa" inspect-session --store "$store" --session direct/main >"$state/corrupt-read.out" 2>"$state/corrupt-read.err"; then
+    echo "canonical corruption produced a successful observation" >&2
+    exit 1
+fi
+contains "$(cat "$state/corrupt-read.out")" '"code":"canonical_store_failure"'
+if "$latifa" configure --store "$store" --record "$records/after-corruption.json" --key after-corruption --session direct/after-corruption --workspace "$root" --model model-a >"$state/corrupt-admission.out" 2>"$state/corrupt-admission.err"; then
+    echo "fenced Host admitted configuration after canonical read failure" >&2
+    exit 1
+fi
+contains "$(cat "$state/corrupt-admission.out")" '"code":"canonical_store_failure"'
+
 stop_host
 
 # Persisted identity/journal settings remain readable after the owner closes.
