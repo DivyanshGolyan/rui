@@ -6,7 +6,7 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 7;
+pub const schema_version: u32 = 8;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const runnable_probe_sql =
@@ -137,7 +137,6 @@ pub const DispatchPermit = struct {
 
 pub const AttemptAdmission = struct {
     permit: DispatchPermit,
-    selected_messages: u64,
 };
 
 /// Borrowed from one pointer-stable preparation view. Invalid after it closes.
@@ -1284,10 +1283,7 @@ pub const Store = struct {
             .operation_id = operation_id,
             .attempt_ordinal = 1,
         };
-        return .{
-            .permit = .{ .binding = binding },
-            .selected_messages = @intCast(selected),
-        };
+        return .{ .permit = .{ .binding = binding } };
     }
 
     pub fn tryAdmitNextModelRetry(
@@ -1391,7 +1387,7 @@ pub const Store = struct {
             .turn_id = current.turn_id,
             .operation_id = current.operation_id,
             .attempt_ordinal = replacement_ordinal,
-        } }, .selected_messages = 0 };
+        } } };
     }
 
     fn hasRunnableWorkLocked(self: *Store) !bool {
@@ -2676,14 +2672,13 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\) STRICT, WITHOUT ROWID;
         \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id);
         \\CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL;
-        \\CREATE INDEX model_operation_runnable ON model_operation(resolution_code,operation_id);
         \\CREATE INDEX model_operation_retry_age ON model_operation(operation_id) WHERE resolution_code IS NULL AND allowance_used<4;
         \\CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0;
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
         \\CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
     );
     try exec(database, "PRAGMA application_id=1280591409");
-    try exec(database, "PRAGMA user_version=7");
+    try exec(database, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
     const statement = try prepare(database, "INSERT INTO store_meta(key,value) VALUES('wire_version','1'),('store_selector',?1)");
     defer _ = c.sqlite3_finalize(statement);
     try bindText(statement, 1, selector);
@@ -2700,7 +2695,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry','model_output_item','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry','model_output_item','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','turn_one_active_per_session','model_operation_runnable','model_operation_retry_age','model_operation_retry_exhausted','conversation_entry_history','model_output_history')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','turn_one_active_per_session','model_operation_retry_age','model_operation_retry_exhausted','conversation_entry_history','model_output_history')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -3653,6 +3648,35 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_WORKER_THREADS, -1));
 }
 
+test "fresh Store uses current schema and rejects the prior version" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+
+    var storage = try Store.open(std.testing.io, database, root);
+    try std.testing.expectEqual(schema_version, try pragmaInt(storage.database, "PRAGMA user_version"));
+    {
+        const removed_index = try prepare(
+            storage.database,
+            "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='model_operation_runnable'",
+        );
+        defer _ = c.sqlite3_finalize(removed_index);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(removed_index));
+        try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(removed_index, 0));
+    }
+    try exec(storage.database, "PRAGMA user_version=7");
+    try storage.close();
+
+    try std.testing.expectError(
+        error.WrongStoreVersion,
+        Store.open(std.testing.io, database, root),
+    );
+}
+
 test "existing Store rejects a different canonical identity" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3986,14 +4010,16 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqual(@as(i64, 1), try pragmaInt(storage.database, "SELECT next_position FROM session"));
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
-    try std.testing.expectEqual(@as(u64, 2), admitted.selected_messages);
     const binding = try admitted.permit.consume();
     try std.testing.expectError(error.DispatchPermitConsumed, admitted.permit.consume());
-    try std.testing.expect((try storage.observeCommand("dispatch-1")).message.?.status == .processing);
-    try std.testing.expectEqual(
-        binding.operation_id,
-        (try storage.observeCommand("dispatch-2")).message.?.operation_id.?,
-    );
+    const first_observation = (try storage.observeCommand("dispatch-1")).message.?;
+    const second_observation = (try storage.observeCommand("dispatch-2")).message.?;
+    try std.testing.expect(first_observation.status == .processing);
+    try std.testing.expect(second_observation.status == .processing);
+    try std.testing.expectEqual(binding.turn_id, first_observation.turn_id.?);
+    try std.testing.expectEqual(binding.turn_id, second_observation.turn_id.?);
+    try std.testing.expectEqual(binding.operation_id, first_observation.operation_id.?);
+    try std.testing.expectEqual(binding.operation_id, second_observation.operation_id.?);
 
     const third_file = try tmp.dir.createFile(std.testing.io, "dispatch-third", .{ .read = true });
     try third_file.writeStreamingAll(std.testing.io, "later");
