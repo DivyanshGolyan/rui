@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const execution = @import("execution.zig");
 const protocol = @import("protocol.zig");
 const store = @import("store.zig");
 const transport_options = @import("transport_options");
@@ -13,11 +14,17 @@ pub const openssl_version = "OpenSSL/3.6.3";
 pub const request_scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
 pub const response_observation_limit_bytes: usize = 64 * 1024;
 pub const max_endpoint_bytes = 2048;
+const per_input_framing_charge: u64 = 128;
 
 pub const PreparationFaults = struct {
     first_step: bool = false,
     write: bool = false,
     seal: bool = false,
+    unlink: bool = false,
+};
+
+pub const TransportOptions = struct {
+    inactivity_seconds: c_long = 5 * 60,
 };
 
 pub const ScratchBudget = struct {
@@ -49,6 +56,24 @@ pub const PreparedRequest = struct {
 
     pub fn deinit(self: *PreparedRequest) void {
         self.file.close(self.io);
+        self.budget.release(self.charged);
+        self.* = undefined;
+    }
+};
+
+pub const RetainedScratch = struct {
+    io: std.Io,
+    file: std.Io.File,
+    scratch_path: protocol.Bounded(protocol.max_store_bytes + 64),
+    name: protocol.Bounded(96),
+    charged: u64,
+    budget: ScratchBudget,
+
+    pub fn cleanup(self: *RetainedScratch) !void {
+        self.file.close(self.io);
+        var scratch = try std.Io.Dir.cwd().openDir(self.io, self.scratch_path.slice(), .{});
+        defer scratch.close(self.io);
+        try scratch.deleteFile(self.io, self.name.slice());
         self.budget.release(self.charged);
         self.* = undefined;
     }
@@ -135,20 +160,29 @@ pub fn materialize(
     scratch_path: []const u8,
     budget: ScratchBudget,
     faults: PreparationFaults,
+    retained: *?RetainedScratch,
 ) !PreparedRequest {
+    retained.* = null;
     if (faults.first_step) return error.InjectedFirstPreparationFailure;
     const settings = try view.settings();
     var maximum: u64 = 1024;
     maximum = try addEscapedMaximum(maximum, settings.model.len);
-    maximum = try addEscapedMaximum(maximum, settings.instructions.length);
     if (settings.output_schema) |schema| maximum = try std.math.add(u64, maximum, schema.length);
+    var after_revision: u64 = 0;
+    while (try view.nextInstruction(after_revision)) |instruction| {
+        maximum = try addEscapedMaximum(maximum, instruction.content.length);
+        maximum = try std.math.add(u64, maximum, per_input_framing_charge);
+        after_revision = instruction.revision;
+    }
     var after: u64 = 0;
     while (try view.nextInput(after)) |input| {
         maximum = try addEscapedMaximum(maximum, input.content.length);
+        maximum = try std.math.add(u64, maximum, per_input_framing_charge);
         after = input.admission_id;
     }
     if (!budget.reserve(maximum)) return error.RequestScratchExhausted;
-    errdefer budget.release(maximum);
+    var budget_owned = true;
+    errdefer if (budget_owned) budget.release(maximum);
 
     var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
     defer scratch.close(io);
@@ -158,25 +192,66 @@ pub fn materialize(
         view.binding.attempt_ordinal,
     });
     const file = try scratch.createFile(io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-    errdefer file.close(io);
-    try scratch.deleteFile(io, name);
+    var file_owned = true;
+    errdefer if (file_owned) file.close(io);
+    if (faults.unlink) {
+        var owned = RetainedScratch{
+            .io = io,
+            .file = file,
+            .scratch_path = .{},
+            .name = .{},
+            .charged = maximum,
+            .budget = budget,
+        };
+        owned.scratch_path.set(scratch_path) catch unreachable;
+        owned.name.set(name) catch unreachable;
+        retained.* = owned;
+        file_owned = false;
+        budget_owned = false;
+        return error.InjectedRequestUnlinkFailure;
+    }
+    scratch.deleteFile(io, name) catch |err| {
+        var owned = RetainedScratch{
+            .io = io,
+            .file = file,
+            .scratch_path = .{},
+            .name = .{},
+            .charged = maximum,
+            .budget = budget,
+        };
+        owned.scratch_path.set(scratch_path) catch unreachable;
+        owned.name.set(name) catch unreachable;
+        retained.* = owned;
+        file_owned = false;
+        budget_owned = false;
+        return err;
+    };
 
     var writer = RequestWriter{ .io = io, .file = file, .fail_write = faults.write };
     try writer.write("{\"model\":");
     try writer.jsonString(settings.model.slice());
     try writer.write(",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[");
-    try writer.write("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
-    var instructions = try view.openContent(settings.instructions);
-    try writer.jsonContent(&instructions);
-    instructions.close();
-    try writer.write("}]}");
+    var input_comma = false;
+    after_revision = 0;
+    while (try view.nextInstruction(after_revision)) |instruction| {
+        if (input_comma) try writer.write(",");
+        try writer.write("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
+        var instructions = try view.openContent(instruction.content);
+        try writer.jsonContent(&instructions);
+        instructions.close();
+        try writer.write("}]}");
+        input_comma = true;
+        after_revision = instruction.revision;
+    }
     after = 0;
     while (try view.nextInput(after)) |input| {
-        try writer.write(",{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":");
+        if (input_comma) try writer.write(",");
+        try writer.write("{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":");
         var content = try view.openContent(input.content);
         try writer.jsonContent(&content);
         content.close();
         try writer.write("}]}");
+        input_comma = true;
         after = input.admission_id;
     }
     try writer.write("],\"tools\":[");
@@ -201,6 +276,9 @@ pub fn materialize(
     if (faults.seal) return error.InjectedRequestSealFailure;
     try file.sync(io);
     if (try file.length(io) != writer.offset) return error.RequestSealFailed;
+    if (writer.offset > maximum) return error.RequestScratchAccountingFailure;
+    file_owned = false;
+    budget_owned = false;
     return .{ .io = io, .file = file, .length = writer.offset, .charged = maximum, .budget = budget };
 }
 
@@ -233,7 +311,8 @@ pub const Reactor = struct {
         self.* = undefined;
     }
 
-    pub fn add(self: *Reactor, transfer: *Transfer) !void {
+    fn add(self: *Reactor, transfer: *Transfer) !void {
+        transfer.armTimeout();
         if (c.curl_multi_add_handle(self.multi, transfer.easy) != c.CURLM_OK) {
             return error.TransportReactorAddFailed;
         }
@@ -301,15 +380,32 @@ const WriteContext = struct {
     overflow: bool = false,
 };
 
+const TimeoutContext = struct {
+    io: std.Io,
+    inactivity_ns: i64,
+    last_download: c.curl_off_t = 0,
+    last_progress: std.Io.Clock.Timestamp = undefined,
+    armed: bool = false,
+};
+
 pub const Transfer = struct {
     easy: *c.CURL,
     headers: ?*c.curl_slist,
     request: PreparedRequest,
     read_context: ReadContext,
     write_context: WriteContext = .{},
+    timeout_context: TimeoutContext,
     in_reactor: bool = false,
+    binding: store.AttemptBinding,
 
-    pub fn start(self: *Transfer, endpoint: []const u8, request: PreparedRequest) !void {
+    pub fn start(
+        self: *Transfer,
+        endpoint: []const u8,
+        request: PreparedRequest,
+        binding: store.AttemptBinding,
+        options: TransportOptions,
+    ) !void {
+        if (options.inactivity_seconds <= 0) return error.InvalidTransportTimeout;
         try validateEndpoint(endpoint);
         var endpoint_buffer: [max_endpoint_bytes + 1:0]u8 = undefined;
         const endpoint_z = try std.fmt.bufPrintZ(&endpoint_buffer, "{s}", .{endpoint});
@@ -324,6 +420,11 @@ pub const Transfer = struct {
             .headers = headers,
             .request = request,
             .read_context = .{ .io = request.io, .file = request.file, .length = request.length },
+            .binding = binding,
+            .timeout_context = .{
+                .io = request.io,
+                .inactivity_ns = options.inactivity_seconds * std.time.ns_per_s,
+            },
         };
         try setOpt(easy, c.CURLOPT_URL, endpoint_z.ptr);
         try setOpt(easy, c.CURLOPT_POST, @as(c_long, 1));
@@ -338,8 +439,10 @@ pub const Transfer = struct {
         try setOpt(easy, c.CURLOPT_NOSIGNAL, @as(c_long, 1));
         try setOpt(easy, c.CURLOPT_FRESH_CONNECT, @as(c_long, 1));
         try setOpt(easy, c.CURLOPT_FORBID_REUSE, @as(c_long, 1));
-        try setOpt(easy, c.CURLOPT_CONNECTTIMEOUT_MS, @as(c_long, 10_000));
-        try setOpt(easy, c.CURLOPT_TIMEOUT_MS, @as(c_long, 30_000));
+        try setOpt(easy, c.CURLOPT_CONNECTTIMEOUT_MS, options.inactivity_seconds * 1000);
+        try setOpt(easy, c.CURLOPT_NOPROGRESS, @as(c_long, 0));
+        try setOpt(easy, c.CURLOPT_XFERINFOFUNCTION, xferInfoCallback);
+        try setOpt(easy, c.CURLOPT_XFERINFODATA, &self.timeout_context);
         try setOpt(easy, c.CURLOPT_HTTP_VERSION, @as(c_long, if (std.mem.startsWith(u8, endpoint, "http://"))
             c.CURL_HTTP_VERSION_1_1
         else
@@ -369,6 +472,11 @@ pub const Transfer = struct {
         return .{ .class = class, .http_status = status, .response_bytes = self.write_context.bytes };
     }
 
+    fn armTimeout(self: *Transfer) void {
+        self.timeout_context.last_progress = std.Io.Clock.Timestamp.now(self.timeout_context.io, .awake);
+        self.timeout_context.armed = true;
+    }
+
     pub fn deinit(self: *Transfer) void {
         std.debug.assert(!self.in_reactor);
         c.curl_slist_free_all(self.headers);
@@ -377,6 +485,25 @@ pub const Transfer = struct {
         self.* = undefined;
     }
 };
+
+pub fn launch(
+    reactor: *Reactor,
+    transfer: *Transfer,
+    custody: *execution.CustodyPool,
+    token: execution.CustodyToken,
+    storage: *store.Store,
+) !void {
+    try custody.consumeLaunchAuthority(token, transfer.binding);
+    try storage.withDispatchHandoff(
+        transfer.binding,
+        .{ .reactor = reactor, .transfer = transfer },
+        struct {
+            fn handoff(context: anytype) !void {
+                try context.reactor.add(context.transfer);
+            }
+        }.handoff,
+    );
+}
 
 fn readCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopaque) callconv(.c) usize {
     const context: *ReadContext = @ptrCast(@alignCast(context_pointer orelse return c.CURL_READFUNC_ABORT));
@@ -396,6 +523,24 @@ fn readCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*a
     return actual;
 }
 
+fn xferInfoCallback(
+    context_pointer: ?*anyopaque,
+    _: c.curl_off_t,
+    download_now: c.curl_off_t,
+    _: c.curl_off_t,
+    _: c.curl_off_t,
+) callconv(.c) c_int {
+    const context: *TimeoutContext = @ptrCast(@alignCast(context_pointer orelse return 1));
+    if (!context.armed) return 0;
+    const now = std.Io.Clock.Timestamp.now(context.io, .awake);
+    if (download_now != context.last_download) {
+        context.last_download = download_now;
+        context.last_progress = now;
+        return 0;
+    }
+    return if (context.last_progress.durationTo(now).raw.nanoseconds >= context.inactivity_ns) 1 else 0;
+}
+
 fn writeCallback(_: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopaque) callconv(.c) usize {
     const context: *WriteContext = @ptrCast(@alignCast(context_pointer orelse return 0));
     const bytes = std.math.mul(usize, size, count) catch return 0;
@@ -408,61 +553,6 @@ fn writeCallback(_: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopa
     return bytes;
 }
 
-pub fn dispatch(endpoint: []const u8, request: *PreparedRequest) !TransportEvidence {
-    if (comptime !transport_options.enabled) return error.TransportUnavailableOnTarget;
-    try validateEndpoint(endpoint);
-    var endpoint_buffer: [max_endpoint_bytes + 1:0]u8 = undefined;
-    const endpoint_z = try std.fmt.bufPrintZ(&endpoint_buffer, "{s}", .{endpoint});
-    const easy = c.curl_easy_init() orelse return error.TransportAllocationFailed;
-    defer c.curl_easy_cleanup(easy);
-    var headers: ?*c.curl_slist = null;
-    headers = c.curl_slist_append(headers, "Content-Type: application/json") orelse
-        return error.TransportAllocationFailed;
-    defer c.curl_slist_free_all(headers);
-    var read_context = ReadContext{ .io = request.io, .file = request.file, .length = request.length };
-    var write_context = WriteContext{};
-    try setOpt(easy, c.CURLOPT_URL, endpoint_z.ptr);
-    try setOpt(easy, c.CURLOPT_POST, @as(c_long, 1));
-    try setOpt(easy, c.CURLOPT_POSTFIELDSIZE_LARGE, @as(c.curl_off_t, @intCast(request.length)));
-    try setOpt(easy, c.CURLOPT_READFUNCTION, readCallback);
-    try setOpt(easy, c.CURLOPT_READDATA, &read_context);
-    try setOpt(easy, c.CURLOPT_WRITEFUNCTION, writeCallback);
-    try setOpt(easy, c.CURLOPT_WRITEDATA, &write_context);
-    try setOpt(easy, c.CURLOPT_HTTPHEADER, headers);
-    try setOpt(easy, c.CURLOPT_FOLLOWLOCATION, @as(c_long, 0));
-    try setOpt(easy, c.CURLOPT_MAXREDIRS, @as(c_long, 0));
-    try setOpt(easy, c.CURLOPT_NOSIGNAL, @as(c_long, 1));
-    try setOpt(easy, c.CURLOPT_FRESH_CONNECT, @as(c_long, 1));
-    try setOpt(easy, c.CURLOPT_FORBID_REUSE, @as(c_long, 1));
-    try setOpt(easy, c.CURLOPT_CONNECTTIMEOUT_MS, @as(c_long, 10_000));
-    try setOpt(easy, c.CURLOPT_TIMEOUT_MS, @as(c_long, 30_000));
-    try setOpt(easy, c.CURLOPT_HTTP_VERSION, @as(c_long, if (std.mem.startsWith(u8, endpoint, "http://"))
-        c.CURL_HTTP_VERSION_1_1
-    else
-        c.CURL_HTTP_VERSION_2TLS));
-    if (builtin.os.tag == .macos and !std.mem.startsWith(u8, endpoint, "http://")) {
-        try setOpt(easy, c.CURLOPT_SSL_OPTIONS, @as(c_long, c.CURLSSLOPT_NATIVE_CA));
-    }
-    const result = c.curl_easy_perform(easy);
-    if (result != c.CURLE_OK or read_context.failed or write_context.overflow) {
-        return .{ .class = .transport_failure, .response_bytes = write_context.bytes };
-    }
-    var response_code: c_long = 0;
-    if (c.curl_easy_getinfo(easy, c.CURLINFO_RESPONSE_CODE, &response_code) != c.CURLE_OK or
-        response_code < 100 or response_code > 599)
-    {
-        return error.InvalidHttpEvidence;
-    }
-    const status: u16 = @intCast(response_code);
-    const class: TransportClass = if (status == 408 or status == 429 or status >= 500)
-        .temporary_http
-    else if (status >= 400)
-        .permanent_http
-    else
-        .transport_failure;
-    return .{ .class = class, .http_status = status, .response_bytes = write_context.bytes };
-}
-
 fn setOpt(easy: *c.CURL, option: c.CURLoption, value: anytype) !void {
     if (c.curl_easy_setopt(easy, option, value) != c.CURLE_OK) return error.TransportOptionFailed;
 }
@@ -473,9 +563,14 @@ pub fn validateEndpoint(endpoint: []const u8) !void {
     {
         return error.InvalidProviderEndpoint;
     }
-    if (std.mem.startsWith(u8, endpoint, "https://")) return;
-    if (std.mem.startsWith(u8, endpoint, "http://127.0.0.1:") or
-        std.mem.startsWith(u8, endpoint, "http://[::1]:")) return;
+    const uri = std.Uri.parse(endpoint) catch return error.InvalidProviderEndpoint;
+    if (uri.user != null or uri.password != null or uri.fragment != null) return error.InvalidProviderEndpoint;
+    var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = (uri.getHost(&host_buffer) catch return error.InvalidProviderEndpoint).bytes;
+    if (host.len == 0) return error.InvalidProviderEndpoint;
+    if (std.mem.eql(u8, uri.scheme, "https")) return;
+    if (!std.mem.eql(u8, uri.scheme, "http")) return error.InvalidProviderEndpoint;
+    if (std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1")) return;
     return error.InsecureProviderEndpoint;
 }
 
@@ -492,4 +587,14 @@ test "endpoint validation permits TLS and loopback fixture HTTP only" {
     try validateEndpoint("https://chatgpt.com/backend-api/codex/responses");
     try validateEndpoint("http://127.0.0.1:9876/fail");
     try std.testing.expectError(error.InsecureProviderEndpoint, validateEndpoint("http://example.com/fail"));
+    try std.testing.expectError(
+        error.InvalidProviderEndpoint,
+        validateEndpoint("http://127.0.0.1:80@example.com/fail"),
+    );
+    try std.testing.expectError(
+        error.InvalidProviderEndpoint,
+        validateEndpoint("http://127.0.0.1:80@127.0.0.1:9876/fail"),
+    );
+    try std.testing.expectError(error.InvalidProviderEndpoint, validateEndpoint("https://user@example.com/fail"));
+    try std.testing.expectError(error.InsecureProviderEndpoint, validateEndpoint("http://[::1]evil:80/fail"));
 }

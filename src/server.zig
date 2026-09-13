@@ -32,7 +32,11 @@ pub const Faults = struct {
     request_write: bool = false,
     request_seal: bool = false,
     request_scratch_acquire: bool = false,
+    request_scratch_limit_bytes: u64 = scratch_limit_bytes,
+    request_unlink: bool = false,
     cleanup_delay_ms: i64 = 0,
+    provider_inactivity_seconds: i64 = 5 * 60,
+    before_launch_delay_ms: i64 = 0,
 };
 
 const Host = struct {
@@ -195,12 +199,15 @@ pub fn serve(
 }
 
 const ExecutionSlot = struct {
-    state: enum { free, transport, cleanup } = .free,
+    state: enum { free, transport, cleanup, retained_scratch } = .free,
     token: execution.CustodyToken = undefined,
     binding: store_module.AttemptBinding = undefined,
     transfer: provider.Transfer = undefined,
     cleanup_ticks: u32 = 0,
+    retained_scratch: provider.RetainedScratch = undefined,
 };
+
+const AdmissionProgress = enum { no_work, retry_later, admitted };
 
 fn executionMain(host: *Host) void {
     const slots = host.allocator.alloc(ExecutionSlot, host.custody.records.len) catch |err| {
@@ -216,12 +223,17 @@ fn executionMain(host: *Host) void {
     defer reactor.deinit();
     defer shutdownExecution(host, &reactor, slots);
 
-    while (!host.execution_shutdown.load(.acquire) and !host.dispatch_fenced.load(.acquire)) {
+    while (!host.execution_shutdown.load(.acquire)) {
         var found_work = false;
-        for (slots) |*slot| {
-            if (slot.state != .free) continue;
-            found_work = admitAttempt(host, &reactor, slot) or found_work;
-            if (host.dispatch_fenced.load(.acquire)) break;
+        if (!host.dispatch_fenced.load(.acquire)) {
+            for (slots) |*slot| {
+                if (slot.state != .free) continue;
+                switch (admitAttempt(host, &reactor, slot)) {
+                    .admitted => found_work = true,
+                    .no_work, .retry_later => break,
+                }
+                if (host.dispatch_fenced.load(.acquire)) break;
+            }
         }
         reactor.drive(if (hasTransport(slots)) 25 else 0) catch |err| {
             fenceDispatch(host, "transport reactor", err);
@@ -237,8 +249,8 @@ fn executionMain(host: *Host) void {
     }
 }
 
-fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) bool {
-    const token = host.custody.reserve() orelse return false;
+fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) AdmissionProgress {
+    const token = host.custody.reserve() orelse return .no_work;
     var admission = host.store.admitNextModelAttempt(.{
         .attempt_before_commit = host.faults.attempt_before_commit,
     }) catch |err| {
@@ -246,10 +258,10 @@ fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) b
         if (err != error.InjectedAttemptCommitFailure) {
             fenceDispatch(host, "Attempt admission", err);
         }
-        return false;
+        return .retry_later;
     } orelse {
         host.custody.releaseUnused(token) catch unreachable;
-        return false;
+        return .no_work;
     };
     const binding = admission.permit.consume() catch unreachable;
     host.custody.attach(token, binding) catch unreachable;
@@ -257,13 +269,14 @@ fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) b
     var view = host.store.openHistoricalView(binding) catch |err| {
         fenceDispatch(host, "historical view", err);
         finishCustodyNow(host, token);
-        return true;
+        return .admitted;
     };
     defer view.close();
     const request_budget = provider.ScratchBudget{
         .used = &host.scratch_used,
-        .limit = if (host.faults.request_scratch_acquire) 0 else scratch_limit_bytes,
+        .limit = if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes,
     };
+    var retained_scratch: ?provider.RetainedScratch = null;
     var request = provider.materialize(
         host.io,
         &view,
@@ -273,30 +286,55 @@ fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) b
             .first_step = host.faults.request_first_step,
             .write = host.faults.request_write,
             .seal = host.faults.request_seal,
+            .unlink = host.faults.request_unlink,
         },
+        &retained_scratch,
     ) catch |err| {
+        if (retained_scratch) |retained| {
+            slot.state = .retained_scratch;
+            slot.token = token;
+            slot.binding = binding;
+            slot.retained_scratch = retained;
+            fenceDispatch(host, "request scratch unlink", err);
+            return .admitted;
+        }
+        if (host.store.isFenced()) {
+            fenceDispatch(host, "canonical request read", err);
+            finishCustodyNow(host, token);
+            return .admitted;
+        }
         settleAttemptFailure(host, token, binding, preparationFailureCode(err));
         finishCustodyNow(host, token);
-        return true;
+        return .admitted;
     };
-    slot.transfer.start(host.provider_endpoint.?, request) catch |err| {
+    slot.transfer.start(host.provider_endpoint.?, request, binding, .{
+        .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
+    }) catch |err| {
         request.deinit();
         std.debug.print("latifa: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, token, binding, "provider_transport_failure");
         finishCustodyNow(host, token);
-        return true;
+        return .admitted;
     };
-    reactor.add(&slot.transfer) catch |err| {
+    if (host.faults.before_launch_delay_ms != 0) {
+        _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
+    }
+    provider.launch(reactor, &slot.transfer, &host.custody, token, host.store) catch |err| {
         slot.transfer.deinit();
         std.debug.print("latifa: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        if (host.store.isFenced()) {
+            fenceDispatch(host, "dispatch handoff", err);
+            finishCustodyNow(host, token);
+            return .admitted;
+        }
         settleAttemptFailure(host, token, binding, "provider_transport_failure");
         finishCustodyNow(host, token);
-        return true;
+        return .admitted;
     };
     slot.state = .transport;
     slot.token = token;
     slot.binding = binding;
-    return true;
+    return .admitted;
 }
 
 fn completeTransfer(
@@ -360,6 +398,14 @@ fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []Execution
         },
         .cleanup => {
             slot.transfer.deinit();
+            host.custody.cleanupComplete(slot.token) catch unreachable;
+        },
+        .retained_scratch => {
+            slot.retained_scratch.cleanup() catch |err| {
+                std.debug.print("latifa: retained named request scratch after cleanup failure: {s}\n", .{@errorName(err)});
+                continue;
+            };
+            host.custody.detach(slot.token) catch unreachable;
             host.custody.cleanupComplete(slot.token) catch unreachable;
         },
     };
@@ -493,6 +539,9 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
                 .content_import = host.faults.content_import,
                 .before_commit = host.faults.before_commit,
             });
+            if (result == .infrastructure_failure and host.store.isFenced()) {
+                host.dispatch_fenced.store(true, .release);
+            }
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             var response: protocol.ResponseBuffer = .{};
             try renderConfigureReply(&response, command, result);
@@ -509,6 +558,9 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
                 .content_import = host.faults.content_import,
                 .before_commit = host.faults.before_commit,
             });
+            if (result == .infrastructure_failure and host.store.isFenced()) {
+                host.dispatch_fenced.store(true, .release);
+            }
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             var response: protocol.ResponseBuffer = .{};
             try renderMessageReply(&response, command, result);
@@ -521,6 +573,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
         },
         .observe_command => |command| {
             const observation = host.store.observeCommand(command.key.slice()) catch {
+                host.dispatch_fenced.store(true, .release);
                 return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
             };
             var response: protocol.ResponseBuffer = .{};
@@ -529,10 +582,19 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
         },
         .inspect_session => |request_value| {
             const observation = host.store.inspectSession(request_value.session.slice()) catch {
+                host.dispatch_fenced.store(true, .release);
                 return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
             };
             var response: protocol.ResponseBuffer = .{};
-            try renderSessionObservation(&response, observation);
+            const scratch_used = host.scratch_used.load(.acquire);
+            std.debug.assert(scratch_used >= header.content_length);
+            try renderSessionObservation(&response, observation, .{
+                .dispatch_fenced = host.dispatch_fenced.load(.acquire),
+                .custody_occupied = host.custody.occupied(),
+                // Report workload scratch, not the inspection request that is
+                // currently using the shared ingress scratch pool.
+                .scratch_used_bytes = scratch_used - header.content_length,
+            });
             deliverResponse(host.io, fd, 200, response.slice());
         },
     }
@@ -765,9 +827,16 @@ fn renderCommandObservation(
     try response.append("}}");
 }
 
+const ExecutionObservation = struct {
+    dispatch_fenced: bool = false,
+    custody_occupied: usize = 0,
+    scratch_used_bytes: u64 = 0,
+};
+
 fn renderSessionObservation(
     response: *protocol.ResponseBuffer,
     observation: store_module.SessionObservation,
+    execution_observation: ExecutionObservation,
 ) !void {
     try response.append("{\"version\":\"1\",\"type\":\"session_observation\",\"session\":");
     if (!observation.found) {
@@ -802,7 +871,12 @@ fn renderSessionObservation(
     } else {
         try response.append("null");
     }
-    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"partial\",\"unavailable\":[\"successful_model_output\",\"retry_and_restart_resolution\"]}}}}", .{observation.pending_messages});
+    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"successful_model_output\",\"retry_and_restart_resolution\"]}}}}", .{
+        observation.pending_messages,
+        if (execution_observation.dispatch_fenced) "true" else "false",
+        execution_observation.custody_occupied,
+        execution_observation.scratch_used_bytes,
+    });
 }
 
 fn renderContentReference(response: *protocol.ResponseBuffer, reference: store_module.ContentReference) !void {
@@ -891,7 +965,7 @@ test "Session observation buffer covers worst-case JSON escaping" {
         .digest = [_]u8{0xff} ** 32,
     };
     var response: protocol.ResponseBuffer = .{};
-    try renderSessionObservation(&response, observation);
+    try renderSessionObservation(&response, observation, .{});
     try std.testing.expect(response.len <= protocol.max_response_bytes);
 }
 

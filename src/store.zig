@@ -6,7 +6,7 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 3;
+pub const schema_version: u32 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 
 pub const Faults = struct {
@@ -141,6 +141,11 @@ pub const HistoricalInput = struct {
     content: ContentReference,
 };
 
+pub const HistoricalInstruction = struct {
+    revision: u64,
+    content: ContentReference,
+};
+
 pub const HistoricalView = struct {
     store: *Store,
     binding: AttemptBinding,
@@ -154,6 +159,11 @@ pub const HistoricalView = struct {
     pub fn nextInput(self: *HistoricalView, after_admission: u64) !?HistoricalInput {
         std.debug.assert(self.active);
         return self.store.readHistoricalInput(self.binding, after_admission);
+    }
+
+    pub fn nextInstruction(self: *HistoricalView, after_revision: u64) !?HistoricalInstruction {
+        std.debug.assert(self.active);
+        return self.store.readHistoricalInstruction(self.binding, after_revision);
     }
 
     pub fn openContent(self: *HistoricalView, reference: ContentReference) !ContentReader {
@@ -405,7 +415,12 @@ pub const Store = struct {
         } else {
             try self.updateSession(command.session.slice(), &next);
         }
-        try self.insertRevision(command.session.slice(), command.key.slice(), &next);
+        try self.insertRevision(
+            command.session.slice(),
+            command.key.slice(),
+            &next,
+            created or configuration.instructions.state == .value,
+        );
         const answer = StoredAnswer{
             .accepted = true,
             .revision = next.revision,
@@ -665,6 +680,7 @@ pub const Store = struct {
     }
 
     fn admitNextModelAttemptLocked(self: *Store, faults: Faults) !?AttemptAdmission {
+        if (!try self.hasRunnableWorkLocked()) return null;
         try exec(self.database, "BEGIN IMMEDIATE");
         errdefer rollback(self.database);
 
@@ -762,6 +778,21 @@ pub const Store = struct {
         };
     }
 
+    fn hasRunnableWorkLocked(self: *Store) !bool {
+        const statement = try prepare(
+            self.database,
+            "SELECT 1 FROM message_admission m WHERE m.turn_id IS NULL AND NOT EXISTS(" ++
+                " SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL" ++
+                ") LIMIT 1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => true,
+            c.SQLITE_DONE => false,
+            else => error.RunnableSelectionFailed,
+        };
+    }
+
     pub fn openHistoricalView(self: *Store, binding: AttemptBinding) !HistoricalView {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
@@ -791,6 +822,13 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        return self.readHistoricalSettingsLocked(binding) catch |err| switch (err) {
+            error.StaleAttemptBinding => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn readHistoricalSettingsLocked(self: *Store, binding: AttemptBinding) !HistoricalSettings {
         try self.validateCurrentAttempt(binding);
         const statement = try prepare(
             self.database,
@@ -820,6 +858,49 @@ pub const Store = struct {
         };
     }
 
+    fn readHistoricalInstruction(
+        self: *Store,
+        binding: AttemptBinding,
+        after_revision: u64,
+    ) !?HistoricalInstruction {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.readHistoricalInstructionLocked(binding, after_revision) catch |err| switch (err) {
+            error.StaleAttemptBinding => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn readHistoricalInstructionLocked(
+        self: *Store,
+        binding: AttemptBinding,
+        after_revision: u64,
+    ) !?HistoricalInstruction {
+        try self.validateCurrentAttempt(binding);
+        const statement = try prepare(
+            self.database,
+            "SELECT r.revision,r.instructions_content_id FROM model_operation o " ++
+                "JOIN session_revision r ON r.session_ref=o.session_ref " ++
+                "WHERE o.operation_id=?1 AND r.revision>?2 AND r.revision<=o.settings_revision " ++
+                "AND r.instructions_updated=1 ORDER BY r.revision LIMIT 1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, binding.operation_id);
+        try bindU64(statement, 2, after_revision);
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return null;
+        if (result != c.SQLITE_ROW) return error.HistoricalInstructionReadFailed;
+        const revision = c.sqlite3_column_int64(statement, 0);
+        const content_id = c.sqlite3_column_int64(statement, 1);
+        if (revision <= 0 or content_id <= 0) return error.CorruptStore;
+        const metadata = try self.readContentMetadata(content_id);
+        return .{
+            .revision = @intCast(revision),
+            .content = .{ .length = metadata.length, .digest = metadata.digest },
+        };
+    }
+
     fn readHistoricalInput(
         self: *Store,
         binding: AttemptBinding,
@@ -828,6 +909,17 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        return self.readHistoricalInputLocked(binding, after_admission) catch |err| switch (err) {
+            error.StaleAttemptBinding => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn readHistoricalInputLocked(
+        self: *Store,
+        binding: AttemptBinding,
+        after_admission: u64,
+    ) !?HistoricalInput {
         try self.validateCurrentAttempt(binding);
         const statement = try prepare(
             self.database,
@@ -850,6 +942,27 @@ pub const Store = struct {
             .admission_id = @intCast(admission_id),
             .content = .{ .length = metadata.length, .digest = metadata.digest },
         };
+    }
+
+    pub fn isFenced(self: *const Store) bool {
+        return self.fenced.load(.acquire);
+    }
+
+    pub fn withDispatchHandoff(
+        self: *Store,
+        binding: AttemptBinding,
+        context: anytype,
+        comptime handoff: anytype,
+    ) !void {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.validateCurrentAttempt(binding) catch |err| switch (err) {
+            error.StaleAttemptBinding => return err,
+            else => return self.fenceReadFailure(err),
+        };
+        try handoff(context);
     }
 
     pub fn settleModelFailure(
@@ -1076,8 +1189,9 @@ pub const Store = struct {
         session_ref: []const u8,
         command_key: []const u8,
         current: *const CurrentConfiguration,
+        instructions_updated: bool,
     ) !void {
-        const statement = try prepare(self.database, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)");
+        const statement = try prepare(self.database, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         try bindU64(statement, 2, current.revision);
@@ -1085,9 +1199,10 @@ pub const Store = struct {
         try bindText(statement, 4, current.workspace.slice());
         try bindText(statement, 5, current.model.slice());
         try bindNullableI64(statement, 6, current.instructions_id);
-        try bindI64(statement, 7, current.tools_mask);
-        try bindI64(statement, 8, current.permission_mode);
-        try bindNullableI64(statement, 9, current.output_schema_id);
+        try bindI64(statement, 7, @as(i64, if (instructions_updated) 1 else 0));
+        try bindI64(statement, 8, current.tools_mask);
+        try bindI64(statement, 9, current.permission_mode);
+        try bindNullableI64(statement, 10, current.output_schema_id);
         try expectDone(statement);
     }
 
@@ -1330,6 +1445,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ workspace TEXT NOT NULL,
         \\ model TEXT NOT NULL,
         \\ instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
+        \\ instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),
         \\ tools_mask INTEGER NOT NULL,
         \\ permission_mode INTEGER NOT NULL,
         \\ output_schema_content_id INTEGER REFERENCES content(content_id),
@@ -1376,7 +1492,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX model_operation_runnable ON model_operation(resolution_code,operation_id);
     );
     try exec(database, "PRAGMA application_id=1280591409");
-    try exec(database, "PRAGMA user_version=3");
+    try exec(database, "PRAGMA user_version=4");
     const statement = try prepare(database, "INSERT INTO store_meta(key,value) VALUES('wire_version','1'),('store_selector',?1)");
     defer _ = c.sqlite3_finalize(statement);
     try bindText(statement, 1, selector);
@@ -2315,4 +2431,33 @@ test "saved model failure is atomic and retains consumed uncertainty on save fau
         try std.testing.expectEqual(@as(u64, 1), observation.attempt_ordinal.?);
         try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
     }
+}
+
+test "canonical historical read failure fences dispatch without a fabricated outcome" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration("historical-config", "direct/historical-corrupt", workspace, "model-a");
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+    const file = try tmp.dir.createFile(std.testing.io, "historical-message", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, "message");
+    try file.sync(std.testing.io);
+    var message = try completeMessage("historical-message", "direct/historical-corrupt", file, "message");
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+    var attempt = (try storage.admitNextModelAttempt(.{})).?;
+    const binding = try attempt.permit.consume();
+
+    try exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try exec(storage.database, "UPDATE session_revision SET instructions_content_id=9223372036854775807 WHERE session_ref='direct/historical-corrupt'");
+    try exec(storage.database, "PRAGMA foreign_keys=ON");
+    var view = try storage.openHistoricalView(binding);
+    defer view.close();
+    try std.testing.expectError(error.CorruptStore, view.settings());
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.settleModelFailure(binding, "request_preparation_failed", .{}));
 }
