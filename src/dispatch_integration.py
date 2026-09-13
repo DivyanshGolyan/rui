@@ -5,6 +5,7 @@ import os
 import pathlib
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,7 @@ class FailureEndpoint(http.server.ThreadingHTTPServer):
     def __init__(self):
         super().__init__(("127.0.0.1", 0), FailureHandler)
         self.requests = []
+        self.paths = []
         self.received = threading.Event()
         self.release = threading.Event()
 
@@ -33,15 +35,43 @@ class FailureHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers["Content-Length"])
         body = self.rfile.read(length)
         self.server.requests.append(body)
+        self.server.paths.append(self.path)
         self.server.received.set()
+        if self.path == "/progress":
+            self.send_response(422)
+            self.send_header("Content-Length", "8")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for _ in range(8):
+                self.wfile.write(b"x")
+                self.wfile.flush()
+                time.sleep(0.4)
+            self.close_connection = True
+            return
+        if self.path == "/stall":
+            self.send_response(422)
+            self.send_header("Content-Length", "2")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"x")
+            self.wfile.flush()
+            time.sleep(2.5)
+            try:
+                self.wfile.write(b"x")
+            except BrokenPipeError:
+                pass
+            self.close_connection = True
+            return
         if not self.server.release.wait(10):
             raise RuntimeError("fixture response was never released")
         payload = b'{"error":"deterministic permanent failure"}'
         self.send_response(422)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(payload)
+        self.close_connection = True
 
     def log_message(self, _format, *_args):
         pass
@@ -97,7 +127,7 @@ def stop_host(process):
     process.wait(timeout=10)
 
 
-def configure(state, store, key, session, model, schema=None):
+def configure(state, store, key, session, model, schema=None, instructions=None):
     record = state / f"{key}.json"
     args = [
         "configure",
@@ -118,6 +148,10 @@ def configure(state, store, key, session, model, schema=None):
         schema_path = state / f"{key}-schema.json"
         schema_path.write_text(json.dumps(schema, separators=(",", ":")))
         args += ["--output-schema", schema_path]
+    if instructions is not None:
+        instructions_path = state / f"{key}-instructions.txt"
+        instructions_path.write_text(instructions)
+        args += ["--instructions", instructions_path]
     result = command(*args)
     assert result["answer"]["status"] == "accepted", result
 
@@ -175,7 +209,10 @@ def main():
             "required": ["answer"],
             "additionalProperties": False,
         }
-        configure(state, store, "config-a", "direct/main", "model-a", output_schema)
+        configure(state, store, "config-a", "direct/main", "model-a", output_schema, "A")
+        configure(state, store, "instructions-b", "direct/main", "model-a", instructions="B")
+        configure(state, store, "instructions-a", "direct/main", "model-a", instructions="A")
+        configure(state, store, "instructions-a-again", "direct/main", "model-a", instructions="A")
         message(state, store, "message-a", "direct/main", 'first "message"\n')
         if not endpoint.received.wait(8):
             raise AssertionError("endpoint did not receive committed request")
@@ -202,7 +239,10 @@ def main():
             "stream": True,
             "include": ["reasoning.encrypted_content"],
             "input": [
-                {"role": "system", "content": [{"type": "input_text", "text": ""}]},
+                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
+                {"role": "system", "content": [{"type": "input_text", "text": "B"}]},
+                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
+                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
                 {
                     "role": "user",
                     "content": [{"type": "input_text", "text": 'first "message"\n'}],
@@ -361,6 +401,209 @@ def main():
         assert uncertain["queue"]["status"] == "processing", uncertain
         assert uncertain["processing"]["attempt"] == "1", uncertain
         assert "result" not in uncertain, uncertain
+        stop_host(offline)
+        processes.remove(offline)
+
+        # Per-input framing participates in scratch reservation. Forty empty
+        # messages exceed the old fixed allowance: the successful run remains
+        # fully charged, and one byte below the observed complete request is
+        # rejected before HTTP rather than oversubscribing the shared budget.
+        endpoint.requests.clear()
+        endpoint.release.clear()
+        framing_store = state / "framing-store"
+        host = start_host(framing_store, url, "--fault", "attempt-before-commit")
+        processes.append(host)
+        configure(state, framing_store, "framing-config", "direct/framing", "model-a")
+        for index in range(40):
+            message(state, framing_store, f"framing-{index}", "direct/framing", "")
+        stop_host(host)
+        processes.remove(host)
+        host = start_host(framing_store, url)
+        processes.append(host)
+        wait_for(lambda: len(endpoint.requests) == 1, "many-input materialization")
+        actual_request_bytes = len(endpoint.requests[0])
+        resources = command(
+            "inspect-session", "--store", framing_store, "--session", "direct/framing"
+        )["execution"]
+        assert int(resources["scratch_used_bytes"]) >= actual_request_bytes, resources
+        endpoint.release.set()
+        wait_for(
+            lambda: observe(framing_store, "framing-0").get("result", {}).get("code")
+            == "provider_http_422",
+            "many-input permanent failure",
+        )
+        stop_host(host)
+        processes.remove(host)
+
+        endpoint.requests.clear()
+        endpoint.release.clear()
+        framing_limit_store = state / "framing-limit-store"
+        host = start_host(framing_limit_store, url, "--fault", "attempt-before-commit")
+        processes.append(host)
+        configure(state, framing_limit_store, "limit-config", "direct/framing-limit", "model-a")
+        for index in range(40):
+            message(state, framing_limit_store, f"limit-{index}", "direct/framing-limit", "")
+        stop_host(host)
+        processes.remove(host)
+        host = start_host(
+            framing_limit_store,
+            url,
+            "--test-request-scratch-limit",
+            str(actual_request_bytes - 1),
+        )
+        processes.append(host)
+        limited = wait_for(
+            lambda: (value := observe(framing_limit_store, "limit-0")).get("result", {}).get("code")
+            == "request_scratch_exhausted"
+            and value,
+            "pre-dispatch framing capacity failure",
+        )
+        assert limited["processing"]["attempt"] == "1", limited
+        assert endpoint.requests == []
+        stop_host(host)
+        processes.remove(host)
+
+        # URL authority is parsed before curl sees it. Userinfo that makes a
+        # prefix look loopback is rejected at startup and reaches no server.
+        endpoint.requests.clear()
+        deceptive = subprocess.run(
+            [
+                str(LATIFA), "serve", "--store", str(state / "deceptive-store"),
+                "--provider-endpoint", f"http://127.0.0.1:80@127.0.0.1:{endpoint.server_port}/responses",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert deceptive.returncode != 0
+        assert endpoint.requests == []
+
+        # The production timeout is inactivity-based, not a total request
+        # deadline. A reduced one-second interval stays alive while bytes make
+        # progress for over three intervals, while a body stall fails.
+        progress_store = state / "progress-store"
+        host = start_host(
+            progress_store,
+            f"http://127.0.0.1:{endpoint.server_port}/progress",
+            "--test-provider-inactivity-seconds",
+            "1",
+        )
+        processes.append(host)
+        configure(state, progress_store, "progress-config", "direct/progress", "model-a")
+        message(state, progress_store, "progress-message", "direct/progress", "progress")
+        progress_failure = wait_for(
+            lambda: (value := observe(progress_store, "progress-message")).get("result", {}).get("code")
+            == "provider_http_422"
+            and value,
+            "progressing response beyond inactivity interval",
+            timeout=8,
+        )
+        assert progress_failure["queue"]["status"] == "failed"
+        stop_host(host)
+        processes.remove(host)
+
+        stall_store = state / "stall-store"
+        host = start_host(
+            stall_store,
+            f"http://127.0.0.1:{endpoint.server_port}/stall",
+            "--test-provider-inactivity-seconds",
+            "1",
+        )
+        processes.append(host)
+        configure(state, stall_store, "stall-config", "direct/stall", "model-a")
+        message(state, stall_store, "stall-message", "direct/stall", "stall")
+        stalled = wait_for(
+            lambda: (value := observe(stall_store, "stall-message")).get("result", {}).get("code")
+            == "provider_transport_failure"
+            and value,
+            "stalled response inactivity failure",
+            timeout=8,
+        )
+        assert stalled["queue"]["status"] == "failed"
+        stop_host(host)
+        processes.remove(host)
+
+        # A canonical read fault published after the final historical read but
+        # before launch wins the synchronized Store handoff and launches zero.
+        endpoint.requests.clear()
+        endpoint.release.clear()
+        race_store = state / "fence-race-store"
+        host = start_host(race_store, url, "--test-before-launch-delay-ms", "1500")
+        processes.append(host)
+        configure(state, race_store, "race-config", "direct/race", "model-a")
+        message(state, race_store, "race-message", "direct/race", "race")
+        def admitted_race_attempt():
+            database = sqlite3.connect(race_store / "latifa.sqlite3", timeout=5)
+            try:
+                return database.execute(
+                    "SELECT COUNT(*) FROM model_operation"
+                ).fetchone()[0] == 1
+            finally:
+                database.close()
+
+        wait_for(admitted_race_attempt, "admitted request before launch")
+        database = sqlite3.connect(race_store / "latifa.sqlite3", timeout=5)
+        database.execute("PRAGMA foreign_keys=OFF")
+        database.execute(
+            "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref='direct/race'"
+        )
+        database.commit()
+        database.close()
+        canonical_read = subprocess.run(
+            [str(LATIFA), "inspect-session", "--store", str(race_store), "--session", "direct/race"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert canonical_read.returncode != 0
+        time.sleep(1.7)
+        assert endpoint.requests == []
+        database = sqlite3.connect(race_store / "latifa.sqlite3")
+        uncertain = database.execute(
+            "SELECT attempt_ordinal,uncertain,resolution_code FROM model_operation"
+        ).fetchone()
+        database.close()
+        assert uncertain == (1, 1, None), uncertain
+        stop_host(host)
+        processes.remove(host)
+
+        # If initial unlink fails, the live owner keeps the named scratch,
+        # charge and custody while fencing later dispatch. A fresh owner removes
+        # the identifiable leftover before serving.
+        unlink_store = state / "unlink-store"
+        host = start_host(unlink_store, url, "--fault", "request-unlink")
+        processes.append(host)
+        configure(state, unlink_store, "unlink-config", "direct/unlink", "model-a")
+        message(state, unlink_store, "unlink-message", "direct/unlink", "unlink")
+        leftovers = wait_for(
+            lambda: list(unlink_store.rglob("request-*")),
+            "retained named request scratch",
+        )
+        resources = command(
+            "inspect-session", "--store", unlink_store, "--session", "direct/unlink"
+        )["execution"]
+        assert resources["dispatch_fenced"] is True, resources
+        assert resources["custody_occupied"] == "1", resources
+        assert int(resources["scratch_used_bytes"]) > 0, resources
+        assert endpoint.requests == []
+        stop_host(host)
+        processes.remove(host)
+        assert leftovers[0].exists()
+
+        offline = subprocess.Popen(
+            [str(LATIFA), "serve", "--store", str(unlink_store), "--active-capacity", "1"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        processes.append(offline)
+        assert offline.stdout.readline().startswith("ready ")
+        assert not list(unlink_store.rglob("request-*"))
+        resources = command(
+            "inspect-session", "--store", unlink_store, "--session", "direct/unlink"
+        )["execution"]
+        assert resources["custody_occupied"] == "0", resources
+        assert resources["scratch_used_bytes"] == "0", resources
         stop_host(offline)
         processes.remove(offline)
     finally:
