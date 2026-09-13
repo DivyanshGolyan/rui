@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const execution = @import("execution.zig");
 const protocol = @import("protocol.zig");
 const provider_output = @import("provider_output.zig");
 const store = @import("store.zig");
@@ -337,7 +336,7 @@ pub const Reactor = struct {
         self.* = undefined;
     }
 
-    fn add(self: *Reactor, transfer: *Transfer) !void {
+    pub fn add(self: *Reactor, transfer: *Transfer) !void {
         transfer.armTimeout();
         if (c.curl_multi_add_handle(self.multi, transfer.easy) != c.CURLM_OK) {
             return error.TransportReactorAddFailed;
@@ -729,25 +728,6 @@ pub const Transfer = struct {
         return self.request.structured_output;
     }
 };
-
-pub fn launch(
-    reactor: *Reactor,
-    transfer: *Transfer,
-    custody: *execution.CustodyPool,
-    token: execution.CustodyToken,
-    storage: *store.Store,
-) !void {
-    try custody.consumeLaunchAuthority(token, transfer.binding);
-    try storage.withDispatchHandoff(
-        transfer.binding,
-        .{ .reactor = reactor, .transfer = transfer },
-        struct {
-            fn handoff(context: anytype) !void {
-                try context.reactor.add(context.transfer);
-            }
-        }.handoff,
-    );
-}
 
 fn readCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopaque) callconv(.c) usize {
     const context: *ReadContext = @ptrCast(@alignCast(context_pointer orelse return c.CURL_READFUNC_ABORT));
