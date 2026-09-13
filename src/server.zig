@@ -350,7 +350,7 @@ fn admitNewAttempt(
     slot: *ExecutionSlot,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    const admission = host.store.admitNextModelAttempt(.{
+    var admission = host.store.admitNextModelAttempt(.{
         .attempt_before_commit = host.faults.attempt_before_commit,
     }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
@@ -362,7 +362,7 @@ fn admitNewAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, reactor, slot, token, admission);
+    return beginAdmittedAttempt(host, reactor, slot, token, &admission.permit);
 }
 
 fn admitRetryAttempt(
@@ -372,7 +372,7 @@ fn admitRetryAttempt(
     active: store_module.ActiveOperationFilter,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    const admission = host.store.tryAdmitNextModelRetry(
+    var admission = host.store.tryAdmitNextModelRetry(
         active,
         .{ .attempt_before_commit = host.faults.attempt_before_commit },
     ) catch |err| {
@@ -385,7 +385,7 @@ fn admitRetryAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, reactor, slot, token, admission);
+    return beginAdmittedAttempt(host, reactor, slot, token, &admission.permit);
 }
 
 fn beginAdmittedAttempt(
@@ -393,11 +393,13 @@ fn beginAdmittedAttempt(
     reactor: *provider.Reactor,
     slot: *ExecutionSlot,
     token: execution.CustodyToken,
-    admitted: store_module.AttemptAdmission,
+    permit: *store_module.DispatchPermit,
 ) AdmissionProgress {
-    var admission = admitted;
-    const binding = admission.permit.consume() catch unreachable;
-    host.custody.attach(token, binding) catch unreachable;
+    const binding = host.custody.attach(token, permit) catch |err| {
+        host.custody.releaseUnused(token) catch unreachable;
+        fenceDispatch(host, "custody attachment", err);
+        return .admitted;
+    };
 
     var view = host.store.openHistoricalView(binding) catch |err| {
         fenceDispatch(host, "historical view", err);
@@ -475,7 +477,22 @@ fn beginAdmittedAttempt(
     if (host.faults.before_launch_delay_ms != 0) {
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
     }
-    provider.launch(reactor, &slot.transfer, &host.custody, token, host.store) catch |err| {
+    host.custody.consumeLaunchAuthority(token, binding) catch |err| {
+        slot.transfer.deinit();
+        std.debug.print("latifa: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        fenceDispatch(host, "dispatch handoff", err);
+        finishCustodyNow(host, token);
+        return .admitted;
+    };
+    host.store.withDispatchHandoff(
+        binding,
+        .{ .reactor = reactor, .transfer = &slot.transfer },
+        struct {
+            fn handoff(context: anytype) !void {
+                try context.reactor.add(context.transfer);
+            }
+        }.handoff,
+    ) catch |err| {
         slot.transfer.deinit();
         std.debug.print("latifa: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);

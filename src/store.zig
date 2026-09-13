@@ -133,10 +133,6 @@ pub const DispatchPermit = struct {
         self.available = false;
         return self.binding;
     }
-
-    pub fn suppress(self: *DispatchPermit) void {
-        self.available = false;
-    }
 };
 
 pub const AttemptAdmission = struct {
