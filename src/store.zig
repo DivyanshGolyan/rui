@@ -509,6 +509,94 @@ const CurrentConfiguration = struct {
     next_position: u64 = 1,
 };
 
+const ConfigurationContentAction = enum(u2) {
+    preserve,
+    import_requested,
+    default_empty,
+    clear,
+};
+
+const ConfigurationUpdatePlan = union(enum) {
+    rejected: ConfigurationRejection,
+    update: struct {
+        instructions: ConfigurationContentAction,
+        output_schema: ConfigurationContentAction,
+    },
+};
+
+fn configurationBeforeWorkspace(
+    current: ?*const CurrentConfiguration,
+    requested: *const protocol.Configuration,
+    continuation_risk: bool,
+) ?ConfigurationRejection {
+    if (current == null and
+        (requested.workspace.state != .value or requested.model.state != .value))
+    {
+        return .incomplete_initial_configuration;
+    }
+    if (current) |existing| {
+        if (requested.model.state == .value and
+            !existing.model.eql(requested.model.value.slice()) and
+            continuation_risk)
+        {
+            return .continuation_model_incompatible;
+        }
+    }
+    return null;
+}
+
+fn planConfigurationUpdate(
+    current: ?*const CurrentConfiguration,
+    requested: *const protocol.Configuration,
+    canonical_workspace: ?*const protocol.Bounded(protocol.max_workspace_bytes),
+    next: *CurrentConfiguration,
+) ConfigurationUpdatePlan {
+    const created = current == null;
+    if (requested.workspace.state == .value) {
+        const workspace = canonical_workspace orelse unreachable;
+        if (current) |existing| {
+            if (!existing.workspace.eql(workspace.slice())) {
+                return .{ .rejected = .workspace_is_immutable };
+            }
+        }
+    } else {
+        std.debug.assert(canonical_workspace == null);
+    }
+    if (current) |existing| {
+        if (existing.revision == std.math.maxInt(i64)) {
+            return .{ .rejected = .revision_exhausted };
+        }
+    }
+
+    if (canonical_workspace) |workspace| next.workspace = workspace.*;
+    if (requested.model.state == .value) next.model = requested.model.value;
+    if (requested.tools.state == .value) {
+        next.tools_mask = 0;
+        for (requested.tools.values[0..requested.tools.count]) |tool| {
+            next.tools_mask |= switch (tool) {
+                .bash => 1,
+                .edit => 2,
+            };
+        }
+    }
+    if (requested.permission_mode.state == .value) {
+        next.permission_mode = if (requested.permission_mode.value.eql("ask")) 0 else 1;
+    }
+    next.revision = if (created) 1 else current.?.revision + 1;
+
+    return .{ .update = .{
+        .instructions = switch (requested.instructions.state) {
+            .value => .import_requested,
+            .omitted, .explicit_null => if (created) .default_empty else .preserve,
+        },
+        .output_schema = switch (requested.output_schema.state) {
+            .value => .import_requested,
+            .explicit_null => .clear,
+            .omitted => if (created) .clear else .preserve,
+        },
+    } };
+}
+
 pub const Store = struct {
     io: std.Io,
     database: *c.sqlite3,
@@ -660,64 +748,69 @@ pub const Store = struct {
         }
 
         const current = try self.readSession(command.session.slice());
-        const created = current == null;
-        if (created and (configuration.workspace.state != .value or configuration.model.state != .value)) {
-            return try self.saveConfigurationRejection(command, &digest, .incomplete_initial_configuration, faults);
-        }
-        if (!created and configuration.model.state == .value and
-            !current.?.model.eql(configuration.model.value.slice()) and
-            try self.sessionHasContinuationRisk(command.session.slice()))
-        {
-            return try self.saveConfigurationRejection(command, &digest, .continuation_model_incompatible, faults);
+        const current_configuration: ?*const CurrentConfiguration = if (current) |*value| value else null;
+        const continuation_risk = if (current_configuration) |existing|
+            if (configuration.model.state == .value and
+                !existing.model.eql(configuration.model.value.slice()))
+                try self.sessionHasContinuationRisk(command.session.slice())
+            else
+                false
+        else
+            false;
+        if (configurationBeforeWorkspace(current_configuration, configuration, continuation_risk)) |rejection| {
+            return try self.saveConfigurationRejection(command, &digest, rejection, faults);
         }
 
-        var next = current orelse CurrentConfiguration{};
-        if (configuration.workspace.state == .value) {
-            var canonical_workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-            validateWorkspace(self.io, configuration.workspace.value.slice(), &canonical_workspace) catch {
-                return try self.saveConfigurationRejection(command, &digest, .invalid_workspace, faults);
-            };
-            if (!created and !next.workspace.eql(canonical_workspace.slice())) {
-                return try self.saveConfigurationRejection(command, &digest, .workspace_is_immutable, faults);
-            }
-            next.workspace = canonical_workspace;
-        }
-        if (configuration.model.state == .value) next.model = configuration.model.value;
-        if (configuration.tools.state == .value) {
-            next.tools_mask = 0;
-            for (configuration.tools.values[0..configuration.tools.count]) |tool| {
-                next.tools_mask |= switch (tool) {
-                    .bash => 1,
-                    .edit => 2,
+        var canonical_workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+        const canonical_workspace_ref: ?*const protocol.Bounded(protocol.max_workspace_bytes) =
+            if (configuration.workspace.state == .value) canonical: {
+                validateWorkspace(
+                    self.io,
+                    configuration.workspace.value.slice(),
+                    &canonical_workspace,
+                ) catch {
+                    return try self.saveConfigurationRejection(command, &digest, .invalid_workspace, faults);
                 };
-            }
-        }
-        if (configuration.permission_mode.state == .value) {
-            next.permission_mode = if (configuration.permission_mode.value.eql("ask")) 0 else 1;
-        }
-        if (!created and next.revision == std.math.maxInt(i64)) {
-            return try self.saveConfigurationRejection(command, &digest, .revision_exhausted, faults);
-        }
-        const command_instructions_id = if (configuration.instructions.state == .value)
-            try self.importContent(&configuration.instructions, faults)
-        else
-            null;
-        if (command_instructions_id) |content_id| {
-            next.instructions_id = content_id;
-        } else if (created) {
-            next.instructions_id = try self.importEmptyContent();
-        }
-        const command_output_schema_id = if (configuration.output_schema.state == .value)
-            try self.importContent(&configuration.output_schema, faults)
-        else
-            null;
-        switch (configuration.output_schema.state) {
-            .omitted => {},
-            .explicit_null => next.output_schema_id = null,
-            .value => next.output_schema_id = command_output_schema_id,
-        }
-        next.revision = if (created) 1 else next.revision + 1;
+                break :canonical &canonical_workspace;
+            } else null;
 
+        const created = current_configuration == null;
+        var next = if (current_configuration) |existing| existing.* else CurrentConfiguration{};
+        const content_actions = switch (planConfigurationUpdate(
+            current_configuration,
+            configuration,
+            canonical_workspace_ref,
+            &next,
+        )) {
+            .rejected => |rejection| return try self.saveConfigurationRejection(
+                command,
+                &digest,
+                rejection,
+                faults,
+            ),
+            .update => |actions| actions,
+        };
+
+        var command_instructions_id: ?i64 = null;
+        switch (content_actions.instructions) {
+            .preserve => {},
+            .import_requested => {
+                command_instructions_id = try self.importContent(&configuration.instructions, faults);
+                next.instructions_id = command_instructions_id;
+            },
+            .default_empty => next.instructions_id = try self.importEmptyContent(),
+            .clear => next.instructions_id = null,
+        }
+        var command_output_schema_id: ?i64 = null;
+        switch (content_actions.output_schema) {
+            .preserve => {},
+            .import_requested => {
+                command_output_schema_id = try self.importContent(&configuration.output_schema, faults);
+                next.output_schema_id = command_output_schema_id;
+            },
+            .default_empty => next.output_schema_id = try self.importEmptyContent(),
+            .clear => next.output_schema_id = null,
+        }
         if (created) {
             try self.insertSession(command.session.slice(), &next);
         } else {
@@ -2867,6 +2960,303 @@ fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
 
 fn admitRetryForTesting(storage: *Store) !?AttemptAdmission {
     return storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{});
+}
+
+test "configuration pre-Workspace decisions preserve completeness and continuation precedence" {
+    const Case = struct {
+        name: []const u8,
+        has_current: bool,
+        workspace_requested: bool,
+        model_requested: ?[]const u8,
+        continuation_risk: bool,
+        expected: ?ConfigurationRejection,
+    };
+    const cases = [_]Case{
+        .{
+            .name = "new sparse request",
+            .has_current = false,
+            .workspace_requested = false,
+            .model_requested = null,
+            .continuation_risk = false,
+            .expected = .incomplete_initial_configuration,
+        },
+        .{
+            .name = "new request missing model",
+            .has_current = false,
+            .workspace_requested = true,
+            .model_requested = null,
+            .continuation_risk = false,
+            .expected = .incomplete_initial_configuration,
+        },
+        .{
+            .name = "new complete request",
+            .has_current = false,
+            .workspace_requested = true,
+            .model_requested = "model-a",
+            .continuation_risk = true,
+            .expected = null,
+        },
+        .{
+            .name = "risky incompatible model before Workspace",
+            .has_current = true,
+            .workspace_requested = true,
+            .model_requested = "model-b",
+            .continuation_risk = true,
+            .expected = .continuation_model_incompatible,
+        },
+        .{
+            .name = "same model with continuation",
+            .has_current = true,
+            .workspace_requested = false,
+            .model_requested = "model-a",
+            .continuation_risk = true,
+            .expected = null,
+        },
+        .{
+            .name = "compatible sparse update",
+            .has_current = true,
+            .workspace_requested = false,
+            .model_requested = "model-b",
+            .continuation_risk = false,
+            .expected = null,
+        },
+    };
+
+    var existing: CurrentConfiguration = .{};
+    try existing.workspace.set("/canonical/workspace");
+    try existing.model.set("model-a");
+    existing.instructions_id = 11;
+    existing.revision = 1;
+    for (cases) |case| {
+        var requested: protocol.Configuration = .{};
+        if (case.workspace_requested) {
+            requested.workspace.state = .value;
+            try requested.workspace.value.set("relative-or-different-workspace");
+        }
+        if (case.model_requested) |model| {
+            requested.model.state = .value;
+            try requested.model.value.set(model);
+        }
+        const current: ?*const CurrentConfiguration = if (case.has_current) &existing else null;
+        std.testing.expectEqual(
+            case.expected,
+            configurationBeforeWorkspace(current, &requested, case.continuation_risk),
+        ) catch |err| {
+            std.debug.print("configuration pre-Workspace case failed: {s}\n", .{case.name});
+            return err;
+        };
+    }
+}
+
+test "configuration planning preserves sparse defaults and rejection precedence" {
+    const WorkspaceRequest = enum { omitted, same, different };
+    const InstructionsRequest = enum { omitted, value };
+    const SchemaRequest = enum { omitted, value, clear };
+    const Actions = struct {
+        instructions: ConfigurationContentAction,
+        output_schema: ConfigurationContentAction,
+    };
+    const Case = struct {
+        name: []const u8,
+        created: bool,
+        workspace: WorkspaceRequest,
+        model: ?[]const u8 = null,
+        empty_tools: bool = false,
+        permission: ?[]const u8 = null,
+        instructions: InstructionsRequest = .omitted,
+        schema: SchemaRequest = .omitted,
+        current_revision: u64 = 7,
+        expected_rejection: ?ConfigurationRejection = null,
+        expected_actions: ?Actions = null,
+        expected_model: []const u8 = "model-a",
+        expected_tools: u8 = 3,
+        expected_permission: u8 = 0,
+        expected_revision: u64 = 8,
+    };
+    const cases = [_]Case{
+        .{
+            .name = "new defaults",
+            .created = true,
+            .workspace = .same,
+            .model = "model-a",
+            .expected_actions = .{ .instructions = .default_empty, .output_schema = .clear },
+            .expected_revision = 1,
+        },
+        .{
+            .name = "sparse update preserves omitted content",
+            .created = false,
+            .workspace = .omitted,
+            .expected_actions = .{ .instructions = .preserve, .output_schema = .preserve },
+        },
+        .{
+            .name = "explicit update requests imports and clear",
+            .created = false,
+            .workspace = .same,
+            .model = "model-b",
+            .empty_tools = true,
+            .permission = "bypass",
+            .instructions = .value,
+            .schema = .clear,
+            .expected_actions = .{ .instructions = .import_requested, .output_schema = .clear },
+            .expected_model = "model-b",
+            .expected_tools = 0,
+            .expected_permission = 1,
+        },
+        .{
+            .name = "requested schema imports",
+            .created = false,
+            .workspace = .omitted,
+            .schema = .value,
+            .expected_actions = .{ .instructions = .preserve, .output_schema = .import_requested },
+        },
+        .{
+            .name = "Workspace immutability precedes revision exhaustion",
+            .created = false,
+            .workspace = .different,
+            .current_revision = std.math.maxInt(i64),
+            .expected_rejection = .workspace_is_immutable,
+            .expected_revision = std.math.maxInt(i64),
+        },
+        .{
+            .name = "revision exhaustion follows equal Workspace",
+            .created = false,
+            .workspace = .same,
+            .current_revision = std.math.maxInt(i64),
+            .expected_rejection = .revision_exhausted,
+            .expected_revision = std.math.maxInt(i64),
+        },
+    };
+
+    try std.testing.expect(@sizeOf(ConfigurationUpdatePlan) <= 4);
+    for (cases) |case| {
+        var existing: CurrentConfiguration = .{};
+        try existing.workspace.set("/canonical/workspace");
+        try existing.model.set("model-a");
+        existing.instructions_id = 11;
+        existing.output_schema_id = 12;
+        existing.revision = case.current_revision;
+
+        var requested: protocol.Configuration = .{};
+        if (case.workspace != .omitted) requested.workspace.state = .value;
+        if (case.model) |model| {
+            requested.model.state = .value;
+            try requested.model.value.set(model);
+        }
+        if (case.empty_tools) {
+            requested.tools.state = .value;
+            requested.tools.count = 0;
+        }
+        if (case.permission) |permission| {
+            requested.permission_mode.state = .value;
+            try requested.permission_mode.value.set(permission);
+        }
+        if (case.instructions == .value) requested.instructions.state = .value;
+        requested.output_schema.state = switch (case.schema) {
+            .omitted => .omitted,
+            .value => .value,
+            .clear => .explicit_null,
+        };
+
+        var canonical_workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+        try canonical_workspace.set(switch (case.workspace) {
+            .omitted, .same => "/canonical/workspace",
+            .different => "/different/workspace",
+        });
+        const canonical_workspace_ref: ?*const protocol.Bounded(protocol.max_workspace_bytes) =
+            if (case.workspace == .omitted) null else &canonical_workspace;
+        const current: ?*const CurrentConfiguration = if (case.created) null else &existing;
+        var next = if (current) |value| value.* else CurrentConfiguration{};
+        const plan = planConfigurationUpdate(current, &requested, canonical_workspace_ref, &next);
+
+        if (case.expected_rejection) |expected| {
+            std.testing.expect(plan == .rejected) catch |err| {
+                std.debug.print("configuration planning case failed: {s}\n", .{case.name});
+                return err;
+            };
+            try std.testing.expectEqual(expected, plan.rejected);
+        } else {
+            const expected = case.expected_actions.?;
+            std.testing.expect(plan == .update) catch |err| {
+                std.debug.print("configuration planning case failed: {s}\n", .{case.name});
+                return err;
+            };
+            try std.testing.expectEqual(expected.instructions, plan.update.instructions);
+            try std.testing.expectEqual(expected.output_schema, plan.update.output_schema);
+        }
+        try std.testing.expectEqualStrings(case.expected_model, next.model.slice());
+        try std.testing.expectEqual(case.expected_tools, next.tools_mask);
+        try std.testing.expectEqual(case.expected_permission, next.permission_mode);
+        try std.testing.expectEqual(case.expected_revision, next.revision);
+        try std.testing.expectEqual(@as(?i64, if (case.created) null else 11), next.instructions_id);
+        try std.testing.expectEqual(@as(?i64, if (case.created) null else 12), next.output_schema_id);
+    }
+}
+
+test "configuration rejection content imports roll back and replay committed answer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const instructions = "rejected instructions";
+    const instructions_file = try tmp.dir.createFile(std.testing.io, "rejected-instructions", .{ .read = true });
+    try instructions_file.writeStreamingAll(std.testing.io, instructions);
+    try instructions_file.sync(std.testing.io);
+    const schema = "{\"type\":\"object\"}";
+    const schema_file = try tmp.dir.createFile(std.testing.io, "rejected-schema", .{ .read = true });
+    try schema_file.writeStreamingAll(std.testing.io, schema);
+    try schema_file.sync(std.testing.io);
+    var command: protocol.ConfigureCommand = .{};
+    try command.key.set("rejected-content");
+    command.configuration.instructions = .{
+        .state = .value,
+        .file = instructions_file,
+        .length = instructions.len,
+        .digest = protocol.contentDigest(instructions),
+    };
+    command.configuration.output_schema = .{
+        .state = .value,
+        .file = schema_file,
+        .length = schema.len,
+        .digest = protocol.contentDigest(schema),
+    };
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+
+    {
+        var storage = try testingStore(&tmp, std.testing.io);
+        try std.testing.expect(storage.configure(&command, .{ .content_import = true }) == .infrastructure_failure);
+        try storage.close();
+    }
+    {
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try std.testing.expect((try storage.observeCommand("rejected-content")).status == .absent);
+        const rolled_back_content = try prepare(storage.database, "SELECT COUNT(*) FROM content");
+        defer _ = c.sqlite3_finalize(rolled_back_content);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(rolled_back_content));
+        try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(rolled_back_content, 0));
+
+        const rejected = storage.configure(&command, .{});
+        try std.testing.expect(rejected == .rejected);
+        try std.testing.expectEqual(ConfigurationRejection.invalid_session_reference, rejected.rejected.code);
+        const committed_content = try prepare(
+            storage.database,
+            "SELECT COUNT(*) FROM core_command command " ++
+                "JOIN content instructions ON instructions.content_id=command.primary_content_id " ++
+                "JOIN content schema ON schema.content_id=command.secondary_content_id " ++
+                "WHERE command.command_key='rejected-content'",
+        );
+        defer _ = c.sqlite3_finalize(committed_content);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(committed_content));
+        try std.testing.expectEqual(@as(i64, 1), c.sqlite3_column_int64(committed_content, 0));
+
+        const replay = storage.configure(&command, .{});
+        try std.testing.expect(replay == .rejected);
+        try std.testing.expect(replay.rejected.replayed);
+        try std.testing.expectEqual(ConfigurationRejection.invalid_session_reference, replay.rejected.code);
+        const retained_content = try prepare(storage.database, "SELECT COUNT(*) FROM content");
+        defer _ = c.sqlite3_finalize(retained_content);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(retained_content));
+        try std.testing.expectEqual(@as(i64, 2), c.sqlite3_column_int64(retained_content, 0));
+    }
 }
 
 test "configuration answers replay without reverting newer settings" {
