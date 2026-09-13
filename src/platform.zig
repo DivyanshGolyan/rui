@@ -132,6 +132,7 @@ fn isCanonicalPositiveDecimal(value: []const u8) bool {
     for (value[1..]) |byte| {
         if (byte < '0' or byte > '9') return false;
     }
+    _ = std.fmt.parseInt(u64, value, 10) catch return false;
     return true;
 }
 
@@ -185,6 +186,10 @@ test "startup cleanup recognizes only owned ingress names" {
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}12-x.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}0-2.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}02-2.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}18446744073709551616-2.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-18446744073709551616.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}999999999999999999999999999999-2.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-999999999999999999999999999999.tmp", .{prefix})));
     }
     try std.testing.expect(!isOwnedIngressName("response-secret.tmp"));
     try std.testing.expect(!isOwnedIngressName("canonical.sqlite3"));
