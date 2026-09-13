@@ -30,3 +30,29 @@ notice, SQLite includes this blessing:
 > May you do good and not evil.
 > May you find forgiveness for yourself and forgive others.
 > May you share freely, never taking more than you give.
+
+## curl 8.22.0
+
+Latifa builds a pinned static curl 8.22.0 with HTTP, OpenSSL, Apple SecTrust on
+macOS and the supported threaded asynchronous resolver.
+
+- Source: `https://curl.se/download/curl-8.22.0.tar.xz`
+- Zig package content hash: `N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM`
+- License: curl license, reproduced in the source archive's `COPYING` file
+
+Copyright (c) Daniel Stenberg and contributors. Permission to use, copy,
+modify and distribute the software for any purpose with or without fee is
+granted under the conditions in that notice. The software is provided
+without warranty.
+
+## OpenSSL 3.6.3
+
+Latifa builds pinned static OpenSSL 3.6.3 as curl's TLS implementation.
+
+- Source: `https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz`
+- Zig package content hash: `N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM`
+- License: Apache License 2.0, reproduced in the source archive's `LICENSE.txt`
+
+Copyright (c) 1998-2026 The OpenSSL Project Authors and copyright holders
+identified in the source. Licensed under the Apache License, Version 2.0;
+the license is available at `https://www.apache.org/licenses/LICENSE-2.0`.

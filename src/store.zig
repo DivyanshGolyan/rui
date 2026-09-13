@@ -6,13 +6,14 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 2;
+pub const schema_version: u32 = 3;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 
 pub const Faults = struct {
     content_read: bool = false,
     content_import: bool = false,
     before_commit: bool = false,
+    attempt_before_commit: bool = false,
 };
 
 pub const AcceptedConfiguration = struct {
@@ -94,8 +95,76 @@ pub const ContentReference = struct {
 
 pub const MessageObservation = struct {
     admission_id: ?u64,
-    status: enum { queued },
+    status: enum { queued, processing, failed },
     content: ContentReference,
+    turn_id: ?u64 = null,
+    operation_id: ?u64 = null,
+    attempt_ordinal: ?u64 = null,
+    failure: protocol.Bounded(96) = .{},
+};
+
+pub const AttemptBinding = struct {
+    turn_id: u64,
+    operation_id: u64,
+    attempt_ordinal: u64,
+};
+
+pub const DispatchPermit = struct {
+    binding: AttemptBinding,
+    available: bool = true,
+
+    pub fn consume(self: *DispatchPermit) !AttemptBinding {
+        if (!self.available) return error.DispatchPermitConsumed;
+        self.available = false;
+        return self.binding;
+    }
+
+    pub fn suppress(self: *DispatchPermit) void {
+        self.available = false;
+    }
+};
+
+pub const AttemptAdmission = struct {
+    permit: DispatchPermit,
+    selected_messages: u64,
+};
+
+pub const HistoricalSettings = struct {
+    model: protocol.Bounded(protocol.max_model_bytes),
+    instructions: ContentReference,
+    output_schema: ?ContentReference,
+    tools_mask: u8,
+};
+
+pub const HistoricalInput = struct {
+    admission_id: u64,
+    content: ContentReference,
+};
+
+pub const HistoricalView = struct {
+    store: *Store,
+    binding: AttemptBinding,
+    active: bool = true,
+
+    pub fn settings(self: *HistoricalView) !HistoricalSettings {
+        std.debug.assert(self.active);
+        return self.store.readHistoricalSettings(self.binding);
+    }
+
+    pub fn nextInput(self: *HistoricalView, after_admission: u64) !?HistoricalInput {
+        std.debug.assert(self.active);
+        return self.store.readHistoricalInput(self.binding, after_admission);
+    }
+
+    pub fn openContent(self: *HistoricalView, reference: ContentReference) !ContentReader {
+        std.debug.assert(self.active);
+        return self.store.openContent(reference);
+    }
+
+    pub fn close(self: *HistoricalView) void {
+        std.debug.assert(self.active);
+        self.active = false;
+    }
 };
 
 pub const SessionObservation = struct {
@@ -497,14 +566,61 @@ pub const Store = struct {
                 return self.fenceReadFailure(error.CorruptStore);
             const metadata = self.readContentMetadata(content_id) catch |err|
                 return self.fenceReadFailure(err);
-            observation.message = .{
-                .admission_id = self.readMessageAdmission(key, command.target.slice(), content_id) catch |err|
-                    return self.fenceReadFailure(err),
-                .status = .queued,
-                .content = .{ .length = metadata.length, .digest = metadata.digest },
-            };
+            observation.message = self.readMessageObservation(
+                key,
+                command.target.slice(),
+                content_id,
+                .{ .length = metadata.length, .digest = metadata.digest },
+            ) catch |err| return self.fenceReadFailure(err);
         }
         return observation;
+    }
+
+    fn readMessageObservation(
+        self: *Store,
+        command_key: []const u8,
+        session_ref: []const u8,
+        content_id: i64,
+        content: ContentReference,
+    ) !MessageObservation {
+        const statement = try prepare(
+            self.database,
+            "SELECT m.admission_id,m.turn_id,t.operation_id,t.outcome_code,o.attempt_ordinal " ++
+                "FROM message_admission m " ++
+                "LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
+                "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
+                "WHERE m.command_key=?1 AND m.session_ref=?2 AND m.content_id=?3",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, command_key);
+        try bindText(statement, 2, session_ref);
+        try bindI64(statement, 3, content_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        const admission_id = c.sqlite3_column_int64(statement, 0);
+        if (admission_id <= 0) return error.CorruptStore;
+        var result = MessageObservation{
+            .admission_id = @intCast(admission_id),
+            .status = .queued,
+            .content = content,
+        };
+        const turn_id = try readNullablePositiveI64(statement, 1);
+        if (turn_id) |actual_turn| {
+            result.turn_id = @intCast(actual_turn);
+            const operation_id = try readNullablePositiveI64(statement, 2) orelse
+                return error.CorruptStore;
+            result.operation_id = @intCast(operation_id);
+            const attempt = c.sqlite3_column_int64(statement, 4);
+            if (attempt <= 0) return error.CorruptStore;
+            result.attempt_ordinal = @intCast(attempt);
+            if (c.sqlite3_column_type(statement, 3) == c.SQLITE_NULL) {
+                result.status = .processing;
+            } else {
+                try readText(statement, 3, &result.failure);
+                if (result.failure.len == 0) return error.CorruptStore;
+                result.status = .failed;
+            }
+        }
+        return result;
     }
 
     pub fn inspectSession(self: *Store, session_ref: []const u8) !SessionObservation {
@@ -534,6 +650,264 @@ pub const Store = struct {
         observation.pending_messages = self.countPendingMessages(session_ref) catch |err|
             return self.fenceReadFailure(err);
         return observation;
+    }
+
+    pub fn admitNextModelAttempt(self: *Store, faults: Faults) !?AttemptAdmission {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.admitNextModelAttemptLocked(faults) catch |err| {
+            rollback(self.database);
+            if (err != error.InjectedAttemptCommitFailure) self.fenced.store(true, .release);
+            return err;
+        };
+    }
+
+    fn admitNextModelAttemptLocked(self: *Store, faults: Faults) !?AttemptAdmission {
+        try exec(self.database, "BEGIN IMMEDIATE");
+        errdefer rollback(self.database);
+
+        const select = try prepare(
+            self.database,
+            "SELECT m.session_ref,min(m.admission_id),max(m.admission_id),count(*),s.revision " ++
+                "FROM message_admission m JOIN session s ON s.session_ref=m.session_ref " ++
+                "WHERE m.turn_id IS NULL AND NOT EXISTS(" ++
+                " SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL" ++
+                ") GROUP BY m.session_ref ORDER BY min(m.admission_id) LIMIT 1",
+        );
+        defer _ = c.sqlite3_finalize(select);
+        const step_result = c.sqlite3_step(select);
+        if (step_result == c.SQLITE_DONE) {
+            try exec(self.database, "ROLLBACK");
+            return null;
+        }
+        if (step_result != c.SQLITE_ROW) return error.RunnableSelectionFailed;
+        var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(select, 0, &session_ref);
+        const first_admission = c.sqlite3_column_int64(select, 1);
+        const cutoff = c.sqlite3_column_int64(select, 2);
+        const selected = c.sqlite3_column_int64(select, 3);
+        const revision = c.sqlite3_column_int64(select, 4);
+        if (first_admission <= 0 or cutoff < first_admission or selected <= 0 or revision <= 0) {
+            return error.CorruptStore;
+        }
+
+        const turn_id = try nextIdentity(self.database, "turn", "turn_id");
+        const operation_id = try nextIdentity(self.database, "model_operation", "operation_id");
+        {
+            const insert = try prepare(
+                self.database,
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code) " ++
+                    "VALUES(?1,?2,?3,?4,?5,NULL)",
+            );
+            defer _ = c.sqlite3_finalize(insert);
+            try bindU64(insert, 1, turn_id);
+            try bindText(insert, 2, session_ref.slice());
+            try bindI64(insert, 3, first_admission);
+            try bindI64(insert, 4, cutoff);
+            try bindU64(insert, 5, operation_id);
+            try expectDone(insert);
+        }
+        {
+            const bind = try prepare(
+                self.database,
+                "UPDATE message_admission SET turn_id=?1 WHERE session_ref=?2 AND turn_id IS NULL AND admission_id<=?3",
+            );
+            defer _ = c.sqlite3_finalize(bind);
+            try bindU64(bind, 1, turn_id);
+            try bindText(bind, 2, session_ref.slice());
+            try bindI64(bind, 3, cutoff);
+            try expectDone(bind);
+            if (c.sqlite3_changes(self.database) != selected) return error.SelectionChanged;
+        }
+        {
+            const project = try prepare(
+                self.database,
+                "INSERT INTO conversation_entry(session_ref,entry_ordinal,turn_id,source_admission_id,content_id) " ++
+                    "SELECT ?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0) + " ++
+                    "row_number() OVER (ORDER BY admission_id),?2,admission_id,content_id " ++
+                    "FROM message_admission WHERE turn_id=?2 ORDER BY admission_id",
+            );
+            defer _ = c.sqlite3_finalize(project);
+            try bindText(project, 1, session_ref.slice());
+            try bindU64(project, 2, turn_id);
+            try expectDone(project);
+            if (c.sqlite3_changes(self.database) != selected) return error.ProjectionFailed;
+        }
+        {
+            const insert = try prepare(
+                self.database,
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
+                    "attempt_ordinal,allowance_used,uncertain,resolution_code) VALUES(?1,?2,?3,?4,?5,1,1,1,NULL)",
+            );
+            defer _ = c.sqlite3_finalize(insert);
+            try bindU64(insert, 1, operation_id);
+            try bindU64(insert, 2, turn_id);
+            try bindText(insert, 3, session_ref.slice());
+            try bindI64(insert, 4, revision);
+            try bindI64(insert, 5, cutoff);
+            try expectDone(insert);
+        }
+        if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
+        try exec(self.database, "COMMIT");
+        const binding = AttemptBinding{
+            .turn_id = turn_id,
+            .operation_id = operation_id,
+            .attempt_ordinal = 1,
+        };
+        return .{
+            .permit = .{ .binding = binding },
+            .selected_messages = @intCast(selected),
+        };
+    }
+
+    pub fn openHistoricalView(self: *Store, binding: AttemptBinding) !HistoricalView {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        try self.validateCurrentAttempt(binding);
+        return .{ .store = self, .binding = binding };
+    }
+
+    fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT turn_id,attempt_ordinal,resolution_code FROM model_operation WHERE operation_id=?1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, binding.operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW or
+            c.sqlite3_column_int64(statement, 0) != binding.turn_id or
+            c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal or
+            c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL)
+        {
+            return error.StaleAttemptBinding;
+        }
+    }
+
+    fn readHistoricalSettings(self: *Store, binding: AttemptBinding) !HistoricalSettings {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        try self.validateCurrentAttempt(binding);
+        const statement = try prepare(
+            self.database,
+            "SELECT r.model,r.instructions_content_id,r.output_schema_content_id,r.tools_mask " ++
+                "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref " ++
+                "AND r.revision=o.settings_revision WHERE o.operation_id=?1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, binding.operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        var model: protocol.Bounded(protocol.max_model_bytes) = .{};
+        try readText(statement, 0, &model);
+        const instructions_id = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
+        const output_schema_id = try readNullablePositiveI64(statement, 2);
+        const tools = c.sqlite3_column_int(statement, 3);
+        if (tools < 0 or tools > 3) return error.CorruptStore;
+        const instructions = try self.readContentMetadata(instructions_id);
+        const output_schema = if (output_schema_id) |content_id| blk: {
+            const metadata = try self.readContentMetadata(content_id);
+            break :blk ContentReference{ .length = metadata.length, .digest = metadata.digest };
+        } else null;
+        return .{
+            .model = model,
+            .instructions = .{ .length = instructions.length, .digest = instructions.digest },
+            .output_schema = output_schema,
+            .tools_mask = @intCast(tools),
+        };
+    }
+
+    fn readHistoricalInput(
+        self: *Store,
+        binding: AttemptBinding,
+        after_admission: u64,
+    ) !?HistoricalInput {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        try self.validateCurrentAttempt(binding);
+        const statement = try prepare(
+            self.database,
+            "SELECT m.admission_id,m.content_id FROM model_operation o " ++
+                "JOIN message_admission m ON m.turn_id=o.turn_id " ++
+                "WHERE o.operation_id=?1 AND m.admission_id>?2 AND m.admission_id<=o.input_cutoff " ++
+                "ORDER BY m.admission_id LIMIT 1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, binding.operation_id);
+        try bindU64(statement, 2, after_admission);
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return null;
+        if (result != c.SQLITE_ROW) return error.HistoricalInputReadFailed;
+        const admission_id = c.sqlite3_column_int64(statement, 0);
+        const content_id = c.sqlite3_column_int64(statement, 1);
+        if (admission_id <= 0 or content_id <= 0) return error.CorruptStore;
+        const metadata = try self.readContentMetadata(content_id);
+        return .{
+            .admission_id = @intCast(admission_id),
+            .content = .{ .length = metadata.length, .digest = metadata.digest },
+        };
+    }
+
+    pub fn settleModelFailure(
+        self: *Store,
+        binding: AttemptBinding,
+        code: []const u8,
+        faults: Faults,
+    ) !void {
+        if (code.len == 0 or code.len > 96 or !std.unicode.utf8ValidateSlice(code)) {
+            return error.InvalidFailureCode;
+        }
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.settleModelFailureLocked(binding, code, faults) catch |err| {
+            rollback(self.database);
+            self.fenced.store(true, .release);
+            return err;
+        };
+    }
+
+    fn settleModelFailureLocked(
+        self: *Store,
+        binding: AttemptBinding,
+        code: []const u8,
+        faults: Faults,
+    ) !void {
+        try exec(self.database, "BEGIN IMMEDIATE");
+        errdefer rollback(self.database);
+        try self.validateCurrentAttempt(binding);
+        {
+            const statement = try prepare(
+                self.database,
+                "UPDATE model_operation SET uncertain=0,resolution_code=?2 " ++
+                    "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
+            );
+            defer _ = c.sqlite3_finalize(statement);
+            try bindU64(statement, 1, binding.operation_id);
+            try bindText(statement, 2, code);
+            try bindU64(statement, 3, binding.attempt_ordinal);
+            try expectDone(statement);
+            if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
+        }
+        {
+            const statement = try prepare(
+                self.database,
+                "UPDATE turn SET outcome_code=?2 WHERE turn_id=?1 AND operation_id=?3 AND outcome_code IS NULL",
+            );
+            defer _ = c.sqlite3_finalize(statement);
+            try bindU64(statement, 1, binding.turn_id);
+            try bindText(statement, 2, code);
+            try bindU64(statement, 3, binding.operation_id);
+            try expectDone(statement);
+            if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
+        }
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try exec(self.database, "COMMIT");
     }
 
     pub fn openContent(self: *Store, reference: ContentReference) !ContentReader {
@@ -648,7 +1022,7 @@ pub const Store = struct {
     }
 
     fn countPendingMessages(self: *Store, session_ref: []const u8) !u64 {
-        const statement = try prepare(self.database, "SELECT count(*) FROM message_admission WHERE session_ref=?1");
+        const statement = try prepare(self.database, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.MessageAdmissionReadFailed;
@@ -965,12 +1339,44 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ admission_id INTEGER PRIMARY KEY CHECK(admission_id>0),
         \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
         \\ command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key) DEFERRABLE INITIALLY DEFERRED,
-        \\ content_id INTEGER NOT NULL REFERENCES content(content_id)
+        \\ content_id INTEGER NOT NULL REFERENCES content(content_id),
+        \\ turn_id INTEGER REFERENCES turn(turn_id) DEFERRABLE INITIALLY DEFERRED
         \\) STRICT;
-        \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,admission_id);
+        \\CREATE TABLE turn(
+        \\ turn_id INTEGER PRIMARY KEY CHECK(turn_id>0),
+        \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
+        \\ first_admission_id INTEGER NOT NULL REFERENCES message_admission(admission_id) DEFERRABLE INITIALLY DEFERRED,
+        \\ input_cutoff INTEGER NOT NULL CHECK(input_cutoff>=first_admission_id),
+        \\ operation_id INTEGER NOT NULL UNIQUE,
+        \\ outcome_code TEXT CHECK(outcome_code IS NULL OR length(CAST(outcome_code AS BLOB)) BETWEEN 1 AND 96)
+        \\) STRICT;
+        \\CREATE UNIQUE INDEX turn_one_active_per_session ON turn(session_ref) WHERE outcome_code IS NULL;
+        \\CREATE TABLE model_operation(
+        \\ operation_id INTEGER PRIMARY KEY CHECK(operation_id>0),
+        \\ turn_id INTEGER NOT NULL UNIQUE REFERENCES turn(turn_id) DEFERRABLE INITIALLY DEFERRED,
+        \\ session_ref TEXT NOT NULL,
+        \\ settings_revision INTEGER NOT NULL CHECK(settings_revision>0),
+        \\ input_cutoff INTEGER NOT NULL CHECK(input_cutoff>0),
+        \\ attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal>0),
+        \\ allowance_used INTEGER NOT NULL CHECK(allowance_used BETWEEN 1 AND 4),
+        \\ uncertain INTEGER NOT NULL CHECK(uncertain IN (0,1)),
+        \\ resolution_code TEXT CHECK(resolution_code IS NULL OR length(CAST(resolution_code AS BLOB)) BETWEEN 1 AND 96),
+        \\ FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),
+        \\ CHECK((resolution_code IS NULL AND uncertain=1) OR (resolution_code IS NOT NULL AND uncertain=0))
+        \\) STRICT;
+        \\CREATE TABLE conversation_entry(
+        \\ session_ref TEXT NOT NULL,
+        \\ entry_ordinal INTEGER NOT NULL CHECK(entry_ordinal>0),
+        \\ turn_id INTEGER NOT NULL REFERENCES turn(turn_id),
+        \\ source_admission_id INTEGER NOT NULL UNIQUE REFERENCES message_admission(admission_id),
+        \\ content_id INTEGER NOT NULL REFERENCES content(content_id),
+        \\ PRIMARY KEY(session_ref,entry_ordinal)
+        \\) STRICT, WITHOUT ROWID;
+        \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id);
+        \\CREATE INDEX model_operation_runnable ON model_operation(resolution_code,operation_id);
     );
     try exec(database, "PRAGMA application_id=1280591409");
-    try exec(database, "PRAGMA user_version=2");
+    try exec(database, "PRAGMA user_version=3");
     const statement = try prepare(database, "INSERT INTO store_meta(key,value) VALUES('wire_version','1'),('store_selector',?1)");
     defer _ = c.sqlite3_finalize(statement);
     try bindText(statement, 1, selector);
@@ -985,9 +1391,9 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
         const statement = try prepare(
             database,
             "SELECT count(*) FROM sqlite_schema WHERE " ++
-                "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission')) OR " ++
-                "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission')) OR " ++
-                "(sql IS NOT NULL AND (name!='message_admission_session_order' OR tbl_name!='message_admission')))) OR " ++
+                "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry')) OR " ++
+                "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry')) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','turn_one_active_per_session','model_operation_runnable')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -1031,6 +1437,20 @@ fn bindCurrent(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *co
     try bindI64(statement, 6, current.permission_mode);
     try bindNullableI64(statement, 7, current.output_schema_id);
     try bindU64(statement, 8, current.revision);
+}
+
+fn nextIdentity(database: *c.sqlite3, comptime table: []const u8, comptime column: []const u8) !u64 {
+    const statement = try prepare(
+        database,
+        "SELECT " ++ column ++ " FROM " ++ table ++ " ORDER BY " ++ column ++ " DESC LIMIT 1",
+    );
+    defer _ = c.sqlite3_finalize(statement);
+    const result = c.sqlite3_step(statement);
+    if (result == c.SQLITE_DONE) return 1;
+    if (result != c.SQLITE_ROW) return error.IdentityReadFailed;
+    const prior = c.sqlite3_column_int64(statement, 0);
+    if (prior <= 0 or prior == std.math.maxInt(i64)) return error.IdentityExhausted;
+    return @intCast(prior + 1);
 }
 
 fn prepare(database: *c.sqlite3, sql: [:0]const u8) !*c.sqlite3_stmt {
@@ -1782,4 +2202,117 @@ test "definite rejections retain decisions without retaining payloads" {
     changed_kind.text = unknown_message.text;
     try std.testing.expect(storage.submitMessage(&changed_kind, .{}) == .conflict);
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM content"));
+}
+
+test "one committed selection freezes its settings and input prefix" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration("configure", "direct/dispatch", workspace, "model-a");
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+
+    const first_file = try tmp.dir.createFile(std.testing.io, "dispatch-first", .{ .read = true });
+    try first_file.writeStreamingAll(std.testing.io, "first");
+    try first_file.sync(std.testing.io);
+    var first = try completeMessage("dispatch-1", "direct/dispatch", first_file, "first");
+    defer first.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&first, .{}) == .accepted);
+
+    const second_file = try tmp.dir.createFile(std.testing.io, "dispatch-second", .{ .read = true });
+    try second_file.writeStreamingAll(std.testing.io, "second");
+    try second_file.sync(std.testing.io);
+    var second = try completeMessage("dispatch-2", "direct/dispatch", second_file, "second");
+    defer second.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&second, .{}) == .accepted);
+
+    try std.testing.expectError(
+        error.InjectedAttemptCommitFailure,
+        storage.admitNextModelAttempt(.{ .attempt_before_commit = true }),
+    );
+    try std.testing.expect((try storage.observeCommand("dispatch-1")).message.?.status == .queued);
+
+    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+    try std.testing.expectEqual(@as(u64, 2), admitted.selected_messages);
+    const binding = try admitted.permit.consume();
+    try std.testing.expectError(error.DispatchPermitConsumed, admitted.permit.consume());
+    try std.testing.expect((try storage.observeCommand("dispatch-1")).message.?.status == .processing);
+    try std.testing.expectEqual(
+        binding.operation_id,
+        (try storage.observeCommand("dispatch-2")).message.?.operation_id.?,
+    );
+
+    const third_file = try tmp.dir.createFile(std.testing.io, "dispatch-third", .{ .read = true });
+    try third_file.writeStreamingAll(std.testing.io, "later");
+    try third_file.sync(std.testing.io);
+    var third = try completeMessage("dispatch-3", "direct/dispatch", third_file, "later");
+    defer third.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&third, .{}) == .accepted);
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("configure-later");
+    try update.session.set("direct/dispatch");
+    update.configuration.model.state = .value;
+    try update.configuration.model.value.set("model-b");
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+
+    var view = try storage.openHistoricalView(binding);
+    defer view.close();
+    const settings = try view.settings();
+    try std.testing.expectEqualStrings("model-a", settings.model.slice());
+    const first_input = (try view.nextInput(0)).?;
+    const second_input = (try view.nextInput(first_input.admission_id)).?;
+    try std.testing.expect((try view.nextInput(second_input.admission_id)) == null);
+    var first_reader = try view.openContent(first_input.content);
+    defer first_reader.close();
+    var actual: [5]u8 = undefined;
+    try std.testing.expectEqual(actual.len, try first_reader.read(0, &actual));
+    try std.testing.expectEqualStrings("first", &actual);
+
+    try storage.settleModelFailure(binding, "provider_http_422", .{});
+    const failed = (try storage.observeCommand("dispatch-1")).message.?;
+    try std.testing.expect(failed.status == .failed);
+    try std.testing.expectEqualStrings("provider_http_422", failed.failure.slice());
+    try std.testing.expect((try storage.observeCommand("dispatch-3")).message.?.status == .queued);
+    try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/dispatch")).pending_messages);
+
+    const later = (try storage.admitNextModelAttempt(.{})).?;
+    var later_view = try storage.openHistoricalView(later.permit.binding);
+    defer later_view.close();
+    try std.testing.expectEqualStrings("model-b", (try later_view.settings()).model.slice());
+}
+
+test "saved model failure is atomic and retains consumed uncertainty on save fault" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration("configure", "direct/failure", workspace, "model-a");
+
+    {
+        var storage = try testingStore(&tmp, std.testing.io);
+        try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+        const message_file = try tmp.dir.createFile(std.testing.io, "failure-message", .{ .read = true });
+        try message_file.writeStreamingAll(std.testing.io, "fail");
+        try message_file.sync(std.testing.io);
+        var message = try completeMessage("failure-message", "direct/failure", message_file, "fail");
+        defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expectError(
+            error.InjectedCommitFailure,
+            storage.settleModelFailure(binding, "request_preparation_failed", .{ .before_commit = true }),
+        );
+        try storage.close();
+    }
+    {
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const observation = (try storage.observeCommand("failure-message")).message.?;
+        try std.testing.expect(observation.status == .processing);
+        try std.testing.expectEqual(@as(u64, 1), observation.attempt_ordinal.?);
+        try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+    }
 }

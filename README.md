@@ -4,7 +4,7 @@ Latifa (formerly OnePage) is a resource-bounded, crash-resumable local runtime f
 
 ## Status
 
-The source implements the first two redesigned runtime slices: an explicitly started Host, exclusive Store ownership, direct configuration/message clients, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, immutable ordered message admission, queued observations and bounded SQLite/content ingress. Model processing and every Workflow, tool, permission, stop and interruption surface enter in later implementation issues; accepted messages remain visibly queued until the core-owned selection path is implemented.
+The source implements the first three redesigned runtime slices: an explicitly started Host, exclusive Store ownership, direct configuration/message clients, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, immutable ordered message admission and the first model-attempt path. Core selects an eligible queued prefix into one Turn, freezes its historical settings and inputs, reserves fixed custody, materializes a complete disk-backed Responses request and launches it once through a bounded libcurl reactor. A permanent HTTP failure is saved and readable through every selected message admission. Successful provider output, retry/restart resolution and every Workflow, tool, permission, stop and interruption surface enter in later implementation issues.
 
 The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. The current build cross-compiles all four targets. Runtime and resource verification uses the available Apple Silicon Mac; the other targets remain compile-only evidence until exercised on their platforms.
 
@@ -27,11 +27,19 @@ V1 excludes conversation branching/editing, attachments, automatic provider fall
 
 ## Build and try the current implementation
 
-Requirements: Zig 0.16.0 and Python 3 for the process-level verification fixture. The opt-in production measurement command additionally requires Go 1.27.1. SQLite is pinned by the build.
+Requirements: Zig 0.16.0, Python 3, Perl, a C toolchain and Make. The opt-in production measurement commands additionally require Go 1.27.1. SQLite 3.53.4, curl 8.22.0 and OpenSSL 3.6.3 are pinned by the build.
 
 ```sh
 zig build
 ./zig-out/bin/latifa serve --store /absolute/path/to/private-store
+```
+
+The partial development transport is opt-in so it cannot make a live provider call. To exercise this slice, start the Host with an HTTPS endpoint, or with loopback HTTP for a deterministic local fixture. The Host rejects non-loopback plaintext endpoints. No authentication is attached in this slice.
+
+```sh
+./zig-out/bin/latifa serve \
+  --store /absolute/path/to/private-store \
+  --provider-endpoint http://127.0.0.1:8000/responses
 ```
 
 In another shell, configure a Session. The record path must be in a private directory; retry reuses that durable capture after a lost reply or client restart.
@@ -76,9 +84,11 @@ The applicable gates are:
 ```sh
 zig build check
 zig build cross-check
+zig build dispatch-integration
 zig build measure-admission
 zig build measure-message-admission
+zig build measure-model-dispatch
 ```
 
-The measurement steps are opt-in macOS resource runs. Model/provider authentication, processing and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The measurement steps are opt-in macOS resource runs. Provider authentication, successful output processing, retry/restart completion and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 `check` exercises both the ReleaseSafe production gate and the default Debug artifact shown above; `cross-check` compiles ReleaseSmall deliverables.

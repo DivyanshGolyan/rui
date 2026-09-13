@@ -18,6 +18,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn serve(io: std.Io, args: []const []const u8) !void {
     var store_path: ?[]const u8 = null;
+    var provider_endpoint: ?[]const u8 = null;
     var active_capacity: usize = server.default_active_capacity;
     var faults: server.Faults = .{};
     var index: usize = 0;
@@ -25,15 +26,20 @@ fn serve(io: std.Io, args: []const []const u8) !void {
         const arg = args[index];
         if (std.mem.eql(u8, arg, "--store")) {
             store_path = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--provider-endpoint")) {
+            provider_endpoint = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--active-capacity")) {
             active_capacity = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
         } else if (std.mem.eql(u8, arg, "--fault")) {
             const fault = try takeValue(args, &index);
-            if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else return error.UnknownFault;
+            if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else if (std.mem.eql(u8, fault, "attempt-before-commit")) faults.attempt_before_commit = true else if (std.mem.eql(u8, fault, "result-before-commit")) faults.result_before_commit = true else if (std.mem.eql(u8, fault, "request-first-step")) faults.request_first_step = true else if (std.mem.eql(u8, fault, "request-write")) faults.request_write = true else if (std.mem.eql(u8, fault, "request-seal")) faults.request_seal = true else if (std.mem.eql(u8, fault, "request-scratch-acquire")) faults.request_scratch_acquire = true else return error.UnknownFault;
+        } else if (std.mem.eql(u8, arg, "--test-cleanup-delay-ms")) {
+            faults.cleanup_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
+            if (faults.cleanup_delay_ms < 0 or faults.cleanup_delay_ms > 60_000) return error.InvalidCleanupDelay;
         } else return error.UnknownArgument;
         index += 1;
     }
-    return server.serve(io, std.heap.c_allocator, store_path orelse return usage(), active_capacity, faults);
+    return server.serve(io, std.heap.c_allocator, store_path orelse return usage(), active_capacity, faults, provider_endpoint);
 }
 
 fn configure(io: std.Io, args: []const []const u8) !void {
@@ -124,7 +130,7 @@ fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
 fn usage() error{InvalidArguments} {
     std.debug.print(
         \\usage:
-        \\  latifa serve --store PATH [--active-capacity N] [--fault NAME]
+        \\  latifa serve --store PATH [--active-capacity N] [--provider-endpoint URL] [--fault NAME]
         \\  latifa configure --store PATH --record FILE --key KEY --session REF [settings]
         \\  latifa message --store PATH --record FILE --key KEY --session REF --text FILE|-
         \\  latifa retry --store PATH --record FILE --kind configure|message

@@ -8,12 +8,22 @@
             .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip",
             .hash = "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
         },
+        .curl = .{
+            .url = "https://curl.se/download/curl-8.22.0.tar.xz",
+            .hash = "N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM",
+        },
+        .openssl = .{
+            .url = "https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz",
+            .hash = "N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM",
+        },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "src/build_transport.sh",
         "research/configuration-admission",
+        "research/model-dispatch",
         "README.md",
         "THIRD_PARTY_NOTICES.md",
     },

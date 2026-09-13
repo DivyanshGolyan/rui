@@ -700,7 +700,7 @@ expected = {
     "journal_mode": "delete",
     "mmap_size": 0,
     "application_id": 0x4C544631,
-    "user_version": 2,
+    "user_version": 3,
 }
 for name, value in expected.items():
     actual = db.execute("PRAGMA " + name).fetchone()[0]
