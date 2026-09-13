@@ -1,9 +1,9 @@
 {
   "scope": "issue-172 production frozen-request dispatch",
   "status": "passed",
-  "tested_revision": "3519d34350fa578971c7c204f607e1638799ee60",
+  "tested_revision": "066fdaef9707223c863b8b26fdb82eb0acd75f45",
   "working_tree_dirty": false,
-  "binary_sha256": "ba7ed65510d0b794c08bf17c5b1158afc9f278335f89117bb16372113eba59dc",
+  "binary_sha256": "9ac59df1e5738d3e17beb9819e6c4455649d5fbc9d84d053ae5b603336ad38c2",
   "zig": "0.16.0",
   "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
   "transport": {
@@ -15,52 +15,52 @@
     {
       "active_capacity": 1,
       "custody_record_bytes": 40,
-      "execution_slot_bytes": 4624,
-      "idle_cpu_percent_one_core": 0.497,
+      "execution_slot_bytes": 4368,
+      "idle_cpu_percent_one_core": 0.995,
       "idle_cpu_sample_seconds": 2.01,
-      "rss_bytes": 7913472,
-      "virtual_bytes": 420141023232,
-      "physical_footprint_bytes": 3507200,
-      "lifetime_peak_physical_footprint_bytes": 3507200,
+      "rss_bytes": 7995392,
+      "virtual_bytes": 420421107712,
+      "physical_footprint_bytes": 3539968,
+      "lifetime_peak_physical_footprint_bytes": 3539968,
       "open_descriptor_rows": 15,
       "open_request_file_descriptors": 0
     },
     {
       "active_capacity": 16,
       "custody_record_bytes": 40,
-      "execution_slot_bytes": 4624,
+      "execution_slot_bytes": 4368,
       "idle_cpu_percent_one_core": 0.497,
       "idle_cpu_sample_seconds": 2.01,
-      "rss_bytes": 7749632,
-      "virtual_bytes": 420275240960,
-      "physical_footprint_bytes": 3392512,
-      "lifetime_peak_physical_footprint_bytes": 3392512,
+      "rss_bytes": 8290304,
+      "virtual_bytes": 420284792832,
+      "physical_footprint_bytes": 3834880,
+      "lifetime_peak_physical_footprint_bytes": 3834880,
       "open_descriptor_rows": 15,
       "open_request_file_descriptors": 0
     },
     {
       "active_capacity": 256,
       "custody_record_bytes": 40,
-      "execution_slot_bytes": 4624,
+      "execution_slot_bytes": 4368,
       "idle_cpu_percent_one_core": 0.497,
       "idle_cpu_sample_seconds": 2.01,
-      "rss_bytes": 8830976,
-      "virtual_bytes": 420275240960,
-      "physical_footprint_bytes": 4457472,
-      "lifetime_peak_physical_footprint_bytes": 4457472,
+      "rss_bytes": 9240576,
+      "virtual_bytes": 420141137920,
+      "physical_footprint_bytes": 4736000,
+      "lifetime_peak_physical_footprint_bytes": 4736000,
       "open_descriptor_rows": 15,
       "open_request_file_descriptors": 0
     },
     {
       "active_capacity": 1000,
       "custody_record_bytes": 40,
-      "execution_slot_bytes": 4624,
+      "execution_slot_bytes": 4368,
       "idle_cpu_percent_one_core": 0.497,
       "idle_cpu_sample_seconds": 2.01,
-      "rss_bytes": 12533760,
-      "virtual_bytes": 420131586048,
-      "physical_footprint_bytes": 8127488,
-      "lifetime_peak_physical_footprint_bytes": 8127488,
+      "rss_bytes": 12517376,
+      "virtual_bytes": 420141137920,
+      "physical_footprint_bytes": 7996416,
+      "lifetime_peak_physical_footprint_bytes": 7996416,
       "open_descriptor_rows": 15,
       "open_request_file_descriptors": 0
     }
@@ -74,37 +74,35 @@
         "status": "partial",
         "dispatch_fenced": false,
         "custody_occupied": "1",
-        "scratch_used_bytes": "1322",
+        "scratch_used_bytes": "354",
         "unavailable": [
-          "successful_model_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "in_flight": {
-        "rss_bytes": 8617984,
-        "virtual_bytes": 420256940032,
-        "physical_footprint_bytes": 4146176,
-        "lifetime_peak_physical_footprint_bytes": 4310016,
-        "open_descriptor_rows": 17,
+        "rss_bytes": 9043968,
+        "virtual_bytes": 420257054720,
+        "physical_footprint_bytes": 4408320,
+        "lifetime_peak_physical_footprint_bytes": 4555776,
+        "open_descriptor_rows": 19,
         "open_request_file_descriptors": 1
       },
       "saved_failure_delayed_cleanup_execution": {
         "status": "partial",
         "dispatch_fenced": false,
         "custody_occupied": "1",
-        "scratch_used_bytes": "1322",
+        "scratch_used_bytes": "0",
         "unavailable": [
-          "successful_model_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "saved_failure_delayed_cleanup": {
-        "rss_bytes": 8617984,
-        "virtual_bytes": 420256940032,
-        "physical_footprint_bytes": 4146176,
-        "lifetime_peak_physical_footprint_bytes": 4310016,
-        "open_descriptor_rows": 16,
-        "open_request_file_descriptors": 1
+        "rss_bytes": 9043968,
+        "virtual_bytes": 420257054720,
+        "physical_footprint_bytes": 4408320,
+        "lifetime_peak_physical_footprint_bytes": 4555776,
+        "open_descriptor_rows": 15,
+        "open_request_file_descriptors": 0
       }
     },
     {
@@ -115,37 +113,35 @@
         "status": "partial",
         "dispatch_fenced": false,
         "custody_occupied": "1",
-        "scratch_used_bytes": "6292778",
+        "scratch_used_bytes": "1048930",
         "unavailable": [
-          "successful_model_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "in_flight": {
-        "rss_bytes": 9764864,
-        "virtual_bytes": 420256940032,
-        "physical_footprint_bytes": 5260288,
-        "lifetime_peak_physical_footprint_bytes": 5424128,
-        "open_descriptor_rows": 17,
+        "rss_bytes": 10371072,
+        "virtual_bytes": 420400709632,
+        "physical_footprint_bytes": 5784576,
+        "lifetime_peak_physical_footprint_bytes": 5932032,
+        "open_descriptor_rows": 19,
         "open_request_file_descriptors": 1
       },
       "saved_failure_delayed_cleanup_execution": {
         "status": "partial",
         "dispatch_fenced": false,
         "custody_occupied": "1",
-        "scratch_used_bytes": "6292778",
+        "scratch_used_bytes": "0",
         "unavailable": [
-          "successful_model_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "saved_failure_delayed_cleanup": {
-        "rss_bytes": 9764864,
-        "virtual_bytes": 420256940032,
-        "physical_footprint_bytes": 5260288,
-        "lifetime_peak_physical_footprint_bytes": 5424128,
-        "open_descriptor_rows": 16,
-        "open_request_file_descriptors": 1
+        "rss_bytes": 10371072,
+        "virtual_bytes": 420400709632,
+        "physical_footprint_bytes": 5784576,
+        "lifetime_peak_physical_footprint_bytes": 5932032,
+        "open_descriptor_rows": 15,
+        "open_request_file_descriptors": 0
       }
     },
     {
@@ -156,37 +152,35 @@
         "status": "partial",
         "dispatch_fenced": false,
         "custody_occupied": "1",
-        "scratch_used_bytes": "50332970",
+        "scratch_used_bytes": "8388962",
         "unavailable": [
-          "successful_model_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "in_flight": {
-        "rss_bytes": 13320192,
-        "virtual_bytes": 420284678144,
-        "physical_footprint_bytes": 8848384,
-        "lifetime_peak_physical_footprint_bytes": 9012224,
-        "open_descriptor_rows": 17,
+        "rss_bytes": 13516800,
+        "virtual_bytes": 420409573376,
+        "physical_footprint_bytes": 8963072,
+        "lifetime_peak_physical_footprint_bytes": 9110528,
+        "open_descriptor_rows": 19,
         "open_request_file_descriptors": 1
       },
       "saved_failure_delayed_cleanup_execution": {
         "status": "partial",
         "dispatch_fenced": false,
         "custody_occupied": "1",
-        "scratch_used_bytes": "50332970",
+        "scratch_used_bytes": "0",
         "unavailable": [
-          "successful_model_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "saved_failure_delayed_cleanup": {
-        "rss_bytes": 13320192,
-        "virtual_bytes": 420284678144,
-        "physical_footprint_bytes": 8848384,
-        "lifetime_peak_physical_footprint_bytes": 9012224,
-        "open_descriptor_rows": 16,
-        "open_request_file_descriptors": 1
+        "rss_bytes": 13631488,
+        "virtual_bytes": 420553228288,
+        "physical_footprint_bytes": 9110528,
+        "lifetime_peak_physical_footprint_bytes": 9257984,
+        "open_descriptor_rows": 15,
+        "open_request_file_descriptors": 0
       }
     }
   ],
@@ -197,22 +191,21 @@
       "status": "partial",
       "dispatch_fenced": false,
       "custody_occupied": "8",
-      "scratch_used_bytes": "3156304",
+      "scratch_used_bytes": "527120",
       "unavailable": [
-        "successful_model_output",
-        "retry_and_restart_resolution"
+        "structured_output"
       ]
     },
     "custody_record_bytes": 40,
-    "execution_slot_bytes": 4624,
-    "rss_bytes": 10354688,
-    "virtual_bytes": 420697341952,
-    "physical_footprint_bytes": 5932032,
-    "lifetime_peak_physical_footprint_bytes": 6095872,
-    "open_descriptor_rows": 31,
+    "execution_slot_bytes": 4368,
+    "rss_bytes": 11206656,
+    "virtual_bytes": 420544364544,
+    "physical_footprint_bytes": 6620160,
+    "lifetime_peak_physical_footprint_bytes": 6800384,
+    "open_descriptor_rows": 47,
     "open_request_file_descriptors": 8
   },
-  "elapsed_seconds": 29.701,
+  "elapsed_seconds": 29.341,
   "limits": [
     "macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only",
     "endpoint is deterministic loopback HTTP and qualifies no TLS trust store or live provider behavior",
