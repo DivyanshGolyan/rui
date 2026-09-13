@@ -71,7 +71,7 @@ The **Host Store** contains canonical facts/content. The **Storage Owner** exclu
 | Workspace | Working-directory context for relative tool paths, not a sandbox or allowed-path boundary. |
 | Turn | Work from taking one or more queued User Messages for processing through a Final Answer or typed terminal outcome. At most one Turn is nonterminal per Session; callers need no Turn key. |
 
-Each fact has one authority; each resident allocation has an owner, bounded population and release boundary. Use direct transactions and deep effect modules. Native embedding and Cloudflare Durable Objects are design probes, not SDK/ABI/deployment commitments. Abstractions need concrete consumers or invariants.
+Each fact has one authority; each resident allocation has an owner, bounded population and release boundary. Core drives Session progression; Runtime drives workflow evaluation, saved submissions and cancellation through ordinary core calls. Their Host-facing driving interfaces are private; clients do not sequence transactions, dispatch or recovery. Use direct transactions and deep effect modules. Native embedding and Cloudflare Durable Objects are design probes, not SDK/ABI/deployment commitments. Abstractions need concrete consumers or invariants.
 
 ## Admission and public requests
 
@@ -113,7 +113,7 @@ Recover a matching existing admission answer before reevaluating current admissi
 
 Retrying old configuration cannot revert later settings; retrying a message recovers the same admission, without enqueueing it again, changing an established result binding or reviving excluded input. An unbound admission remains the same queued work until core takes it for processing. A rejection before Session initialization remains rejected afterward.
 
-Malformed envelopes without usable identity and failed commits cannot promise a recorded answer.
+Each command's typed result distinguishes its original committed acceptance or rejection, a proven conflicting key binding, and failure to establish a trustworthy admission answer. A conflict leaves the original binding unchanged; an invocation or canonical-storage failure cannot be reported as a saved rejection. Malformed envelopes without usable identity and failed commits cannot promise a recorded answer.
 
 Acknowledgment follows durable commit, without provider dispatch or final-answer delay. Configuration completes at admission. Message acceptance completes queue admission; processing and the final result may remain pending.
 
@@ -337,7 +337,7 @@ The local owner orders completion/interruption, fences further result publicatio
 
 One reactor multiplexes provider streams and subprocess pipes. Effect modules own handles, bounded windows and charged scratch, never SQLite or permission/retry policy. After commit, adapters materialize outbound requests from manifests/content into unlinked scratch; execution streams output to scratch. No transaction spans request construction, provider/process execution, target mutation or delivery. Only private report-scratch and workflow visibility-metadata writes may occur under their owning read transactions; finish them before delivery/evaluation.
 
-Core invokes private provider/Bash/Edit interfaces through closed effect-specific inputs and evidence. No public provider module, generic dispatch registry or stable ABI is required. An execution receives its admitted Operation/Attempt binding, one-shot permit, immutable input readers and local cancellation control; it cannot choose another descriptor or read current Session settings to replace saved inputs. Keep the permit distinct from the read access needed for validation or permission preview.
+Core invokes private provider/Bash/Edit interfaces through closed effect-specific inputs and evidence. No public provider module, generic dispatch registry or stable ABI is required. An execution receives its admitted Operation/Attempt binding, one-shot permit, immutable input readers and local cancellation control; it cannot choose another descriptor or read current Session settings to replace saved inputs. Keep the permit distinct from the read access needed for validation or permission preview. The reserved execution owner retains this binding before fallible post-commit preparation begins; preparation, authentication and launch failures remain attributable to that Attempt under its failure or canonical-shutdown rule. Starting execution does not wait for its terminal outcome.
 
 | Consumer | Input and returned evidence |
 | --- | --- |
@@ -358,7 +358,7 @@ Charge metadata growth; retain source/metadata through cleanup. Post-commit requ
 
 Caller content enters as a sealed source at its first semantic reference: import verifies length/digest/type/stable bytes; there is no independent public content-publication operation or staged Content Reference. Bounded memory does not bound SQLite/import or validation elapsed time.
 
-Sealed-source handoff grants bounded reads through the last range read and import commit/rollback. Validation metadata contains source-bound ranges, never independent content handles, and expires with the serial workspace. Partial capture, failed seal or terminal disagreement permits only typed failure handling, never promotion of fragments as complete output.
+Sealed-source handoff grants bounded reads through the last range read and import commit/rollback. Validation metadata contains source-bound ranges, never independent content handles, and expires with the serial workspace. Finishing settlement ends core's evidence reads; it does not report physical cleanup or return execution custody. Partial capture, failed seal or terminal disagreement permits only typed failure handling, never promotion of fragments as complete output.
 
 Captures waiting for the serial workspace remain with occupied execution custody, without another growing payload queue. Import creates canonical Content References only at commit. Scratch closes after its final consumer, while callbacks may retain custody longer. Interruption/rejection fences publication before cleanup.
 
@@ -720,4 +720,4 @@ Credential preparation does not grant another model dispatch: HTTP authenticatio
 
 Session configuration, input applicability, observation/answer semantics and wait conditions follow their owning sections above. Exact command/wire spelling, inspection layout/default content, history defaults, content-range edge encoding, key encoding and SQL/private representations are implementation choices under [VERIFICATION.md](VERIFICATION.md). They must preserve complete requested content, private-content restrictions, explicit errors and the selected identity/recovery rules. No separate context-patch mechanism or historical revision guard is required beyond independent sparse configuration and append-only instruction inclusion.
 
-Provider wire/continuation/compaction research (#73), provider/effect interfaces (#122) and workflow/Host/client composition (#123) are resolved in this contract. Production and live-provider qualification remain required by VERIFICATION.md and tracked through readiness issue #2; final cross-module readiness (#124) remains open. V1 excludes conversation branching, model/provider fallback, incompatible handoff, dynamic tools/MCP, generalized scheduling, multi-host coordination, retained workflow VMs and application-state retention/migration. Future fork creates a new Session with ancestry.
+Provider wire/continuation/compaction research (#73), provider/effect interfaces (#122) and workflow/Host/client composition (#123) are resolved in this contract. [Integrated design readiness was accepted](https://github.com/DivyanshGolyan/latifa/issues/124#issuecomment-5651285657) on 2026-09-13. Production implementation and live-provider qualification remain required by VERIFICATION.md; design acceptance does not establish either. V1 excludes conversation branching, model/provider fallback, incompatible handoff, dynamic tools/MCP, generalized scheduling, multi-host coordination, retained workflow VMs and application-state retention/migration. Future fork creates a new Session with ancestry.

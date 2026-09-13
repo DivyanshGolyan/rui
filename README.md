@@ -23,7 +23,7 @@ Start one local server explicitly, then use direct CLI/script calls or JavaScrip
 
 V1 excludes conversation branching/editing, attachments, automatic provider fallback, incompatible model switching, multi-host execution, plugins/dynamic tools, MCP execution, retained workflow VMs, storage migration, public event-stream/watch/webhook/push interfaces, TUI/editor/Web UI and a separate daemon manager. Native embedding and Durable Objects are design probes, not initial supported deployments.
 
-[Issue #2](https://github.com/DivyanshGolyan/latifa/issues/2) owns readiness. Provider wire research, Session/client decisions and interface walkthroughs are resolved in the contract; final readiness stays open there. Production and live-provider qualification remain required. Create implementation slices when the contract is aligned; retired planning tickets do not mean implementation is complete.
+[V1 design readiness was accepted](https://github.com/DivyanshGolyan/latifa/issues/124#issuecomment-5651285657) on 2026-09-13 after the integrated walkthrough. The [readiness map](https://github.com/DivyanshGolyan/latifa/issues/2) records the completed design work. Implementation proceeds in bounded slices under the accepted contract; production and live-provider qualification remain required. Retired planning tickets do not mean implementation is complete.
 
 ## Build and try the current implementation
 
