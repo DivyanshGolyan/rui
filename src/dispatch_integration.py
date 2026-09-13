@@ -667,6 +667,113 @@ def main():
         evidence_endpoint.server_close()
         evidence_thread.join(timeout=5)
 
+        contradictory_sse, _, _ = sse_answer(
+            "contradictory-response",
+            "contradictory-reasoning",
+            "contradictory-message",
+            "must not publish",
+            served_model="model-body",
+        )
+        contradictory_endpoint = SuccessEndpoint(
+            [
+                ResponseSpec(
+                    contradictory_sse,
+                    {
+                        "OpenAI-Model": "model-openai-header",
+                        "X-OpenAI-Model": "model-x-openai-header",
+                        "X-Request-Id": "contradictory-request",
+                    },
+                )
+            ]
+        )
+        contradictory_thread = threading.Thread(
+            target=contradictory_endpoint.serve_forever, daemon=True
+        )
+        contradictory_thread.start()
+        contradictory_store = state / "contradictory-evidence-store"
+        contradictory_host = start_host(
+            contradictory_store,
+            f"http://127.0.0.1:{contradictory_endpoint.server_port}/responses",
+        )
+        processes.append(contradictory_host)
+        configure(
+            state,
+            contradictory_store,
+            "contradictory-config",
+            "direct/contradictory-evidence",
+            "model-a",
+        )
+        message(
+            state,
+            contradictory_store,
+            "contradictory-message",
+            "direct/contradictory-evidence",
+            "contradictory evidence",
+        )
+        contradictory_failure = wait_for(
+            lambda: (
+                value := observe(contradictory_store, "contradictory-message")
+            ).get("result", {}).get("code")
+            and value,
+            "contradictory model evidence failure",
+        )
+        assert contradictory_failure["queue"]["status"] == "failed", contradictory_failure
+        assert (
+            contradictory_failure["result"]["code"] == "contradictory_provider_output"
+        ), contradictory_failure
+        assert len(contradictory_endpoint.requests) == 1
+        database = sqlite3.connect(contradictory_store / "latifa.sqlite3")
+        assert database.execute(
+            "SELECT uncertain,resolution_code,response_id,body_model,openai_model,x_openai_model,request_id FROM model_operation"
+        ).fetchone() == (0, "contradictory_provider_output", None, None, None, None, None)
+        assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
+        assert database.execute(
+            "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
+        ).fetchone()[0] == 0
+        assert database.execute("SELECT outcome_content_id FROM turn").fetchone()[0] is None
+        database.close()
+        stop_host(contradictory_host)
+        processes.remove(contradictory_host)
+        contradictory_reopened = subprocess.Popen(
+            [
+                str(LATIFA),
+                "serve",
+                "--store",
+                str(contradictory_store),
+                "--active-capacity",
+                "1",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        processes.append(contradictory_reopened)
+        assert contradictory_reopened.stdout.readline().startswith("ready ")
+        restarted_failure = observe(contradictory_store, "contradictory-message")
+        assert restarted_failure["queue"]["status"] == "failed", restarted_failure
+        assert restarted_failure["result"] == {
+            "status": "failed",
+            "code": "contradictory_provider_output",
+        }, restarted_failure
+        unreadable_result = subprocess.run(
+            [
+                str(LATIFA),
+                "read-result",
+                "--store",
+                str(contradictory_store),
+                "--key",
+                "contradictory-message",
+            ],
+            capture_output=True,
+            timeout=15,
+        )
+        assert unreadable_result.returncode != 0, unreadable_result.stdout
+        stop_host(contradictory_reopened)
+        processes.remove(contradictory_reopened)
+        contradictory_endpoint.shutdown()
+        contradictory_endpoint.server_close()
+        contradictory_thread.join(timeout=5)
+
         # Input committed after the first request's cutoff is selected at the
         # next boundary. The first complete candidate is durable history but
         # cannot become the Turn's Final Answer while applicable input waits.
