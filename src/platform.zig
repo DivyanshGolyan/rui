@@ -121,14 +121,18 @@ fn isOwnedIngressName(name: []const u8) bool {
 fn isOwnedNumericScratch(name: []const u8, prefix: []const u8) bool {
     if (!std.mem.startsWith(u8, name, prefix) or !std.mem.endsWith(u8, name, ".tmp")) return false;
     const middle = name[prefix.len .. name.len - ".tmp".len];
-    var dash_count: u8 = 0;
-    if (middle.len == 0) return false;
-    for (middle) |byte| {
-        if (byte == '-') {
-            dash_count += 1;
-        } else if (byte < '0' or byte > '9') return false;
+    const separator = std.mem.indexOfScalar(u8, middle, '-') orelse return false;
+    if (std.mem.indexOfScalar(u8, middle[separator + 1 ..], '-') != null) return false;
+    return isCanonicalPositiveDecimal(middle[0..separator]) and
+        isCanonicalPositiveDecimal(middle[separator + 1 ..]);
+}
+
+fn isCanonicalPositiveDecimal(value: []const u8) bool {
+    if (value.len == 0 or value[0] < '1' or value[0] > '9') return false;
+    for (value[1..]) |byte| {
+        if (byte < '0' or byte > '9') return false;
     }
-    return dash_count == 1;
+    return true;
 }
 
 fn cleanupOwnedIngress(scratch: *std.Io.Dir, io: std.Io, fault_cleanup: bool) !void {
@@ -172,8 +176,16 @@ test "startup cleanup recognizes only owned ingress names" {
     try std.testing.expect(isOwnedIngressName("request-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("response-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("response-metadata-12-2.tmp"));
-    try std.testing.expect(!isOwnedIngressName("request-x-2.tmp"));
-    try std.testing.expect(!isOwnedIngressName("response-metadata-12-x.tmp"));
+    inline for (.{ "request-", "response-", "response-metadata-" }) |prefix| {
+        var name_buffer: [64]u8 = undefined;
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}-2.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}--.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}x-2.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}12-x.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}0-2.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}02-2.tmp", .{prefix})));
+    }
     try std.testing.expect(!isOwnedIngressName("response-secret.tmp"));
     try std.testing.expect(!isOwnedIngressName("canonical.sqlite3"));
 }
