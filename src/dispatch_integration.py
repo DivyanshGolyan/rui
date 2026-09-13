@@ -303,7 +303,7 @@ def command(*args, expect=0):
     return json.loads(completed.stdout)
 
 
-def start_host(store, endpoint, *extra):
+def start_host(store, endpoint, *extra, accelerated_retries=True):
     args = [
         str(LATIFA),
         "serve",
@@ -313,12 +313,9 @@ def start_host(store, endpoint, *extra):
         "1",
     ]
     if endpoint is not None:
-        args += [
-            "--provider-endpoint",
-            endpoint,
-            "--test-retry-waits-ms",
-            "50,100,150",
-        ]
+        args += ["--provider-endpoint", endpoint]
+        if accelerated_retries:
+            args += ["--test-retry-waits-ms", "50,100,150"]
     args += extra
     process, _ = start_ready_process(
         args,
@@ -333,6 +330,19 @@ def start_host(store, endpoint, *extra):
 
 def stop_host(process):
     stop_process(process)
+
+
+def crash_host(process, state, label):
+    assert process.poll() is None, process.returncode
+    process.kill()
+    stdout, stderr = process.communicate(timeout=10)
+    (state / f"{label}.stdout").write_bytes(stdout)
+    (state / f"{label}.stderr").write_bytes(stderr)
+    return {
+        "returncode": process.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
 
 
 def configure(state, store, key, session, model, schema=None, instructions=None):
@@ -425,6 +435,7 @@ def main():
     processes = []
     success_endpoint = None
     success_thread = None
+    completed = False
     try:
         first_answer = 'First "answer"\n🙂'.encode()
         second_answer = ("second answer " + "x" * 5000).encode()
@@ -1719,6 +1730,7 @@ def main():
             f"http://127.0.0.1:{preparation_endpoint.server_port}/responses",
             "--fault",
             "provider-prepare",
+            accelerated_retries=False,
         )
         processes.append(preparation_host)
         configure(
@@ -1736,30 +1748,67 @@ def main():
             "known preparation failure",
         )
 
-        def saved_preparation_failure():
-            database = sqlite3.connect(preparation_store / "latifa.sqlite3")
-            try:
-                row = database.execute(
-                    "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code FROM model_operation"
-                ).fetchone()
-                return row if row and row[2] == 0 and row[3] > 0 else None
-            finally:
-                database.close()
+        def known_preparation_settled():
+            observation = observe(preparation_store, "preparation-message")
+            if observation.get("processing", {}).get("attempt") != "1":
+                return None
+            resources = command(
+                "inspect-session",
+                "--store",
+                preparation_store,
+                "--session",
+                "direct/preparation",
+            )["execution"]
+            if resources["custody_occupied"] != "0" or resources["dispatch_fenced"]:
+                return None
+            return observation, resources
 
-        preparation_fact = wait_for(
-            saved_preparation_failure,
-            "saved preparation failure",
+        preparation_observation, preparation_resources = wait_for(
+            known_preparation_settled,
+            "publicly observed saved preparation failure",
             timeout=15,
         )
-        assert preparation_fact[:3] == (1, 1, 0), preparation_fact
-        assert preparation_fact[3] > 0, preparation_fact
-        assert preparation_fact[4] == "provider_transport_failure", preparation_fact
+        assert preparation_observation["queue"]["status"] == "processing"
+        assert preparation_resources["dispatch_fenced"] is False
         assert preparation_endpoint.requests == []
-        stop_host(preparation_host)
+        preparation_crash = crash_host(
+            preparation_host, state, "known-preparation-crash"
+        )
         processes.remove(preparation_host)
+        assert preparation_crash["returncode"] == -signal.SIGKILL, {
+            "crash": preparation_crash,
+            "endpoint_requests": preparation_endpoint.requests,
+            "state": str(state),
+        }
+        database = sqlite3.connect(preparation_store / "latifa.sqlite3")
+        try:
+            preparation_fact = database.execute(
+                "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code FROM model_operation"
+            ).fetchone()
+        finally:
+            database.close()
+        (state / "known-preparation-crash.json").write_text(
+            json.dumps(
+                {
+                    "returncode": preparation_crash["returncode"],
+                    "endpoint_request_count": len(preparation_endpoint.requests),
+                    "offline_row": preparation_fact,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        assert preparation_fact[:3] == (1, 1, 0), {
+            "row": preparation_fact,
+            "crash": preparation_crash,
+            "state": str(state),
+        }
+        assert preparation_fact[3] > 0, preparation_fact
+        assert preparation_fact[4:] == ("provider_transport_failure", None), preparation_fact
         preparation_host = start_host(
             preparation_store,
             f"http://127.0.0.1:{preparation_endpoint.server_port}/responses",
+            accelerated_retries=False,
         )
         processes.append(preparation_host)
         wait_for(
@@ -1768,6 +1817,14 @@ def main():
         )
         assert observe(preparation_store, "preparation-message")["processing"]["attempt"] == "2"
         assert len(preparation_endpoint.requests) == 1
+        resources = command(
+            "inspect-session",
+            "--store",
+            preparation_store,
+            "--session",
+            "direct/preparation",
+        )["execution"]
+        assert resources["dispatch_fenced"] is False, resources
         stop_host(preparation_host)
         processes.remove(preparation_host)
         preparation_endpoint.shutdown()
@@ -1804,19 +1861,50 @@ def main():
             "crash before launch",
         )
 
-        def prelaunch_admitted():
-            database = sqlite3.connect(prelaunch_store / "latifa.sqlite3")
-            try:
-                return database.execute(
-                    "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code FROM model_operation"
-                ).fetchone()
-            finally:
-                database.close()
+        def prelaunch_attempt_one():
+            observation = observe(prelaunch_store, "prelaunch-message")
+            return (
+                observation
+                if observation.get("processing", {}).get("attempt") == "1"
+                else None
+            )
 
-        assert wait_for(prelaunch_admitted, "prelaunch Attempt admission") == (1, 1, 1, None)
-        stop_host(prelaunch_host)
-        processes.remove(prelaunch_host)
+        prelaunch_observation = wait_for(
+            prelaunch_attempt_one,
+            "publicly observed prelaunch Attempt 1",
+        )
+        assert prelaunch_observation["queue"]["status"] == "processing"
         assert prelaunch_endpoint.requests == []
+        prelaunch_crash = crash_host(prelaunch_host, state, "prelaunch-crash")
+        processes.remove(prelaunch_host)
+        assert prelaunch_crash["returncode"] == -signal.SIGKILL, {
+            "crash": prelaunch_crash,
+            "endpoint_requests": prelaunch_endpoint.requests,
+            "state": str(state),
+        }
+        database = sqlite3.connect(prelaunch_store / "latifa.sqlite3")
+        try:
+            prelaunch_fact = database.execute(
+                "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code FROM model_operation"
+            ).fetchone()
+        finally:
+            database.close()
+        (state / "prelaunch-crash.json").write_text(
+            json.dumps(
+                {
+                    "returncode": prelaunch_crash["returncode"],
+                    "endpoint_request_count": len(prelaunch_endpoint.requests),
+                    "offline_row": prelaunch_fact,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        assert prelaunch_fact == (1, 1, 1, None), {
+            "row": prelaunch_fact,
+            "crash": prelaunch_crash,
+            "state": str(state),
+        }
         prelaunch_host = start_host(
             prelaunch_store,
             f"http://127.0.0.1:{prelaunch_endpoint.server_port}/responses",
@@ -1828,6 +1916,14 @@ def main():
         )
         assert observe(prelaunch_store, "prelaunch-message")["processing"]["attempt"] == "2"
         assert len(prelaunch_endpoint.requests) == 1
+        resources = command(
+            "inspect-session",
+            "--store",
+            prelaunch_store,
+            "--session",
+            "direct/prelaunch",
+        )["execution"]
+        assert resources["dispatch_fenced"] is False, resources
         stop_host(prelaunch_host)
         processes.remove(prelaunch_host)
         prelaunch_endpoint.shutdown()
@@ -3104,6 +3200,7 @@ def main():
         assert resources["scratch_used_bytes"] == "0", resources
         stop_host(offline)
         processes.remove(offline)
+        completed = True
     finally:
         for process in processes:
             stop_host(process)
@@ -3115,7 +3212,10 @@ def main():
             success_endpoint.server_close()
         if success_thread is not None:
             success_thread.join(timeout=5)
-        shutil.rmtree(state)
+        if completed:
+            shutil.rmtree(state)
+        else:
+            print(f"retained dispatch integration failure state: {state}", file=sys.stderr)
 
 
 if __name__ == "__main__":
