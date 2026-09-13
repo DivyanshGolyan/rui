@@ -2032,6 +2032,164 @@ def main():
         capacity_endpoint.server_close()
         capacity_thread.join(timeout=5)
 
+        # Retry selection is taken only when execution capacity is available.
+        # A candidate observed while full cannot survive until release and
+        # bypass an older Operation that becomes due in the meantime.
+        stale_release = threading.Event()
+        stale_endpoint = SuccessEndpoint(
+            [
+                ResponseSpec(b"older waiting", {}, 503),
+                ResponseSpec(b"newer waiting", {}, 503),
+                (ResponseSpec(b"capacity owner", {}, 422), stale_release),
+                ResponseSpec(b"selected after release", {}, 422),
+                ResponseSpec(b"remaining retry", {}, 422),
+            ]
+        )
+        stale_thread = threading.Thread(target=stale_endpoint.serve_forever, daemon=True)
+        stale_thread.start()
+        stale_store = state / "retry-release-order-store"
+        stale_host = start_host(
+            stale_store,
+            f"http://127.0.0.1:{stale_endpoint.server_port}/responses",
+            "--test-retry-waits-ms",
+            "60000,60000,60000",
+        )
+        processes.append(stale_host)
+        for name in ("older", "newer", "capacity"):
+            expected_requests = len(stale_endpoint.requests) + 1
+            configure(
+                state,
+                stale_store,
+                f"stale-{name}-config",
+                f"direct/stale-{name}",
+                "model-a",
+            )
+            message(
+                state,
+                stale_store,
+                f"stale-{name}-message",
+                f"direct/stale-{name}",
+                f"stale-{name}",
+            )
+            wait_for(
+                lambda expected=expected_requests: len(stale_endpoint.requests) >= expected,
+                f"{name} initial Attempt",
+            )
+        database = sqlite3.connect(stale_store / "latifa.sqlite3")
+        try:
+            now_ms = time.time_ns() // 1_000_000
+            database.execute(
+                "UPDATE model_operation SET retry_due_at_ms=? WHERE operation_id=1",
+                (now_ms + 3000,),
+            )
+            database.execute(
+                "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=2"
+            )
+            database.commit()
+        finally:
+            database.close()
+        time.sleep(3.2)
+        stale_release.set()
+        wait_for(lambda: len(stale_endpoint.requests) >= 4, "retry after capacity release")
+        released_request = json.loads(stale_endpoint.requests[3])
+        released_user_text = next(
+            content["text"]
+            for item in released_request["input"]
+            if item.get("role") == "user"
+            for content in item["content"]
+            if content.get("type") == "input_text"
+        )
+        assert released_user_text == "stale-older", released_user_text
+        stop_host(stale_host)
+        processes.remove(stale_host)
+        stale_endpoint.shutdown()
+        stale_endpoint.server_close()
+        stale_thread.join(timeout=5)
+
+        # A due snapshot larger than one discovery page is serviced between
+        # event-loop turns without adding a 100 ms sleep per page. Deadline
+        # order is deliberately opposite Operation age; the oldest valid
+        # Operation still launches first.
+        paging_release = threading.Event()
+        paging_endpoint = SuccessEndpoint(
+            [
+                ResponseSpec(b"initial temporary failure", {}, 503),
+                (ResponseSpec(b"paged retry", {}, 422), paging_release),
+            ]
+        )
+        paging_thread = threading.Thread(target=paging_endpoint.serve_forever, daemon=True)
+        paging_thread.start()
+        paging_store = state / "retry-paging-store"
+        paging_host = start_host(
+            paging_store,
+            f"http://127.0.0.1:{paging_endpoint.server_port}/responses",
+            "--test-retry-waits-ms",
+            "60000,60000,60000",
+        )
+        processes.append(paging_host)
+        configure(state, paging_store, "paging-config", "direct/paging", "model-a")
+        message(
+            state,
+            paging_store,
+            "paging-message",
+            "direct/paging",
+            "oldest-paged-retry",
+        )
+
+        def paging_waiting():
+            database = sqlite3.connect(paging_store / "latifa.sqlite3")
+            try:
+                row = database.execute(
+                    "SELECT retry_due_at_ms FROM model_operation WHERE operation_id=1"
+                ).fetchone()
+                return row is not None and row[0] > 0
+            finally:
+                database.close()
+
+        wait_for(paging_waiting, "paged retry wait")
+        stop_host(paging_host)
+        processes.remove(paging_host)
+        database = sqlite3.connect(paging_store / "latifa.sqlite3")
+        try:
+            database.execute("PRAGMA foreign_keys=OFF")
+            database.execute("UPDATE model_operation SET retry_due_at_ms=1024 WHERE operation_id=1")
+            database.execute(
+                "WITH RECURSIVE sequence(value) AS (VALUES(1000) UNION ALL "
+                "SELECT value+1 FROM sequence WHERE value<2023) "
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) "
+                "SELECT value,value,printf('paging-%d',value),1,1,1,1,1,0,1 FROM sequence"
+            )
+            database.commit()
+        finally:
+            database.close()
+        paging_started = time.monotonic()
+        paging_host = start_host(
+            paging_store,
+            f"http://127.0.0.1:{paging_endpoint.server_port}/responses",
+            "--test-retry-waits-ms",
+            "60000,60000,60000",
+        )
+        processes.append(paging_host)
+        wait_for(lambda: len(paging_endpoint.requests) == 2, "bounded paged retry launch")
+        paging_elapsed = time.monotonic() - paging_started
+        assert paging_elapsed < 1.0, paging_elapsed
+        paged_request = json.loads(paging_endpoint.requests[1])
+        paged_user_text = next(
+            content["text"]
+            for item in paged_request["input"]
+            if item.get("role") == "user"
+            for content in item["content"]
+            if content.get("type") == "input_text"
+        )
+        assert paged_user_text == "oldest-paged-retry", paged_user_text
+        stop_host(paging_host)
+        processes.remove(paging_host)
+        paging_release.set()
+        paging_endpoint.shutdown()
+        paging_endpoint.server_close()
+        paging_thread.join(timeout=5)
+
         # Exhaustion settles only the selected prefix. Input admitted while
         # those retries run remains unselected and receives the outcome of the
         # successor Turn that eventually takes it.
