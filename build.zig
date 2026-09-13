@@ -200,10 +200,12 @@ fn configureTransport(
     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libcrypto.a"));
     if (target.result.os.tag == .macos) {
-        const sdk = std.mem.trimEnd(u8, b.run(&.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" }), "\r\n");
-        compile.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System/Library/Frameworks" }) });
-        compile.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
-        compile.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
+        // The selected transport build discovers the active CLT/Xcode SDK and
+        // exposes these paths lazily. Constructing dormant macOS cross steps
+        // therefore requires no Apple tooling on a Linux build host.
+        compile.root_module.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
+        compile.root_module.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
+        compile.root_module.addLibraryPath(pinned.output.path(b, "sdk/usr/lib"));
         compile.root_module.linkFramework("Security", .{});
         compile.root_module.linkFramework("CoreFoundation", .{});
         compile.root_module.linkFramework("CoreServices", .{});
