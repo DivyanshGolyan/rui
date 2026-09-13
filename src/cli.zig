@@ -12,6 +12,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "message")) return message(init.io, args[2..]);
     if (std.mem.eql(u8, command, "retry")) return retry(init.io, args[2..]);
     if (std.mem.eql(u8, command, "observe-command")) return observe(init.io, args[2..]);
+    if (std.mem.eql(u8, command, "read-result")) return readResult(init.io, args[2..]);
     if (std.mem.eql(u8, command, "inspect-session")) return inspect(init.io, args[2..]);
     return usage();
 }
@@ -32,7 +33,7 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             active_capacity = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
         } else if (std.mem.eql(u8, arg, "--fault")) {
             const fault = try takeValue(args, &index);
-            if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-short-write")) faults.content_short_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "scratch-acquire")) faults.scratch_acquire = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else if (std.mem.eql(u8, fault, "attempt-before-commit")) faults.attempt_before_commit = true else if (std.mem.eql(u8, fault, "result-before-commit")) faults.result_before_commit = true else if (std.mem.eql(u8, fault, "request-first-step")) faults.request_first_step = true else if (std.mem.eql(u8, fault, "request-write")) faults.request_write = true else if (std.mem.eql(u8, fault, "request-seal")) faults.request_seal = true else if (std.mem.eql(u8, fault, "request-scratch-acquire")) faults.request_scratch_acquire = true else if (std.mem.eql(u8, fault, "request-unlink")) faults.request_unlink = true else return error.UnknownFault;
+            if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-short-write")) faults.content_short_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "scratch-acquire")) faults.scratch_acquire = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else if (std.mem.eql(u8, fault, "attempt-before-commit")) faults.attempt_before_commit = true else if (std.mem.eql(u8, fault, "result-before-commit")) faults.result_before_commit = true else if (std.mem.eql(u8, fault, "request-first-step")) faults.request_first_step = true else if (std.mem.eql(u8, fault, "request-write")) faults.request_write = true else if (std.mem.eql(u8, fault, "request-seal")) faults.request_seal = true else if (std.mem.eql(u8, fault, "request-scratch-acquire")) faults.request_scratch_acquire = true else if (std.mem.eql(u8, fault, "request-unlink")) faults.request_unlink = true else if (std.mem.eql(u8, fault, "response-acquire")) faults.response_acquire = true else if (std.mem.eql(u8, fault, "response-write")) faults.response_write = true else if (std.mem.eql(u8, fault, "response-seal")) faults.response_seal = true else if (std.mem.eql(u8, fault, "response-metadata")) faults.response_metadata = true else if (std.mem.eql(u8, fault, "response-read")) faults.response_read = true else if (std.mem.eql(u8, fault, "response-import")) faults.response_import = true else if (std.mem.eql(u8, fault, "response-commit")) faults.response_commit = true else return error.UnknownFault;
         } else if (std.mem.eql(u8, arg, "--test-cleanup-delay-ms")) {
             faults.cleanup_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
             if (faults.cleanup_delay_ms < 0 or faults.cleanup_delay_ms > 60_000) return error.InvalidCleanupDelay;
@@ -129,6 +130,19 @@ fn inspect(io: std.Io, args: []const []const u8) !void {
     if (status != 200) return error.HostInvocationFailed;
 }
 
+fn readResult(io: std.Io, args: []const []const u8) !void {
+    var store_path: ?[]const u8 = null;
+    var key: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < args.len) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) key = try takeValue(args, &index) else return error.UnknownArgument;
+        index += 1;
+    }
+    const status = try client.readResult(io, store_path orelse return usage(), key orelse return usage());
+    if (status != 200) return error.HostInvocationFailed;
+}
+
 fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
     index.* += 1;
     if (index.* >= args.len) return error.MissingArgumentValue;
@@ -143,6 +157,7 @@ fn usage() error{InvalidArguments} {
         \\  latifa message --store PATH --record FILE --key KEY --session REF --text FILE|-
         \\  latifa retry --store PATH --record FILE --kind configure|message
         \\  latifa observe-command --store PATH --key KEY
+        \\  latifa read-result --store PATH --key KEY
         \\  latifa inspect-session --store PATH --session REF
         \\
     , .{});

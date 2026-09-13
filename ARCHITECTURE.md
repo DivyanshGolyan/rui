@@ -552,7 +552,7 @@ Bound native allocations/stack separately from engine heap; reuse temporary stor
 
 ### Public operations
 
-The adapter exposes Session configuration/messages, observations/history/wait, permission, exact Model Interruption and stops, plus Workflow create/attach/inspect/cancel. Driving is internal, not public `advance`. Direct CLI is Session-addressed; message text is positional and `-` reads complete stdin. Final command spellings remain implementation work.
+The adapter exposes Session configuration/messages, keyed result reads, observations/history/wait, permission, exact Model Interruption and stops, plus Workflow create/attach/inspect/cancel. Driving is internal, not public `advance`. Direct CLI is Session-addressed; message text is positional and `-` reads complete stdin. A keyed result read returns only that accepted message's terminal public answer and streams it without exposing private provider items. Final command spellings beyond implemented slices remain implementation work.
 
 ### Inspecting Sessions associated with a Workflow
 

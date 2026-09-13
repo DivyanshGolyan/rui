@@ -5,4 +5,5 @@ test {
     _ = @import("server.zig");
     _ = @import("execution.zig");
     _ = @import("provider.zig");
+    _ = @import("provider_output.zig");
 }

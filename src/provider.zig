@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const execution = @import("execution.zig");
 const protocol = @import("protocol.zig");
+const provider_output = @import("provider_output.zig");
 const store = @import("store.zig");
 const transport_options = @import("transport_options");
 
@@ -12,7 +13,6 @@ const c = @cImport({
 pub const curl_version = "8.22.0";
 pub const openssl_version = "OpenSSL/3.6.3";
 pub const request_scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
-pub const response_observation_limit_bytes: usize = 64 * 1024;
 pub const max_endpoint_bytes = 2048;
 const per_input_framing_charge: u64 = 128;
 
@@ -25,6 +25,8 @@ pub const PreparationFaults = struct {
 
 pub const TransportOptions = struct {
     inactivity_seconds: c_long = 5 * 60,
+    response_acquire_fault: bool = false,
+    response_write_fault: bool = false,
 };
 
 pub const ScratchBudget = struct {
@@ -85,7 +87,7 @@ const RequestWriter = struct {
     offset: u64 = 0,
     fail_write: bool,
 
-    fn write(self: *RequestWriter, bytes: []const u8) !void {
+    pub fn write(self: *RequestWriter, bytes: []const u8) !void {
         if (self.fail_write) return error.InjectedRequestWriteFailure;
         try self.file.writeStreamingAll(self.io, bytes);
         self.offset = try std.math.add(u64, self.offset, bytes.len);
@@ -168,17 +170,15 @@ pub fn materialize(
     var maximum: u64 = 1024;
     maximum = try addEscapedMaximum(maximum, settings.model.len);
     if (settings.output_schema) |schema| maximum = try std.math.add(u64, maximum, schema.length);
-    var after_revision: u64 = 0;
-    while (try view.nextInstruction(after_revision)) |instruction| {
-        maximum = try addEscapedMaximum(maximum, instruction.content.length);
+    maximum = try addEscapedMaximum(maximum, settings.baseline_instructions.length);
+    var after_position: u64 = 0;
+    while (try view.nextEntry(after_position)) |entry| {
+        maximum = if (entry.kind == .provider_output)
+            try std.math.add(u64, maximum, entry.content.length)
+        else
+            try addEscapedMaximum(maximum, entry.content.length);
         maximum = try std.math.add(u64, maximum, per_input_framing_charge);
-        after_revision = instruction.revision;
-    }
-    var after: u64 = 0;
-    while (try view.nextInput(after)) |input| {
-        maximum = try addEscapedMaximum(maximum, input.content.length);
-        maximum = try std.math.add(u64, maximum, per_input_framing_charge);
-        after = input.admission_id;
+        after_position = entry.position;
     }
     if (!budget.reserve(maximum)) return error.RequestScratchExhausted;
     var budget_owned = true;
@@ -232,36 +232,29 @@ pub fn materialize(
     try writer.jsonString(settings.model.slice());
     try writer.write(",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[");
     var input_comma = false;
-    after_revision = 0;
-    if (try view.nextInstruction(after_revision)) |baseline| {
-        try writer.write("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
-        var instructions = try view.openContent(baseline.content);
-        try writer.jsonContent(&instructions);
-        instructions.close();
-        try writer.write("}]}");
-        input_comma = true;
-        after_revision = baseline.revision;
-    }
-    after = 0;
-    while (try view.nextInput(after)) |input| {
+    try writer.write("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
+    var baseline = try view.openContent(settings.baseline_instructions);
+    try writer.jsonContent(&baseline);
+    baseline.close();
+    try writer.write("}]}");
+    input_comma = true;
+    after_position = 0;
+    while (try view.nextEntry(after_position)) |entry| {
         if (input_comma) try writer.write(",");
-        try writer.write("{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":");
-        var content = try view.openContent(input.content);
-        try writer.jsonContent(&content);
+        var content = try view.openContent(entry.content);
+        if (entry.kind == .provider_output) {
+            try provider_output.writeReplayItem(&content, &writer);
+        } else {
+            try writer.write(if (entry.kind == .user)
+                "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":"
+            else
+                "{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
+            try writer.jsonContent(&content);
+            try writer.write("}]}");
+        }
         content.close();
-        try writer.write("}]}");
         input_comma = true;
-        after = input.admission_id;
-    }
-    while (try view.nextInstruction(after_revision)) |instruction| {
-        if (input_comma) try writer.write(",");
-        try writer.write("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
-        var instructions = try view.openContent(instruction.content);
-        try writer.jsonContent(&instructions);
-        instructions.close();
-        try writer.write("}]}");
-        input_comma = true;
-        after_revision = instruction.revision;
+        after_position = entry.position;
     }
     try writer.write("],\"tools\":[");
     var comma = false;
@@ -295,7 +288,7 @@ fn addEscapedMaximum(current: u64, bytes: u64) !u64 {
     return std.math.add(u64, current, try std.math.mul(u64, bytes, 6));
 }
 
-pub const TransportClass = enum { permanent_http, temporary_http, transport_failure };
+pub const TransportClass = enum { success, permanent_http, temporary_http, transport_failure };
 
 pub const TransportEvidence = struct {
     class: TransportClass,
@@ -384,9 +377,115 @@ const ReadContext = struct {
     failed: bool = false,
 };
 
-const WriteContext = struct {
-    bytes: u64 = 0,
-    overflow: bool = false,
+pub const ResponseCapture = struct {
+    const Failure = enum { scratch_exhausted, write_failed };
+
+    io: std.Io,
+    file: std.Io.File,
+    readonly: ?std.Io.File,
+    budget: ScratchBudget,
+    length: u64 = 0,
+    charged: u64 = 0,
+    sealed: bool = false,
+    fail_write: bool = false,
+    failure: ?Failure = null,
+
+    pub fn init(
+        io: std.Io,
+        scratch_path: []const u8,
+        budget: ScratchBudget,
+        binding: store.AttemptBinding,
+        fail_acquire: bool,
+        fail_write: bool,
+    ) !ResponseCapture {
+        if (fail_acquire) return error.InjectedResponseAcquireFailure;
+        var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
+        defer scratch.close(io);
+        var name_buffer: [96]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "response-{d}-{d}.tmp", .{
+            binding.operation_id,
+            binding.attempt_ordinal,
+        });
+        const file = try scratch.createFile(io, name, .{
+            .read = true,
+            .exclusive = true,
+            .permissions = .fromMode(0o600),
+        });
+        errdefer file.close(io);
+        errdefer scratch.deleteFile(io, name) catch {};
+        const readonly = try scratch.openFile(io, name, .{});
+        errdefer readonly.close(io);
+        try scratch.deleteFile(io, name);
+        return .{
+            .io = io,
+            .file = file,
+            .readonly = readonly,
+            .budget = budget,
+            .fail_write = fail_write,
+        };
+    }
+
+    fn write(self: *ResponseCapture, bytes: []const u8) !void {
+        std.debug.assert(!self.sealed);
+        if (self.fail_write) {
+            self.failure = .write_failed;
+            return error.InjectedResponseWriteFailure;
+        }
+        if (!self.budget.reserve(bytes.len)) {
+            self.failure = .scratch_exhausted;
+            return error.ResponseScratchExhausted;
+        }
+        const next_charged = std.math.add(u64, self.charged, bytes.len) catch {
+            self.budget.release(bytes.len);
+            self.failure = .write_failed;
+            return error.ResponseLengthOverflow;
+        };
+        const next_length = std.math.add(u64, self.length, bytes.len) catch {
+            self.budget.release(bytes.len);
+            self.failure = .write_failed;
+            return error.ResponseLengthOverflow;
+        };
+        // Retain the whole callback reservation after a partial OS write. The
+        // failed capture is released immediately and never undercounts disk.
+        self.charged = next_charged;
+        self.file.writeStreamingAll(self.io, bytes) catch |err| {
+            self.failure = .write_failed;
+            return err;
+        };
+        self.length = next_length;
+    }
+
+    fn failureCode(self: *const ResponseCapture) ?[]const u8 {
+        return if (self.failure) |failure| switch (failure) {
+            .scratch_exhausted => "response_scratch_exhausted",
+            .write_failed => "response_write_failed",
+        } else null;
+    }
+
+    pub fn seal(self: *ResponseCapture, fail: bool) !void {
+        std.debug.assert(!self.sealed);
+        if (fail) return error.InjectedResponseSealFailure;
+        try self.file.sync(self.io);
+        if (try self.file.length(self.io) != self.length) return error.ResponseSealFailed;
+        const readonly = self.readonly orelse return error.ResponseSealFailed;
+        self.file.close(self.io);
+        self.file = readonly;
+        self.readonly = null;
+        self.sealed = true;
+    }
+
+    pub fn deinit(self: *ResponseCapture) void {
+        self.file.close(self.io);
+        if (self.readonly) |readonly| readonly.close(self.io);
+        self.budget.release(self.charged);
+        self.* = undefined;
+    }
+};
+
+const HeaderContext = struct {
+    request_id: protocol.Bounded(256) = .{},
+    served_model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    invalid: bool = false,
 };
 
 const TimeoutContext = struct {
@@ -402,7 +501,9 @@ pub const Transfer = struct {
     headers: ?*c.curl_slist,
     request: PreparedRequest,
     read_context: ReadContext,
-    write_context: WriteContext = .{},
+    response: ResponseCapture,
+    response_owned: bool = true,
+    header_context: HeaderContext = .{},
     timeout_context: TimeoutContext,
     in_reactor: bool = false,
     binding: store.AttemptBinding,
@@ -413,6 +514,8 @@ pub const Transfer = struct {
         request: PreparedRequest,
         binding: store.AttemptBinding,
         options: TransportOptions,
+        scratch_path: []const u8,
+        response_budget: ScratchBudget,
     ) !void {
         if (options.inactivity_seconds <= 0) return error.InvalidTransportTimeout;
         try validateEndpoint(endpoint);
@@ -424,11 +527,21 @@ pub const Transfer = struct {
         headers = c.curl_slist_append(headers, "Content-Type: application/json") orelse
             return error.TransportAllocationFailed;
         errdefer c.curl_slist_free_all(headers);
+        var response = ResponseCapture.init(
+            request.io,
+            scratch_path,
+            response_budget,
+            binding,
+            options.response_acquire_fault,
+            options.response_write_fault,
+        ) catch return error.ResponseCaptureAcquisitionFailed;
+        errdefer response.deinit();
         self.* = .{
             .easy = easy,
             .headers = headers,
             .request = request,
             .read_context = .{ .io = request.io, .file = request.file, .length = request.length },
+            .response = response,
             .binding = binding,
             .timeout_context = .{
                 .io = request.io,
@@ -441,7 +554,9 @@ pub const Transfer = struct {
         try setOpt(easy, c.CURLOPT_READFUNCTION, readCallback);
         try setOpt(easy, c.CURLOPT_READDATA, &self.read_context);
         try setOpt(easy, c.CURLOPT_WRITEFUNCTION, writeCallback);
-        try setOpt(easy, c.CURLOPT_WRITEDATA, &self.write_context);
+        try setOpt(easy, c.CURLOPT_WRITEDATA, &self.response);
+        try setOpt(easy, c.CURLOPT_HEADERFUNCTION, headerCallback);
+        try setOpt(easy, c.CURLOPT_HEADERDATA, &self.header_context);
         try setOpt(easy, c.CURLOPT_HTTPHEADER, headers);
         try setOpt(easy, c.CURLOPT_FOLLOWLOCATION, @as(c_long, 0));
         try setOpt(easy, c.CURLOPT_MAXREDIRS, @as(c_long, 0));
@@ -462,8 +577,8 @@ pub const Transfer = struct {
     }
 
     pub fn evidence(self: *Transfer, result: c.CURLcode) !TransportEvidence {
-        if (result != c.CURLE_OK or self.read_context.failed or self.write_context.overflow) {
-            return .{ .class = .transport_failure, .response_bytes = self.write_context.bytes };
+        if (result != c.CURLE_OK or self.read_context.failed or self.header_context.invalid) {
+            return .{ .class = .transport_failure, .response_bytes = self.response.length };
         }
         var response_code: c_long = 0;
         if (c.curl_easy_getinfo(self.easy, c.CURLINFO_RESPONSE_CODE, &response_code) != c.CURLE_OK or
@@ -472,13 +587,15 @@ pub const Transfer = struct {
             return error.InvalidHttpEvidence;
         }
         const status: u16 = @intCast(response_code);
-        const class: TransportClass = if (status == 408 or status == 429 or status >= 500)
+        const class: TransportClass = if (status >= 200 and status < 300)
+            .success
+        else if (status == 408 or status == 429 or status >= 500)
             .temporary_http
         else if (status >= 400)
             .permanent_http
         else
             .transport_failure;
-        return .{ .class = class, .http_status = status, .response_bytes = self.write_context.bytes };
+        return .{ .class = class, .http_status = status, .response_bytes = self.response.length };
     }
 
     fn armTimeout(self: *Transfer) void {
@@ -491,7 +608,26 @@ pub const Transfer = struct {
         c.curl_slist_free_all(self.headers);
         c.curl_easy_cleanup(self.easy);
         self.request.deinit();
+        if (self.response_owned) self.response.deinit();
         self.* = undefined;
+    }
+
+    pub fn takeResponse(self: *Transfer) ResponseCapture {
+        std.debug.assert(self.response_owned);
+        self.response_owned = false;
+        return self.response;
+    }
+
+    pub fn requestId(self: *const Transfer) []const u8 {
+        return self.header_context.request_id.slice();
+    }
+
+    pub fn servedModel(self: *const Transfer) []const u8 {
+        return self.header_context.served_model.slice();
+    }
+
+    pub fn responseFailureCode(self: *const Transfer) ?[]const u8 {
+        return self.response.failureCode();
     }
 };
 
@@ -550,15 +686,34 @@ fn xferInfoCallback(
     return if (context.last_progress.durationTo(now).raw.nanoseconds >= context.inactivity_ns) 1 else 0;
 }
 
-fn writeCallback(_: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopaque) callconv(.c) usize {
-    const context: *WriteContext = @ptrCast(@alignCast(context_pointer orelse return 0));
+fn writeCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopaque) callconv(.c) usize {
+    const context: *ResponseCapture = @ptrCast(@alignCast(context_pointer orelse return 0));
     const bytes = std.math.mul(usize, size, count) catch return 0;
-    const next = std.math.add(u64, context.bytes, bytes) catch return 0;
-    if (next > response_observation_limit_bytes) {
-        context.overflow = true;
+    context.write(pointer[0..bytes]) catch return 0;
+    return bytes;
+}
+
+fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopaque) callconv(.c) usize {
+    const context: *HeaderContext = @ptrCast(@alignCast(context_pointer orelse return 0));
+    const bytes = std.math.mul(usize, size, count) catch return 0;
+    const line = pointer[0..bytes];
+    const colon = std.mem.indexOfScalar(u8, line, ':') orelse return bytes;
+    const name = std.mem.trim(u8, line[0..colon], " \t");
+    const value = std.mem.trim(u8, line[colon + 1 ..], " \t\r\n");
+    const destination = if (std.ascii.eqlIgnoreCase(name, "x-request-id"))
+        &context.request_id
+    else if (std.ascii.eqlIgnoreCase(name, "openai-model") or std.ascii.eqlIgnoreCase(name, "x-openai-model"))
+        &context.served_model
+    else
+        return bytes;
+    if (value.len == 0 or (destination.len != 0 and !destination.eql(value))) {
+        context.invalid = true;
         return 0;
     }
-    context.bytes = next;
+    destination.set(value) catch {
+        context.invalid = true;
+        return 0;
+    };
     return bytes;
 }
 

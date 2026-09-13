@@ -4,7 +4,7 @@ Latifa (formerly OnePage) is a resource-bounded, crash-resumable local runtime f
 
 ## Status
 
-The source implements the first three redesigned runtime slices: an explicitly started Host, exclusive Store ownership, direct configuration/message clients, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, immutable ordered message admission and the first model-attempt path. Core selects an eligible queued prefix into one Turn, freezes its historical settings and inputs, reserves fixed custody, materializes a complete disk-backed Responses request and launches it once through a bounded libcurl reactor. A permanent HTTP failure is saved and readable through every selected message admission. Successful provider output, retry/restart resolution and every Workflow, tool, permission, stop and interruption surface enter in later implementation issues.
+The source implements the first four redesigned runtime slices: an explicitly started Host, exclusive Store ownership, direct configuration/message clients, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, immutable ordered message admission and completed text-model Turns. Core selects an eligible queued prefix, freezes its historical view, launches one disk-backed Responses request, captures and validates the complete SSE response, and atomically saves ordered private provider output with the public answer. The original message key reads its complete answer after client or Host restart. A later Turn reconstructs the Session from canonical host input and private provider output without relying on provider-side storage. Automatic retry/recovery of interrupted Attempts and every Workflow, tool, permission, stop and interruption surface enter in later implementation issues.
 
 The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. The current build cross-compiles all four targets. Runtime and resource verification uses the available Apple Silicon Mac; the other targets remain compile-only evidence until exercised on their platforms.
 
@@ -77,6 +77,10 @@ Submit a complete message from a file or from stdin. Acceptance identifies its i
 ./zig-out/bin/latifa observe-command \
   --store /absolute/path/to/private-store \
   --key message-1
+
+./zig-out/bin/latifa read-result \
+  --store /absolute/path/to/private-store \
+  --key message-1
 ```
 
 The applicable gates are:
@@ -88,7 +92,8 @@ zig build dispatch-integration
 zig build measure-admission
 zig build measure-message-admission
 zig build measure-model-dispatch
+zig build measure-model-output
 ```
 
-The measurement steps are opt-in macOS resource runs. Provider authentication, successful output processing, retry/restart completion and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The measurement steps are opt-in macOS resource runs. Provider authentication, automatic retry/recovery of interrupted Attempts, tool execution and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 `check` exercises both the ReleaseSafe production gate and the default Debug artifact shown above; `cross-check` compiles ReleaseSmall deliverables.
