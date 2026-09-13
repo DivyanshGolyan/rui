@@ -214,14 +214,37 @@ pub fn serve(
     }
 }
 
-const ExecutionSlot = struct {
-    state: enum { free, transport, cleanup, retained_scratch, retained_metadata } = .free,
+const AttemptOwner = struct {
     token: execution.CustodyToken = undefined,
     binding: store_module.AttemptBinding = undefined,
+};
+
+const ProviderSlot = struct {
+    owner: AttemptOwner,
     transfer: provider.Transfer = undefined,
+};
+
+const CleanupSlot = struct {
+    owner: AttemptOwner,
     cleanup_ticks: u32 = 0,
-    retained_scratch: provider.RetainedScratch = undefined,
-    retained_metadata: store_module.RetainedOutputMetadata = undefined,
+};
+
+const RetainedScratchSlot = struct {
+    token: execution.CustodyToken,
+    scratch: provider.RetainedScratch,
+};
+
+const RetainedMetadataSlot = struct {
+    token: execution.CustodyToken,
+    metadata: store_module.RetainedOutputMetadata,
+};
+
+const ExecutionSlot = union(enum) {
+    free,
+    provider: ProviderSlot,
+    cleanup: CleanupSlot,
+    retained_scratch: RetainedScratchSlot,
+    retained_metadata: RetainedMetadataSlot,
 };
 
 const AdmissionProgress = enum { no_work, retry_later, admitted };
@@ -232,7 +255,7 @@ fn executionMain(host: *Host) void {
         return;
     };
     defer host.allocator.free(slots);
-    for (slots) |*slot| slot.* = .{};
+    for (slots) |*slot| slot.* = .free;
     var reactor = provider.Reactor.init() catch |err| {
         fenceDispatch(host, "transport reactor initialization", err);
         return;
@@ -273,7 +296,7 @@ fn executionMain(host: *Host) void {
                 }
                 if (free_slots != 0) {
                     for (slots) |*slot| {
-                        if (slot.state != .free) continue;
+                        if (!slotIsFree(slot)) continue;
                         switch (admitRetryAttempt(host, &reactor, slot, active_filter)) {
                             .admitted => {
                                 made_progress = true;
@@ -290,7 +313,7 @@ fn executionMain(host: *Host) void {
             }
             if (may_admit_new) {
                 for (slots) |*slot| {
-                    if (slot.state != .free) continue;
+                    if (!slotIsFree(slot)) continue;
                     switch (admitNewAttempt(host, &reactor, slot)) {
                         .admitted => made_progress = true,
                         .no_work, .retry_later => {},
@@ -326,9 +349,13 @@ fn executionMain(host: *Host) void {
 fn countFreeSlots(slots: []const ExecutionSlot) usize {
     var free: usize = 0;
     for (slots) |slot| {
-        if (slot.state == .free) free += 1;
+        if (slot == .free) free += 1;
     }
     return free;
+}
+
+fn slotIsFree(slot: *const ExecutionSlot) bool {
+    return slot.* == .free;
 }
 
 const ActiveSlots = struct {
@@ -337,9 +364,11 @@ const ActiveSlots = struct {
 
 fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
     const active: *const ActiveSlots = @ptrCast(@alignCast(context));
-    for (active.slots) |slot| {
-        if (slot.state != .free and slot.binding.operation_id == operation_id) return true;
-    }
+    for (active.slots) |slot| switch (slot) {
+        .provider => |value| if (value.owner.binding.operation_id == operation_id) return true,
+        .cleanup => |value| if (value.owner.binding.operation_id == operation_id) return true,
+        .free, .retained_scratch, .retained_metadata => {},
+    };
     return false;
 }
 
@@ -349,7 +378,10 @@ fn findActiveTransfer(
 ) ?*provider.Transfer {
     const active: *const ActiveSlots = @ptrCast(@alignCast(context));
     for (active.slots) |*slot| {
-        if (slot.state == .transport and slot.transfer.matchesHandle(handle)) return &slot.transfer;
+        switch (slot.*) {
+            .provider => |*value| if (value.transfer.matchesHandle(handle)) return &value.transfer,
+            else => {},
+        }
     }
     return null;
 }
@@ -436,10 +468,10 @@ fn beginAdmittedAttempt(
         &retained_scratch,
     ) catch |err| {
         if (retained_scratch) |retained| {
-            slot.state = .retained_scratch;
-            slot.token = token;
-            slot.binding = binding;
-            slot.retained_scratch = retained;
+            slot.* = .{ .retained_scratch = .{
+                .token = token,
+                .scratch = retained,
+            } };
             retainDispatchFence(host, "request scratch unlink", err);
             return .admitted;
         }
@@ -461,7 +493,14 @@ fn beginAdmittedAttempt(
         finishCustodyNow(host, token);
         return .admitted;
     }
-    slot.transfer.start(host.provider_endpoint.?, request, binding, .{
+    // Transfer.start gives curl pointers into the Transfer, so construct it in
+    // its final slot and keep that union arm active through removal and deinit.
+    slot.* = .{ .provider = .{
+        .owner = .{ .token = token, .binding = binding },
+        .transfer = undefined,
+    } };
+    const active = &slot.provider;
+    active.transfer.start(host.provider_endpoint.?, request, binding, .{
         .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,
@@ -471,10 +510,10 @@ fn beginAdmittedAttempt(
     }, host.lease.paths.scratch.slice(), request_budget, &retained_response) catch |err| {
         request.deinit();
         if (retained_response) |retained| {
-            slot.state = .retained_scratch;
-            slot.token = token;
-            slot.binding = binding;
-            slot.retained_scratch = retained;
+            slot.* = .{ .retained_scratch = .{
+                .token = token,
+                .scratch = retained,
+            } };
             retainDispatchFence(host, "response scratch unlink", err);
             return .admitted;
         }
@@ -485,36 +524,36 @@ fn beginAdmittedAttempt(
             fenceDispatch(host, "provider preparation", err);
         }
         finishCustodyNow(host, token);
+        slot.* = .free;
         return .admitted;
     };
     if (host.faults.before_launch_delay_ms != 0) {
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
     }
     host.custody.consumeLaunchAuthority(token, binding) catch |err| {
-        slot.transfer.deinit();
+        active.transfer.deinit();
         std.debug.print("latifa: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
+        slot.* = .free;
         return .admitted;
     };
     host.store.withDispatchHandoff(
         binding,
-        .{ .reactor = reactor, .transfer = &slot.transfer },
+        .{ .reactor = reactor, .transfer = &active.transfer },
         struct {
             fn handoff(context: anytype) !void {
                 try context.reactor.add(context.transfer);
             }
         }.handoff,
     ) catch |err| {
-        slot.transfer.deinit();
+        active.transfer.deinit();
         std.debug.print("latifa: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
+        slot.* = .free;
         return .admitted;
     };
-    slot.state = .transport;
-    slot.token = token;
-    slot.binding = binding;
     return .admitted;
 }
 
@@ -524,32 +563,43 @@ fn completeTransfer(
     completion: provider.Completion,
 ) void {
     const slot = for (slots) |*candidate| {
-        if (candidate.state == .transport and candidate.transfer.identity() == completion.identity) break candidate;
+        switch (candidate.*) {
+            .provider => |*active| if (active.transfer.identity() == completion.identity) break candidate,
+            else => {},
+        }
     } else {
         fenceDispatch(host, "unknown transport completion", error.UnknownTransportCompletion);
         return;
     };
+    const active = &slot.provider;
+    const owner = active.owner;
     const evidence = switch (completion.outcome) {
         .response_capture_failed => |failure| {
             const code = switch (failure) {
                 .scratch_exhausted => "response_scratch_exhausted",
                 .write_failed => "response_write_failed",
             };
-            settleAttemptFailure(host, slot.token, slot.binding, code, .terminal);
-            slot.transfer.deinit();
-            beginCleanup(host, slot);
+            settleAttemptFailure(host, owner.token, owner.binding, code, .terminal);
+            active.transfer.deinit();
+            beginCleanup(host, slot, owner);
             return;
         },
         .request_source_failed => {
             fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed);
-            slot.transfer.deinit();
-            beginCleanup(host, slot);
+            active.transfer.deinit();
+            beginCleanup(host, slot, owner);
             return;
         },
         .transport_finished => |evidence| evidence,
     };
     if (evidence.disposition == .success) {
-        completeSuccessfulTransfer(host, slot);
+        switch (completeSuccessfulTransfer(host, active)) {
+            .cleanup => beginCleanup(host, slot, owner),
+            .retained_metadata => |metadata| slot.* = .{ .retained_metadata = .{
+                .token = owner.token,
+                .metadata = metadata,
+            } },
+        }
         return;
     }
     var code_buffer: [96]u8 = undefined;
@@ -574,44 +624,48 @@ fn completeTransfer(
             .terminal;
     settleAttemptFailure(
         host,
-        slot.token,
-        slot.binding,
+        owner.token,
+        owner.binding,
         code,
         failure_disposition,
     );
-    slot.transfer.deinit();
-    beginCleanup(host, slot);
+    active.transfer.deinit();
+    beginCleanup(host, slot, owner);
 }
 
-fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
-    const structured_output = slot.transfer.hasStructuredOutput();
-    slot.transfer.response.seal(host.faults.response_seal) catch |err| {
-        std.debug.print("latifa: response seal failed for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, "response_seal_failed", .terminal);
-        slot.transfer.deinit();
-        beginCleanup(host, slot);
-        return;
+const SuccessfulCompletion = union(enum) {
+    cleanup,
+    retained_metadata: store_module.RetainedOutputMetadata,
+};
+
+fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulCompletion {
+    const owner = active.owner;
+    const structured_output = active.transfer.hasStructuredOutput();
+    active.transfer.response.seal(host.faults.response_seal) catch |err| {
+        std.debug.print("latifa: response seal failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+        settleAttemptFailure(host, owner.token, owner.binding, "response_seal_failed", .terminal);
+        active.transfer.deinit();
+        return .cleanup;
     };
     if (structured_output) {
-        settleAttemptFailure(host, slot.token, slot.binding, "unsupported_output_schema", .terminal);
-        slot.transfer.deinit();
-        beginCleanup(host, slot);
-        return;
+        settleAttemptFailure(host, owner.token, owner.binding, "unsupported_output_schema", .terminal);
+        active.transfer.deinit();
+        return .cleanup;
     }
     var request_id: protocol.Bounded(256) = .{};
-    request_id.set(slot.transfer.requestId()) catch unreachable;
+    request_id.set(active.transfer.requestId()) catch unreachable;
     var openai_model: protocol.Bounded(protocol.max_model_bytes) = .{};
-    openai_model.set(slot.transfer.openaiModel()) catch unreachable;
+    openai_model.set(active.transfer.openaiModel()) catch unreachable;
     var x_openai_model: protocol.Bounded(protocol.max_model_bytes) = .{};
-    x_openai_model.set(slot.transfer.xOpenaiModel()) catch unreachable;
-    var response = slot.transfer.takeResponse();
-    slot.transfer.deinit();
+    x_openai_model.set(active.transfer.xOpenaiModel()) catch unreachable;
+    var response = active.transfer.takeResponse();
+    active.transfer.deinit();
     defer response.deinit();
 
     var metadata_name_buffer: [96]u8 = undefined;
     const metadata_name = std.fmt.bufPrint(&metadata_name_buffer, "response-metadata-{d}-{d}.tmp", .{
-        slot.binding.operation_id,
-        slot.binding.attempt_ordinal,
+        owner.binding.operation_id,
+        owner.binding.attempt_ordinal,
     }) catch unreachable;
     var retained_metadata: ?store_module.RetainedOutputMetadata = null;
     var metadata = store_module.OutputMetadataWriter.init(
@@ -624,42 +678,34 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
         &retained_metadata,
     ) catch |err| {
         if (retained_metadata) |retained| {
-            slot.state = .retained_metadata;
-            slot.retained_metadata = retained;
             retainDispatchFence(host, "response metadata unlink", err);
-            return;
+            return .{ .retained_metadata = retained };
         }
-        std.debug.print("latifa: response metadata acquisition failed for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, "response_metadata_exhausted", .terminal);
-        beginCleanup(host, slot);
-        return;
+        std.debug.print("latifa: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+        settleAttemptFailure(host, owner.token, owner.binding, "response_metadata_exhausted", .terminal);
+        return .cleanup;
     };
     defer metadata.deinit();
     const validated = provider_output.validate(host.io, response.file, response.length, &metadata, .{
         .metadata = host.faults.response_metadata,
     }) catch |err| {
-        std.debug.print("latifa: provider output rejected for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, provider_output.failureCode(err), .terminal);
-        beginCleanup(host, slot);
-        return;
+        std.debug.print("latifa: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+        settleAttemptFailure(host, owner.token, owner.binding, provider_output.failureCode(err), .terminal);
+        return .cleanup;
     };
     if (!modelObservationsAgree(
         validated.evidence.served_model.slice(),
         openai_model.slice(),
         x_openai_model.slice(),
     )) {
-        settleAttemptFailure(host, slot.token, slot.binding, "contradictory_provider_output", .terminal);
-        beginCleanup(host, slot);
-        return;
+        settleAttemptFailure(host, owner.token, owner.binding, "contradictory_provider_output", .terminal);
+        return .cleanup;
     }
     if (host.faults.before_result_delay_ms != 0) {
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_result_delay_ms), .awake) catch {};
     }
-    if (!host.custody.claimTerminalDelivery(slot.token)) {
-        beginCleanup(host, slot);
-        return;
-    }
-    host.store.settleModelSuccess(slot.binding, &.{
+    if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
+    host.store.settleModelSuccess(owner.binding, &.{
         .source = response.file,
         .source_length = response.length,
         .metadata = metadata.file,
@@ -676,7 +722,7 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
         .output_import = host.faults.response_import,
         .output_commit = host.faults.response_commit,
     }) catch |err| fenceDispatch(host, "model output import", err);
-    beginCleanup(host, slot);
+    return .cleanup;
 }
 
 fn modelObservationsAgree(body: []const u8, openai: []const u8, x_openai: []const u8) bool {
@@ -691,59 +737,70 @@ fn modelObservationsAgree(body: []const u8, openai: []const u8, x_openai: []cons
     return true;
 }
 
-fn beginCleanup(host: *Host, slot: *ExecutionSlot) void {
-    host.custody.detach(slot.token) catch unreachable;
-    slot.state = .cleanup;
-    slot.cleanup_ticks = @intCast(@divFloor(host.faults.cleanup_delay_ms + 24, 25));
-    if (slot.cleanup_ticks == 0) finishSlotCleanup(host, slot);
+fn beginCleanup(host: *Host, slot: *ExecutionSlot, owner: AttemptOwner) void {
+    host.custody.detach(owner.token) catch unreachable;
+    slot.* = .{ .cleanup = .{
+        .owner = owner,
+        .cleanup_ticks = @intCast(@divFloor(host.faults.cleanup_delay_ms + 24, 25)),
+    } };
+    if (slot.cleanup.cleanup_ticks == 0) finishSlotCleanup(host, slot);
 }
 
 fn advanceCleanup(host: *Host, slots: []ExecutionSlot) void {
     for (slots) |*slot| {
-        if (slot.state != .cleanup or slot.cleanup_ticks == 0) continue;
-        slot.cleanup_ticks -= 1;
-        if (slot.cleanup_ticks == 0) finishSlotCleanup(host, slot);
+        switch (slot.*) {
+            .cleanup => |*cleanup| {
+                if (cleanup.cleanup_ticks == 0) continue;
+                cleanup.cleanup_ticks -= 1;
+                if (cleanup.cleanup_ticks == 0) finishSlotCleanup(host, slot);
+            },
+            else => {},
+        }
     }
 }
 
 fn finishSlotCleanup(host: *Host, slot: *ExecutionSlot) void {
-    host.custody.cleanupComplete(slot.token) catch unreachable;
-    slot.* = .{};
+    const token = slot.cleanup.owner.token;
+    host.custody.cleanupComplete(token) catch unreachable;
+    slot.* = .free;
 }
 
 fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot) void {
-    for (slots) |*slot| switch (slot.state) {
+    for (slots) |*slot| switch (slot.*) {
         .free => {},
-        .transport => {
-            reactor.cancel(&slot.transfer);
-            slot.transfer.deinit();
-            host.custody.detach(slot.token) catch unreachable;
-            host.custody.cleanupComplete(slot.token) catch unreachable;
+        .provider => |*active| {
+            const token = active.owner.token;
+            reactor.cancel(&active.transfer);
+            active.transfer.deinit();
+            host.custody.detach(token) catch unreachable;
+            host.custody.cleanupComplete(token) catch unreachable;
         },
-        .cleanup => {
-            host.custody.cleanupComplete(slot.token) catch unreachable;
+        .cleanup => |cleanup| {
+            host.custody.cleanupComplete(cleanup.owner.token) catch unreachable;
         },
-        .retained_scratch => {
-            slot.retained_scratch.cleanup() catch |err| {
+        .retained_scratch => |*retained| {
+            retained.scratch.cleanup() catch |err| {
                 std.debug.print("latifa: retained named scratch after cleanup failure: {s}\n", .{@errorName(err)});
                 continue;
             };
-            host.custody.detach(slot.token) catch unreachable;
-            host.custody.cleanupComplete(slot.token) catch unreachable;
+            host.custody.detach(retained.token) catch unreachable;
+            host.custody.cleanupComplete(retained.token) catch unreachable;
         },
-        .retained_metadata => {
-            slot.retained_metadata.cleanup() catch |err| {
+        .retained_metadata => |*retained| {
+            retained.metadata.cleanup() catch |err| {
                 std.debug.print("latifa: retained named response metadata after cleanup failure: {s}\n", .{@errorName(err)});
                 continue;
             };
-            host.custody.detach(slot.token) catch unreachable;
-            host.custody.cleanupComplete(slot.token) catch unreachable;
+            host.custody.detach(retained.token) catch unreachable;
+            host.custody.cleanupComplete(retained.token) catch unreachable;
         },
     };
 }
 
 fn hasTransport(slots: []const ExecutionSlot) bool {
-    for (slots) |slot| if (slot.state == .transport) return true;
+    for (slots) |slot| {
+        if (slot == .provider) return true;
+    }
     return false;
 }
 
