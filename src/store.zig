@@ -26,6 +26,7 @@ pub const Faults = struct {
     output_read: bool = false,
     output_import: bool = false,
     output_commit: bool = false,
+    rollback_failure: bool = false,
 };
 
 pub const AcceptedConfiguration = struct {
@@ -581,8 +582,7 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return .infrastructure_failure;
         return self.configureLocked(command, faults) catch {
-            rollback(self.database);
-            self.fenced.store(true, .release);
+            self.finishTransactionFailure(faults);
             return .infrastructure_failure;
         };
     }
@@ -593,7 +593,6 @@ pub const Store = struct {
         faults: Faults,
     ) !ConfigureReply {
         try exec(self.database, "BEGIN IMMEDIATE");
-        errdefer rollback(self.database);
 
         const digest = command.semanticDigest();
         if (try self.readExistingCommand(command.key.slice())) |existing| {
@@ -772,8 +771,7 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return .infrastructure_failure;
         return self.submitMessageLocked(command, faults) catch {
-            rollback(self.database);
-            self.fenced.store(true, .release);
+            self.finishTransactionFailure(faults);
             return .infrastructure_failure;
         };
     }
@@ -784,7 +782,6 @@ pub const Store = struct {
         faults: Faults,
     ) !MessageReply {
         try exec(self.database, "BEGIN IMMEDIATE");
-        errdefer rollback(self.database);
         const digest = command.semanticDigest();
         const supplied_content = ContentReference{
             .length = command.text.length,
@@ -1004,16 +1001,17 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         return self.admitNextModelAttemptLocked(faults) catch |err| {
-            rollback(self.database);
-            if (err != error.InjectedAttemptCommitFailure) self.fenced.store(true, .release);
-            return err;
+            return self.finishTransactionError(
+                err,
+                faults,
+                err == error.InjectedAttemptCommitFailure,
+            );
         };
     }
 
     fn admitNextModelAttemptLocked(self: *Store, faults: Faults) !?AttemptAdmission {
         if (!try self.hasRunnableWorkLocked()) return null;
         try exec(self.database, "BEGIN IMMEDIATE");
-        errdefer rollback(self.database);
 
         const select = try prepare(
             self.database,
@@ -1184,9 +1182,11 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         return self.tryAdmitNextModelRetryLocked(active, faults) catch |err| {
-            rollback(self.database);
-            if (err != error.InjectedAttemptCommitFailure) self.fenced.store(true, .release);
-            return err;
+            return self.finishTransactionError(
+                err,
+                faults,
+                err == error.InjectedAttemptCommitFailure,
+            );
         };
     }
 
@@ -1196,7 +1196,6 @@ pub const Store = struct {
         faults: Faults,
     ) !?AttemptAdmission {
         try exec(self.database, "BEGIN IMMEDIATE");
-        errdefer rollback(self.database);
         const snapshot_ms = try readUnixMilliseconds(self.database);
         const selection_limit = try std.math.add(
             usize,
@@ -1442,9 +1441,11 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.settleModelFailureLocked(binding, code, faults) catch |err| {
-            rollback(self.database);
-            if (err != error.StaleAttemptBinding) self.fenced.store(true, .release);
-            return err;
+            return self.finishTransactionError(
+                err,
+                faults,
+                err == error.StaleAttemptBinding,
+            );
         };
     }
 
@@ -1455,7 +1456,6 @@ pub const Store = struct {
         faults: Faults,
     ) !void {
         try exec(self.database, "BEGIN IMMEDIATE");
-        errdefer rollback(self.database);
         try self.validateCurrentAttempt(binding);
         {
             const statement = try prepare(
@@ -1511,9 +1511,11 @@ pub const Store = struct {
             @max(wait_ms, retry_after_ms orelse 0),
             faults,
         ) catch |err| {
-            rollback(self.database);
-            if (err != error.StaleAttemptBinding) self.fenced.store(true, .release);
-            return err;
+            return self.finishTransactionError(
+                err,
+                faults,
+                err == error.StaleAttemptBinding,
+            );
         };
     }
 
@@ -1525,7 +1527,6 @@ pub const Store = struct {
         faults: Faults,
     ) !void {
         try exec(self.database, "BEGIN IMMEDIATE");
-        errdefer rollback(self.database);
         try self.validateCurrentAttempt(binding);
         if (binding.attempt_ordinal < maximum_model_attempts) {
             const now_ms = try readUnixMilliseconds(self.database);
@@ -1583,9 +1584,7 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         return self.recoverOneExhaustedModelAttemptLocked(active) catch |err| {
-            rollback(self.database);
-            self.fenced.store(true, .release);
-            return err;
+            return self.finishTransactionError(err, .{}, false);
         };
     }
 
@@ -1633,7 +1632,6 @@ pub const Store = struct {
         const binding = selected orelse return false;
 
         try exec(self.database, "BEGIN IMMEDIATE");
-        errdefer rollback(self.database);
         {
             const update_operation = try prepare(
                 self.database,
@@ -1673,9 +1671,11 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.settleModelSuccessLocked(binding, output, faults) catch |err| {
-            rollback(self.database);
-            if (err != error.StaleAttemptBinding) self.fenced.store(true, .release);
-            return err;
+            return self.finishTransactionError(
+                err,
+                faults,
+                err == error.StaleAttemptBinding,
+            );
         };
     }
 
@@ -1686,7 +1686,6 @@ pub const Store = struct {
         faults: Faults,
     ) !void {
         try exec(self.database, "BEGIN IMMEDIATE");
-        errdefer rollback(self.database);
         try self.validateCurrentAttempt(binding);
         const operation = try prepare(
             self.database,
@@ -2019,6 +2018,35 @@ pub const Store = struct {
     fn fenceReadFailure(self: *Store, err: anyerror) anyerror {
         self.fenced.store(true, .release);
         return err;
+    }
+
+    fn finishTransactionError(
+        self: *Store,
+        err: anyerror,
+        faults: Faults,
+        preserve_expected: bool,
+    ) anyerror {
+        self.rollbackAfterError(faults) catch |rollback_err| {
+            self.fenced.store(true, .release);
+            return rollback_err;
+        };
+        if (!preserve_expected) self.fenced.store(true, .release);
+        return err;
+    }
+
+    fn finishTransactionFailure(self: *Store, faults: Faults) void {
+        self.rollbackAfterError(faults) catch {};
+        self.fenced.store(true, .release);
+    }
+
+    fn rollbackAfterError(self: *Store, faults: Faults) !void {
+        if (c.sqlite3_get_autocommit(self.database) != 0) return;
+        if (faults.rollback_failure) return error.CanonicalRollbackFailed;
+        if (c.sqlite3_exec(self.database, "ROLLBACK", null, null, null) != c.SQLITE_OK or
+            c.sqlite3_get_autocommit(self.database) == 0)
+        {
+            return error.CanonicalRollbackFailed;
+        }
     }
 
     const ExistingCommand = struct {
@@ -3125,6 +3153,99 @@ test "failed message import rolls back content command and admission" {
     try std.testing.expect((try storage.observeCommand("message-import")).status == .absent);
     try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/import")).pending_messages);
     try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+}
+
+test "rollback failure fences mutation until fresh reopen restores committed facts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration(
+        "rollback-configure",
+        "direct/rollback",
+        workspace,
+        "model-a",
+    );
+    const message_file = try tmp.dir.createFile(std.testing.io, "rollback-message", .{ .read = true });
+    try message_file.writeStreamingAll(std.testing.io, "committed prefix");
+    try message_file.sync(std.testing.io);
+    var message = try completeMessage(
+        "rollback-message",
+        "direct/rollback",
+        message_file,
+        "committed prefix",
+    );
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+
+    {
+        var storage = try testingStore(&tmp, std.testing.io);
+        try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+        try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+        try std.testing.expectError(
+            error.CanonicalRollbackFailed,
+            storage.admitNextModelAttempt(.{
+                .attempt_before_commit = true,
+                .rollback_failure = true,
+            }),
+        );
+        try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_get_autocommit(storage.database));
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expectError(error.StoreFenced, storage.admitNextModelAttempt(.{}));
+        var later = try completeConfiguration("rollback-later", "direct/later", workspace, "model-a");
+        try std.testing.expect(storage.configure(&later, .{}) == .infrastructure_failure);
+        try storage.close();
+    }
+
+    var binding: AttemptBinding = undefined;
+    {
+        var storage = try testingStore(&tmp, std.testing.io);
+        try std.testing.expect((try storage.observeCommand("rollback-configure")).status == .accepted);
+        try std.testing.expect((try storage.observeCommand("rollback-message")).message.?.status == .queued);
+        {
+            const partial = try prepare(
+                storage.database,
+                "SELECT (SELECT count(*) FROM turn),(SELECT count(*) FROM model_operation)," ++
+                    "(SELECT count(*) FROM conversation_entry)",
+            );
+            defer _ = c.sqlite3_finalize(partial);
+            try std.testing.expectEqual(@as(c_int, c.SQLITE_ROW), c.sqlite3_step(partial));
+            try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(partial, 0));
+            try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(partial, 1));
+            try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(partial, 2));
+        }
+
+        var admission = (try storage.admitNextModelAttempt(.{})).?;
+        binding = try admission.permit.consume();
+        var stale = binding;
+        stale.attempt_ordinal += 1;
+        try std.testing.expectError(
+            error.CanonicalRollbackFailed,
+            storage.settleModelFailure(
+                stale,
+                "must-not-settle",
+                .{ .rollback_failure = true },
+            ),
+        );
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expectError(
+            error.StoreFenced,
+            storage.settleModelFailure(binding, "must-not-settle", .{}),
+        );
+        try storage.close();
+    }
+
+    {
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const observation = (try storage.observeCommand("rollback-message")).message.?;
+        try std.testing.expect(observation.status == .processing);
+        try std.testing.expectEqual(binding.operation_id, observation.operation_id.?);
+        try storage.settleModelFailure(binding, "provider_http_422", .{});
+        try std.testing.expect(
+            (try storage.observeCommand("rollback-message")).message.?.status == .failed,
+        );
+    }
 }
 
 test "production Store applies finite durable SQLite settings" {
