@@ -17,6 +17,10 @@ const runnable_probe_sql =
     " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     " WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL AND current.resolution_code='continued'" ++
     ")) LIMIT 1";
+const continuation_risk_sql =
+    "SELECT 1 FROM model_output_item WHERE session_ref=?1 UNION ALL " ++
+    "SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
+    "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND current.resolution_code IS NULL LIMIT 1";
 
 pub const Faults = struct {
     content_read: bool = false,
@@ -850,11 +854,7 @@ pub const Store = struct {
     }
 
     fn sessionHasContinuationRisk(self: *Store, session_ref: []const u8) !bool {
-        const statement = try prepare(
-            self.database,
-            "SELECT 1 FROM model_output_item WHERE session_ref=?1 UNION ALL " ++
-                "SELECT 1 FROM model_operation WHERE session_ref=?1 AND resolution_code IS NULL LIMIT 1",
-        );
+        const statement = try prepare(self.database, continuation_risk_sql);
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         return switch (c.sqlite3_step(statement)) {
@@ -3883,6 +3883,120 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqualStrings("model-b", (try later_view.settings()).model.slice());
 }
 
+test "continued accepted output keeps model continuation incompatible" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration(
+        "continued-config",
+        "direct/continued-output",
+        workspace,
+        "model-a",
+    );
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+
+    const first_file = try tmp.dir.createFile(std.testing.io, "continued-first", .{ .read = true });
+    try first_file.writeStreamingAll(std.testing.io, "first");
+    try first_file.sync(std.testing.io);
+    var first = try completeMessage(
+        "continued-first",
+        "direct/continued-output",
+        first_file,
+        "first",
+    );
+    defer first.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&first, .{}) == .accepted);
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+    const second_file = try tmp.dir.createFile(std.testing.io, "continued-second", .{ .read = true });
+    try second_file.writeStreamingAll(std.testing.io, "second");
+    try second_file.sync(std.testing.io);
+    var second = try completeMessage(
+        "continued-second",
+        "direct/continued-output",
+        second_file,
+        "second",
+    );
+    defer second.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&second, .{}) == .accepted);
+
+    const source_bytes = "\"answer\"";
+    const source = try tmp.dir.createFile(std.testing.io, "continued-output", .{ .read = true });
+    defer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, source_bytes);
+    try source.sync(std.testing.io);
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    var metadata_used: std.atomic.Value(u64) = .init(0);
+    var retained_metadata: ?RetainedOutputMetadata = null;
+    var metadata = try OutputMetadataWriter.init(
+        std.testing.io,
+        root_buffer[0..root_length],
+        "continued-metadata",
+        &metadata_used,
+        1_024,
+        false,
+        &retained_metadata,
+    );
+    defer metadata.deinit();
+    try std.testing.expect(retained_metadata == null);
+    try metadata.append(.{
+        .tag = .item,
+        .kind = .message,
+        .start = 0,
+        .length = source_bytes.len,
+        .content_digest = protocol.contentDigest(source_bytes),
+    });
+    try metadata.append(.{
+        .tag = .text,
+        .start = 1,
+        .length = "answer".len,
+        .decoded_length = "answer".len,
+    });
+    try metadata.sealForRead();
+    try storage.settleModelSuccess(binding, &.{
+        .source = source,
+        .source_length = source_bytes.len,
+        .metadata = metadata.file,
+        .item_count = 1,
+        .answer_length = "answer".len,
+        .answer_digest = protocol.contentDigest("answer"),
+        .response_id = .{},
+        .body_model = .{},
+        .openai_model = .{},
+        .x_openai_model = .{},
+        .request_id = .{},
+    }, .{});
+    {
+        const resolution = try prepare(
+            storage.database,
+            "SELECT resolution_code FROM model_operation WHERE operation_id=?1",
+        );
+        defer _ = c.sqlite3_finalize(resolution);
+        try bindU64(resolution, 1, binding.operation_id);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(resolution));
+        var code: protocol.Bounded(96) = .{};
+        try readText(resolution, 0, &code);
+        try std.testing.expectEqualStrings("continued", code.slice());
+    }
+
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("continued-model-change");
+    try update.session.set("direct/continued-output");
+    update.configuration.model.state = .value;
+    try update.configuration.model.value.set("model-b");
+    const rejected = storage.configure(&update, .{});
+    try std.testing.expect(rejected == .rejected);
+    try std.testing.expectEqual(
+        ConfigurationRejection.continuation_model_incompatible,
+        rejected.rejected.code,
+    );
+}
+
 test "failed model settlement recovers uncertainty with a fresh consumed Attempt" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4166,6 +4280,48 @@ test "idle runnable probe uses the pending-only admission index" {
         else => return error.InvalidQueryPlan,
     };
     try std.testing.expect(uses_pending_index);
+}
+
+test "continuation risk follows output and active Turn indexes without Operation scan" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const statement = try prepare(storage.database, "EXPLAIN QUERY PLAN " ++ continuation_risk_sql);
+    defer _ = c.sqlite3_finalize(statement);
+    try bindText(statement, 1, "direct/query-plan");
+    var uses_output_index = false;
+    var uses_active_turn_index = false;
+    var uses_current_operation_identity = false;
+    var scans_model_operations = false;
+    while (true) switch (c.sqlite3_step(statement)) {
+        c.SQLITE_ROW => {
+            const pointer = c.sqlite3_column_text(statement, 3) orelse return error.InvalidQueryPlan;
+            const length = c.sqlite3_column_bytes(statement, 3);
+            if (length < 0) return error.InvalidQueryPlan;
+            const detail = pointer[0..@intCast(length)];
+            uses_output_index = uses_output_index or
+                std.mem.indexOf(u8, detail, "model_output_history") != null;
+            uses_active_turn_index = uses_active_turn_index or
+                std.mem.indexOf(u8, detail, "turn_one_active_per_session") != null;
+            uses_current_operation_identity = uses_current_operation_identity or
+                (std.mem.indexOf(u8, detail, "current") != null and
+                    std.mem.indexOf(u8, detail, "INTEGER PRIMARY KEY") != null);
+            const scans_relation = std.mem.startsWith(u8, detail, "SCAN ") or
+                std.mem.indexOf(u8, detail, " SCAN ") != null;
+            scans_model_operations = scans_model_operations or
+                (scans_relation and
+                    (std.mem.indexOf(u8, detail, "current") != null or
+                        std.mem.indexOf(u8, detail, "model_operation") != null));
+        },
+        c.SQLITE_DONE => break,
+        else => return error.InvalidQueryPlan,
+    };
+    try std.testing.expect(uses_output_index);
+    try std.testing.expect(uses_active_turn_index);
+    try std.testing.expect(uses_current_operation_identity);
+    try std.testing.expect(!scans_model_operations);
 }
 
 test "retry admission and exhausted recovery use age indexes without temporary sorting" {
