@@ -50,6 +50,7 @@ const Host = struct {
     provider_endpoint: ?[]const u8 = null,
     custody: execution.CustodyPool = .{ .records = &.{} },
     execution_shutdown: std.atomic.Value(bool) = .init(false),
+    effect_shutdown: std.atomic.Value(bool) = .init(false),
     dispatch_fenced: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
     active_clients: std.atomic.Value(usize) = .init(0),
@@ -152,8 +153,16 @@ pub fn serve(
     while (true) {
         const stream = listener.accept(io) catch |err| switch (err) {
             error.ConnectionAborted => continue,
+            error.SocketNotListening => if (host.effect_shutdown.load(.acquire))
+                return error.EffectAwareShutdown
+            else
+                return err,
             else => return err,
         };
+        if (host.effect_shutdown.load(.acquire)) {
+            stream.close(io);
+            return error.EffectAwareShutdown;
+        }
         const previous = host.active_clients.fetchAdd(1, .acq_rel);
         if (previous >= max_clients) {
             host.clientFinished();
@@ -213,7 +222,7 @@ fn executionMain(host: *Host) void {
     defer reactor.deinit();
     defer shutdownExecution(host, &reactor, slots);
 
-    while (!host.execution_shutdown.load(.acquire)) {
+    while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
         var found_work = false;
         if (!host.dispatch_fenced.load(.acquire)) {
             for (slots) |*slot| {
@@ -285,7 +294,7 @@ fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) A
             slot.token = token;
             slot.binding = binding;
             slot.retained_scratch = retained;
-            fenceDispatch(host, "request scratch unlink", err);
+            retainDispatchFence(host, "request scratch unlink", err);
             return .admitted;
         }
         if (host.store.isFenced()) {
@@ -434,6 +443,24 @@ fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
 }
 
 fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
+    if (host.effect_shutdown.swap(true, .acq_rel)) return;
+    host.dispatch_fenced.store(true, .release);
+    std.debug.print("latifa: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
+    // Waking accept transfers shutdown to serve's owner. That owner stops new
+    // connections, joins the execution thread (which detaches any active
+    // effects under custody), drains existing clients, then releases Store.
+    const address = std.Io.net.UnixAddress.init(host.lease.paths.socket.slice()) catch |address_err| {
+        std.debug.print("latifa: listener wake address after dispatch fence failed: {s}\n", .{@errorName(address_err)});
+        return;
+    };
+    const wake = address.connect(host.io) catch |connect_err| {
+        std.debug.print("latifa: listener wake after dispatch fence failed: {s}\n", .{@errorName(connect_err)});
+        return;
+    };
+    wake.close(host.io);
+}
+
+fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
     host.dispatch_fenced.store(true, .release);
     std.debug.print("latifa: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
 }
@@ -537,7 +564,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
                 .before_commit = host.faults.before_commit,
             });
             if (result == .infrastructure_failure and host.store.isFenced()) {
-                host.dispatch_fenced.store(true, .release);
+                fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
             }
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             var response: protocol.ResponseBuffer = .{};
@@ -556,7 +583,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
                 .before_commit = host.faults.before_commit,
             });
             if (result == .infrastructure_failure and host.store.isFenced()) {
-                host.dispatch_fenced.store(true, .release);
+                fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             var response: protocol.ResponseBuffer = .{};
@@ -569,8 +596,8 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
             deliverResponse(host.io, fd, status, response.slice());
         },
         .observe_command => |command| {
-            const observation = host.store.observeCommand(command.key.slice()) catch {
-                host.dispatch_fenced.store(true, .release);
+            const observation = host.store.observeCommand(command.key.slice()) catch |err| {
+                fenceDispatch(host, "command observation", err);
                 return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
             };
             var response: protocol.ResponseBuffer = .{};
@@ -578,8 +605,8 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
             deliverResponse(host.io, fd, 200, response.slice());
         },
         .inspect_session => |request_value| {
-            const observation = host.store.inspectSession(request_value.session.slice()) catch {
-                host.dispatch_fenced.store(true, .release);
+            const observation = host.store.inspectSession(request_value.session.slice()) catch |err| {
+                fenceDispatch(host, "session inspection", err);
                 return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
             };
             var response: protocol.ResponseBuffer = .{};

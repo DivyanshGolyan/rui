@@ -240,13 +240,13 @@ def main():
             "include": ["reasoning.encrypted_content"],
             "input": [
                 {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
-                {"role": "system", "content": [{"type": "input_text", "text": "B"}]},
-                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
-                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
                 {
                     "role": "user",
                     "content": [{"type": "input_text", "text": 'first "message"\n'}],
                 },
+                {"role": "system", "content": [{"type": "input_text", "text": "B"}]},
+                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
+                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
             ],
             "tools": [
                 {"type": "function", "name": "bash", "description": "Run Bash"},
@@ -532,6 +532,7 @@ def main():
         processes.append(host)
         configure(state, race_store, "race-config", "direct/race", "model-a")
         message(state, race_store, "race-message", "direct/race", "race")
+
         def admitted_race_attempt():
             database = sqlite3.connect(race_store / "latifa.sqlite3", timeout=5)
             try:
@@ -543,6 +544,9 @@ def main():
 
         wait_for(admitted_race_attempt, "admitted request before launch")
         database = sqlite3.connect(race_store / "latifa.sqlite3", timeout=5)
+        original_instructions = database.execute(
+            "SELECT instructions_content_id FROM session WHERE session_ref='direct/race'"
+        ).fetchone()[0]
         database.execute("PRAGMA foreign_keys=OFF")
         database.execute(
             "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref='direct/race'"
@@ -556,16 +560,32 @@ def main():
             timeout=10,
         )
         assert canonical_read.returncode != 0
-        time.sleep(1.7)
+        wait_for(lambda: host.poll() is not None, "effect-aware Host shutdown", timeout=5)
+        assert host.returncode != 0
+        processes.remove(host)
         assert endpoint.requests == []
         database = sqlite3.connect(race_store / "latifa.sqlite3")
         uncertain = database.execute(
             "SELECT attempt_ordinal,uncertain,resolution_code FROM model_operation"
         ).fetchone()
+        database.execute("PRAGMA foreign_keys=OFF")
+        database.execute(
+            "UPDATE session SET instructions_content_id=? WHERE session_ref='direct/race'",
+            (original_instructions,),
+        )
+        database.commit()
         database.close()
         assert uncertain == (1, 1, None), uncertain
-        stop_host(host)
-        processes.remove(host)
+        repaired = subprocess.Popen(
+            [str(LATIFA), "serve", "--store", str(race_store), "--active-capacity", "1"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        processes.append(repaired)
+        assert repaired.stdout.readline().startswith("ready ")
+        stop_host(repaired)
+        processes.remove(repaired)
 
         # If initial unlink fails, the live owner keeps the named scratch,
         # charge and custody while fencing later dispatch. A fresh owner removes

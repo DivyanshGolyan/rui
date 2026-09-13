@@ -233,15 +233,14 @@ pub fn materialize(
     try writer.write(",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[");
     var input_comma = false;
     after_revision = 0;
-    while (try view.nextInstruction(after_revision)) |instruction| {
-        if (input_comma) try writer.write(",");
+    if (try view.nextInstruction(after_revision)) |baseline| {
         try writer.write("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
-        var instructions = try view.openContent(instruction.content);
+        var instructions = try view.openContent(baseline.content);
         try writer.jsonContent(&instructions);
         instructions.close();
         try writer.write("}]}");
         input_comma = true;
-        after_revision = instruction.revision;
+        after_revision = baseline.revision;
     }
     after = 0;
     while (try view.nextInput(after)) |input| {
@@ -253,6 +252,16 @@ pub fn materialize(
         try writer.write("}]}");
         input_comma = true;
         after = input.admission_id;
+    }
+    while (try view.nextInstruction(after_revision)) |instruction| {
+        if (input_comma) try writer.write(",");
+        try writer.write("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
+        var instructions = try view.openContent(instruction.content);
+        try writer.jsonContent(&instructions);
+        instructions.close();
+        try writer.write("}]}");
+        input_comma = true;
+        after_revision = instruction.revision;
     }
     try writer.write("],\"tools\":[");
     var comma = false;
