@@ -1,19 +1,38 @@
 {
   "scope": "issue-174 production retry discovery and custody churn",
   "status": "passed",
-  "tested_revision": "5e510e748f02fd4f321df506be2dac52d9caed44",
+  "tested_revision": "da50b1a5720af5e88d721dc339b6ad5c57b02e41",
   "working_tree_dirty": false,
-  "binary_sha256": "c1eeca34bb6f38b5a8afbc96fbf6473b97326ff9bc7ae77066080baa6f503284",
+  "binary_sha256": "356a154f5dd7762a2be2c95ce19ca1fdfcb1416993476fc50d28c52abfdefca4",
   "zig": "0.16.0",
   "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
   "timing": {
-    "retry_due_at_unix_ms": 1789308424639,
-    "replacement_admitted_at_unix_ms": 1789308424948,
-    "replacement_launched_at_unix_ms": 1789308425206,
-    "discovery_after_due_ms": 309,
-    "launch_after_discovery_ms": 258,
+    "retry_due_at_unix_ms": 1789311414744,
+    "replacement_admitted_at_unix_ms": 1789311415360,
+    "replacement_launched_at_unix_ms": 1789311415606,
+    "discovery_after_due_ms": 616,
+    "launch_after_discovery_ms": 246,
     "configured_prelaunch_delay_ms": 250,
     "endpoint_attempts": 2
+  },
+  "unresolved_history": {
+    "stages": [
+      {
+        "model_operations": 32,
+        "older_unresolved_future_retries": 31,
+        "replacement_admitted_after_start_ms": 68,
+        "replacement_launched_after_start_ms": 39,
+        "database_bytes": 135168
+      },
+      {
+        "model_operations": 128,
+        "older_unresolved_future_retries": 126,
+        "replacement_admitted_after_start_ms": 57,
+        "replacement_launched_after_start_ms": 32,
+        "database_bytes": 249856
+      }
+    ],
+    "qualification_limit_ms": 2000
   },
   "churn_and_delayed_cleanup": {
     "active_capacity": 16,
@@ -22,7 +41,7 @@
       {
         "round": 1,
         "terminal_operations": 32,
-        "database_bytes": 131072,
+        "database_bytes": 135168,
         "execution": {
           "status": "partial",
           "dispatch_fenced": false,
@@ -32,7 +51,47 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 16089088,
+        "rss_bytes": 14712832,
+        "virtual_bytes": 421253103616,
+        "physical_footprint_bytes": 10485760,
+        "lifetime_peak_physical_footprint_bytes": 10485760,
+        "open_descriptor_rows": 15,
+        "open_retry_scratch_descriptors": 0
+      },
+      {
+        "round": 2,
+        "terminal_operations": 64,
+        "database_bytes": 163840,
+        "execution": {
+          "status": "partial",
+          "dispatch_fenced": false,
+          "custody_occupied": "0",
+          "scratch_used_bytes": "0",
+          "unavailable": [
+            "structured_output"
+          ]
+        },
+        "rss_bytes": 15106048,
+        "virtual_bytes": 421395709952,
+        "physical_footprint_bytes": 10485760,
+        "lifetime_peak_physical_footprint_bytes": 10485760,
+        "open_descriptor_rows": 15,
+        "open_retry_scratch_descriptors": 0
+      },
+      {
+        "round": 3,
+        "terminal_operations": 96,
+        "database_bytes": 212992,
+        "execution": {
+          "status": "partial",
+          "dispatch_fenced": false,
+          "custody_occupied": "0",
+          "scratch_used_bytes": "0",
+          "unavailable": [
+            "structured_output"
+          ]
+        },
+        "rss_bytes": 15794176,
         "virtual_bytes": 421395709952,
         "physical_footprint_bytes": 11534336,
         "lifetime_peak_physical_footprint_bytes": 11534336,
@@ -40,49 +99,9 @@
         "open_retry_scratch_descriptors": 0
       },
       {
-        "round": 2,
-        "terminal_operations": 64,
-        "database_bytes": 159744,
-        "execution": {
-          "status": "partial",
-          "dispatch_fenced": false,
-          "custody_occupied": "0",
-          "scratch_used_bytes": "0",
-          "unavailable": [
-            "structured_output"
-          ]
-        },
-        "rss_bytes": 15335424,
-        "virtual_bytes": 421395709952,
-        "physical_footprint_bytes": 12582912,
-        "lifetime_peak_physical_footprint_bytes": 12582912,
-        "open_descriptor_rows": 15,
-        "open_retry_scratch_descriptors": 0
-      },
-      {
-        "round": 3,
-        "terminal_operations": 96,
-        "database_bytes": 208896,
-        "execution": {
-          "status": "partial",
-          "dispatch_fenced": false,
-          "custody_occupied": "0",
-          "scratch_used_bytes": "0",
-          "unavailable": [
-            "structured_output"
-          ]
-        },
-        "rss_bytes": 15171584,
-        "virtual_bytes": 421395709952,
-        "physical_footprint_bytes": 12582912,
-        "lifetime_peak_physical_footprint_bytes": 12582912,
-        "open_descriptor_rows": 15,
-        "open_retry_scratch_descriptors": 0
-      },
-      {
         "round": 4,
         "terminal_operations": 128,
-        "database_bytes": 245760,
+        "database_bytes": 249856,
         "execution": {
           "status": "partial",
           "dispatch_fenced": false,
@@ -92,17 +111,17 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 15499264,
+        "rss_bytes": 16154624,
         "virtual_bytes": 421395709952,
-        "physical_footprint_bytes": 12582912,
-        "lifetime_peak_physical_footprint_bytes": 12582912,
+        "physical_footprint_bytes": 11534336,
+        "lifetime_peak_physical_footprint_bytes": 11534336,
         "open_descriptor_rows": 15,
         "open_retry_scratch_descriptors": 0
       },
       {
         "round": 5,
         "terminal_operations": 160,
-        "database_bytes": 286720,
+        "database_bytes": 294912,
         "execution": {
           "status": "partial",
           "dispatch_fenced": false,
@@ -112,31 +131,31 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 14237696,
+        "rss_bytes": 13811712,
         "virtual_bytes": 421395709952,
-        "physical_footprint_bytes": 12582912,
-        "lifetime_peak_physical_footprint_bytes": 12582912,
+        "physical_footprint_bytes": 11534336,
+        "lifetime_peak_physical_footprint_bytes": 11534336,
         "open_descriptor_rows": 15,
         "open_retry_scratch_descriptors": 0
       }
     ],
     "baseline": {
-      "rss_bytes": 8519680,
-      "virtual_bytes": 420439474176,
-      "physical_footprint_bytes": 4080640,
-      "lifetime_peak_physical_footprint_bytes": 4080640,
+      "rss_bytes": 8175616,
+      "virtual_bytes": 420429463552,
+      "physical_footprint_bytes": 3752960,
+      "lifetime_peak_physical_footprint_bytes": 3752960,
       "open_descriptor_rows": 15,
       "open_retry_scratch_descriptors": 0
     },
     "custody_record_bytes": 40,
     "execution_slot_bytes": 9840,
-    "idle_cpu_percent_one_core": 0.499,
-    "idle_cpu_sample_seconds": 2.005,
+    "idle_cpu_percent_one_core": 0.0,
+    "idle_cpu_sample_seconds": 2.001,
     "retained_idle": {
-      "rss_bytes": 13975552,
+      "rss_bytes": 13778944,
       "virtual_bytes": 421395709952,
-      "physical_footprint_bytes": 12582912,
-      "lifetime_peak_physical_footprint_bytes": 12582912,
+      "physical_footprint_bytes": 11534336,
+      "lifetime_peak_physical_footprint_bytes": 11534336,
       "open_descriptor_rows": 15,
       "open_retry_scratch_descriptors": 0
     },
@@ -149,12 +168,13 @@
       ]
     ]
   },
-  "elapsed_seconds": 41.325,
+  "elapsed_seconds": 43.21,
   "limits": [
     "macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only",
     "deterministic loopback HTTP classifies no TLS trust store or live-provider behavior",
     "a 250 ms fixture delay separates committed retry discovery from provider launch",
     "external 10 ms SQLite observation adds sampling delay and is not a Runtime clock",
+    "two production-store stages put 31 then 126 older unresolved future retries before one due replacement",
     "five 32-Operation rounds exercise 0-to-capacity-to-0 custody churn with 250 ms delayed cleanup",
     "process termination evidence is not power-loss qualification"
   ]
