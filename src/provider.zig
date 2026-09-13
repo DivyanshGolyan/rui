@@ -26,6 +26,7 @@ pub const PreparationFaults = struct {
 pub const TransportOptions = struct {
     inactivity_seconds: c_long = 5 * 60,
     response_acquire_fault: bool = false,
+    response_unlink_fault: bool = false,
     response_write_fault: bool = false,
 };
 
@@ -55,6 +56,7 @@ pub const PreparedRequest = struct {
     length: u64,
     charged: u64,
     budget: ScratchBudget,
+    structured_output: bool,
 
     pub fn deinit(self: *PreparedRequest) void {
         self.file.close(self.io);
@@ -66,16 +68,18 @@ pub const PreparedRequest = struct {
 pub const RetainedScratch = struct {
     io: std.Io,
     file: std.Io.File,
+    secondary_file: ?std.Io.File = null,
     scratch_path: protocol.Bounded(protocol.max_store_bytes + 64),
     name: protocol.Bounded(96),
     charged: u64,
     budget: ScratchBudget,
 
     pub fn cleanup(self: *RetainedScratch) !void {
-        self.file.close(self.io);
         var scratch = try std.Io.Dir.cwd().openDir(self.io, self.scratch_path.slice(), .{});
         defer scratch.close(self.io);
         try scratch.deleteFile(self.io, self.name.slice());
+        self.file.close(self.io);
+        if (self.secondary_file) |file| file.close(self.io);
         self.budget.release(self.charged);
         self.* = undefined;
     }
@@ -281,7 +285,14 @@ pub fn materialize(
     if (writer.offset > maximum) return error.RequestScratchAccountingFailure;
     file_owned = false;
     budget_owned = false;
-    return .{ .io = io, .file = file, .length = writer.offset, .charged = maximum, .budget = budget };
+    return .{
+        .io = io,
+        .file = file,
+        .length = writer.offset,
+        .charged = maximum,
+        .budget = budget,
+        .structured_output = settings.output_schema != null,
+    };
 }
 
 fn addEscapedMaximum(current: u64, bytes: u64) !u64 {
@@ -396,8 +407,11 @@ pub const ResponseCapture = struct {
         budget: ScratchBudget,
         binding: store.AttemptBinding,
         fail_acquire: bool,
+        fail_unlink: bool,
         fail_write: bool,
+        retained: *?RetainedScratch,
     ) !ResponseCapture {
+        retained.* = null;
         if (fail_acquire) return error.InjectedResponseAcquireFailure;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
@@ -411,11 +425,18 @@ pub const ResponseCapture = struct {
             .exclusive = true,
             .permissions = .fromMode(0o600),
         });
-        errdefer file.close(io);
-        errdefer scratch.deleteFile(io, name) catch {};
-        const readonly = try scratch.openFile(io, name, .{});
-        errdefer readonly.close(io);
-        try scratch.deleteFile(io, name);
+        const readonly = scratch.openFile(io, name, .{}) catch |err| {
+            retained.* = retainedNamedScratch(io, file, null, scratch_path, name, budget, 0);
+            return err;
+        };
+        if (fail_unlink) {
+            retained.* = retainedNamedScratch(io, file, readonly, scratch_path, name, budget, 0);
+            return error.InjectedResponseUnlinkFailure;
+        }
+        scratch.deleteFile(io, name) catch |err| {
+            retained.* = retainedNamedScratch(io, file, readonly, scratch_path, name, budget, 0);
+            return err;
+        };
         return .{
             .io = io,
             .file = file,
@@ -482,9 +503,33 @@ pub const ResponseCapture = struct {
     }
 };
 
+fn retainedNamedScratch(
+    io: std.Io,
+    file: std.Io.File,
+    secondary_file: ?std.Io.File,
+    scratch_path: []const u8,
+    name: []const u8,
+    budget: ScratchBudget,
+    charged: u64,
+) RetainedScratch {
+    var retained = RetainedScratch{
+        .io = io,
+        .file = file,
+        .secondary_file = secondary_file,
+        .scratch_path = .{},
+        .name = .{},
+        .charged = charged,
+        .budget = budget,
+    };
+    retained.scratch_path.set(scratch_path) catch unreachable;
+    retained.name.set(name) catch unreachable;
+    return retained;
+}
+
 const HeaderContext = struct {
     request_id: protocol.Bounded(256) = .{},
-    served_model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    openai_model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    x_openai_model: protocol.Bounded(protocol.max_model_bytes) = .{},
     invalid: bool = false,
 };
 
@@ -516,6 +561,7 @@ pub const Transfer = struct {
         options: TransportOptions,
         scratch_path: []const u8,
         response_budget: ScratchBudget,
+        retained_response: *?RetainedScratch,
     ) !void {
         if (options.inactivity_seconds <= 0) return error.InvalidTransportTimeout;
         try validateEndpoint(endpoint);
@@ -533,7 +579,9 @@ pub const Transfer = struct {
             response_budget,
             binding,
             options.response_acquire_fault,
+            options.response_unlink_fault,
             options.response_write_fault,
+            retained_response,
         ) catch return error.ResponseCaptureAcquisitionFailed;
         errdefer response.deinit();
         self.* = .{
@@ -622,12 +670,20 @@ pub const Transfer = struct {
         return self.header_context.request_id.slice();
     }
 
-    pub fn servedModel(self: *const Transfer) []const u8 {
-        return self.header_context.served_model.slice();
+    pub fn openaiModel(self: *const Transfer) []const u8 {
+        return self.header_context.openai_model.slice();
+    }
+
+    pub fn xOpenaiModel(self: *const Transfer) []const u8 {
+        return self.header_context.x_openai_model.slice();
     }
 
     pub fn responseFailureCode(self: *const Transfer) ?[]const u8 {
         return self.response.failureCode();
+    }
+
+    pub fn hasStructuredOutput(self: *const Transfer) bool {
+        return self.request.structured_output;
     }
 };
 
@@ -702,8 +758,10 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
     const value = std.mem.trim(u8, line[colon + 1 ..], " \t\r\n");
     const destination = if (std.ascii.eqlIgnoreCase(name, "x-request-id"))
         &context.request_id
-    else if (std.ascii.eqlIgnoreCase(name, "openai-model") or std.ascii.eqlIgnoreCase(name, "x-openai-model"))
-        &context.served_model
+    else if (std.ascii.eqlIgnoreCase(name, "openai-model"))
+        &context.openai_model
+    else if (std.ascii.eqlIgnoreCase(name, "x-openai-model"))
+        &context.x_openai_model
     else
         return bytes;
     if (value.len == 0 or (destination.len != 0 and !destination.eql(value))) {

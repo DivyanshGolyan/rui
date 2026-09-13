@@ -85,7 +85,15 @@ def encode_sse(payloads, done=True):
     return body + (b"data: [DONE]\n\n" if done else b"")
 
 
-def sse_answer(response_id, reasoning_id, message_id, answer, *, extension=None):
+def sse_answer(
+    response_id,
+    reasoning_id,
+    message_id,
+    answer,
+    *,
+    extension=None,
+    served_model="model-a-served",
+):
     reasoning = {
         "type": "reasoning",
         "id": reasoning_id,
@@ -110,6 +118,14 @@ def sse_answer(response_id, reasoning_id, message_id, answer, *, extension=None)
             }
         ],
     }
+    completed_response = {
+        "id": response_id,
+        "status": "completed",
+        "output": [reasoning, message_item],
+        "usage": {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
+    }
+    if served_model is not None:
+        completed_response["model"] = served_model
     payloads = [
         {
             "type": "response.output_item.added",
@@ -125,13 +141,7 @@ def sse_answer(response_id, reasoning_id, message_id, answer, *, extension=None)
         {"type": "response.output_item.done", "output_index": 1, "item": message_item},
         {
             "type": "response.completed",
-            "response": {
-                "id": response_id,
-                "status": "completed",
-                "model": "model-a-served",
-                "output": [reasoning, message_item],
-                "usage": {"input_tokens": 7, "output_tokens": 11, "total_tokens": 18},
-            },
+            "response": completed_response,
         },
     ]
     body = encode_sse(payloads)
@@ -200,6 +210,12 @@ class SuccessEndpoint(http.server.ThreadingHTTPServer):
         self.lock = threading.Lock()
 
 
+class ResponseSpec:
+    def __init__(self, body, headers):
+        self.body = body
+        self.headers = headers
+
+
 class SuccessHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -215,11 +231,15 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
             payload, release = payload
             if not release.wait(10):
                 raise RuntimeError("success fixture response was never released")
+        headers = {"X-Request-Id": f"request-{len(self.server.requests)}", "OpenAI-Model": "model-a-served"}
+        if isinstance(payload, ResponseSpec):
+            headers = payload.headers
+            payload = payload.body
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("X-Request-Id", f"request-{len(self.server.requests)}")
-        self.send_header("OpenAI-Model", "model-a-served")
+        for name, value in headers.items():
+            self.send_header(name, value)
         self.send_header("Connection", "close")
         self.end_headers()
         # Split inside SSE field names, JSON punctuation, escapes and UTF-8.
@@ -430,6 +450,44 @@ def main():
         success_host = start_host(success_store, success_url)
         processes.append(success_host)
         assert read_result(success_store, "success-first") == first_answer
+        before_model_change = command(
+            "inspect-session", "--store", success_store, "--session", "direct/success"
+        )["session"]
+        incompatible_args = (
+            "configure",
+            "--store",
+            success_store,
+            "--record",
+            state / "incompatible-model.json",
+            "--key",
+            "incompatible-model",
+            "--session",
+            "direct/success",
+            "--model",
+            "model-b",
+        )
+        incompatible = command(*incompatible_args)
+        assert incompatible["answer"]["status"] == "rejected", incompatible
+        assert incompatible["answer"]["code"] == "continuation_model_incompatible", incompatible
+        replayed_incompatible = command(
+            "retry",
+            "--store",
+            success_store,
+            "--record",
+            state / "incompatible-model.json",
+            "--kind",
+            "configure",
+        )
+        assert replayed_incompatible["answer"]["status"] == "rejected", replayed_incompatible
+        assert replayed_incompatible["answer"]["replayed"] is True, replayed_incompatible
+        after_model_change = command(
+            "inspect-session", "--store", success_store, "--session", "direct/success"
+        )["session"]
+        assert after_model_change["model"] == "model-a", after_model_change
+        assert after_model_change["revision"] == before_model_change["revision"], (
+            before_model_change,
+            after_model_change,
+        )
         message(state, success_store, "success-second", "direct/success", "second question")
         wait_for(
             lambda: completed_observation(success_store, "success-second"),
@@ -467,10 +525,26 @@ def main():
             ).fetchone()[0]
             assert json.loads(raw_reasoning)["created_by"] == "response-only"
             assert database.execute(
-                "SELECT response_id,served_model,request_id,resolution_code,usage_content_id IS NOT NULL FROM model_operation ORDER BY operation_id"
+                "SELECT response_id,body_model,openai_model,x_openai_model,request_id,resolution_code,usage_content_id IS NOT NULL FROM model_operation ORDER BY operation_id"
             ).fetchall() == [
-                ("response-1", "model-a-served", "request-1", "completed", 1),
-                ("response-2", "model-a-served", "request-2", "completed", 1),
+                (
+                    "response-1",
+                    "model-a-served",
+                    "model-a-served",
+                    None,
+                    "request-1",
+                    "completed",
+                    1,
+                ),
+                (
+                    "response-2",
+                    "model-a-served",
+                    "model-a-served",
+                    None,
+                    "request-2",
+                    "completed",
+                    1,
+                ),
             ]
             saved_usage = database.execute(
                 "SELECT CAST(c.payload AS TEXT) FROM model_operation o JOIN content c ON c.content_id=o.usage_content_id ORDER BY o.operation_id"
@@ -495,6 +569,94 @@ def main():
         assert read_result(success_store, "success-second") == second_answer
         stop_host(offline_success)
         processes.remove(offline_success)
+
+        evidence_cases = (
+            ("body-only", "model-a-served", {}, ("model-a-served", None, None, None)),
+            (
+                "openai-only",
+                None,
+                {"OpenAI-Model": "model-a-served"},
+                (None, "model-a-served", None, None),
+            ),
+            (
+                "x-openai-only",
+                None,
+                {"X-OpenAI-Model": "model-a-served"},
+                (None, None, "model-a-served", None),
+            ),
+            (
+                "all-sources",
+                "model-a-served",
+                {
+                    "OpenAI-Model": "model-a-served",
+                    "X-OpenAI-Model": "model-a-served",
+                    "X-Request-Id": "all-sources-request",
+                },
+                (
+                    "model-a-served",
+                    "model-a-served",
+                    "model-a-served",
+                    "all-sources-request",
+                ),
+            ),
+            ("absent", None, {}, (None, None, None, None)),
+        )
+        evidence_endpoint = SuccessEndpoint(
+            [
+                ResponseSpec(
+                    sse_answer(
+                        f"evidence-{name}",
+                        f"evidence-{name}-reasoning",
+                        f"evidence-{name}-message",
+                        f"answer-{name}",
+                        served_model=body_model,
+                    )[0],
+                    headers,
+                )
+                for name, body_model, headers, _ in evidence_cases
+            ]
+        )
+        evidence_thread = threading.Thread(target=evidence_endpoint.serve_forever, daemon=True)
+        evidence_thread.start()
+        evidence_url = f"http://127.0.0.1:{evidence_endpoint.server_port}/responses"
+        for name, _, _, expected_evidence in evidence_cases:
+            evidence_store = state / f"evidence-{name}-store"
+            evidence_host = start_host(evidence_store, evidence_url)
+            processes.append(evidence_host)
+            configure(state, evidence_store, f"evidence-{name}-config", f"direct/evidence-{name}", "model-a")
+            message(
+                state,
+                evidence_store,
+                f"evidence-{name}-message",
+                f"direct/evidence-{name}",
+                "evidence",
+            )
+            wait_for(
+                lambda key=f"evidence-{name}-message", store=evidence_store: completed_observation(store, key),
+                f"{name} evidence completion",
+            )
+            stop_host(evidence_host)
+            processes.remove(evidence_host)
+            reopened = subprocess.Popen(
+                [str(LATIFA), "serve", "--store", str(evidence_store), "--active-capacity", "1"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            processes.append(reopened)
+            assert reopened.stdout.readline().startswith("ready ")
+            assert read_result(evidence_store, f"evidence-{name}-message") == f"answer-{name}".encode()
+            database = sqlite3.connect(evidence_store / "latifa.sqlite3")
+            actual_evidence = database.execute(
+                "SELECT body_model,openai_model,x_openai_model,request_id FROM model_operation"
+            ).fetchone()
+            database.close()
+            assert actual_evidence == expected_evidence, (name, actual_evidence, expected_evidence)
+            stop_host(reopened)
+            processes.remove(reopened)
+        evidence_endpoint.shutdown()
+        evidence_endpoint.server_close()
+        evidence_thread.join(timeout=5)
 
         # Input committed after the first request's cutoff is selected at the
         # next boundary. The first complete candidate is durable history but
@@ -558,6 +720,57 @@ def main():
         pending_endpoint.shutdown()
         pending_endpoint.server_close()
         pending_thread.join(timeout=5)
+
+        # Structured output remains an explicitly unavailable partial-build
+        # surface. Even a complete 2xx text response cannot be published under
+        # a frozen object schema without schema validation.
+        schema_candidate = sse_answer(
+            "schema-response", "schema-reasoning", "schema-message", "not a JSON object"
+        )[0]
+        schema_endpoint = SuccessEndpoint([schema_candidate])
+        schema_thread = threading.Thread(target=schema_endpoint.serve_forever, daemon=True)
+        schema_thread.start()
+        schema_store = state / "unsupported-schema-store"
+        schema_host = start_host(
+            schema_store, f"http://127.0.0.1:{schema_endpoint.server_port}/responses"
+        )
+        processes.append(schema_host)
+        configure(
+            state,
+            schema_store,
+            "schema-config",
+            "direct/unsupported-schema",
+            "model-a",
+            {"type": "object"},
+        )
+        message(
+            state,
+            schema_store,
+            "schema-message",
+            "direct/unsupported-schema",
+            "return an object",
+        )
+        schema_failure = wait_for(
+            lambda: (value := observe(schema_store, "schema-message")).get("result", {}).get("code")
+            and value,
+            "unsupported structured output rejection",
+        )
+        assert schema_failure["result"]["code"] == "unsupported_output_schema", schema_failure
+        assert len(schema_endpoint.requests) == 1
+        database = sqlite3.connect(schema_store / "latifa.sqlite3")
+        assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
+        assert database.execute(
+            "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
+        ).fetchone()[0] == 0
+        assert database.execute(
+            "SELECT outcome_content_id FROM turn"
+        ).fetchone()[0] is None
+        database.close()
+        stop_host(schema_host)
+        processes.remove(schema_host)
+        schema_endpoint.shutdown()
+        schema_endpoint.server_close()
+        schema_thread.join(timeout=5)
 
         # Completed transport is not success: the whole SSE candidate must be
         # complete, consistent and limited to the supported text subset.
@@ -840,7 +1053,21 @@ def main():
         message(state, store, "message-a", "direct/main", 'first "message"\n')
         if not endpoint.received.wait(8):
             raise AssertionError("endpoint did not receive committed request")
-        configure(state, store, "config-b", "direct/main", "model-b")
+        active_model_change = command(
+            "configure",
+            "--store",
+            store,
+            "--record",
+            state / "config-b.json",
+            "--key",
+            "config-b",
+            "--session",
+            "direct/main",
+            "--model",
+            "model-b",
+        )
+        assert active_model_change["answer"]["status"] == "rejected", active_model_change
+        assert active_model_change["answer"]["code"] == "continuation_model_incompatible"
         message(state, store, "message-b", "direct/main", "later message")
         assert len(endpoint.requests) == 1
         endpoint.release.set()
@@ -852,6 +1079,7 @@ def main():
         )
         assert failed["queue"]["status"] == "failed", failed
         assert failed["processing"]["attempt"] == "1", failed
+        configure(state, store, "config-b-after-failure", "direct/main", "model-b")
         later = observe(store, "message-b")
         assert later["queue"]["status"] == "queued", later
         assert len(endpoint.requests) == 1, "a permit launched more than once"
@@ -1210,6 +1438,83 @@ def main():
         assert repaired.stdout.readline().startswith("ready ")
         stop_host(repaired)
         processes.remove(repaired)
+
+        # Response and validation-metadata unlink failures retain one named
+        # file under custody and fence dispatch. A second failed cleanup leaves
+        # it owned for the next startup, which removes only recognized names.
+        unlink_output, _, _ = sse_answer(
+            "unlink-response", "unlink-reasoning", "unlink-message", "must not publish"
+        )
+        unlink_endpoint = SuccessEndpoint([unlink_output])
+        unlink_thread = threading.Thread(target=unlink_endpoint.serve_forever, daemon=True)
+        unlink_thread.start()
+        unlink_url = f"http://127.0.0.1:{unlink_endpoint.server_port}/responses"
+        for fault, pattern, launched in (
+            ("response-unlink", "response-[0-9]*.tmp", False),
+            ("response-metadata-unlink", "response-metadata-*.tmp", True),
+        ):
+            owned_store = state / f"{fault}-owned-store"
+            owned_host = start_host(owned_store, unlink_url, "--fault", fault)
+            processes.append(owned_host)
+            configure(state, owned_store, f"{fault}-config", f"direct/{fault}", "model-a")
+            message(state, owned_store, f"{fault}-message", f"direct/{fault}", "unlink")
+            leftovers = wait_for(
+                lambda store=owned_store, glob=pattern: list((store / "scratch").glob(glob)),
+                f"retained named {fault} scratch",
+            )
+            resources = command(
+                "inspect-session", "--store", owned_store, "--session", f"direct/{fault}"
+            )["execution"]
+            assert resources["dispatch_fenced"] is True, resources
+            assert resources["custody_occupied"] == "1", resources
+            assert len(unlink_endpoint.requests) == (1 if launched else 0)
+            database = sqlite3.connect(owned_store / "latifa.sqlite3")
+            assert database.execute(
+                "SELECT uncertain,resolution_code FROM model_operation"
+            ).fetchone() == (1, None)
+            assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
+            database.close()
+            stop_host(owned_host)
+            processes.remove(owned_host)
+            assert leftovers[0].exists()
+
+            failed_cleanup = subprocess.run(
+                [
+                    str(LATIFA),
+                    "serve",
+                    "--store",
+                    str(owned_store),
+                    "--active-capacity",
+                    "1",
+                    "--fault",
+                    "startup-cleanup",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            assert failed_cleanup.returncode != 0, failed_cleanup
+            assert leftovers[0].exists()
+
+            cleanup_host = subprocess.Popen(
+                [str(LATIFA), "serve", "--store", str(owned_store), "--active-capacity", "1"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            processes.append(cleanup_host)
+            assert cleanup_host.stdout.readline().startswith("ready ")
+            assert not list((owned_store / "scratch").glob(pattern))
+            resources = command(
+                "inspect-session", "--store", owned_store, "--session", f"direct/{fault}"
+            )["execution"]
+            assert resources["custody_occupied"] == "0", resources
+            assert resources["scratch_used_bytes"] == "0", resources
+            stop_host(cleanup_host)
+            processes.remove(cleanup_host)
+        unlink_endpoint.shutdown()
+        unlink_endpoint.server_close()
+        unlink_thread.join(timeout=5)
 
         # If initial unlink fails, the live owner keeps the named scratch,
         # charge and custody while fencing later dispatch. A fresh owner removes

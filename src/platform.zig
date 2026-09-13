@@ -113,8 +113,14 @@ fn validatePrivateDirectory(dir: std.Io.Dir, io: std.Io) !void {
 }
 
 fn isOwnedIngressName(name: []const u8) bool {
-    if (!std.mem.startsWith(u8, name, "request-") or !std.mem.endsWith(u8, name, ".tmp")) return false;
-    const middle = name["request-".len .. name.len - ".tmp".len];
+    return isOwnedNumericScratch(name, "request-") or
+        isOwnedNumericScratch(name, "response-") or
+        isOwnedNumericScratch(name, "response-metadata-");
+}
+
+fn isOwnedNumericScratch(name: []const u8, prefix: []const u8) bool {
+    if (!std.mem.startsWith(u8, name, prefix) or !std.mem.endsWith(u8, name, ".tmp")) return false;
+    const middle = name[prefix.len .. name.len - ".tmp".len];
     var dash_count: u8 = 0;
     if (middle.len == 0) return false;
     for (middle) |byte| {
@@ -164,6 +170,10 @@ test "Store paths canonicalize aliases to one socket" {
 
 test "startup cleanup recognizes only owned ingress names" {
     try std.testing.expect(isOwnedIngressName("request-12-2.tmp"));
+    try std.testing.expect(isOwnedIngressName("response-12-2.tmp"));
+    try std.testing.expect(isOwnedIngressName("response-metadata-12-2.tmp"));
     try std.testing.expect(!isOwnedIngressName("request-x-2.tmp"));
+    try std.testing.expect(!isOwnedIngressName("response-metadata-12-x.tmp"));
+    try std.testing.expect(!isOwnedIngressName("response-secret.tmp"));
     try std.testing.expect(!isOwnedIngressName("canonical.sqlite3"));
 }
