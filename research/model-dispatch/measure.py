@@ -74,7 +74,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(result)))
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(result)
+        try:
+            self.wfile.write(result)
+        except BrokenPipeError:
+            pass
         self.close_connection = True
 
     def log_message(self, _format, *_args):
