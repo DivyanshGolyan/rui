@@ -358,8 +358,9 @@ known_session=$($latifa inspect-session --store "$store" --session direct/main)
 contains "$known_session" '"pending_messages":"1"'
 
 # Complete stdin is captured into the durable caller record before transport;
-# the pipe then disappears, and a restart retry retains its second position.
-stdin_message=$(printf 'stdin line one\nstdin line two 🙂\n' | "$latifa" message --store "$store" --record "$records/stdin-message.json" --key msg-stdin --session direct/main --text -)
+# the multi-window pipe then disappears, and a restart retry retains its exact
+# independently calculated length/digest and second position.
+stdin_message=$(python3 -c 'import sys; sys.stdout.write("stdin🙂line\n" * 1000)' | "$latifa" message --store "$store" --record "$records/stdin-message.json" --key msg-stdin --session direct/main --text -)
 contains "$stdin_message" '"status":"accepted"'
 contains "$stdin_message" '"admission":"2"'
 stop_host
@@ -367,6 +368,17 @@ start_host
 stdin_replay=$($latifa retry --store "$store" --record "$records/stdin-message.json" --kind message)
 contains "$stdin_replay" '"replayed":true'
 contains "$stdin_replay" '"admission":"2"'
+python3 - "$stdin_replay" <<'PY'
+import hashlib, json, sys
+payload = ("stdin🙂line\n" * 1000).encode()
+domain = b"latifa/content/v1"
+digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + payload).hexdigest()
+answer = json.loads(sys.argv[1])
+if answer["input"]["bytes"] != str(len(payload)):
+    raise SystemExit("stdin capture length differs from independent oracle")
+if answer["input"]["sha256"] != digest:
+    raise SystemExit("stdin capture digest differs from independent oracle")
+PY
 ordered_session=$($latifa inspect-session --store "$store" --session direct/main)
 contains "$ordered_session" '"pending_messages":"2"'
 
