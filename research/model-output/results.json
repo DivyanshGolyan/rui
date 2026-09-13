@@ -1,9 +1,9 @@
 {
   "scope": "issue-173 production model-output capture, import, and retained idle",
   "status": "passed",
-  "tested_revision": "69baf26c96a148fddff34f11c8782d6ed762244c",
+  "tested_revision": "1c653bd9e008b4aa782fa4e1b944bfe9db9c1e2a",
   "working_tree_dirty": false,
-  "binary_sha256": "787cbcd1de46a63bd77e48baa2d608f27e3e34047d097747b6f0060405dc8118",
+  "binary_sha256": "434a77f3b15e5c28aade77a04f3fb3e500af26390efaf8dd72d9c300a8b36b18",
   "zig": "0.16.0",
   "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
   "active_capacity": 1,
@@ -18,22 +18,28 @@
       "canonical_output_items": 2,
       "private_content_rows": 3,
       "assistant_projections": 1,
-      "database_bytes": 118784,
+      "database_bytes": 122880,
       "cold": {
-        "rss_bytes": 8044544,
-        "virtual_bytes": 420267982848,
-        "physical_footprint_bytes": 3621888,
-        "lifetime_peak_physical_footprint_bytes": 3621888,
+        "rss_bytes": 8011776,
+        "virtual_bytes": 420420059136,
+        "physical_footprint_bytes": 3589120,
+        "lifetime_peak_physical_footprint_bytes": 3589120,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 9502720,
-        "virtual_bytes": 420699521024,
-        "physical_footprint_bytes": 5014528,
-        "lifetime_peak_physical_footprint_bytes": 5178368,
+        "rss_bytes": 9846784,
+        "virtual_bytes": 420831674368,
+        "physical_footprint_bytes": 5325824,
+        "lifetime_peak_physical_footprint_bytes": 5473280,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
+      },
+      "client_delivery": {
+        "destination_bytes": 1024,
+        "destination_sha256": "49abd65bbf7f7e40c7055093ed2e3fd75f2f602f2c5fcf955c213e3135eb03f7",
+        "maximum_resident_set_size_bytes": 3473408,
+        "peak_memory_footprint_bytes": 2196096
       },
       "execution_after_completion": {
         "status": "partial",
@@ -41,8 +47,7 @@
         "custody_occupied": "0",
         "scratch_used_bytes": "0",
         "unavailable": [
-          "structured_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "answer_sha256": "49abd65bbf7f7e40c7055093ed2e3fd75f2f602f2c5fcf955c213e3135eb03f7"
@@ -57,22 +62,28 @@
       "canonical_output_items": 2,
       "private_content_rows": 3,
       "assistant_projections": 1,
-      "database_bytes": 2215936,
+      "database_bytes": 2220032,
       "cold": {
-        "rss_bytes": 7716864,
-        "virtual_bytes": 420256448512,
-        "physical_footprint_bytes": 3277824,
-        "lifetime_peak_physical_footprint_bytes": 3277824,
+        "rss_bytes": 8028160,
+        "virtual_bytes": 420256481280,
+        "physical_footprint_bytes": 3523584,
+        "lifetime_peak_physical_footprint_bytes": 3523584,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 10960896,
-        "virtual_bytes": 420391239680,
-        "physical_footprint_bytes": 6390784,
-        "lifetime_peak_physical_footprint_bytes": 6554624,
+        "rss_bytes": 11747328,
+        "virtual_bytes": 420534927360,
+        "physical_footprint_bytes": 7128064,
+        "lifetime_peak_physical_footprint_bytes": 7291904,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
+      },
+      "client_delivery": {
+        "destination_bytes": 1048576,
+        "destination_sha256": "8f990ba0b577b51cf009ea049368c16bbda1b21e1b93be07a824758bb253c39b",
+        "maximum_resident_set_size_bytes": 3473408,
+        "peak_memory_footprint_bytes": 2196096
       },
       "execution_after_completion": {
         "status": "partial",
@@ -80,8 +91,7 @@
         "custody_occupied": "0",
         "scratch_used_bytes": "0",
         "unavailable": [
-          "structured_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "answer_sha256": "8f990ba0b577b51cf009ea049368c16bbda1b21e1b93be07a824758bb253c39b"
@@ -96,22 +106,28 @@
       "canonical_output_items": 2,
       "private_content_rows": 3,
       "assistant_projections": 1,
-      "database_bytes": 16912384,
+      "database_bytes": 16916480,
       "cold": {
-        "rss_bytes": 7913472,
-        "virtual_bytes": 420122230784,
-        "physical_footprint_bytes": 3458048,
-        "lifetime_peak_physical_footprint_bytes": 3458048,
+        "rss_bytes": 7946240,
+        "virtual_bytes": 420122263552,
+        "physical_footprint_bytes": 3425280,
+        "lifetime_peak_physical_footprint_bytes": 3425280,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 13598720,
-        "virtual_bytes": 420553228288,
-        "physical_footprint_bytes": 9077760,
-        "lifetime_peak_physical_footprint_bytes": 9225216,
+        "rss_bytes": 14483456,
+        "virtual_bytes": 420687478784,
+        "physical_footprint_bytes": 9929728,
+        "lifetime_peak_physical_footprint_bytes": 10077184,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
+      },
+      "client_delivery": {
+        "destination_bytes": 8388608,
+        "destination_sha256": "0c77bc0a0795a93612d45256897456d0fcb24f151c44c150d07ecd03f4ef5168",
+        "maximum_resident_set_size_bytes": 3473408,
+        "peak_memory_footprint_bytes": 2196096
       },
       "execution_after_completion": {
         "status": "partial",
@@ -119,8 +135,7 @@
         "custody_occupied": "0",
         "scratch_used_bytes": "0",
         "unavailable": [
-          "structured_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "answer_sha256": "0c77bc0a0795a93612d45256897456d0fcb24f151c44c150d07ecd03f4ef5168"
@@ -137,22 +152,28 @@
       "canonical_output_items": 2,
       "private_content_rows": 3,
       "assistant_projections": 1,
-      "database_bytes": 118784,
+      "database_bytes": 122880,
       "cold": {
-        "rss_bytes": 8044544,
-        "virtual_bytes": 420141105152,
-        "physical_footprint_bytes": 3589120,
-        "lifetime_peak_physical_footprint_bytes": 3589120,
+        "rss_bytes": 7716864,
+        "virtual_bytes": 420256481280,
+        "physical_footprint_bytes": 3212288,
+        "lifetime_peak_physical_footprint_bytes": 3212288,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 9224192,
-        "virtual_bytes": 420275896320,
-        "physical_footprint_bytes": 4637696,
-        "lifetime_peak_physical_footprint_bytes": 4801536,
+        "rss_bytes": 8962048,
+        "virtual_bytes": 420400709632,
+        "physical_footprint_bytes": 4342784,
+        "lifetime_peak_physical_footprint_bytes": 4490240,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
+      },
+      "client_delivery": {
+        "destination_bytes": 6,
+        "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+        "maximum_resident_set_size_bytes": 3473408,
+        "peak_memory_footprint_bytes": 2196096
       },
       "execution_after_completion": {
         "status": "partial",
@@ -160,8 +181,7 @@
         "custody_occupied": "0",
         "scratch_used_bytes": "0",
         "unavailable": [
-          "structured_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9"
@@ -176,22 +196,28 @@
       "canonical_output_items": 129,
       "private_content_rows": 130,
       "assistant_projections": 1,
-      "database_bytes": 151552,
+      "database_bytes": 155648,
       "cold": {
-        "rss_bytes": 7667712,
-        "virtual_bytes": 420256448512,
-        "physical_footprint_bytes": 3212288,
-        "lifetime_peak_physical_footprint_bytes": 3212288,
+        "rss_bytes": 7929856,
+        "virtual_bytes": 420247044096,
+        "physical_footprint_bytes": 3458048,
+        "lifetime_peak_physical_footprint_bytes": 3458048,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 8945664,
-        "virtual_bytes": 420266459136,
-        "physical_footprint_bytes": 4375552,
-        "lifetime_peak_physical_footprint_bytes": 4539392,
+        "rss_bytes": 9469952,
+        "virtual_bytes": 420534927360,
+        "physical_footprint_bytes": 4916224,
+        "lifetime_peak_physical_footprint_bytes": 5080064,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
+      },
+      "client_delivery": {
+        "destination_bytes": 6,
+        "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+        "maximum_resident_set_size_bytes": 3473408,
+        "peak_memory_footprint_bytes": 2212544
       },
       "execution_after_completion": {
         "status": "partial",
@@ -199,8 +225,7 @@
         "custody_occupied": "0",
         "scratch_used_bytes": "0",
         "unavailable": [
-          "structured_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9"
@@ -215,22 +240,28 @@
       "canonical_output_items": 1001,
       "private_content_rows": 1002,
       "assistant_projections": 1,
-      "database_bytes": 454656,
+      "database_bytes": 458752,
       "cold": {
-        "rss_bytes": 7897088,
-        "virtual_bytes": 420543758336,
-        "physical_footprint_bytes": 3556352,
-        "lifetime_peak_physical_footprint_bytes": 3556352,
+        "rss_bytes": 8011776,
+        "virtual_bytes": 420256481280,
+        "physical_footprint_bytes": 3523584,
+        "lifetime_peak_physical_footprint_bytes": 3523584,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
       },
       "retained_idle": {
-        "rss_bytes": 9306112,
-        "virtual_bytes": 420678549504,
-        "physical_footprint_bytes": 4834304,
-        "lifetime_peak_physical_footprint_bytes": 4981760,
+        "rss_bytes": 10452992,
+        "virtual_bytes": 420535975936,
+        "physical_footprint_bytes": 5882880,
+        "lifetime_peak_physical_footprint_bytes": 6046720,
         "open_descriptor_rows": 15,
         "open_response_file_descriptors": 0
+      },
+      "client_delivery": {
+        "destination_bytes": 6,
+        "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+        "maximum_resident_set_size_bytes": 3473408,
+        "peak_memory_footprint_bytes": 2196096
       },
       "execution_after_completion": {
         "status": "partial",
@@ -238,19 +269,19 @@
         "custody_occupied": "0",
         "scratch_used_bytes": "0",
         "unavailable": [
-          "structured_output",
-          "retry_and_restart_resolution"
+          "structured_output"
         ]
       },
       "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9"
     }
   ],
-  "elapsed_seconds": 7.477,
+  "elapsed_seconds": 7.139,
   "limits": [
     "macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only",
     "deterministic loopback HTTP qualifies no TLS trust store, live provider, billing, or backend continuation",
     "each row uses a fresh Store and Host so answer bytes and item count grow independently of durable history",
     "physical footprint peak is the macOS lifetime counter; retained idle is sampled after canonical commit, result verification, zero scratch charge, and released custody",
+    "client delivery redirects stdout to a fresh concrete file; macOS time counters cover only the CLI process, while exact destination length and SHA-256 prove complete framing without an added newline",
     "SQLite file bytes include complete private provider items and one public answer; rows do not isolate filesystem cache from process footprint",
     "process termination and restart tests are crash evidence, not power-loss qualification"
   ]
