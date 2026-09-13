@@ -270,7 +270,7 @@ fn executionMain(host: *Host) void {
             const maintain_retries = retry_poll_due or capacity_released;
             var may_admit_new = !maintain_retries;
             if (maintain_retries) {
-                const recovered = host.store.recoverOneExhaustedModelAttemptForHost(active_filter) catch |err| {
+                const recovered = host.store.recoverOneExhaustedModelAttempt(active_filter) catch |err| {
                     fenceDispatch(host, "exhausted retry recovery", err);
                     break;
                 };
@@ -438,14 +438,16 @@ fn beginAdmittedAttempt(
             finishCustodyNow(host, token);
             return .admitted;
         }
-        settleAttemptFailure(host, token, binding, preparationFailureCode(err), false, null);
+        settleAttemptFailure(host, token, binding, preparationFailureCode(err), .terminal);
         finishCustodyNow(host, token);
         return .admitted;
     };
     var retained_response: ?provider.RetainedScratch = null;
     if (host.faults.provider_prepare) {
         request.deinit();
-        settleAttemptFailure(host, token, binding, "provider_transport_failure", true, null);
+        settleAttemptFailure(host, token, binding, "provider_transport_failure", .{ .retryable = .{
+            .waits_ms = host.faults.retry_waits_ms,
+        } });
         finishCustodyNow(host, token);
         return .admitted;
     }
@@ -467,7 +469,7 @@ fn beginAdmittedAttempt(
         }
         std.debug.print("latifa: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         if (err == error.ResponseCaptureAcquisitionFailed) {
-            settleAttemptFailure(host, token, binding, "response_capture_failed", false, null);
+            settleAttemptFailure(host, token, binding, "response_capture_failed", .terminal);
         } else {
             fenceDispatch(host, "provider preparation", err);
         }
@@ -519,7 +521,7 @@ fn completeTransfer(
     };
     reactor.remove(&slot.transfer);
     if (slot.transfer.responseFailureCode()) |code| {
-        settleAttemptFailure(host, slot.token, slot.binding, code, false, null);
+        settleAttemptFailure(host, slot.token, slot.binding, code, .terminal);
         slot.transfer.deinit();
         beginCleanup(host, slot);
         return;
@@ -553,15 +555,21 @@ fn completeTransfer(
         .invalid_headers => "invalid_provider_headers",
         .request_read_failure => unreachable,
     };
-    const retryable = evidence.disposition == .temporary_http or
-        evidence.disposition == .temporary_connection;
+    const failure_disposition: store_module.ModelFailureDisposition =
+        if (evidence.disposition == .temporary_http or
+        evidence.disposition == .temporary_connection)
+            .{ .retryable = .{
+                .waits_ms = host.faults.retry_waits_ms,
+                .retry_after_ms = evidence.retry_after_ms,
+            } }
+        else
+            .terminal;
     settleAttemptFailure(
         host,
         slot.token,
         slot.binding,
         code,
-        retryable,
-        evidence.retry_after_ms,
+        failure_disposition,
     );
     slot.transfer.deinit();
     beginCleanup(host, slot);
@@ -571,13 +579,13 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
     const structured_output = slot.transfer.hasStructuredOutput();
     slot.transfer.response.seal(host.faults.response_seal) catch |err| {
         std.debug.print("latifa: response seal failed for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, "response_seal_failed", false, null);
+        settleAttemptFailure(host, slot.token, slot.binding, "response_seal_failed", .terminal);
         slot.transfer.deinit();
         beginCleanup(host, slot);
         return;
     };
     if (structured_output) {
-        settleAttemptFailure(host, slot.token, slot.binding, "unsupported_output_schema", false, null);
+        settleAttemptFailure(host, slot.token, slot.binding, "unsupported_output_schema", .terminal);
         slot.transfer.deinit();
         beginCleanup(host, slot);
         return;
@@ -614,7 +622,7 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
             return;
         }
         std.debug.print("latifa: response metadata acquisition failed for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, "response_metadata_exhausted", false, null);
+        settleAttemptFailure(host, slot.token, slot.binding, "response_metadata_exhausted", .terminal);
         beginCleanup(host, slot);
         return;
     };
@@ -623,7 +631,7 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
         .metadata = host.faults.response_metadata,
     }) catch |err| {
         std.debug.print("latifa: provider output rejected for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, provider_output.failureCode(err), false, null);
+        settleAttemptFailure(host, slot.token, slot.binding, provider_output.failureCode(err), .terminal);
         beginCleanup(host, slot);
         return;
     };
@@ -632,7 +640,7 @@ fn completeSuccessfulTransfer(host: *Host, slot: *ExecutionSlot) void {
         openai_model.slice(),
         x_openai_model.slice(),
     )) {
-        settleAttemptFailure(host, slot.token, slot.binding, "contradictory_provider_output", false, null);
+        settleAttemptFailure(host, slot.token, slot.binding, "contradictory_provider_output", .terminal);
         beginCleanup(host, slot);
         return;
     }
@@ -746,29 +754,12 @@ fn settleAttemptFailure(
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
     code: []const u8,
-    retryable: bool,
-    retry_after_ms: ?u64,
+    disposition: store_module.ModelFailureDisposition,
 ) void {
     if (!host.custody.claimTerminalDelivery(token)) return;
-    if (retryable) {
-        host.store.settleRetryableModelFailure(
-            binding,
-            code,
-            retryWaitForAttempt(host, binding.attempt_ordinal),
-            retry_after_ms,
-            .{ .before_commit = host.faults.result_before_commit },
-        ) catch |err| fenceDispatch(host, "model retry save", err);
-    } else {
-        host.store.settleModelFailure(binding, code, .{
-            .before_commit = host.faults.result_before_commit,
-        }) catch |err| fenceDispatch(host, "model failure save", err);
-    }
-}
-
-fn retryWaitForAttempt(host: *const Host, attempt_ordinal: u64) u64 {
-    std.debug.assert(attempt_ordinal >= 1 and attempt_ordinal <= store_module.maximum_model_attempts);
-    const index: usize = @intCast(@min(attempt_ordinal - 1, host.faults.retry_waits_ms.len - 1));
-    return host.faults.retry_waits_ms[index];
+    host.store.settleModelAttemptFailure(binding, code, disposition, .{
+        .before_commit = host.faults.result_before_commit,
+    }) catch |err| fenceDispatch(host, "model failure save", err);
 }
 
 fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
