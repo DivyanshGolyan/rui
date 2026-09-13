@@ -88,8 +88,10 @@ fn configure(io: std.Io, args: []const []const u8) !void {
         index += 1;
     }
     if (input.store.len == 0 or input.record.len == 0 or input.session.len == 0 or !key_seen) return usage();
-    const status = try client.configure(io, input);
-    if (status != 200 and status != 409) return error.HostInvocationFailed;
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try client.configure(io, input, &reply_buffer);
+    try writeCommandReply(io, reply);
+    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
 fn message(io: std.Io, args: []const []const u8) !void {
@@ -105,8 +107,10 @@ fn message(io: std.Io, args: []const []const u8) !void {
         index += 1;
     }
     if (input.store.len == 0 or input.record.len == 0 or input.session.len == 0 or input.text_path.len == 0 or !key_seen) return usage();
-    const status = try client.message(io, input);
-    if (status != 200 and status != 409) return error.HostInvocationFailed;
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try client.message(io, input, &reply_buffer);
+    try writeCommandReply(io, reply);
+    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
 fn retry(io: std.Io, args: []const []const u8) !void {
@@ -119,8 +123,10 @@ fn retry(io: std.Io, args: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--kind")) kind = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    const status = try client.retry(io, store_path orelse return usage(), record orelse return usage(), kind orelse return usage());
-    if (status != 200 and status != 409) return error.HostInvocationFailed;
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try client.retry(io, store_path orelse return usage(), record orelse return usage(), kind orelse return usage(), &reply_buffer);
+    try writeCommandReply(io, reply);
+    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
 fn observe(io: std.Io, args: []const []const u8) !void {
@@ -132,8 +138,10 @@ fn observe(io: std.Io, args: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) key = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    const status = try client.observeCommand(io, store_path orelse return usage(), key orelse return usage());
-    if (status != 200) return error.HostInvocationFailed;
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try client.observeCommand(io, store_path orelse return usage(), key orelse return usage(), &reply_buffer);
+    try writeCommandReply(io, reply);
+    if (reply.status != 200) return error.HostInvocationFailed;
 }
 
 fn inspect(io: std.Io, args: []const []const u8) !void {
@@ -145,8 +153,10 @@ fn inspect(io: std.Io, args: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    const status = try client.inspectSession(io, store_path orelse return usage(), session orelse return usage());
-    if (status != 200) return error.HostInvocationFailed;
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try client.inspectSession(io, store_path orelse return usage(), session orelse return usage(), &reply_buffer);
+    try writeCommandReply(io, reply);
+    if (reply.status != 200) return error.HostInvocationFailed;
 }
 
 fn readResult(io: std.Io, args: []const []const u8) !void {
@@ -158,8 +168,26 @@ fn readResult(io: std.Io, args: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) key = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    const status = try client.readResult(io, store_path orelse return usage(), key orelse return usage());
-    if (status != 200) return error.HostInvocationFailed;
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try client.readResult(
+        io,
+        store_path orelse return usage(),
+        key orelse return usage(),
+        std.Io.File.stdout(),
+        &reply_buffer,
+    );
+    switch (reply) {
+        .answer => {},
+        .command => |command_reply| {
+            try writeCommandReply(io, command_reply);
+            return error.HostInvocationFailed;
+        },
+    }
+}
+
+fn writeCommandReply(io: std.Io, reply: client.CommandReply) !void {
+    try std.Io.File.stdout().writeStreamingAll(io, reply.body);
+    try std.Io.File.stdout().writeStreamingAll(io, "\n");
 }
 
 fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
