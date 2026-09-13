@@ -176,6 +176,12 @@ pub const RetryScan = struct {
 
 pub const RetryScanProgress = enum { more, complete };
 
+pub const ExhaustedRecovery = struct {
+    settled: usize,
+    examined_rows: usize,
+    progress: RetryScanProgress,
+};
+
 fn retainOldestRetryCandidate(
     candidates: []RetryCandidate,
     candidate_count: *usize,
@@ -1725,29 +1731,37 @@ pub const Store = struct {
     }
 
     pub fn recoverOneExhaustedModelAttempt(self: *Store) !bool {
-        return self.recoverOneExhaustedModelAttemptForHost(null);
+        var candidate: [1]RetryCandidate = undefined;
+        return (try self.recoverExhaustedModelAttemptsForHost(null, &candidate)).settled != 0;
     }
 
-    pub fn recoverOneExhaustedModelAttemptForHost(
+    pub fn recoverExhaustedModelAttemptsForHost(
         self: *Store,
         active: ?ActiveOperationFilter,
-    ) !bool {
+        candidates: []RetryCandidate,
+    ) !ExhaustedRecovery {
+        if (candidates.len == 0) return error.InvalidRetryScan;
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.recoverOneExhaustedModelAttemptLocked(active) catch |err| {
+        return self.recoverExhaustedModelAttemptsLocked(active, candidates) catch |err| {
             rollback(self.database);
             self.fenced.store(true, .release);
             return err;
         };
     }
 
-    fn recoverOneExhaustedModelAttemptLocked(
+    fn recoverExhaustedModelAttemptsLocked(
         self: *Store,
         active: ?ActiveOperationFilter,
-    ) !bool {
-        const scan_limit = try std.math.add(usize, if (active) |filter| filter.maximum_exclusions else 0, 1);
+        candidates: []RetryCandidate,
+    ) !ExhaustedRecovery {
+        const scan_limit = try std.math.add(
+            usize,
+            if (active) |filter| filter.maximum_exclusions else 0,
+            candidates.len,
+        );
         if (scan_limit > std.math.maxInt(i64)) return error.RetryScanLimitExceeded;
         const select = try prepare(
             self.database,
@@ -1760,27 +1774,44 @@ pub const Store = struct {
             if (select_open) _ = c.sqlite3_finalize(select);
         }
         try bindI64(select, 1, @as(i64, @intCast(scan_limit)));
-        var selected: ?struct { turn_id: i64, operation_id: i64 } = null;
+        var examined_rows: usize = 0;
+        var candidate_count: usize = 0;
+        var truncated = false;
         while (true) {
             const result = c.sqlite3_step(select);
             if (result == c.SQLITE_DONE) break;
             if (result != c.SQLITE_ROW) return error.RetryRecoveryFailed;
+            examined_rows += 1;
             const turn_id = c.sqlite3_column_int64(select, 0);
             const operation_id = c.sqlite3_column_int64(select, 1);
             if (turn_id <= 0 or operation_id <= 0) return error.CorruptStore;
             if (active) |filter| {
                 if (filter.contains(@intCast(operation_id))) continue;
             }
-            selected = .{ .turn_id = turn_id, .operation_id = operation_id };
-            break;
+            if (candidate_count == candidates.len) {
+                truncated = true;
+                break;
+            }
+            candidates[candidate_count] = .{ .binding = .{
+                .turn_id = @intCast(turn_id),
+                .operation_id = @intCast(operation_id),
+                .attempt_ordinal = maximum_model_attempts,
+            } };
+            candidate_count += 1;
         }
         if (c.sqlite3_finalize(select) != c.SQLITE_OK) return error.RetryRecoveryFailed;
         select_open = false;
-        const binding = selected orelse return false;
+        const progress: RetryScanProgress = if (truncated or examined_rows == scan_limit) .more else .complete;
+        if (candidate_count == 0) return .{
+            .settled = 0,
+            .examined_rows = examined_rows,
+            .progress = progress,
+        };
 
         try exec(self.database, "BEGIN IMMEDIATE");
         errdefer rollback(self.database);
-        {
+        for (candidates[0..candidate_count]) |candidate| {
+            const binding = candidate.binding;
             const update_operation = try prepare(
                 self.database,
                 "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='retry_exhausted' " ++
@@ -1791,8 +1822,7 @@ pub const Store = struct {
             try bindU64(update_operation, 2, maximum_model_attempts);
             try expectDone(update_operation);
             if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
-        }
-        {
+
             const update_turn = try prepare(
                 self.database,
                 "UPDATE turn SET outcome_code='retry_exhausted' " ++
@@ -1805,7 +1835,11 @@ pub const Store = struct {
             if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
         }
         try exec(self.database, "COMMIT");
-        return true;
+        return .{
+            .settled = candidate_count,
+            .examined_rows = examined_rows,
+            .progress = progress,
+        };
     }
 
     pub fn settleModelSuccess(
@@ -3486,11 +3520,13 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
             }
         };
         const active_operation = replacement_binding.operation_id;
-        try std.testing.expect(!try storage.recoverOneExhaustedModelAttemptForHost(.{
+        var candidates: [1]RetryCandidate = undefined;
+        const recovery = try storage.recoverExhaustedModelAttemptsForHost(.{
             .context = &active_operation,
             .containsFn = Active.contains,
             .maximum_exclusions = 1,
-        }));
+        }, &candidates);
+        try std.testing.expectEqual(@as(usize, 0), recovery.settled);
         try std.testing.expect(try storage.recoverOneExhaustedModelAttempt());
         const exhausted = (try storage.observeCommand("failure-message")).message.?;
         try std.testing.expect(exhausted.status == .failed);
@@ -3751,22 +3787,36 @@ test "retry polling bounds query work across future and exhausted history" {
     );
     try exec(storage.database, "PRAGMA foreign_keys=ON");
 
-    const active_exhausted: u64 = 5000;
-    try std.testing.expect(try storage.recoverOneExhaustedModelAttemptForHost(.{
+    const ActiveMany = struct {
+        fn contains(context: *const anyopaque, operation_id: u64) bool {
+            const active_operations: *const [32]u64 = @ptrCast(@alignCast(context));
+            for (active_operations) |active_id| {
+                if (operation_id == active_id) return true;
+            }
+            return false;
+        }
+    };
+    var active_exhausted: [32]u64 = undefined;
+    for (&active_exhausted, 0..) |*operation_id, index| operation_id.* = 5000 + @as(u64, @intCast(index));
+    var exhausted_candidates: [32]RetryCandidate = undefined;
+    const recovery = try storage.recoverExhaustedModelAttemptsForHost(.{
         .context = &active_exhausted,
-        .containsFn = Active.contains,
-        .maximum_exclusions = 1,
-    }));
+        .containsFn = ActiveMany.contains,
+        .maximum_exclusions = active_exhausted.len,
+    }, &exhausted_candidates);
+    try std.testing.expectEqual(@as(usize, 32), recovery.settled);
+    try std.testing.expectEqual(@as(usize, 64), recovery.examined_rows);
+    try std.testing.expectEqual(RetryScanProgress.more, recovery.progress);
     const outcomes = try prepare(
         storage.database,
-        "SELECT operation_id,resolution_code FROM model_operation WHERE operation_id IN (5000,5001) ORDER BY operation_id",
+        "SELECT operation_id,resolution_code FROM model_operation WHERE operation_id IN (5000,5032) ORDER BY operation_id",
     );
     defer _ = c.sqlite3_finalize(outcomes);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));
     try std.testing.expectEqual(@as(i64, 5000), c.sqlite3_column_int64(outcomes, 0));
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(outcomes, 1));
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));
-    try std.testing.expectEqual(@as(i64, 5001), c.sqlite3_column_int64(outcomes, 0));
+    try std.testing.expectEqual(@as(i64, 5032), c.sqlite3_column_int64(outcomes, 0));
     var resolution: protocol.Bounded(96) = .{};
     try readText(outcomes, 1, &resolution);
     try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());

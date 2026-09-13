@@ -232,11 +232,18 @@ fn executionMain(host: *Host) void {
     };
     defer host.allocator.free(slots);
     for (slots) |*slot| slot.* = .{};
-    const retry_candidates = host.allocator.alloc(store_module.RetryCandidate, slots.len) catch |err| {
+    // The execution thread owns one retry candidate and one exhausted-recovery
+    // batch entry per slot; both arrays release when this thread joins.
+    const retry_candidates = host.allocator.alloc(store_module.RetryCandidate, @max(slots.len, 1)) catch |err| {
         fenceDispatch(host, "retry discovery workspace allocation", err);
         return;
     };
     defer host.allocator.free(retry_candidates);
+    const exhausted_candidates = host.allocator.alloc(store_module.RetryCandidate, @max(slots.len, 1)) catch |err| {
+        fenceDispatch(host, "exhausted recovery workspace allocation", err);
+        return;
+    };
+    defer host.allocator.free(exhausted_candidates);
     var reactor = provider.Reactor.init() catch |err| {
         fenceDispatch(host, "transport reactor initialization", err);
         return;
@@ -248,14 +255,23 @@ fn executionMain(host: *Host) void {
     var retry_scan: store_module.RetryScan = .{};
     var retry_candidate_count: usize = 0;
     var retry_candidates_ready = false;
+    var exhausted_recovery_pending = false;
+    var capacity_was_full = slots.len == 0;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
         var found_work = false;
         const now = std.Io.Clock.Timestamp.now(host.io, .awake);
-        const begin_retry_scan = !retry_scan.started and !retry_candidates_ready and (if (last_retry_scan) |last|
+        const free_slots = countFreeSlots(slots);
+        const capacity_released = capacity_was_full and free_slots != 0;
+        const retry_tick_due = if (last_retry_scan) |last|
             last.durationTo(now).raw.nanoseconds >= std.time.ns_per_s
         else
-            true);
-        if (begin_retry_scan) last_retry_scan = now;
+            true;
+        // A completed snapshot is sized to the slots it can fill immediately.
+        // Nothing selected while full can outlive capacity release and bypass
+        // an older Operation that becomes due before the slot is available.
+        const begin_retry_scan = free_slots != 0 and !retry_scan.started and !retry_candidates_ready and
+            (retry_tick_due or capacity_released);
+        if (retry_tick_due or capacity_released) last_retry_scan = now;
         if (!host.dispatch_fenced.load(.acquire)) {
             const active_slots = ActiveSlots{ .slots = slots };
             const active_filter = store_module.ActiveOperationFilter{
@@ -263,26 +279,30 @@ fn executionMain(host: *Host) void {
                 .containsFn = activeOperationContains,
                 .maximum_exclusions = slots.len,
             };
-            if (begin_retry_scan) {
-                for (0..@max(slots.len, 1)) |_| {
-                    if (!(host.store.recoverOneExhaustedModelAttemptForHost(active_filter) catch |err| {
-                        fenceDispatch(host, "exhausted retry recovery", err);
-                        break;
-                    })) break;
-                }
+            if (retry_tick_due or capacity_released or exhausted_recovery_pending) {
+                const recovery = host.store.recoverExhaustedModelAttemptsForHost(
+                    active_filter,
+                    exhausted_candidates,
+                ) catch |err| {
+                    fenceDispatch(host, "exhausted retry recovery", err);
+                    break;
+                };
+                exhausted_recovery_pending = recovery.progress == .more;
+                found_work = found_work or recovery.settled != 0 or exhausted_recovery_pending;
             }
             if (slots.len != 0 and (begin_retry_scan or retry_scan.started)) {
                 const progress = host.store.discoverDueModelRetries(
                     active_filter,
                     &retry_scan,
-                    retry_candidates,
+                    retry_candidates[0..free_slots],
                     &retry_candidate_count,
-                    @max(slots.len, 64),
+                    @max(free_slots, 64),
                 ) catch |err| {
                     fenceDispatch(host, "retry discovery", err);
                     break;
                 };
                 retry_candidates_ready = progress == .complete;
+                found_work = found_work or progress == .more;
             }
             if (retry_candidates_ready) {
                 for (slots) |*slot| {
@@ -295,10 +315,11 @@ fn executionMain(host: *Host) void {
                     }
                     if (host.dispatch_fenced.load(.acquire)) break;
                 }
-                if (retry_candidate_count == 0) {
-                    retry_scan.reset();
-                    retry_candidates_ready = false;
-                }
+                const rediscover = retry_candidate_count != 0;
+                retry_candidate_count = 0;
+                retry_scan.reset();
+                retry_candidates_ready = false;
+                if (rediscover) last_retry_scan = null;
             }
             if (!retry_scan.started and !retry_candidates_ready) {
                 for (slots) |*slot| {
@@ -311,6 +332,7 @@ fn executionMain(host: *Host) void {
                 }
             }
         }
+        capacity_was_full = countFreeSlots(slots) == 0;
         reactor.drive(if (hasTransport(slots)) 25 else 0) catch |err| {
             fenceDispatch(host, "transport reactor", err);
             break;
@@ -323,6 +345,14 @@ fn executionMain(host: *Host) void {
             _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {};
         }
     }
+}
+
+fn countFreeSlots(slots: []const ExecutionSlot) usize {
+    var free: usize = 0;
+    for (slots) |slot| {
+        if (slot.state == .free) free += 1;
+    }
+    return free;
 }
 
 fn popRetryCandidate(
