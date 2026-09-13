@@ -40,6 +40,7 @@ pub const Faults = struct {
     request_read: bool = false,
     request_unlink: bool = false,
     provider_prepare: bool = false,
+    completion_identity_fault: provider.CompletionIdentityFault = .none,
     response_acquire: bool = false,
     response_unlink: bool = false,
     response_write: bool = false,
@@ -307,8 +308,16 @@ fn executionMain(host: *Host) void {
         } else if (!made_progress) {
             _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {};
         }
-        while (reactor.nextCompletion()) |completion| {
-            completeTransfer(host, &reactor, slots, completion);
+        while (true) {
+            const active_transfers = ActiveSlots{ .slots = slots };
+            const completion = reactor.nextCompletion(.{
+                .context = &active_transfers,
+                .find_fn = findActiveTransfer,
+            }) catch |err| {
+                fenceDispatch(host, "transport completion", err);
+                return;
+            } orelse break;
+            completeTransfer(host, slots, completion);
         }
         advanceCleanup(host, slots);
     }
@@ -323,7 +332,7 @@ fn countFreeSlots(slots: []const ExecutionSlot) usize {
 }
 
 const ActiveSlots = struct {
-    slots: []const ExecutionSlot,
+    slots: []ExecutionSlot,
 };
 
 fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
@@ -332,6 +341,17 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
         if (slot.state != .free and slot.binding.operation_id == operation_id) return true;
     }
     return false;
+}
+
+fn findActiveTransfer(
+    context: *const anyopaque,
+    handle: provider.TransportHandleIdentity,
+) ?*provider.Transfer {
+    const active: *const ActiveSlots = @ptrCast(@alignCast(context));
+    for (active.slots) |*slot| {
+        if (slot.state == .transport and slot.transfer.matchesHandle(handle)) return &slot.transfer;
+    }
+    return null;
 }
 
 fn admitNewAttempt(
@@ -447,6 +467,7 @@ fn beginAdmittedAttempt(
         .response_acquire_fault = host.faults.response_acquire,
         .response_unlink_fault = host.faults.response_unlink,
         .response_write_fault = host.faults.response_write,
+        .completion_identity_fault = host.faults.completion_identity_fault,
     }, host.lease.paths.scratch.slice(), request_budget, &retained_response) catch |err| {
         request.deinit();
         if (retained_response) |retained| {
@@ -499,36 +520,34 @@ fn beginAdmittedAttempt(
 
 fn completeTransfer(
     host: *Host,
-    reactor: *provider.Reactor,
     slots: []ExecutionSlot,
     completion: provider.Completion,
 ) void {
     const slot = for (slots) |*candidate| {
-        if (candidate.state == .transport and candidate.transfer.easy == completion.easy) break candidate;
+        if (candidate.state == .transport and candidate.transfer.identity() == completion.identity) break candidate;
     } else {
         fenceDispatch(host, "unknown transport completion", error.UnknownTransportCompletion);
         return;
     };
-    reactor.remove(&slot.transfer);
-    if (slot.transfer.responseFailureCode()) |code| {
-        settleAttemptFailure(host, slot.token, slot.binding, code, .terminal);
-        slot.transfer.deinit();
-        beginCleanup(host, slot);
-        return;
-    }
-    const evidence = slot.transfer.evidence(completion.result) catch |err| {
-        std.debug.print("latifa: invalid provider evidence for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        fenceDispatch(host, "provider evidence", err);
-        slot.transfer.deinit();
-        beginCleanup(host, slot);
-        return;
+    const evidence = switch (completion.outcome) {
+        .response_capture_failed => |failure| {
+            const code = switch (failure) {
+                .scratch_exhausted => "response_scratch_exhausted",
+                .write_failed => "response_write_failed",
+            };
+            settleAttemptFailure(host, slot.token, slot.binding, code, .terminal);
+            slot.transfer.deinit();
+            beginCleanup(host, slot);
+            return;
+        },
+        .request_source_failed => {
+            fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed);
+            slot.transfer.deinit();
+            beginCleanup(host, slot);
+            return;
+        },
+        .transport_finished => |evidence| evidence,
     };
-    if (evidence.disposition == .request_read_failure) {
-        fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed);
-        slot.transfer.deinit();
-        beginCleanup(host, slot);
-        return;
-    }
     if (evidence.disposition == .success) {
         completeSuccessfulTransfer(host, slot);
         return;
@@ -543,7 +562,6 @@ fn completeTransfer(
         .authentication_failure => "provider_authentication_failed",
         .tls_verification_failure => "provider_tls_verification_failed",
         .invalid_headers => "invalid_provider_headers",
-        .request_read_failure => unreachable,
     };
     const failure_disposition: store_module.ModelFailureDisposition =
         if (evidence.disposition == .temporary_http or
@@ -697,7 +715,7 @@ fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []Execution
     for (slots) |*slot| switch (slot.state) {
         .free => {},
         .transport => {
-            reactor.remove(&slot.transfer);
+            reactor.cancel(&slot.transfer);
             slot.transfer.deinit();
             host.custody.detach(slot.token) catch unreachable;
             host.custody.cleanupComplete(slot.token) catch unreachable;

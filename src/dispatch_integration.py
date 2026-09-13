@@ -205,9 +205,10 @@ def sse_many(response_id, reasoning_count, answer):
 class SuccessEndpoint(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
 
-    def __init__(self, responses):
+    def __init__(self, responses, responses_by_input=None):
         super().__init__(("127.0.0.1", 0), SuccessHandler)
         self.responses = list(responses)
+        self.responses_by_input = responses_by_input
         self.requests = []
         self.request_times = []
         self.lock = threading.Lock()
@@ -229,9 +230,18 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
         with self.server.lock:
             self.server.requests.append(body)
             self.server.request_times.append(time.monotonic())
-            if not self.server.responses:
-                raise AssertionError("unexpected extra model request")
-            payload = self.server.responses.pop(0)
+            if self.server.responses_by_input is not None:
+                request = json.loads(body)
+                user_text = next(
+                    item["content"][0]["text"]
+                    for item in reversed(request["input"])
+                    if item.get("role") == "user"
+                )
+                payload = self.server.responses_by_input[user_text]
+            else:
+                if not self.server.responses:
+                    raise AssertionError("unexpected extra model request")
+                payload = self.server.responses.pop(0)
         if isinstance(payload, tuple):
             payload, release = payload
             if not release.wait(10):
@@ -772,6 +782,90 @@ def main():
         local_read_endpoint.shutdown()
         local_read_endpoint.server_close()
         local_read_thread.join(timeout=5)
+
+        # Completion identity is recovered only after the fixed slot owner
+        # matches curl's native handle. Missing, foreign and mismatched private
+        # pointers fence safely; the reactor removes the owned handle once, and
+        # shutdown still closes its transfer scratch and releases custody.
+        identity_endpoint = SuccessEndpoint(
+            [
+                sse_answer(
+                    f"identity-{index}",
+                    f"identity-r-{index}",
+                    f"identity-m-{index}",
+                    "must not publish",
+                )[0]
+                for index in range(3)
+            ]
+        )
+        identity_thread = threading.Thread(
+            target=identity_endpoint.serve_forever, daemon=True
+        )
+        identity_thread.start()
+        for index, (fault, expected_error) in enumerate(
+            (
+                ("completion-private-missing", "MissingTransportCompletionIdentity"),
+                ("completion-private-foreign", "MismatchedTransportCompletionIdentity"),
+                ("completion-private-mismatch", "MismatchedTransportCompletionIdentity"),
+            )
+        ):
+            identity_store = state / f"{fault}-store"
+            identity_host = start_host(
+                identity_store,
+                f"http://127.0.0.1:{identity_endpoint.server_port}/responses",
+                "--fault",
+                fault,
+            )
+            processes.append(identity_host)
+            configure(
+                state,
+                identity_store,
+                f"{fault}-config",
+                f"direct/{fault}",
+                "model-a",
+            )
+            message(
+                state,
+                identity_store,
+                f"{fault}-message",
+                f"direct/{fault}",
+                fault,
+            )
+            wait_for(
+                lambda process=identity_host: process.poll() is not None,
+                f"{fault} fenced shutdown",
+            )
+            processes.remove(identity_host)
+            assert identity_host.returncode == 1, identity_host.returncode
+            stderr = identity_host.stderr.read()
+            assert expected_error.encode() in stderr, stderr
+            assert len(identity_endpoint.requests) == index + 1
+            database = sqlite3.connect(identity_store / "latifa.sqlite3")
+            assert database.execute(
+                "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code FROM model_operation"
+            ).fetchone() == (1, 1, 1, None)
+            database.close()
+
+            offline = start_host(identity_store, None)
+            processes.append(offline)
+            observation = observe(identity_store, f"{fault}-message")
+            assert observation["queue"]["status"] == "processing", observation
+            assert observation["processing"]["attempt"] == "1", observation
+            assert "result" not in observation, observation
+            resources = command(
+                "inspect-session",
+                "--store",
+                identity_store,
+                "--session",
+                f"direct/{fault}",
+            )["execution"]
+            assert resources["custody_occupied"] == "0", resources
+            assert resources["scratch_used_bytes"] == "0", resources
+            stop_host(offline)
+            processes.remove(offline)
+        identity_endpoint.shutdown()
+        identity_endpoint.server_close()
+        identity_thread.join(timeout=5)
 
         # A replacement Attempt reuses the exact historical view, including
         # private continuation, even after newer settings and input commit.
@@ -2399,32 +2493,59 @@ def main():
         exhaustion_thread.join(timeout=5)
 
         # One reactor fills two fixed custody records without allocating a
-        # worker per Session. Both requests reach the endpoint before either
-        # response is released.
-        endpoint.received.clear()
-        endpoint.release.clear()
-        endpoint.requests.clear()
+        # worker per Session. Complete beta first and verify that the opaque
+        # completion identity settles beta's binding while alpha remains live.
+        alpha_release = threading.Event()
+        beta_release = threading.Event()
+        capacity_endpoint = SuccessEndpoint(
+            [],
+            responses_by_input={
+                "alpha": (
+                    sse_answer("capacity-alpha", "capacity-alpha-r", "capacity-alpha-m", "alpha answer")[0],
+                    alpha_release,
+                ),
+                "beta": (
+                    sse_answer("capacity-beta", "capacity-beta-r", "capacity-beta-m", "beta answer")[0],
+                    beta_release,
+                ),
+            },
+        )
+        capacity_thread = threading.Thread(target=capacity_endpoint.serve_forever, daemon=True)
+        capacity_thread.start()
         capacity_store = state / "capacity-store"
-        host = start_host(capacity_store, url, "--active-capacity", "2")
+        host = start_host(
+            capacity_store,
+            f"http://127.0.0.1:{capacity_endpoint.server_port}/responses",
+            "--active-capacity",
+            "2",
+        )
         processes.append(host)
         configure(state, capacity_store, "capacity-config-a", "direct/capacity-a", "model-a")
         configure(state, capacity_store, "capacity-config-b", "direct/capacity-b", "model-a")
         message(state, capacity_store, "capacity-message-a", "direct/capacity-a", "alpha")
         message(state, capacity_store, "capacity-message-b", "direct/capacity-b", "beta")
-        wait_for(lambda: len(endpoint.requests) == 2, "two concurrent reactor requests")
-        endpoint.release.set()
+        wait_for(lambda: len(capacity_endpoint.requests) == 2, "two concurrent reactor requests")
+        beta_release.set()
         wait_for(
-            lambda: observe(capacity_store, "capacity-message-a").get("result", {}).get("code")
-            == "provider_http_422",
-            "first concurrent failure",
+            lambda: completed_observation(capacity_store, "capacity-message-b"),
+            "second concurrent request completing first",
         )
+        alpha_pending = observe(capacity_store, "capacity-message-a")
+        assert alpha_pending["queue"]["status"] == "processing", alpha_pending
+        assert "result" not in alpha_pending, alpha_pending
+        assert read_result(capacity_store, "capacity-message-b") == b"beta answer"
+        alpha_release.set()
         wait_for(
-            lambda: observe(capacity_store, "capacity-message-b").get("result", {}).get("code")
-            == "provider_http_422",
-            "second concurrent failure",
+            lambda: completed_observation(capacity_store, "capacity-message-a"),
+            "first concurrent request completing second",
         )
+        assert read_result(capacity_store, "capacity-message-a") == b"alpha answer"
+        assert len(capacity_endpoint.requests) == 2
         stop_host(host)
         processes.remove(host)
+        capacity_endpoint.shutdown()
+        capacity_endpoint.server_close()
+        capacity_thread.join(timeout=5)
 
         # A failed Attempt commit rolls back all provenance and cannot produce
         # an endpoint launch.

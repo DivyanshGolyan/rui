@@ -28,7 +28,10 @@ pub const TransportOptions = struct {
     response_acquire_fault: bool = false,
     response_unlink_fault: bool = false,
     response_write_fault: bool = false,
+    completion_identity_fault: CompletionIdentityFault = .none,
 };
+
+pub const CompletionIdentityFault = enum { none, missing, foreign, mismatched };
 
 pub const ScratchBudget = struct {
     used: *std.atomic.Value(u64),
@@ -299,7 +302,6 @@ pub const TransportDisposition = enum {
     authentication_failure,
     tls_verification_failure,
     invalid_headers,
-    request_read_failure,
 };
 
 pub const TransportEvidence = struct {
@@ -309,10 +311,32 @@ pub const TransportEvidence = struct {
     retry_after_ms: ?u64 = null,
 };
 
-pub const Completion = struct {
-    easy: *c.CURL,
-    result: c.CURLcode,
+pub const CaptureFailure = enum { scratch_exhausted, write_failed };
+
+pub const TransferIdentity = *const opaque {};
+pub const TransportHandleIdentity = *const opaque {};
+
+pub const CompletionOutcome = union(enum) {
+    response_capture_failed: CaptureFailure,
+    request_source_failed,
+    transport_finished: TransportEvidence,
 };
+
+pub const Completion = struct {
+    identity: TransferIdentity,
+    outcome: CompletionOutcome,
+};
+
+pub const TransferMembership = struct {
+    context: *const anyopaque,
+    find_fn: *const fn (*const anyopaque, TransportHandleIdentity) ?*Transfer,
+
+    fn find(self: TransferMembership, handle: TransportHandleIdentity) ?*Transfer {
+        return self.find_fn(self.context, handle);
+    }
+};
+
+var foreign_completion_identity: u8 = 0;
 
 pub const Reactor = struct {
     multi: *c.CURLM,
@@ -328,13 +352,20 @@ pub const Reactor = struct {
 
     pub fn add(self: *Reactor, transfer: *Transfer) !void {
         transfer.armTimeout();
+        const private: ?*anyopaque = switch (transfer.completion_identity_fault) {
+            .none => @ptrCast(transfer),
+            .missing => null,
+            .foreign => @ptrCast(&foreign_completion_identity),
+            .mismatched => @ptrCast(&transfer.response),
+        };
+        try setOpt(transfer.easy, c.CURLOPT_PRIVATE, private);
         if (c.curl_multi_add_handle(self.multi, transfer.easy) != c.CURLM_OK) {
             return error.TransportReactorAddFailed;
         }
         transfer.in_reactor = true;
     }
 
-    pub fn remove(self: *Reactor, transfer: *Transfer) void {
+    pub fn cancel(self: *Reactor, transfer: *Transfer) void {
         if (!transfer.in_reactor) return;
         std.debug.assert(c.curl_multi_remove_handle(self.multi, transfer.easy) == c.CURLM_OK);
         transfer.in_reactor = false;
@@ -352,13 +383,39 @@ pub const Reactor = struct {
         }
     }
 
-    pub fn nextCompletion(self: *Reactor) ?Completion {
+    pub fn nextCompletion(self: *Reactor, membership: TransferMembership) !?Completion {
         var remaining: c_int = 0;
         while (c.curl_multi_info_read(self.multi, &remaining)) |message| {
             if (message.*.msg != c.CURLMSG_DONE) continue;
-            return .{ .easy = message.*.easy_handle.?, .result = message.*.data.result };
+            const easy = message.*.easy_handle orelse return error.MissingTransportCompletionHandle;
+            const result = message.*.data.result;
+            const handle: TransportHandleIdentity = @ptrCast(easy);
+            // Establish the actual fixed-slot owner from the completed native
+            // handle before treating curl's private value as an identity. The
+            // private pointer is compared only; it is never dereferenced.
+            const transfer = membership.find(handle) orelse return error.UnknownTransportCompletion;
+            if (!transfer.matchesHandle(handle)) return error.MismatchedTransportMembership;
+            var private: ?*anyopaque = null;
+            const private_result = c.curl_easy_getinfo(easy, c.CURLINFO_PRIVATE, &private);
+            try self.removeCompleted(transfer);
+            if (private_result != c.CURLE_OK) return error.TransportCompletionIdentityUnavailable;
+            const private_pointer = private orelse return error.MissingTransportCompletionIdentity;
+            const identity: TransferIdentity = @ptrCast(private_pointer);
+            if (identity != transfer.identity()) return error.MismatchedTransportCompletionIdentity;
+            return .{
+                .identity = identity,
+                .outcome = try transfer.completionOutcome(result),
+            };
         }
         return null;
+    }
+
+    fn removeCompleted(self: *Reactor, transfer: *Transfer) !void {
+        if (!transfer.in_reactor) return error.InactiveTransportCompletion;
+        if (c.curl_multi_remove_handle(self.multi, transfer.easy) != c.CURLM_OK) {
+            return error.TransportReactorRemoveFailed;
+        }
+        transfer.in_reactor = false;
     }
 };
 
@@ -392,8 +449,6 @@ const ReadContext = struct {
 };
 
 pub const ResponseCapture = struct {
-    const Failure = enum { scratch_exhausted, write_failed };
-
     io: std.Io,
     file: std.Io.File,
     readonly: ?std.Io.File,
@@ -402,7 +457,7 @@ pub const ResponseCapture = struct {
     charged: u64 = 0,
     sealed: bool = false,
     fail_write: bool = false,
-    failure: ?Failure = null,
+    failure: ?CaptureFailure = null,
 
     pub fn init(
         io: std.Io,
@@ -479,13 +534,6 @@ pub const ResponseCapture = struct {
         self.length = next_length;
     }
 
-    fn failureCode(self: *const ResponseCapture) ?[]const u8 {
-        return if (self.failure) |failure| switch (failure) {
-            .scratch_exhausted => "response_scratch_exhausted",
-            .write_failed => "response_write_failed",
-        } else null;
-    }
-
     pub fn seal(self: *ResponseCapture, fail: bool) !void {
         std.debug.assert(!self.sealed);
         if (fail) return error.InjectedResponseSealFailure;
@@ -556,6 +604,7 @@ pub const Transfer = struct {
     header_context: HeaderContext = .{},
     timeout_context: TimeoutContext,
     in_reactor: bool = false,
+    completion_identity_fault: CompletionIdentityFault,
     binding: store.AttemptBinding,
 
     pub fn start(
@@ -609,6 +658,7 @@ pub const Transfer = struct {
             },
             .response = response,
             .binding = binding,
+            .completion_identity_fault = options.completion_identity_fault,
             .timeout_context = .{
                 .io = request.io,
                 .inactivity_ns = inactivity_ns,
@@ -642,10 +692,14 @@ pub const Transfer = struct {
         }
     }
 
-    pub fn evidence(self: *Transfer, result: c.CURLcode) !TransportEvidence {
-        const disposition: TransportDisposition = if (self.read_context.failed)
-            .request_read_failure
-        else if (self.header_context.invalid)
+    fn completionOutcome(self: *Transfer, result: c.CURLcode) !CompletionOutcome {
+        if (self.response.failure) |failure| return .{ .response_capture_failed = failure };
+        if (self.read_context.failed) return .request_source_failed;
+        return .{ .transport_finished = try self.transportEvidence(result) };
+    }
+
+    fn transportEvidence(self: *Transfer, result: c.CURLcode) !TransportEvidence {
+        const disposition: TransportDisposition = if (self.header_context.invalid)
             .invalid_headers
         else if (result != c.CURLE_OK)
             curlFailureDisposition(result, self.timeout_context.expired)
@@ -710,8 +764,12 @@ pub const Transfer = struct {
         return self.header_context.x_openai_model.slice();
     }
 
-    pub fn responseFailureCode(self: *const Transfer) ?[]const u8 {
-        return self.response.failureCode();
+    pub fn identity(self: *const Transfer) TransferIdentity {
+        return @ptrCast(self);
+    }
+
+    pub fn matchesHandle(self: *const Transfer, handle: TransportHandleIdentity) bool {
+        return self.in_reactor and handle == @as(TransportHandleIdentity, @ptrCast(self.easy));
     }
 
     pub fn hasStructuredOutput(self: *const Transfer) bool {
