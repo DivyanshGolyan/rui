@@ -985,7 +985,7 @@ test "control captures attain their exact worst-case request bounds" {
     var paths: platform.Paths = .{};
     try paths.store.set(&escaped_store);
 
-    var stop_path_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    var stop_path_buffer: [protocol.max_store_bytes + "/records/stop-record".len]u8 = undefined;
     const stop_path = try std.fmt.bufPrint(
         &stop_path_buffer,
         "{s}/records/stop-record",
@@ -1004,7 +1004,7 @@ test "control captures attain their exact worst-case request bounds" {
         try stop_file.length(std.testing.io),
     );
 
-    var interruption_path_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    var interruption_path_buffer: [protocol.max_store_bytes + "/records/interruption-record".len]u8 = undefined;
     const interruption_path = try std.fmt.bufPrint(
         &interruption_path_buffer,
         "{s}/records/interruption-record",

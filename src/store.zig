@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 
 const c = @cImport({
@@ -406,11 +407,11 @@ pub const OutputMetadataWriter = struct {
             .permissions = .fromMode(0o600),
         });
         if (fail_unlink) {
-            retained.* = retainedOutputMetadata(io, file, scratch_path, name, used);
+            retained.* = retainedOutputMetadata(io, file, name, used);
             return error.InjectedMetadataUnlinkFailure;
         }
         scratch.deleteFile(io, name) catch |err| {
-            retained.* = retainedOutputMetadata(io, file, scratch_path, name, used);
+            retained.* = retainedOutputMetadata(io, file, name, used);
             return err;
         };
         return .{ .io = io, .file = file, .used = used, .limit = limit };
@@ -458,13 +459,12 @@ pub const OutputMetadataWriter = struct {
 pub const RetainedOutputMetadata = struct {
     io: std.Io,
     file: std.Io.File,
-    scratch_path: protocol.Bounded(protocol.max_store_bytes + 64),
     name: protocol.Bounded(96),
     used: *std.atomic.Value(u64),
     charged: u64 = 0,
 
-    pub fn cleanup(self: *RetainedOutputMetadata) !void {
-        var scratch = try std.Io.Dir.cwd().openDir(self.io, self.scratch_path.slice(), .{});
+    pub fn cleanup(self: *RetainedOutputMetadata, scratch_path: []const u8) !void {
+        var scratch = try std.Io.Dir.cwd().openDir(self.io, scratch_path, .{});
         defer scratch.close(self.io);
         try scratch.deleteFile(self.io, self.name.slice());
         self.file.close(self.io);
@@ -476,18 +476,15 @@ pub const RetainedOutputMetadata = struct {
 fn retainedOutputMetadata(
     io: std.Io,
     file: std.Io.File,
-    scratch_path: []const u8,
     name: []const u8,
     used: *std.atomic.Value(u64),
 ) RetainedOutputMetadata {
     var retained = RetainedOutputMetadata{
         .io = io,
         .file = file,
-        .scratch_path = .{},
         .name = .{},
         .used = used,
     };
-    retained.scratch_path.set(scratch_path) catch unreachable;
     retained.name.set(name) catch unreachable;
     return retained;
 }
@@ -749,7 +746,7 @@ pub const Store = struct {
             break :blk stat.size != 0;
         };
 
-        var path_buffer: [protocol.max_store_bytes + 65:0]u8 = undefined;
+        var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
         const path = try std.fmt.bufPrintZ(&path_buffer, "{s}", .{database_path});
         var database: ?*c.sqlite3 = null;
         const open_result = c.sqlite3_open_v2(
@@ -3610,12 +3607,37 @@ fn testingStore(tmp: *std.testing.TmpDir, io: std.Io) !Store {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(io, &root_buffer);
     const root = root_buffer[0..root_length];
-    var database_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
     return Store.open(io, database, root) catch |err| {
         std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
         return err;
     };
+}
+
+fn createMaximumCanonicalStore(tmp: *std.testing.TmpDir, path_buffer: []u8) ![]const u8 {
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const relative_length = protocol.max_store_bytes - root.len - 1;
+    var relative_buffer: [protocol.max_store_bytes]u8 = undefined;
+    var offset: usize = 0;
+    var remaining = relative_length;
+    while (remaining > 255) {
+        @memset(relative_buffer[offset .. offset + 255], 'a');
+        relative_buffer[offset + 255] = '/';
+        offset += 256;
+        remaining -= 256;
+    }
+    if (remaining == 0) return error.InvalidStoreTestPath;
+    @memset(relative_buffer[offset .. offset + remaining], 'b');
+    const relative = relative_buffer[0 .. offset + remaining];
+    var directory = try tmp.dir.createDirPathOpen(std.testing.io, relative, .{
+        .permissions = .fromMode(0o700),
+    });
+    directory.close(std.testing.io);
+    const path = try std.fmt.bufPrint(path_buffer, "{s}/{s}", .{ root, relative });
+    std.debug.assert(path.len == protocol.max_store_bytes);
+    return path;
 }
 
 fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace: []const u8, model: []const u8) !protocol.ConfigureCommand {
@@ -3905,7 +3927,7 @@ test "failed control commit saves no answer after reopening" {
 
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
-    var database_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(
         &database_buffer,
         "{s}/store.sqlite3",
@@ -4739,13 +4761,36 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expect(diagnostic.cache_spills != null);
 }
 
+test "maximum canonical Store path completes a journaled transaction" {
+    const vfs = c.sqlite3_vfs_find(null) orelse return error.SqliteVfsUnavailable;
+    try std.testing.expectEqual(@as(c_int, 512), vfs.*.mxPathname);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const store_path = try createMaximumCanonicalStore(&tmp, &store_buffer);
+    const paths = try platform.resolveClientPaths(std.testing.io, store_path);
+    try std.testing.expectEqual(@as(usize, platform.max_database_path_bytes), paths.database.len);
+
+    var storage = try Store.open(std.testing.io, paths.database.slice(), paths.store.slice());
+    defer storage.close() catch unreachable;
+    try exec(storage.database, "BEGIN IMMEDIATE");
+    errdefer rollback(storage.database);
+    try exec(storage.database, "UPDATE store_meta SET value='temporary' WHERE key='wire_version'");
+    var journal_buffer: [platform.max_database_path_bytes + "-journal".len]u8 = undefined;
+    const journal_path = try std.fmt.bufPrint(&journal_buffer, "{s}-journal", .{paths.database.slice()});
+    const journal = try std.Io.Dir.cwd().statFile(std.testing.io, journal_path, .{});
+    try std.testing.expect(journal.kind == .file);
+    try exec(storage.database, "ROLLBACK");
+}
+
 test "measurement Store can disable cache spill without changing other limits" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
     const root = root_buffer[0..root_length];
-    var database_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
     var storage = try Store.openWithOptions(
         std.testing.io,
@@ -4769,7 +4814,7 @@ test "fresh Store uses current schema and rejects the prior version" {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
     const root = root_buffer[0..root_length];
-    var database_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
 
     var storage = try Store.open(std.testing.io, database, root);
@@ -4798,7 +4843,7 @@ test "existing Store rejects a different canonical identity" {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
     const root = root_buffer[0..root_length];
-    var database_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
     var storage = try Store.open(std.testing.io, database, root);
     try storage.close();

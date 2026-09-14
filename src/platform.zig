@@ -1,11 +1,21 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 
+pub const database_suffix = "/latifa.sqlite3";
+pub const scratch_suffix = "/scratch";
+pub const max_database_path_bytes = protocol.max_store_bytes + database_suffix.len;
+pub const max_scratch_path_bytes = protocol.max_store_bytes + scratch_suffix.len;
+const runtime_prefix = "/tmp/latifa-";
+const max_uid_bytes = "4294967295".len;
+const socket_suffix = ".sock";
+pub const max_runtime_directory_bytes = runtime_prefix.len + max_uid_bytes;
+pub const max_socket_path_bytes = max_runtime_directory_bytes + "/".len + 32 + socket_suffix.len;
+
 pub const Paths = struct {
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
-    database: protocol.Bounded(protocol.max_store_bytes + 64) = .{},
-    scratch: protocol.Bounded(protocol.max_store_bytes + 64) = .{},
-    socket: protocol.Bounded(256) = .{},
+    database: protocol.Bounded(max_database_path_bytes) = .{},
+    scratch: protocol.Bounded(max_scratch_path_bytes) = .{},
+    socket: protocol.Bounded(max_socket_path_bytes) = .{},
 };
 
 pub const StoreLease = struct {
@@ -52,7 +62,7 @@ pub const StoreLease = struct {
         try validatePrivateDirectory(scratch, self.io);
         try cleanupOwnedIngress(&scratch, self.io, fault_cleanup);
 
-        var runtime_dir_path: [128]u8 = undefined;
+        var runtime_dir_path: [max_runtime_directory_bytes]u8 = undefined;
         const runtime_path = try runtimeDirectory(&runtime_dir_path);
         var runtime_dir = try std.Io.Dir.cwd().createDirPathOpen(self.io, runtime_path, .{
             .permissions = .fromMode(0o700),
@@ -78,32 +88,51 @@ pub fn resolveClientPaths(io: std.Io, supplied_path: []const u8) !Paths {
 }
 
 fn pathsFromOpenStore(store_dir: std.Io.Dir, io: std.Io) !Paths {
-    var canonical_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const canonical_length = try store_dir.realPath(io, &canonical_buffer);
+    // A full Linux readlink buffer can mean truncation. One extra byte makes
+    // both an exact 490-byte path and any truncated longer path reject.
+    var canonical_buffer: [protocol.max_store_bytes + 1]u8 = undefined;
+    const canonical_length = store_dir.realPath(io, &canonical_buffer) catch |err| switch (err) {
+        error.NameTooLong => return error.StorePathTooLong,
+        else => return err,
+    };
+    if (canonical_length > protocol.max_store_bytes) return error.StorePathTooLong;
     const canonical = canonical_buffer[0..canonical_length];
-    if (!std.unicode.utf8ValidateSlice(canonical)) return error.InvalidStorePath;
+    try validateCanonicalPath(canonical);
 
     var paths: Paths = .{};
     try paths.store.set(canonical);
-    var database_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
-    try paths.database.set(try std.fmt.bufPrint(&database_buffer, "{s}/latifa.sqlite3", .{canonical}));
-    var scratch_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
-    try paths.scratch.set(try std.fmt.bufPrint(&scratch_buffer, "{s}/scratch", .{canonical}));
+    var database_buffer: [max_database_path_bytes]u8 = undefined;
+    try paths.database.set(try std.fmt.bufPrint(&database_buffer, "{s}{s}", .{ canonical, database_suffix }));
+    var scratch_buffer: [max_scratch_path_bytes]u8 = undefined;
+    try paths.scratch.set(try std.fmt.bufPrint(&scratch_buffer, "{s}{s}", .{ canonical, scratch_suffix }));
 
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(canonical, &digest, .{});
-    var hash_text: [32]u8 = undefined;
-    _ = std.fmt.bufPrint(&hash_text, "{x}", .{digest[0..16]}) catch unreachable;
-    var runtime_buffer: [128]u8 = undefined;
-    const runtime = try runtimeDirectory(&runtime_buffer);
-    var socket_buffer: [256]u8 = undefined;
-    try paths.socket.set(try std.fmt.bufPrint(&socket_buffer, "{s}/{s}.sock", .{ runtime, hash_text }));
+    var socket_buffer: [max_socket_path_bytes]u8 = undefined;
+    try paths.socket.set(try socketPathForCanonical(canonical, &socket_buffer));
     if (paths.socket.len > std.Io.net.UnixAddress.max_len) return error.SocketPathTooLong;
     return paths;
 }
 
+fn validateCanonicalPath(canonical: []const u8) !void {
+    if (canonical.len > protocol.max_store_bytes) return error.StorePathTooLong;
+    if (!std.unicode.utf8ValidateSlice(canonical)) return error.InvalidStorePath;
+}
+
 fn runtimeDirectory(buffer: []u8) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "/tmp/latifa-{d}", .{std.c.geteuid()});
+    return runtimeDirectoryForUid(buffer, @intCast(std.c.geteuid()));
+}
+
+fn runtimeDirectoryForUid(buffer: []u8, uid: u32) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "{s}{d}", .{ runtime_prefix, uid });
+}
+
+fn socketPathForCanonical(canonical: []const u8, buffer: []u8) ![]const u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(canonical, &digest, .{});
+    var hash_text: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&hash_text, "{x}", .{digest[0..16]}) catch unreachable;
+    var runtime_buffer: [max_runtime_directory_bytes]u8 = undefined;
+    const runtime = try runtimeDirectory(&runtime_buffer);
+    return std.fmt.bufPrint(buffer, "{s}/{s}{s}", .{ runtime, hash_text, socket_suffix });
 }
 
 fn validatePrivateDirectory(dir: std.Io.Dir, io: std.Io) !void {
@@ -156,6 +185,50 @@ fn reclaimStaleSocket(io: std.Io, socket_path: []const u8) !void {
     try std.Io.Dir.deleteFileAbsolute(io, socket_path);
 }
 
+fn createDirectoryAtCanonicalLength(
+    parent: std.Io.Dir,
+    io: std.Io,
+    target_length: usize,
+    path_buffer: []u8,
+) ![]const u8 {
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try parent.realPath(io, &root_buffer)];
+    if (target_length <= root.len) return error.InvalidTargetLength;
+    const relative_length = target_length - root.len - 1;
+    var relative_buffer: [protocol.max_store_bytes]u8 = undefined;
+    var offset: usize = 0;
+    var remaining = relative_length;
+    while (remaining > 255) {
+        @memset(relative_buffer[offset .. offset + 255], 'a');
+        relative_buffer[offset + 255] = '/';
+        offset += 256;
+        remaining -= 256;
+    }
+    if (remaining == 0) return error.InvalidTargetLength;
+    @memset(relative_buffer[offset .. offset + remaining], 'b');
+    const relative = relative_buffer[0 .. offset + remaining];
+    var directory = try parent.createDirPathOpen(io, relative, .{
+        .permissions = .fromMode(0o700),
+    });
+    directory.close(io);
+    const path = try std.fmt.bufPrint(path_buffer, "{s}/{s}", .{ root, relative });
+    std.debug.assert(path.len == target_length);
+    return path;
+}
+
+fn expectNoStoreEffects(path: []const u8, io: std.Io) !void {
+    var directory = try std.Io.Dir.cwd().openDir(io, path, .{});
+    defer directory.close(io);
+    try std.testing.expectError(error.FileNotFound, directory.statFile(io, "host.lock", .{}));
+    try std.testing.expectError(error.FileNotFound, directory.statFile(io, "latifa.sqlite3", .{}));
+    var socket_buffer: [max_socket_path_bytes]u8 = undefined;
+    const socket_path = try socketPathForCanonical(path, &socket_buffer);
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().statFile(io, socket_path, .{ .follow_symlinks = false }),
+    );
+}
+
 test "Store paths canonicalize aliases to one socket" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -172,6 +245,92 @@ test "Store paths canonicalize aliases to one socket" {
     const two = try pathsFromOpenStore(second, std.testing.io);
     try std.testing.expectEqualStrings(one.store.slice(), two.store.slice());
     try std.testing.expectEqualStrings(one.socket.slice(), two.socket.slice());
+}
+
+test "Store path capacities follow the SQLite VFS and derived suffixes" {
+    try std.testing.expectEqual(@as(usize, 489), protocol.max_store_bytes);
+    try std.testing.expectEqual(@as(usize, 504), max_database_path_bytes);
+    try std.testing.expectEqual(@as(usize, 497), max_scratch_path_bytes);
+    try std.testing.expectEqual(@as(usize, 60), max_socket_path_bytes);
+    var runtime_buffer: [max_runtime_directory_bytes]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, max_runtime_directory_bytes),
+        (try runtimeDirectoryForUid(&runtime_buffer, std.math.maxInt(u32))).len,
+    );
+}
+
+test "canonical Store boundary rejects before ownership or endpoint effects" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var accepted_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const accepted_path = try createDirectoryAtCanonicalLength(
+        tmp.dir,
+        std.testing.io,
+        protocol.max_store_bytes,
+        &accepted_buffer,
+    );
+    const accepted = try resolveClientPaths(std.testing.io, accepted_path);
+    try std.testing.expectEqual(@as(usize, protocol.max_store_bytes), accepted.store.len);
+    try std.testing.expectEqual(@as(usize, max_database_path_bytes), accepted.database.len);
+    try std.testing.expectEqual(@as(usize, max_scratch_path_bytes), accepted.scratch.len);
+
+    var exact_overflow_buffer: [protocol.max_store_bytes + 1]u8 = undefined;
+    const exact_overflow = try createDirectoryAtCanonicalLength(
+        tmp.dir,
+        std.testing.io,
+        protocol.max_store_bytes + 1,
+        &exact_overflow_buffer,
+    );
+    try std.testing.expectError(
+        error.StorePathTooLong,
+        StoreLease.acquire(std.testing.io, exact_overflow),
+    );
+    try expectNoStoreEffects(exact_overflow, std.testing.io);
+
+    var truncated_buffer: [protocol.max_store_bytes + 2]u8 = undefined;
+    const truncated = try createDirectoryAtCanonicalLength(
+        tmp.dir,
+        std.testing.io,
+        protocol.max_store_bytes + 2,
+        &truncated_buffer,
+    );
+    try std.testing.expectError(
+        error.StorePathTooLong,
+        StoreLease.acquire(std.testing.io, truncated),
+    );
+    try expectNoStoreEffects(truncated, std.testing.io);
+}
+
+test "long raw Store aliases remain usable when their canonical path fits" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try tmp.dir.createDirPathOpen(std.testing.io, "store", .{
+        .permissions = .fromMode(0o700),
+    });
+    store.close(std.testing.io);
+
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var alias_buffer: [protocol.max_store_bytes + 128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&alias_buffer);
+    try stream.writeAll(root);
+    try stream.writeAll("/store");
+    while (stream.end <= protocol.max_store_bytes) try stream.writeAll("/.");
+    const alias = stream.buffered();
+    try std.testing.expect(alias.len > protocol.max_store_bytes);
+
+    var lease = try StoreLease.acquire(std.testing.io, alias);
+    var expected_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{s}/store", .{root});
+    try std.testing.expectEqualStrings(expected, lease.paths.store.slice());
+    lease.release();
+}
+
+test "invalid UTF-8 Store path remains distinct from path overflow" {
+    try std.testing.expectError(error.InvalidStorePath, validateCanonicalPath(&.{0xff}));
+    const overlong = [_]u8{'a'} ** (protocol.max_store_bytes + 1);
+    try std.testing.expectError(error.StorePathTooLong, validateCanonicalPath(&overlong));
 }
 
 test "startup cleanup recognizes only owned ingress names" {

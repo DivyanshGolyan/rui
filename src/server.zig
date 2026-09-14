@@ -873,7 +873,7 @@ fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []Execution
             host.custody.cleanupComplete(cleanup.owner.token) catch unreachable;
         },
         .retained_scratch => |*retained| {
-            retained.scratch.cleanup() catch |err| {
+            retained.scratch.cleanup(host.lease.paths.scratch.slice()) catch |err| {
                 std.debug.print("latifa: retained named scratch after cleanup failure: {s}\n", .{@errorName(err)});
                 continue;
             };
@@ -881,7 +881,7 @@ fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []Execution
             host.custody.cleanupComplete(retained.token) catch unreachable;
         },
         .retained_metadata => |*retained| {
-            retained.metadata.cleanup() catch |err| {
+            retained.metadata.cleanup(host.lease.paths.scratch.slice()) catch |err| {
                 std.debug.print("latifa: retained named response metadata after cleanup failure: {s}\n", .{@errorName(err)});
                 continue;
             };
