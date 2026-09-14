@@ -52,6 +52,13 @@ fn serve(io: std.Io, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--test-before-result-delay-ms")) {
             faults.before_result_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
             if (faults.before_result_delay_ms < 0 or faults.before_result_delay_ms > 10_000) return error.InvalidResultDelay;
+        } else if (std.mem.eql(u8, arg, "--test-inspection-reply-delay-ms")) {
+            faults.inspection_reply_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
+            if (faults.inspection_reply_delay_ms < 0 or faults.inspection_reply_delay_ms > 60_000) return error.InvalidInspectionReplyDelay;
+        } else if (std.mem.eql(u8, arg, "--test-phase-trace")) {
+            faults.test_phase_trace = true;
+        } else if (std.mem.eql(u8, arg, "--test-suppress-first-control-hint")) {
+            faults.suppress_first_control_hint = true;
         } else if (std.mem.eql(u8, arg, "--test-request-scratch-limit")) {
             faults.request_scratch_limit_bytes = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
         } else return error.UnknownArgument;

@@ -1,6 +1,6 @@
 {
-  "scope": "issue-175 production Session stop and exact model interruption",
-  "status": "passed",
+  "scope": "120 stalled ordinary ingresses plus live-stream cancellation; full inspection-delivery and sealed-settlement qualification pending",
+  "status": "superseded_pending_issue_175_requalification",
   "tested_revision": "86fa5ef7fb06680d8eddb979f1c715baf5038dd0",
   "working_tree_dirty": false,
   "binary_sha256": "616d61645cc4c6f72ce05522b1ca5dda24fb8167d761004cc545e9ec619f35e1",
@@ -18,7 +18,7 @@
         "open_unix_client_sockets": 1
       }
     },
-    "ordinary_capacity_and_control_acknowledgment": {
+    "stalled_incomplete_ingress_diagnostic": {
       "ordinary_connections": 120,
       "control_commands": 50,
       "p95_acknowledgment_ms": 36.468,

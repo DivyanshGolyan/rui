@@ -55,6 +55,9 @@ pub const Faults = struct {
     retry_waits_ms: [3]u64 = default_retry_waits_ms,
     before_launch_delay_ms: i64 = 0,
     before_result_delay_ms: i64 = 0,
+    inspection_reply_delay_ms: i64 = 0,
+    test_phase_trace: bool = false,
+    suppress_first_control_hint: bool = false,
 };
 
 const Host = struct {
@@ -69,11 +72,13 @@ const Host = struct {
     effect_shutdown: std.atomic.Value(bool) = .init(false),
     dispatch_fenced: std.atomic.Value(bool) = .init(false),
     controls_changed: std.atomic.Value(bool) = .init(false),
+    control_hint_suppressed: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
     active_clients: std.atomic.Value(usize) = .init(0),
     classification_clients: std.atomic.Value(usize) = .init(0),
     ordinary_clients: std.atomic.Value(usize) = .init(0),
     scratch_used: std.atomic.Value(u64) = .init(0),
+    trace_mutex: std.Io.Mutex = .init,
     drain_mutex: std.Io.Mutex = .init,
     drain_condition: std.Io.Condition = .init,
 
@@ -97,6 +102,7 @@ const Host = struct {
 const Connection = struct {
     host: *Host,
     stream: std.Io.net.Stream,
+    accepted_at_ns: u64,
 };
 
 pub fn serve(
@@ -202,7 +208,11 @@ pub fn serve(
             stream.close(io);
             continue;
         };
-        connection.* = .{ .host = &host, .stream = stream };
+        connection.* = .{
+            .host = &host,
+            .stream = stream,
+            .accepted_at_ns = nowNs(&host),
+        };
         const thread = std.Thread.spawn(.{ .stack_size = connection_stack_bytes }, connectionMain, .{connection}) catch {
             allocator.destroy(connection);
             _ = host.classification_clients.fetchSub(1, .acq_rel);
@@ -558,6 +568,7 @@ fn beginAdmittedAttempt(
         return .admitted;
     };
     if (host.faults.before_launch_delay_ms != 0) {
+        traceOperation(host, "prepared_before_handoff", binding);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
     }
     host.custody.consumeLaunchAuthority(token, binding) catch |err| {
@@ -579,6 +590,7 @@ fn beginAdmittedAttempt(
     ) catch |err| {
         active.transfer.deinit();
         if (err == error.SupersededByControl) {
+            traceOperation(host, "canonical_handoff_superseded", binding);
             finishCustodyNow(host, token);
             slot.* = .free;
             return .admitted;
@@ -589,6 +601,7 @@ fn beginAdmittedAttempt(
         slot.* = .free;
         return .admitted;
     };
+    traceOperation(host, "transport_handoff_committed", binding);
     return .admitted;
 }
 
@@ -737,6 +750,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         return .cleanup;
     }
     if (host.faults.before_result_delay_ms != 0) {
+        traceOperation(host, "sealed_before_settlement", owner.binding);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_result_delay_ms), .awake) catch {};
     }
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
@@ -756,8 +770,15 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         .output_read = host.faults.response_read,
         .output_import = host.faults.response_import,
         .output_commit = host.faults.response_commit,
-    }) catch |err| if (err != error.SupersededByControl)
-        fenceDispatch(host, "model output import", err);
+    }) catch |err| {
+        if (err == error.SupersededByControl) {
+            traceOperation(host, "model_settlement_superseded", owner.binding);
+        } else {
+            fenceDispatch(host, "model output import", err);
+        }
+        return .cleanup;
+    };
+    traceOperation(host, "model_settlement_committed", owner.binding);
     return .cleanup;
 }
 
@@ -775,6 +796,7 @@ fn modelObservationsAgree(body: []const u8, openai: []const u8, x_openai: []cons
 
 fn beginCleanup(host: *Host, slot: *ExecutionSlot, owner: AttemptOwner) void {
     host.custody.detach(owner.token) catch unreachable;
+    traceOperation(host, "cleanup_started", owner.binding);
     slot.* = .{ .cleanup = .{
         .owner = owner,
         .cleanup_ticks = @intCast(@divFloor(host.faults.cleanup_delay_ms + 24, 25)),
@@ -796,8 +818,10 @@ fn advanceCleanup(host: *Host, slots: []ExecutionSlot) void {
 }
 
 fn finishSlotCleanup(host: *Host, slot: *ExecutionSlot) void {
-    const token = slot.cleanup.owner.token;
+    const owner = slot.cleanup.owner;
+    const token = owner.token;
     host.custody.cleanupComplete(token) catch unreachable;
+    traceOperation(host, "cleanup_completed", owner.binding);
     slot.* = .free;
 }
 
@@ -892,9 +916,113 @@ fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
     std.debug.print("latifa: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
 }
 
+fn nowNs(host: *Host) u64 {
+    return @intCast(std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds);
+}
+
+fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer) void {
+    if (!host.faults.test_phase_trace) return;
+    trace.append("\n") catch return;
+    host.trace_mutex.lockUncancelable(host.io);
+    defer host.trace_mutex.unlock(host.io);
+    std.Io.File.stderr().writeStreamingAll(host.io, trace.slice()) catch return;
+}
+
+fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"latifa_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"subject_kind\":", .{nowNs(host)}) catch return;
+    trace.appendJsonString(subject_kind) catch return;
+    trace.append(",\"subject\":") catch return;
+    trace.appendJsonString(subject) catch return;
+    trace.append("}") catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"latifa_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{
+        nowNs(host),
+        binding.turn_id,
+        binding.operation_id,
+    }) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn publishControlHint(host: *Host, command_key: []const u8) void {
+    if (host.faults.suppress_first_control_hint and
+        !host.control_hint_suppressed.swap(true, .acq_rel))
+    {
+        traceSubject(host, "control_hint_suppressed", "command_key", command_key);
+        return;
+    }
+    host.controls_changed.store(true, .release);
+    traceSubject(host, "control_hint_published", "command_key", command_key);
+}
+
+const ControlTiming = struct {
+    host: *Host,
+    command_key: []const u8,
+    kind: []const u8,
+    accepted_at_ns: u64,
+    store_queued_ns: u64,
+    lock_acquired_ns: u64 = 0,
+    store_complete_ns: u64 = 0,
+
+    fn init(host: *Host, command_key: []const u8, kind: []const u8, accepted_at_ns: u64) ControlTiming {
+        return .{
+            .host = host,
+            .command_key = command_key,
+            .kind = kind,
+            .accepted_at_ns = accepted_at_ns,
+            .store_queued_ns = nowNs(host),
+        };
+    }
+
+    fn storeTrace(self: *ControlTiming) ?store_module.ControlTrace {
+        if (!self.host.faults.test_phase_trace) return null;
+        return .{ .context = self, .mark_fn = markStore };
+    }
+
+    fn markStore(context: *anyopaque, phase: store_module.ControlTracePhase) void {
+        const self: *ControlTiming = @ptrCast(@alignCast(context));
+        switch (phase) {
+            .lock_acquired => self.lock_acquired_ns = nowNs(self.host),
+            .store_complete => self.store_complete_ns = nowNs(self.host),
+        }
+    }
+
+    fn replyComplete(self: *ControlTiming) void {
+        if (!self.host.faults.test_phase_trace) return;
+        const reply_complete_ns = nowNs(self.host);
+        if (self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
+        var trace: protocol.ResponseBuffer = .{};
+        trace.append("{\"latifa_test_phase\":\"control_timing\",\"command_key\":") catch return;
+        trace.appendJsonString(self.command_key) catch return;
+        trace.append(",\"kind\":") catch return;
+        trace.appendJsonString(self.kind) catch return;
+        trace.appendFmt(",\"store_complete_at_ns\":\"{d}\",\"reply_complete_at_ns\":\"{d}\",\"queue_wait_ns\":\"{d}\",\"store_lock_wait_ns\":\"{d}\",\"store_service_ns\":\"{d}\",\"post_commit_reply_ns\":\"{d}\",\"host_total_ns\":\"{d}\"}}", .{
+            self.store_complete_ns,
+            reply_complete_ns,
+            self.store_queued_ns - self.accepted_at_ns,
+            self.lock_acquired_ns - self.store_queued_ns,
+            self.store_complete_ns - self.lock_acquired_ns,
+            reply_complete_ns - self.store_complete_ns,
+            reply_complete_ns - self.accepted_at_ns,
+        }) catch return;
+        writeTestTrace(self.host, &trace);
+    }
+};
+
 fn connectionMain(connection: *Connection) void {
     const host = connection.host;
     const stream = connection.stream;
+    const accepted_at_ns = connection.accepted_at_ns;
     defer {
         stream.close(host.io);
         host.allocator.destroy(connection);
@@ -902,7 +1030,7 @@ fn connectionMain(connection: *Connection) void {
         // soon as the active population reaches zero.
         host.clientFinished();
     }
-    handleConnection(host, stream.socket.handle) catch |err| {
+    handleConnection(host, stream.socket.handle, accepted_at_ns) catch |err| {
         sendStatic(host.io, stream.socket.handle, 400, "invocation_error", @errorName(err)) catch {};
     };
 }
@@ -929,7 +1057,7 @@ const Header = struct {
     drop: DropMode = .none,
 };
 
-fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
+fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void {
     var classification_held = true;
     defer if (classification_held) {
         _ = host.classification_clients.fetchSub(1, .acq_rel);
@@ -1054,11 +1182,15 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
             deliverResponse(host.io, fd, status, response.slice());
         },
         .session_stop => |*command| {
-            const result = host.store.stopSession(command, .{ .before_commit = host.faults.before_commit });
+            var timing = ControlTiming.init(host, command.key.slice(), "session_stop", accepted_at_ns);
+            const result = host.store.stopSession(command, .{
+                .before_commit = host.faults.before_commit,
+                .control_trace = timing.storeTrace(),
+            });
             if (result == .infrastructure_failure and host.store.isFenced()) {
                 fenceDispatch(host, "Session stop save", error.CanonicalStoreFailure);
             }
-            if (result == .accepted) host.controls_changed.store(true, .release);
+            if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             var response: protocol.ResponseBuffer = .{};
             try renderSessionStopReply(&response, command, result);
@@ -1068,13 +1200,18 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
                 .infrastructure_failure => 500,
             };
             deliverResponse(host.io, fd, status, response.slice());
+            timing.replyComplete();
         },
         .model_interruption => |*command| {
-            const result = host.store.interruptModel(command, .{ .before_commit = host.faults.before_commit });
+            var timing = ControlTiming.init(host, command.key.slice(), "model_interruption", accepted_at_ns);
+            const result = host.store.interruptModel(command, .{
+                .before_commit = host.faults.before_commit,
+                .control_trace = timing.storeTrace(),
+            });
             if (result == .infrastructure_failure and host.store.isFenced()) {
                 fenceDispatch(host, "model interruption save", error.CanonicalStoreFailure);
             }
-            if (result == .accepted) host.controls_changed.store(true, .release);
+            if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             var response: protocol.ResponseBuffer = .{};
             try renderModelInterruptionReply(&response, command, result);
@@ -1084,6 +1221,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
                 .infrastructure_failure => 500,
             };
             deliverResponse(host.io, fd, status, response.slice());
+            timing.replyComplete();
         },
         .observe_command => |command| {
             const observation = host.store.observeCommand(command.key.slice()) catch |err| {
@@ -1126,6 +1264,10 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
                 // currently using the shared ingress scratch pool.
                 .scratch_used_bytes = scratch_used - header.content_length,
             });
+            traceSubject(host, "inspection_captured", "session", request_value.session.slice());
+            if (host.faults.inspection_reply_delay_ms != 0) {
+                _ = host.io.sleep(.fromMilliseconds(host.faults.inspection_reply_delay_ms), .awake) catch {};
+            }
             deliverResponse(host.io, fd, 200, response.slice());
         },
     }
