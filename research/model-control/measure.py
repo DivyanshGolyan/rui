@@ -113,10 +113,26 @@ def source_worktree_dirty(output):
         ignored = str(output.resolve().relative_to(ROOT))
     except ValueError:
         pass
-    lines = subprocess.check_output(
-        ["git", "status", "--porcelain", "--untracked-files=all"], text=True
-    ).splitlines()
+    try:
+        lines = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).splitlines()
+    except subprocess.CalledProcessError:
+        return False
     return any(line[3:] != ignored for line in lines)
+
+
+def source_revision():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except subprocess.CalledProcessError:
+        return "packaged_source_without_git_revision"
 
 
 def run_measurement(binary):
@@ -378,7 +394,7 @@ def main():
     results = {
         "scope": "issue-175 production Session stop and exact model interruption",
         "status": "passed",
-        "tested_revision": command("git", "rev-parse", "HEAD"),
+        "tested_revision": source_revision(),
         "working_tree_dirty": source_worktree_dirty(args.output),
         "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
         "zig": command("zig", "version"),
