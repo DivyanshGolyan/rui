@@ -34,8 +34,8 @@ Assert programmer errors; return typed expected failures. Handle errors and expl
 
 Explicitly review every PR for simplicity alongside correctness, using the [simplicity gate](VERIFICATION.md#product-tenets-at-stage-completion). Apply these rules to Codex PR reviews as well as local reviews.
 
-- Flag unnecessary coupling introduced or worsened by the change: duplicated authority, policy scattered across owners, or callers depending on private representation, call order or cleanup details.
-- Examine added state, layers, caches, queues and per-slot allocations for a required behavior or demonstrated cost that justifies them. Recommend removal or consolidation when a smaller design preserves the contract.
+- Review the affected design beyond changed lines. Trace complexity to its owning state or control flow, including existing code that forces the change into workarounds. Flag duplicated authority, scattered policy and dependencies on private representation, call order or cleanup details; explain how each finding relates to the PR.
+- Examine state, layers, caches, queues and per-slot allocations in the affected path for a required behavior or demonstrated cost that justifies them. Prefer correcting the responsible design, including removing or replacing existing machinery, over adding another special case. Choose the smallest complete design correction, even when it changes more lines; keep unrelated cleanup separate.
 - For each finding, identify the affected code, concrete scenario and consequence, then describe the smallest correction and the guarantees it must preserve. Quantify memory multipliers when relevant; distinguish estimates from measurements.
 - Report actionable design consequences. Keep personal style preferences, speculative extensibility and formatting already checked by CI out of findings. Passing tests does not waive simplicity review.
 
