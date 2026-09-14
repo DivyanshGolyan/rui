@@ -1,19 +1,23 @@
 {
   "scope": "issue-175 production Session stop and exact model interruption",
   "status": "fixture_passed_import_contention_qualification_pending",
-  "tested_revision": "0285887e2b9391575b45733d86e024ec71865ea5",
+  "tested_revision": "afceea3d16130c4e7b4ea1533dc4a80982399c70",
   "working_tree_dirty": false,
-  "binary_sha256": "af364ed2f32b8912c7693732dd370784971249dfe2f3a100468dc90254db81e8",
+  "provenance_boundary_checks": {
+    "outside_git": "null_revision_and_dirty_state",
+    "nested_in_unrelated_repository": "null_revision_and_dirty_state"
+  },
+  "binary_sha256": "920ca2a5f5cb85fd972dba46e9b9a75557895aa028e0b7e4a52016a2c1820925",
   "zig": "0.16.0",
   "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
   "configurations": {
     "idle_host": {
       "active_capacity": 8,
       "sample": {
-        "rss_bytes": 8519680,
-        "virtual_bytes": 420247060480,
-        "physical_footprint_bytes": 3900416,
-        "lifetime_peak_physical_footprint_bytes": 4064256,
+        "rss_bytes": 8601600,
+        "virtual_bytes": 420250206208,
+        "physical_footprint_bytes": 3998720,
+        "lifetime_peak_physical_footprint_bytes": 4162560,
         "open_descriptor_rows": 15,
         "open_unix_client_sockets": 1
       }
@@ -22,67 +26,67 @@
       "scope": "120 ordinary clients stopped after partial request bodies; this is retained diagnostic evidence, not the issue-175 saturated-load qualification",
       "ordinary_connections": 120,
       "control_commands": 50,
-      "p95_acknowledgment_ms": 38.94,
-      "maximum_acknowledgment_ms": 59.467,
+      "p95_acknowledgment_ms": 40.305,
+      "maximum_acknowledgment_ms": 42.262,
       "qualification_limit_ms": 1000,
       "before_controls": {
-        "rss_bytes": 56885248,
-        "virtual_bytes": 420945494016,
+        "rss_bytes": 57131008,
+        "virtual_bytes": 420811276288,
         "physical_footprint_bytes": 52428800,
         "lifetime_peak_physical_footprint_bytes": 52428800,
         "open_descriptor_rows": 135,
         "open_unix_client_sockets": 121
       },
       "after_controls": {
-        "rss_bytes": 58753024,
-        "virtual_bytes": 421240143872,
+        "rss_bytes": 58720256,
+        "virtual_bytes": 420954931200,
         "physical_footprint_bytes": 54525952,
         "lifetime_peak_physical_footprint_bytes": 54525952,
         "open_descriptor_rows": 135,
         "open_unix_client_sockets": 121
       },
       "resource_delta_from_idle": {
-        "rss_bytes": 48365568,
-        "virtual_bytes": 698433536,
-        "physical_footprint_bytes": 48528384,
+        "rss_bytes": 48529408,
+        "virtual_bytes": 561070080,
+        "physical_footprint_bytes": 48430080,
         "open_descriptor_rows": 120,
         "open_unix_client_sockets": 120
       },
       "second_saturation_round": {
-        "rss_bytes": 59473920,
-        "virtual_bytes": 421240143872,
-        "physical_footprint_bytes": 46137344,
+        "rss_bytes": 62259200,
+        "virtual_bytes": 420954931200,
+        "physical_footprint_bytes": 32505856,
         "lifetime_peak_physical_footprint_bytes": 54525952,
         "open_descriptor_rows": 135,
         "open_unix_client_sockets": 121
       },
       "retained_after_first_drain": {
-        "rss_bytes": 44990464,
-        "virtual_bytes": 421108416512,
-        "physical_footprint_bytes": 17825792,
+        "rss_bytes": 44957696,
+        "virtual_bytes": 420823203840,
+        "physical_footprint_bytes": 14680064,
         "lifetime_peak_physical_footprint_bytes": 54525952,
         "open_descriptor_rows": 15,
         "open_unix_client_sockets": 1
       },
       "retained_after_second_drain": {
-        "rss_bytes": 45744128,
-        "virtual_bytes": 421109465088,
-        "physical_footprint_bytes": 15728640,
+        "rss_bytes": 48594944,
+        "virtual_bytes": 420833689600,
+        "physical_footprint_bytes": 10485760,
         "lifetime_peak_physical_footprint_bytes": 54525952,
         "open_descriptor_rows": 15,
         "open_unix_client_sockets": 1
       },
       "retained_delta_from_idle": {
-        "rss_bytes": 37224448,
-        "virtual_bytes": 862404608,
-        "physical_footprint_bytes": 11828224,
+        "rss_bytes": 39993344,
+        "virtual_bytes": 583483392,
+        "physical_footprint_bytes": 6487040,
         "open_descriptor_rows": 0,
         "open_unix_client_sockets": 0
       },
       "second_drain_delta_from_first": {
-        "rss_bytes": 753664,
-        "virtual_bytes": 1048576,
-        "physical_footprint_bytes": -2097152,
+        "rss_bytes": 3637248,
+        "virtual_bytes": 10485760,
+        "physical_footprint_bytes": -4194304,
         "open_descriptor_rows": 0,
         "open_unix_client_sockets": 0
       }
@@ -90,120 +94,155 @@
     "live_model_cancellation": {
       "active_capacity": 8,
       "active_model_streams": 8,
-      "exact_interruption_acknowledgment_ms": 24.439,
-      "session_stop_p95_acknowledgment_ms": 30.959,
+      "exact_interruption_acknowledgment_ms": 31.175,
+      "session_stop_p95_acknowledgment_ms": 37.01,
       "qualification_limit_ms": 1000,
       "before_controls": {
-        "rss_bytes": 10682368,
-        "virtual_bytes": 420537040896,
-        "physical_footprint_bytes": 6079488,
-        "lifetime_peak_physical_footprint_bytes": 6259712,
+        "rss_bytes": 10665984,
+        "virtual_bytes": 420822253568,
+        "physical_footprint_bytes": 6145024,
+        "lifetime_peak_physical_footprint_bytes": 6308864,
         "open_descriptor_rows": 47,
         "open_unix_client_sockets": 1
       },
       "after_cleanup": {
-        "rss_bytes": 10944512,
-        "virtual_bytes": 420546478080,
-        "physical_footprint_bytes": 6358016,
-        "lifetime_peak_physical_footprint_bytes": 6521856,
+        "rss_bytes": 10665984,
+        "virtual_bytes": 420822253568,
+        "physical_footprint_bytes": 6145024,
+        "lifetime_peak_physical_footprint_bytes": 6308864,
         "open_descriptor_rows": 15,
         "open_unix_client_sockets": 1
       },
       "resource_delta_after_cleanup": {
-        "rss_bytes": 262144,
-        "virtual_bytes": 9437184,
-        "physical_footprint_bytes": 278528,
+        "rss_bytes": 0,
+        "virtual_bytes": 0,
+        "physical_footprint_bytes": 0,
         "open_descriptor_rows": -32,
         "open_unix_client_sockets": 0
       },
       "provider_disconnects": 8
     },
-    "captured_report_and_sealed_settlement_qualification": {
-      "scope": "120 fully received inspections held after report capture, eight valid provider responses released toward sealed validation/import, and eight simultaneous Session stops using protected control places",
+    "control_first_settlement_race": {
+      "scope": "120 fully captured reports held during delivery while eight controls commit before sealed settlement; canonical settlement loses without fencing",
+      "status": "passed",
       "ordinary_connections": 120,
-      "active_model_responses": 8,
       "concurrent_control_commands": 8,
+      "model_settlement_superseded": true,
+      "total_durable_acknowledgment": {
+        "definition": "caller start through receipt of the complete durable Session-stop reply",
+        "p95_ms": 147.635,
+        "maximum_ms": 147.635
+      }
+    },
+    "real_settlement_import_contention_qualification": {
+      "scope": "120 fully captured reports held during delivery, one 32 MiB answer streamed with bounded fixture memory into real Store import, and eight later concurrent controls",
+      "ordinary_connections": 120,
+      "active_model_responses": 1,
+      "concurrent_control_commands": 8,
+      "large_answer_bytes": 33554432,
+      "large_answer_sha256": "05f052c8f6da8ee5228ec291820b559c4be183773b9e97a6b82e30dacff85dd3",
+      "settlement_service_ms": 675.641,
+      "overlapping_control_keys": [
+        "settlement-later-stop-6",
+        "settlement-later-stop-4",
+        "settlement-later-stop-2",
+        "settlement-later-stop-5",
+        "settlement-later-stop-7",
+        "settlement-later-stop-3",
+        "settlement-later-interrupt",
+        "settlement-later-stop-1"
+      ],
+      "resolved_interruption_key": "settlement-later-interrupt",
+      "idle_stop_keys": [
+        "settlement-later-stop-1",
+        "settlement-later-stop-2",
+        "settlement-later-stop-3",
+        "settlement-later-stop-4",
+        "settlement-later-stop-5",
+        "settlement-later-stop-6",
+        "settlement-later-stop-7"
+      ],
       "cleanup_delay_ms": 1500,
       "qualification_limit_ms": 1000,
       "total_durable_acknowledgment": {
         "definition": "caller start through receipt of the complete durable Session-stop reply",
-        "p95_ms": 126.26,
-        "maximum_ms": 126.26
+        "p95_ms": 782.735,
+        "maximum_ms": 782.735
       },
       "control_queue_wait": {
         "definition": "Host accept through parsed control queued at the Store owner",
-        "p95_ms": 0.623,
-        "maximum_ms": 0.623
+        "p95_ms": 0.245,
+        "maximum_ms": 0.245
       },
       "store_lock_wait": {
         "definition": "Store call entry through acquisition of its single-writer mutex",
-        "p95_ms": 60.235,
-        "maximum_ms": 60.235
+        "p95_ms": 719.78,
+        "maximum_ms": 719.78
       },
       "store_service": {
         "definition": "Store mutex acquisition through committed canonical answer",
-        "p95_ms": 16.088,
-        "maximum_ms": 16.088
+        "p95_ms": 15.905,
+        "maximum_ms": 15.905
       },
       "post_commit_reply": {
         "definition": "canonical commit through completion of the Host reply write attempt",
-        "p95_ms": 0.034,
-        "maximum_ms": 0.034
+        "p95_ms": 0.028,
+        "maximum_ms": 0.028
       },
       "semantic_completion": {
-        "definition": "Host accept through the Session-stop commit that cancels the selected Turn",
-        "p95_ms": 73.705,
-        "maximum_ms": 73.705
+        "definition": "Host accept through the committed resolved-interruption or idle-stop answer",
+        "p95_ms": 734.278,
+        "maximum_ms": 734.278
       },
       "physical_custody_release": {
-        "definition": "Session-stop commit through cleanup completion and custody-slot release",
-        "p95_ms": 7528.383,
-        "maximum_ms": 7528.383
+        "definition": "successful settlement completion through cleanup completion and custody-slot release",
+        "p95_ms": 7461.528,
+        "maximum_ms": 7461.528
       },
       "resources": {
         "idle": {
-          "rss_bytes": 8126464,
-          "virtual_bytes": 420256497664,
-          "physical_footprint_bytes": 3605504,
-          "lifetime_peak_physical_footprint_bytes": 3605504,
+          "rss_bytes": 8011776,
+          "virtual_bytes": 420122279936,
+          "physical_footprint_bytes": 3474432,
+          "lifetime_peak_physical_footprint_bytes": 3474432,
           "open_descriptor_rows": 15,
           "open_unix_client_sockets": 1
         },
-        "reports_captured_and_responses_held": {
-          "rss_bytes": 68960256,
-          "virtual_bytes": 421097095168,
-          "physical_footprint_bytes": 63963136,
-          "lifetime_peak_physical_footprint_bytes": 65011712,
-          "open_descriptor_rows": 167,
+        "reports_captured_before_settlement": {
+          "rss_bytes": 67158016,
+          "virtual_bytes": 420810326016,
+          "physical_footprint_bytes": 62914560,
+          "lifetime_peak_physical_footprint_bytes": 62914560,
+          "open_descriptor_rows": 139,
           "open_unix_client_sockets": 121
         },
         "controls_acknowledged": {
-          "rss_bytes": 71237632,
-          "virtual_bytes": 421519671296,
-          "physical_footprint_bytes": 67108864,
-          "lifetime_peak_physical_footprint_bytes": 67108864,
-          "open_descriptor_rows": 135,
-          "open_unix_client_sockets": 121
+          "rss_bytes": 48955392,
+          "virtual_bytes": 420679581696,
+          "physical_footprint_bytes": 12582912,
+          "lifetime_peak_physical_footprint_bytes": 62914560,
+          "open_descriptor_rows": 15,
+          "open_unix_client_sockets": 1
         },
         "physically_released": {
-          "rss_bytes": 47939584,
-          "virtual_bytes": 421395759104,
-          "physical_footprint_bytes": 13631488,
-          "lifetime_peak_physical_footprint_bytes": 67108864,
+          "rss_bytes": 49512448,
+          "virtual_bytes": 421252104192,
+          "physical_footprint_bytes": 12582912,
+          "lifetime_peak_physical_footprint_bytes": 62914560,
           "open_descriptor_rows": 15,
           "open_unix_client_sockets": 1
         },
         "captured_load_delta_from_idle": {
-          "rss_bytes": 60833792,
-          "virtual_bytes": 840597504,
-          "physical_footprint_bytes": 60357632,
-          "open_descriptor_rows": 152,
+          "rss_bytes": 59146240,
+          "virtual_bytes": 688046080,
+          "physical_footprint_bytes": 59440128,
+          "open_descriptor_rows": 124,
           "open_unix_client_sockets": 120
         },
         "retained_delta_after_physical_release": {
-          "rss_bytes": 39813120,
-          "virtual_bytes": 1139261440,
-          "physical_footprint_bytes": 10025984,
+          "rss_bytes": 41500672,
+          "virtual_bytes": 1129824256,
+          "physical_footprint_bytes": 9108480,
           "open_descriptor_rows": 0,
           "open_unix_client_sockets": 0
         }
