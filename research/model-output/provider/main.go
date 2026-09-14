@@ -21,16 +21,16 @@ import (
 const event = "data: {\"type\":\"response.in_progress\"}\n\n"
 
 type stream struct {
-	id            string
-	requestBytes  int
-	requestSHA256 string
-	completed     int
-	missed        int
-	offerBytes    int
-	terminalBytes int
-	maximumLateNS int64
-	offerError    string
-	terminalError string
+	id                              string
+	requestBytes                    int
+	requestSHA256                   string
+	completed                       int
+	misses                          missEvidence
+	offerBytes                      int
+	terminalBytes                   int
+	maximumOnTimeCompletionOffsetNS int64
+	offerError                      string
+	terminalError                   string
 }
 
 type fixture struct {
@@ -90,40 +90,133 @@ type requestBody struct {
 }
 
 type streamFact struct {
-	ID            string  `json:"id"`
-	RequestBytes  int     `json:"request_bytes"`
-	RequestSHA256 string  `json:"request_sha256"`
-	Completed     int     `json:"completed_batches"`
-	Missed        int     `json:"missed_batches"`
-	OfferBytes    int     `json:"offer_bytes"`
-	TerminalBytes int     `json:"terminal_bytes"`
-	MaximumLateMS float64 `json:"maximum_lateness_ms"`
-	OfferError    string  `json:"offer_error,omitempty"`
-	TerminalError string  `json:"terminal_error,omitempty"`
+	ID                              string           `json:"id"`
+	RequestBytes                    int              `json:"request_bytes"`
+	RequestSHA256                   string           `json:"request_sha256"`
+	Completed                       int              `json:"completed_batches"`
+	Missed                          int              `json:"missed_batches"`
+	MissEvidence                    missEvidenceFact `json:"miss_evidence"`
+	OfferBytes                      int              `json:"offer_bytes"`
+	TerminalBytes                   int              `json:"terminal_bytes"`
+	MaximumOnTimeCompletionOffsetMS float64          `json:"maximum_on_time_completion_offset_ms"`
+	OfferError                      string           `json:"offer_error,omitempty"`
+	TerminalError                   string           `json:"terminal_error,omitempty"`
 }
 
 type Summary struct {
-	ExpectedStreams   int     `json:"expected_streams"`
-	ReadyStreams      int     `json:"ready_streams"`
-	OfferFinished     int     `json:"offer_finished_streams"`
-	TerminalFinished  int     `json:"terminal_finished_streams"`
-	ExactStreams      int     `json:"exact_streams"`
-	FailedStreams     int     `json:"failed_streams"`
-	MinimumBatches    int     `json:"minimum_completed_batches"`
-	MaximumBatches    int     `json:"maximum_completed_batches"`
-	CompletedBatches  int     `json:"completed_batches"`
-	MissedBatches     int     `json:"missed_batches"`
-	OfferBytes        int     `json:"offer_bytes"`
-	TerminalBytes     int     `json:"terminal_bytes"`
-	MaximumLatenessMS float64 `json:"maximum_lateness_ms"`
-	RequestBytes      int     `json:"request_bytes"`
-	RequestSetSHA256  string  `json:"request_set_sha256"`
-	StartUnixNS       int64   `json:"start_unix_ns,omitempty"`
-	DeadlineUnixNS    int64   `json:"deadline_unix_ns,omitempty"`
-	EventBytes        int     `json:"event_bytes"`
-	EventsPerBatch    int     `json:"events_per_batch"`
-	BatchesPerStream  int     `json:"batches_per_stream"`
-	OfferSeconds      float64 `json:"offer_seconds"`
+	ExpectedStreams                 int                 `json:"expected_streams"`
+	ReadyStreams                    int                 `json:"ready_streams"`
+	OfferFinished                   int                 `json:"offer_finished_streams"`
+	TerminalFinished                int                 `json:"terminal_finished_streams"`
+	ExactStreams                    int                 `json:"exact_streams"`
+	FailedStreams                   int                 `json:"failed_streams"`
+	MinimumBatches                  int                 `json:"minimum_completed_batches"`
+	MaximumBatches                  int                 `json:"maximum_completed_batches"`
+	CompletedBatches                int                 `json:"completed_batches"`
+	MissedBatches                   int                 `json:"missed_batches"`
+	LateWakeMissedBatches           int                 `json:"late_wake_missed_batches"`
+	LateFlushMissedBatches          int                 `json:"late_flush_missed_batches"`
+	MaximumLateWake                 *summaryMissWitness `json:"maximum_late_wake,omitempty"`
+	MaximumLateFlush                *summaryMissWitness `json:"maximum_late_flush,omitempty"`
+	OfferBytes                      int                 `json:"offer_bytes"`
+	TerminalBytes                   int                 `json:"terminal_bytes"`
+	MaximumOnTimeCompletionOffsetMS float64             `json:"maximum_on_time_completion_offset_ms"`
+	RequestBytes                    int                 `json:"request_bytes"`
+	RequestSetSHA256                string              `json:"request_set_sha256"`
+	StartUnixNS                     int64               `json:"start_unix_ns,omitempty"`
+	DeadlineUnixNS                  int64               `json:"deadline_unix_ns,omitempty"`
+	EventBytes                      int                 `json:"event_bytes"`
+	EventsPerBatch                  int                 `json:"events_per_batch"`
+	BatchesPerStream                int                 `json:"batches_per_stream"`
+	OfferSeconds                    float64             `json:"offer_seconds"`
+}
+
+type missStage string
+
+const (
+	lateWake  missStage = "late_wake"
+	lateFlush missStage = "late_flush"
+
+	missWitnessLimit = 8
+)
+
+type missWitness struct {
+	Ordinal   int       `json:"ordinal"`
+	Stage     missStage `json:"stage"`
+	OverdueNS int64     `json:"overdue_ns"`
+}
+
+type missStageEvidence struct {
+	Count                 int   `json:"count"`
+	FirstOrdinal          int   `json:"first_ordinal"`
+	LastOrdinal           int   `json:"last_ordinal"`
+	MaximumOverdueNS      int64 `json:"maximum_overdue_ns"`
+	MaximumOverdueOrdinal int   `json:"maximum_overdue_ordinal"`
+}
+
+type missEvidence struct {
+	lateWake         missStageEvidence
+	lateFlush        missStageEvidence
+	witnesses        [missWitnessLimit]missWitness
+	witnessCount     int
+	witnessesOmitted int
+}
+
+type missEvidenceFact struct {
+	LateWake         missStageEvidence `json:"late_wake"`
+	LateFlush        missStageEvidence `json:"late_flush"`
+	Witnesses        []missWitness     `json:"witnesses"`
+	WitnessesOmitted int               `json:"witnesses_omitted"`
+}
+
+type summaryMissWitness struct {
+	ID        string `json:"id"`
+	Ordinal   int    `json:"ordinal"`
+	OverdueNS int64  `json:"overdue_ns"`
+}
+
+func (e *missStageEvidence) record(ordinal int, overdue time.Duration) {
+	e.Count++
+	if e.Count == 1 {
+		e.FirstOrdinal = ordinal
+	}
+	e.LastOrdinal = ordinal
+	if e.Count == 1 || overdue.Nanoseconds() > e.MaximumOverdueNS {
+		e.MaximumOverdueNS = overdue.Nanoseconds()
+		e.MaximumOverdueOrdinal = ordinal
+	}
+}
+
+func (e *missEvidence) record(ordinal int, stage missStage, overdue time.Duration) {
+	switch stage {
+	case lateWake:
+		e.lateWake.record(ordinal, overdue)
+	case lateFlush:
+		e.lateFlush.record(ordinal, overdue)
+	default:
+		panic("unknown miss stage")
+	}
+	if e.witnessCount < len(e.witnesses) {
+		e.witnesses[e.witnessCount] = missWitness{Ordinal: ordinal, Stage: stage, OverdueNS: overdue.Nanoseconds()}
+		e.witnessCount++
+	} else {
+		e.witnessesOmitted++
+	}
+}
+
+func (e *missEvidence) total() int {
+	return e.lateWake.Count + e.lateFlush.Count
+}
+
+func (e *missEvidence) fact() missEvidenceFact {
+	witnesses := make([]missWitness, e.witnessCount)
+	copy(witnesses, e.witnesses[:e.witnessCount])
+	return missEvidenceFact{
+		LateWake:         e.lateWake,
+		LateFlush:        e.lateFlush,
+		Witnesses:        witnesses,
+		WitnessesOmitted: e.witnessesOmitted,
+	}
 }
 
 func newFixture(expected int, duration time.Duration, artifactDir string, facts *os.File) *fixture {
@@ -239,21 +332,43 @@ func writeBody(writer io.Writer, body string) (int, error) {
 	return written, err
 }
 
-func writePacedBody(writer io.Writer, flush func() error, body string, slotEnd time.Time, now func() time.Time) (int, bool, error) {
+func writePacedBody(writer io.Writer, flush func() error, body string, now func() time.Time) (int, time.Time, error) {
 	written, err := writeBody(writer, body)
 	if err != nil {
-		return written, false, err
+		return written, time.Time{}, err
 	}
 	if err := flush(); err != nil {
-		return written, false, err
+		return written, time.Time{}, err
 	}
-	return written, !now().After(slotEnd), nil
+	return written, now(), nil
 }
 
 type scheduledSlot struct {
 	start time.Time
 	end   time.Time
 	wait  time.Duration
+}
+
+type slotOffer struct {
+	written            int
+	completed          bool
+	missedStage        missStage
+	overdue            time.Duration
+	completionOffsetNS int64
+}
+
+func offerScheduledBatch(writer io.Writer, flush func() error, body string, slot scheduledSlot, wakeAt time.Time, now func() time.Time) (slotOffer, error) {
+	if slotExpired(wakeAt, slot.end) {
+		return slotOffer{missedStage: lateWake, overdue: wakeAt.Sub(slot.end)}, nil
+	}
+	written, finishedAt, err := writePacedBody(writer, flush, body, now)
+	if err != nil {
+		return slotOffer{written: written}, err
+	}
+	if finishedAt.After(slot.end) {
+		return slotOffer{written: written, missedStage: lateFlush, overdue: finishedAt.Sub(slot.end)}, nil
+	}
+	return slotOffer{written: written, completed: true, completionOffsetNS: finishedAt.Sub(slot.start).Nanoseconds()}, nil
 }
 
 func absoluteSlot(startAt time.Time, interval time.Duration, ordinal int, now time.Time) scheduledSlot {
@@ -351,9 +466,9 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	completed := 0
-	missed := 0
+	var misses missEvidence
 	offerBytes := 0
-	maximumLateNS := int64(0)
+	maximumOnTimeCompletionOffsetNS := int64(0)
 	offerError := ""
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
@@ -366,38 +481,37 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 			offerError = r.Context().Err().Error()
 			break
 		}
-		if slotExpired(time.Now(), slot.end) {
-			missed++
+		wakeAt := time.Now()
+		if slotExpired(wakeAt, slot.end) {
+			misses.record(ordinal, lateWake, wakeAt.Sub(slot.end))
 			continue
 		}
 		if err := controller.SetWriteDeadline(slot.end); err != nil {
 			offerError = err.Error()
 			break
 		}
-		written, onTime, err := writePacedBody(w, controller.Flush, f.batch, slot.end, time.Now)
-		offerBytes += written
+		result, err := offerScheduledBatch(w, controller.Flush, f.batch, slot, wakeAt, time.Now)
+		offerBytes += result.written
 		if err != nil {
 			offerError = err.Error()
 			break
 		}
-		finished := time.Now()
-		if !onTime {
-			missed++
+		if result.missedStage != "" {
+			misses.record(ordinal, result.missedStage, result.overdue)
 			continue
 		}
 		completed++
-		lateness := finished.Sub(slot.start).Nanoseconds()
-		if lateness > maximumLateNS {
-			maximumLateNS = lateness
+		if result.completionOffsetNS > maximumOnTimeCompletionOffsetNS {
+			maximumOnTimeCompletionOffsetNS = result.completionOffsetNS
 		}
 	}
 	_ = controller.SetWriteDeadline(time.Time{})
 
 	f.mu.Lock()
 	current.completed = completed
-	current.missed = missed
+	current.misses = misses
 	current.offerBytes = offerBytes
-	current.maximumLateNS = maximumLateNS
+	current.maximumOnTimeCompletionOffsetNS = maximumOnTimeCompletionOffsetNS
 	current.offerError = offerError
 	f.offerFinished++
 	if f.offerFinished == f.expected {
@@ -450,17 +564,19 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 	defer f.mu.Unlock()
 	rows := make([]streamFact, 0, len(f.streams))
 	for _, value := range f.streams {
+		misses := value.misses.fact()
 		rows = append(rows, streamFact{
-			ID:            value.id,
-			RequestBytes:  value.requestBytes,
-			RequestSHA256: value.requestSHA256,
-			Completed:     value.completed,
-			Missed:        value.missed,
-			OfferBytes:    value.offerBytes,
-			TerminalBytes: value.terminalBytes,
-			MaximumLateMS: float64(value.maximumLateNS) / float64(time.Millisecond),
-			OfferError:    value.offerError,
-			TerminalError: value.terminalError,
+			ID:                              value.id,
+			RequestBytes:                    value.requestBytes,
+			RequestSHA256:                   value.requestSHA256,
+			Completed:                       value.completed,
+			Missed:                          value.misses.total(),
+			MissEvidence:                    misses,
+			OfferBytes:                      value.offerBytes,
+			TerminalBytes:                   value.terminalBytes,
+			MaximumOnTimeCompletionOffsetMS: float64(value.maximumOnTimeCompletionOffsetNS) / float64(time.Millisecond),
+			OfferError:                      value.offerError,
+			TerminalError:                   value.terminalError,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
@@ -481,6 +597,10 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 		fmt.Fprintf(requestSet, "%s\n", row.RequestSHA256)
 		result.CompletedBatches += row.Completed
 		result.MissedBatches += row.Missed
+		result.LateWakeMissedBatches += row.MissEvidence.LateWake.Count
+		result.LateFlushMissedBatches += row.MissEvidence.LateFlush.Count
+		updateMaximumMiss(&result.MaximumLateWake, row.ID, row.MissEvidence.LateWake)
+		updateMaximumMiss(&result.MaximumLateFlush, row.ID, row.MissEvidence.LateFlush)
 		result.OfferBytes += row.OfferBytes
 		result.TerminalBytes += row.TerminalBytes
 		if row.Completed < result.MinimumBatches {
@@ -495,8 +615,8 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 		if row.OfferError != "" || row.TerminalError != "" {
 			result.FailedStreams++
 		}
-		if row.MaximumLateMS > result.MaximumLatenessMS {
-			result.MaximumLatenessMS = row.MaximumLateMS
+		if row.MaximumOnTimeCompletionOffsetMS > result.MaximumOnTimeCompletionOffsetMS {
+			result.MaximumOnTimeCompletionOffsetMS = row.MaximumOnTimeCompletionOffsetMS
 		}
 	}
 	result.RequestSetSHA256 = hex.EncodeToString(requestSet.Sum(nil))
@@ -505,6 +625,17 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 		result.DeadlineUnixNS = f.startAt.Add(f.duration).UnixNano()
 	}
 	return rows, result
+}
+
+func updateMaximumMiss(current **summaryMissWitness, id string, stage missStageEvidence) {
+	if stage.Count == 0 || (*current != nil && stage.MaximumOverdueNS <= (*current).OverdueNS) {
+		return
+	}
+	*current = &summaryMissWitness{
+		ID:        id,
+		Ordinal:   stage.MaximumOverdueOrdinal,
+		OverdueNS: stage.MaximumOverdueNS,
+	}
 }
 
 func writeJSON(path string, value any) error {
