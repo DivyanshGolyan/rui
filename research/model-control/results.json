@@ -1,7 +1,7 @@
 {
   "scope": "issue-175 production Session stop and exact model interruption",
   "status": "passed",
-  "tested_revision": "5f2ec7b8315d5db3d8a77179e8d9c73fe178393f",
+  "tested_revision": "0285887e2b9391575b45733d86e024ec71865ea5",
   "working_tree_dirty": false,
   "binary_sha256": "af364ed2f32b8912c7693732dd370784971249dfe2f3a100468dc90254db81e8",
   "zig": "0.16.0",
@@ -10,10 +10,10 @@
     "idle_host": {
       "active_capacity": 8,
       "sample": {
-        "rss_bytes": 8699904,
-        "virtual_bytes": 420275372032,
-        "physical_footprint_bytes": 4113408,
-        "lifetime_peak_physical_footprint_bytes": 4277248,
+        "rss_bytes": 8519680,
+        "virtual_bytes": 420247060480,
+        "physical_footprint_bytes": 3900416,
+        "lifetime_peak_physical_footprint_bytes": 4064256,
         "open_descriptor_rows": 15,
         "open_unix_client_sockets": 1
       }
@@ -22,67 +22,67 @@
       "scope": "120 ordinary clients stopped after partial request bodies; this is retained diagnostic evidence, not the issue-175 saturated-load qualification",
       "ordinary_connections": 120,
       "control_commands": 50,
-      "p95_acknowledgment_ms": 34.827,
-      "maximum_acknowledgment_ms": 36.956,
+      "p95_acknowledgment_ms": 38.94,
+      "maximum_acknowledgment_ms": 59.467,
       "qualification_limit_ms": 1000,
       "before_controls": {
-        "rss_bytes": 46268416,
-        "virtual_bytes": 421393235968,
+        "rss_bytes": 56885248,
+        "virtual_bytes": 420945494016,
         "physical_footprint_bytes": 52428800,
         "lifetime_peak_physical_footprint_bytes": 52428800,
         "open_descriptor_rows": 135,
         "open_unix_client_sockets": 121
       },
       "after_controls": {
-        "rss_bytes": 48300032,
-        "virtual_bytes": 421393235968,
+        "rss_bytes": 58753024,
+        "virtual_bytes": 421240143872,
         "physical_footprint_bytes": 54525952,
         "lifetime_peak_physical_footprint_bytes": 54525952,
         "open_descriptor_rows": 135,
         "open_unix_client_sockets": 121
       },
       "resource_delta_from_idle": {
-        "rss_bytes": 37568512,
-        "virtual_bytes": 1117863936,
-        "physical_footprint_bytes": 48315392,
+        "rss_bytes": 48365568,
+        "virtual_bytes": 698433536,
+        "physical_footprint_bytes": 48528384,
         "open_descriptor_rows": 120,
         "open_unix_client_sockets": 120
       },
       "second_saturation_round": {
-        "rss_bytes": 58900480,
-        "virtual_bytes": 421393235968,
-        "physical_footprint_bytes": 37748736,
+        "rss_bytes": 59473920,
+        "virtual_bytes": 421240143872,
+        "physical_footprint_bytes": 46137344,
         "lifetime_peak_physical_footprint_bytes": 54525952,
         "open_descriptor_rows": 135,
         "open_unix_client_sockets": 121
       },
       "retained_after_first_drain": {
-        "rss_bytes": 36896768,
-        "virtual_bytes": 421261508608,
-        "physical_footprint_bytes": 14680064,
+        "rss_bytes": 44990464,
+        "virtual_bytes": 421108416512,
+        "physical_footprint_bytes": 17825792,
         "lifetime_peak_physical_footprint_bytes": 54525952,
         "open_descriptor_rows": 15,
         "open_unix_client_sockets": 1
       },
       "retained_after_second_drain": {
-        "rss_bytes": 45137920,
-        "virtual_bytes": 421261508608,
-        "physical_footprint_bytes": 13631488,
+        "rss_bytes": 45744128,
+        "virtual_bytes": 421109465088,
+        "physical_footprint_bytes": 15728640,
         "lifetime_peak_physical_footprint_bytes": 54525952,
         "open_descriptor_rows": 15,
         "open_unix_client_sockets": 1
       },
       "retained_delta_from_idle": {
-        "rss_bytes": 36438016,
-        "virtual_bytes": 986136576,
-        "physical_footprint_bytes": 9518080,
+        "rss_bytes": 37224448,
+        "virtual_bytes": 862404608,
+        "physical_footprint_bytes": 11828224,
         "open_descriptor_rows": 0,
         "open_unix_client_sockets": 0
       },
       "second_drain_delta_from_first": {
-        "rss_bytes": 8241152,
-        "virtual_bytes": 0,
-        "physical_footprint_bytes": -1048576,
+        "rss_bytes": 753664,
+        "virtual_bytes": 1048576,
+        "physical_footprint_bytes": -2097152,
         "open_descriptor_rows": 0,
         "open_unix_client_sockets": 0
       }
@@ -90,29 +90,29 @@
     "live_model_cancellation": {
       "active_capacity": 8,
       "active_model_streams": 8,
-      "exact_interruption_acknowledgment_ms": 34.502,
-      "session_stop_p95_acknowledgment_ms": 32.822,
+      "exact_interruption_acknowledgment_ms": 24.439,
+      "session_stop_p95_acknowledgment_ms": 30.959,
       "qualification_limit_ms": 1000,
       "before_controls": {
-        "rss_bytes": 11059200,
-        "virtual_bytes": 420678598656,
-        "physical_footprint_bytes": 6505472,
-        "lifetime_peak_physical_footprint_bytes": 6669312,
+        "rss_bytes": 10682368,
+        "virtual_bytes": 420537040896,
+        "physical_footprint_bytes": 6079488,
+        "lifetime_peak_physical_footprint_bytes": 6259712,
         "open_descriptor_rows": 47,
         "open_unix_client_sockets": 1
       },
       "after_cleanup": {
-        "rss_bytes": 11059200,
-        "virtual_bytes": 420678598656,
-        "physical_footprint_bytes": 6505472,
-        "lifetime_peak_physical_footprint_bytes": 6669312,
+        "rss_bytes": 10944512,
+        "virtual_bytes": 420546478080,
+        "physical_footprint_bytes": 6358016,
+        "lifetime_peak_physical_footprint_bytes": 6521856,
         "open_descriptor_rows": 15,
         "open_unix_client_sockets": 1
       },
       "resource_delta_after_cleanup": {
-        "rss_bytes": 0,
-        "virtual_bytes": 0,
-        "physical_footprint_bytes": 0,
+        "rss_bytes": 262144,
+        "virtual_bytes": 9437184,
+        "physical_footprint_bytes": 278528,
         "open_descriptor_rows": -32,
         "open_unix_client_sockets": 0
       },
@@ -127,66 +127,66 @@
       "qualification_limit_ms": 1000,
       "total_durable_acknowledgment": {
         "definition": "caller start through receipt of the complete durable Session-stop reply",
-        "p95_ms": 156.346,
-        "maximum_ms": 156.346
+        "p95_ms": 126.26,
+        "maximum_ms": 126.26
       },
       "control_queue_wait": {
         "definition": "Host accept through parsed control queued at the Store owner",
-        "p95_ms": 0.499,
-        "maximum_ms": 0.499
+        "p95_ms": 0.623,
+        "maximum_ms": 0.623
       },
       "store_lock_wait": {
         "definition": "Store call entry through acquisition of its single-writer mutex",
-        "p95_ms": 88.512,
-        "maximum_ms": 88.512
+        "p95_ms": 60.235,
+        "maximum_ms": 60.235
       },
       "store_service": {
         "definition": "Store mutex acquisition through committed canonical answer",
-        "p95_ms": 22.016,
-        "maximum_ms": 22.016
+        "p95_ms": 16.088,
+        "maximum_ms": 16.088
       },
       "post_commit_reply": {
         "definition": "canonical commit through completion of the Host reply write attempt",
-        "p95_ms": 0.053,
-        "maximum_ms": 0.053
+        "p95_ms": 0.034,
+        "maximum_ms": 0.034
       },
       "semantic_completion": {
         "definition": "Host accept through the Session-stop commit that cancels the selected Turn",
-        "p95_ms": 103.695,
-        "maximum_ms": 103.695
+        "p95_ms": 73.705,
+        "maximum_ms": 73.705
       },
       "physical_custody_release": {
         "definition": "Session-stop commit through cleanup completion and custody-slot release",
-        "p95_ms": 8733.677,
-        "maximum_ms": 8733.677
+        "p95_ms": 7528.383,
+        "maximum_ms": 7528.383
       },
       "resources": {
         "idle": {
-          "rss_bytes": 8044544,
-          "virtual_bytes": 420122279936,
-          "physical_footprint_bytes": 3507200,
-          "lifetime_peak_physical_footprint_bytes": 3507200,
+          "rss_bytes": 8126464,
+          "virtual_bytes": 420256497664,
+          "physical_footprint_bytes": 3605504,
+          "lifetime_peak_physical_footprint_bytes": 3605504,
           "open_descriptor_rows": 15,
           "open_unix_client_sockets": 1
         },
         "reports_captured_and_responses_held": {
-          "rss_bytes": 68829184,
-          "virtual_bytes": 421393842176,
+          "rss_bytes": 68960256,
+          "virtual_bytes": 421097095168,
           "physical_footprint_bytes": 63963136,
           "lifetime_peak_physical_footprint_bytes": 65011712,
           "open_descriptor_rows": 167,
           "open_unix_client_sockets": 121
         },
         "controls_acknowledged": {
-          "rss_bytes": 71008256,
-          "virtual_bytes": 421528059904,
+          "rss_bytes": 71237632,
+          "virtual_bytes": 421519671296,
           "physical_footprint_bytes": 67108864,
           "lifetime_peak_physical_footprint_bytes": 67108864,
-          "open_descriptor_rows": 161,
+          "open_descriptor_rows": 135,
           "open_unix_client_sockets": 121
         },
         "physically_released": {
-          "rss_bytes": 9928704,
+          "rss_bytes": 47939584,
           "virtual_bytes": 421395759104,
           "physical_footprint_bytes": 13631488,
           "lifetime_peak_physical_footprint_bytes": 67108864,
@@ -194,16 +194,16 @@
           "open_unix_client_sockets": 1
         },
         "captured_load_delta_from_idle": {
-          "rss_bytes": 60784640,
-          "virtual_bytes": 1271562240,
-          "physical_footprint_bytes": 60455936,
+          "rss_bytes": 60833792,
+          "virtual_bytes": 840597504,
+          "physical_footprint_bytes": 60357632,
           "open_descriptor_rows": 152,
           "open_unix_client_sockets": 120
         },
         "retained_delta_after_physical_release": {
-          "rss_bytes": 1884160,
-          "virtual_bytes": 1273479168,
-          "physical_footprint_bytes": 10124288,
+          "rss_bytes": 39813120,
+          "virtual_bytes": 1139261440,
+          "physical_footprint_bytes": 10025984,
           "open_descriptor_rows": 0,
           "open_unix_client_sockets": 0
         }
