@@ -1,6 +1,6 @@
 # Working on Latifa
 
-Build the smallest complete runtime whose rules the user can explain through ordinary work, failure and recovery. Ground design discussions in concrete caller behavior. Additional machinery must earn its complexity through necessary behavior or demonstrated cost.
+Build the smallest complete runtime whose rules the user can explain through ordinary work, failure and recovery. Ground design discussions in concrete caller behavior. Simplicity means keeping independent concerns independent; familiarity and line or module counts are poor proxies. Additional machinery must earn its complexity through necessary behavior or demonstrated cost.
 
 ## Read and maintain the contract
 
@@ -16,9 +16,19 @@ Inspect source before claiming implementation. Keep accepted behavior, prototype
 
 Inspect the working-tree diff first and preserve concurrent work. Keep reviews read-only unless fixes are requested. Complete authorized work without reopening settled choices; stay within the requested scope.
 
-Keep state, validation and transitions together under their owner. Expose semantic intent and opaque, pointer-stable resource handles, not storage rows, internal lifecycle state or generic command buses. Use closed typed variants where different cases carry different authority. Extract helpers for concrete reuse or clearer reasoning.
+For every review, obtain a read-only opinion from an agent independent of the implementer and reviewer before implementing its findings. Check the finding against the accepted contract, trace the cause to its owning state or control flow, and recommend the smallest complete correction, including what can be removed and how memory and behavior will be verified. Prioritize simplicity, explainability and memory efficiency over implementation speed; do not accumulate patches or machinery to satisfy unproven assumptions.
 
-Every allocation and external resource needs an owner, population multiplier, bound, failure behavior and release point. Stream variable content; do not duplicate complete payloads. Derive limits from their actual consumer, retain safety checks until replacement storage is verified, and never silently truncate semantic input. Separate orchestration memory from workload memory.
+Give each independent design opinion one named programmer's lens: Rich Hickey by default, or John Ousterhout, Rob Pike or Joe Armstrong when their perspective better fits the finding. Explain what they would likely challenge and recommend, grounded in their published ideas and this code. Present this as an interpretation, not their actual opinion or endorsement; the accepted contract and evidence decide the outcome.
+
+Follow the [Zig 0.16 style guide](https://ziglang.org/documentation/0.16.0/#Style-Guide) and installed standard-library APIs. Use `TitleCase` for types/type-producing functions, `camelCase` for other functions, and `snake_case` for values and namespace files; files with top-level instance fields use `TitleCase`. Name declarations in their full namespace without redundant prefixes or miscellaneous utility buckets. Keep helpers with their consumer until a concrete shared responsibility warrants extraction.
+
+Keep state, validation and transitions together under their owner. Separate compact decision facts from effects within that owner, preserving atomic checks and resource lifetimes. Expose semantic intent and opaque, pointer-stable resource handles, not storage rows, internal lifecycle state or generic command buses. Use closed typed variants where different cases carry different authority.
+
+Every allocation and external resource needs an owner, population multiplier, bound, failure behavior and release point. Stream variable content; do not duplicate complete payloads. Derive limits from their actual consumer, retain safety checks until replacement storage is verified, and never silently truncate semantic input. Separate orchestration memory from workload memory. Account for shared budgets across owners; justify independent pools against aggregate demand and required isolation.
+
+Use [Abseil Performance Hints](https://abseil.io/fast/hints.html) as an implementation and review reference: prefer efficient choices that preserve clarity; estimate repeated work, copies and allocation multipliers before adding complexity. Keep optimizations behind owning interfaces and validate measured gains against representative end-to-end workloads. Preserve required pointer stability and asynchronous lifetimes; the guide does not override the accepted contract.
+
+Make allocator dependencies explicit where allocation occurs. Document returned pointers/slices as owned or borrowed, including invalidation. Pair acquisition with `defer`/`errdefer` only when scope exit is the actual release boundary; transferred or asynchronous resources remain with their owner until cleanup is safe.
 
 Respect the architecture's transaction and effect boundaries. One owner accesses each mutable handle. Do not free callback state or recycle custody before safe cleanup. Validate external syntax and consequential meaning; treat notifications as hints and committed facts as authority. Trust already-validated local/SQLite facts within their documented boundary rather than layering redundant validation.
 
