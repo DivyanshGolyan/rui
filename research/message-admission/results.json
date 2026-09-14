@@ -1,154 +1,275 @@
 {
-  "scope": "issue-171 production Host message admission and observation",
-  "status": "passed",
-  "tested_revision": "36e44b50e50aa6baf7a2dbf736c5664b5aed2dad",
-  "working_tree_dirty": false,
-  "binary": "/private/tmp/latifa-cold-local.6Q57ac/o/337c525343d7ba4cc682ad1a475933be/latifa-release-small-check",
-  "binary_sha256": "0c2b3140ece98d847c50bf01c31b6e4410979d06555f5a2ae17258844b2aa6e9",
-  "zig": "0.16.0",
-  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
-  "measurement_runtime": {
-    "python_executable": "/private/tmp/latifa-final-measurement-venv.odhQxo/bin/python3",
-    "python_version": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 17.0.0 (clang-1700.6.4.2)]",
-    "psutil_version": "7.2.2",
-    "requirements_path": "research/measurement-requirements.txt",
-    "helper_path": "research/measurement_process.py"
-  },
   "active_capacity": 1000,
+  "artifacts": "/private/tmp/latifa-message-measure-599946761",
+  "binary": "../zig-out/bin/latifa",
+  "binary_sha256": "8a25cc1d0d53ad6baf9c78ac99d9492a577cce1f9389846e7090cc0052ebb3bb",
   "client_capacity": {
-    "total": 128,
+    "control_headroom": 8,
     "ordinary": 120,
-    "control_headroom": 8
+    "total": 128
   },
   "content_window_bytes": 4096,
-  "sqlite_heap_limit_bytes": 16777216,
+  "elapsed_seconds": 191.427597958,
+  "format": "latifa-message-admission-v2-go",
+  "limits": [
+    "macOS physical-footprint evidence only",
+    "payload and history use separate fresh Stores",
+    "driver payload construction is excluded from Host counters",
+    "model processing is intentionally unavailable in this experiment"
+  ],
+  "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+  "measurement_runtime": {
+    "go_arch": "arm64",
+    "go_os": "darwin",
+    "go_version": "go1.27.1",
+    "gopsutil_version": "v4.26.7",
+    "logical_cpus": 10,
+    "module_path": "latifa.local/research",
+    "physical_memory_bytes": 17179869184
+  },
   "payload_growth": [
     {
+      "admission_elapsed_ms": 14.801,
+      "observation_elapsed_ms": 0.824,
       "payload_bytes": 0,
       "queued_messages": 1,
-      "admission_elapsed_ms": 13.945,
-      "observation_elapsed_ms": 0.627,
-      "rss_bytes": 5472256,
-      "virtual_bytes": 420436295680,
-      "physical_footprint_bytes": 3441664,
-      "physical_footprint_rounding_tolerance_bytes": 512,
-      "lifetime_peak_physical_footprint_bytes": 3621888,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-      "database_logical_bytes": 135168,
-      "database_allocated_bytes": 135168
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 135168,
+          "database_logical_bytes": 135168
+        },
+        "process": {
+          "rss_bytes": 5373952,
+          "virtual_bytes": 420289495040,
+          "cpu_user_seconds": 0.00441,
+          "cpu_system_seconds": 0.008025166666666667,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 10,
+          "disk_read_bytes": 1974272,
+          "disk_write_bytes": 380928,
+          "footprint": {
+            "physical_footprint_bytes": 3343360,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3523584,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      }
     },
     {
+      "admission_elapsed_ms": 12.109,
+      "observation_elapsed_ms": 0.503,
       "payload_bytes": 4096,
       "queued_messages": 2,
-      "admission_elapsed_ms": 13.85,
-      "observation_elapsed_ms": 0.435,
-      "rss_bytes": 6193152,
-      "virtual_bytes": 420444684288,
-      "physical_footprint_bytes": 4178944,
-      "physical_footprint_rounding_tolerance_bytes": 512,
-      "lifetime_peak_physical_footprint_bytes": 4359168,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-      "database_logical_bytes": 139264,
-      "database_allocated_bytes": 139264
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 139264,
+          "database_logical_bytes": 139264
+        },
+        "process": {
+          "rss_bytes": 5849088,
+          "virtual_bytes": 420432101376,
+          "cpu_user_seconds": 0.0049085,
+          "cpu_system_seconds": 0.009440291666666666,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 10,
+          "disk_read_bytes": 1978368,
+          "disk_write_bytes": 532480,
+          "footprint": {
+            "physical_footprint_bytes": 3834880,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 4015104,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      }
     },
     {
+      "admission_elapsed_ms": 225.246,
+      "observation_elapsed_ms": 0.618,
       "payload_bytes": 8388608,
       "queued_messages": 3,
-      "admission_elapsed_ms": 322.076,
-      "observation_elapsed_ms": 0.496,
-      "rss_bytes": 9469952,
-      "virtual_bytes": 420604067840,
-      "physical_footprint_bytes": 9126912,
-      "physical_footprint_rounding_tolerance_bytes": 512,
-      "lifetime_peak_physical_footprint_bytes": 9307136,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-      "database_logical_bytes": 8536064,
-      "database_allocated_bytes": 8536064
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 8536064,
+          "database_logical_bytes": 8536064
+        },
+        "process": {
+          "rss_bytes": 10649600,
+          "virtual_bytes": 420567367680,
+          "cpu_user_seconds": 0.13740066666666664,
+          "cpu_system_seconds": 0.06698741666666666,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 10,
+          "disk_read_bytes": 1986560,
+          "disk_write_bytes": 25878528,
+          "footprint": {
+            "physical_footprint_bytes": 8651776,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 8832000,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      }
     },
     {
+      "admission_elapsed_ms": 848.826,
+      "observation_elapsed_ms": 0.467,
       "payload_bytes": 33554432,
       "queued_messages": 4,
-      "admission_elapsed_ms": 828.649,
-      "observation_elapsed_ms": 0.464,
-      "rss_bytes": 9125888,
-      "virtual_bytes": 420738285568,
-      "physical_footprint_bytes": 9290752,
-      "physical_footprint_rounding_tolerance_bytes": 512,
-      "lifetime_peak_physical_footprint_bytes": 9487360,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-      "database_logical_bytes": 42123264,
-      "database_allocated_bytes": 43139072
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 42123264,
+          "database_logical_bytes": 42123264
+        },
+        "process": {
+          "rss_bytes": 10944512,
+          "virtual_bytes": 420567367680,
+          "cpu_user_seconds": 0.666268625,
+          "cpu_system_seconds": 0.2894458333333333,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 10,
+          "disk_read_bytes": 2502656,
+          "disk_write_bytes": 126738432,
+          "footprint": {
+            "physical_footprint_bytes": 8946688,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 9307136,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      }
     }
   ],
+  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
   "queued_history_growth": [
     {
-      "queued_messages": 0,
       "last_admission_elapsed_ms": null,
-      "session_observation_elapsed_ms": 0.483,
-      "rss_bytes": 5324800,
-      "virtual_bytes": 420298932224,
-      "physical_footprint_bytes": 3261440,
-      "physical_footprint_rounding_tolerance_bytes": 512,
-      "lifetime_peak_physical_footprint_bytes": 3458048,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-      "database_logical_bytes": 135168,
-      "database_allocated_bytes": 135168
+      "queued_messages": 0,
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 135168,
+          "database_logical_bytes": 135168
+        },
+        "process": {
+          "rss_bytes": 4947968,
+          "virtual_bytes": 420288446464,
+          "cpu_user_seconds": 0.003893958333333333,
+          "cpu_system_seconds": 0.0036647916666666665,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 10,
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 249856,
+          "footprint": {
+            "physical_footprint_bytes": 2900992,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3097600,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      },
+      "session_observation_elapsed_ms": 0.481
     },
     {
+      "last_admission_elapsed_ms": 20.499,
+      "newest_observation_elapsed_ms": 0.653,
+      "oldest_observation_elapsed_ms": 1.07,
       "queued_messages": 100,
-      "last_admission_elapsed_ms": 16.75,
-      "session_observation_elapsed_ms": 3.838,
-      "oldest_observation_elapsed_ms": 0.849,
-      "newest_observation_elapsed_ms": 0.385,
-      "rss_bytes": 7602176,
-      "virtual_bytes": 421294030848,
-      "physical_footprint_bytes": 7029760,
-      "physical_footprint_rounding_tolerance_bytes": 512,
-      "lifetime_peak_physical_footprint_bytes": 7226368,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-      "database_logical_bytes": 151552,
-      "database_allocated_bytes": 208896
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 151552,
+          "database_logical_bytes": 151552
+        },
+        "process": {
+          "rss_bytes": 7094272,
+          "virtual_bytes": 420709974016,
+          "cpu_user_seconds": 0.06019125,
+          "cpu_system_seconds": 0.3352785,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 10,
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 13176832,
+          "footprint": {
+            "physical_footprint_bytes": 5145600,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 5342208,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      },
+      "session_observation_elapsed_ms": 3.051
     },
     {
+      "last_admission_elapsed_ms": 17.926,
+      "newest_observation_elapsed_ms": 0.727,
+      "oldest_observation_elapsed_ms": 1.116,
       "queued_messages": 1000,
-      "last_admission_elapsed_ms": 19.12,
-      "session_observation_elapsed_ms": 3.978,
-      "oldest_observation_elapsed_ms": 1.667,
-      "newest_observation_elapsed_ms": 0.884,
-      "rss_bytes": 8372224,
-      "virtual_bytes": 421294030848,
-      "physical_footprint_bytes": 8045568,
-      "physical_footprint_rounding_tolerance_bytes": 512,
-      "lifetime_peak_physical_footprint_bytes": 8242176,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-      "database_logical_bytes": 376832,
-      "database_allocated_bytes": 405504
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 376832,
+          "database_logical_bytes": 376832
+        },
+        "process": {
+          "rss_bytes": 8536064,
+          "virtual_bytes": 421150375936,
+          "cpu_user_seconds": 0.647013625,
+          "cpu_system_seconds": 3.952445458333333,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 10,
+          "disk_read_bytes": 40960,
+          "disk_write_bytes": 112877568,
+          "footprint": {
+            "physical_footprint_bytes": 6653952,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 6850560,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      },
+      "session_observation_elapsed_ms": 2.292
     },
     {
+      "last_admission_elapsed_ms": 23.272,
+      "newest_observation_elapsed_ms": 0.404,
+      "oldest_observation_elapsed_ms": 0.458,
       "queued_messages": 10000,
-      "last_admission_elapsed_ms": 17.222,
-      "session_observation_elapsed_ms": 5.848,
-      "oldest_observation_elapsed_ms": 0.65,
-      "newest_observation_elapsed_ms": 0.439,
-      "rss_bytes": 10633216,
-      "virtual_bytes": 421294030848,
-      "physical_footprint_bytes": 10485760,
-      "physical_footprint_rounding_tolerance_bytes": 524288,
-      "lifetime_peak_physical_footprint_bytes": 10485760,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288,
-      "database_logical_bytes": 2519040,
-      "database_allocated_bytes": 3158016
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 2519040,
+          "database_logical_bytes": 2519040
+        },
+        "process": {
+          "rss_bytes": 12075008,
+          "virtual_bytes": 421159813120,
+          "cpu_user_seconds": 6.485724125,
+          "cpu_system_seconds": 40.82246825,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 10,
+          "disk_read_bytes": 294912,
+          "disk_write_bytes": 1133199360,
+          "footprint": {
+            "physical_footprint_bytes": 10192896,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 10485760,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+          }
+        }
+      },
+      "session_observation_elapsed_ms": 3.085
     }
   ],
-  "elapsed_seconds": 184.629,
-  "limits": [
-    "macOS-only runtime and physical-footprint evidence on the available Apple Silicon host",
-    "Linux and other macOS targets are compile-only in this checkout",
-    "payload and history grow in separate fresh Stores at fixed configured capacities",
-    "measurement-client payload construction is outside the measured Host process",
-    "sequential one-exchange connections do not qualify simultaneous 128-client behavior beyond the process integration gate",
-    "allocator-live, private-dirty, descriptor and SQLite high-water counters are unavailable here",
-    "model processing is intentionally unavailable; no provider or execution resources are measured",
-    "process termination is crash evidence, not power-loss qualification"
-  ]
+  "scope": "issue-171 production Host message admission and observation",
+  "sqlite_heap_limit_bytes": 16777216,
+  "status": "passed",
+  "tested_revision": "9b4f5a44c8553e426b17603ced0648181dce6f14",
+  "working_tree_dirty": false,
+  "zig": "0.16.0"
 }

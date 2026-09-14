@@ -4,9 +4,9 @@
       "active_capacity": 1,
       "process_identity": {
         "all_distinct": true,
-        "controller_pid": 68908,
-        "host_pid": 69160,
-        "provider_pid": 69159
+        "controller_pid": 56016,
+        "host_pid": 56273,
+        "provider_pid": 56272
       },
       "rounds": [
         {
@@ -91,13 +91,13 @@
           },
           "cpu": {
             "at_most_2_average_cores": true,
-            "average_cores_10_to_50": 0.015278871826730264,
+            "average_cores_10_to_50": 0.015221413486157376,
             "complete_work_at_most_120_cpu_seconds": true,
-            "complete_work_cpu_seconds": 0.9629364166666666,
-            "sample_10_unix_ns": 1789400524296231000,
-            "sample_50_unix_ns": 1789400564295175000,
-            "sample_window_seconds": 39.998860207999996,
-            "seconds_10_to_50": 0.6111374583333333
+            "complete_work_cpu_seconds": 0.944946,
+            "sample_10_unix_ns": 1789399608338932000,
+            "sample_50_unix_ns": 1789399648337728000,
+            "sample_window_seconds": 39.998749167,
+            "seconds_10_to_50": 0.6088374999999999
           },
           "expected_response_scratch_delta_bytes": 234000,
           "expected_retained_scratch_bytes": 234252,
@@ -114,11 +114,11 @@
             "missed_batches": 0,
             "offer_bytes": 234000,
             "terminal_bytes": 821,
-            "maximum_lateness_ms": 7.398208,
+            "maximum_lateness_ms": 9.536333,
             "request_bytes": 252,
             "request_set_sha256": "34ecbe735b6ef531bc50b00688e8d907956cd29dddc815956b7d71f7f38fafa7",
-            "start_unix_ns": 1789400514293749000,
-            "deadline_unix_ns": 1789400574293749000,
+            "start_unix_ns": 1789399598336453000,
+            "deadline_unix_ns": 1789399658336453000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -147,19 +147,19 @@
           },
           "initial": {
             "host": {
-              "rss_bytes": 7716864,
-              "virtual_bytes": 420256481280,
-              "cpu_user_seconds": 0.005108916666666666,
-              "cpu_system_seconds": 0.003667875,
+              "rss_bytes": 7929856,
+              "virtual_bytes": 420247044096,
+              "cpu_user_seconds": 0.004987541666666666,
+              "cpu_system_seconds": 0.00369225,
               "threads": 4,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 8192,
+              "disk_read_bytes": 12288,
               "disk_write_bytes": 143360,
               "footprint": {
-                "physical_footprint_bytes": 3195904,
+                "physical_footprint_bytes": 3392512,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 3195904,
+                "lifetime_peak_physical_footprint_bytes": 3392512,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
@@ -167,11 +167,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 3195904,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 3196416,
-              "physical_footprint_bytes": 3195904,
+              "lifetime_peak_physical_footprint_bytes": 3392512,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 3393024,
+              "physical_footprint_bytes": 3392512,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 7716864,
+              "rss_bytes": 7929856,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -190,11 +190,11 @@
             "missed_batches": 0,
             "offer_bytes": 234000,
             "terminal_bytes": 0,
-            "maximum_lateness_ms": 7.398208,
+            "maximum_lateness_ms": 9.536333,
             "request_bytes": 252,
             "request_set_sha256": "34ecbe735b6ef531bc50b00688e8d907956cd29dddc815956b7d71f7f38fafa7",
-            "start_unix_ns": 1789400514293749000,
-            "deadline_unix_ns": 1789400574293749000,
+            "start_unix_ns": 1789399598336453000,
+            "deadline_unix_ns": 1789399658336453000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -202,37 +202,37 @@
           },
           "provider_process": {
             "initial": {
-              "rss_bytes": 9519104,
-              "virtual_bytes": 421258313728,
-              "cpu_user_seconds": 0.0031254166666666665,
-              "cpu_system_seconds": 0.002712458333333333,
-              "threads": 7,
+              "rss_bytes": 9338880,
+              "virtual_bytes": 421249859584,
+              "cpu_user_seconds": 0.003125208333333333,
+              "cpu_system_seconds": 0.00247325,
+              "threads": 6,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 9,
-              "disk_read_bytes": 311296,
+              "disk_read_bytes": 0,
               "disk_write_bytes": 4096,
               "footprint": {
-                "physical_footprint_bytes": 4785152,
+                "physical_footprint_bytes": 4572160,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 4785152,
+                "lifetime_peak_physical_footprint_bytes": 4572160,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
-            "pid": 69159,
+            "pid": 56272,
             "retained": {
-              "rss_bytes": 11649024,
-              "virtual_bytes": 421258575872,
-              "cpu_user_seconds": 0.3014480416666666,
-              "cpu_system_seconds": 0.720791125,
-              "threads": 7,
+              "rss_bytes": 11714560,
+              "virtual_bytes": 421250121728,
+              "cpu_user_seconds": 0.3016264583333333,
+              "cpu_system_seconds": 0.7240751666666666,
+              "threads": 6,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 380928,
+              "disk_read_bytes": 4096,
               "disk_write_bytes": 36864,
               "footprint": {
-                "physical_footprint_bytes": 6439936,
+                "physical_footprint_bytes": 6472704,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 6439936,
+                "lifetime_peak_physical_footprint_bytes": 6472704,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             }
@@ -247,19 +247,19 @@
           "result_delivery_complete": true,
           "retained": {
             "host": {
-              "rss_bytes": 8978432,
-              "virtual_bytes": 420275863552,
-              "cpu_user_seconds": 0.1788327083333333,
-              "cpu_system_seconds": 0.7939802083333333,
+              "rss_bytes": 9175040,
+              "virtual_bytes": 420409032704,
+              "cpu_user_seconds": 0.17320091666666665,
+              "cpu_system_seconds": 0.7815397916666667,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 266240,
-              "disk_write_bytes": 847872,
+              "disk_read_bytes": 311296,
+              "disk_write_bytes": 831488,
               "footprint": {
-                "physical_footprint_bytes": 4359168,
+                "physical_footprint_bytes": 4555776,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 4555776,
+                "lifetime_peak_physical_footprint_bytes": 4752384,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
@@ -267,11 +267,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 4555776,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 4556288,
-              "physical_footprint_bytes": 4359168,
+              "lifetime_peak_physical_footprint_bytes": 4752384,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 4752896,
+              "physical_footprint_bytes": 4555776,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 8978432,
+              "rss_bytes": 9175040,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -335,7 +335,7 @@
             "execution": {
               "custody_occupied": "1",
               "dispatch_fenced": false,
-              "scratch_used_bytes": "234174",
+              "scratch_used_bytes": "234252",
               "status": "partial",
               "unavailable": [
                 "structured_output"
@@ -389,34 +389,34 @@
           },
           "cpu": {
             "at_most_2_average_cores": true,
-            "average_cores_10_to_50": 0.01539063065174795,
+            "average_cores_10_to_50": 0.01516847772618258,
             "complete_work_at_most_120_cpu_seconds": true,
-            "complete_work_cpu_seconds": 0.9363602083333333,
-            "sample_10_unix_ns": 1789400585597913000,
-            "sample_50_unix_ns": 1789400625597606000,
-            "sample_window_seconds": 39.999609,
-            "seconds_10_to_50": 0.6156192083333332
+            "complete_work_cpu_seconds": 0.9637234166666664,
+            "sample_10_unix_ns": 1789399669621589000,
+            "sample_50_unix_ns": 1789399709625726000,
+            "sample_window_seconds": 39.998968208,
+            "seconds_10_to_50": 0.6067234583333332
           },
-          "expected_response_scratch_delta_bytes": 233922,
-          "expected_retained_scratch_bytes": 234174,
+          "expected_response_scratch_delta_bytes": 234000,
+          "expected_retained_scratch_bytes": 234252,
           "fixture_completion": {
             "expected_streams": 1,
             "ready_streams": 1,
             "offer_finished_streams": 1,
             "terminal_finished_streams": 1,
-            "exact_streams": 0,
+            "exact_streams": 1,
             "failed_streams": 0,
-            "minimum_completed_batches": 2999,
-            "maximum_completed_batches": 2999,
-            "completed_batches": 2999,
-            "missed_batches": 1,
-            "offer_bytes": 233922,
+            "minimum_completed_batches": 3000,
+            "maximum_completed_batches": 3000,
+            "completed_batches": 3000,
+            "missed_batches": 0,
+            "offer_bytes": 234000,
             "terminal_bytes": 821,
-            "maximum_lateness_ms": 15.549667,
+            "maximum_lateness_ms": 16.957041,
             "request_bytes": 252,
             "request_set_sha256": "162aa4284e355ce3a9c5d0597570e176138a6143ba2cdd89a20d3d4ee78d6bf8",
-            "start_unix_ns": 1789400575595266000,
-            "deadline_unix_ns": 1789400635595266000,
+            "start_unix_ns": 1789399659619392000,
+            "deadline_unix_ns": 1789399719619392000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -445,19 +445,19 @@
           },
           "initial": {
             "host": {
-              "rss_bytes": 8978432,
-              "virtual_bytes": 420275863552,
-              "cpu_user_seconds": 0.17908833333333332,
-              "cpu_system_seconds": 0.7940409166666667,
+              "rss_bytes": 9240576,
+              "virtual_bytes": 420418469888,
+              "cpu_user_seconds": 0.17344154166666664,
+              "cpu_system_seconds": 0.7816125416666666,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 266240,
-              "disk_write_bytes": 847872,
+              "disk_read_bytes": 311296,
+              "disk_write_bytes": 831488,
               "footprint": {
-                "physical_footprint_bytes": 4359168,
+                "physical_footprint_bytes": 4637696,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 4555776,
+                "lifetime_peak_physical_footprint_bytes": 4752384,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
@@ -465,11 +465,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 4555776,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 4556288,
-              "physical_footprint_bytes": 4359168,
+              "lifetime_peak_physical_footprint_bytes": 4752384,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 4752896,
+              "physical_footprint_bytes": 4637696,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 8978432,
+              "rss_bytes": 9240576,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -480,19 +480,19 @@
             "ready_streams": 1,
             "offer_finished_streams": 1,
             "terminal_finished_streams": 0,
-            "exact_streams": 0,
+            "exact_streams": 1,
             "failed_streams": 0,
-            "minimum_completed_batches": 2999,
-            "maximum_completed_batches": 2999,
-            "completed_batches": 2999,
-            "missed_batches": 1,
-            "offer_bytes": 233922,
+            "minimum_completed_batches": 3000,
+            "maximum_completed_batches": 3000,
+            "completed_batches": 3000,
+            "missed_batches": 0,
+            "offer_bytes": 234000,
             "terminal_bytes": 0,
-            "maximum_lateness_ms": 15.549667,
+            "maximum_lateness_ms": 16.957041,
             "request_bytes": 252,
             "request_set_sha256": "162aa4284e355ce3a9c5d0597570e176138a6143ba2cdd89a20d3d4ee78d6bf8",
-            "start_unix_ns": 1789400575595266000,
-            "deadline_unix_ns": 1789400635595266000,
+            "start_unix_ns": 1789399659619392000,
+            "deadline_unix_ns": 1789399719619392000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -500,37 +500,37 @@
           },
           "provider_process": {
             "initial": {
-              "rss_bytes": 11665408,
-              "virtual_bytes": 421258575872,
-              "cpu_user_seconds": 0.30154525,
-              "cpu_system_seconds": 0.7210784166666666,
-              "threads": 7,
+              "rss_bytes": 11730944,
+              "virtual_bytes": 421250121728,
+              "cpu_user_seconds": 0.3017311666666666,
+              "cpu_system_seconds": 0.7243750416666667,
+              "threads": 6,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 380928,
+              "disk_read_bytes": 4096,
               "disk_write_bytes": 40960,
               "footprint": {
-                "physical_footprint_bytes": 6456320,
+                "physical_footprint_bytes": 6489088,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 6456320,
+                "lifetime_peak_physical_footprint_bytes": 6489088,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
-            "pid": 69159,
+            "pid": 56272,
             "retained": {
-              "rss_bytes": 10354688,
-              "virtual_bytes": 421258575872,
-              "cpu_user_seconds": 0.5987798333333333,
-              "cpu_system_seconds": 1.4362705416666666,
-              "threads": 7,
+              "rss_bytes": 10911744,
+              "virtual_bytes": 421250121728,
+              "cpu_user_seconds": 0.5984650416666666,
+              "cpu_system_seconds": 1.4467880833333333,
+              "threads": 6,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 520192,
+              "disk_read_bytes": 8192,
               "disk_write_bytes": 73728,
               "footprint": {
-                "physical_footprint_bytes": 7275520,
+                "physical_footprint_bytes": 7324672,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 7275520,
+                "lifetime_peak_physical_footprint_bytes": 7324672,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             }
@@ -545,19 +545,19 @@
           "result_delivery_complete": true,
           "retained": {
             "host": {
-              "rss_bytes": 7487488,
-              "virtual_bytes": 420418469888,
-              "cpu_user_seconds": 0.348632375,
-              "cpu_system_seconds": 1.561917375,
+              "rss_bytes": 8192000,
+              "virtual_bytes": 420552687616,
+              "cpu_user_seconds": 0.34672625,
+              "cpu_system_seconds": 1.5730624166666665,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 585728,
+              "disk_read_bytes": 581632,
               "disk_write_bytes": 1527808,
               "footprint": {
-                "physical_footprint_bytes": 4441088,
+                "physical_footprint_bytes": 5440512,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 4637696,
+                "lifetime_peak_physical_footprint_bytes": 5637120,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
@@ -565,11 +565,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 4637696,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 4638208,
-              "physical_footprint_bytes": 4441088,
+              "lifetime_peak_physical_footprint_bytes": 5637120,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 5637632,
+              "physical_footprint_bytes": 5440512,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 7487488,
+              "rss_bytes": 8192000,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -603,26 +603,26 @@
           },
           "retained_request_scratch_bytes": 252,
           "round": 2,
-          "status": "incomplete"
+          "status": "passed"
         }
       ],
       "same_host_rounds": 2,
       "second_retained_delta_from_first": {
         "open_descriptor_rows": 0,
-        "physical_footprint_bytes": 81920,
-        "rss_bytes": -1490944,
+        "physical_footprint_bytes": 884736,
+        "rss_bytes": -983040,
         "status": "observed",
-        "virtual_bytes": 142606336
+        "virtual_bytes": 143654912
       },
-      "status": "incomplete"
+      "status": "passed"
     },
     {
       "active_capacity": 10,
       "process_identity": {
         "all_distinct": true,
-        "controller_pid": 68908,
-        "host_pid": 69348,
-        "provider_pid": 69347
+        "controller_pid": 56016,
+        "host_pid": 56439,
+        "provider_pid": 56438
       },
       "rounds": [
         {
@@ -824,7 +824,7 @@
             "execution": {
               "custody_occupied": "10",
               "dispatch_fenced": false,
-              "scratch_used_bytes": "2342530",
+              "scratch_used_bytes": "2341984",
               "status": "partial",
               "unavailable": [
                 "structured_output"
@@ -878,34 +878,34 @@
           },
           "cpu": {
             "at_most_2_average_cores": true,
-            "average_cores_10_to_50": 0.035946521957806205,
+            "average_cores_10_to_50": 0.03645431505541883,
             "complete_work_at_most_120_cpu_seconds": true,
-            "complete_work_cpu_seconds": 2.5590688333333333,
-            "sample_10_unix_ns": 1789400647486806000,
-            "sample_50_unix_ns": 1789400687485538000,
-            "sample_window_seconds": 39.998217167,
-            "seconds_10_to_50": 1.4377967916666665
+            "complete_work_cpu_seconds": 2.5621323333333335,
+            "sample_10_unix_ns": 1789399731480186000,
+            "sample_50_unix_ns": 1789399771479823000,
+            "sample_window_seconds": 39.999457708,
+            "seconds_10_to_50": 1.4581528333333333
           },
-          "expected_response_scratch_delta_bytes": 2340000,
-          "expected_retained_scratch_bytes": 2342530,
+          "expected_response_scratch_delta_bytes": 2339454,
+          "expected_retained_scratch_bytes": 2341984,
           "fixture_completion": {
             "expected_streams": 10,
             "ready_streams": 10,
             "offer_finished_streams": 10,
             "terminal_finished_streams": 10,
-            "exact_streams": 10,
+            "exact_streams": 2,
             "failed_streams": 0,
-            "minimum_completed_batches": 3000,
+            "minimum_completed_batches": 2999,
             "maximum_completed_batches": 3000,
-            "completed_batches": 30000,
-            "missed_batches": 0,
-            "offer_bytes": 2340000,
+            "completed_batches": 29992,
+            "missed_batches": 8,
+            "offer_bytes": 2339454,
             "terminal_bytes": 8270,
-            "maximum_lateness_ms": 17.36725,
+            "maximum_lateness_ms": 16.79425,
             "request_bytes": 2530,
             "request_set_sha256": "4bd1c4f5c87132396091addf4a4f908d219c976f2a7a7991fde6202e5fe7c706",
-            "start_unix_ns": 1789400637483572000,
-            "deadline_unix_ns": 1789400697483572000,
+            "start_unix_ns": 1789399721477499000,
+            "deadline_unix_ns": 1789399781477499000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -934,19 +934,19 @@
           },
           "initial": {
             "host": {
-              "rss_bytes": 7979008,
-              "virtual_bytes": 420256481280,
-              "cpu_user_seconds": 0.004761333333333333,
-              "cpu_system_seconds": 0.0034152916666666663,
+              "rss_bytes": 7946240,
+              "virtual_bytes": 420122263552,
+              "cpu_user_seconds": 0.004824416666666666,
+              "cpu_system_seconds": 0.0034566666666666665,
               "threads": 4,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 36864,
+              "disk_read_bytes": 4096,
               "disk_write_bytes": 143360,
               "footprint": {
-                "physical_footprint_bytes": 3458048,
+                "physical_footprint_bytes": 3408896,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 3458048,
+                "lifetime_peak_physical_footprint_bytes": 3408896,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
@@ -954,11 +954,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 3458048,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 3458560,
-              "physical_footprint_bytes": 3458048,
+              "lifetime_peak_physical_footprint_bytes": 3408896,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 3409408,
+              "physical_footprint_bytes": 3408896,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 7979008,
+              "rss_bytes": 7946240,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -969,19 +969,19 @@
             "ready_streams": 10,
             "offer_finished_streams": 10,
             "terminal_finished_streams": 0,
-            "exact_streams": 10,
+            "exact_streams": 2,
             "failed_streams": 0,
-            "minimum_completed_batches": 3000,
+            "minimum_completed_batches": 2999,
             "maximum_completed_batches": 3000,
-            "completed_batches": 30000,
-            "missed_batches": 0,
-            "offer_bytes": 2340000,
+            "completed_batches": 29992,
+            "missed_batches": 8,
+            "offer_bytes": 2339454,
             "terminal_bytes": 0,
-            "maximum_lateness_ms": 17.36725,
+            "maximum_lateness_ms": 16.79425,
             "request_bytes": 2530,
             "request_set_sha256": "4bd1c4f5c87132396091addf4a4f908d219c976f2a7a7991fde6202e5fe7c706",
-            "start_unix_ns": 1789400637483572000,
-            "deadline_unix_ns": 1789400697483572000,
+            "start_unix_ns": 1789399721477499000,
+            "deadline_unix_ns": 1789399781477499000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -989,32 +989,32 @@
           },
           "provider_process": {
             "initial": {
-              "rss_bytes": 9453568,
+              "rss_bytes": 9388032,
               "virtual_bytes": 421249859584,
-              "cpu_user_seconds": 0.003003333333333333,
-              "cpu_system_seconds": 0.0022049166666666667,
+              "cpu_user_seconds": 0.0030951666666666666,
+              "cpu_system_seconds": 0.002659583333333333,
               "threads": 6,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 9,
-              "disk_read_bytes": 16384,
+              "disk_read_bytes": 0,
               "disk_write_bytes": 4096,
               "footprint": {
-                "physical_footprint_bytes": 4686848,
+                "physical_footprint_bytes": 4637696,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 4686848,
+                "lifetime_peak_physical_footprint_bytes": 4637696,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
-            "pid": 69347,
+            "pid": 56438,
             "retained": {
-              "rss_bytes": 16039936,
-              "virtual_bytes": 421314822144,
-              "cpu_user_seconds": 0.7351800833333333,
-              "cpu_system_seconds": 1.520755,
+              "rss_bytes": 15958016,
+              "virtual_bytes": 421316739072,
+              "cpu_user_seconds": 0.733614125,
+              "cpu_system_seconds": 1.4593844166666665,
               "threads": 13,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 69632,
+              "disk_read_bytes": 8192,
               "disk_write_bytes": 36864,
               "footprint": {
                 "physical_footprint_bytes": 11534336,
@@ -1034,19 +1034,19 @@
           "result_delivery_complete": true,
           "retained": {
             "host": {
-              "rss_bytes": 10092544,
-              "virtual_bytes": 420984700928,
-              "cpu_user_seconds": 0.4991239166666666,
-              "cpu_system_seconds": 2.0793745833333332,
+              "rss_bytes": 10076160,
+              "virtual_bytes": 420993089536,
+              "cpu_user_seconds": 0.5115265416666667,
+              "cpu_system_seconds": 2.07031125,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 2887680,
+              "disk_read_bytes": 3088384,
               "disk_write_bytes": 6950912,
               "footprint": {
-                "physical_footprint_bytes": 7865344,
+                "physical_footprint_bytes": 7996416,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 8061952,
+                "lifetime_peak_physical_footprint_bytes": 8193024,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
@@ -1054,11 +1054,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 8061952,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 8062464,
-              "physical_footprint_bytes": 7865344,
+              "lifetime_peak_physical_footprint_bytes": 8193024,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 8193536,
+              "physical_footprint_bytes": 7996416,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 10092544,
+              "rss_bytes": 10076160,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -1092,7 +1092,7 @@
           },
           "retained_request_scratch_bytes": 2530,
           "round": 1,
-          "status": "passed"
+          "status": "incomplete"
         },
         {
           "active_capacity": 10,
@@ -1347,13 +1347,13 @@
           },
           "cpu": {
             "at_most_2_average_cores": true,
-            "average_cores_10_to_50": 0.03420446266339776,
+            "average_cores_10_to_50": 0.03822174798219379,
             "complete_work_at_most_120_cpu_seconds": true,
-            "complete_work_cpu_seconds": 2.4860036250000004,
-            "sample_10_unix_ns": 1789400709807489000,
-            "sample_50_unix_ns": 1789400749808539000,
-            "sample_window_seconds": 40.000947541,
-            "seconds_10_to_50": 1.368210916666667
+            "complete_work_cpu_seconds": 2.6224599166666662,
+            "sample_10_unix_ns": 1789399793743685000,
+            "sample_50_unix_ns": 1789399833742401000,
+            "sample_window_seconds": 39.998627458,
+            "seconds_10_to_50": 1.5288174583333327
           },
           "expected_response_scratch_delta_bytes": 2340000,
           "expected_retained_scratch_bytes": 2342530,
@@ -1370,11 +1370,11 @@
             "missed_batches": 0,
             "offer_bytes": 2340000,
             "terminal_bytes": 8270,
-            "maximum_lateness_ms": 17.732625,
+            "maximum_lateness_ms": 15.463416,
             "request_bytes": 2530,
             "request_set_sha256": "1aa5e644cebd5cc122e24e354c00ac35359354f079cea2e48296ad349c4273cb",
-            "start_unix_ns": 1789400699805326000,
-            "deadline_unix_ns": 1789400759805326000,
+            "start_unix_ns": 1789399783739904000,
+            "deadline_unix_ns": 1789399843739904000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -1403,19 +1403,19 @@
           },
           "initial": {
             "host": {
-              "rss_bytes": 10108928,
-              "virtual_bytes": 420984700928,
-              "cpu_user_seconds": 0.4993860416666666,
-              "cpu_system_seconds": 2.07944025,
+              "rss_bytes": 10092544,
+              "virtual_bytes": 420993089536,
+              "cpu_user_seconds": 0.5118859583333333,
+              "cpu_system_seconds": 2.0704049166666665,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 2887680,
+              "disk_read_bytes": 3088384,
               "disk_write_bytes": 6950912,
               "footprint": {
-                "physical_footprint_bytes": 7865344,
+                "physical_footprint_bytes": 7996416,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 8061952,
+                "lifetime_peak_physical_footprint_bytes": 8193024,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
@@ -1423,11 +1423,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 8061952,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 8062464,
-              "physical_footprint_bytes": 7865344,
+              "lifetime_peak_physical_footprint_bytes": 8193024,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 8193536,
+              "physical_footprint_bytes": 7996416,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 10108928,
+              "rss_bytes": 10092544,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -1446,11 +1446,11 @@
             "missed_batches": 0,
             "offer_bytes": 2340000,
             "terminal_bytes": 0,
-            "maximum_lateness_ms": 17.732625,
+            "maximum_lateness_ms": 15.463416,
             "request_bytes": 2530,
             "request_set_sha256": "1aa5e644cebd5cc122e24e354c00ac35359354f079cea2e48296ad349c4273cb",
-            "start_unix_ns": 1789400699805326000,
-            "deadline_unix_ns": 1789400759805326000,
+            "start_unix_ns": 1789399783739904000,
+            "deadline_unix_ns": 1789399843739904000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -1458,14 +1458,14 @@
           },
           "provider_process": {
             "initial": {
-              "rss_bytes": 16056320,
-              "virtual_bytes": 421314822144,
-              "cpu_user_seconds": 0.7353125833333333,
-              "cpu_system_seconds": 1.5211229583333332,
+              "rss_bytes": 15974400,
+              "virtual_bytes": 421316739072,
+              "cpu_user_seconds": 0.7337764166666666,
+              "cpu_system_seconds": 1.4598193333333334,
               "threads": 13,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 69632,
+              "disk_read_bytes": 8192,
               "disk_write_bytes": 40960,
               "footprint": {
                 "physical_footprint_bytes": 11534336,
@@ -1474,19 +1474,19 @@
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             },
-            "pid": 69347,
+            "pid": 56438,
             "retained": {
-              "rss_bytes": 16662528,
-              "virtual_bytes": 421314822144,
-              "cpu_user_seconds": 1.4680157916666665,
-              "cpu_system_seconds": 2.974933,
+              "rss_bytes": 16252928,
+              "virtual_bytes": 421316820992,
+              "cpu_user_seconds": 1.4882382083333332,
+              "cpu_system_seconds": 2.967188875,
               "threads": 13,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 73728,
+              "disk_read_bytes": 12288,
               "disk_write_bytes": 73728,
               "footprint": {
-                "physical_footprint_bytes": 12582912,
+                "physical_footprint_bytes": 11534336,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
                 "lifetime_peak_physical_footprint_bytes": 12582912,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
@@ -1503,19 +1503,19 @@
           "result_delivery_complete": true,
           "retained": {
             "host": {
-              "rss_bytes": 10616832,
+              "rss_bytes": 11517952,
               "virtual_bytes": 421127307264,
-              "cpu_user_seconds": 0.98916625,
-              "cpu_system_seconds": 4.086624625,
+              "cpu_user_seconds": 1.0241855833333333,
+              "cpu_system_seconds": 4.193771666666667,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 5623808,
-              "disk_write_bytes": 13848576,
+              "disk_read_bytes": 5656576,
+              "disk_write_bytes": 13750272,
               "footprint": {
-                "physical_footprint_bytes": 8669184,
+                "physical_footprint_bytes": 9765888,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 8865792,
+                "lifetime_peak_physical_footprint_bytes": 9962496,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
@@ -1523,11 +1523,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 8865792,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 8866304,
-              "physical_footprint_bytes": 8669184,
+              "lifetime_peak_physical_footprint_bytes": 9962496,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 9963008,
+              "physical_footprint_bytes": 9765888,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 10616832,
+              "rss_bytes": 11517952,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -1567,20 +1567,20 @@
       "same_host_rounds": 2,
       "second_retained_delta_from_first": {
         "open_descriptor_rows": 0,
-        "physical_footprint_bytes": 803840,
-        "rss_bytes": 524288,
+        "physical_footprint_bytes": 1769472,
+        "rss_bytes": 1441792,
         "status": "observed",
-        "virtual_bytes": 142606336
+        "virtual_bytes": 134217728
       },
-      "status": "passed"
+      "status": "incomplete"
     },
     {
       "active_capacity": 50,
       "process_identity": {
         "all_distinct": true,
-        "controller_pid": 68908,
-        "host_pid": 70091,
-        "provider_pid": 70090
+        "controller_pid": 56016,
+        "host_pid": 57339,
+        "provider_pid": 57338
       },
       "rounds": [
         {
@@ -2542,7 +2542,7 @@
             "execution": {
               "custody_occupied": "50",
               "dispatch_fenced": false,
-              "scratch_used_bytes": "11712690",
+              "scratch_used_bytes": "11709960",
               "status": "partial",
               "unavailable": [
                 "structured_output"
@@ -2596,34 +2596,34 @@
           },
           "cpu": {
             "at_most_2_average_cores": true,
-            "average_cores_10_to_50": 0.12158595779593545,
+            "average_cores_10_to_50": 0.11961666897153696,
             "complete_work_at_most_120_cpu_seconds": true,
-            "complete_work_cpu_seconds": 9.1180945,
-            "sample_10_unix_ns": 1789400774719103000,
-            "sample_50_unix_ns": 1789400814717553000,
-            "sample_window_seconds": 39.99835525,
-            "seconds_10_to_50": 4.863238333333333
+            "complete_work_cpu_seconds": 9.103706708333332,
+            "sample_10_unix_ns": 1789399858614648000,
+            "sample_50_unix_ns": 1789399898619268000,
+            "sample_window_seconds": 40.004536292,
+            "seconds_10_to_50": 4.785209375
           },
-          "expected_response_scratch_delta_bytes": 11700000,
-          "expected_retained_scratch_bytes": 11712690,
+          "expected_response_scratch_delta_bytes": 11697270,
+          "expected_retained_scratch_bytes": 11709960,
           "fixture_completion": {
             "expected_streams": 50,
             "ready_streams": 50,
             "offer_finished_streams": 50,
             "terminal_finished_streams": 50,
-            "exact_streams": 50,
+            "exact_streams": 14,
             "failed_streams": 0,
-            "minimum_completed_batches": 3000,
+            "minimum_completed_batches": 2999,
             "maximum_completed_batches": 3000,
-            "completed_batches": 150000,
-            "missed_batches": 0,
-            "offer_bytes": 11700000,
+            "completed_batches": 149964,
+            "missed_batches": 36,
+            "offer_bytes": 11697270,
             "terminal_bytes": 41590,
-            "maximum_lateness_ms": 17.19675,
+            "maximum_lateness_ms": 19.246208,
             "request_bytes": 12690,
             "request_set_sha256": "7f58dd5a3e1531d729520676b808b3bf2ee7b2862d75746e9aed35edf02b2cba",
-            "start_unix_ns": 1789400764715039000,
-            "deadline_unix_ns": 1789400824715039000,
+            "start_unix_ns": 1789399848614193000,
+            "deadline_unix_ns": 1789399908614193000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -2654,12 +2654,12 @@
             "host": {
               "rss_bytes": 8093696,
               "virtual_bytes": 420265918464,
-              "cpu_user_seconds": 0.005024875,
-              "cpu_system_seconds": 0.003564208333333333,
+              "cpu_user_seconds": 0.005146958333333333,
+              "cpu_system_seconds": 0.0035165416666666665,
               "threads": 4,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 32768,
+              "disk_read_bytes": 28672,
               "disk_write_bytes": 143360,
               "footprint": {
                 "physical_footprint_bytes": 3605504,
@@ -2687,19 +2687,19 @@
             "ready_streams": 50,
             "offer_finished_streams": 50,
             "terminal_finished_streams": 0,
-            "exact_streams": 50,
+            "exact_streams": 14,
             "failed_streams": 0,
-            "minimum_completed_batches": 3000,
+            "minimum_completed_batches": 2999,
             "maximum_completed_batches": 3000,
-            "completed_batches": 150000,
-            "missed_batches": 0,
-            "offer_bytes": 11700000,
+            "completed_batches": 149964,
+            "missed_batches": 36,
+            "offer_bytes": 11697270,
             "terminal_bytes": 0,
-            "maximum_lateness_ms": 17.19675,
+            "maximum_lateness_ms": 19.246208,
             "request_bytes": 12690,
             "request_set_sha256": "7f58dd5a3e1531d729520676b808b3bf2ee7b2862d75746e9aed35edf02b2cba",
-            "start_unix_ns": 1789400764715039000,
-            "deadline_unix_ns": 1789400824715039000,
+            "start_unix_ns": 1789399848614193000,
+            "deadline_unix_ns": 1789399908614193000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -2707,32 +2707,32 @@
           },
           "provider_process": {
             "initial": {
-              "rss_bytes": 9437184,
-              "virtual_bytes": 421249859584,
-              "cpu_user_seconds": 0.0030266666666666667,
-              "cpu_system_seconds": 0.0022250416666666664,
+              "rss_bytes": 9404416,
+              "virtual_bytes": 421249597440,
+              "cpu_user_seconds": 0.0030756666666666667,
+              "cpu_system_seconds": 0.002205333333333333,
               "threads": 6,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 9,
-              "disk_read_bytes": 16384,
+              "disk_read_bytes": 0,
               "disk_write_bytes": 4096,
               "footprint": {
-                "physical_footprint_bytes": 4686848,
+                "physical_footprint_bytes": 4637696,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 4686848,
+                "lifetime_peak_physical_footprint_bytes": 4637696,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
-            "pid": 70090,
+            "pid": 57338,
             "retained": {
-              "rss_bytes": 19169280,
-              "virtual_bytes": 421316001792,
-              "cpu_user_seconds": 2.4137377916666667,
-              "cpu_system_seconds": 4.249029833333333,
+              "rss_bytes": 19464192,
+              "virtual_bytes": 421315084288,
+              "cpu_user_seconds": 2.404305833333333,
+              "cpu_system_seconds": 4.222919416666667,
               "threads": 13,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 24576,
+              "disk_read_bytes": 4096,
               "disk_write_bytes": 73728,
               "footprint": {
                 "physical_footprint_bytes": 13631488,
@@ -2752,19 +2752,19 @@
           "result_delivery_complete": true,
           "retained": {
             "host": {
-              "rss_bytes": 16695296,
-              "virtual_bytes": 421253136384,
-              "cpu_user_seconds": 1.90353325,
-              "cpu_system_seconds": 7.280109916666666,
+              "rss_bytes": 16171008,
+              "virtual_bytes": 420993089536,
+              "cpu_user_seconds": 1.9040572083333334,
+              "cpu_system_seconds": 7.26514025,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 12169216,
-              "disk_write_bytes": 36646912,
+              "disk_read_bytes": 12898304,
+              "disk_write_bytes": 35856384,
               "footprint": {
-                "physical_footprint_bytes": 10485760,
-                "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 12582912,
+                "physical_footprint_bytes": 10012672,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 11534336,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             },
@@ -2772,11 +2772,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 12582912,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 13107200,
-              "physical_footprint_bytes": 10485760,
+              "lifetime_peak_physical_footprint_bytes": 11534336,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 12058624,
+              "physical_footprint_bytes": 10012672,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 16695296,
+              "rss_bytes": 16171008,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -2810,7 +2810,7 @@
           },
           "retained_request_scratch_bytes": 12690,
           "round": 1,
-          "status": "passed"
+          "status": "incomplete"
         },
         {
           "active_capacity": 50,
@@ -3771,7 +3771,7 @@
             "execution": {
               "custody_occupied": "50",
               "dispatch_fenced": false,
-              "scratch_used_bytes": "11708790",
+              "scratch_used_bytes": "11696310",
               "status": "partial",
               "unavailable": [
                 "structured_output"
@@ -3825,16 +3825,16 @@
           },
           "cpu": {
             "at_most_2_average_cores": true,
-            "average_cores_10_to_50": 0.11675561231030814,
+            "average_cores_10_to_50": 0.11432032503791413,
             "complete_work_at_most_120_cpu_seconds": true,
-            "complete_work_cpu_seconds": 9.018546249999996,
-            "sample_10_unix_ns": 1789400842061440000,
-            "sample_50_unix_ns": 1789400882061419000,
-            "sample_window_seconds": 39.999914416,
-            "seconds_10_to_50": 4.670214500000002
+            "complete_work_cpu_seconds": 8.816682499999999,
+            "sample_10_unix_ns": 1789399925662434000,
+            "sample_50_unix_ns": 1789399965659071000,
+            "sample_window_seconds": 39.996553166,
+            "seconds_10_to_50": 4.5724189583333334
           },
-          "expected_response_scratch_delta_bytes": 11696100,
-          "expected_retained_scratch_bytes": 11708790,
+          "expected_response_scratch_delta_bytes": 11683620,
+          "expected_retained_scratch_bytes": 11696310,
           "fixture_completion": {
             "expected_streams": 50,
             "ready_streams": 50,
@@ -3842,17 +3842,17 @@
             "terminal_finished_streams": 50,
             "exact_streams": 0,
             "failed_streams": 0,
-            "minimum_completed_batches": 2999,
-            "maximum_completed_batches": 2999,
-            "completed_batches": 149950,
-            "missed_batches": 50,
-            "offer_bytes": 11696100,
+            "minimum_completed_batches": 2995,
+            "maximum_completed_batches": 2996,
+            "completed_batches": 149786,
+            "missed_batches": 214,
+            "offer_bytes": 11683620,
             "terminal_bytes": 41590,
-            "maximum_lateness_ms": 19.677083,
+            "maximum_lateness_ms": 18.283791,
             "request_bytes": 12690,
             "request_set_sha256": "927c94c88d40158b69ec292af8ce0f07afebd86a3dde8ba80827f8d205ec4bba",
-            "start_unix_ns": 1789400832058627000,
-            "deadline_unix_ns": 1789400892058627000,
+            "start_unix_ns": 1789399915657650000,
+            "deadline_unix_ns": 1789399975657650000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -3881,19 +3881,19 @@
           },
           "initial": {
             "host": {
-              "rss_bytes": 16695296,
-              "virtual_bytes": 421253136384,
-              "cpu_user_seconds": 1.9038578333333334,
-              "cpu_system_seconds": 7.280186083333333,
+              "rss_bytes": 16171008,
+              "virtual_bytes": 420993089536,
+              "cpu_user_seconds": 1.9043735416666665,
+              "cpu_system_seconds": 7.265210541666666,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 12169216,
-              "disk_write_bytes": 36646912,
+              "disk_read_bytes": 12898304,
+              "disk_write_bytes": 35856384,
               "footprint": {
-                "physical_footprint_bytes": 10485760,
-                "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 12582912,
+                "physical_footprint_bytes": 10012672,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 11534336,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             },
@@ -3901,11 +3901,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 12582912,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 13107200,
-              "physical_footprint_bytes": 10485760,
+              "lifetime_peak_physical_footprint_bytes": 11534336,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 12058624,
+              "physical_footprint_bytes": 10012672,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 16695296,
+              "rss_bytes": 16171008,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -3918,17 +3918,17 @@
             "terminal_finished_streams": 0,
             "exact_streams": 0,
             "failed_streams": 0,
-            "minimum_completed_batches": 2999,
-            "maximum_completed_batches": 2999,
-            "completed_batches": 149950,
-            "missed_batches": 50,
-            "offer_bytes": 11696100,
+            "minimum_completed_batches": 2995,
+            "maximum_completed_batches": 2996,
+            "completed_batches": 149786,
+            "missed_batches": 214,
+            "offer_bytes": 11683620,
             "terminal_bytes": 0,
-            "maximum_lateness_ms": 19.677083,
+            "maximum_lateness_ms": 18.283791,
             "request_bytes": 12690,
             "request_set_sha256": "927c94c88d40158b69ec292af8ce0f07afebd86a3dde8ba80827f8d205ec4bba",
-            "start_unix_ns": 1789400832058627000,
-            "deadline_unix_ns": 1789400892058627000,
+            "start_unix_ns": 1789399915657650000,
+            "deadline_unix_ns": 1789399975657650000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -3936,14 +3936,14 @@
           },
           "provider_process": {
             "initial": {
-              "rss_bytes": 19169280,
-              "virtual_bytes": 421316001792,
-              "cpu_user_seconds": 2.4138590416666665,
-              "cpu_system_seconds": 4.249373208333333,
+              "rss_bytes": 19464192,
+              "virtual_bytes": 421315084288,
+              "cpu_user_seconds": 2.4044321666666666,
+              "cpu_system_seconds": 4.223264583333333,
               "threads": 13,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 28672,
+              "disk_read_bytes": 4096,
               "disk_write_bytes": 77824,
               "footprint": {
                 "physical_footprint_bytes": 13631488,
@@ -3952,21 +3952,21 @@
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             },
-            "pid": 70090,
+            "pid": 57338,
             "retained": {
-              "rss_bytes": 18890752,
-              "virtual_bytes": 421324455936,
-              "cpu_user_seconds": 4.758824291666666,
-              "cpu_system_seconds": 8.355675916666666,
-              "threads": 14,
+              "rss_bytes": 19644416,
+              "virtual_bytes": 421315100672,
+              "cpu_user_seconds": 4.723574291666666,
+              "cpu_system_seconds": 8.259352083333333,
+              "threads": 13,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 180224,
+              "disk_read_bytes": 8192,
               "disk_write_bytes": 147456,
               "footprint": {
-                "physical_footprint_bytes": 14680064,
+                "physical_footprint_bytes": 13631488,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 14680064,
+                "lifetime_peak_physical_footprint_bytes": 13631488,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             }
@@ -3981,19 +3981,19 @@
           "result_delivery_complete": true,
           "retained": {
             "host": {
-              "rss_bytes": 16482304,
-              "virtual_bytes": 421261524992,
-              "cpu_user_seconds": 3.7902190416666666,
-              "cpu_system_seconds": 14.477363208333331,
+              "rss_bytes": 18186240,
+              "virtual_bytes": 421127307264,
+              "cpu_user_seconds": 3.766201125,
+              "cpu_system_seconds": 14.279283208333332,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 25829376,
-              "disk_write_bytes": 78692352,
+              "disk_read_bytes": 24645632,
+              "disk_write_bytes": 78352384,
               "footprint": {
-                "physical_footprint_bytes": 12582912,
-                "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 14680064,
+                "physical_footprint_bytes": 9586688,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 11534336,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             },
@@ -4001,11 +4001,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 14680064,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 15204352,
-              "physical_footprint_bytes": 12582912,
+              "lifetime_peak_physical_footprint_bytes": 11534336,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 12058624,
+              "physical_footprint_bytes": 9586688,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 16482304,
+              "rss_bytes": 18186240,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -4045,10 +4045,10 @@
       "same_host_rounds": 2,
       "second_retained_delta_from_first": {
         "open_descriptor_rows": 0,
-        "physical_footprint_bytes": 2097152,
-        "rss_bytes": -212992,
+        "physical_footprint_bytes": -425984,
+        "rss_bytes": 2015232,
         "status": "observed",
-        "virtual_bytes": 8388608
+        "virtual_bytes": 134217728
       },
       "status": "incomplete"
     },
@@ -4056,9 +4056,9 @@
       "active_capacity": 100,
       "process_identity": {
         "all_distinct": true,
-        "controller_pid": 68908,
-        "host_pid": 71048,
-        "provider_pid": 71046
+        "controller_pid": 56016,
+        "host_pid": 57985,
+        "provider_pid": 57984
       },
       "rounds": [
         {
@@ -5970,7 +5970,7 @@
             "execution": {
               "custody_occupied": "100",
               "dispatch_fenced": false,
-              "scratch_used_bytes": "23328146",
+              "scratch_used_bytes": "23409890",
               "status": "partial",
               "unavailable": [
                 "structured_output"
@@ -6024,16 +6024,16 @@
           },
           "cpu": {
             "at_most_2_average_cores": true,
-            "average_cores_10_to_50": 0.17481039748267388,
+            "average_cores_10_to_50": 0.18297379649116238,
             "complete_work_at_most_120_cpu_seconds": true,
-            "complete_work_cpu_seconds": 14.246091999999999,
-            "sample_10_unix_ns": 1789400912254777000,
-            "sample_50_unix_ns": 1789400952254841000,
-            "sample_window_seconds": 39.999968875,
-            "seconds_10_to_50": 6.9924104583333335
+            "complete_work_cpu_seconds": 14.655889166666665,
+            "sample_10_unix_ns": 1789399995959591000,
+            "sample_50_unix_ns": 1789400035962101000,
+            "sample_window_seconds": 40.00242575,
+            "seconds_10_to_50": 7.319395708333333
           },
-          "expected_response_scratch_delta_bytes": 23302656,
-          "expected_retained_scratch_bytes": 23328146,
+          "expected_response_scratch_delta_bytes": 23384400,
+          "expected_retained_scratch_bytes": 23409890,
           "fixture_completion": {
             "expected_streams": 100,
             "ready_streams": 100,
@@ -6041,17 +6041,17 @@
             "terminal_finished_streams": 100,
             "exact_streams": 0,
             "failed_streams": 0,
-            "minimum_completed_batches": 2985,
-            "maximum_completed_batches": 2989,
-            "completed_batches": 298747,
-            "missed_batches": 1253,
-            "offer_bytes": 23302656,
+            "minimum_completed_batches": 2998,
+            "maximum_completed_batches": 2998,
+            "completed_batches": 299800,
+            "missed_batches": 200,
+            "offer_bytes": 23384400,
             "terminal_bytes": 83840,
-            "maximum_lateness_ms": 19.999209,
+            "maximum_lateness_ms": 17.17975,
             "request_bytes": 25490,
             "request_set_sha256": "dc78d33a04f0afbdf8b330833f6f2709ae945677584b4fd116daaf65de1c229e",
-            "start_unix_ns": 1789400902252337000,
-            "deadline_unix_ns": 1789400962252337000,
+            "start_unix_ns": 1789399985956827000,
+            "deadline_unix_ns": 1789400045956827000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -6080,19 +6080,19 @@
           },
           "initial": {
             "host": {
-              "rss_bytes": 8126464,
-              "virtual_bytes": 420256481280,
-              "cpu_user_seconds": 0.0048230416666666664,
-              "cpu_system_seconds": 0.0038084166666666665,
+              "rss_bytes": 8060928,
+              "virtual_bytes": 420122263552,
+              "cpu_user_seconds": 0.00502975,
+              "cpu_system_seconds": 0.003690708333333333,
               "threads": 4,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 24576,
+              "disk_read_bytes": 16384,
               "disk_write_bytes": 143360,
               "footprint": {
-                "physical_footprint_bytes": 3621888,
+                "physical_footprint_bytes": 3523584,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 3621888,
+                "lifetime_peak_physical_footprint_bytes": 3523584,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
@@ -6100,11 +6100,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 3621888,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 3622400,
-              "physical_footprint_bytes": 3621888,
+              "lifetime_peak_physical_footprint_bytes": 3523584,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 3524096,
+              "physical_footprint_bytes": 3523584,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 8126464,
+              "rss_bytes": 8060928,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -6117,17 +6117,17 @@
             "terminal_finished_streams": 0,
             "exact_streams": 0,
             "failed_streams": 0,
-            "minimum_completed_batches": 2985,
-            "maximum_completed_batches": 2989,
-            "completed_batches": 298747,
-            "missed_batches": 1253,
-            "offer_bytes": 23302656,
+            "minimum_completed_batches": 2998,
+            "maximum_completed_batches": 2998,
+            "completed_batches": 299800,
+            "missed_batches": 200,
+            "offer_bytes": 23384400,
             "terminal_bytes": 0,
-            "maximum_lateness_ms": 19.999209,
+            "maximum_lateness_ms": 17.17975,
             "request_bytes": 25490,
             "request_set_sha256": "dc78d33a04f0afbdf8b330833f6f2709ae945677584b4fd116daaf65de1c229e",
-            "start_unix_ns": 1789400902252337000,
-            "deadline_unix_ns": 1789400962252337000,
+            "start_unix_ns": 1789399985956827000,
+            "deadline_unix_ns": 1789400045956827000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -6135,37 +6135,37 @@
           },
           "provider_process": {
             "initial": {
-              "rss_bytes": 9404416,
-              "virtual_bytes": 421250121728,
-              "cpu_user_seconds": 0.002978083333333333,
-              "cpu_system_seconds": 0.0022957916666666665,
+              "rss_bytes": 9338880,
+              "virtual_bytes": 421249859584,
+              "cpu_user_seconds": 0.0030680416666666664,
+              "cpu_system_seconds": 0.002559208333333333,
               "threads": 6,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 9,
-              "disk_read_bytes": 16384,
+              "disk_read_bytes": 0,
               "disk_write_bytes": 4096,
               "footprint": {
-                "physical_footprint_bytes": 4637696,
+                "physical_footprint_bytes": 4588544,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 4637696,
+                "lifetime_peak_physical_footprint_bytes": 4588544,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
-            "pid": 71046,
+            "pid": 57984,
             "retained": {
-              "rss_bytes": 20463616,
-              "virtual_bytes": 421335121920,
-              "cpu_user_seconds": 3.7377947916666665,
-              "cpu_system_seconds": 6.451718666666666,
+              "rss_bytes": 22265856,
+              "virtual_bytes": 421333729280,
+              "cpu_user_seconds": 3.991155458333333,
+              "cpu_system_seconds": 6.924750583333333,
               "threads": 15,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 24576,
+              "disk_read_bytes": 8192,
               "disk_write_bytes": 122880,
               "footprint": {
-                "physical_footprint_bytes": 15728640,
+                "physical_footprint_bytes": 16777216,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 15728640,
+                "lifetime_peak_physical_footprint_bytes": 16777216,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             }
@@ -6180,17 +6180,17 @@
           "result_delivery_complete": true,
           "retained": {
             "host": {
-              "rss_bytes": 21626880,
+              "rss_bytes": 23691264,
               "virtual_bytes": 421127307264,
-              "cpu_user_seconds": 3.1412291666666663,
-              "cpu_system_seconds": 11.241680958333331,
+              "cpu_user_seconds": 3.2445340416666664,
+              "cpu_system_seconds": 11.547144583333331,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 22208512,
-              "disk_write_bytes": 84566016,
+              "disk_read_bytes": 21774336,
+              "disk_write_bytes": 80318464,
               "footprint": {
-                "physical_footprint_bytes": 13631488,
+                "physical_footprint_bytes": 12582912,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
                 "lifetime_peak_physical_footprint_bytes": 18874368,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
@@ -6202,9 +6202,9 @@
               "host_processes": 1,
               "lifetime_peak_physical_footprint_bytes": 18874368,
               "lifetime_peak_physical_footprint_upper_bound_bytes": 19398656,
-              "physical_footprint_bytes": 13631488,
+              "physical_footprint_bytes": 12582912,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 21626880,
+              "rss_bytes": 23691264,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -8149,7 +8149,7 @@
             "execution": {
               "custody_occupied": "100",
               "dispatch_fenced": false,
-              "scratch_used_bytes": "23404196",
+              "scratch_used_bytes": "23423228",
               "status": "partial",
               "unavailable": [
                 "structured_output"
@@ -8203,34 +8203,34 @@
           },
           "cpu": {
             "at_most_2_average_cores": true,
-            "average_cores_10_to_50": 0.17692287514990898,
+            "average_cores_10_to_50": 0.17979910985082412,
             "complete_work_at_most_120_cpu_seconds": true,
-            "complete_work_cpu_seconds": 14.441248791666666,
-            "sample_10_unix_ns": 1789400985776991000,
-            "sample_50_unix_ns": 1789401025774450000,
-            "sample_window_seconds": 39.997364166,
-            "seconds_10_to_50": 7.076448666666661
+            "complete_work_cpu_seconds": 14.468502083333334,
+            "sample_10_unix_ns": 1789400068747719000,
+            "sample_50_unix_ns": 1789400108747677000,
+            "sample_window_seconds": 39.999874291,
+            "seconds_10_to_50": 7.191941791666665
           },
-          "expected_response_scratch_delta_bytes": 23378706,
-          "expected_retained_scratch_bytes": 23404196,
+          "expected_response_scratch_delta_bytes": 23397738,
+          "expected_retained_scratch_bytes": 23423228,
           "fixture_completion": {
             "expected_streams": 100,
             "ready_streams": 100,
             "offer_finished_streams": 100,
             "terminal_finished_streams": 100,
-            "exact_streams": 0,
+            "exact_streams": 70,
             "failed_streams": 0,
-            "minimum_completed_batches": 2996,
-            "maximum_completed_batches": 2998,
-            "completed_batches": 299724,
-            "missed_batches": 276,
-            "offer_bytes": 23378706,
+            "minimum_completed_batches": 2999,
+            "maximum_completed_batches": 3000,
+            "completed_batches": 299970,
+            "missed_batches": 30,
+            "offer_bytes": 23397738,
             "terminal_bytes": 83840,
-            "maximum_lateness_ms": 19.995333,
+            "maximum_lateness_ms": 19.719709,
             "request_bytes": 25490,
             "request_set_sha256": "df7b1eb61f73f43b6c5862c5dcf589873bdd86d6ba17ccd91f7dcd484e69cf7c",
-            "start_unix_ns": 1789400975773923000,
-            "deadline_unix_ns": 1789401035773923000,
+            "start_unix_ns": 1789400058745139000,
+            "deadline_unix_ns": 1789400118745139000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -8259,17 +8259,17 @@
           },
           "initial": {
             "host": {
-              "rss_bytes": 21643264,
+              "rss_bytes": 23691264,
               "virtual_bytes": 421127307264,
-              "cpu_user_seconds": 3.14146925,
-              "cpu_system_seconds": 11.24174125,
+              "cpu_user_seconds": 3.2448645416666664,
+              "cpu_system_seconds": 11.54721675,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 22208512,
-              "disk_write_bytes": 84566016,
+              "disk_read_bytes": 21774336,
+              "disk_write_bytes": 80318464,
               "footprint": {
-                "physical_footprint_bytes": 13631488,
+                "physical_footprint_bytes": 12582912,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
                 "lifetime_peak_physical_footprint_bytes": 18874368,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
@@ -8281,9 +8281,9 @@
               "host_processes": 1,
               "lifetime_peak_physical_footprint_bytes": 18874368,
               "lifetime_peak_physical_footprint_upper_bound_bytes": 19398656,
-              "physical_footprint_bytes": 13631488,
+              "physical_footprint_bytes": 12582912,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 21643264,
+              "rss_bytes": 23691264,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -8294,19 +8294,19 @@
             "ready_streams": 100,
             "offer_finished_streams": 100,
             "terminal_finished_streams": 0,
-            "exact_streams": 0,
+            "exact_streams": 70,
             "failed_streams": 0,
-            "minimum_completed_batches": 2996,
-            "maximum_completed_batches": 2998,
-            "completed_batches": 299724,
-            "missed_batches": 276,
-            "offer_bytes": 23378706,
+            "minimum_completed_batches": 2999,
+            "maximum_completed_batches": 3000,
+            "completed_batches": 299970,
+            "missed_batches": 30,
+            "offer_bytes": 23397738,
             "terminal_bytes": 0,
-            "maximum_lateness_ms": 19.995333,
+            "maximum_lateness_ms": 19.719709,
             "request_bytes": 25490,
             "request_set_sha256": "df7b1eb61f73f43b6c5862c5dcf589873bdd86d6ba17ccd91f7dcd484e69cf7c",
-            "start_unix_ns": 1789400975773923000,
-            "deadline_unix_ns": 1789401035773923000,
+            "start_unix_ns": 1789400058745139000,
+            "deadline_unix_ns": 1789400118745139000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -8314,37 +8314,37 @@
           },
           "provider_process": {
             "initial": {
-              "rss_bytes": 20496384,
-              "virtual_bytes": 421335121920,
-              "cpu_user_seconds": 3.7379049166666665,
-              "cpu_system_seconds": 6.452013791666666,
+              "rss_bytes": 22282240,
+              "virtual_bytes": 421333729280,
+              "cpu_user_seconds": 3.991272,
+              "cpu_system_seconds": 6.925049333333333,
               "threads": 15,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 24576,
+              "disk_read_bytes": 8192,
               "disk_write_bytes": 126976,
               "footprint": {
-                "physical_footprint_bytes": 15728640,
+                "physical_footprint_bytes": 16777216,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 15728640,
+                "lifetime_peak_physical_footprint_bytes": 16777216,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             },
-            "pid": 71046,
+            "pid": 57984,
             "retained": {
-              "rss_bytes": 20070400,
-              "virtual_bytes": 421335121920,
-              "cpu_user_seconds": 7.677831041666666,
-              "cpu_system_seconds": 13.237569583333332,
-              "threads": 15,
+              "rss_bytes": 22528000,
+              "virtual_bytes": 421342167040,
+              "cpu_user_seconds": 7.98035525,
+              "cpu_system_seconds": 13.834085208333333,
+              "threads": 16,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 61440,
+              "disk_read_bytes": 12288,
               "disk_write_bytes": 245760,
               "footprint": {
-                "physical_footprint_bytes": 15728640,
+                "physical_footprint_bytes": 16777216,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 15728640,
+                "lifetime_peak_physical_footprint_bytes": 16777216,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             }
@@ -8359,19 +8359,19 @@
           "result_delivery_complete": true,
           "retained": {
             "host": {
-              "rss_bytes": 22298624,
+              "rss_bytes": 24805376,
               "virtual_bytes": 421127307264,
-              "cpu_user_seconds": 6.327522083333333,
-              "cpu_system_seconds": 22.625823208333333,
+              "cpu_user_seconds": 6.438655791666666,
+              "cpu_system_seconds": 22.94823175,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 43687936,
-              "disk_write_bytes": 177147904,
+              "disk_read_bytes": 47939584,
+              "disk_write_bytes": 171503616,
               "footprint": {
-                "physical_footprint_bytes": 10485760,
+                "physical_footprint_bytes": 11534336,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 19922944,
+                "lifetime_peak_physical_footprint_bytes": 18874368,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             },
@@ -8379,11 +8379,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 19922944,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 20447232,
-              "physical_footprint_bytes": 10485760,
+              "lifetime_peak_physical_footprint_bytes": 18874368,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 19398656,
+              "physical_footprint_bytes": 11534336,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 22298624,
+              "rss_bytes": 24805376,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -8423,8 +8423,8 @@
       "same_host_rounds": 2,
       "second_retained_delta_from_first": {
         "open_descriptor_rows": 0,
-        "physical_footprint_bytes": -3145728,
-        "rss_bytes": 671744,
+        "physical_footprint_bytes": -1048576,
+        "rss_bytes": 1114112,
         "status": "observed",
         "virtual_bytes": 0
       },
@@ -8434,9 +8434,9 @@
       "active_capacity": 1000,
       "process_identity": {
         "all_distinct": true,
-        "controller_pid": 68908,
-        "host_pid": 72364,
-        "provider_pid": 72363
+        "controller_pid": 56016,
+        "host_pid": 59227,
+        "provider_pid": 59226
       },
       "rounds": [
         {
@@ -27502,13 +27502,13 @@
           },
           "cpu": {
             "at_most_2_average_cores": true,
-            "average_cores_10_to_50": 0.5479314861195083,
+            "average_cores_10_to_50": 0.5450001161615633,
             "complete_work_at_most_120_cpu_seconds": true,
-            "complete_work_cpu_seconds": 72.70858441666667,
-            "sample_10_unix_ns": 1789401120488738000,
-            "sample_50_unix_ns": 1789401160489910000,
-            "sample_window_seconds": 40.001077334,
-            "seconds_10_to_50": 21.91784975
+            "complete_work_cpu_seconds": 73.10951783333333,
+            "sample_10_unix_ns": 1789400202645324000,
+            "sample_50_unix_ns": 1789400242645372000,
+            "sample_window_seconds": 39.999963875,
+            "seconds_10_to_50": 21.799984958333333
           },
           "expected_response_scratch_delta_bytes": 234000000,
           "expected_retained_scratch_bytes": 234256890,
@@ -27525,11 +27525,11 @@
             "missed_batches": 0,
             "offer_bytes": 234000000,
             "terminal_bytes": 850340,
-            "maximum_lateness_ms": 7.912541,
+            "maximum_lateness_ms": 7.1875,
             "request_bytes": 256890,
             "request_set_sha256": "3e0da633088cf7ca8178d442fa48611c03dfe4c555e8baa51262b00ffa8c3da7",
-            "start_unix_ns": 1789401110488473000,
-            "deadline_unix_ns": 1789401170488473000,
+            "start_unix_ns": 1789400192643199000,
+            "deadline_unix_ns": 1789400252643199000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -27558,19 +27558,19 @@
           },
           "initial": {
             "host": {
-              "rss_bytes": 9240576,
-              "virtual_bytes": 420256481280,
-              "cpu_user_seconds": 0.004950666666666666,
-              "cpu_system_seconds": 0.0035824166666666665,
+              "rss_bytes": 9289728,
+              "virtual_bytes": 420257529856,
+              "cpu_user_seconds": 0.004829166666666666,
+              "cpu_system_seconds": 0.003616125,
               "threads": 4,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 8192,
+              "disk_read_bytes": 24576,
               "disk_write_bytes": 143360,
               "footprint": {
-                "physical_footprint_bytes": 4719616,
+                "physical_footprint_bytes": 4785152,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 4719616,
+                "lifetime_peak_physical_footprint_bytes": 4785152,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
@@ -27578,11 +27578,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 4719616,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 4720128,
-              "physical_footprint_bytes": 4719616,
+              "lifetime_peak_physical_footprint_bytes": 4785152,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 4785664,
+              "physical_footprint_bytes": 4785152,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 9240576,
+              "rss_bytes": 9289728,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -27601,11 +27601,11 @@
             "missed_batches": 0,
             "offer_bytes": 234000000,
             "terminal_bytes": 0,
-            "maximum_lateness_ms": 7.912541,
+            "maximum_lateness_ms": 7.1875,
             "request_bytes": 256890,
             "request_set_sha256": "3e0da633088cf7ca8178d442fa48611c03dfe4c555e8baa51262b00ffa8c3da7",
-            "start_unix_ns": 1789401110488473000,
-            "deadline_unix_ns": 1789401170488473000,
+            "start_unix_ns": 1789400192643199000,
+            "deadline_unix_ns": 1789400252643199000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -27614,36 +27614,36 @@
           "provider_process": {
             "initial": {
               "rss_bytes": 9453568,
-              "virtual_bytes": 421249859584,
-              "cpu_user_seconds": 0.0031725,
-              "cpu_system_seconds": 0.00233,
+              "virtual_bytes": 421249597440,
+              "cpu_user_seconds": 0.003102583333333333,
+              "cpu_system_seconds": 0.0022459166666666665,
               "threads": 6,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 9,
-              "disk_read_bytes": 16384,
+              "disk_read_bytes": 0,
               "disk_write_bytes": 4096,
               "footprint": {
-                "physical_footprint_bytes": 4686848,
+                "physical_footprint_bytes": 4703232,
                 "physical_footprint_rounding_tolerance_bytes": 512,
-                "lifetime_peak_physical_footprint_bytes": 4686848,
+                "lifetime_peak_physical_footprint_bytes": 4703232,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
               }
             },
-            "pid": 72363,
+            "pid": 59226,
             "retained": {
-              "rss_bytes": 64159744,
-              "virtual_bytes": 421505105920,
-              "cpu_user_seconds": 12.407746208333332,
-              "cpu_system_seconds": 29.1684895,
-              "threads": 27,
+              "rss_bytes": 63275008,
+              "virtual_bytes": 421472321536,
+              "cpu_user_seconds": 12.29504775,
+              "cpu_system_seconds": 28.946586083333333,
+              "threads": 23,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 36864,
+              "disk_read_bytes": 24576,
               "disk_write_bytes": 942080,
               "footprint": {
-                "physical_footprint_bytes": 59768832,
+                "physical_footprint_bytes": 58720256,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 59768832,
+                "lifetime_peak_physical_footprint_bytes": 58720256,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             }
@@ -27658,17 +27658,17 @@
           "result_delivery_complete": true,
           "retained": {
             "host": {
-              "rss_bytes": 85245952,
-              "virtual_bytes": 421395742720,
-              "cpu_user_seconds": 20.377974541666664,
-              "cpu_system_seconds": 53.64093070833333,
+              "rss_bytes": 111083520,
+              "virtual_bytes": 421262573568,
+              "cpu_user_seconds": 20.503492125,
+              "cpu_system_seconds": 53.87538229166666,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 223985664,
-              "disk_write_bytes": 939053056,
+              "disk_read_bytes": 251592704,
+              "disk_write_bytes": 926425088,
               "footprint": {
-                "physical_footprint_bytes": 23068672,
+                "physical_footprint_bytes": 19922944,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
                 "lifetime_peak_physical_footprint_bytes": 116391936,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
@@ -27680,9 +27680,9 @@
               "host_processes": 1,
               "lifetime_peak_physical_footprint_bytes": 116391936,
               "lifetime_peak_physical_footprint_upper_bound_bytes": 116916224,
-              "physical_footprint_bytes": 23068672,
+              "physical_footprint_bytes": 19922944,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 85245952,
+              "rss_bytes": 111083520,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -46727,7 +46727,7 @@
             "execution": {
               "custody_occupied": "1000",
               "dispatch_fenced": false,
-              "scratch_used_bytes": "234255486",
+              "scratch_used_bytes": "234256890",
               "status": "partial",
               "unavailable": [
                 "structured_output"
@@ -46781,34 +46781,34 @@
           },
           "cpu": {
             "at_most_2_average_cores": true,
-            "average_cores_10_to_50": 0.566303485397398,
+            "average_cores_10_to_50": 0.5565732680284979,
             "complete_work_at_most_120_cpu_seconds": true,
-            "complete_work_cpu_seconds": 74.38288945833332,
-            "sample_10_unix_ns": 1789401305082243000,
-            "sample_50_unix_ns": 1789401345083965000,
-            "sample_window_seconds": 40.001627,
-            "seconds_10_to_50": 22.65306079166666
+            "complete_work_cpu_seconds": 74.27554479166665,
+            "sample_10_unix_ns": 1789400384264955000,
+            "sample_50_unix_ns": 1789400424264994000,
+            "sample_window_seconds": 39.999955209,
+            "seconds_10_to_50": 22.262905791666668
           },
-          "expected_response_scratch_delta_bytes": 233998596,
-          "expected_retained_scratch_bytes": 234255486,
+          "expected_response_scratch_delta_bytes": 234000000,
+          "expected_retained_scratch_bytes": 234256890,
           "fixture_completion": {
             "expected_streams": 1000,
             "ready_streams": 1000,
             "offer_finished_streams": 1000,
             "terminal_finished_streams": 1000,
-            "exact_streams": 979,
+            "exact_streams": 1000,
             "failed_streams": 0,
-            "minimum_completed_batches": 2999,
+            "minimum_completed_batches": 3000,
             "maximum_completed_batches": 3000,
-            "completed_batches": 2999979,
-            "missed_batches": 21,
-            "offer_bytes": 233998596,
+            "completed_batches": 3000000,
+            "missed_batches": 0,
+            "offer_bytes": 234000000,
             "terminal_bytes": 850340,
-            "maximum_lateness_ms": 19.999625,
+            "maximum_lateness_ms": 10.635792,
             "request_bytes": 256890,
             "request_set_sha256": "b0517c1394af15eb4d7daae7f0949b56f70d4701124fa7ddb8ee838385eb2ef8",
-            "start_unix_ns": 1789401295081285000,
-            "deadline_unix_ns": 1789401355081285000,
+            "start_unix_ns": 1789400374262809000,
+            "deadline_unix_ns": 1789400434262809000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -46837,17 +46837,17 @@
           },
           "initial": {
             "host": {
-              "rss_bytes": 85262336,
-              "virtual_bytes": 421395742720,
-              "cpu_user_seconds": 20.37829908333333,
-              "cpu_system_seconds": 53.6410065,
+              "rss_bytes": 111099904,
+              "virtual_bytes": 421262573568,
+              "cpu_user_seconds": 20.50381683333333,
+              "cpu_system_seconds": 53.875455125,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 223985664,
-              "disk_write_bytes": 939053056,
+              "disk_read_bytes": 251592704,
+              "disk_write_bytes": 926425088,
               "footprint": {
-                "physical_footprint_bytes": 23068672,
+                "physical_footprint_bytes": 19922944,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
                 "lifetime_peak_physical_footprint_bytes": 116391936,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
@@ -46859,9 +46859,9 @@
               "host_processes": 1,
               "lifetime_peak_physical_footprint_bytes": 116391936,
               "lifetime_peak_physical_footprint_upper_bound_bytes": 116916224,
-              "physical_footprint_bytes": 23068672,
+              "physical_footprint_bytes": 19922944,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 85262336,
+              "rss_bytes": 111099904,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -46872,19 +46872,19 @@
             "ready_streams": 1000,
             "offer_finished_streams": 1000,
             "terminal_finished_streams": 0,
-            "exact_streams": 979,
+            "exact_streams": 1000,
             "failed_streams": 0,
-            "minimum_completed_batches": 2999,
+            "minimum_completed_batches": 3000,
             "maximum_completed_batches": 3000,
-            "completed_batches": 2999979,
-            "missed_batches": 21,
-            "offer_bytes": 233998596,
+            "completed_batches": 3000000,
+            "missed_batches": 0,
+            "offer_bytes": 234000000,
             "terminal_bytes": 0,
-            "maximum_lateness_ms": 19.999625,
+            "maximum_lateness_ms": 10.635792,
             "request_bytes": 256890,
             "request_set_sha256": "b0517c1394af15eb4d7daae7f0949b56f70d4701124fa7ddb8ee838385eb2ef8",
-            "start_unix_ns": 1789401295081285000,
-            "deadline_unix_ns": 1789401355081285000,
+            "start_unix_ns": 1789400374262809000,
+            "deadline_unix_ns": 1789400434262809000,
             "event_bytes": 39,
             "events_per_batch": 2,
             "batches_per_stream": 3000,
@@ -46892,37 +46892,37 @@
           },
           "provider_process": {
             "initial": {
-              "rss_bytes": 64192512,
-              "virtual_bytes": 421505105920,
-              "cpu_user_seconds": 12.408003041666666,
-              "cpu_system_seconds": 29.169135416666663,
-              "threads": 27,
+              "rss_bytes": 63307776,
+              "virtual_bytes": 421472321536,
+              "cpu_user_seconds": 12.295173625,
+              "cpu_system_seconds": 28.94690770833333,
+              "threads": 23,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 36864,
+              "disk_read_bytes": 24576,
               "disk_write_bytes": 946176,
               "footprint": {
-                "physical_footprint_bytes": 54525952,
+                "physical_footprint_bytes": 58720256,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 59768832,
+                "lifetime_peak_physical_footprint_bytes": 58720256,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             },
-            "pid": 72363,
+            "pid": 59226,
             "retained": {
-              "rss_bytes": 67977216,
-              "virtual_bytes": 421514854400,
-              "cpu_user_seconds": 25.165507833333333,
-              "cpu_system_seconds": 57.876173958333325,
-              "threads": 28,
+              "rss_bytes": 68993024,
+              "virtual_bytes": 421499224064,
+              "cpu_user_seconds": 25.067446708333332,
+              "cpu_system_seconds": 57.698856625,
+              "threads": 26,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 10,
-              "disk_read_bytes": 86016,
+              "disk_read_bytes": 49152,
               "disk_write_bytes": 1884160,
               "footprint": {
-                "physical_footprint_bytes": 63963136,
+                "physical_footprint_bytes": 66060288,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 63963136,
+                "lifetime_peak_physical_footprint_bytes": 66060288,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             }
@@ -46937,19 +46937,19 @@
           "result_delivery_complete": true,
           "retained": {
             "host": {
-              "rss_bytes": 85573632,
-              "virtual_bytes": 421396791296,
-              "cpu_user_seconds": 40.99831908333333,
-              "cpu_system_seconds": 109.14144375,
+              "rss_bytes": 81018880,
+              "virtual_bytes": 421262573568,
+              "cpu_user_seconds": 41.233868458333326,
+              "cpu_system_seconds": 109.12828658333333,
               "threads": 3,
               "live_descendant_processes": 0,
               "open_descriptor_rows": 15,
-              "disk_read_bytes": 462123008,
-              "disk_write_bytes": 1883586560,
+              "disk_read_bytes": 507748352,
+              "disk_write_bytes": 1879441408,
               "footprint": {
                 "physical_footprint_bytes": 24117248,
                 "physical_footprint_rounding_tolerance_bytes": 524288,
-                "lifetime_peak_physical_footprint_bytes": 116391936,
+                "lifetime_peak_physical_footprint_bytes": 118489088,
                 "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
               }
             },
@@ -46957,11 +46957,11 @@
               "aggregate_equals_host": true,
               "descendant_processes": 0,
               "host_processes": 1,
-              "lifetime_peak_physical_footprint_bytes": 116391936,
-              "lifetime_peak_physical_footprint_upper_bound_bytes": 116916224,
+              "lifetime_peak_physical_footprint_bytes": 118489088,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 119013376,
               "physical_footprint_bytes": 24117248,
               "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-              "rss_bytes": 85573632,
+              "rss_bytes": 81018880,
               "status": "complete",
               "within_256_mib_target": true
             }
@@ -46995,18 +46995,18 @@
           },
           "retained_request_scratch_bytes": 256890,
           "round": 2,
-          "status": "incomplete"
+          "status": "passed"
         }
       ],
       "same_host_rounds": 2,
       "second_retained_delta_from_first": {
         "open_descriptor_rows": 0,
-        "physical_footprint_bytes": 1048576,
-        "rss_bytes": 327680,
+        "physical_footprint_bytes": 4194304,
+        "rss_bytes": -30064640,
         "status": "observed",
-        "virtual_bytes": 1048576
+        "virtual_bytes": 0
       },
-      "status": "incomplete"
+      "status": "passed"
     }
   ],
   "answer_byte_growth": [
@@ -47016,23 +47016,23 @@
       "client_delivery": {
         "destination_bytes": 1024,
         "destination_sha256": "49abd65bbf7f7e40c7055093ed2e3fd75f2f602f2c5fcf955c213e3135eb03f7",
-        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 128  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   5  involuntary context switches\n            34240629  instructions retired\n            11749604  cycles elapsed\n             2146944  peak memory footprint\n"
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 128  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   5  involuntary context switches\n            34244680  instructions retired\n            12122439  cycles elapsed\n             2146944  peak memory footprint\n"
       },
       "cold": {
         "host": {
-          "rss_bytes": 7503872,
-          "virtual_bytes": 420256481280,
-          "cpu_user_seconds": 0.004442875,
-          "cpu_system_seconds": 0.006481833333333333,
+          "rss_bytes": 7815168,
+          "virtual_bytes": 420255432704,
+          "cpu_user_seconds": 0.008103666666666665,
+          "cpu_system_seconds": 0.014355583333333331,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
-          "disk_read_bytes": 3612672,
+          "disk_read_bytes": 3600384,
           "disk_write_bytes": 143360,
           "footprint": {
-            "physical_footprint_bytes": 3163136,
+            "physical_footprint_bytes": 3490816,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 3163136,
+            "lifetime_peak_physical_footprint_bytes": 3490816,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47040,11 +47040,11 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 3163136,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 3163648,
-          "physical_footprint_bytes": 3163136,
+          "lifetime_peak_physical_footprint_bytes": 3490816,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3491328,
+          "physical_footprint_bytes": 3490816,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-          "rss_bytes": 7503872,
+          "rss_bytes": 7815168,
           "status": "complete",
           "within_256_mib_target": true
         }
@@ -47094,19 +47094,19 @@
       "request_bytes": 239,
       "retained_idle": {
         "host": {
-          "rss_bytes": 8847360,
-          "virtual_bytes": 420257054720,
-          "cpu_user_seconds": 0.007751708333333333,
-          "cpu_system_seconds": 0.01251225,
+          "rss_bytes": 9158656,
+          "virtual_bytes": 420258103296,
+          "cpu_user_seconds": 0.011364166666666667,
+          "cpu_system_seconds": 0.020093875,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
-          "disk_read_bytes": 3694592,
+          "disk_read_bytes": 3682304,
           "disk_write_bytes": 811008,
           "footprint": {
-            "physical_footprint_bytes": 4195328,
+            "physical_footprint_bytes": 4539392,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 4391936,
+            "lifetime_peak_physical_footprint_bytes": 4736000,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47114,11 +47114,11 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 4391936,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 4392448,
-          "physical_footprint_bytes": 4195328,
+          "lifetime_peak_physical_footprint_bytes": 4736000,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 4736512,
+          "physical_footprint_bytes": 4539392,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-          "rss_bytes": 8847360,
+          "rss_bytes": 9158656,
           "status": "complete",
           "within_256_mib_target": true
         }
@@ -47134,23 +47134,23 @@
       "client_delivery": {
         "destination_bytes": 1048576,
         "destination_sha256": "8f990ba0b577b51cf009ea049368c16bbda1b21e1b93be07a824758bb253c39b",
-        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 386  messages received\n                   0  signals received\n                   1  voluntary context switches\n                  18  involuntary context switches\n            70158681  instructions retired\n            21743175  cycles elapsed\n             2163392  peak memory footprint\n"
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 386  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  16  involuntary context switches\n            70663409  instructions retired\n            21443726  cycles elapsed\n             2163392  peak memory footprint\n"
       },
       "cold": {
         "host": {
-          "rss_bytes": 7946240,
+          "rss_bytes": 7651328,
           "virtual_bytes": 420256481280,
-          "cpu_user_seconds": 0.004815666666666666,
-          "cpu_system_seconds": 0.003588958333333333,
+          "cpu_user_seconds": 0.00469025,
+          "cpu_system_seconds": 0.0038099166666666663,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
-          "disk_read_bytes": 8192,
+          "disk_read_bytes": 4096,
           "disk_write_bytes": 143360,
           "footprint": {
-            "physical_footprint_bytes": 3458048,
+            "physical_footprint_bytes": 3163136,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 3458048,
+            "lifetime_peak_physical_footprint_bytes": 3163136,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47158,11 +47158,11 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 3458048,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 3458560,
-          "physical_footprint_bytes": 3458048,
+          "lifetime_peak_physical_footprint_bytes": 3163136,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3163648,
+          "physical_footprint_bytes": 3163136,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-          "rss_bytes": 7946240,
+          "rss_bytes": 7651328,
           "status": "complete",
           "within_256_mib_target": true
         }
@@ -47212,19 +47212,19 @@
       "request_bytes": 239,
       "retained_idle": {
         "host": {
-          "rss_bytes": 11780096,
-          "virtual_bytes": 420257054720,
-          "cpu_user_seconds": 0.26654891666666664,
-          "cpu_system_seconds": 0.025614,
+          "rss_bytes": 11632640,
+          "virtual_bytes": 420534927360,
+          "cpu_user_seconds": 0.2655174166666667,
+          "cpu_system_seconds": 0.024884958333333332,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
           "disk_read_bytes": 32768,
           "disk_write_bytes": 5005312,
           "footprint": {
-            "physical_footprint_bytes": 7144448,
+            "physical_footprint_bytes": 7046144,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 7341056,
+            "lifetime_peak_physical_footprint_bytes": 7242752,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47232,11 +47232,11 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 7341056,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 7341568,
-          "physical_footprint_bytes": 7144448,
+          "lifetime_peak_physical_footprint_bytes": 7242752,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 7243264,
+          "physical_footprint_bytes": 7046144,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-          "rss_bytes": 11780096,
+          "rss_bytes": 11632640,
           "status": "complete",
           "within_256_mib_target": true
         }
@@ -47252,23 +47252,23 @@
       "client_delivery": {
         "destination_bytes": 8388608,
         "destination_sha256": "0c77bc0a0795a93612d45256897456d0fcb24f151c44c150d07ecd03f4ef5168",
-        "time_stderr": "        0.10 real         0.00 user         0.02 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                2178  messages received\n                   0  signals received\n                   8  voluntary context switches\n                 238  involuntary context switches\n           324707135  instructions retired\n            95440369  cycles elapsed\n             2163392  peak memory footprint\n"
+        "time_stderr": "        0.11 real         0.00 user         0.02 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                2178  messages received\n                   0  signals received\n                   0  voluntary context switches\n                 318  involuntary context switches\n           333146788  instructions retired\n           100569491  cycles elapsed\n             2146944  peak memory footprint\n"
       },
       "cold": {
         "host": {
-          "rss_bytes": 7569408,
-          "virtual_bytes": 420247044096,
-          "cpu_user_seconds": 0.004520541666666666,
-          "cpu_system_seconds": 0.0033391666666666665,
+          "rss_bytes": 7684096,
+          "virtual_bytes": 420256481280,
+          "cpu_user_seconds": 0.004709291666666666,
+          "cpu_system_seconds": 0.004412541666666666,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
-          "disk_read_bytes": 4096,
+          "disk_read_bytes": 28672,
           "disk_write_bytes": 143360,
           "footprint": {
-            "physical_footprint_bytes": 3097600,
+            "physical_footprint_bytes": 3179520,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 3097600,
+            "lifetime_peak_physical_footprint_bytes": 3179520,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47276,11 +47276,11 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 3097600,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 3098112,
-          "physical_footprint_bytes": 3097600,
+          "lifetime_peak_physical_footprint_bytes": 3179520,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3180032,
+          "physical_footprint_bytes": 3179520,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-          "rss_bytes": 7569408,
+          "rss_bytes": 7684096,
           "status": "complete",
           "within_256_mib_target": true
         }
@@ -47330,19 +47330,19 @@
       "request_bytes": 239,
       "retained_idle": {
         "host": {
-          "rss_bytes": 14024704,
-          "virtual_bytes": 420534386688,
-          "cpu_user_seconds": 2.0704639166666663,
-          "cpu_system_seconds": 0.20276570833333332,
+          "rss_bytes": 13860864,
+          "virtual_bytes": 420679090176,
+          "cpu_user_seconds": 2.070684458333333,
+          "cpu_system_seconds": 0.2127323333333333,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
-          "disk_read_bytes": 270336,
+          "disk_read_bytes": 110592,
           "disk_write_bytes": 36491264,
           "footprint": {
-            "physical_footprint_bytes": 9438208,
+            "physical_footprint_bytes": 9290752,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 9634816,
+            "lifetime_peak_physical_footprint_bytes": 9487360,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47350,11 +47350,11 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 9634816,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 9635328,
-          "physical_footprint_bytes": 9438208,
+          "lifetime_peak_physical_footprint_bytes": 9487360,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 9487872,
+          "physical_footprint_bytes": 9290752,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-          "rss_bytes": 14024704,
+          "rss_bytes": 13860864,
           "status": "complete",
           "within_256_mib_target": true
         }
@@ -47365,10 +47365,10 @@
       "total_output_items": 2
     }
   ],
-  "artifacts": "/private/tmp/latifa-output-measure-494555877",
+  "artifacts": "/private/tmp/latifa-output-measure-365159491",
   "binary": "/Users/divyanshgolyan/.codex/worktrees/1e5b/latifa/zig-out/bin/latifa",
   "binary_sha256": "8a25cc1d0d53ad6baf9c78ac99d9492a577cce1f9389846e7090cc0052ebb3bb",
-  "elapsed_seconds": 904.038526416,
+  "elapsed_seconds": 897.256354959,
   "format": "latifa-model-output-v3-go",
   "item_count_growth": [
     {
@@ -47377,23 +47377,23 @@
       "client_delivery": {
         "destination_bytes": 6,
         "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
-        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   6  involuntary context switches\n            34156555  instructions retired\n            11879545  cycles elapsed\n             2146944  peak memory footprint\n"
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   5  involuntary context switches\n            34222971  instructions retired\n            11123230  cycles elapsed\n             2163392  peak memory footprint\n"
       },
       "cold": {
         "host": {
           "rss_bytes": 7651328,
           "virtual_bytes": 420256481280,
-          "cpu_user_seconds": 0.004819,
-          "cpu_system_seconds": 0.003355875,
+          "cpu_user_seconds": 0.004756666666666666,
+          "cpu_system_seconds": 0.00347125,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
-          "disk_read_bytes": 4096,
+          "disk_read_bytes": 0,
           "disk_write_bytes": 143360,
           "footprint": {
-            "physical_footprint_bytes": 3146752,
+            "physical_footprint_bytes": 3179520,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 3146752,
+            "lifetime_peak_physical_footprint_bytes": 3179520,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47401,9 +47401,9 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 3146752,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 3147264,
-          "physical_footprint_bytes": 3146752,
+          "lifetime_peak_physical_footprint_bytes": 3179520,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3180032,
+          "physical_footprint_bytes": 3179520,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
           "rss_bytes": 7651328,
           "status": "complete",
@@ -47455,19 +47455,19 @@
       "request_bytes": 239,
       "retained_idle": {
         "host": {
-          "rss_bytes": 9256960,
-          "virtual_bytes": 420534927360,
-          "cpu_user_seconds": 0.007541666666666666,
-          "cpu_system_seconds": 0.008621333333333332,
+          "rss_bytes": 9125888,
+          "virtual_bytes": 420391272448,
+          "cpu_user_seconds": 0.007644083333333333,
+          "cpu_system_seconds": 0.008839833333333331,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
-          "disk_read_bytes": 4096,
+          "disk_read_bytes": 0,
           "disk_write_bytes": 811008,
           "footprint": {
-            "physical_footprint_bytes": 4654080,
+            "physical_footprint_bytes": 4490240,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 4850688,
+            "lifetime_peak_physical_footprint_bytes": 4686848,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47475,11 +47475,11 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 4850688,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 4851200,
-          "physical_footprint_bytes": 4654080,
+          "lifetime_peak_physical_footprint_bytes": 4686848,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 4687360,
+          "physical_footprint_bytes": 4490240,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-          "rss_bytes": 9256960,
+          "rss_bytes": 9125888,
           "status": "complete",
           "within_256_mib_target": true
         }
@@ -47495,23 +47495,23 @@
       "client_delivery": {
         "destination_bytes": 6,
         "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
-        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   5  involuntary context switches\n            34180831  instructions retired\n            11468031  cycles elapsed\n             2146944  peak memory footprint\n"
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   5  involuntary context switches\n            34151497  instructions retired\n            12084014  cycles elapsed\n             2163392  peak memory footprint\n"
       },
       "cold": {
         "host": {
           "rss_bytes": 7946240,
           "virtual_bytes": 420256481280,
-          "cpu_user_seconds": 0.004808625,
-          "cpu_system_seconds": 0.0034040416666666663,
+          "cpu_user_seconds": 0.004787041666666666,
+          "cpu_system_seconds": 0.003508333333333333,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
-          "disk_read_bytes": 8192,
+          "disk_read_bytes": 16384,
           "disk_write_bytes": 143360,
           "footprint": {
-            "physical_footprint_bytes": 3490816,
+            "physical_footprint_bytes": 3458048,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 3490816,
+            "lifetime_peak_physical_footprint_bytes": 3458048,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47519,9 +47519,9 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 3490816,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 3491328,
-          "physical_footprint_bytes": 3490816,
+          "lifetime_peak_physical_footprint_bytes": 3458048,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3458560,
+          "physical_footprint_bytes": 3458048,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
           "rss_bytes": 7946240,
           "status": "complete",
@@ -47573,19 +47573,19 @@
       "request_bytes": 239,
       "retained_idle": {
         "host": {
-          "rss_bytes": 9158656,
-          "virtual_bytes": 420257054720,
-          "cpu_user_seconds": 0.019728416666666665,
-          "cpu_system_seconds": 0.015586125,
+          "rss_bytes": 9306112,
+          "virtual_bytes": 420401758208,
+          "cpu_user_seconds": 0.020684291666666663,
+          "cpu_system_seconds": 0.0170895,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
           "disk_read_bytes": 16384,
           "disk_write_bytes": 909312,
           "footprint": {
-            "physical_footprint_bytes": 4523008,
+            "physical_footprint_bytes": 4703232,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 4719616,
+            "lifetime_peak_physical_footprint_bytes": 4899840,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47593,11 +47593,11 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 4719616,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 4720128,
-          "physical_footprint_bytes": 4523008,
+          "lifetime_peak_physical_footprint_bytes": 4899840,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 4900352,
+          "physical_footprint_bytes": 4703232,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-          "rss_bytes": 9158656,
+          "rss_bytes": 9306112,
           "status": "complete",
           "within_256_mib_target": true
         }
@@ -47613,23 +47613,23 @@
       "client_delivery": {
         "destination_bytes": 6,
         "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
-        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 448  page reclaims\n                  15  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   3  voluntary context switches\n                   5  involuntary context switches\n            37699634  instructions retired\n            13672385  cycles elapsed\n             2146944  peak memory footprint\n"
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3555328  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 449  page reclaims\n                  20  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   6  voluntary context switches\n                   5  involuntary context switches\n            40099590  instructions retired\n            14486012  cycles elapsed\n             2261696  peak memory footprint\n"
       },
       "cold": {
         "host": {
-          "rss_bytes": 8011776,
-          "virtual_bytes": 420265918464,
-          "cpu_user_seconds": 0.00537425,
-          "cpu_system_seconds": 0.004406125,
+          "rss_bytes": 7946240,
+          "virtual_bytes": 420256481280,
+          "cpu_user_seconds": 0.004719791666666666,
+          "cpu_system_seconds": 0.0034746666666666667,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
-          "disk_read_bytes": 4096,
+          "disk_read_bytes": 8192,
           "disk_write_bytes": 143360,
           "footprint": {
-            "physical_footprint_bytes": 3523584,
+            "physical_footprint_bytes": 3474432,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 3523584,
+            "lifetime_peak_physical_footprint_bytes": 3474432,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47637,11 +47637,11 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 3523584,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 3524096,
-          "physical_footprint_bytes": 3523584,
+          "lifetime_peak_physical_footprint_bytes": 3474432,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3474944,
+          "physical_footprint_bytes": 3474432,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-          "rss_bytes": 8011776,
+          "rss_bytes": 7946240,
           "status": "complete",
           "within_256_mib_target": true
         }
@@ -47691,19 +47691,19 @@
       "request_bytes": 239,
       "retained_idle": {
         "host": {
-          "rss_bytes": 9846784,
-          "virtual_bytes": 420678582272,
-          "cpu_user_seconds": 0.15518104166666666,
-          "cpu_system_seconds": 0.2358029583333333,
+          "rss_bytes": 9961472,
+          "virtual_bytes": 420400709632,
+          "cpu_user_seconds": 0.15485291666666665,
+          "cpu_system_seconds": 0.23638483333333332,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptor_rows": 15,
-          "disk_read_bytes": 4096,
+          "disk_read_bytes": 8192,
           "disk_write_bytes": 1691648,
           "footprint": {
-            "physical_footprint_bytes": 5276672,
+            "physical_footprint_bytes": 5391360,
             "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 5473280,
+            "lifetime_peak_physical_footprint_bytes": 5587968,
             "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
           }
         },
@@ -47711,11 +47711,11 @@
           "aggregate_equals_host": true,
           "descendant_processes": 0,
           "host_processes": 1,
-          "lifetime_peak_physical_footprint_bytes": 5473280,
-          "lifetime_peak_physical_footprint_upper_bound_bytes": 5473792,
-          "physical_footprint_bytes": 5276672,
+          "lifetime_peak_physical_footprint_bytes": 5587968,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 5588480,
+          "physical_footprint_bytes": 5391360,
           "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-          "rss_bytes": 9846784,
+          "rss_bytes": 9961472,
           "status": "complete",
           "within_256_mib_target": true
         }
@@ -47755,10 +47755,10 @@
         "client_delivery": {
           "destination_bytes": 5242880,
           "destination_sha256": "09e6f0af8b8cc712caa5a5da72b12cfef57476ad121bbd795d344efb4e2ac005",
-          "time_stderr": "        0.04 real         0.00 user         0.01 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                1410  messages received\n                   0  signals received\n                   6  voluntary context switches\n                 162  involuntary context switches\n           212861941  instructions retired\n            61942022  cycles elapsed\n             2146944  peak memory footprint\n"
+          "time_stderr": "        0.04 real         0.00 user         0.01 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                1410  messages received\n                   0  signals received\n                  16  voluntary context switches\n                  89  involuntary context switches\n           215105579  instructions retired\n            61875221  cycles elapsed\n             2146944  peak memory footprint\n"
         },
         "database_bytes_after_host_reaped": 10629120,
-        "duration_seconds": 1.466714917,
+        "duration_seconds": 1.462742917,
         "effective_sqlite_configuration_valid": true,
         "execution": {
           "custody_occupied": "0",
@@ -47772,19 +47772,19 @@
         "expected_spill_off_memory_failure": false,
         "final": {
           "host": {
-            "rss_bytes": 13680640,
-            "virtual_bytes": 420534927360,
-            "cpu_user_seconds": 1.2939937083333333,
-            "cpu_system_seconds": 0.110283,
+            "rss_bytes": 14073856,
+            "virtual_bytes": 420822237184,
+            "cpu_user_seconds": 1.2922234166666664,
+            "cpu_system_seconds": 0.11251383333333333,
             "threads": 5,
             "live_descendant_processes": 0,
             "open_descriptor_rows": 15,
-            "disk_read_bytes": 98304,
+            "disk_read_bytes": 20480,
             "disk_write_bytes": 21819392,
             "footprint": {
-              "physical_footprint_bytes": 9094144,
+              "physical_footprint_bytes": 9536512,
               "physical_footprint_rounding_tolerance_bytes": 512,
-              "lifetime_peak_physical_footprint_bytes": 9323520,
+              "lifetime_peak_physical_footprint_bytes": 9765888,
               "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
             }
           },
@@ -47792,11 +47792,11 @@
             "aggregate_equals_host": true,
             "descendant_processes": 0,
             "host_processes": 1,
-            "lifetime_peak_physical_footprint_bytes": 9323520,
-            "lifetime_peak_physical_footprint_upper_bound_bytes": 9324032,
-            "physical_footprint_bytes": 9094144,
+            "lifetime_peak_physical_footprint_bytes": 9765888,
+            "lifetime_peak_physical_footprint_upper_bound_bytes": 9766400,
+            "physical_footprint_bytes": 9536512,
             "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-            "rss_bytes": 13680640,
+            "rss_bytes": 14073856,
             "status": "complete",
             "within_256_mib_target": true
           }
@@ -47809,7 +47809,7 @@
         "host_sqlite_diagnostics": [
           {
             "latifa_test_phase": "sqlite_diagnostic",
-            "at_ns": "1276572167096125",
+            "at_ns": "1275656212862291",
             "subject": "measure/spill",
             "process_memory_scope": "SQLite process-global allocator; one Store per Host",
             "process_memory_current_bytes": 283888,
@@ -47830,7 +47830,7 @@
           },
           {
             "latifa_test_phase": "sqlite_diagnostic",
-            "at_ns": "1276573836076375",
+            "at_ns": "1275657879879583",
             "subject": "measure/spill",
             "process_memory_scope": "SQLite process-global allocator; one Store per Host",
             "process_memory_current_bytes": 4699952,
@@ -47850,7 +47850,7 @@
             "journal_mode": "delete"
           }
         ],
-        "host_stderr_tail": "{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1276572167041208\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1276572167096125\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":283888,\"process_memory_highwater_bytes\":402560,\"cache_used_bytes\":148656,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":0,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_pages\":-4096,\"cache_spill_threshold\":991,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n{\"latifa_test_phase\":\"transport_handoff_committed\",\"at_ns\":\"1276572354533333\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_lock_acquired\",\"at_ns\":\"1276573631880500\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_complete\",\"at_ns\":\"1276573747167583\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"model_settlement_committed\",\"at_ns\":\"1276573747181833\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_started\",\"at_ns\":\"1276573747408583\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_completed\",\"at_ns\":\"1276573747416083\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1276573836042583\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1276573836076375\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":4699952,\"process_memory_highwater_bytes\":4822256,\"cache_used_bytes\":4313520,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":4252,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_pages\":-4096,\"cache_spill_threshold\":991,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n",
+        "host_stderr_tail": "{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1275656212804833\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1275656212862291\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":283888,\"process_memory_highwater_bytes\":402560,\"cache_used_bytes\":148656,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":0,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_pages\":-4096,\"cache_spill_threshold\":991,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n{\"latifa_test_phase\":\"transport_handoff_committed\",\"at_ns\":\"1275656396826458\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_lock_acquired\",\"at_ns\":\"1275657670744375\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_complete\",\"at_ns\":\"1275657789132791\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"model_settlement_committed\",\"at_ns\":\"1275657789147916\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_started\",\"at_ns\":\"1275657789385916\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_completed\",\"at_ns\":\"1275657789398666\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1275657879848583\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1275657879879583\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":4699952,\"process_memory_highwater_bytes\":4822256,\"cache_used_bytes\":4313520,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":4252,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_pages\":-4096,\"cache_spill_threshold\":991,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n",
         "initial": {
           "execution": {
             "custody_occupied": "0",
@@ -47862,19 +47862,19 @@
             ]
           },
           "host": {
-            "rss_bytes": 8437760,
+            "rss_bytes": 8716288,
             "virtual_bytes": 420256481280,
-            "cpu_user_seconds": 0.005200666666666666,
-            "cpu_system_seconds": 0.004682375,
+            "cpu_user_seconds": 0.005057708333333333,
+            "cpu_system_seconds": 0.004500666666666666,
             "threads": 4,
             "live_descendant_processes": 0,
             "open_descriptor_rows": 15,
             "disk_read_bytes": 8192,
             "disk_write_bytes": 249856,
             "footprint": {
-              "physical_footprint_bytes": 3867648,
+              "physical_footprint_bytes": 4146176,
               "physical_footprint_rounding_tolerance_bytes": 512,
-              "lifetime_peak_physical_footprint_bytes": 4080640,
+              "lifetime_peak_physical_footprint_bytes": 4359168,
               "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
             }
           },
@@ -47882,11 +47882,11 @@
             "aggregate_equals_host": true,
             "descendant_processes": 0,
             "host_processes": 1,
-            "lifetime_peak_physical_footprint_bytes": 4080640,
-            "lifetime_peak_physical_footprint_upper_bound_bytes": 4081152,
-            "physical_footprint_bytes": 3867648,
+            "lifetime_peak_physical_footprint_bytes": 4359168,
+            "lifetime_peak_physical_footprint_upper_bound_bytes": 4359680,
+            "physical_footprint_bytes": 4146176,
             "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-            "rss_bytes": 8437760,
+            "rss_bytes": 8716288,
             "status": "complete",
             "within_256_mib_target": true
           }
@@ -47922,10 +47922,10 @@
         "client_delivery": {
           "destination_bytes": 5242880,
           "destination_sha256": "09e6f0af8b8cc712caa5a5da72b12cfef57476ad121bbd795d344efb4e2ac005",
-          "time_stderr": "        0.04 real         0.00 user         0.01 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                1410  messages received\n                   0  signals received\n                   9  voluntary context switches\n                 216  involuntary context switches\n           214476901  instructions retired\n            61997139  cycles elapsed\n             2163392  peak memory footprint\n"
+          "time_stderr": "        0.04 real         0.00 user         0.01 sys\n             3457024  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                1410  messages received\n                   0  signals received\n                   2  voluntary context switches\n                 149  involuntary context switches\n           216480578  instructions retired\n            63394474  cycles elapsed\n             2146944  peak memory footprint\n"
         },
         "database_bytes_after_host_reaped": 10629120,
-        "duration_seconds": 1.44804575,
+        "duration_seconds": 1.458444083,
         "effective_sqlite_configuration_valid": true,
         "execution": {
           "custody_occupied": "0",
@@ -47939,17 +47939,17 @@
         "expected_spill_off_memory_failure": false,
         "final": {
           "host": {
-            "rss_bytes": 20774912,
+            "rss_bytes": 21020672,
             "virtual_bytes": 420409098240,
-            "cpu_user_seconds": 1.2902449166666665,
-            "cpu_system_seconds": 0.1010985,
+            "cpu_user_seconds": 1.290541875,
+            "cpu_system_seconds": 0.10938675,
             "threads": 5,
             "live_descendant_processes": 0,
             "open_descriptor_rows": 15,
-            "disk_read_bytes": 36864,
+            "disk_read_bytes": 323584,
             "disk_write_bytes": 21790720,
             "footprint": {
-              "physical_footprint_bytes": 15728640,
+              "physical_footprint_bytes": 16777216,
               "physical_footprint_rounding_tolerance_bytes": 524288,
               "lifetime_peak_physical_footprint_bytes": 16777216,
               "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
@@ -47961,9 +47961,9 @@
             "host_processes": 1,
             "lifetime_peak_physical_footprint_bytes": 16777216,
             "lifetime_peak_physical_footprint_upper_bound_bytes": 17301504,
-            "physical_footprint_bytes": 15728640,
+            "physical_footprint_bytes": 16777216,
             "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-            "rss_bytes": 20774912,
+            "rss_bytes": 21020672,
             "status": "complete",
             "within_256_mib_target": true
           }
@@ -47976,7 +47976,7 @@
         "host_sqlite_diagnostics": [
           {
             "latifa_test_phase": "sqlite_diagnostic",
-            "at_ns": "1276574075571125",
+            "at_ns": "1275658125151041",
             "subject": "measure/spill",
             "process_memory_scope": "SQLite process-global allocator; one Store per Host",
             "process_memory_current_bytes": 283888,
@@ -47997,7 +47997,7 @@
           },
           {
             "latifa_test_phase": "sqlite_diagnostic",
-            "at_ns": "1276575715798041",
+            "at_ns": "1275659778501416",
             "subject": "measure/spill",
             "process_memory_scope": "SQLite process-global allocator; one Store per Host",
             "process_memory_current_bytes": 4742960,
@@ -48017,7 +48017,7 @@
             "journal_mode": "delete"
           }
         ],
-        "host_stderr_tail": "{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1276574075521250\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1276574075571125\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":283888,\"process_memory_highwater_bytes\":402560,\"cache_used_bytes\":148656,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":0,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_pages\":-4096,\"cache_spill_threshold\":0,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n{\"latifa_test_phase\":\"transport_handoff_committed\",\"at_ns\":\"1276574266880333\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_lock_acquired\",\"at_ns\":\"1276575535355041\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_complete\",\"at_ns\":\"1276575635175083\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"model_settlement_committed\",\"at_ns\":\"1276575635189125\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_started\",\"at_ns\":\"1276575635440208\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_completed\",\"at_ns\":\"1276575635449083\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1276575715766958\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1276575715798041\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":4742960,\"process_memory_highwater_bytes\":12141296,\"cache_used_bytes\":4317872,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":0,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_pages\":-4096,\"cache_spill_threshold\":0,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n",
+        "host_stderr_tail": "{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1275658125096208\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1275658125151041\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":283888,\"process_memory_highwater_bytes\":402560,\"cache_used_bytes\":148656,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":0,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_pages\":-4096,\"cache_spill_threshold\":0,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n{\"latifa_test_phase\":\"transport_handoff_committed\",\"at_ns\":\"1275658313648416\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_lock_acquired\",\"at_ns\":\"1275659582772583\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_complete\",\"at_ns\":\"1275659698126083\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"model_settlement_committed\",\"at_ns\":\"1275659698141458\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_started\",\"at_ns\":\"1275659698307041\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_completed\",\"at_ns\":\"1275659698314541\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1275659778470291\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1275659778501416\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":4742960,\"process_memory_highwater_bytes\":12141296,\"cache_used_bytes\":4317872,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":0,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_pages\":-4096,\"cache_spill_threshold\":0,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n",
         "initial": {
           "execution": {
             "custody_occupied": "0",
@@ -48029,19 +48029,19 @@
             ]
           },
           "host": {
-            "rss_bytes": 8142848,
+            "rss_bytes": 8437760,
             "virtual_bytes": 420256481280,
-            "cpu_user_seconds": 0.005450375,
-            "cpu_system_seconds": 0.004713041666666666,
+            "cpu_user_seconds": 0.005283083333333333,
+            "cpu_system_seconds": 0.004537,
             "threads": 4,
             "live_descendant_processes": 0,
             "open_descriptor_rows": 15,
             "disk_read_bytes": 8192,
             "disk_write_bytes": 249856,
             "footprint": {
-              "physical_footprint_bytes": 3539968,
+              "physical_footprint_bytes": 3851264,
               "physical_footprint_rounding_tolerance_bytes": 512,
-              "lifetime_peak_physical_footprint_bytes": 3785728,
+              "lifetime_peak_physical_footprint_bytes": 4080640,
               "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
             }
           },
@@ -48049,11 +48049,11 @@
             "aggregate_equals_host": true,
             "descendant_processes": 0,
             "host_processes": 1,
-            "lifetime_peak_physical_footprint_bytes": 3785728,
-            "lifetime_peak_physical_footprint_upper_bound_bytes": 3786240,
-            "physical_footprint_bytes": 3539968,
+            "lifetime_peak_physical_footprint_bytes": 4080640,
+            "lifetime_peak_physical_footprint_upper_bound_bytes": 4081152,
+            "physical_footprint_bytes": 3851264,
             "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
-            "rss_bytes": 8142848,
+            "rss_bytes": 8437760,
             "status": "complete",
             "within_256_mib_target": true
           }

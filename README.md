@@ -8,6 +8,8 @@ The source implements the first six redesigned runtime slices: an explicitly sta
 
 The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. The current build cross-compiles all four targets. Runtime and resource verification uses the available Apple Silicon Mac; the other targets remain compile-only evidence until exercised on their platforms.
 
+Clean Go reference reports pass the configuration-admission, message-admission, frozen-request dispatch, retry and control workloads. Model-output qualification remains incomplete under the existing exact 20 ms, zero-miss cadence: repeated runs on this tested Mac include exact rounds and correlated late-wake/flush rounds. The retained diagnostics identify the measured fixture timing boundary without changing the workload or verdict. This evidence does not complete #165 or production/live-provider qualification.
+
 ## Intended experience
 
 Start one local server explicitly, then use direct CLI/script calls or JavaScript workflows. Clients can disconnect while saved work continues. Restart recovers unfinished work under its original inputs and remaining budgets.

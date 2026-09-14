@@ -1,246 +1,348 @@
 {
+  "artifacts": "/private/tmp/latifa-dispatch-measure-3277914668",
+  "binary": "../zig-out/bin/latifa",
+  "binary_sha256": "8a25cc1d0d53ad6baf9c78ac99d9492a577cce1f9389846e7090cc0052ebb3bb",
+  "elapsed_seconds": 37.161131292,
+  "format": "latifa-model-dispatch-v2-go",
+  "idle_capacity_growth": [
+    {
+      "active_capacity": 1,
+      "custody_record_bytes": "40",
+      "execution_slot_bytes": "1200",
+      "idle_cpu_percent_one_core": 0.5595646084594602,
+      "idle_cpu_sample_seconds": 2.002181666,
+      "process": {
+        "cpu_system_seconds": 0.012689666666666667,
+        "cpu_user_seconds": 0.01252675,
+        "disk_read_bytes": 3661824,
+        "disk_write_bytes": 143360,
+        "footprint": {
+          "lifetime_peak_physical_footprint_bytes": 3802112,
+          "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
+          "physical_footprint_bytes": 3802112,
+          "physical_footprint_rounding_tolerance_bytes": 512
+        },
+        "live_descendant_processes": 0,
+        "open_descriptor_rows": 15,
+        "open_request_file_descriptors": 0,
+        "rss_bytes": 8241152,
+        "threads": 4,
+        "virtual_bytes": 420294230016
+      }
+    },
+    {
+      "active_capacity": 16,
+      "custody_record_bytes": "40",
+      "execution_slot_bytes": "1200",
+      "idle_cpu_percent_one_core": 0.4940254342727011,
+      "idle_cpu_sample_seconds": 2.002157375,
+      "process": {
+        "cpu_system_seconds": 0.006556583333333333,
+        "cpu_user_seconds": 0.010969541666666666,
+        "disk_read_bytes": 0,
+        "disk_write_bytes": 143360,
+        "footprint": {
+          "lifetime_peak_physical_footprint_bytes": 3572736,
+          "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
+          "physical_footprint_bytes": 3572736,
+          "physical_footprint_rounding_tolerance_bytes": 512
+        },
+        "live_descendant_processes": 0,
+        "open_descriptor_rows": 15,
+        "open_request_file_descriptors": 0,
+        "rss_bytes": 8093696,
+        "threads": 4,
+        "virtual_bytes": 420141137920
+      }
+    },
+    {
+      "active_capacity": 256,
+      "custody_record_bytes": "40",
+      "execution_slot_bytes": "1200",
+      "idle_cpu_percent_one_core": 0.5045035339081755,
+      "idle_cpu_sample_seconds": 2.002149834,
+      "process": {
+        "cpu_system_seconds": 0.006733416666666666,
+        "cpu_user_seconds": 0.011227125,
+        "disk_read_bytes": 24576,
+        "disk_write_bytes": 143360,
+        "footprint": {
+          "lifetime_peak_physical_footprint_bytes": 3998720,
+          "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
+          "physical_footprint_bytes": 3998720,
+          "physical_footprint_rounding_tolerance_bytes": 512
+        },
+        "live_descendant_processes": 0,
+        "open_descriptor_rows": 15,
+        "open_request_file_descriptors": 0,
+        "rss_bytes": 8486912,
+        "threads": 4,
+        "virtual_bytes": 420284792832
+      }
+    },
+    {
+      "active_capacity": 1000,
+      "custody_record_bytes": "40",
+      "execution_slot_bytes": "1200",
+      "idle_cpu_percent_one_core": 0.5138737206404235,
+      "idle_cpu_sample_seconds": 2.002145583,
+      "process": {
+        "cpu_system_seconds": 0.006907791666666666,
+        "cpu_user_seconds": 0.01134,
+        "disk_read_bytes": 16384,
+        "disk_write_bytes": 143360,
+        "footprint": {
+          "lifetime_peak_physical_footprint_bytes": 4883456,
+          "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
+          "physical_footprint_bytes": 4883456,
+          "physical_footprint_rounding_tolerance_bytes": 512
+        },
+        "live_descendant_processes": 0,
+        "open_descriptor_rows": 15,
+        "open_request_file_descriptors": 0,
+        "rss_bytes": 9388032,
+        "threads": 4,
+        "virtual_bytes": 420275355648
+      }
+    }
+  ],
+  "limits": [
+    "macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only",
+    "endpoint is deterministic loopback HTTP and qualifies no TLS trust store or live provider behavior",
+    "idle CPU is process CPU-time growth over a two-second quiet interval and must remain below 1% of one core",
+    "process termination is crash evidence, not power-loss qualification"
+  ],
+  "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+  "measurement_runtime": {
+    "go_arch": "arm64",
+    "go_os": "darwin",
+    "go_version": "go1.27.1",
+    "gopsutil_version": "v4.26.7",
+    "logical_cpus": 10,
+    "module_path": "latifa.local/research",
+    "physical_memory_bytes": 17179869184
+  },
+  "overlapping_transport": {
+    "active_capacity": 8,
+    "custody_record_bytes": "40",
+    "endpoint_requests": 8,
+    "execution": {
+      "custody_occupied": "8",
+      "dispatch_fenced": false,
+      "scratch_used_bytes": "527120",
+      "status": "partial",
+      "unavailable": [
+        "structured_output"
+      ]
+    },
+    "execution_slot_bytes": "1200",
+    "process": {
+      "cpu_system_seconds": 0.032633875,
+      "cpu_user_seconds": 0.0255475,
+      "disk_read_bytes": 8192,
+      "disk_write_bytes": 4784128,
+      "footprint": {
+        "lifetime_peak_physical_footprint_bytes": 6407168,
+        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
+        "physical_footprint_bytes": 6210560,
+        "physical_footprint_rounding_tolerance_bytes": 512
+      },
+      "live_descendant_processes": 0,
+      "open_descriptor_rows": 47,
+      "open_request_file_descriptors": 8,
+      "rss_bytes": 10780672,
+      "threads": 5,
+      "virtual_bytes": 420543315968
+    }
+  },
+  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+  "request_growth_and_delayed_cleanup": [
+    {
+      "endpoint_request_bytes": 354,
+      "in_flight": {
+        "cpu_system_seconds": 0.006817375,
+        "cpu_user_seconds": 0.0061725,
+        "disk_read_bytes": 45056,
+        "disk_write_bytes": 589824,
+        "footprint": {
+          "lifetime_peak_physical_footprint_bytes": 4424704,
+          "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
+          "physical_footprint_bytes": 4228096,
+          "physical_footprint_rounding_tolerance_bytes": 512
+        },
+        "live_descendant_processes": 0,
+        "open_descriptor_rows": 19,
+        "open_request_file_descriptors": 1,
+        "rss_bytes": 8863744,
+        "threads": 5,
+        "virtual_bytes": 420266491904
+      },
+      "in_flight_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "354",
+        "status": "partial",
+        "unavailable": [
+          "structured_output"
+        ]
+      },
+      "input_bytes": 0,
+      "saved_failure_delayed_cleanup": {
+        "cpu_system_seconds": 0.00777525,
+        "cpu_user_seconds": 0.006608125,
+        "disk_read_bytes": 45056,
+        "disk_write_bytes": 700416,
+        "footprint": {
+          "lifetime_peak_physical_footprint_bytes": 4424704,
+          "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
+          "physical_footprint_bytes": 4228096,
+          "physical_footprint_rounding_tolerance_bytes": 512
+        },
+        "live_descendant_processes": 0,
+        "open_descriptor_rows": 15,
+        "open_request_file_descriptors": 0,
+        "rss_bytes": 8863744,
+        "threads": 5,
+        "virtual_bytes": 420266491904
+      },
+      "saved_failure_delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output"
+        ]
+      },
+      "scratch_limit_bytes": "8589934592"
+    },
+    {
+      "endpoint_request_bytes": 1048930,
+      "in_flight": {
+        "cpu_system_seconds": 0.018683666666666664,
+        "cpu_user_seconds": 0.02635170833333333,
+        "disk_read_bytes": 32768,
+        "disk_write_bytes": 3747840,
+        "footprint": {
+          "lifetime_peak_physical_footprint_bytes": 5211136,
+          "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
+          "physical_footprint_bytes": 5014528,
+          "physical_footprint_rounding_tolerance_bytes": 512
+        },
+        "live_descendant_processes": 0,
+        "open_descriptor_rows": 19,
+        "open_request_file_descriptors": 1,
+        "rss_bytes": 9650176,
+        "threads": 5,
+        "virtual_bytes": 420257054720
+      },
+      "in_flight_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "1048930",
+        "status": "partial",
+        "unavailable": [
+          "structured_output"
+        ]
+      },
+      "input_bytes": 1048576,
+      "saved_failure_delayed_cleanup": {
+        "cpu_system_seconds": 0.019632166666666666,
+        "cpu_user_seconds": 0.026702125,
+        "disk_read_bytes": 32768,
+        "disk_write_bytes": 3858432,
+        "footprint": {
+          "lifetime_peak_physical_footprint_bytes": 5211136,
+          "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
+          "physical_footprint_bytes": 5014528,
+          "physical_footprint_rounding_tolerance_bytes": 512
+        },
+        "live_descendant_processes": 0,
+        "open_descriptor_rows": 15,
+        "open_request_file_descriptors": 0,
+        "rss_bytes": 9650176,
+        "threads": 5,
+        "virtual_bytes": 420257054720
+      },
+      "saved_failure_delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output"
+        ]
+      },
+      "scratch_limit_bytes": "8589934592"
+    },
+    {
+      "endpoint_request_bytes": 8388962,
+      "in_flight": {
+        "cpu_system_seconds": 0.925600375,
+        "cpu_user_seconds": 0.40398891666666664,
+        "disk_read_bytes": 204800,
+        "disk_write_bytes": 34189312,
+        "footprint": {
+          "lifetime_peak_physical_footprint_bytes": 9159680,
+          "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
+          "physical_footprint_bytes": 8963072,
+          "physical_footprint_rounding_tolerance_bytes": 512
+        },
+        "live_descendant_processes": 0,
+        "open_descriptor_rows": 19,
+        "open_request_file_descriptors": 1,
+        "rss_bytes": 13549568,
+        "threads": 4,
+        "virtual_bytes": 420409573376
+      },
+      "in_flight_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "8388962",
+        "status": "partial",
+        "unavailable": [
+          "structured_output"
+        ]
+      },
+      "input_bytes": 8388608,
+      "saved_failure_delayed_cleanup": {
+        "cpu_system_seconds": 0.9268110833333333,
+        "cpu_user_seconds": 0.4044024583333333,
+        "disk_read_bytes": 204800,
+        "disk_write_bytes": 34299904,
+        "footprint": {
+          "lifetime_peak_physical_footprint_bytes": 9159680,
+          "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
+          "physical_footprint_bytes": 8963072,
+          "physical_footprint_rounding_tolerance_bytes": 512
+        },
+        "live_descendant_processes": 0,
+        "open_descriptor_rows": 15,
+        "open_request_file_descriptors": 0,
+        "rss_bytes": 13549568,
+        "threads": 4,
+        "virtual_bytes": 420409573376
+      },
+      "saved_failure_delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output"
+        ]
+      },
+      "scratch_limit_bytes": "8589934592"
+    }
+  ],
   "scope": "issue-172 production frozen-request dispatch",
   "status": "passed",
-  "tested_revision": "36e44b50e50aa6baf7a2dbf736c5664b5aed2dad",
-  "working_tree_dirty": false,
-  "binary_sha256": "0c2b3140ece98d847c50bf01c31b6e4410979d06555f5a2ae17258844b2aa6e9",
-  "zig": "0.16.0",
-  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
-  "measurement_runtime": {
-    "python_executable": "/private/tmp/latifa-final-measurement-venv.odhQxo/bin/python3",
-    "python_version": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 17.0.0 (clang-1700.6.4.2)]",
-    "psutil_version": "7.2.2",
-    "requirements_path": "research/measurement-requirements.txt",
-    "helper_path": "research/measurement_process.py"
-  },
+  "tested_revision": "9b4f5a44c8553e426b17603ced0648181dce6f14",
   "transport": {
     "curl": "8.22.0",
     "openssl": "3.6.3",
     "resolver": "threaded"
   },
-  "idle_capacity_growth": [
-    {
-      "active_capacity": 1,
-      "custody_record_bytes": 40,
-      "execution_slot_bytes": 1200,
-      "idle_cpu_percent_one_core": 0.22,
-      "idle_cpu_sample_seconds": 2.004,
-      "rss_bytes": 5980160,
-      "virtual_bytes": 420448370688,
-      "physical_footprint_bytes": 3785728,
-      "physical_footprint_rounding_tolerance_bytes": 512,
-      "lifetime_peak_physical_footprint_bytes": 3785728,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-      "open_descriptor_rows": 15,
-      "open_request_file_descriptors": 0
-    },
-    {
-      "active_capacity": 16,
-      "custody_record_bytes": 40,
-      "execution_slot_bytes": 1200,
-      "idle_cpu_percent_one_core": 0.267,
-      "idle_cpu_sample_seconds": 2.001,
-      "rss_bytes": 5554176,
-      "virtual_bytes": 420296327168,
-      "physical_footprint_bytes": 3834880,
-      "physical_footprint_rounding_tolerance_bytes": 512,
-      "lifetime_peak_physical_footprint_bytes": 3834880,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-      "open_descriptor_rows": 15,
-      "open_request_file_descriptors": 0
-    },
-    {
-      "active_capacity": 256,
-      "custody_record_bytes": 40,
-      "execution_slot_bytes": 1200,
-      "idle_cpu_percent_one_core": 0.208,
-      "idle_cpu_sample_seconds": 2.006,
-      "rss_bytes": 8601600,
-      "virtual_bytes": 420294230016,
-      "physical_footprint_bytes": 4097024,
-      "physical_footprint_rounding_tolerance_bytes": 512,
-      "lifetime_peak_physical_footprint_bytes": 4097024,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-      "open_descriptor_rows": 15,
-      "open_request_file_descriptors": 0
-    },
-    {
-      "active_capacity": 1000,
-      "custody_record_bytes": 40,
-      "execution_slot_bytes": 1200,
-      "idle_cpu_percent_one_core": 0.236,
-      "idle_cpu_sample_seconds": 2.003,
-      "rss_bytes": 9486336,
-      "virtual_bytes": 420169449472,
-      "physical_footprint_bytes": 4998144,
-      "physical_footprint_rounding_tolerance_bytes": 512,
-      "lifetime_peak_physical_footprint_bytes": 5014528,
-      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-      "open_descriptor_rows": 15,
-      "open_request_file_descriptors": 0
-    }
-  ],
-  "request_growth_and_delayed_cleanup": [
-    {
-      "input_bytes": 0,
-      "endpoint_request_bytes": 354,
-      "scratch_limit_bytes": 8589934592,
-      "in_flight_execution": {
-        "status": "partial",
-        "dispatch_fenced": false,
-        "custody_occupied": "1",
-        "scratch_used_bytes": "354",
-        "unavailable": [
-          "structured_output"
-        ]
-      },
-      "in_flight": {
-        "rss_bytes": 9240576,
-        "virtual_bytes": 420708990976,
-        "physical_footprint_bytes": 4686848,
-        "physical_footprint_rounding_tolerance_bytes": 512,
-        "lifetime_peak_physical_footprint_bytes": 4883456,
-        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-        "open_descriptor_rows": 19,
-        "open_request_file_descriptors": 1
-      },
-      "saved_failure_delayed_cleanup_execution": {
-        "status": "partial",
-        "dispatch_fenced": false,
-        "custody_occupied": "1",
-        "scratch_used_bytes": "0",
-        "unavailable": [
-          "structured_output"
-        ]
-      },
-      "saved_failure_delayed_cleanup": {
-        "rss_bytes": 9273344,
-        "virtual_bytes": 420843208704,
-        "physical_footprint_bytes": 4736000,
-        "physical_footprint_rounding_tolerance_bytes": 512,
-        "lifetime_peak_physical_footprint_bytes": 4932608,
-        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-        "open_descriptor_rows": 15,
-        "open_request_file_descriptors": 0
-      }
-    },
-    {
-      "input_bytes": 1048576,
-      "endpoint_request_bytes": 1048930,
-      "scratch_limit_bytes": 8589934592,
-      "in_flight_execution": {
-        "status": "partial",
-        "dispatch_fenced": false,
-        "custody_occupied": "1",
-        "scratch_used_bytes": "1048930",
-        "unavailable": [
-          "structured_output"
-        ]
-      },
-      "in_flight": {
-        "rss_bytes": 9158656,
-        "virtual_bytes": 420717379584,
-        "physical_footprint_bytes": 6505472,
-        "physical_footprint_rounding_tolerance_bytes": 512,
-        "lifetime_peak_physical_footprint_bytes": 6702080,
-        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-        "open_descriptor_rows": 19,
-        "open_request_file_descriptors": 1
-      },
-      "saved_failure_delayed_cleanup_execution": {
-        "status": "partial",
-        "dispatch_fenced": false,
-        "custody_occupied": "1",
-        "scratch_used_bytes": "0",
-        "unavailable": [
-          "structured_output"
-        ]
-      },
-      "saved_failure_delayed_cleanup": {
-        "rss_bytes": 8388608,
-        "virtual_bytes": 420717379584,
-        "physical_footprint_bytes": 6800384,
-        "physical_footprint_rounding_tolerance_bytes": 512,
-        "lifetime_peak_physical_footprint_bytes": 6996992,
-        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-        "open_descriptor_rows": 15,
-        "open_request_file_descriptors": 0
-      }
-    },
-    {
-      "input_bytes": 8388608,
-      "endpoint_request_bytes": 8388962,
-      "scratch_limit_bytes": 8589934592,
-      "in_flight_execution": {
-        "status": "partial",
-        "dispatch_fenced": false,
-        "custody_occupied": "1",
-        "scratch_used_bytes": "8388962",
-        "unavailable": [
-          "structured_output"
-        ]
-      },
-      "in_flight": {
-        "rss_bytes": 12320768,
-        "virtual_bytes": 420993630208,
-        "physical_footprint_bytes": 9552896,
-        "physical_footprint_rounding_tolerance_bytes": 512,
-        "lifetime_peak_physical_footprint_bytes": 9749504,
-        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-        "open_descriptor_rows": 19,
-        "open_request_file_descriptors": 1
-      },
-      "saved_failure_delayed_cleanup_execution": {
-        "status": "partial",
-        "dispatch_fenced": false,
-        "custody_occupied": "1",
-        "scratch_used_bytes": "0",
-        "unavailable": [
-          "structured_output"
-        ]
-      },
-      "saved_failure_delayed_cleanup": {
-        "rss_bytes": 12664832,
-        "virtual_bytes": 420993630208,
-        "physical_footprint_bytes": 9847808,
-        "physical_footprint_rounding_tolerance_bytes": 512,
-        "lifetime_peak_physical_footprint_bytes": 10044416,
-        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-        "open_descriptor_rows": 15,
-        "open_request_file_descriptors": 0
-      }
-    }
-  ],
-  "overlapping_transport": {
-    "active_capacity": 8,
-    "endpoint_requests": 8,
-    "execution": {
-      "status": "partial",
-      "dispatch_fenced": false,
-      "custody_occupied": "8",
-      "scratch_used_bytes": "527120",
-      "unavailable": [
-        "structured_output"
-      ]
-    },
-    "custody_record_bytes": 40,
-    "execution_slot_bytes": 1200,
-    "rss_bytes": 12681216,
-    "virtual_bytes": 421262639104,
-    "physical_footprint_bytes": 8194048,
-    "physical_footprint_rounding_tolerance_bytes": 512,
-    "lifetime_peak_physical_footprint_bytes": 8390656,
-    "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
-    "open_descriptor_rows": 47,
-    "open_request_file_descriptors": 8
-  },
-  "elapsed_seconds": 34.683,
-  "limits": [
-    "macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only",
-    "endpoint is deterministic loopback HTTP and qualifies no TLS trust store or live provider behavior",
-    "idle CPU is process CPU-time growth over a two-second quiet interval and must remain below 1% of one core",
-    "custody and scratch use are exported runtime counters sampled through inspect-session",
-    "lsof rows include libraries and SQLite descriptors; request-named rows identify already-unlinked request scratch still held by a descriptor",
-    "process termination is crash evidence, not power-loss qualification"
-  ]
+  "working_tree_dirty": false,
+  "zig": "0.16.0"
 }
