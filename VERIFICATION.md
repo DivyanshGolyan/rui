@@ -209,7 +209,7 @@ Required populations: **0/100/1,000/10,000 Dormant Sessions** at fixed capacity;
 | --- | --- |
 | **≤256 MiB** aggregate Latifa-owned process physical footprint | Planned 1,000-operation mixed/specialized loads and cold/retained idle, including evaluator/helpers; stable churn and no dormant/history-driven resident growth. Model-selected workloads remain separately observed. |
 | **<1% of one core** idle CPU | Include retry/workflow polling and idle waits. |
-| **≤2 cores** average model-fixture CPU | 1,000 streams × 100 small SSE events/second each, short requests and bounded terminal bursts; exclude fixture server, report tool/mixed CPU separately. |
+| **≤2 cores** sustained model-fixture CPU and **≤120 CPU seconds** complete work | Offer 1,000 streams × 100 small SSE events/second each for 60 seconds. Measure Host CPU over seconds 10–50, and separately from before message admission through every-key result audit and observed global custody/scratch release. Exclude the fixture process; report its counters separately. |
 | **p95 durable control acknowledgement ≤1 second** | Saturated load including inspection/import contention; record maximum, queue/service time and physical cleanup separately. No real-time termination/billing promise. |
 | Retry discovery **≤2 seconds after due** | Free capacity/light load; one indexed poll/second, no per-Operation timer or catch-up backlog; separate discovery/admission/launch. |
 
