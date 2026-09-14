@@ -36,6 +36,7 @@ pub const Faults = struct {
     output_commit: bool = false,
     rollback_failure: bool = false,
     control_trace: ?ControlTrace = null,
+    settlement_trace: ?SettlementTrace = null,
 };
 
 pub const ControlTracePhase = enum { lock_acquired, store_complete };
@@ -45,6 +46,17 @@ pub const ControlTrace = struct {
     mark_fn: *const fn (*anyopaque, ControlTracePhase) void,
 
     fn mark(self: ControlTrace, phase: ControlTracePhase) void {
+        self.mark_fn(self.context, phase);
+    }
+};
+
+pub const SettlementTracePhase = enum { lock_acquired, settlement_complete };
+
+pub const SettlementTrace = struct {
+    context: *anyopaque,
+    mark_fn: *const fn (*anyopaque, SettlementTracePhase) void,
+
+    fn mark(self: SettlementTrace, phase: SettlementTracePhase) void {
         self.mark_fn(self.context, phase);
     }
 };
@@ -2307,14 +2319,18 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        if (faults.settlement_trace) |trace| trace.mark(.lock_acquired);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.settleModelSuccessLocked(binding, output, faults) catch |err| {
-            return self.finishTransactionError(
+            const final_err = self.finishTransactionError(
                 err,
                 faults,
                 err == error.StaleAttemptBinding or err == error.SupersededByControl,
             );
+            if (faults.settlement_trace) |trace| trace.mark(.settlement_complete);
+            return final_err;
         };
+        if (faults.settlement_trace) |trace| trace.mark(.settlement_complete);
     }
 
     fn settleModelSuccessLocked(

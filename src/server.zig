@@ -754,6 +754,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_result_delay_ms), .awake) catch {};
     }
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
+    var settlement_trace = SettlementTrace.init(host, owner.binding);
     host.store.settleModelSuccess(owner.binding, &.{
         .source = response.file,
         .source_length = response.length,
@@ -770,6 +771,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         .output_read = host.faults.response_read,
         .output_import = host.faults.response_import,
         .output_commit = host.faults.response_commit,
+        .settlement_trace = settlement_trace.storeTrace(),
     }) catch |err| {
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
@@ -1006,7 +1008,9 @@ const ControlTiming = struct {
         trace.appendJsonString(self.command_key) catch return;
         trace.append(",\"kind\":") catch return;
         trace.appendJsonString(self.kind) catch return;
-        trace.appendFmt(",\"store_complete_at_ns\":\"{d}\",\"reply_complete_at_ns\":\"{d}\",\"queue_wait_ns\":\"{d}\",\"store_lock_wait_ns\":\"{d}\",\"store_service_ns\":\"{d}\",\"post_commit_reply_ns\":\"{d}\",\"host_total_ns\":\"{d}\"}}", .{
+        trace.appendFmt(",\"store_queued_at_ns\":\"{d}\",\"lock_acquired_at_ns\":\"{d}\",\"store_complete_at_ns\":\"{d}\",\"reply_complete_at_ns\":\"{d}\",\"queue_wait_ns\":\"{d}\",\"store_lock_wait_ns\":\"{d}\",\"store_service_ns\":\"{d}\",\"post_commit_reply_ns\":\"{d}\",\"host_total_ns\":\"{d}\"}}", .{
+            self.store_queued_ns,
+            self.lock_acquired_ns,
             self.store_complete_ns,
             reply_complete_ns,
             self.store_queued_ns - self.accepted_at_ns,
@@ -1016,6 +1020,28 @@ const ControlTiming = struct {
             reply_complete_ns - self.accepted_at_ns,
         }) catch return;
         writeTestTrace(self.host, &trace);
+    }
+};
+
+const SettlementTrace = struct {
+    host: *Host,
+    binding: store_module.AttemptBinding,
+
+    fn init(host: *Host, binding: store_module.AttemptBinding) SettlementTrace {
+        return .{ .host = host, .binding = binding };
+    }
+
+    fn storeTrace(self: *SettlementTrace) ?store_module.SettlementTrace {
+        if (!self.host.faults.test_phase_trace) return null;
+        return .{ .context = self, .mark_fn = markStore };
+    }
+
+    fn markStore(context: *anyopaque, phase: store_module.SettlementTracePhase) void {
+        const self: *SettlementTrace = @ptrCast(@alignCast(context));
+        traceOperation(self.host, switch (phase) {
+            .lock_acquired => "settlement_lock_acquired",
+            .settlement_complete => "settlement_complete",
+        }, self.binding);
     }
 };
 
