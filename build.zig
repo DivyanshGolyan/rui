@@ -188,6 +188,15 @@ pub fn build(b: *std.Build) void {
         "Measure macOS retry discovery, launch separation, churn, and custody",
     );
     measure_retry_step.dependOn(&measure_retry.step);
+
+    const measure_control = b.addSystemCommand(&.{"python3"});
+    measure_control.addFileArg(b.path("research/model-control/measure.py"));
+    measure_control.addArtifactArg(release);
+    const measure_control_step = b.step(
+        "measure-model-control",
+        "Measure control headroom, acknowledgment latency, and cleanup resources",
+    );
+    measure_control_step.dependOn(&measure_control.step);
 }
 
 fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget) bool {
