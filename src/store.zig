@@ -552,13 +552,21 @@ pub const SessionObservation = struct {
 };
 
 pub const ContentReader = struct {
+    pub const content_window_bytes = 64 * 1024;
+
     store: *Store,
     reference: ContentReference,
+    content_id: i64,
     active: bool = true,
 
     pub fn read(self: *ContentReader, start: u64, destination: []u8) !usize {
         std.debug.assert(self.active);
-        return self.store.readContentRange(self.reference, start, destination);
+        return self.store.readContentRange(
+            self.content_id,
+            self.reference.length,
+            start,
+            destination,
+        );
     }
 
     pub fn close(self: *ContentReader) void {
@@ -2651,24 +2659,24 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
-        _ = self.resolveContentReference(reference) catch |err| return self.fenceReadFailure(err);
-        return .{ .store = self, .reference = reference };
+        const content_id = self.resolveContentReference(reference) catch |err| return self.fenceReadFailure(err);
+        return .{ .store = self, .reference = reference, .content_id = content_id };
     }
 
     fn readContentRange(
         self: *Store,
-        reference: ContentReference,
+        content_id: i64,
+        content_length: u64,
         start: u64,
         destination: []u8,
     ) !usize {
-        if (destination.len > protocol.content_window_bytes) return error.WindowTooLarge;
+        if (destination.len > ContentReader.content_window_bytes) return error.WindowTooLarge;
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
-        const content_id = self.resolveContentReference(reference) catch |err| return self.fenceReadFailure(err);
-        if (start > reference.length) return error.RangeOutOfBounds;
-        const wanted: u64 = @min(destination.len, reference.length - start);
+        if (start > content_length) return error.RangeOutOfBounds;
+        const wanted: u64 = @min(destination.len, content_length - start);
         if (wanted == 0) return 0;
         if (start > std.math.maxInt(c_int)) return error.RangeOutOfBounds;
         var blob: ?*c.sqlite3_blob = null;
@@ -4289,6 +4297,49 @@ test "configuration answers replay without reverting newer settings" {
     first.configuration.model.value.len = 0;
     try first.configuration.model.value.set("model-c");
     try std.testing.expect(storage.configure(&first, .{}) == .conflict);
+}
+
+test "content reader owns the bounded result-delivery window" {
+    try std.testing.expectEqual(@as(usize, 4096), protocol.content_window_bytes);
+    try std.testing.expectEqual(
+        @as(usize, 64 * 1024),
+        ContentReader.content_window_bytes,
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "configure-window", "direct/window");
+    var text: [ContentReader.content_window_bytes + 17]u8 = undefined;
+    for (&text, 0..) |*byte, index| byte.* = @intCast(index % 251);
+    try submitTestMessage(
+        &storage,
+        &tmp,
+        "window-message-source",
+        "window-message",
+        "direct/window",
+        &text,
+    );
+    const reference = (try storage.observeCommand("window-message")).message.?.content;
+    var reader = try storage.openContent(reference);
+    defer reader.close();
+
+    var window: [ContentReader.content_window_bytes]u8 = undefined;
+    try std.testing.expectEqual(window.len, try reader.read(0, &window));
+    try std.testing.expectEqualSlices(u8, text[0..window.len], &window);
+    try std.testing.expectEqual(
+        @as(usize, 17),
+        try reader.read(window.len, &window),
+    );
+    try std.testing.expectEqualSlices(u8, text[window.len..], window[0..17]);
+    try std.testing.expectEqual(@as(usize, 0), try reader.read(text.len, &window));
+    try std.testing.expectError(
+        error.RangeOutOfBounds,
+        reader.read(text.len + 1, &window),
+    );
+    try std.testing.expectError(error.WindowTooLarge, reader.read(0, &text));
 }
 
 test "core preserves empty keys and Session references containing NUL" {
