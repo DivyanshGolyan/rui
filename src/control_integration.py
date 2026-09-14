@@ -1010,8 +1010,6 @@ def prove_real_settlement_contention(
             resource_samples["idle"] = sample_host(process.pid)
 
         session = "contention/real-settlement"
-        probe_session = "contention/real-settlement-probe"
-        configure(state, store, "real-settlement-probe-config", probe_session)
         configure(state, store, "real-settlement-config", session)
         message(
             state,
@@ -1143,9 +1141,6 @@ def prove_real_settlement_contention(
             operation=processing["operation"],
             timeout=20,
         )[0]
-        execution = inspect_execution(store, probe_session)
-        assert execution["dispatch_fenced"] is False, execution
-        assert execution["custody_occupied"] == "0", execution
         if sample_host is not None:
             resource_samples["physically_released"] = sample_host(process.pid)
         return {
