@@ -26,6 +26,7 @@
         "research/model-dispatch",
         "research/model-output",
         "research/model-retry",
+        "research/model-control",
         "README.md",
         "THIRD_PARTY_NOTICES.md",
     },

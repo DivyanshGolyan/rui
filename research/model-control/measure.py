@@ -95,7 +95,16 @@ def inspect_execution(binary, store, session):
 
 
 def percentile_95(values):
-    return statistics.quantiles(values, n=20)[18]
+    ordered = sorted(values)
+    return ordered[max(0, (95 * len(ordered) + 99) // 100 - 1)]
+
+
+def timing_summary(values, definition):
+    return {
+        "definition": definition,
+        "p95_ms": round(percentile_95(values), 3),
+        "maximum_ms": round(max(values), 3),
+    }
 
 
 def source_worktree_dirty(output):
@@ -226,13 +235,36 @@ def run_measurement(binary):
         stop_process(host)
         host = None
 
+        qualified = controls.prove_delivery_and_settlement_contention(
+            state,
+            sample_host=sample,
+            cleanup_delay_ms=1500,
+        )
+        timing_records = qualified["control_timings"]
+
+        def milliseconds(field):
+            return [int(record[field]) / 1_000_000 for record in timing_records]
+
+        queue_wait = milliseconds("queue_wait_ns")
+        store_lock_wait = milliseconds("store_lock_wait_ns")
+        store_service = milliseconds("store_service_ns")
+        post_commit_reply = milliseconds("post_commit_reply_ns")
+        semantic_completion = [
+            queue + lock + service
+            for queue, lock, service in zip(
+                queue_wait, store_lock_wait, store_service, strict=True
+            )
+        ]
+        qualified_samples = qualified["resource_samples"]
+
         return {
             "configurations": {
                 "idle_host": {
                     "active_capacity": 8,
                     "sample": idle,
                 },
-                "ordinary_capacity_and_control_acknowledgment": {
+                "stalled_incomplete_ingress_diagnostic": {
+                    "scope": "120 ordinary clients stopped after partial request bodies; this is retained diagnostic evidence, not the issue-175 saturated-load qualification",
                     "ordinary_connections": controls.ORDINARY_CLIENTS,
                     "control_commands": len(latencies),
                     "p95_acknowledgment_ms": round(percentile_95(latencies), 3),
@@ -269,6 +301,55 @@ def run_measurement(binary):
                         active, cancelled_and_drained
                     ),
                     "provider_disconnects": endpoint.counts()[1],
+                },
+                "captured_report_and_sealed_settlement_qualification": {
+                    "scope": "120 fully received inspections held after report capture, eight valid provider responses released toward sealed validation/import, and eight simultaneous Session stops using protected control places",
+                    "ordinary_connections": controls.ORDINARY_CLIENTS,
+                    "active_model_responses": 8,
+                    "concurrent_control_commands": 8,
+                    "cleanup_delay_ms": 1500,
+                    "qualification_limit_ms": 1000,
+                    "total_durable_acknowledgment": timing_summary(
+                        qualified["acknowledgment_ms"],
+                        "caller start through receipt of the complete durable Session-stop reply",
+                    ),
+                    "control_queue_wait": timing_summary(
+                        queue_wait,
+                        "Host accept through parsed control queued at the Store owner",
+                    ),
+                    "store_lock_wait": timing_summary(
+                        store_lock_wait,
+                        "Store call entry through acquisition of its single-writer mutex",
+                    ),
+                    "store_service": timing_summary(
+                        store_service,
+                        "Store mutex acquisition through committed canonical answer",
+                    ),
+                    "post_commit_reply": timing_summary(
+                        post_commit_reply,
+                        "canonical commit through completion of the Host reply write attempt",
+                    ),
+                    "semantic_completion": timing_summary(
+                        semantic_completion,
+                        "Host accept through the Session-stop commit that cancels the selected Turn",
+                    ),
+                    "physical_custody_release": timing_summary(
+                        qualified["physical_release_ms"],
+                        "Session-stop commit through cleanup completion and custody-slot release",
+                    ),
+                    "resources": {
+                        **qualified_samples,
+                        "captured_load_delta_from_idle": resource_delta(
+                            qualified_samples["idle"],
+                            qualified_samples[
+                                "reports_captured_and_responses_held"
+                            ],
+                        ),
+                        "retained_delta_after_physical_release": resource_delta(
+                            qualified_samples["idle"],
+                            qualified_samples["physically_released"],
+                        ),
+                    },
                 },
             }
         }

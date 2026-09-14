@@ -39,6 +39,18 @@ pub const Faults = struct {
     output_import: bool = false,
     output_commit: bool = false,
     rollback_failure: bool = false,
+    control_trace: ?ControlTrace = null,
+};
+
+pub const ControlTracePhase = enum { lock_acquired, store_complete };
+
+pub const ControlTrace = struct {
+    context: *anyopaque,
+    mark_fn: *const fn (*anyopaque, ControlTracePhase) void,
+
+    fn mark(self: ControlTrace, phase: ControlTracePhase) void {
+        self.mark_fn(self.context, phase);
+    }
 };
 
 pub const AcceptedConfiguration = struct {
@@ -1055,11 +1067,16 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return .infrastructure_failure;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return .infrastructure_failure;
-        return self.stopSessionLocked(command, faults) catch {
-            self.finishTransactionFailure(faults);
-            return .infrastructure_failure;
+        if (faults.control_trace) |trace| trace.mark(.lock_acquired);
+        const result: SessionStopReply = result: {
+            if (self.fenced.load(.acquire)) break :result .infrastructure_failure;
+            break :result self.stopSessionLocked(command, faults) catch {
+                self.finishTransactionFailure(faults);
+                break :result .infrastructure_failure;
+            };
         };
+        if (faults.control_trace) |trace| trace.mark(.store_complete);
+        return result;
     }
 
     fn stopSessionLocked(
@@ -1213,11 +1230,16 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return .infrastructure_failure;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return .infrastructure_failure;
-        return self.interruptModelLocked(command, faults) catch {
-            self.finishTransactionFailure(faults);
-            return .infrastructure_failure;
+        if (faults.control_trace) |trace| trace.mark(.lock_acquired);
+        const result: ModelInterruptionReply = result: {
+            if (self.fenced.load(.acquire)) break :result .infrastructure_failure;
+            break :result self.interruptModelLocked(command, faults) catch {
+                self.finishTransactionFailure(faults);
+                break :result .infrastructure_failure;
+            };
         };
+        if (faults.control_trace) |trace| trace.mark(.store_complete);
+        return result;
     }
 
     fn interruptModelLocked(
