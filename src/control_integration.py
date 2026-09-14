@@ -995,10 +995,11 @@ def prove_real_settlement_contention(
     inspections = []
     try:
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
+        inspection_delay_ms = 20_000 if sample_host is not None else 8_000
         extra = [
             "--test-phase-trace",
             "--test-inspection-reply-delay-ms",
-            "8000",
+            str(inspection_delay_ms),
         ]
         if cleanup_delay_ms:
             extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
@@ -1109,7 +1110,12 @@ def prove_real_settlement_contention(
             resource_samples["controls_acknowledged"] = sample_host(process.pid)
         with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
             responses = list(
-                pool.map(lambda connection: read_http_response(connection, 12), inspections)
+                pool.map(
+                    lambda connection: read_http_response(
+                        connection, inspection_delay_ms / 1000 + 5
+                    ),
+                    inspections,
+                )
             )
         for head, body in responses:
             assert b" 200 " in head, (head, body)
