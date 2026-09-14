@@ -4,7 +4,7 @@ Latifa (formerly OnePage) is a resource-bounded, crash-resumable local runtime f
 
 ## Status
 
-The source implements the first five redesigned runtime slices: an explicitly started Host, exclusive Store ownership, direct configuration/message clients, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, immutable ordered message admission, completed text-model Turns and conserved model retries after temporary failure or Host loss. Core selects an eligible queued prefix, freezes its historical view, launches disk-backed Responses Attempts, captures and validates complete SSE output, and atomically saves ordered private provider output with the public answer. The answer references validated text ranges in those items, so delivery decodes sequentially without retaining a second full payload. The original message key reads its complete answer after client or Host restart. Replacement Attempts retain the same historical request and remaining allowance; later Turns reconstruct the Session from canonical host input and private provider output without relying on provider-side storage. Every Workflow, tool, permission, stop and interruption surface enters in later implementation issues.
+The source implements the first six redesigned runtime slices: an explicitly started Host, exclusive Store ownership, direct configuration/message/control clients, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, immutable ordered message admission, completed text-model Turns, conserved model retries after temporary failure or Host loss, Session stop and exact Model Interruption. Core selects an eligible queued prefix, freezes its historical view, launches disk-backed Responses Attempts, captures and validates complete SSE output, and atomically saves ordered private provider output with the public answer. The answer references validated text ranges in those items, so delivery decodes sequentially without retaining a second full payload. The original message key reads its complete answer after client or Host restart. Replacement Attempts retain the same historical request and remaining allowance; later Turns reconstruct the Session from canonical host input and private provider output without relying on provider-side storage. A stop freezes its active-Turn and admission-cutoff selection; an exact interruption resolves only the supplied active model Operation. Both recover their original answer after lost replies and promptly cancel superseded local transport. Every Workflow, tool and permission surface enters in later implementation issues.
 
 The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. The current build cross-compiles all four targets. Runtime and resource verification uses the available Apple Silicon Mac; the other targets remain compile-only evidence until exercised on their platforms.
 
@@ -85,17 +85,46 @@ Submit a complete message from a file or from stdin. Acceptance identifies its i
   --key message-1
 ```
 
+Stop a Session with a fresh durable key. This acknowledges the frozen selection; retrying the captured record recovers that same selection rather than stopping newer work.
+
+```sh
+./zig-out/bin/latifa stop-session \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/stop.json \
+  --key stop-1 \
+  --session direct/reviewer
+
+./zig-out/bin/latifa retry \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/stop.json \
+  --kind session-stop
+```
+
+Interrupt one exact active model Operation using the Turn and Operation identities returned by message observation. If independently admitted input is already waiting, it may continue the same Turn through a new Operation; otherwise the Turn is cancelled.
+
+```sh
+./zig-out/bin/latifa interrupt-model \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/interruption.json \
+  --key interruption-1 \
+  --session direct/reviewer \
+  --turn 1 \
+  --operation 1
+```
+
 The applicable gates are:
 
 ```sh
 zig build check
 zig build cross-check
 zig build dispatch-integration
+zig build control-integration
 zig build measure-admission
 zig build measure-message-admission
 zig build measure-model-dispatch
 zig build measure-model-output
 zig build measure-model-retry
+zig build measure-model-control
 ```
 
 The measurement steps are opt-in macOS resource runs. Provider authentication, structured-answer validation, tool execution and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

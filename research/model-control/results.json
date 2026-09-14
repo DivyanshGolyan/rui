@@ -1,0 +1,121 @@
+{
+  "scope": "issue-175 production Session stop and exact model interruption",
+  "status": "passed",
+  "tested_revision": "86fa5ef7fb06680d8eddb979f1c715baf5038dd0",
+  "working_tree_dirty": false,
+  "binary_sha256": "616d61645cc4c6f72ce05522b1ca5dda24fb8167d761004cc545e9ec619f35e1",
+  "zig": "0.16.0",
+  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+  "configurations": {
+    "idle_host": {
+      "active_capacity": 8,
+      "sample": {
+        "rss_bytes": 8503296,
+        "virtual_bytes": 420256497664,
+        "physical_footprint_bytes": 3965952,
+        "lifetime_peak_physical_footprint_bytes": 4129792,
+        "open_descriptor_rows": 15,
+        "open_unix_client_sockets": 1
+      }
+    },
+    "ordinary_capacity_and_control_acknowledgment": {
+      "ordinary_connections": 120,
+      "control_commands": 50,
+      "p95_acknowledgment_ms": 36.468,
+      "maximum_acknowledgment_ms": 38.483,
+      "qualification_limit_ms": 1000,
+      "before_controls": {
+        "rss_bytes": 56508416,
+        "virtual_bytes": 421078663168,
+        "physical_footprint_bytes": 52428800,
+        "lifetime_peak_physical_footprint_bytes": 52428800,
+        "open_descriptor_rows": 135,
+        "open_unix_client_sockets": 121
+      },
+      "after_controls": {
+        "rss_bytes": 58114048,
+        "virtual_bytes": 421089148928,
+        "physical_footprint_bytes": 53477376,
+        "lifetime_peak_physical_footprint_bytes": 53477376,
+        "open_descriptor_rows": 135,
+        "open_unix_client_sockets": 121
+      },
+      "resource_delta_from_idle": {
+        "rss_bytes": 48005120,
+        "virtual_bytes": 822165504,
+        "physical_footprint_bytes": 48462848,
+        "open_descriptor_rows": 120,
+        "open_unix_client_sockets": 120
+      },
+      "second_saturation_round": {
+        "rss_bytes": 60473344,
+        "virtual_bytes": 421089148928,
+        "physical_footprint_bytes": 31457280,
+        "lifetime_peak_physical_footprint_bytes": 53477376,
+        "open_descriptor_rows": 135,
+        "open_unix_client_sockets": 121
+      },
+      "retained_after_first_drain": {
+        "rss_bytes": 44351488,
+        "virtual_bytes": 420957421568,
+        "physical_footprint_bytes": 14680064,
+        "lifetime_peak_physical_footprint_bytes": 53477376,
+        "open_descriptor_rows": 15,
+        "open_unix_client_sockets": 1
+      },
+      "retained_after_second_drain": {
+        "rss_bytes": 46710784,
+        "virtual_bytes": 420957421568,
+        "physical_footprint_bytes": 10485760,
+        "lifetime_peak_physical_footprint_bytes": 53477376,
+        "open_descriptor_rows": 15,
+        "open_unix_client_sockets": 1
+      },
+      "retained_delta_from_idle": {
+        "rss_bytes": 38207488,
+        "virtual_bytes": 700923904,
+        "physical_footprint_bytes": 6519808,
+        "open_descriptor_rows": 0,
+        "open_unix_client_sockets": 0
+      },
+      "second_drain_delta_from_first": {
+        "rss_bytes": 2359296,
+        "virtual_bytes": 0,
+        "physical_footprint_bytes": -4194304,
+        "open_descriptor_rows": 0,
+        "open_unix_client_sockets": 0
+      }
+    },
+    "live_model_cancellation": {
+      "active_capacity": 8,
+      "active_model_streams": 8,
+      "exact_interruption_acknowledgment_ms": 31.105,
+      "session_stop_p95_acknowledgment_ms": 34.567,
+      "qualification_limit_ms": 1000,
+      "before_controls": {
+        "rss_bytes": 11059200,
+        "virtual_bytes": 420688035840,
+        "physical_footprint_bytes": 6587392,
+        "lifetime_peak_physical_footprint_bytes": 6751232,
+        "open_descriptor_rows": 47,
+        "open_unix_client_sockets": 1
+      },
+      "after_cleanup": {
+        "rss_bytes": 11255808,
+        "virtual_bytes": 420831690752,
+        "physical_footprint_bytes": 6801408,
+        "lifetime_peak_physical_footprint_bytes": 6965248,
+        "open_descriptor_rows": 15,
+        "open_unix_client_sockets": 1
+      },
+      "resource_delta_after_cleanup": {
+        "rss_bytes": 196608,
+        "virtual_bytes": 143654912,
+        "physical_footprint_bytes": 214016,
+        "open_descriptor_rows": -32,
+        "open_unix_client_sockets": 0
+      },
+      "provider_disconnects": 8
+    }
+  }
+}
