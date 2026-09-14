@@ -98,6 +98,18 @@ def percentile_95(values):
     return statistics.quantiles(values, n=20)[18]
 
 
+def source_worktree_dirty(output):
+    ignored = None
+    try:
+        ignored = str(output.resolve().relative_to(ROOT))
+    except ValueError:
+        pass
+    lines = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"], text=True
+    ).splitlines()
+    return any(line[3:] != ignored for line in lines)
+
+
 def run_measurement(binary):
     controls.LATIFA = binary
     controls.ROOT = ROOT
@@ -286,7 +298,7 @@ def main():
         "scope": "issue-175 production Session stop and exact model interruption",
         "status": "passed",
         "tested_revision": command("git", "rev-parse", "HEAD"),
-        "working_tree_dirty": bool(command("git", "status", "--porcelain")),
+        "working_tree_dirty": source_worktree_dirty(args.output),
         "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
         "zig": command("zig", "version"),
         "platform": command("uname", "-a"),
