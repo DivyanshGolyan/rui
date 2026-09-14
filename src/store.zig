@@ -6,16 +6,20 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 8;
+pub const schema_version: u32 = 9;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const runnable_probe_sql =
     "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending " ++
-    "WHERE m.turn_id IS NULL AND (NOT EXISTS(" ++
+    "WHERE m.turn_id IS NULL AND NOT EXISTS(" ++
+    " SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
+    " AND m.admission_id<=stopped.admission_cutoff" ++
+    ") AND (NOT EXISTS(" ++
     " SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL" ++
     ") OR EXISTS(" ++
     " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
-    " WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL AND current.resolution_code='continued'" ++
+    " WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
+    " AND current.resolution_code IN ('continued','interrupted')" ++
     ")) LIMIT 1";
 const continuation_risk_sql =
     "SELECT 1 FROM model_output_item WHERE session_ref=?1 UNION ALL " ++
@@ -91,7 +95,7 @@ pub const MessageReply = union(enum) {
     infrastructure_failure,
 };
 
-pub const AdmissionKind = enum { configure, message };
+pub const CommandKind = enum { configure, message, session_stop, model_interruption };
 
 const StoredAnswer = struct {
     accepted: bool,
@@ -102,12 +106,59 @@ const StoredAnswer = struct {
 
 pub const CommandObservation = struct {
     status: enum { absent, accepted, rejected },
-    kind: AdmissionKind = .configure,
+    kind: CommandKind = .configure,
     target: protocol.Bounded(protocol.max_session_bytes) = .{},
     code: protocol.Bounded(96) = .{},
     revision: u64 = 0,
     created: bool = false,
     message: ?MessageObservation = null,
+    session_stop: ?SessionStopObservation = null,
+    model_interruption: ?ModelInterruptionTarget = null,
+};
+
+pub const SessionStopSelection = struct {
+    selected_turn_id: ?u64 = null,
+    admission_cutoff: u64,
+};
+
+pub const SessionStopObservation = struct {
+    selection: SessionStopSelection,
+    completion: enum { pending, completed },
+};
+
+pub const ModelInterruptionTarget = struct {
+    session: protocol.Bounded(protocol.max_session_bytes),
+    turn_id: u64,
+    operation_id: u64,
+};
+
+pub const SessionStopRejection = enum { invalid_session_reference, unknown_session };
+
+pub const SessionStopReply = union(enum) {
+    accepted: struct {
+        replayed: bool,
+        selection: SessionStopSelection,
+        interrupted_operation_id: ?u64 = null,
+    },
+    rejected: struct { replayed: bool, code: SessionStopRejection },
+    conflict,
+    infrastructure_failure,
+};
+
+pub const ModelInterruptionRejection = enum {
+    invalid_session_reference,
+    invalid_target,
+    unknown_session,
+    unknown_operation,
+    target_mismatch,
+    operation_resolved,
+};
+
+pub const ModelInterruptionReply = union(enum) {
+    accepted: struct { replayed: bool },
+    rejected: struct { replayed: bool, code: ModelInterruptionRejection },
+    conflict,
+    infrastructure_failure,
 };
 
 pub const ContentReference = struct {
@@ -126,10 +177,15 @@ pub const AcceptedMessageQueue = struct {
 
     pub const State = union(enum) {
         queued,
+        excluded: struct { code: protocol.Bounded(96) },
         processing: AttemptBinding,
         completed: struct {
             binding: AttemptBinding,
             answer: ContentReference,
+        },
+        cancelled: struct {
+            binding: AttemptBinding,
+            code: protocol.Bounded(96),
         },
         failed: struct {
             binding: AttemptBinding,
@@ -991,6 +1047,344 @@ pub const Store = struct {
         } };
     }
 
+    pub fn stopSession(
+        self: *Store,
+        command: *const protocol.SessionStopCommand,
+        faults: Faults,
+    ) SessionStopReply {
+        if (self.fenced.load(.acquire)) return .infrastructure_failure;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return .infrastructure_failure;
+        return self.stopSessionLocked(command, faults) catch {
+            self.finishTransactionFailure(faults);
+            return .infrastructure_failure;
+        };
+    }
+
+    fn stopSessionLocked(
+        self: *Store,
+        command: *const protocol.SessionStopCommand,
+        faults: Faults,
+    ) !SessionStopReply {
+        try exec(self.database, "BEGIN IMMEDIATE");
+        const digest = command.semanticDigest();
+        if (try self.readExistingCommand(command.key.slice())) |existing| {
+            try exec(self.database, "ROLLBACK");
+            if (existing.kind != .session_stop or
+                !existing.target.eql(command.session.slice()) or
+                !std.mem.eql(u8, &existing.digest, &digest)) return .conflict;
+            if (!existing.accepted) return .{ .rejected = .{
+                .replayed = true,
+                .code = std.meta.stringToEnum(SessionStopRejection, existing.code.slice()) orelse
+                    return error.CorruptStore,
+            } };
+            const selection = try self.readSessionStopSelection(command.key.slice());
+            return .{ .accepted = .{
+                .replayed = true,
+                .selection = selection,
+                .interrupted_operation_id = try self.readInterruptedOperation(command.key.slice()),
+            } };
+        }
+
+        if (command.session.len == 0) {
+            return self.saveSessionStopRejection(command, &digest, .invalid_session_reference, faults);
+        }
+        if (try self.readSession(command.session.slice()) == null) {
+            return self.saveSessionStopRejection(command, &digest, .unknown_session, faults);
+        }
+
+        const cutoff_statement = try prepare(
+            self.database,
+            "SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1",
+        );
+        defer _ = c.sqlite3_finalize(cutoff_statement);
+        try bindText(cutoff_statement, 1, command.session.slice());
+        if (c.sqlite3_step(cutoff_statement) != c.SQLITE_ROW) return error.StopSelectionFailed;
+        const cutoff_value = c.sqlite3_column_int64(cutoff_statement, 0);
+        if (cutoff_value < 0) return error.CorruptStore;
+
+        const active_statement = try prepare(
+            self.database,
+            "SELECT t.turn_id,t.operation_id,o.resolution_code FROM turn t " ++
+                "JOIN model_operation o ON o.operation_id=t.operation_id " ++
+                "WHERE t.session_ref=?1 AND t.outcome_code IS NULL",
+        );
+        defer _ = c.sqlite3_finalize(active_statement);
+        try bindText(active_statement, 1, command.session.slice());
+        const active_result = c.sqlite3_step(active_statement);
+        var selected_turn_id: ?u64 = null;
+        var current_operation_id: ?u64 = null;
+        var operation_unresolved = false;
+        if (active_result == c.SQLITE_ROW) {
+            const turn_value = c.sqlite3_column_int64(active_statement, 0);
+            const operation_value = c.sqlite3_column_int64(active_statement, 1);
+            if (turn_value <= 0 or operation_value <= 0) return error.CorruptStore;
+            selected_turn_id = @intCast(turn_value);
+            current_operation_id = @intCast(operation_value);
+            operation_unresolved = c.sqlite3_column_type(active_statement, 2) == c.SQLITE_NULL;
+        } else if (active_result != c.SQLITE_DONE) return error.StopSelectionFailed;
+
+        try self.insertCommand(
+            command.key.slice(),
+            .session_stop,
+            command.session.slice(),
+            &digest,
+            null,
+            null,
+            .{ .accepted = true },
+        );
+        {
+            const insert = try prepare(
+                self.database,
+                "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) VALUES(?1,?2,?3,?4)",
+            );
+            defer _ = c.sqlite3_finalize(insert);
+            try bindText(insert, 1, command.key.slice());
+            try bindText(insert, 2, command.session.slice());
+            try bindNullableU64(insert, 3, selected_turn_id);
+            try bindI64(insert, 4, cutoff_value);
+            try expectDone(insert);
+        }
+        var interrupted_operation_id: ?u64 = null;
+        if (selected_turn_id) |turn_id| {
+            if (operation_unresolved) {
+                const update_operation = try prepare(
+                    self.database,
+                    "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='interrupted'," ++
+                        "interrupted_by_command_key=?2 WHERE operation_id=?1 AND resolution_code IS NULL",
+                );
+                defer _ = c.sqlite3_finalize(update_operation);
+                try bindU64(update_operation, 1, current_operation_id.?);
+                try bindText(update_operation, 2, command.key.slice());
+                try expectDone(update_operation);
+                if (c.sqlite3_changes(self.database) != 1) return error.StopSelectionChanged;
+                interrupted_operation_id = current_operation_id;
+            }
+            const update_turn = try prepare(
+                self.database,
+                "UPDATE turn SET outcome_code='cancelled' WHERE turn_id=?1 AND outcome_code IS NULL",
+            );
+            defer _ = c.sqlite3_finalize(update_turn);
+            try bindU64(update_turn, 1, turn_id);
+            try expectDone(update_turn);
+            if (c.sqlite3_changes(self.database) != 1) return error.StopSelectionChanged;
+        }
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try exec(self.database, "COMMIT");
+        return .{ .accepted = .{
+            .replayed = false,
+            .selection = .{
+                .selected_turn_id = selected_turn_id,
+                .admission_cutoff = @intCast(cutoff_value),
+            },
+            .interrupted_operation_id = interrupted_operation_id,
+        } };
+    }
+
+    fn saveSessionStopRejection(
+        self: *Store,
+        command: *const protocol.SessionStopCommand,
+        digest: *const [32]u8,
+        code: SessionStopRejection,
+        faults: Faults,
+    ) !SessionStopReply {
+        var answer = StoredAnswer{ .accepted = false };
+        try answer.code.set(@tagName(code));
+        try self.insertCommand(
+            command.key.slice(),
+            .session_stop,
+            command.session.slice(),
+            digest,
+            null,
+            null,
+            answer,
+        );
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try exec(self.database, "COMMIT");
+        return .{ .rejected = .{ .replayed = false, .code = code } };
+    }
+
+    pub fn interruptModel(
+        self: *Store,
+        command: *const protocol.ModelInterruptionCommand,
+        faults: Faults,
+    ) ModelInterruptionReply {
+        if (self.fenced.load(.acquire)) return .infrastructure_failure;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return .infrastructure_failure;
+        return self.interruptModelLocked(command, faults) catch {
+            self.finishTransactionFailure(faults);
+            return .infrastructure_failure;
+        };
+    }
+
+    fn interruptModelLocked(
+        self: *Store,
+        command: *const protocol.ModelInterruptionCommand,
+        faults: Faults,
+    ) !ModelInterruptionReply {
+        try exec(self.database, "BEGIN IMMEDIATE");
+        const digest = command.semanticDigest();
+        if (try self.readExistingCommand(command.key.slice())) |existing| {
+            try exec(self.database, "ROLLBACK");
+            if (existing.kind != .model_interruption or
+                !existing.target.eql(command.session.slice()) or
+                !std.mem.eql(u8, &existing.digest, &digest)) return .conflict;
+            const saved_target = try self.readModelInterruptionTarget(command.key.slice());
+            if (!saved_target.session.eql(command.session.slice()) or
+                saved_target.turn_id != command.turn_id or
+                saved_target.operation_id != command.operation_id) return error.CorruptStore;
+            if (existing.accepted) return .{ .accepted = .{ .replayed = true } };
+            return .{ .rejected = .{
+                .replayed = true,
+                .code = std.meta.stringToEnum(ModelInterruptionRejection, existing.code.slice()) orelse
+                    return error.CorruptStore,
+            } };
+        }
+
+        var rejection: ?ModelInterruptionRejection = null;
+        if (command.session.len == 0) {
+            rejection = .invalid_session_reference;
+        } else if (command.turn_id == 0 or command.operation_id == 0 or
+            command.turn_id > std.math.maxInt(i64) or command.operation_id > std.math.maxInt(i64))
+        {
+            rejection = .invalid_target;
+        } else if (try self.readSession(command.session.slice()) == null) {
+            rejection = .unknown_session;
+        }
+
+        if (rejection == null) {
+            const operation = try prepare(
+                self.database,
+                "SELECT turn_id,session_ref,resolution_code FROM model_operation WHERE operation_id=?1",
+            );
+            defer _ = c.sqlite3_finalize(operation);
+            try bindU64(operation, 1, command.operation_id);
+            const result = c.sqlite3_step(operation);
+            if (result == c.SQLITE_DONE) {
+                rejection = .unknown_operation;
+            } else if (result != c.SQLITE_ROW) {
+                return error.InterruptionTargetReadFailed;
+            } else {
+                const turn_value = c.sqlite3_column_int64(operation, 0);
+                var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+                try readText(operation, 1, &session);
+                if (turn_value <= 0 or @as(u64, @intCast(turn_value)) != command.turn_id or
+                    !session.eql(command.session.slice()))
+                {
+                    rejection = .target_mismatch;
+                } else if (c.sqlite3_column_type(operation, 2) != c.SQLITE_NULL) {
+                    rejection = .operation_resolved;
+                }
+            }
+        }
+
+        if (rejection) |code| {
+            return self.saveModelInterruptionAnswer(command, &digest, false, @tagName(code), faults);
+        }
+
+        const current_turn = try prepare(
+            self.database,
+            "SELECT 1 FROM turn WHERE turn_id=?1 AND session_ref=?2 AND operation_id=?3 AND outcome_code IS NULL",
+        );
+        defer _ = c.sqlite3_finalize(current_turn);
+        try bindU64(current_turn, 1, command.turn_id);
+        try bindText(current_turn, 2, command.session.slice());
+        try bindU64(current_turn, 3, command.operation_id);
+        const current_result = c.sqlite3_step(current_turn);
+        if (current_result == c.SQLITE_DONE) {
+            return self.saveModelInterruptionAnswer(
+                command,
+                &digest,
+                false,
+                @tagName(ModelInterruptionRejection.target_mismatch),
+                faults,
+            );
+        }
+        if (current_result != c.SQLITE_ROW) return error.InterruptionTargetReadFailed;
+
+        try self.insertModelInterruptionCommand(command, &digest, .{ .accepted = true });
+        {
+            const update = try prepare(
+                self.database,
+                "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='interrupted'," ++
+                    "interrupted_by_command_key=?2 WHERE operation_id=?1 AND resolution_code IS NULL",
+            );
+            defer _ = c.sqlite3_finalize(update);
+            try bindU64(update, 1, command.operation_id);
+            try bindText(update, 2, command.key.slice());
+            try expectDone(update);
+            if (c.sqlite3_changes(self.database) != 1) return error.InterruptionTargetChanged;
+        }
+        if (!try self.hasApplicablePendingMessage(command.session.slice())) {
+            const settle_turn = try prepare(
+                self.database,
+                "UPDATE turn SET outcome_code='cancelled' WHERE turn_id=?1 AND operation_id=?2 AND outcome_code IS NULL",
+            );
+            defer _ = c.sqlite3_finalize(settle_turn);
+            try bindU64(settle_turn, 1, command.turn_id);
+            try bindU64(settle_turn, 2, command.operation_id);
+            try expectDone(settle_turn);
+            if (c.sqlite3_changes(self.database) != 1) return error.InterruptionTargetChanged;
+        }
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try exec(self.database, "COMMIT");
+        return .{ .accepted = .{ .replayed = false } };
+    }
+
+    fn saveModelInterruptionAnswer(
+        self: *Store,
+        command: *const protocol.ModelInterruptionCommand,
+        digest: *const [32]u8,
+        accepted: bool,
+        code: []const u8,
+        faults: Faults,
+    ) !ModelInterruptionReply {
+        var answer = StoredAnswer{ .accepted = accepted };
+        try answer.code.set(code);
+        try self.insertModelInterruptionCommand(command, digest, answer);
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try exec(self.database, "COMMIT");
+        if (accepted) return .{ .accepted = .{ .replayed = false } };
+        return .{ .rejected = .{
+            .replayed = false,
+            .code = std.meta.stringToEnum(ModelInterruptionRejection, code) orelse unreachable,
+        } };
+    }
+
+    fn insertModelInterruptionCommand(
+        self: *Store,
+        command: *const protocol.ModelInterruptionCommand,
+        digest: *const [32]u8,
+        answer: StoredAnswer,
+    ) !void {
+        try self.insertCommand(
+            command.key.slice(),
+            .model_interruption,
+            command.session.slice(),
+            digest,
+            null,
+            null,
+            answer,
+        );
+        var turn_buffer: [20]u8 = undefined;
+        const turn = try std.fmt.bufPrint(&turn_buffer, "{d}", .{command.turn_id});
+        var operation_buffer: [20]u8 = undefined;
+        const operation = try std.fmt.bufPrint(&operation_buffer, "{d}", .{command.operation_id});
+        const insert = try prepare(
+            self.database,
+            "INSERT INTO model_interruption_command(command_key,session_ref,turn_id,operation_id) VALUES(?1,?2,?3,?4)",
+        );
+        defer _ = c.sqlite3_finalize(insert);
+        try bindText(insert, 1, command.key.slice());
+        try bindText(insert, 2, command.session.slice());
+        try bindText(insert, 3, turn);
+        try bindText(insert, 4, operation);
+        try expectDone(insert);
+    }
+
     pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
@@ -1020,6 +1414,22 @@ pub const Store = struct {
                     command.accepted,
                 ) catch |err| return self.fenceReadFailure(err),
             };
+        } else if (command.kind == .session_stop and command.accepted) {
+            const selection = self.readSessionStopSelection(key) catch |err|
+                return self.fenceReadFailure(err);
+            observation.session_stop = .{
+                .selection = selection,
+                .completion = if (selection.selected_turn_id) |turn_id|
+                    if (self.turnIsComplete(turn_id) catch |err| return self.fenceReadFailure(err))
+                        .completed
+                    else
+                        .pending
+                else
+                    .completed,
+            };
+        } else if (command.kind == .model_interruption) {
+            observation.model_interruption = self.readModelInterruptionTarget(key) catch |err|
+                return self.fenceReadFailure(err);
         }
         return observation;
     }
@@ -1033,7 +1443,9 @@ pub const Store = struct {
     ) !?AcceptedMessageQueue {
         const statement = try prepare(
             self.database,
-            "SELECT m.session_ref,m.content_id,m.admission_id,m.turn_id,t.operation_id,t.outcome_code,o.attempt_ordinal,t.outcome_content_id " ++
+            "SELECT m.session_ref,m.content_id,m.admission_id,m.turn_id,t.operation_id,t.outcome_code,o.attempt_ordinal,t.outcome_content_id," ++
+                "EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
+                "AND m.admission_id<=stopped.admission_cutoff) " ++
                 "FROM message_admission m " ++
                 "LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
                 "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
@@ -1053,8 +1465,14 @@ pub const Store = struct {
         const admission_id = c.sqlite3_column_int64(statement, 2);
         if (admission_id <= 0) return error.CorruptStore;
         const turn_id = try readNullablePositiveI64(statement, 3);
-        if (turn_id == null)
+        if (turn_id == null) {
+            if (c.sqlite3_column_int(statement, 8) != 0) {
+                var code: protocol.Bounded(96) = .{};
+                try code.set("session_stopped");
+                return .{ .admission_id = @intCast(admission_id), .state = .{ .excluded = .{ .code = code } } };
+            }
             return .{ .admission_id = @intCast(admission_id), .state = .queued };
+        }
         const binding = AttemptBinding{
             .turn_id = @intCast(turn_id.?),
             .operation_id = @intCast(try readNullablePositiveI64(statement, 4) orelse
@@ -1079,6 +1497,13 @@ pub const Store = struct {
                 } },
             };
         }
+        if (outcome.eql("cancelled")) {
+            if (c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL) return error.CorruptStore;
+            return .{
+                .admission_id = @intCast(admission_id),
+                .state = .{ .cancelled = .{ .binding = binding, .code = outcome } },
+            };
+        }
         if (outcome.len == 0 or c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL)
             return error.CorruptStore;
         return .{
@@ -1094,13 +1519,18 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         const statement = try prepare(
             self.database,
-            "SELECT t.outcome_code,t.outcome_content_id FROM core_command command " ++
+            "SELECT t.outcome_code,t.outcome_content_id,EXISTS(" ++
+                "SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
+                "AND m.admission_id<=stopped.admission_cutoff) FROM core_command command " ++
                 "JOIN message_admission m ON m.command_key=command.command_key " ++
                 "LEFT JOIN turn t ON t.turn_id=m.turn_id WHERE command.command_key=?1 AND command.kind=2 AND command.accepted=1",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, key);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ResultNotFound;
+        if (c.sqlite3_column_int(statement, 2) != 0 and c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) {
+            return error.ResultFailed;
+        }
         if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return error.ResultNotReady;
         var outcome: protocol.Bounded(96) = .{};
         try readText(statement, 0, &outcome);
@@ -1161,13 +1591,18 @@ pub const Store = struct {
             self.database,
             "SELECT m.session_ref,min(m.admission_id),max(m.admission_id),count(*),s.revision,s.next_position," ++
                 "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
-                "WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL AND current.resolution_code='continued') " ++
+                "WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
+                "AND current.resolution_code IN ('continued','interrupted')) " ++
                 "FROM message_admission m JOIN session s ON s.session_ref=m.session_ref " ++
-                "WHERE m.turn_id IS NULL AND (NOT EXISTS(" ++
+                "WHERE m.turn_id IS NULL AND NOT EXISTS(" ++
+                " SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
+                " AND m.admission_id<=stopped.admission_cutoff" ++
+                ") AND (NOT EXISTS(" ++
                 " SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL" ++
                 ") OR EXISTS(" ++
                 " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
-                " WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL AND current.resolution_code='continued'" ++
+                " WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
+                " AND current.resolution_code IN ('continued','interrupted')" ++
                 ")) GROUP BY m.session_ref ORDER BY min(m.admission_id) LIMIT 1",
         );
         defer _ = c.sqlite3_finalize(select);
@@ -1219,7 +1654,9 @@ pub const Store = struct {
         {
             const bind = try prepare(
                 self.database,
-                "UPDATE message_admission SET turn_id=?1 WHERE session_ref=?2 AND turn_id IS NULL AND admission_id<=?3",
+                "UPDATE message_admission SET turn_id=?1 WHERE session_ref=?2 AND turn_id IS NULL AND admission_id<=?3 " ++
+                    "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=message_admission.session_ref " ++
+                    "AND message_admission.admission_id<=stopped.admission_cutoff)",
             );
             defer _ = c.sqlite3_finalize(bind);
             try bindU64(bind, 1, turn_id);
@@ -1434,17 +1871,18 @@ pub const Store = struct {
     fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
         const statement = try prepare(
             self.database,
-            "SELECT turn_id,attempt_ordinal,resolution_code FROM model_operation WHERE operation_id=?1",
+            "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key " ++
+                "FROM model_operation WHERE operation_id=?1",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, binding.operation_id);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW or
             c.sqlite3_column_int64(statement, 0) != binding.turn_id or
-            c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal or
-            c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL)
-        {
+            c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
             return error.StaleAttemptBinding;
-        }
+        if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return;
+        if (c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL) return error.SupersededByControl;
+        return error.StaleAttemptBinding;
     }
 
     fn readHistoricalSettings(self: *Store, view: *HistoricalView) !HistoricalSettings {
@@ -1452,7 +1890,7 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.readHistoricalSettingsLocked(view) catch |err| switch (err) {
-            error.StaleAttemptBinding => err,
+            error.StaleAttemptBinding, error.SupersededByControl => err,
             else => self.fenceReadFailure(err),
         };
     }
@@ -1492,7 +1930,7 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.readHistoricalEntryLocked(view, after_position) catch |err| switch (err) {
-            error.StaleAttemptBinding => err,
+            error.StaleAttemptBinding, error.SupersededByControl => err,
             else => self.fenceReadFailure(err),
         };
     }
@@ -1544,6 +1982,26 @@ pub const Store = struct {
         return self.fenced.load(.acquire);
     }
 
+    pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !bool {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const statement = prepare(
+            self.database,
+            "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
+        ) catch |err| return self.fenceReadFailure(err);
+        defer _ = c.sqlite3_finalize(statement);
+        bindU64(statement, 1, binding.operation_id) catch |err| return self.fenceReadFailure(err);
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) return false;
+        if (step != c.SQLITE_ROW) return self.fenceReadFailure(error.OperationReadFailed);
+        if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
+            c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
+            return false;
+        return c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL;
+    }
+
     pub fn withDispatchHandoff(
         self: *Store,
         binding: AttemptBinding,
@@ -1555,7 +2013,7 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.validateCurrentAttempt(binding) catch |err| switch (err) {
-            error.StaleAttemptBinding => return err,
+            error.StaleAttemptBinding, error.SupersededByControl => return err,
             else => return self.fenceReadFailure(err),
         };
         try handoff(context);
@@ -1579,7 +2037,7 @@ pub const Store = struct {
             return self.finishTransactionError(
                 err,
                 faults,
-                err == error.StaleAttemptBinding,
+                err == error.StaleAttemptBinding or err == error.SupersededByControl,
             );
         };
     }
@@ -1760,7 +2218,7 @@ pub const Store = struct {
             return self.finishTransactionError(
                 err,
                 faults,
-                err == error.StaleAttemptBinding,
+                err == error.StaleAttemptBinding or err == error.SupersededByControl,
             );
         };
     }
@@ -2136,7 +2594,7 @@ pub const Store = struct {
     }
 
     const ExistingCommand = struct {
-        kind: AdmissionKind,
+        kind: CommandKind,
         target: protocol.Bounded(protocol.max_session_bytes),
         digest: [32]u8,
         accepted: bool,
@@ -2154,9 +2612,11 @@ pub const Store = struct {
         if (step_result == c.SQLITE_DONE) return null;
         if (step_result != c.SQLITE_ROW) return error.CommandReadFailed;
         const kind_value = c.sqlite3_column_int(statement, 0);
-        const kind: AdmissionKind = switch (kind_value) {
+        const kind: CommandKind = switch (kind_value) {
             1 => .configure,
             2 => .message,
+            3 => .session_stop,
+            4 => .model_interruption,
             else => return error.CorruptStore,
         };
         var target: protocol.Bounded(protocol.max_session_bytes) = .{};
@@ -2206,13 +2666,96 @@ pub const Store = struct {
     }
 
     fn countPendingMessages(self: *Store, session_ref: []const u8) !u64 {
-        const statement = try prepare(self.database, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL");
+        const statement = try prepare(
+            self.database,
+            "SELECT count(*) FROM message_admission m WHERE session_ref=?1 AND turn_id IS NULL AND NOT EXISTS(" ++
+                "SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
+                "AND m.admission_id<=stopped.admission_cutoff)",
+        );
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.MessageAdmissionReadFailed;
         const count = c.sqlite3_column_int64(statement, 0);
         if (count < 0) return error.CorruptStore;
         return @intCast(count);
+    }
+
+    fn hasApplicablePendingMessage(self: *Store, session_ref: []const u8) !bool {
+        const statement = try prepare(
+            self.database,
+            "SELECT 1 FROM message_admission m WHERE m.session_ref=?1 AND m.turn_id IS NULL AND NOT EXISTS(" ++
+                "SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
+                "AND m.admission_id<=stopped.admission_cutoff) LIMIT 1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => true,
+            c.SQLITE_DONE => false,
+            else => error.MessageAdmissionReadFailed,
+        };
+    }
+
+    fn readSessionStopSelection(self: *Store, command_key: []const u8) !SessionStopSelection {
+        const statement = try prepare(
+            self.database,
+            "SELECT selected_turn_id,admission_cutoff FROM session_stop WHERE command_key=?1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, command_key);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        const cutoff = c.sqlite3_column_int64(statement, 1);
+        if (cutoff < 0) return error.CorruptStore;
+        return .{
+            .selected_turn_id = if (try readNullablePositiveI64(statement, 0)) |value| @intCast(value) else null,
+            .admission_cutoff = @intCast(cutoff),
+        };
+    }
+
+    fn readInterruptedOperation(self: *Store, command_key: []const u8) !?u64 {
+        const statement = try prepare(
+            self.database,
+            "SELECT operation_id FROM model_operation WHERE interrupted_by_command_key=?1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, command_key);
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return null;
+        if (result != c.SQLITE_ROW) return error.CorruptStore;
+        const operation_id = c.sqlite3_column_int64(statement, 0);
+        if (operation_id <= 0 or c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptStore;
+        return @intCast(operation_id);
+    }
+
+    fn readModelInterruptionTarget(self: *Store, command_key: []const u8) !ModelInterruptionTarget {
+        const statement = try prepare(
+            self.database,
+            "SELECT session_ref,turn_id,operation_id FROM model_interruption_command WHERE command_key=?1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, command_key);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        var target = ModelInterruptionTarget{
+            .session = .{},
+            .turn_id = 0,
+            .operation_id = 0,
+        };
+        try readText(statement, 0, &target.session);
+        var turn_text: protocol.Bounded(20) = .{};
+        try readText(statement, 1, &turn_text);
+        var operation_text: protocol.Bounded(20) = .{};
+        try readText(statement, 2, &operation_text);
+        target.turn_id = std.fmt.parseInt(u64, turn_text.slice(), 10) catch return error.CorruptStore;
+        target.operation_id = std.fmt.parseInt(u64, operation_text.slice(), 10) catch return error.CorruptStore;
+        return target;
+    }
+
+    fn turnIsComplete(self: *Store, turn_id: u64) !bool {
+        const statement = try prepare(self.database, "SELECT outcome_code FROM turn WHERE turn_id=?1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, turn_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        return c.sqlite3_column_type(statement, 0) != c.SQLITE_NULL;
     }
 
     fn readSession(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
@@ -2283,7 +2826,7 @@ pub const Store = struct {
     fn insertCommand(
         self: *Store,
         key: []const u8,
-        kind: AdmissionKind,
+        kind: CommandKind,
         target: []const u8,
         digest: *const [32]u8,
         primary_content_id: ?i64,
@@ -2296,6 +2839,8 @@ pub const Store = struct {
         const kind_value: i64 = switch (kind) {
             .configure => 1,
             .message => 2,
+            .session_stop => 3,
+            .model_interruption => 4,
         };
         try bindI64(statement, 2, kind_value);
         try bindText(statement, 3, target);
@@ -2588,7 +3133,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\) STRICT;
         \\CREATE TABLE core_command(
         \\ command_key TEXT PRIMARY KEY CHECK(length(CAST(command_key AS BLOB))<=128),
-        \\ kind INTEGER NOT NULL CHECK(kind IN (1,2)),
+        \\ kind INTEGER NOT NULL CHECK(kind IN (1,2,3,4)),
         \\ target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),
         \\ input_digest BLOB NOT NULL CHECK(length(input_digest)=32),
         \\ primary_content_id INTEGER REFERENCES content(content_id),
@@ -2628,6 +3173,18 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ outcome_content_id INTEGER REFERENCES content(content_id)
         \\) STRICT;
         \\CREATE UNIQUE INDEX turn_one_active_per_session ON turn(session_ref) WHERE outcome_code IS NULL;
+        \\CREATE TABLE session_stop(
+        \\ command_key TEXT PRIMARY KEY REFERENCES core_command(command_key),
+        \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
+        \\ selected_turn_id INTEGER REFERENCES turn(turn_id),
+        \\ admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0)
+        \\) STRICT, WITHOUT ROWID;
+        \\CREATE TABLE model_interruption_command(
+        \\ command_key TEXT PRIMARY KEY REFERENCES core_command(command_key),
+        \\ session_ref TEXT NOT NULL CHECK(length(CAST(session_ref AS BLOB))<=128),
+        \\ turn_id TEXT NOT NULL CHECK(length(turn_id) BETWEEN 1 AND 20),
+        \\ operation_id TEXT NOT NULL CHECK(length(operation_id) BETWEEN 1 AND 20)
+        \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE model_operation(
         \\ operation_id INTEGER PRIMARY KEY CHECK(operation_id>0),
         \\ turn_id INTEGER NOT NULL REFERENCES turn(turn_id) DEFERRABLE INITIALLY DEFERRED,
@@ -2648,9 +3205,12 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ x_openai_model TEXT CHECK(x_openai_model IS NULL OR length(CAST(x_openai_model AS BLOB))<=256),
         \\ request_id TEXT CHECK(request_id IS NULL OR length(CAST(request_id AS BLOB))<=256),
         \\ usage_content_id INTEGER REFERENCES content(content_id),
+        \\ interrupted_by_command_key TEXT REFERENCES core_command(command_key),
         \\ FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),
         \\ CHECK((resolution_code IS NULL AND ((uncertain=1 AND retry_due_at_ms=0) OR (uncertain=0 AND retry_due_at_ms>0))) OR
-        \\       (resolution_code IS NOT NULL AND uncertain=0 AND retry_due_at_ms IS NULL))
+        \\       (resolution_code IS NOT NULL AND uncertain=0 AND retry_due_at_ms IS NULL)),
+        \\ CHECK((resolution_code='interrupted' AND interrupted_by_command_key IS NOT NULL) OR
+        \\       (coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL))
         \\) STRICT;
         \\CREATE TABLE conversation_entry(
         \\ session_ref TEXT NOT NULL,
@@ -2692,6 +3252,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\) STRICT, WITHOUT ROWID;
         \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id);
         \\CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL;
+        \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff);
         \\CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND allowance_used<4;
         \\CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0;
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
@@ -2713,9 +3274,9 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
         const statement = try prepare(
             database,
             "SELECT count(*) FROM sqlite_schema WHERE " ++
-                "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry','model_output_item','answer_text_projection')) OR " ++
-                "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry','model_output_item','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','conversation_entry_history','model_output_history')))) OR " ++
+                "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','answer_text_projection')) OR " ++
+                "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','answer_text_projection')) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','session_stop_exclusion','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','conversation_entry_history','model_output_history')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -2871,6 +3432,11 @@ fn bindNullableI64(statement: *c.sqlite3_stmt, index: c_int, value: ?i64) !void 
     if (result != c.SQLITE_OK) return error.BindFailed;
 }
 
+fn bindNullableU64(statement: *c.sqlite3_stmt, index: c_int, value: ?u64) !void {
+    if (value) |present| return bindU64(statement, index, present);
+    if (c.sqlite3_bind_null(statement, index) != c.SQLITE_OK) return error.BindFailed;
+}
+
 fn expectDone(statement: *c.sqlite3_stmt) !void {
     if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.StatementFailed;
 }
@@ -2979,6 +3545,233 @@ fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
 
 fn admitRetryForTesting(storage: *Store) !?AttemptAdmission {
     return storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{});
+}
+
+fn completeSessionStop(key: []const u8, session_ref: []const u8) !protocol.SessionStopCommand {
+    var command: protocol.SessionStopCommand = .{};
+    try command.key.set(key);
+    try command.session.set(session_ref);
+    return command;
+}
+
+fn completeModelInterruption(
+    key: []const u8,
+    session_ref: []const u8,
+    binding: AttemptBinding,
+) !protocol.ModelInterruptionCommand {
+    var command: protocol.ModelInterruptionCommand = .{};
+    try command.key.set(key);
+    try command.session.set(session_ref);
+    command.turn_id = binding.turn_id;
+    command.operation_id = binding.operation_id;
+    return command;
+}
+
+fn configureTestSession(
+    storage: *Store,
+    key: []const u8,
+    session_ref: []const u8,
+) !void {
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration(key, session_ref, workspace, "model-a");
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+}
+
+fn submitTestMessage(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    file_name: []const u8,
+    key: []const u8,
+    session_ref: []const u8,
+    text: []const u8,
+) !void {
+    const file = try tmp.dir.createFile(std.testing.io, file_name, .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, text);
+    try file.sync(std.testing.io);
+    var command = try completeMessage(key, session_ref, file, text);
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&command, .{}) == .accepted);
+}
+
+test "Session stop freezes its selection and excludes only the admitted prefix" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "configure-stop", "direct/stop");
+    try submitTestMessage(&storage, &tmp, "stop-a", "message-a", "direct/stop", "first");
+    const first = (try storage.admitNextModelAttempt(.{})).?;
+    const binding = first.permit.binding;
+
+    var stop = try completeSessionStop("stop", "direct/stop");
+    const accepted = storage.stopSession(&stop, .{});
+    try std.testing.expect(accepted == .accepted);
+    try std.testing.expect(!accepted.accepted.replayed);
+    try std.testing.expectEqual(binding.turn_id, accepted.accepted.selection.selected_turn_id.?);
+    try std.testing.expectEqual(@as(u64, 1), accepted.accepted.selection.admission_cutoff);
+    try std.testing.expectEqual(binding.operation_id, accepted.accepted.interrupted_operation_id.?);
+    try std.testing.expectError(error.SupersededByControl, storage.openHistoricalView(binding));
+
+    const cancelled = (try storage.observeCommand("message-a")).message.?.queue.?;
+    const cancellation = switch (cancelled.state) {
+        .cancelled => |value| value,
+        else => return error.ExpectedCancelledObservation,
+    };
+    try std.testing.expectEqual(binding.turn_id, cancellation.binding.turn_id);
+    try std.testing.expectEqualStrings("cancelled", cancellation.code.slice());
+
+    var after_stop = try completeModelInterruption("interrupt-after-stop", "direct/stop", binding);
+    const rejected_interrupt = storage.interruptModel(&after_stop, .{});
+    try std.testing.expect(rejected_interrupt == .rejected);
+    try std.testing.expectEqual(
+        ModelInterruptionRejection.operation_resolved,
+        rejected_interrupt.rejected.code,
+    );
+
+    try submitTestMessage(&storage, &tmp, "stop-b", "message-b", "direct/stop", "later");
+    const replay = storage.stopSession(&stop, .{});
+    try std.testing.expect(replay == .accepted);
+    try std.testing.expect(replay.accepted.replayed);
+    try std.testing.expectEqual(@as(u64, 1), replay.accepted.selection.admission_cutoff);
+    try std.testing.expect((try storage.observeCommand("message-b")).message.?.queue.?.state == .queued);
+    const later = (try storage.admitNextModelAttempt(.{})).?;
+    try std.testing.expect(later.permit.binding.turn_id != binding.turn_id);
+}
+
+test "idle Session stop excludes queued work but not later admissions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "configure-idle-stop", "direct/idle-stop");
+    try submitTestMessage(&storage, &tmp, "idle-stop-a", "idle-message-a", "direct/idle-stop", "before");
+    var stop = try completeSessionStop("idle-stop", "direct/idle-stop");
+    const accepted = storage.stopSession(&stop, .{});
+    try std.testing.expect(accepted == .accepted);
+    try std.testing.expectEqual(@as(?u64, null), accepted.accepted.selection.selected_turn_id);
+    try std.testing.expectEqual(@as(u64, 1), accepted.accepted.selection.admission_cutoff);
+    const excluded = (try storage.observeCommand("idle-message-a")).message.?.queue.?;
+    try std.testing.expect(excluded.state == .excluded);
+    try std.testing.expectEqualStrings("session_stopped", excluded.state.excluded.code.slice());
+    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+
+    try submitTestMessage(&storage, &tmp, "idle-stop-b", "idle-message-b", "direct/idle-stop", "after");
+    const later = (try storage.admitNextModelAttempt(.{})).?;
+    try std.testing.expectEqual(@as(u64, 1), later.permit.binding.turn_id);
+}
+
+test "exact model interruption continues only with applicable pending input" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "configure-interrupt", "direct/interrupt");
+    try submitTestMessage(&storage, &tmp, "interrupt-a", "interrupt-message-a", "direct/interrupt", "first");
+    const first = (try storage.admitNextModelAttempt(.{})).?;
+    const binding = first.permit.binding;
+    try submitTestMessage(&storage, &tmp, "interrupt-b", "interrupt-message-b", "direct/interrupt", "second");
+
+    var interrupt = try completeModelInterruption("interrupt", "direct/interrupt", binding);
+    const accepted = storage.interruptModel(&interrupt, .{});
+    try std.testing.expect(accepted == .accepted);
+    try std.testing.expectError(error.SupersededByControl, storage.openHistoricalView(binding));
+    const successor = (try storage.admitNextModelAttempt(.{})).?;
+    try std.testing.expectEqual(binding.turn_id, successor.permit.binding.turn_id);
+    try std.testing.expect(successor.permit.binding.operation_id != binding.operation_id);
+
+    const observation = try storage.observeCommand("interrupt");
+    try std.testing.expectEqual(binding.turn_id, observation.model_interruption.?.turn_id);
+    try std.testing.expectEqual(binding.operation_id, observation.model_interruption.?.operation_id);
+}
+
+test "exact model interruption rejects stale targets and replays before applicability" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "configure-rejected-interrupt", "direct/rejected-interrupt");
+    var early: protocol.ModelInterruptionCommand = .{ .turn_id = 1, .operation_id = 1 };
+    try early.key.set("early-interrupt");
+    try early.session.set("direct/rejected-interrupt");
+    const rejected = storage.interruptModel(&early, .{});
+    try std.testing.expect(rejected == .rejected);
+    try std.testing.expectEqual(ModelInterruptionRejection.unknown_operation, rejected.rejected.code);
+
+    try submitTestMessage(&storage, &tmp, "rejected-interrupt-a", "rejected-interrupt-message", "direct/rejected-interrupt", "first");
+    const admitted = (try storage.admitNextModelAttempt(.{})).?;
+    try std.testing.expectEqual(@as(u64, 1), admitted.permit.binding.operation_id);
+    const replay = storage.interruptModel(&early, .{});
+    try std.testing.expect(replay == .rejected);
+    try std.testing.expect(replay.rejected.replayed);
+    try std.testing.expectEqual(ModelInterruptionRejection.unknown_operation, replay.rejected.code);
+
+    early.operation_id = 2;
+    try std.testing.expect(storage.interruptModel(&early, .{}) == .conflict);
+
+    var exact = try completeModelInterruption("exact-interrupt", "direct/rejected-interrupt", admitted.permit.binding);
+    try std.testing.expect(storage.interruptModel(&exact, .{}) == .accepted);
+    try std.testing.expect(
+        (try storage.observeCommand("rejected-interrupt-message")).message.?.queue.?.state == .cancelled,
+    );
+    try std.testing.expectError(
+        error.SupersededByControl,
+        storage.settleModelAttemptFailure(admitted.permit.binding, "late_failure", .terminal, .{}),
+    );
+
+    var after = try completeModelInterruption("after-interrupt", "direct/rejected-interrupt", admitted.permit.binding);
+    const resolved = storage.interruptModel(&after, .{});
+    try std.testing.expect(resolved == .rejected);
+    try std.testing.expectEqual(ModelInterruptionRejection.operation_resolved, resolved.rejected.code);
+}
+
+test "model interruption removes a scheduled retry from admission" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "configure-retry-interrupt", "direct/retry-interrupt");
+    try submitTestMessage(&storage, &tmp, "retry-interrupt-a", "retry-interrupt-message", "direct/retry-interrupt", "first");
+    const admitted = (try storage.admitNextModelAttempt(.{})).?;
+    try storage.settleModelAttemptFailure(admitted.permit.binding, "temporary", .{ .retryable = .{
+        .waits_ms = .{ 1, 1, 1 },
+    } }, .{});
+
+    var interrupt = try completeModelInterruption(
+        "retry-interrupt",
+        "direct/retry-interrupt",
+        admitted.permit.binding,
+    );
+    try std.testing.expect(storage.interruptModel(&interrupt, .{}) == .accepted);
+    try std.testing.expect((try admitRetryForTesting(&storage)) == null);
+}
+
+test "failed control commit saves no answer after reopening" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    try configureTestSession(&storage, "configure-control-rollback", "direct/control-rollback");
+    var stop = try completeSessionStop("rollback-stop", "direct/control-rollback");
+    try std.testing.expect(storage.stopSession(&stop, .{ .before_commit = true }) == .infrastructure_failure);
+    try std.testing.expect(storage.isFenced());
+    try storage.close();
+
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    var database_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    const database = try std.fmt.bufPrint(
+        &database_buffer,
+        "{s}/store.sqlite3",
+        .{root_buffer[0..root_length]},
+    );
+    storage = try Store.open(std.testing.io, database, root_buffer[0..root_length]);
+    defer storage.close() catch unreachable;
+    try std.testing.expect((try storage.observeCommand("rollback-stop")).status == .absent);
 }
 
 test "configuration pre-Workspace decisions preserve completeness and continuation precedence" {

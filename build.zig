@@ -44,6 +44,15 @@ pub fn build(b: *std.Build) void {
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
+    const control_integration = b.addSystemCommand(&.{"python3"});
+    control_integration.addFileArg(b.path("src/control_integration.py"));
+    control_integration.addArtifactArg(release_safe);
+    const control_integration_step = b.step(
+        "control-integration",
+        "Run Session-stop, exact-interruption, and protected-capacity cases",
+    );
+    control_integration_step.dependOn(&control_integration.step);
+
     const debug = addLatifa(b, target, .Debug, "latifa-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("src/admission_integration.sh"));
@@ -70,6 +79,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&run_tests.step);
     check_step.dependOn(&integration.step);
     check_step.dependOn(&dispatch_integration.step);
+    check_step.dependOn(&control_integration.step);
     check_step.dependOn(&debug_integration.step);
 
     const host_process_test = b.addSystemCommand(&.{"python3"});

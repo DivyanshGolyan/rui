@@ -10,6 +10,8 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "serve")) return serve(init.io, args[2..]);
     if (std.mem.eql(u8, command, "configure")) return configure(init.io, args[2..]);
     if (std.mem.eql(u8, command, "message")) return message(init.io, args[2..]);
+    if (std.mem.eql(u8, command, "stop-session")) return stopSession(init.io, args[2..]);
+    if (std.mem.eql(u8, command, "interrupt-model")) return interruptModel(init.io, args[2..]);
     if (std.mem.eql(u8, command, "retry")) return retry(init.io, args[2..]);
     if (std.mem.eql(u8, command, "observe-command")) return observe(init.io, args[2..]);
     if (std.mem.eql(u8, command, "read-result")) return readResult(init.io, args[2..]);
@@ -113,6 +115,60 @@ fn message(io: std.Io, args: []const []const u8) !void {
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
+fn stopSession(io: std.Io, args: []const []const u8) !void {
+    var input = client.SessionStopInput{ .store = "", .record = "", .key = "", .session = "" };
+    var key_seen = false;
+    var index: usize = 0;
+    while (index < args.len) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--store")) input.store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+            input.key = try takeValue(args, &index);
+            key_seen = true;
+        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
+        index += 1;
+    }
+    if (input.store.len == 0 or input.record.len == 0 or input.session.len == 0 or !key_seen) return usage();
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try client.stopSession(io, input, &reply_buffer);
+    try writeCommandReply(io, reply);
+    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+}
+
+fn interruptModel(io: std.Io, args: []const []const u8) !void {
+    var input = client.ModelInterruptionInput{
+        .store = "",
+        .record = "",
+        .key = "",
+        .session = "",
+        .turn_id = 0,
+        .operation_id = 0,
+    };
+    var key_seen = false;
+    var turn_seen = false;
+    var operation_seen = false;
+    var index: usize = 0;
+    while (index < args.len) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--store")) input.store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+            input.key = try takeValue(args, &index);
+            key_seen = true;
+        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--turn")) {
+            input.turn_id = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
+            turn_seen = true;
+        } else if (std.mem.eql(u8, arg, "--operation")) {
+            input.operation_id = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
+            operation_seen = true;
+        } else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
+        index += 1;
+    }
+    if (input.store.len == 0 or input.record.len == 0 or input.session.len == 0 or
+        !key_seen or !turn_seen or !operation_seen) return usage();
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try client.interruptModel(io, input, &reply_buffer);
+    try writeCommandReply(io, reply);
+    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+}
+
 fn retry(io: std.Io, args: []const []const u8) !void {
     var store_path: ?[]const u8 = null;
     var record: ?[]const u8 = null;
@@ -202,7 +258,9 @@ fn usage() error{InvalidArguments} {
         \\  latifa serve --store PATH [--active-capacity N] [--provider-endpoint URL] [--fault NAME]
         \\  latifa configure --store PATH --record FILE --key KEY --session REF [settings]
         \\  latifa message --store PATH --record FILE --key KEY --session REF --text FILE|-
-        \\  latifa retry --store PATH --record FILE --kind configure|message
+        \\  latifa stop-session --store PATH --record FILE --key KEY --session REF
+        \\  latifa interrupt-model --store PATH --record FILE --key KEY --session REF --turn ID --operation ID
+        \\  latifa retry --store PATH --record FILE --kind configure|message|session-stop|model-interruption
         \\  latifa observe-command --store PATH --key KEY
         \\  latifa read-result --store PATH --key KEY
         \\  latifa inspect-session --store PATH --session REF
