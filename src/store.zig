@@ -10,7 +10,6 @@ pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 9;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
-pub const max_content_read_bytes: usize = 64 * 1024;
 const runnable_probe_sql =
     "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending " ++
     "WHERE m.turn_id IS NULL AND NOT EXISTS(" ++
@@ -579,6 +578,8 @@ pub const SessionObservation = struct {
 /// Raw values allow ranged reads; derived values are read sequentially from
 /// zero. No reader or SQLite handle is retained across owner cleanup.
 pub const ContentReader = struct {
+    pub const content_window_bytes = 64 * 1024;
+
     content_id: i64,
     representation: union(enum) { raw, projection: ProjectionCursor },
     store: *Store,
@@ -2607,7 +2608,7 @@ pub const Store = struct {
     }
 
     fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !usize {
-        if (destination.len > max_content_read_bytes) return error.WindowTooLarge;
+        if (destination.len > ContentReader.content_window_bytes) return error.WindowTooLarge;
         if (start > reader.reference.length) return error.RangeOutOfBounds;
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
@@ -4283,6 +4284,49 @@ test "configuration answers replay without reverting newer settings" {
     first.configuration.model.value.len = 0;
     try first.configuration.model.value.set("model-c");
     try std.testing.expect(storage.configure(&first, .{}) == .conflict);
+}
+
+test "content reader owns the bounded result-delivery window" {
+    try std.testing.expectEqual(@as(usize, 4096), protocol.content_window_bytes);
+    try std.testing.expectEqual(
+        @as(usize, 64 * 1024),
+        ContentReader.content_window_bytes,
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "configure-window", "direct/window");
+    var text: [ContentReader.content_window_bytes + 17]u8 = undefined;
+    for (&text, 0..) |*byte, index| byte.* = @intCast(index % 251);
+    try submitTestMessage(
+        &storage,
+        &tmp,
+        "window-message-source",
+        "window-message",
+        "direct/window",
+        &text,
+    );
+    const reference = (try storage.observeCommand("window-message")).message.?.content;
+    var reader = try storage.openContent(reference);
+    defer reader.close();
+
+    var window: [ContentReader.content_window_bytes]u8 = undefined;
+    try std.testing.expectEqual(window.len, try reader.read(0, &window));
+    try std.testing.expectEqualSlices(u8, text[0..window.len], &window);
+    try std.testing.expectEqual(
+        @as(usize, 17),
+        try reader.read(window.len, &window),
+    );
+    try std.testing.expectEqualSlices(u8, text[window.len..], window[0..17]);
+    try std.testing.expectEqual(@as(usize, 0), try reader.read(text.len, &window));
+    try std.testing.expectError(
+        error.RangeOutOfBounds,
+        reader.read(text.len + 1, &window),
+    );
+    try std.testing.expectError(error.WindowTooLarge, reader.read(0, &text));
 }
 
 test "core preserves empty keys and Session references containing NUL" {

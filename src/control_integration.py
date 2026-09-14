@@ -315,12 +315,12 @@ class MilestoneLog:
         self.thread.join(timeout=3)
 
 
-def command(*args, expect=0):
+def command(*args, expect=0, timeout=15):
     completed = subprocess.run(
         [str(LATIFA), *map(str, args)],
         text=True,
         capture_output=True,
-        timeout=15,
+        timeout=timeout,
     )
     if completed.returncode != expect:
         raise AssertionError(
@@ -571,9 +571,14 @@ def fill_complete_inspections(socket_path, store, session):
     return held
 
 
-def inspect_execution(store, session):
+def inspect_execution(store, session, *, timeout=15):
     return command(
-        "inspect-session", "--store", store, "--session", session
+        "inspect-session",
+        "--store",
+        store,
+        "--session",
+        session,
+        timeout=timeout,
     )["execution"]
 
 
@@ -613,6 +618,36 @@ def result_digest(store, key, destination):
         while chunk := source.read(64 * 1024):
             digest.update(chunk)
     return destination.stat().st_size, digest.hexdigest()
+
+
+def open_blocked_result(socket_path, store, key):
+    body = json.dumps(
+        {
+            "version": "1",
+            "kind": "read_result",
+            "store": str(store),
+            "key": key,
+        },
+        separators=(",", ":"),
+    ).encode()
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    connection.settimeout(5)
+    connection.connect(socket_path)
+    connection.sendall(
+        b"POST /v1/read-result HTTP/1.1\r\n"
+        b"Host: local\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n".encode()
+        + b"X-Latifa-Wire-Version: 1\r\n"
+        b"Connection: close\r\n\r\n"
+        + body
+    )
+    prefix = connection.recv(len(b"HTTP/1.1 200 "), socket.MSG_PEEK)
+    if not prefix.startswith(b"HTTP/1.1 200 "):
+        connection.close()
+        raise AssertionError(f"blocked result delivery returned {prefix!r}")
+    return connection
 
 
 def repeated_byte_digest(byte, length):
@@ -934,7 +969,7 @@ def prove_delivery_and_settlement_contention(
         milestones = MilestoneLog(process)
         resource_samples = {}
         if sample_host is not None:
-            resource_samples["idle"] = sample_host(process.pid)
+            resource_samples["idle"] = sample_host(process.pid, "idle")
         sessions = [f"contention/{index}" for index in range(CONTROL_HEADROOM)]
         for index, session in enumerate(sessions):
             configure(state, store, f"contention-config-{index}", session)
@@ -971,7 +1006,7 @@ def prove_delivery_and_settlement_contention(
         assert_ordinary_capacity_busy(fields["socket"])
         if sample_host is not None:
             resource_samples["reports_captured_and_responses_held"] = sample_host(
-                process.pid
+                process.pid, "reports_captured_and_responses_held"
             )
 
         endpoint.release.set()
@@ -1019,7 +1054,9 @@ def prove_delivery_and_settlement_contention(
             )
         milestones.wait("model_settlement_superseded", timeout=8)
         if sample_host is not None:
-            resource_samples["controls_acknowledged"] = sample_host(process.pid)
+            resource_samples["controls_acknowledged"] = sample_host(
+                process.pid, "controls_acknowledged"
+            )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
             responses = list(
@@ -1045,7 +1082,9 @@ def prove_delivery_and_settlement_contention(
         assert execution["dispatch_fenced"] is False, execution
         assert execution["custody_occupied"] == "0", execution
         if sample_host is not None:
-            resource_samples["physically_released"] = sample_host(process.pid)
+            resource_samples["physically_released"] = sample_host(
+                process.pid, "physically_released"
+            )
         cleanup_by_operation = {
             record["operation"]: record for record in cleanup_records
         }
@@ -1089,6 +1128,8 @@ def prove_real_settlement_contention(
     inspections = []
     prepared_controls = []
     controls_start = threading.Event()
+    blocked_results = []
+    replacement_ordinary = []
     try:
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         inspection_delay_ms = 20_000 if sample_host is not None else 8_000
@@ -1105,7 +1146,7 @@ def prove_real_settlement_contention(
         milestones = MilestoneLog(process)
         resource_samples = {}
         if sample_host is not None:
-            resource_samples["idle"] = sample_host(process.pid)
+            resource_samples["idle"] = sample_host(process.pid, "idle")
 
         session = "contention/real-settlement"
         configure(state, store, "real-settlement-config", session)
@@ -1133,7 +1174,7 @@ def prove_real_settlement_contention(
         assert_ordinary_capacity_busy(fields["socket"])
         if sample_host is not None:
             resource_samples["reports_captured_before_settlement"] = sample_host(
-                process.pid
+                process.pid, "reports_captured_before_settlement"
             )
 
         for index in range(CONTROL_HEADROOM):
@@ -1226,7 +1267,9 @@ def prove_real_settlement_contention(
             assert reply["answer"]["selection"]["turn"] is None, reply
 
         if sample_host is not None:
-            resource_samples["controls_acknowledged"] = sample_host(process.pid)
+            resource_samples["controls_acknowledged"] = sample_host(
+                process.pid, "controls_acknowledged"
+            )
         with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
             responses = list(
                 pool.map(
@@ -1247,6 +1290,51 @@ def prove_real_settlement_contention(
             "committed large result",
         )
         assert message_result["status"] == "completed", message_result
+        blocked_session = "contention/blocked-result-control"
+        configure(
+            state,
+            store,
+            "blocked-result-config",
+            blocked_session,
+        )
+        try:
+            for _ in range(ORDINARY_CLIENTS):
+                blocked_results.append(
+                    open_blocked_result(
+                        fields["socket"],
+                        fields["store"],
+                        "real-settlement-message",
+                    )
+                )
+            assert_ordinary_capacity_busy(fields["socket"])
+            time.sleep(0.1)
+            if sample_host is not None:
+                resource_samples["blocked_result_delivery"] = sample_host(
+                    process.pid, "blocked_result_delivery"
+                )
+            blocked_control_started = time.monotonic_ns()
+            blocked_control = stop_session(
+                state,
+                store,
+                "blocked-result-stop",
+                blocked_session,
+            )
+            blocked_control_ms = (
+                time.monotonic_ns() - blocked_control_started
+            ) / 1_000_000
+            assert blocked_control["answer"]["status"] == "accepted", blocked_control
+            assert blocked_control_ms <= 1000, blocked_control_ms
+            partial_result = blocked_results[0].recv(4096)
+            assert partial_result.startswith(b"HTTP/1.1 200 "), partial_result
+        finally:
+            for blocked_result in blocked_results:
+                blocked_result.close()
+            blocked_results.clear()
+        replacement_ordinary = fill_ordinary_capacity(fields["socket"])
+        assert_ordinary_capacity_busy(fields["socket"])
+        for connection in replacement_ordinary:
+            connection.close()
+        replacement_ordinary.clear()
         size, digest = result_digest(
             store,
             "real-settlement-message",
@@ -1254,6 +1342,12 @@ def prove_real_settlement_contention(
         )
         assert size == large_answer_bytes, size
         assert digest == repeated_byte_digest(b"x", large_answer_bytes), digest
+        post_disconnect_execution = inspect_execution(
+            store,
+            session,
+            timeout=inspection_delay_ms / 1000 + 5,
+        )
+        assert post_disconnect_execution["dispatch_fenced"] is False
 
         cleanup = milestones.wait(
             "cleanup_completed",
@@ -1261,10 +1355,19 @@ def prove_real_settlement_contention(
             timeout=20,
         )[0]
         if sample_host is not None:
-            resource_samples["physically_released"] = sample_host(process.pid)
+            resource_samples["physically_released"] = sample_host(
+                process.pid, "physically_released"
+            )
         return {
             "large_answer_bytes": large_answer_bytes,
             "large_answer_sha256": digest,
+            "blocked_result_clients": ORDINARY_CLIENTS,
+            "blocked_result_partial_bytes": len(partial_result),
+            "blocked_result_control_acknowledgment_ms": blocked_control_ms,
+            "blocked_result_clean_reread": True,
+            "post_disconnect_dispatch_fenced": post_disconnect_execution[
+                "dispatch_fenced"
+            ],
             "acknowledgment_ms": [latency for _, latency in results],
             "control_timings": timings,
             "overlapping_control_keys": [
@@ -1292,6 +1395,10 @@ def prove_real_settlement_contention(
     finally:
         controls_start.set()
         for connection, _ in prepared_controls:
+            connection.close()
+        for blocked_result in blocked_results:
+            blocked_result.close()
+        for connection in replacement_ordinary:
             connection.close()
         for connection in inspections:
             connection.close()
@@ -1678,6 +1785,7 @@ def main():
             f"control_first_p95_ms={control_first_p95_ms:.1f} "
             f"real_settlement_p95_ms={settlement_p95_ms:.1f} "
             f"overlap_controls={len(settlement['overlapping_control_keys'])} "
+            f"blocked_result_control_ms={settlement['blocked_result_control_acknowledgment_ms']:.1f} "
             f"exact_ack_ms={exact_latency_ms:.1f}"
         )
     finally:
