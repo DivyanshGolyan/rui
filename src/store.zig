@@ -669,6 +669,26 @@ fn planConfigurationUpdate(
     } };
 }
 
+pub const OpenOptions = struct {
+    cache_spill: bool = true,
+};
+
+pub const SqliteDiagnostic = struct {
+    process_memory_current_bytes: ?u64 = null,
+    process_memory_highwater_bytes: ?u64 = null,
+    cache_used_bytes: ?u64 = null,
+    cache_spills: ?u64 = null,
+    hard_heap_limit_bytes: ?u64 = null,
+    page_size_bytes: ?u64 = null,
+    cache_size_pages: ?i64 = null,
+    cache_spill_threshold: ?i64 = null,
+    mmap_size_bytes: ?u64 = null,
+    synchronous: ?i64 = null,
+    temp_store: ?i64 = null,
+    busy_timeout_ms: ?u64 = null,
+    journal_mode: ?protocol.Bounded(16) = null,
+};
+
 pub const Store = struct {
     io: std.Io,
     database: *c.sqlite3,
@@ -677,6 +697,15 @@ pub const Store = struct {
     fenced: std.atomic.Value(bool) = .init(false),
 
     pub fn open(io: std.Io, database_path: []const u8, selector: []const u8) !Store {
+        return openWithOptions(io, database_path, selector, .{});
+    }
+
+    pub fn openWithOptions(
+        io: std.Io,
+        database_path: []const u8,
+        selector: []const u8,
+        options: OpenOptions,
+    ) !Store {
         if (c.sqlite3_hard_heap_limit64(@intCast(sqlite_heap_bytes)) < 0) {
             return error.SqliteHeapLimitConfigurationFailed;
         }
@@ -727,6 +756,7 @@ pub const Store = struct {
         try exec(database.?, "PRAGMA mmap_size=0");
         try exec(database.?, "PRAGMA temp_store=FILE");
         try exec(database.?, "PRAGMA cache_size=-4096");
+        try exec(database.?, if (options.cache_spill) "PRAGMA cache_spill=ON" else "PRAGMA cache_spill=OFF");
         try exec(database.?, "PRAGMA synchronous=EXTRA");
         if (@import("builtin").os.tag == .macos) try exec(database.?, "PRAGMA fullfsync=ON");
         if (!existing) try bootstrap(database.?, selector);
@@ -735,6 +765,55 @@ pub const Store = struct {
         var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
         try stored_selector.set(selector);
         return .{ .io = io, .database = database.?, .selector = stored_selector };
+    }
+
+    pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        var result: SqliteDiagnostic = .{};
+        var current: c.sqlite3_int64 = 0;
+        var highwater: c.sqlite3_int64 = 0;
+        if (c.sqlite3_status64(c.SQLITE_STATUS_MEMORY_USED, &current, &highwater, 0) == c.SQLITE_OK and
+            current >= 0 and highwater >= 0)
+        {
+            result.process_memory_current_bytes = @intCast(current);
+            result.process_memory_highwater_bytes = @intCast(highwater);
+        }
+
+        var cache_used: c_int = 0;
+        var unused_highwater: c_int = 0;
+        if (c.sqlite3_db_status(
+            self.database,
+            c.SQLITE_DBSTATUS_CACHE_USED,
+            &cache_used,
+            &unused_highwater,
+            0,
+        ) == c.SQLITE_OK and cache_used >= 0) {
+            result.cache_used_bytes = @intCast(cache_used);
+        }
+        var spills: c_int = 0;
+        if (c.sqlite3_db_status(
+            self.database,
+            c.SQLITE_DBSTATUS_CACHE_SPILL,
+            &spills,
+            &unused_highwater,
+            0,
+        ) == c.SQLITE_OK and spills >= 0) {
+            result.cache_spills = @intCast(spills);
+        }
+
+        const hard_heap_limit = c.sqlite3_hard_heap_limit64(-1);
+        if (hard_heap_limit >= 0) result.hard_heap_limit_bytes = @intCast(hard_heap_limit);
+        result.page_size_bytes = diagnosticUnsignedPragma(self.database, "PRAGMA page_size");
+        result.cache_size_pages = diagnosticSignedPragma(self.database, "PRAGMA cache_size");
+        result.cache_spill_threshold = diagnosticSignedPragma(self.database, "PRAGMA cache_spill");
+        result.mmap_size_bytes = diagnosticUnsignedPragma(self.database, "PRAGMA mmap_size");
+        result.synchronous = diagnosticSignedPragma(self.database, "PRAGMA synchronous");
+        result.temp_store = diagnosticSignedPragma(self.database, "PRAGMA temp_store");
+        result.busy_timeout_ms = diagnosticUnsignedPragma(self.database, "PRAGMA busy_timeout");
+        result.journal_mode = diagnosticTextPragma(self.database, "PRAGMA journal_mode");
+        return result;
     }
 
     pub fn close(self: *Store) !void {
@@ -3379,6 +3458,31 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
     }
 }
 
+fn diagnosticSignedPragma(database: *c.sqlite3, sql: [:0]const u8) ?i64 {
+    const statement = prepare(database, sql) catch return null;
+    defer _ = c.sqlite3_finalize(statement);
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return null;
+    return c.sqlite3_column_int64(statement, 0);
+}
+
+fn diagnosticUnsignedPragma(database: *c.sqlite3, sql: [:0]const u8) ?u64 {
+    const value = diagnosticSignedPragma(database, sql) orelse return null;
+    if (value < 0) return null;
+    return @intCast(value);
+}
+
+fn diagnosticTextPragma(
+    database: *c.sqlite3,
+    sql: [:0]const u8,
+) ?protocol.Bounded(16) {
+    const statement = prepare(database, sql) catch return null;
+    defer _ = c.sqlite3_finalize(statement);
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return null;
+    var value: protocol.Bounded(16) = .{};
+    readText(statement, 0, &value) catch return null;
+    return value;
+}
+
 fn pragmaInt(database: *c.sqlite3, sql: [:0]const u8) !u32 {
     const statement = try prepare(database, sql);
     defer _ = c.sqlite3_finalize(statement);
@@ -4651,6 +4755,45 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(c_int, 16 * 1024), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_SQL_LENGTH, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_ATTACHED, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_WORKER_THREADS, -1));
+
+    const diagnostic = storage.sqliteDiagnostic();
+    try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
+    try std.testing.expectEqual(@as(?u64, 4096), diagnostic.page_size_bytes);
+    try std.testing.expectEqual(@as(?i64, -4096), diagnostic.cache_size_pages);
+    try std.testing.expect(diagnostic.cache_spill_threshold.? > 0);
+    try std.testing.expectEqual(@as(?u64, 0), diagnostic.mmap_size_bytes);
+    try std.testing.expectEqual(@as(?i64, 3), diagnostic.synchronous);
+    try std.testing.expectEqual(@as(?i64, 1), diagnostic.temp_store);
+    try std.testing.expectEqual(@as(?u64, 0), diagnostic.busy_timeout_ms);
+    try std.testing.expectEqualStrings("delete", diagnostic.journal_mode.?.slice());
+    try std.testing.expect(diagnostic.process_memory_current_bytes != null);
+    try std.testing.expect(diagnostic.process_memory_highwater_bytes != null);
+    try std.testing.expect(diagnostic.cache_used_bytes != null);
+    try std.testing.expect(diagnostic.cache_spills != null);
+}
+
+test "measurement Store can disable cache spill without changing other limits" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage = try Store.openWithOptions(
+        std.testing.io,
+        database,
+        root,
+        .{ .cache_spill = false },
+    );
+    defer storage.close() catch unreachable;
+
+    const diagnostic = storage.sqliteDiagnostic();
+    try std.testing.expectEqual(@as(?i64, 0), diagnostic.cache_spill_threshold);
+    try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
+    try std.testing.expectEqual(@as(?i64, -4096), diagnostic.cache_size_pages);
+    try std.testing.expectEqual(@as(?i64, 3), diagnostic.synchronous);
+    try std.testing.expectEqualStrings("delete", diagnostic.journal_mode.?.slice());
 }
 
 test "fresh Store uses current schema and rejects the prior version" {
