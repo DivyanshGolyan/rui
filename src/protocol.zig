@@ -207,9 +207,10 @@ pub const Request = union(Kind) {
         }
     }
 
+    /// Borrows the active payload's Store bytes until this Request is replaced.
     pub fn store(self: *const Request) []const u8 {
         return switch (self.*) {
-            inline else => |request| request.store.slice(),
+            inline else => |*request| request.store.slice(),
         };
     }
 };
@@ -973,6 +974,29 @@ test "semantic digest distinguishes omission, null, and value" {
     value_schema.configuration.output_schema.digest = [_]u8{1} ** 32;
     try std.testing.expect(!std.mem.eql(u8, &omitted.semanticDigest(), &null_schema.semanticDigest()));
     try std.testing.expect(!std.mem.eql(u8, &null_schema.semanticDigest(), &value_schema.semanticDigest()));
+}
+
+test "Request Store borrow remains in its active union payload" {
+    var requests = [_]Request{
+        .{ .configure = .{} },
+        .{ .message = .{} },
+        .{ .session_stop = .{} },
+        .{ .model_interruption = .{} },
+        .{ .observe_command = .{} },
+        .{ .read_result = .{} },
+        .{ .inspect_session = .{} },
+    };
+    for (&requests) |*request| switch (request.*) {
+        inline else => |*payload| {
+            try payload.store.set("x");
+            const borrowed = request.store();
+            try std.testing.expect(
+                @intFromPtr(borrowed.ptr) == @intFromPtr(&payload.store.bytes[0]),
+            );
+            payload.store.bytes[0] = 'y';
+            try std.testing.expectEqualStrings("y", borrowed);
+        },
+    };
 }
 
 test "captured content cleanup closes sealed custody" {
