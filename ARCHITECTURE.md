@@ -646,11 +646,11 @@ At fixed configured capacity, retained orchestration memory and open-handle popu
 | Tool excerpt | Startup default 10,000 UTF-8 bytes of tail output across the entire Tool Result, no line quota; omission/path metadata additional. |
 | Edit copy window | Reusable 16 KiB; not an expected-text/line/replacement/file limit. |
 | Diagnostics | Startup default 128 MiB, at most 16 files, each floor(cap/16), 4 KiB encoded record. Detail shares cap; exports consume scratch. |
-| Qualification, not admission | Whole Latifa footprint ≤256 MiB at defined 1,000-operation model/Bash/Edit/mixed fixtures, including evaluator/helpers; same cold/retained-idle ceiling. Idle CPU <1% one core; model reference ≤2 cores average; p95 durable control acknowledgment ≤1 s; light/free-capacity retry discovery ≤2 s after due. |
+| Qualification, not admission | Whole Latifa footprint ≤256 MiB at defined 1,000-operation model/Bash/Edit/mixed fixtures, including evaluator/helpers; same cold/retained-idle ceiling. Idle CPU <1% one core. The 60-second, 1,000-stream model reference consumes ≤2 Host cores on average over seconds 10–50 and ≤120 Host CPU seconds from before admission through every-key result audit and observed cleanup. p95 durable control acknowledgment ≤1 s; light/free-capacity retry discovery ≤2 s after due. |
 
 ### Qualification measurements
 
-Qualify stable memory across churn/history growth. Model CPU fixture: 1,000 streams ×100 small SSE events/s, short requests, bounded terminal bursts; exclude fixture server. Measure tool/mixed CPU separately. Include capture/import contention; report maximum delays and cleanup separately from p95 acknowledgment, discovery separately from dispatch. Misses require explicit implementation/default/target review, not helper exclusion or RSS killing.
+Qualify stable memory across churn/history growth. The model CPU fixture offers 1,000 streams ×100 small SSE events/s for 60 seconds, with short requests and bounded terminal bursts. Exclude the independent fixture process from Latifa totals but record it separately. Measure sustained Host CPU over seconds 10–50 and complete-work Host CPU from before admission through every-key result audit and observed custody/scratch release; the latter must not be diluted by an idle tail. Measure tool/mixed CPU separately. Include capture/import contention; report maximum delays and cleanup separately from p95 acknowledgment, discovery separately from dispatch. Misses require explicit implementation/default/target review, not helper exclusion or RSS killing.
 
 ### Scratch, tool output and accounting
 
