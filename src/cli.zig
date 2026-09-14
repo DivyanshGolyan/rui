@@ -62,6 +62,10 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             faults.test_phase_trace = true;
         } else if (std.mem.eql(u8, arg, "--test-suppress-first-control-hint")) {
             faults.suppress_first_control_hint = true;
+        } else if (std.mem.eql(u8, arg, "--test-sqlite-diagnostics")) {
+            faults.sqlite_diagnostics = true;
+        } else if (std.mem.eql(u8, arg, "--test-sqlite-cache-spill-off")) {
+            faults.sqlite_cache_spill = false;
         } else if (std.mem.eql(u8, arg, "--test-request-scratch-limit")) {
             faults.request_scratch_limit_bytes = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
         } else return error.UnknownArgument;

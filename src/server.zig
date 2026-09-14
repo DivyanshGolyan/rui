@@ -58,6 +58,8 @@ pub const Faults = struct {
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
     suppress_first_control_hint: bool = false,
+    sqlite_diagnostics: bool = false,
+    sqlite_cache_spill: bool = true,
 };
 
 const Host = struct {
@@ -115,7 +117,12 @@ pub fn serve(
 ) !void {
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
-    var storage = try store_module.Store.open(io, lease.paths.database.slice(), lease.paths.store.slice());
+    var storage = try store_module.Store.openWithOptions(
+        io,
+        lease.paths.database.slice(),
+        lease.paths.store.slice(),
+        .{ .cache_spill = faults.sqlite_cache_spill },
+    );
     defer storage.close() catch |err| std.debug.print("latifa: Store close failed: {s}\n", .{@errorName(err)});
     try storage.validateRetryWaits(faults.retry_waits_ms);
     try lease.prepareForServing(faults.startup_cleanup);
@@ -981,6 +988,70 @@ fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptB
     writeTestTrace(host, &trace);
 }
 
+fn appendOptionalUnsigned(
+    trace: *protocol.ResponseBuffer,
+    name: []const u8,
+    value: ?u64,
+) !void {
+    try trace.appendJsonString(name);
+    try trace.append(":");
+    if (value) |present| {
+        try trace.appendFmt("{d}", .{present});
+    } else try trace.append("null");
+}
+
+fn appendOptionalSigned(
+    trace: *protocol.ResponseBuffer,
+    name: []const u8,
+    value: ?i64,
+) !void {
+    try trace.appendJsonString(name);
+    try trace.append(":");
+    if (value) |present| {
+        try trace.appendFmt("{d}", .{present});
+    } else try trace.append("null");
+}
+
+fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
+    if (!host.faults.test_phase_trace or !host.faults.sqlite_diagnostics) return;
+    const value = host.store.sqliteDiagnostic();
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
+    trace.appendFmt("{d}", .{nowNs(host)}) catch return;
+    trace.append("\",\"subject\":") catch return;
+    trace.appendJsonString(subject) catch return;
+    trace.append(",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",") catch return;
+    appendOptionalUnsigned(&trace, "process_memory_current_bytes", value.process_memory_current_bytes) catch return;
+    trace.append(",") catch return;
+    appendOptionalUnsigned(&trace, "process_memory_highwater_bytes", value.process_memory_highwater_bytes) catch return;
+    trace.append(",") catch return;
+    appendOptionalUnsigned(&trace, "cache_used_bytes", value.cache_used_bytes) catch return;
+    trace.append(",\"cache_used_scope\":\"connection-current approximate pager bytes\",") catch return;
+    appendOptionalUnsigned(&trace, "cache_spills", value.cache_spills) catch return;
+    trace.append(",\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",") catch return;
+    appendOptionalUnsigned(&trace, "hard_heap_limit_bytes", value.hard_heap_limit_bytes) catch return;
+    trace.append(",") catch return;
+    appendOptionalUnsigned(&trace, "page_size_bytes", value.page_size_bytes) catch return;
+    trace.append(",") catch return;
+    appendOptionalSigned(&trace, "cache_size_pages", value.cache_size_pages) catch return;
+    trace.append(",") catch return;
+    appendOptionalSigned(&trace, "cache_spill_threshold", value.cache_spill_threshold) catch return;
+    trace.append(",") catch return;
+    appendOptionalUnsigned(&trace, "mmap_size_bytes", value.mmap_size_bytes) catch return;
+    trace.append(",") catch return;
+    appendOptionalSigned(&trace, "synchronous", value.synchronous) catch return;
+    trace.append(",") catch return;
+    appendOptionalSigned(&trace, "temp_store", value.temp_store) catch return;
+    trace.append(",") catch return;
+    appendOptionalUnsigned(&trace, "busy_timeout_ms", value.busy_timeout_ms) catch return;
+    trace.append(",\"journal_mode\":") catch return;
+    if (value.journal_mode) |mode| {
+        trace.appendJsonString(mode.slice()) catch return;
+    } else trace.append("null") catch return;
+    trace.append("}") catch return;
+    writeTestTrace(host, &trace);
+}
+
 fn publishControlHint(host: *Host, command_key: []const u8) void {
     if (host.faults.suppress_first_control_hint and
         !host.control_hint_suppressed.swap(true, .acq_rel))
@@ -1304,6 +1375,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
                 .scratch_used_bytes = host.scratch_used.load(.acquire),
             });
             traceSubject(host, "inspection_captured", "session", request_value.session.slice());
+            traceSqliteDiagnostic(host, request_value.session.slice());
             if (host.faults.inspection_reply_delay_ms != 0) {
                 _ = host.io.sleep(.fromMilliseconds(host.faults.inspection_reply_delay_ms), .awake) catch {};
             }

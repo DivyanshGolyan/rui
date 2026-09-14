@@ -387,6 +387,33 @@ def configure(state, store, key, session, model, schema=None, instructions=None)
     assert result["answer"]["status"] == "accepted", result
 
 
+def configure_lost_reply(state, store, key, session, model):
+    completed = subprocess.run(
+        [
+            str(LATIFA),
+            "configure",
+            "--store",
+            str(store),
+            "--record",
+            str(state / f"{key}.json"),
+            "--key",
+            key,
+            "--session",
+            session,
+            "--workspace",
+            str(ROOT),
+            "--model",
+            model,
+            "--test-drop-reply",
+            "after-commit",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    assert completed.returncode != 0, completed
+
+
 def message(state, store, key, session, text):
     text_path = state / f"{key}.txt"
     text_path.write_text(text)
@@ -404,6 +431,33 @@ def message(state, store, key, session, text):
         text_path,
     )
     assert result["answer"]["status"] == "accepted", result
+
+
+def message_lost_reply(state, store, key, session, text):
+    text_path = state / f"{key}.txt"
+    text_path.write_text(text)
+    completed = subprocess.run(
+        [
+            str(LATIFA),
+            "message",
+            "--store",
+            str(store),
+            "--record",
+            str(state / f"{key}.json"),
+            "--key",
+            key,
+            "--session",
+            session,
+            "--text",
+            str(text_path),
+            "--test-drop-reply",
+            "after-commit",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    assert completed.returncode != 0, completed
 
 
 def observe(store, key):
@@ -465,7 +519,25 @@ def main():
         success_store = state / "success-store"
         success_host = start_host(success_store, success_url, "--test-cleanup-delay-ms", "2000")
         processes.append(success_host)
-        configure(state, success_store, "success-config", "direct/success", "model-a")
+        configure_lost_reply(
+            state, success_store, "success-config", "direct/success", "model-a"
+        )
+        stop_host(success_host)
+        processes.remove(success_host)
+
+        success_host = start_host(success_store, success_url, "--test-cleanup-delay-ms", "2000")
+        processes.append(success_host)
+        recovered_configuration = command(
+            "retry",
+            "--store",
+            success_store,
+            "--record",
+            state / "success-config.json",
+            "--kind",
+            "configure",
+        )
+        assert recovered_configuration["answer"]["status"] == "accepted", recovered_configuration
+        assert recovered_configuration["answer"]["replayed"] is True, recovered_configuration
         command(
             "configure",
             "--store",
@@ -479,13 +551,18 @@ def main():
             "--tools",
             "none",
         )
-        message(state, success_store, "success-first", "direct/success", "first question")
+        message_lost_reply(
+            state, success_store, "success-first", "direct/success", "first question"
+        )
         first_complete = wait_for(
             lambda: completed_observation(success_store, "success-first"),
             "first complete model answer",
         )
         assert first_complete["queue"]["status"] == "completed", first_complete
         assert read_result(success_store, "success-first") == first_answer
+        assert hashlib.sha256(read_result(success_store, "success-first")).digest() == hashlib.sha256(
+            first_answer
+        ).digest()
         cleanup_state = command(
             "inspect-session", "--store", success_store, "--session", "direct/success"
         )["execution"]
@@ -493,10 +570,22 @@ def main():
         stop_host(success_host)
         processes.remove(success_host)
 
-        # A fresh Host and client recover the original answer, then the same
-        # Session completes another Turn from the historical provider view.
+        # A fresh Host and client recover the original admission and answer,
+        # then the same Session completes another Turn from the historical
+        # provider view.
         success_host = start_host(success_store, success_url)
         processes.append(success_host)
+        recovered_first = command(
+            "retry",
+            "--store",
+            success_store,
+            "--record",
+            state / "success-first.json",
+            "--kind",
+            "message",
+        )
+        assert recovered_first["answer"]["status"] == "accepted", recovered_first
+        assert recovered_first["answer"]["replayed"] is True, recovered_first
         assert read_result(success_store, "success-first") == first_answer
         before_model_change = command(
             "inspect-session", "--store", success_store, "--session", "direct/success"
@@ -536,7 +625,9 @@ def main():
             before_model_change,
             after_model_change,
         )
-        message(state, success_store, "success-second", "direct/success", "second question")
+        message_lost_reply(
+            state, success_store, "success-second", "direct/success", "second question"
+        )
         wait_for(
             lambda: completed_observation(success_store, "success-second"),
             "second complete model answer",
@@ -559,6 +650,31 @@ def main():
             first_message_item,
             {"role": "user", "content": [{"type": "input_text", "text": "second question"}]},
         ], second_request["input"]
+        stop_host(success_host)
+        processes.remove(success_host)
+
+        success_host = start_host(success_store, success_url)
+        processes.append(success_host)
+        recovered_second = command(
+            "retry",
+            "--store",
+            success_store,
+            "--record",
+            state / "success-second.json",
+            "--kind",
+            "message",
+        )
+        assert recovered_second["answer"]["status"] == "accepted", recovered_second
+        assert recovered_second["answer"]["replayed"] is True, recovered_second
+        assert read_result(success_store, "success-first") == first_answer
+        assert read_result(success_store, "success-second") == second_answer
+        assert hashlib.sha256(read_result(success_store, "success-second")).digest() == hashlib.sha256(
+            second_answer
+        ).digest()
+        assert len(success_endpoint.requests) == 2
+        stop_host(success_host)
+        processes.remove(success_host)
+
         database = sqlite3.connect(success_store / "latifa.sqlite3")
         try:
             assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 4
@@ -603,8 +719,6 @@ def main():
             ]
         finally:
             database.close()
-        stop_host(success_host)
-        processes.remove(success_host)
         offline_success = start_host(success_store, None)
         processes.append(offline_success)
         assert read_result(success_store, "success-first") == first_answer

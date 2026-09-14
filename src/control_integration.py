@@ -216,6 +216,50 @@ class SuccessfulHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class RetryWaitEndpoint(http.server.ThreadingHTTPServer):
+    allow_reuse_address = True
+
+    def __init__(self, label):
+        super().__init__(("127.0.0.1", 0), RetryWaitHandler)
+        self.condition = threading.Condition()
+        self.label = label
+        self.requests = 0
+
+    def count(self):
+        with self.condition:
+            return self.requests
+
+
+class RetryWaitHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        with self.server.condition:
+            self.server.requests += 1
+            request_number = self.server.requests
+            self.server.condition.notify_all()
+        if request_number == 1:
+            body = b"temporary"
+            status = 503
+            content_type = "text/plain"
+        else:
+            body = successful_sse(f"late-{self.server.label}")
+            status = 200
+            content_type = "text/event-stream"
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.close_connection = True
+
+    def log_message(self, _format, *_args):
+        pass
+
+
 class MilestoneLog:
     def __init__(self, process):
         self.process = process
@@ -1258,6 +1302,153 @@ def prove_real_settlement_contention(
         stop_success_endpoint(endpoint, endpoint_thread)
 
 
+def prove_retry_wait_control(state, kind):
+    retry_wait_ms = 2500
+    endpoint = RetryWaitEndpoint(kind)
+    endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoint_thread.start()
+    store = state / f"retry-wait-{kind}-store"
+    session = f"direct/retry-wait-{kind}"
+    process = None
+    milestones = None
+    try:
+        url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
+        retry_waits = f"{retry_wait_ms},{retry_wait_ms},{retry_wait_ms}"
+        process, _ = start_host(
+            store,
+            url,
+            "--test-retry-waits-ms",
+            retry_waits,
+            "--test-suppress-first-control-hint",
+            "--test-phase-trace",
+            active_capacity=1,
+        )
+        milestones = MilestoneLog(process)
+        configure(state, store, f"retry-wait-{kind}-config", session)
+        message(state, store, f"retry-wait-{kind}-message", session, "retry then control")
+        wait_for(lambda: endpoint.count() == 1, f"{kind} temporary provider response")
+
+        def retry_wait_observation():
+            observation = observe(store, f"retry-wait-{kind}-message")
+            execution = command(
+                "inspect-session", "--store", store, "--session", session
+            )["execution"]
+            if (
+                observation.get("processing", {}).get("attempt") == "1"
+                and "result" not in observation
+                and execution["custody_occupied"] == "0"
+                and execution["dispatch_fenced"] is False
+            ):
+                return observation, time.monotonic()
+            return None
+
+        waiting, observed_at = wait_for(
+            retry_wait_observation, f"{kind} committed retry wait"
+        )
+        processing = waiting["processing"]
+        control_key = f"retry-wait-{kind}-control"
+        record = state / f"{control_key}.json"
+        args = [
+            str(LATIFA),
+            "stop-session" if kind == "stop" else "interrupt-model",
+            "--store",
+            str(store),
+            "--record",
+            str(record),
+            "--key",
+            control_key,
+            "--session",
+            session,
+        ]
+        retry_kind = "session-stop" if kind == "stop" else "model-interruption"
+        if kind == "interruption":
+            args += [
+                "--turn",
+                processing["turn"],
+                "--operation",
+                processing["operation"],
+            ]
+        args += ["--test-drop-reply", "after-commit"]
+        dropped = subprocess.run(args, text=True, capture_output=True, timeout=15)
+        assert dropped.returncode != 0, dropped
+        milestones.wait("control_hint_suppressed", subject=control_key)
+        stop_process(process)
+        process = None
+        milestones.close()
+        milestones = None
+
+        process, _ = start_host(
+            store,
+            url,
+            "--test-retry-waits-ms",
+            retry_waits,
+            active_capacity=1,
+        )
+        replayed = command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            record,
+            "--kind",
+            retry_kind,
+        )
+        assert replayed["answer"]["status"] == "accepted", replayed
+        assert replayed["answer"]["replayed"] is True, replayed
+        if kind == "stop":
+            assert replayed["answer"]["selection"]["turn"] == processing["turn"], replayed
+        else:
+            assert replayed["answer"]["target"] == {
+                "session": session,
+                "turn": processing["turn"],
+                "operation": processing["operation"],
+            }, replayed
+
+        cancelled = observe(store, f"retry-wait-{kind}-message")
+        assert cancelled["result"]["status"] == "cancelled", cancelled
+        unreadable = subprocess.run(
+            [
+                str(LATIFA),
+                "read-result",
+                "--store",
+                str(store),
+                "--key",
+                f"retry-wait-{kind}-message",
+            ],
+            capture_output=True,
+            timeout=15,
+        )
+        assert unreadable.returncode != 0, unreadable
+
+        deadline = observed_at + retry_wait_ms / 1000 + 1.25
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        assert endpoint.count() == 1, endpoint.count()
+        assert observe(store, f"retry-wait-{kind}-message") == cancelled
+
+        stop_process(process)
+        process = None
+        database = sqlite3.connect(store / "latifa.sqlite3")
+        try:
+            assert database.execute(
+                "SELECT attempt_ordinal FROM model_operation"
+            ).fetchall() == [(1,)]
+            assert database.execute(
+                "SELECT count(*) FROM model_output_item"
+            ).fetchone()[0] == 0
+        finally:
+            database.close()
+    finally:
+        if process is not None:
+            stop_process(process)
+        if milestones is not None:
+            milestones.close()
+        endpoint.shutdown()
+        endpoint.server_close()
+        endpoint_thread.join(timeout=5)
+
+
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="latifa-control-integration-"))
     store = state / "store"
@@ -1472,6 +1663,8 @@ def main():
 
         prove_pre_handoff_stop(state)
         prove_sealed_interruption_and_cleanup(state)
+        prove_retry_wait_control(state, "stop")
+        prove_retry_wait_control(state, "interruption")
         control_first = prove_delivery_and_settlement_contention(state)
         control_first_p95_ms = percentile_95(
             control_first["acknowledgment_ms"]
