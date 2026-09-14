@@ -3,6 +3,7 @@
 
 import http.server
 import concurrent.futures
+import hashlib
 import json
 import pathlib
 import shutil
@@ -107,7 +108,9 @@ def encode_sse(payloads):
     )
 
 
-def successful_sse(index):
+def successful_sse(index, answer=None):
+    if answer is None:
+        answer = f"answer-{index}"
     message_item = {
         "type": "message",
         "id": f"message-{index}",
@@ -115,7 +118,7 @@ def successful_sse(index):
         "role": "assistant",
         "phase": "final_answer",
         "content": [
-            {"type": "output_text", "text": f"answer-{index}", "annotations": []}
+            {"type": "output_text", "text": answer, "annotations": []}
         ],
     }
     return encode_sse(
@@ -151,11 +154,12 @@ def successful_sse(index):
 class SuccessfulEndpoint(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
 
-    def __init__(self):
+    def __init__(self, large_answer_bytes=0):
         super().__init__(("127.0.0.1", 0), SuccessfulHandler)
         self.condition = threading.Condition()
         self.requests = 0
         self.release = threading.Event()
+        self.large_answer_bytes = large_answer_bytes
 
     def count(self):
         with self.condition:
@@ -174,16 +178,35 @@ class SuccessfulHandler(http.server.BaseHTTPRequestHandler):
             self.server.condition.notify_all()
         if not self.server.release.wait(10):
             raise RuntimeError("successful fixture response was never released")
-        body = successful_sse(index)
+        marker = "LATIFA_STREAMED_ANSWER_MARKER"
+        if self.server.large_answer_bytes and index == 1:
+            body_parts = successful_sse(index, marker).split(marker.encode())
+            assert len(body_parts) == 3
+            content_length = (
+                sum(map(len, body_parts)) + 2 * self.server.large_answer_bytes
+            )
+        else:
+            body = successful_sse(index)
+            body_parts = [body]
+            content_length = len(body)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(content_length))
         self.send_header("OpenAI-Model", "model-a")
         self.send_header("X-Request-Id", f"request-{index}")
         self.send_header("Connection", "close")
         self.end_headers()
         try:
-            self.wfile.write(body)
+            chunk = b"x" * (64 * 1024)
+            for part_index, part in enumerate(body_parts):
+                self.wfile.write(part)
+                if part_index == len(body_parts) - 1:
+                    continue
+                remaining = self.server.large_answer_bytes
+                while remaining:
+                    written = min(remaining, len(chunk))
+                    self.wfile.write(chunk[:written])
+                    remaining -= written
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -494,6 +517,43 @@ def retry(state, store, record_key, kind):
     )
 
 
+def result_digest(store, key, destination):
+    with destination.open("wb") as output:
+        completed = subprocess.run(
+            [
+                str(LATIFA),
+                "read-result",
+                "--store",
+                str(store),
+                "--key",
+                key,
+            ],
+            stdout=output,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"read-result returned {completed.returncode}: {completed.stderr!r}"
+        )
+    digest = hashlib.sha256()
+    with destination.open("rb") as source:
+        while chunk := source.read(64 * 1024):
+            digest.update(chunk)
+    return destination.stat().st_size, digest.hexdigest()
+
+
+def repeated_byte_digest(byte, length):
+    digest = hashlib.sha256()
+    chunk = byte * (64 * 1024)
+    remaining = length
+    while remaining:
+        used = min(remaining, len(chunk))
+        digest.update(chunk[:used])
+        remaining -= used
+    return digest.hexdigest()
+
+
 def maximum_body(kind):
     encoded_store = "\\u0001" * MAX_STORE_BYTES
     encoded_key = "\\u0001" * MAX_KEY_BYTES
@@ -614,8 +674,8 @@ def assert_ordinary_capacity_busy(socket_path):
         extra.close()
 
 
-def start_success_endpoint():
-    endpoint = SuccessfulEndpoint()
+def start_success_endpoint(*, large_answer_bytes=0):
+    endpoint = SuccessfulEndpoint(large_answer_bytes)
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
     return endpoint, thread
@@ -922,6 +982,200 @@ def prove_delivery_and_settlement_contention(
         stop_success_endpoint(endpoint, endpoint_thread)
 
 
+def prove_real_settlement_contention(
+    state, *, sample_host=None, cleanup_delay_ms=0, large_answer_bytes=32 * 1024 * 1024
+):
+    store = state / "real-settlement-contention-store"
+    store.mkdir(mode=0o700)
+    endpoint, endpoint_thread = start_success_endpoint(
+        large_answer_bytes=large_answer_bytes
+    )
+    process = None
+    milestones = None
+    inspections = []
+    try:
+        url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
+        extra = [
+            "--test-phase-trace",
+            "--test-inspection-reply-delay-ms",
+            "8000",
+        ]
+        if cleanup_delay_ms:
+            extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
+        process, fields = start_host(store, url, *extra, active_capacity=1)
+        milestones = MilestoneLog(process)
+        resource_samples = {}
+        if sample_host is not None:
+            resource_samples["idle"] = sample_host(process.pid)
+
+        session = "contention/real-settlement"
+        configure(state, store, "real-settlement-config", session)
+        message(
+            state,
+            store,
+            "real-settlement-message",
+            session,
+            "large committed output",
+        )
+        wait_for(lambda: endpoint.count() == 1, "large provider request")
+        processing = wait_for(
+            lambda: observe(store, "real-settlement-message").get("processing"),
+            "large-output processing identity",
+        )
+        inspections = fill_complete_inspections(
+            fields["socket"], fields["store"], session
+        )
+        milestones.wait(
+            "inspection_captured",
+            count=ORDINARY_CLIENTS,
+            timeout=10,
+            subject=session,
+        )
+        assert_ordinary_capacity_busy(fields["socket"])
+        if sample_host is not None:
+            resource_samples["reports_captured_before_settlement"] = sample_host(
+                process.pid
+            )
+
+        endpoint.release.set()
+        settlement_lock = milestones.wait(
+            "settlement_lock_acquired",
+            operation=processing["operation"],
+            timeout=15,
+        )[0]
+        barrier = threading.Barrier(CONTROL_HEADROOM + 1)
+
+        def run_control(index):
+            barrier.wait()
+            started = time.monotonic_ns()
+            if index == 0:
+                reply = interrupt_model(
+                    state,
+                    store,
+                    "settlement-later-interrupt",
+                    session,
+                    processing,
+                )
+            else:
+                reply = stop_session(
+                    state,
+                    store,
+                    f"settlement-later-stop-{index}",
+                    session,
+                )
+            return reply, (time.monotonic_ns() - started) / 1_000_000
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=CONTROL_HEADROOM
+        ) as pool:
+            futures = [pool.submit(run_control, index) for index in range(8)]
+            barrier.wait()
+            results = [future.result(timeout=20) for future in futures]
+
+        settlement_complete = milestones.wait(
+            "settlement_complete",
+            operation=processing["operation"],
+            timeout=20,
+        )[0]
+        milestones.wait(
+            "model_settlement_committed",
+            operation=processing["operation"],
+            timeout=20,
+        )
+        timings = milestones.wait("control_timing", count=8, timeout=20)
+        overlap = [
+            record
+            for record in timings
+            if int(record["store_queued_at_ns"])
+            < int(settlement_complete["at_ns"])
+            < int(record["lock_acquired_at_ns"])
+        ]
+        assert overlap, (
+            "no control entered before real settlement completion and acquired "
+            "the Store mutex afterward",
+            settlement_lock,
+            settlement_complete,
+            timings,
+        )
+
+        exact = results[0][0]
+        assert exact["answer"]["status"] == "rejected", exact
+        assert exact["answer"]["code"] == "operation_resolved", exact
+        for reply, _ in results[1:]:
+            assert reply["answer"]["status"] == "accepted", reply
+            assert reply["answer"]["selection"]["turn"] is None, reply
+
+        if sample_host is not None:
+            resource_samples["controls_acknowledged"] = sample_host(process.pid)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
+            responses = list(
+                pool.map(lambda connection: read_http_response(connection, 12), inspections)
+            )
+        for head, body in responses:
+            assert b" 200 " in head, (head, body)
+        for connection in inspections:
+            connection.close()
+        inspections.clear()
+
+        message_result = wait_for(
+            lambda: observe(store, "real-settlement-message").get("result"),
+            "committed large result",
+        )
+        assert message_result["status"] == "completed", message_result
+        size, digest = result_digest(
+            store,
+            "real-settlement-message",
+            state / "real-settlement-answer.txt",
+        )
+        assert size == large_answer_bytes, size
+        assert digest == repeated_byte_digest(b"x", large_answer_bytes), digest
+
+        cleanup = milestones.wait(
+            "cleanup_completed",
+            operation=processing["operation"],
+            timeout=20,
+        )[0]
+        execution = inspect_execution(store, session)
+        assert execution["dispatch_fenced"] is False, execution
+        assert execution["custody_occupied"] == "0", execution
+        if sample_host is not None:
+            resource_samples["physically_released"] = sample_host(process.pid)
+        return {
+            "large_answer_bytes": large_answer_bytes,
+            "large_answer_sha256": digest,
+            "acknowledgment_ms": [latency for _, latency in results],
+            "control_timings": timings,
+            "overlapping_control_keys": [
+                record["command_key"] for record in overlap
+            ],
+            "settlement_lock_acquired_at_ns": int(settlement_lock["at_ns"]),
+            "settlement_complete_at_ns": int(settlement_complete["at_ns"]),
+            "settlement_service_ms": (
+                int(settlement_complete["at_ns"])
+                - int(settlement_lock["at_ns"])
+            )
+            / 1_000_000,
+            "physical_release_ms": (
+                int(cleanup["at_ns"])
+                - int(settlement_complete["at_ns"])
+            )
+            / 1_000_000,
+            "resource_samples": resource_samples,
+            "resolved_interruption_key": "settlement-later-interrupt",
+            "idle_stop_keys": [
+                f"settlement-later-stop-{index}" for index in range(1, 8)
+            ],
+        }
+    finally:
+        for connection in inspections:
+            connection.close()
+        if process is not None:
+            stop_process(process)
+        if milestones is not None:
+            milestones.close()
+        stop_success_endpoint(endpoint, endpoint_thread)
+
+
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="latifa-control-integration-"))
     store = state / "store"
@@ -1133,15 +1387,19 @@ def main():
 
         prove_pre_handoff_stop(state)
         prove_sealed_interruption_and_cleanup(state)
-        contention = prove_delivery_and_settlement_contention(state)
-        contention_ack = contention["acknowledgment_ms"]
-        contention_p95_ms = percentile_95(contention_ack)
+        control_first = prove_delivery_and_settlement_contention(state)
+        control_first_p95_ms = percentile_95(
+            control_first["acknowledgment_ms"]
+        )
+        settlement = prove_real_settlement_contention(state)
+        settlement_p95_ms = percentile_95(settlement["acknowledgment_ms"])
         completed = True
         print(
             "control integration: "
             f"stalled_ingress={ORDINARY_CLIENTS} controls=25 p95_ms={p95_ms:.1f} "
-            f"delivery_contention={ORDINARY_CLIENTS} concurrent_controls=8 "
-            f"contention_p95_ms={contention_p95_ms:.1f} "
+            f"control_first_p95_ms={control_first_p95_ms:.1f} "
+            f"real_settlement_p95_ms={settlement_p95_ms:.1f} "
+            f"overlap_controls={len(settlement['overlapping_control_keys'])} "
             f"exact_ack_ms={exact_latency_ms:.1f}"
         )
     finally:

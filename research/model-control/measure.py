@@ -8,7 +8,6 @@ import os
 import pathlib
 import re
 import shutil
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -107,32 +106,68 @@ def timing_summary(values, definition):
     }
 
 
-def source_worktree_dirty(output):
+def source_provenance(root, output):
+    root = root.resolve()
+    try:
+        top_level = pathlib.Path(
+            subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        ).resolve()
+    except subprocess.CalledProcessError:
+        return None, None
+    if top_level != root:
+        return None, None
+    revision = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    ).strip()
     ignored = None
     try:
-        ignored = str(output.resolve().relative_to(ROOT))
+        ignored = str(output.resolve().relative_to(root))
     except ValueError:
         pass
-    try:
-        lines = subprocess.check_output(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).splitlines()
-    except subprocess.CalledProcessError:
-        return False
-    return any(line[3:] != ignored for line in lines)
+    lines = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(root),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    ).splitlines()
+    return revision, any(line[3:] != ignored for line in lines)
 
 
-def source_revision():
+def check_source_provenance_boundaries():
+    state = pathlib.Path(tempfile.mkdtemp(prefix="latifa-provenance-check-"))
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            text=True,
+        outside = state / "outside-package"
+        outside.mkdir()
+        assert source_provenance(outside, outside / "results.json") == (None, None)
+
+        unrelated = state / "unrelated"
+        nested = unrelated / "nested-package"
+        nested.mkdir(parents=True)
+        subprocess.run(
+            ["git", "init", "--quiet", str(unrelated)],
+            check=True,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-        ).strip()
-    except subprocess.CalledProcessError:
-        return "packaged_source_without_git_revision"
+        )
+        assert source_provenance(nested, nested / "results.json") == (None, None)
+        return {
+            "outside_git": "null_revision_and_dirty_state",
+            "nested_in_unrelated_repository": "null_revision_and_dirty_state",
+        }
+    finally:
+        shutil.rmtree(state)
 
 
 def run_measurement(binary):
@@ -251,7 +286,8 @@ def run_measurement(binary):
         stop_process(host)
         host = None
 
-        qualified = controls.prove_delivery_and_settlement_contention(
+        control_first = controls.prove_delivery_and_settlement_contention(state)
+        qualified = controls.prove_real_settlement_contention(
             state,
             sample_host=sample,
             cleanup_delay_ms=1500,
@@ -318,11 +354,34 @@ def run_measurement(binary):
                     ),
                     "provider_disconnects": endpoint.counts()[1],
                 },
-                "captured_report_and_sealed_settlement_qualification": {
-                    "scope": "120 fully received inspections held after report capture, eight valid provider responses released toward sealed validation/import, and eight simultaneous Session stops using protected control places",
+                "control_first_settlement_race": {
+                    "scope": "120 fully captured reports held during delivery while eight controls commit before sealed settlement; canonical settlement loses without fencing",
+                    "status": "passed",
                     "ordinary_connections": controls.ORDINARY_CLIENTS,
-                    "active_model_responses": 8,
                     "concurrent_control_commands": 8,
+                    "model_settlement_superseded": True,
+                    "total_durable_acknowledgment": timing_summary(
+                        control_first["acknowledgment_ms"],
+                        "caller start through receipt of the complete durable Session-stop reply",
+                    ),
+                },
+                "real_settlement_import_contention_qualification": {
+                    "scope": "120 fully captured reports held during delivery, one 32 MiB answer streamed with bounded fixture memory into real Store import, and eight later concurrent controls",
+                    "ordinary_connections": controls.ORDINARY_CLIENTS,
+                    "active_model_responses": 1,
+                    "concurrent_control_commands": 8,
+                    "large_answer_bytes": qualified["large_answer_bytes"],
+                    "large_answer_sha256": qualified["large_answer_sha256"],
+                    "settlement_service_ms": round(
+                        qualified["settlement_service_ms"], 3
+                    ),
+                    "overlapping_control_keys": qualified[
+                        "overlapping_control_keys"
+                    ],
+                    "resolved_interruption_key": qualified[
+                        "resolved_interruption_key"
+                    ],
+                    "idle_stop_keys": qualified["idle_stop_keys"],
                     "cleanup_delay_ms": 1500,
                     "qualification_limit_ms": 1000,
                     "total_durable_acknowledgment": timing_summary(
@@ -347,18 +406,18 @@ def run_measurement(binary):
                     ),
                     "semantic_completion": timing_summary(
                         semantic_completion,
-                        "Host accept through the Session-stop commit that cancels the selected Turn",
+                        "Host accept through the committed resolved-interruption or idle-stop answer",
                     ),
                     "physical_custody_release": timing_summary(
-                        qualified["physical_release_ms"],
-                        "Session-stop commit through cleanup completion and custody-slot release",
+                        [qualified["physical_release_ms"]],
+                        "successful settlement completion through cleanup completion and custody-slot release",
                     ),
                     "resources": {
                         **qualified_samples,
                         "captured_load_delta_from_idle": resource_delta(
                             qualified_samples["idle"],
                             qualified_samples[
-                                "reports_captured_and_responses_held"
+                                "reports_captured_before_settlement"
                             ],
                         ),
                         "retained_delta_after_physical_release": resource_delta(
@@ -391,11 +450,14 @@ def main():
     )
     args = parser.parse_args()
     binary = args.binary.resolve()
+    provenance_boundary_checks = check_source_provenance_boundaries()
+    tested_revision, working_tree_dirty = source_provenance(ROOT, args.output)
     results = {
         "scope": "issue-175 production Session stop and exact model interruption",
         "status": "passed",
-        "tested_revision": source_revision(),
-        "working_tree_dirty": source_worktree_dirty(args.output),
+        "tested_revision": tested_revision,
+        "working_tree_dirty": working_tree_dirty,
+        "provenance_boundary_checks": provenance_boundary_checks,
         "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
         "zig": command("zig", "version"),
         "platform": command("uname", "-a"),

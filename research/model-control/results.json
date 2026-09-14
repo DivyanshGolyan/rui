@@ -1,6 +1,6 @@
 {
   "scope": "issue-175 production Session stop and exact model interruption",
-  "status": "passed",
+  "status": "fixture_passed_import_contention_qualification_pending",
   "tested_revision": "0285887e2b9391575b45733d86e024ec71865ea5",
   "working_tree_dirty": false,
   "binary_sha256": "af364ed2f32b8912c7693732dd370784971249dfe2f3a100468dc90254db81e8",
