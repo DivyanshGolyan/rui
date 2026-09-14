@@ -3,6 +3,7 @@ package provider
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -25,23 +26,147 @@ func (w shortWriter) Write(value []byte) (int, error) {
 
 func TestPacedWriteCountsPartialBodyBytes(t *testing.T) {
 	flushed := false
-	written, onTime, err := writePacedBody(shortWriter{limit: 3}, func() error {
+	written, finishedAt, err := writePacedBody(shortWriter{limit: 3}, func() error {
 		flushed = true
 		return nil
-	}, "abcdef", time.Now().Add(time.Second), time.Now)
-	if written != 3 || onTime || !errors.Is(err, io.ErrShortWrite) || flushed {
-		t.Fatalf("partial write = bytes %d on_time %t err %v flushed %t", written, onTime, err, flushed)
+	}, "abcdef", time.Now)
+	if written != 3 || !finishedAt.IsZero() || !errors.Is(err, io.ErrShortWrite) || flushed {
+		t.Fatalf("partial write = bytes %d finished_at %s err %v flushed %t", written, finishedAt, err, flushed)
 	}
 }
 
-func TestPacedWriteCountsFullBodyThatFinishesLate(t *testing.T) {
-	var destination bytes.Buffer
-	slotEnd := time.Now()
-	written, onTime, err := writePacedBody(&destination, func() error { return nil }, "abcdef", slotEnd, func() time.Time {
-		return slotEnd.Add(time.Nanosecond)
-	})
-	if err != nil || written != 6 || onTime || destination.String() != "abcdef" {
-		t.Fatalf("late write = bytes %d on_time %t err %v body %q", written, onTime, err, destination.String())
+type countingWriter struct {
+	writes int
+	body   bytes.Buffer
+}
+
+func (w *countingWriter) Write(value []byte) (int, error) {
+	w.writes++
+	return w.body.Write(value)
+}
+
+func (w *countingWriter) String() string { return w.body.String() }
+
+func TestScheduledBatchClassifiesDeadlineBoundaries(t *testing.T) {
+	origin := time.Unix(100, 0)
+	slot := scheduledSlot{start: origin, end: origin.Add(20 * time.Millisecond)}
+	for _, wakeAt := range []time.Time{slot.end, slot.end.Add(time.Nanosecond)} {
+		writer := &countingWriter{}
+		flushes := 0
+		result, err := offerScheduledBatch(writer, func() error { flushes++; return nil }, "abcdef", slot, wakeAt, func() time.Time {
+			t.Fatal("late wake sampled a write completion time")
+			return time.Time{}
+		})
+		if err != nil || result.written != 0 || result.completed || result.missedStage != lateWake || result.overdue != wakeAt.Sub(slot.end) || writer.writes != 0 || flushes != 0 {
+			t.Fatalf("late wake %s = result %+v writes %d flushes %d err %v", wakeAt, result, writer.writes, flushes, err)
+		}
+	}
+	for _, test := range []struct {
+		name      string
+		finished  time.Time
+		completed bool
+		stage     missStage
+		overdue   time.Duration
+	}{
+		{name: "at deadline", finished: slot.end, completed: true},
+		{name: "after deadline", finished: slot.end.Add(time.Nanosecond), stage: lateFlush, overdue: time.Nanosecond},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			writer := &countingWriter{}
+			flushes := 0
+			result, err := offerScheduledBatch(writer, func() error { flushes++; return nil }, "abcdef", slot, slot.start, func() time.Time { return test.finished })
+			if err != nil || result.written != 6 || result.completed != test.completed || result.missedStage != test.stage || result.overdue != test.overdue || writer.String() != "abcdef" || writer.writes != 1 || flushes != 1 {
+				t.Fatalf("scheduled write = result %+v body %q writes %d flushes %d err %v", result, writer.String(), writer.writes, flushes, err)
+			}
+		})
+	}
+}
+
+func TestMissEvidenceOwnsExactBoundedAccounting(t *testing.T) {
+	var evidence missEvidence
+	if evidence.total() != 0 || evidence.fact().Witnesses == nil {
+		t.Fatalf("zero evidence = %+v", evidence.fact())
+	}
+	evidence.record(2, lateWake, 3*time.Nanosecond)
+	evidence.record(3, lateFlush, 5*time.Nanosecond)
+	evidence.record(4, lateWake, 3*time.Nanosecond)
+	if evidence.lateWake.MaximumOverdueOrdinal != 2 {
+		t.Fatal("equal overdue duration replaced the earlier deterministic witness")
+	}
+	for ordinal := 5; ordinal <= 10; ordinal++ {
+		evidence.record(ordinal, lateWake, time.Duration(ordinal)*time.Nanosecond)
+	}
+	fact := evidence.fact()
+	if evidence.total() != 9 || evidence.total() != fact.LateWake.Count+fact.LateFlush.Count || fact.LateWake.Count != 8 || fact.LateFlush.Count != 1 {
+		t.Fatalf("counts = total %d fact %+v", evidence.total(), fact)
+	}
+	if fact.LateWake.FirstOrdinal != 2 || fact.LateWake.LastOrdinal != 10 || fact.LateWake.MaximumOverdueOrdinal != 10 || fact.LateWake.MaximumOverdueNS != 10 || fact.LateFlush.FirstOrdinal != 3 || fact.LateFlush.LastOrdinal != 3 || fact.LateFlush.MaximumOverdueOrdinal != 3 || fact.LateFlush.MaximumOverdueNS != 5 {
+		t.Fatalf("stage evidence = %+v", fact)
+	}
+	if len(fact.Witnesses) != missWitnessLimit || fact.WitnessesOmitted != 1 || fact.Witnesses[0].Ordinal != 2 || fact.Witnesses[7].Ordinal != 9 {
+		t.Fatalf("bounded witnesses = %+v", fact)
+	}
+}
+
+func TestWaitOfferPersistsMissEvidenceAndResetClearsIt(t *testing.T) {
+	root := t.TempDir()
+	roundOne := filepath.Join(root, "round-1")
+	if err := os.Mkdir(roundOne, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := os.OpenFile(filepath.Join(roundOne, "provider-facts.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newFixture(1, 40*time.Millisecond, roundOne, facts)
+	var misses missEvidence
+	misses.record(7, lateWake, 11*time.Nanosecond)
+	misses.record(8, lateFlush, 13*time.Nanosecond)
+	fixture.streams["stream-a"] = &stream{id: "stream-a", completed: 0, misses: misses, offerBytes: len(event) * 2}
+	fixture.ready = 1
+	fixture.offerFinished = 1
+	fixture.terminalFinished = 1
+	fixture.started = true
+	fixture.startAt = time.Unix(100, 0)
+	close(fixture.offerCh)
+	server := &Server{
+		fixture: fixture,
+		facts:   facts,
+		config:  Config{Streams: 1, Duration: 40 * time.Millisecond, ArtifactDir: root, Rounds: 2},
+		round:   1,
+	}
+	summary, err := server.WaitOffer(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.MissedBatches != 2 || summary.LateWakeMissedBatches != 1 || summary.LateFlushMissedBatches != 1 || summary.MaximumLateWake == nil || summary.MaximumLateWake.ID != "stream-a" || summary.MaximumLateWake.Ordinal != 7 || summary.MaximumLateWake.OverdueNS != 11 || summary.MaximumLateFlush == nil || summary.MaximumLateFlush.Ordinal != 8 || summary.MaximumLateFlush.OverdueNS != 13 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	encodedSummary, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encodedSummary, []byte("maximum_lateness_ms")) || !bytes.Contains(encodedSummary, []byte("late_wake_missed_batches")) {
+		t.Fatalf("summary JSON = %s", encodedSummary)
+	}
+	encodedRows, err := os.ReadFile(filepath.Join(roundOne, "offer-streams.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []streamFact
+	if err := json.Unmarshal(encodedRows, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Missed != 2 || len(rows[0].MissEvidence.Witnesses) != 2 || rows[0].MissEvidence.Witnesses[0].Ordinal != 7 || rows[0].MissEvidence.Witnesses[1].Stage != lateFlush {
+		t.Fatalf("offer-streams.json = %+v", rows)
+	}
+	if err := server.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	defer server.facts.Close()
+	reset := server.Snapshot()
+	if reset.MissedBatches != 0 || reset.LateWakeMissedBatches != 0 || reset.LateFlushMissedBatches != 0 || reset.MaximumLateWake != nil || reset.MaximumLateFlush != nil {
+		t.Fatalf("reset summary retained miss evidence: %+v", reset)
 	}
 }
 
