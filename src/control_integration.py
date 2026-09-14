@@ -401,12 +401,44 @@ def main():
             lambda: observe(store, "exact-message").get("processing"),
             "exact target",
         )
+        exact_record = state / "exact-interrupt.json"
+        dropped_exact = subprocess.run(
+            [
+                str(LATIFA),
+                "interrupt-model",
+                "--store",
+                str(store),
+                "--record",
+                str(exact_record),
+                "--key",
+                "exact-interrupt",
+                "--session",
+                "direct/exact",
+                "--turn",
+                processing["turn"],
+                "--operation",
+                processing["operation"],
+                "--test-drop-reply",
+                "after-commit",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        assert dropped_exact.returncode != 0, dropped_exact
         started = time.monotonic()
-        exact = interrupt_model(
-            state, store, "exact-interrupt", "direct/exact", processing
+        exact = command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            exact_record,
+            "--kind",
+            "model-interruption",
         )
         exact_latency_ms = (time.monotonic() - started) * 1000
         assert exact["answer"]["status"] == "accepted", exact
+        assert exact["answer"]["replayed"] is True, exact
         assert exact_latency_ms < 1000, exact_latency_ms
         wait_for(lambda: endpoint.counts()[1] >= 1, "exact transport cancellation")
         exact_message = observe(store, "exact-message")
@@ -427,6 +459,39 @@ def main():
         assert stopped_message["result"]["status"] == "cancelled", stopped_message
 
         configure(state, store, "headroom-config", "direct/headroom")
+        lost_stop_record = state / "lost-stop.json"
+        dropped_stop = subprocess.run(
+            [
+                str(LATIFA),
+                "stop-session",
+                "--store",
+                str(store),
+                "--record",
+                str(lost_stop_record),
+                "--key",
+                "lost-stop",
+                "--session",
+                "direct/headroom",
+                "--test-drop-reply",
+                "after-commit",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        assert dropped_stop.returncode != 0, dropped_stop
+        recovered_stop = command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            lost_stop_record,
+            "--kind",
+            "session-stop",
+        )
+        assert recovered_stop["answer"]["status"] == "accepted", recovered_stop
+        assert recovered_stop["answer"]["replayed"] is True, recovered_stop
+        assert recovered_stop["answer"]["selection"]["turn"] is None, recovered_stop
         held = fill_ordinary_capacity(socket_path)
         assert_ordinary_capacity_busy(socket_path)
 
@@ -447,7 +512,7 @@ def main():
         for connection in held:
             connection.close()
         held.clear()
-        time.sleep(0.1)
+        time.sleep(1)
 
         classification = [
             open_partial(socket_path, "/v1/control/session-stop", complete_headers=False)
@@ -462,6 +527,7 @@ def main():
         assert b"classification_capacity_exhausted" in ninth_body, ninth_body
         for connection in classification:
             connection.close()
+        time.sleep(1)
 
         for kind, route, limit in (
             ("session_stop", "/v1/control/session-stop", MAX_SESSION_STOP_REQUEST_BYTES),
