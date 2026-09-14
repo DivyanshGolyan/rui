@@ -72,13 +72,12 @@ pub const RetainedScratch = struct {
     io: std.Io,
     file: std.Io.File,
     secondary_file: ?std.Io.File = null,
-    scratch_path: protocol.Bounded(protocol.max_store_bytes + 64),
     name: protocol.Bounded(96),
     charged: u64,
     budget: ScratchBudget,
 
-    pub fn cleanup(self: *RetainedScratch) !void {
-        var scratch = try std.Io.Dir.cwd().openDir(self.io, self.scratch_path.slice(), .{});
+    pub fn cleanup(self: *RetainedScratch, scratch_path: []const u8) !void {
+        var scratch = try std.Io.Dir.cwd().openDir(self.io, scratch_path, .{});
         defer scratch.close(self.io);
         try scratch.deleteFile(self.io, self.name.slice());
         self.file.close(self.io);
@@ -200,15 +199,15 @@ pub fn materialize(
     });
     const file = try scratch.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
     const readonly = scratch.openFile(io, name, .{}) catch |err| {
-        retained.* = retainedNamedScratch(io, file, null, scratch_path, name, budget, 0);
+        retained.* = retainedNamedScratch(io, file, null, name, budget, 0);
         return err;
     };
     if (faults.unlink) {
-        retained.* = retainedNamedScratch(io, file, readonly, scratch_path, name, budget, 0);
+        retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0);
         return error.InjectedRequestUnlinkFailure;
     }
     scratch.deleteFile(io, name) catch |err| {
-        retained.* = retainedNamedScratch(io, file, readonly, scratch_path, name, budget, 0);
+        retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0);
         return err;
     };
 
@@ -484,15 +483,15 @@ pub const ResponseCapture = struct {
             .permissions = .fromMode(0o600),
         });
         const readonly = scratch.openFile(io, name, .{}) catch |err| {
-            retained.* = retainedNamedScratch(io, file, null, scratch_path, name, budget, 0);
+            retained.* = retainedNamedScratch(io, file, null, name, budget, 0);
             return err;
         };
         if (fail_unlink) {
-            retained.* = retainedNamedScratch(io, file, readonly, scratch_path, name, budget, 0);
+            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0);
             return error.InjectedResponseUnlinkFailure;
         }
         scratch.deleteFile(io, name) catch |err| {
-            retained.* = retainedNamedScratch(io, file, readonly, scratch_path, name, budget, 0);
+            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0);
             return err;
         };
         return .{
@@ -558,7 +557,6 @@ fn retainedNamedScratch(
     io: std.Io,
     file: std.Io.File,
     secondary_file: ?std.Io.File,
-    scratch_path: []const u8,
     name: []const u8,
     budget: ScratchBudget,
     charged: u64,
@@ -567,12 +565,10 @@ fn retainedNamedScratch(
         .io = io,
         .file = file,
         .secondary_file = secondary_file,
-        .scratch_path = .{},
         .name = .{},
         .charged = charged,
         .budget = budget,
     };
-    retained.scratch_path.set(scratch_path) catch unreachable;
     retained.name.set(name) catch unreachable;
     return retained;
 }

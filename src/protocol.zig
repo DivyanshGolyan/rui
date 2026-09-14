@@ -3,7 +3,10 @@ const std = @import("std");
 pub const wire_version = "1";
 pub const max_key_bytes = 128;
 pub const max_session_bytes = 128;
-pub const max_store_bytes = 4096;
+// SQLite's Unix VFS needs eight bytes beyond the database path for journals.
+// The Store selector plus "/latifa.sqlite3" and the journal suffix must stay
+// within its compiled 512-byte pathname limit.
+pub const max_store_bytes = 489;
 pub const max_workspace_bytes = 4096;
 pub const max_model_bytes = 256;
 pub const max_header_bytes = 16 * 1024;
@@ -565,7 +568,12 @@ const Parser = struct {
     fn readContentString(self: *Parser, field: *ContentField) !void {
         self.content_ordinal += 1;
         if (self.options.fault_content_acquire) return error.InjectedContentAcquireFailure;
-        var path_buffer: [max_store_bytes + 128]u8 = undefined;
+        const max_request_number_bytes = 20;
+        const max_content_ordinal_bytes = 3;
+        const max_content_path_bytes = max_store_bytes +
+            "/scratch/request-".len + max_request_number_bytes +
+            "-".len + max_content_ordinal_bytes + ".tmp".len;
+        var path_buffer: [max_content_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buffer, "{s}/request-{d}-{d}.tmp", .{
             self.options.scratch_path,
             self.options.request_number,
