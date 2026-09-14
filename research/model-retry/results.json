@@ -1,18 +1,25 @@
 {
   "scope": "issue-174 production retry discovery and custody churn",
   "status": "passed",
-  "tested_revision": "458fd597db46a58cddd2d004c00be39e834dd308",
+  "tested_revision": "36e44b50e50aa6baf7a2dbf736c5664b5aed2dad",
   "working_tree_dirty": false,
-  "binary_sha256": "166f1870460bccfc13875a50ea94516c513f39fe7c6c71ac7c4eebe22735c3eb",
+  "binary_sha256": "0c2b3140ece98d847c50bf01c31b6e4410979d06555f5a2ae17258844b2aa6e9",
   "zig": "0.16.0",
   "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+  "measurement_runtime": {
+    "python_executable": "/private/tmp/latifa-final-measurement-venv.odhQxo/bin/python3",
+    "python_version": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 17.0.0 (clang-1700.6.4.2)]",
+    "psutil_version": "7.2.2",
+    "requirements_path": "research/measurement-requirements.txt",
+    "helper_path": "research/measurement_process.py"
+  },
   "timing": {
-    "retry_due_at_unix_ms": 1789317273707,
-    "host_started_at_unix_ms": 1789317273461,
-    "replacement_admitted_at_unix_ms": 1789317274589,
-    "replacement_launched_at_unix_ms": 1789317274828,
-    "discovery_after_due_ms": 882,
-    "launch_after_discovery_ms": 239,
+    "retry_due_at_unix_ms": 1789376719978,
+    "host_started_at_unix_ms": 1789376719732,
+    "replacement_admitted_at_unix_ms": 1789376720844,
+    "replacement_launched_at_unix_ms": 1789376721079,
+    "discovery_after_due_ms": 866,
+    "launch_after_discovery_ms": 235,
     "configured_prelaunch_delay_ms": 250,
     "endpoint_attempts": 2
   },
@@ -21,27 +28,27 @@
       {
         "model_operations": 32,
         "older_unresolved_future_retries": 31,
-        "replacement_admitted_after_start_ms": 36,
-        "replacement_launched_after_start_ms": 292,
-        "database_bytes": 135168
+        "replacement_admitted_after_start_ms": 32,
+        "replacement_launched_after_start_ms": 284,
+        "database_bytes": 143360
       },
       {
         "model_operations": 128,
         "older_unresolved_future_retries": 126,
-        "replacement_admitted_after_start_ms": 57,
-        "replacement_launched_after_start_ms": 317,
-        "database_bytes": 249856
+        "replacement_admitted_after_start_ms": 45,
+        "replacement_launched_after_start_ms": 300,
+        "database_bytes": 258048
       },
       {
         "model_operations": 10129,
         "older_unresolved_future_retries": 10126,
-        "replacement_admitted_after_start_ms": 40,
-        "replacement_launched_after_start_ms": 300,
-        "database_bytes": 1056768
+        "replacement_admitted_after_start_ms": 45,
+        "replacement_launched_after_start_ms": 306,
+        "database_bytes": 954368
       }
     ],
-    "future_only_idle_cpu_percent_one_core": 0.599,
-    "future_only_idle_cpu_sample_seconds": 5.01,
+    "future_only_idle_cpu_percent_one_core": 0.336,
+    "future_only_idle_cpu_sample_seconds": 5.001,
     "qualification_limit_ms": 2000
   },
   "churn_and_delayed_cleanup": {
@@ -51,7 +58,7 @@
       {
         "round": 1,
         "terminal_operations": 32,
-        "database_bytes": 135168,
+        "database_bytes": 143360,
         "execution": {
           "status": "partial",
           "dispatch_fenced": false,
@@ -61,17 +68,19 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 13500416,
-        "virtual_bytes": 421261492224,
-        "physical_footprint_bytes": 9044992,
-        "lifetime_peak_physical_footprint_bytes": 9208832,
+        "rss_bytes": 9568256,
+        "virtual_bytes": 421395742720,
+        "physical_footprint_bytes": 10485760,
+        "physical_footprint_rounding_tolerance_bytes": 524288,
+        "lifetime_peak_physical_footprint_bytes": 10485760,
+        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288,
         "open_descriptor_rows": 15,
         "open_retry_scratch_descriptors": 0
       },
       {
         "round": 2,
         "terminal_operations": 64,
-        "database_bytes": 163840,
+        "database_bytes": 172032,
         "execution": {
           "status": "partial",
           "dispatch_fenced": false,
@@ -81,17 +90,19 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 14598144,
-        "virtual_bytes": 421261492224,
-        "physical_footprint_bytes": 10142720,
-        "lifetime_peak_physical_footprint_bytes": 10485760,
+        "rss_bytes": 8814592,
+        "virtual_bytes": 421395742720,
+        "physical_footprint_bytes": 11534336,
+        "physical_footprint_rounding_tolerance_bytes": 524288,
+        "lifetime_peak_physical_footprint_bytes": 11534336,
+        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288,
         "open_descriptor_rows": 15,
         "open_retry_scratch_descriptors": 0
       },
       {
         "round": 3,
         "terminal_operations": 96,
-        "database_bytes": 212992,
+        "database_bytes": 221184,
         "execution": {
           "status": "partial",
           "dispatch_fenced": false,
@@ -101,17 +112,19 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 15532032,
-        "virtual_bytes": 421395709952,
+        "rss_bytes": 14237696,
+        "virtual_bytes": 421395742720,
         "physical_footprint_bytes": 11534336,
-        "lifetime_peak_physical_footprint_bytes": 11534336,
+        "physical_footprint_rounding_tolerance_bytes": 524288,
+        "lifetime_peak_physical_footprint_bytes": 12582912,
+        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288,
         "open_descriptor_rows": 15,
         "open_retry_scratch_descriptors": 0
       },
       {
         "round": 4,
         "terminal_operations": 128,
-        "database_bytes": 249856,
+        "database_bytes": 262144,
         "execution": {
           "status": "partial",
           "dispatch_fenced": false,
@@ -121,17 +134,19 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 15974400,
-        "virtual_bytes": 421395709952,
+        "rss_bytes": 14270464,
+        "virtual_bytes": 421395742720,
         "physical_footprint_bytes": 11534336,
-        "lifetime_peak_physical_footprint_bytes": 11534336,
+        "physical_footprint_rounding_tolerance_bytes": 524288,
+        "lifetime_peak_physical_footprint_bytes": 12582912,
+        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288,
         "open_descriptor_rows": 15,
         "open_retry_scratch_descriptors": 0
       },
       {
         "round": 5,
         "terminal_operations": 160,
-        "database_bytes": 294912,
+        "database_bytes": 290816,
         "execution": {
           "status": "partial",
           "dispatch_fenced": false,
@@ -141,31 +156,37 @@
             "structured_output"
           ]
         },
-        "rss_bytes": 16039936,
-        "virtual_bytes": 421395709952,
-        "physical_footprint_bytes": 11534336,
-        "lifetime_peak_physical_footprint_bytes": 11534336,
+        "rss_bytes": 12353536,
+        "virtual_bytes": 421395742720,
+        "physical_footprint_bytes": 12582912,
+        "physical_footprint_rounding_tolerance_bytes": 524288,
+        "lifetime_peak_physical_footprint_bytes": 12582912,
+        "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288,
         "open_descriptor_rows": 15,
         "open_retry_scratch_descriptors": 0
       }
     ],
     "baseline": {
-      "rss_bytes": 8126464,
-      "virtual_bytes": 420122230784,
-      "physical_footprint_bytes": 3605504,
-      "lifetime_peak_physical_footprint_bytes": 3605504,
+      "rss_bytes": 7979008,
+      "virtual_bytes": 420421107712,
+      "physical_footprint_bytes": 3507200,
+      "physical_footprint_rounding_tolerance_bytes": 512,
+      "lifetime_peak_physical_footprint_bytes": 3507200,
+      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512,
       "open_descriptor_rows": 15,
       "open_retry_scratch_descriptors": 0
     },
     "custody_record_bytes": 40,
-    "execution_slot_bytes": 9840,
-    "idle_cpu_percent_one_core": 0.497,
+    "execution_slot_bytes": 1200,
+    "idle_cpu_percent_one_core": 0.223,
     "idle_cpu_sample_seconds": 2.01,
     "retained_idle": {
-      "rss_bytes": 16039936,
-      "virtual_bytes": 421395709952,
-      "physical_footprint_bytes": 11534336,
-      "lifetime_peak_physical_footprint_bytes": 11534336,
+      "rss_bytes": 12353536,
+      "virtual_bytes": 421395742720,
+      "physical_footprint_bytes": 12582912,
+      "physical_footprint_rounding_tolerance_bytes": 524288,
+      "lifetime_peak_physical_footprint_bytes": 12582912,
+      "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288,
       "open_descriptor_rows": 15,
       "open_retry_scratch_descriptors": 0
     },
@@ -178,15 +199,7 @@
       ]
     ]
   },
-  "ordinary_inspection_diagnostic": {
-    "status": "non_qualifying",
-    "scope": "one /v1/observe-command client repeatedly inspecting the same unresolved attempt while the Host settled 1,000 exhausted operations",
-    "samples_before_terminal": 42,
-    "p95_ms": 1024.836,
-    "max_ms": 2920.992,
-    "qualification_claim": "none; ordinary inspection must progress, while the one-second p95 target applies to durable control acknowledgments on later unsupported surfaces"
-  },
-  "elapsed_seconds": 47.111,
+  "elapsed_seconds": 50.036,
   "limits": [
     "macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only",
     "deterministic loopback HTTP classifies no TLS trust store or live-provider behavior",
