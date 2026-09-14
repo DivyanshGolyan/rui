@@ -165,7 +165,7 @@
       "cleanup_delay_ms": 1500,
       "qualification_limit_ms": 1000,
       "total_durable_acknowledgment": {
-        "definition": "caller start through receipt of the complete durable Session-stop reply",
+        "definition": "caller start through receipt of the complete durable control reply",
         "p95_ms": 812.243,
         "maximum_ms": 812.243
       },

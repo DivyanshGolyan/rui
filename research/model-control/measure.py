@@ -386,7 +386,7 @@ def run_measurement(binary):
                     "qualification_limit_ms": 1000,
                     "total_durable_acknowledgment": timing_summary(
                         qualified["acknowledgment_ms"],
-                        "caller start through receipt of the complete durable Session-stop reply",
+                        "caller start through receipt of the complete durable control reply",
                     ),
                     "control_queue_wait": timing_summary(
                         queue_wait,
