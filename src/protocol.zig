@@ -70,7 +70,15 @@ pub const Configuration = struct {
     output_schema: ContentField = .{},
 };
 
-pub const Kind = enum { configure, message, observe_command, read_result, inspect_session };
+pub const Kind = enum {
+    configure,
+    message,
+    session_stop,
+    model_interruption,
+    observe_command,
+    read_result,
+    inspect_session,
+};
 
 pub const ConfigureCommand = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -128,6 +136,39 @@ pub const MessageCommand = struct {
     }
 };
 
+pub const SessionStopCommand = struct {
+    store: Bounded(max_store_bytes) = .{},
+    key: Bounded(max_key_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+
+    pub fn semanticDigest(self: *const SessionStopCommand) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, "latifa/core/session-stop/v1");
+        hashField(&hash, self.session.slice());
+        return hash.finalResult();
+    }
+};
+
+pub const ModelInterruptionCommand = struct {
+    store: Bounded(max_store_bytes) = .{},
+    key: Bounded(max_key_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    turn_id: u64 = 0,
+    operation_id: u64 = 0,
+
+    pub fn semanticDigest(self: *const ModelInterruptionCommand) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, "latifa/core/model-interruption/v1");
+        hashField(&hash, self.session.slice());
+        var value: [8]u8 = undefined;
+        std.mem.writeInt(u64, &value, self.turn_id, .big);
+        hash.update(&value);
+        std.mem.writeInt(u64, &value, self.operation_id, .big);
+        hash.update(&value);
+        return hash.finalResult();
+    }
+};
+
 pub const ObserveCommand = struct {
     store: Bounded(max_store_bytes) = .{},
     key: Bounded(max_key_bytes) = .{},
@@ -146,6 +187,8 @@ pub const InspectSession = struct {
 pub const Request = union(Kind) {
     configure: ConfigureCommand,
     message: MessageCommand,
+    session_stop: SessionStopCommand,
+    model_interruption: ModelInterruptionCommand,
     observe_command: ObserveCommand,
     read_result: ReadResult,
     inspect_session: InspectSession,
@@ -154,7 +197,7 @@ pub const Request = union(Kind) {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .observe_command, .read_result, .inspect_session => {},
+            .session_stop, .model_interruption, .observe_command, .read_result, .inspect_session => {},
         }
     }
 
@@ -283,6 +326,10 @@ const Parser = struct {
             .configure
         else if (kind_text.eql("message"))
             .message
+        else if (kind_text.eql("session_stop"))
+            .session_stop
+        else if (kind_text.eql("model_interruption"))
+            .model_interruption
         else if (kind_text.eql("observe_command"))
             .observe_command
         else if (kind_text.eql("read_result"))
@@ -300,6 +347,8 @@ const Parser = struct {
         var request: Request = switch (kind) {
             .configure => .{ .configure = try self.parseConfigure(store) },
             .message => .{ .message = try self.parseMessage(store) },
+            .session_stop => .{ .session_stop = try self.parseSessionStop(store) },
+            .model_interruption => .{ .model_interruption = try self.parseModelInterruption(store) },
             .observe_command => .{ .observe_command = try self.parseObserve(store) },
             .read_result => .{ .read_result = try self.parseReadResult(store) },
             .inspect_session => .{ .inspect_session = try self.parseInspect(store) },
@@ -365,6 +414,52 @@ const Parser = struct {
         try self.readContent(&request.text, false);
         if (request.text.state != .value) return error.InvalidMessage;
         return request;
+    }
+
+    fn parseSessionStop(self: *Parser, store: Bounded(max_store_bytes)) !SessionStopCommand {
+        var request = SessionStopCommand{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("key");
+        try self.readSmallString(&request.key);
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        return request;
+    }
+
+    fn parseModelInterruption(self: *Parser, store: Bounded(max_store_bytes)) !ModelInterruptionCommand {
+        var request = ModelInterruptionCommand{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("key");
+        try self.readSmallString(&request.key);
+        try self.expectByte(',');
+        try self.expectKey("target");
+        try self.expectByte('{');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("turn");
+        request.turn_id = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("operation");
+        request.operation_id = try self.readCanonicalU64();
+        try self.expectByte('}');
+        return request;
+    }
+
+    fn readCanonicalU64(self: *Parser) !u64 {
+        try self.expectByte('"');
+        var digits: [20]u8 = undefined;
+        var used: usize = 0;
+        while (true) {
+            const byte = try self.source.readByte();
+            if (byte == '"') break;
+            if (byte < '0' or byte > '9' or used == digits.len) return error.InvalidIdentity;
+            digits[used] = byte;
+            used += 1;
+        }
+        if (used == 0 or (used > 1 and digits[0] == '0')) return error.InvalidIdentity;
+        return std.fmt.parseInt(u64, digits[0..used], 10) catch error.InvalidIdentity;
     }
 
     fn parseObserve(self: *Parser, store: Bounded(max_store_bytes)) !ObserveCommand {
@@ -710,10 +805,117 @@ pub fn maximumJsonStringBytes(input_bytes: usize) usize {
     return 2 + 6 * input_bytes;
 }
 
+pub const max_session_stop_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) +
+    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) + "}".len;
+
+pub const max_model_interruption_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) +
+    ",\"target\":{\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"turn\":\"".len + 20 +
+    "\",\"operation\":\"".len + 20 + "\"}}".len;
+
+pub const max_control_request_bytes = @max(
+    max_session_stop_request_bytes,
+    max_model_interruption_request_bytes,
+);
+
+const max_session_stop_rejection_code_bytes = "invalid_session_reference".len;
+const max_model_interruption_rejection_code_bytes = "invalid_session_reference".len;
+
+pub const max_session_stop_accepted_reply_bytes =
+    "{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":".len +
+    maximumJsonStringBytes(max_session_bytes) +
+    ",\"selection\":{\"turn\":\"".len + 20 +
+    "\",\"admission_cutoff\":\"".len + 20 +
+    "\"}},\"completion\":{\"status\":\"completed\"}}".len;
+pub const max_session_stop_rejected_reply_bytes =
+    "{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":".len +
+    maximumJsonStringBytes(max_session_bytes) +
+    ",\"code\":\"".len + max_session_stop_rejection_code_bytes +
+    "\"},\"completion\":{\"status\":\"unavailable\"}}".len;
+pub const max_session_stop_conflict_reply_bytes =
+    "{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"conflict\",\"replayed\":false,\"session\":".len +
+    maximumJsonStringBytes(max_session_bytes) +
+    ",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}".len;
+pub const max_session_stop_infrastructure_reply_bytes =
+    "{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"infrastructure_failure\",\"replayed\":false,\"session\":".len +
+    maximumJsonStringBytes(max_session_bytes) +
+    ",\"code\":\"canonical_store_failure\"},\"completion\":{\"status\":\"unavailable\"}}".len;
+pub const max_session_stop_reply_bytes = @max(
+    @max(max_session_stop_accepted_reply_bytes, max_session_stop_rejected_reply_bytes),
+    @max(max_session_stop_conflict_reply_bytes, max_session_stop_infrastructure_reply_bytes),
+);
+
+const max_model_interruption_target_bytes =
+    "{\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"turn\":\"".len + 20 + "\",\"operation\":\"".len + 20 + "\"}".len;
+const model_interruption_reply_prefix_bytes =
+    "{\"version\":\"1\",\"type\":\"model_interruption_reply\",\"answer\":{\"status\":\"".len;
+pub const max_model_interruption_accepted_reply_bytes =
+    model_interruption_reply_prefix_bytes + "accepted".len +
+    "\",\"replayed\":false,\"target\":".len + max_model_interruption_target_bytes + "}}".len;
+pub const max_model_interruption_rejected_reply_bytes =
+    model_interruption_reply_prefix_bytes + "rejected".len +
+    "\",\"replayed\":false,\"target\":".len + max_model_interruption_target_bytes +
+    ",\"code\":\"".len + max_model_interruption_rejection_code_bytes + "\"}}".len;
+pub const max_model_interruption_conflict_reply_bytes =
+    model_interruption_reply_prefix_bytes + "conflict".len +
+    "\",\"replayed\":false,\"target\":".len + max_model_interruption_target_bytes +
+    ",\"code\":\"idempotency_key_conflict\"}}".len;
+pub const max_model_interruption_infrastructure_reply_bytes =
+    model_interruption_reply_prefix_bytes + "infrastructure_failure".len +
+    "\",\"replayed\":false,\"target\":".len + max_model_interruption_target_bytes +
+    ",\"code\":\"canonical_store_failure\"}}".len;
+pub const max_model_interruption_reply_bytes = @max(
+    @max(max_model_interruption_accepted_reply_bytes, max_model_interruption_rejected_reply_bytes),
+    @max(max_model_interruption_conflict_reply_bytes, max_model_interruption_infrastructure_reply_bytes),
+);
+
+const control_observation_prefix_bytes =
+    "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":".len +
+    maximumJsonStringBytes(max_key_bytes) + ",\"observation\":{\"status\":\"".len;
+pub const max_session_stop_accepted_observation_bytes =
+    control_observation_prefix_bytes + "accepted".len +
+    "\",\"kind\":\"session_stop\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"selection\":{\"turn\":\"".len + 20 +
+    "\",\"admission_cutoff\":\"".len + 20 +
+    "\"},\"completion\":{\"status\":\"completed\"}}}".len;
+pub const max_session_stop_rejected_observation_bytes =
+    control_observation_prefix_bytes + "rejected".len +
+    "\",\"kind\":\"session_stop\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"code\":\"".len + max_session_stop_rejection_code_bytes + "\"}}".len;
+pub const max_model_interruption_accepted_observation_bytes =
+    control_observation_prefix_bytes + "accepted".len +
+    "\",\"kind\":\"model_interruption\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"interruption_target\":".len + max_model_interruption_target_bytes + "}}".len;
+pub const max_model_interruption_rejected_observation_bytes =
+    control_observation_prefix_bytes + "rejected".len +
+    "\",\"kind\":\"model_interruption\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"code\":\"".len + max_model_interruption_rejection_code_bytes +
+    "\",\"interruption_target\":".len + max_model_interruption_target_bytes + "}}".len;
+pub const max_control_observation_bytes = @max(
+    @max(max_session_stop_accepted_observation_bytes, max_session_stop_rejected_observation_bytes),
+    @max(max_model_interruption_accepted_observation_bytes, max_model_interruption_rejected_observation_bytes),
+);
+
+pub const max_control_error_response_bytes =
+    "{\"version\":\"1\",\"type\":".len + maximumJsonStringBytes(32) +
+    ",\"code\":".len + maximumJsonStringBytes(96) + "}".len;
+
+pub const max_control_response_bytes = @max(
+    @max(max_session_stop_reply_bytes, max_model_interruption_reply_bytes),
+    @max(max_control_observation_bytes, max_control_error_response_bytes),
+);
+
 // The Session inspection is the largest issue-174 response. This bound uses
 // every literal emitted by renderSessionObservation, maximum decimal u64
 // widths, both tools, a present schema, and worst-case JSON escaping.
-pub const max_response_bytes =
+const max_session_observation_response_bytes =
     "{\"version\":\"1\",\"type\":\"session_observation\",\"session\":{\"reference\":".len +
     maximumJsonStringBytes(max_session_bytes) +
     ",\"workspace\":".len + maximumJsonStringBytes(max_workspace_bytes) +
@@ -726,6 +928,8 @@ pub const max_response_bytes =
     "\",\"sha256\":\"".len + 64 +
     "\"}},\"pending_messages\":\"".len + 20 +
     "\",\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"18446744073709551615\",\"scratch_used_bytes\":\"18446744073709551615\",\"unavailable\":[\"structured_output\"]}}".len;
+
+pub const max_response_bytes = @max(max_session_observation_response_bytes, max_control_response_bytes);
 
 pub const ResponseBuffer = struct {
     bytes: [max_response_bytes]u8 = undefined,

@@ -35,6 +35,24 @@ pub const MessageInput = struct {
     drop_reply: ?[]const u8 = null,
 };
 
+pub const SessionStopInput = struct {
+    store: []const u8,
+    record: []const u8,
+    key: []const u8,
+    session: []const u8,
+    drop_reply: ?[]const u8 = null,
+};
+
+pub const ModelInterruptionInput = struct {
+    store: []const u8,
+    record: []const u8,
+    key: []const u8,
+    session: []const u8,
+    turn_id: u64,
+    operation_id: u64,
+    drop_reply: ?[]const u8 = null,
+};
+
 pub const ReplyBuffer = protocol.ResponseBuffer;
 
 pub const CommandReply = struct {
@@ -64,6 +82,37 @@ pub fn message(io: std.Io, input: MessageInput, reply_buffer: *ReplyBuffer) !Com
     return sendRecord(io, &paths, input.record, "/v1/message", input.drop_reply, reply_buffer);
 }
 
+pub fn stopSession(io: std.Io, input: SessionStopInput, reply_buffer: *ReplyBuffer) !CommandReply {
+    reply_buffer.len = 0;
+    const paths = try platform.resolveClientPaths(io, input.store);
+    try validateIdentityInputs(input.key, input.session);
+    try captureSessionStop(io, &paths, input);
+    return sendRecord(
+        io,
+        &paths,
+        input.record,
+        "/v1/control/session-stop",
+        input.drop_reply,
+        reply_buffer,
+    );
+}
+
+pub fn interruptModel(io: std.Io, input: ModelInterruptionInput, reply_buffer: *ReplyBuffer) !CommandReply {
+    reply_buffer.len = 0;
+    const paths = try platform.resolveClientPaths(io, input.store);
+    try validateIdentityInputs(input.key, input.session);
+    if (input.turn_id == 0 or input.operation_id == 0) return error.InvalidTarget;
+    try captureModelInterruption(io, &paths, input);
+    return sendRecord(
+        io,
+        &paths,
+        input.record,
+        "/v1/control/model-interruption",
+        input.drop_reply,
+        reply_buffer,
+    );
+}
+
 pub fn retry(
     io: std.Io,
     store_path: []const u8,
@@ -77,6 +126,10 @@ pub fn retry(
         "/v1/configure"
     else if (std.mem.eql(u8, kind, "message"))
         "/v1/message"
+    else if (std.mem.eql(u8, kind, "session-stop"))
+        "/v1/control/session-stop"
+    else if (std.mem.eql(u8, kind, "model-interruption"))
+        "/v1/control/model-interruption"
     else
         return error.InvalidRetryKind;
     return sendRecord(io, &paths, record, route, null, reply_buffer);
@@ -189,6 +242,41 @@ fn captureMessage(io: std.Io, paths: *const platform.Paths, input: MessageInput)
     try capture.write(",\"text\":{\"state\":\"value\",\"value\":");
     try capture.writeJsonFile(input.text_path);
     try capture.write("}}");
+    try capture.commit();
+}
+
+fn captureSessionStop(io: std.Io, paths: *const platform.Paths, input: SessionStopInput) !void {
+    var capture = try Capture.open(io, input.record);
+    errdefer capture.abort();
+    try capture.write("{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":");
+    try capture.writeJsonString(paths.store.slice());
+    try capture.write(",\"key\":");
+    try capture.writeJsonString(input.key);
+    try capture.write(",\"session\":");
+    try capture.writeJsonString(input.session);
+    try capture.write("}");
+    try capture.commit();
+}
+
+fn captureModelInterruption(
+    io: std.Io,
+    paths: *const platform.Paths,
+    input: ModelInterruptionInput,
+) !void {
+    var capture = try Capture.open(io, input.record);
+    errdefer capture.abort();
+    try capture.write("{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":");
+    try capture.writeJsonString(paths.store.slice());
+    try capture.write(",\"key\":");
+    try capture.writeJsonString(input.key);
+    try capture.write(",\"target\":{\"session\":");
+    try capture.writeJsonString(input.session);
+    var ids: [96]u8 = undefined;
+    const suffix = try std.fmt.bufPrint(&ids, ",\"turn\":\"{d}\",\"operation\":\"{d}\"}}}}", .{
+        input.turn_id,
+        input.operation_id,
+    });
+    try capture.write(suffix);
     try capture.commit();
 }
 
@@ -598,6 +686,63 @@ test "command reply borrows the caller buffer" {
     try std.testing.expectEqual(@as(u16, 409), reply.status);
     try std.testing.expectEqualStrings("{\"status\":\"error\"}", reply.body);
     try std.testing.expectEqual(@intFromPtr(buffer.bytes[0..].ptr), @intFromPtr(reply.body.ptr));
+}
+
+test "control captures attain their exact worst-case request bounds" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    var records = try tmp.dir.createDirPathOpen(std.testing.io, "records", .{
+        .permissions = .fromMode(0o700),
+    });
+    records.close(std.testing.io);
+
+    const escaped_store = [_]u8{1} ** protocol.max_store_bytes;
+    const escaped_key = [_]u8{1} ** protocol.max_key_bytes;
+    const escaped_session = [_]u8{1} ** protocol.max_session_bytes;
+    var paths: platform.Paths = .{};
+    try paths.store.set(&escaped_store);
+
+    var stop_path_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    const stop_path = try std.fmt.bufPrint(
+        &stop_path_buffer,
+        "{s}/records/stop-record",
+        .{root_buffer[0..root_length]},
+    );
+    try captureSessionStop(std.testing.io, &paths, .{
+        .store = "unused",
+        .record = stop_path,
+        .key = &escaped_key,
+        .session = &escaped_session,
+    });
+    const stop_file = try std.Io.Dir.cwd().openFile(std.testing.io, stop_path, .{});
+    defer stop_file.close(std.testing.io);
+    try std.testing.expectEqual(
+        @as(u64, protocol.max_session_stop_request_bytes),
+        try stop_file.length(std.testing.io),
+    );
+
+    var interruption_path_buffer: [protocol.max_store_bytes + 64]u8 = undefined;
+    const interruption_path = try std.fmt.bufPrint(
+        &interruption_path_buffer,
+        "{s}/records/interruption-record",
+        .{root_buffer[0..root_length]},
+    );
+    try captureModelInterruption(std.testing.io, &paths, .{
+        .store = "unused",
+        .record = interruption_path,
+        .key = &escaped_key,
+        .session = &escaped_session,
+        .turn_id = std.math.maxInt(u64),
+        .operation_id = std.math.maxInt(u64),
+    });
+    const interruption_file = try std.Io.Dir.cwd().openFile(std.testing.io, interruption_path, .{});
+    defer interruption_file.close(std.testing.io);
+    try std.testing.expectEqual(
+        @as(u64, protocol.max_model_interruption_request_bytes),
+        try interruption_file.length(std.testing.io),
+    );
 }
 
 test "response parsing rejects truncated head and command body" {

@@ -68,6 +68,7 @@ const Host = struct {
     execution_shutdown: std.atomic.Value(bool) = .init(false),
     effect_shutdown: std.atomic.Value(bool) = .init(false),
     dispatch_fenced: std.atomic.Value(bool) = .init(false),
+    controls_changed: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
     active_clients: std.atomic.Value(usize) = .init(0),
     classification_clients: std.atomic.Value(usize) = .init(0),
@@ -322,6 +323,10 @@ fn executionMain(host: *Host) void {
                 }
             }
         }
+        if (host.controls_changed.swap(false, .acq_rel)) {
+            cancelSupersededTransfers(host, &reactor, slots);
+            made_progress = true;
+        }
         capacity_was_full = countFreeSlots(slots) == 0;
         if (hasTransport(slots)) {
             reactor.drive(if (made_progress) 0 else 25) catch |err| {
@@ -344,6 +349,23 @@ fn executionMain(host: *Host) void {
         }
         advanceCleanup(host, slots);
     }
+}
+
+fn cancelSupersededTransfers(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot) void {
+    for (slots) |*slot| switch (slot.*) {
+        .provider => |*active| {
+            const superseded = host.store.operationSupersededByControl(active.owner.binding) catch |err| {
+                fenceDispatch(host, "control reconciliation", err);
+                return;
+            };
+            if (!superseded) continue;
+            const owner = active.owner;
+            reactor.cancel(&active.transfer);
+            active.transfer.deinit();
+            beginCleanup(host, slot, owner);
+        },
+        .free, .cleanup, .retained_scratch, .retained_metadata => {},
+    };
 }
 
 fn countFreeSlots(slots: []const ExecutionSlot) usize {
@@ -444,6 +466,10 @@ fn beginAdmittedAttempt(
     };
 
     var view = host.store.openHistoricalView(binding) catch |err| {
+        if (err == error.SupersededByControl) {
+            finishCustodyNow(host, token);
+            return .admitted;
+        }
         fenceDispatch(host, "historical view", err);
         finishCustodyNow(host, token);
         return .admitted;
@@ -477,6 +503,10 @@ fn beginAdmittedAttempt(
         }
         if (host.store.isFenced()) {
             fenceDispatch(host, "canonical request read", err);
+            finishCustodyNow(host, token);
+            return .admitted;
+        }
+        if (err == error.SupersededByControl) {
             finishCustodyNow(host, token);
             return .admitted;
         }
@@ -548,6 +578,11 @@ fn beginAdmittedAttempt(
         }.handoff,
     ) catch |err| {
         active.transfer.deinit();
+        if (err == error.SupersededByControl) {
+            finishCustodyNow(host, token);
+            slot.* = .free;
+            return .admitted;
+        }
         std.debug.print("latifa: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
@@ -721,7 +756,8 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         .output_read = host.faults.response_read,
         .output_import = host.faults.response_import,
         .output_commit = host.faults.response_commit,
-    }) catch |err| fenceDispatch(host, "model output import", err);
+    }) catch |err| if (err != error.SupersededByControl)
+        fenceDispatch(host, "model output import", err);
     return .cleanup;
 }
 
@@ -824,7 +860,8 @@ fn settleAttemptFailure(
     if (!host.custody.claimTerminalDelivery(token)) return;
     host.store.settleModelAttemptFailure(binding, code, disposition, .{
         .before_commit = host.faults.result_before_commit,
-    }) catch |err| fenceDispatch(host, "model failure save", err);
+    }) catch |err| if (err != error.SupersededByControl)
+        fenceDispatch(host, "model failure save", err);
 }
 
 fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
@@ -870,7 +907,20 @@ fn connectionMain(connection: *Connection) void {
     };
 }
 
-const Route = enum { configure, message, observe, read_result, inspect, unsupported_control };
+const Route = enum {
+    configure,
+    message,
+    session_stop,
+    model_interruption,
+    observe,
+    read_result,
+    inspect,
+    unsupported_control,
+
+    fn isControl(self: Route) bool {
+        return self == .session_stop or self == .model_interruption or self == .unsupported_control;
+    }
+};
 const DropMode = enum { none, before_admission, during_admission, after_commit };
 
 const Header = struct {
@@ -884,26 +934,41 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
     defer if (classification_held) {
         _ = host.classification_clients.fetchSub(1, .acq_rel);
     };
-    const header = try readHeader(host.io, fd);
-    const ordinary = header.route != .unsupported_control;
+    var ordinary_held = false;
+    defer if (ordinary_held) {
+        _ = host.ordinary_clients.fetchSub(1, .acq_rel);
+    };
+    var header_reader = HeaderReader.init(host.io, fd);
+    const route = try header_reader.readRoute();
+    const ordinary = !route.isControl();
     if (ordinary) {
         const previous = host.ordinary_clients.fetchAdd(1, .acq_rel);
         if (previous >= max_ordinary_clients) {
             _ = host.ordinary_clients.fetchSub(1, .acq_rel);
             return respondStatic(host.io, fd, 503, "busy", "ordinary_capacity_exhausted");
         }
-        defer _ = host.ordinary_clients.fetchSub(1, .acq_rel);
+        ordinary_held = true;
         const prior = host.classification_clients.fetchSub(1, .acq_rel);
         std.debug.assert(prior > 0);
         classification_held = false;
     }
+    const header = try header_reader.finish(route);
     if (header.route == .unsupported_control) {
         return respondStatic(host.io, fd, 501, "unsupported", "control_surface_enters_in_later_slice");
     }
-    if (host.faults.scratch_acquire or !try reserveScratch(host, header.content_length)) {
+    const control = header.route.isControl();
+    const control_limit: u64 = switch (header.route) {
+        .session_stop => protocol.max_session_stop_request_bytes,
+        .model_interruption => protocol.max_model_interruption_request_bytes,
+        else => 0,
+    };
+    if (control and header.content_length > control_limit) {
+        return respondStatic(host.io, fd, 400, "invocation_error", "control_request_too_large");
+    }
+    if (!control and (host.faults.scratch_acquire or !try reserveScratch(host, header.content_length))) {
         return respondStatic(host.io, fd, 507, "invocation_error", "scratch_capacity_exhausted");
     }
-    var release_scratch = true;
+    var release_scratch = !control;
     defer if (release_scratch) releaseScratch(host, header.content_length);
 
     const request_number = nextRequestNumber(host) catch {
@@ -935,6 +1000,8 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
     const route_matches = switch (request) {
         .configure => header.route == .configure,
         .message => header.route == .message,
+        .session_stop => header.route == .session_stop,
+        .model_interruption => header.route == .model_interruption,
         .observe_command => header.route == .observe,
         .read_result => header.route == .read_result,
         .inspect_session => header.route == .inspect,
@@ -979,6 +1046,38 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             var response: protocol.ResponseBuffer = .{};
             try renderMessageReply(&response, command, result);
+            const status: u16 = switch (result) {
+                .accepted, .rejected => 200,
+                .conflict => 409,
+                .infrastructure_failure => 500,
+            };
+            deliverResponse(host.io, fd, status, response.slice());
+        },
+        .session_stop => |*command| {
+            const result = host.store.stopSession(command, .{ .before_commit = host.faults.before_commit });
+            if (result == .infrastructure_failure and host.store.isFenced()) {
+                fenceDispatch(host, "Session stop save", error.CanonicalStoreFailure);
+            }
+            if (result == .accepted) host.controls_changed.store(true, .release);
+            if (header.drop == .after_commit and result != .infrastructure_failure) return;
+            var response: protocol.ResponseBuffer = .{};
+            try renderSessionStopReply(&response, command, result);
+            const status: u16 = switch (result) {
+                .accepted, .rejected => 200,
+                .conflict => 409,
+                .infrastructure_failure => 500,
+            };
+            deliverResponse(host.io, fd, status, response.slice());
+        },
+        .model_interruption => |*command| {
+            const result = host.store.interruptModel(command, .{ .before_commit = host.faults.before_commit });
+            if (result == .infrastructure_failure and host.store.isFenced()) {
+                fenceDispatch(host, "model interruption save", error.CanonicalStoreFailure);
+            }
+            if (result == .accepted) host.controls_changed.store(true, .release);
+            if (header.drop == .after_commit and result != .infrastructure_failure) return;
+            var response: protocol.ResponseBuffer = .{};
+            try renderModelInterruptionReply(&response, command, result);
             const status: u16 = switch (result) {
                 .accepted, .rejected => 200,
                 .conflict => 409,
@@ -1056,88 +1155,118 @@ fn nextRequestNumber(host: *Host) !u64 {
     }
 }
 
-fn readHeader(io: std.Io, fd: std.posix.fd_t) !Header {
-    var buffer: [protocol.max_header_bytes]u8 = undefined;
-    var used: usize = 0;
-    const start = std.Io.Clock.Timestamp.now(io, .awake);
-    while (used < buffer.len) {
-        const now = std.Io.Clock.Timestamp.now(io, .awake);
-        const elapsed = start.durationTo(now).raw.nanoseconds;
+const HeaderReader = struct {
+    io: std.Io,
+    fd: std.posix.fd_t,
+    buffer: [protocol.max_header_bytes]u8 = undefined,
+    used: usize = 0,
+    started: std.Io.Clock.Timestamp,
+
+    fn init(io: std.Io, fd: std.posix.fd_t) HeaderReader {
+        return .{ .io = io, .fd = fd, .started = .now(io, .awake) };
+    }
+
+    fn readRoute(self: *HeaderReader) !Route {
+        while (self.used < self.buffer.len) {
+            try self.readByte();
+            if (self.used >= 2 and std.mem.eql(u8, self.buffer[self.used - 2 .. self.used], "\r\n")) break;
+        } else return error.HeaderTooLarge;
+        const request_line = self.buffer[0 .. self.used - 2];
+        var request_parts = std.mem.splitScalar(u8, request_line, ' ');
+        if (!std.mem.eql(u8, request_parts.next() orelse return error.InvalidRequestLine, "POST")) {
+            return error.InvalidMethod;
+        }
+        const path = request_parts.next() orelse return error.InvalidRequestLine;
+        if (!std.mem.eql(u8, request_parts.next() orelse return error.InvalidRequestLine, "HTTP/1.1") or
+            request_parts.next() != null)
+        {
+            return error.InvalidRequestLine;
+        }
+        return if (std.mem.eql(u8, path, "/v1/configure"))
+            .configure
+        else if (std.mem.eql(u8, path, "/v1/message"))
+            .message
+        else if (std.mem.eql(u8, path, "/v1/control/session-stop"))
+            .session_stop
+        else if (std.mem.eql(u8, path, "/v1/control/model-interruption"))
+            .model_interruption
+        else if (std.mem.eql(u8, path, "/v1/observe-command"))
+            .observe
+        else if (std.mem.eql(u8, path, "/v1/read-result"))
+            .read_result
+        else if (std.mem.eql(u8, path, "/v1/inspect-session"))
+            .inspect
+        else if (std.mem.startsWith(u8, path, "/v1/control/"))
+            .unsupported_control
+        else
+            error.UnknownRoute;
+    }
+
+    fn finish(self: *HeaderReader, route: Route) !Header {
+        while (self.used < self.buffer.len) {
+            try self.readByte();
+            if (self.used >= 4 and std.mem.eql(u8, self.buffer[self.used - 4 .. self.used], "\r\n\r\n")) break;
+        } else return error.HeaderTooLarge;
+
+        var lines = std.mem.splitSequence(u8, self.buffer[0..self.used], "\r\n");
+        _ = lines.next() orelse return error.InvalidRequestLine;
+        var content_length: ?u64 = null;
+        var wire_ok = false;
+        var content_type_ok = false;
+        var drop: DropMode = .none;
+        while (lines.next()) |line| {
+            if (line.len == 0) break;
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidHeader;
+            const name = std.mem.trim(u8, line[0..colon], " \t");
+            const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+            if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
+                if (content_length != null) return error.DuplicateContentLength;
+                content_length = try std.fmt.parseInt(u64, value, 10);
+            } else if (std.ascii.eqlIgnoreCase(name, "Content-Type")) {
+                content_type_ok = std.ascii.eqlIgnoreCase(value, "application/json");
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Latifa-Wire-Version")) {
+                wire_ok = std.mem.eql(u8, value, protocol.wire_version);
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Latifa-Test-Drop-Reply")) {
+                drop = if (std.mem.eql(u8, value, "before-admission"))
+                    .before_admission
+                else if (std.mem.eql(u8, value, "during-admission"))
+                    .during_admission
+                else if (std.mem.eql(u8, value, "after-commit"))
+                    .after_commit
+                else
+                    return error.InvalidTestDropMode;
+            } else if (std.ascii.eqlIgnoreCase(name, "Transfer-Encoding")) {
+                return error.TransferEncodingUnsupported;
+            }
+        }
+        if (!wire_ok) return error.WrongWireVersion;
+        if (!content_type_ok) return error.InvalidContentType;
+        return .{
+            .route = route,
+            .content_length = content_length orelse return error.MissingContentLength,
+            .drop = drop,
+        };
+    }
+
+    fn readByte(self: *HeaderReader) !void {
+        const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+        const elapsed = self.started.durationTo(now).raw.nanoseconds;
         if (elapsed >= 10 * std.time.ns_per_s) return error.HeaderDeadlineExceeded;
-        const remaining_ms: i32 = @intCast(@max(1, @divFloor(10 * std.time.ns_per_s - elapsed, std.time.ns_per_ms)));
+        const remaining_ms: i32 = @intCast(@max(
+            1,
+            @divFloor(10 * std.time.ns_per_s - elapsed, std.time.ns_per_ms),
+        ));
         var poll_fd = [_]std.posix.pollfd{.{
-            .fd = fd,
+            .fd = self.fd,
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
         if (try std.posix.poll(&poll_fd, remaining_ms) == 0) return error.HeaderDeadlineExceeded;
-        const count = try std.posix.read(fd, buffer[used .. used + 1]);
+        const count = try std.posix.read(self.fd, self.buffer[self.used .. self.used + 1]);
         if (count == 0) return error.IncompleteHeader;
-        used += count;
-        if (used >= 4 and std.mem.eql(u8, buffer[used - 4 .. used], "\r\n\r\n")) break;
-    } else return error.HeaderTooLarge;
-
-    const headers = buffer[0..used];
-    var lines = std.mem.splitSequence(u8, headers, "\r\n");
-    const request_line = lines.next() orelse return error.InvalidRequestLine;
-    var request_parts = std.mem.splitScalar(u8, request_line, ' ');
-    if (!std.mem.eql(u8, request_parts.next() orelse return error.InvalidRequestLine, "POST")) {
-        return error.InvalidMethod;
+        self.used += count;
     }
-    const path = request_parts.next() orelse return error.InvalidRequestLine;
-    if (!std.mem.eql(u8, request_parts.next() orelse return error.InvalidRequestLine, "HTTP/1.1") or
-        request_parts.next() != null)
-    {
-        return error.InvalidRequestLine;
-    }
-    const route: Route = if (std.mem.eql(u8, path, "/v1/configure"))
-        .configure
-    else if (std.mem.eql(u8, path, "/v1/message"))
-        .message
-    else if (std.mem.eql(u8, path, "/v1/observe-command"))
-        .observe
-    else if (std.mem.eql(u8, path, "/v1/read-result"))
-        .read_result
-    else if (std.mem.eql(u8, path, "/v1/inspect-session"))
-        .inspect
-    else if (std.mem.startsWith(u8, path, "/v1/control/"))
-        .unsupported_control
-    else
-        return error.UnknownRoute;
-
-    var content_length: ?u64 = null;
-    var wire_ok = false;
-    var content_type_ok = false;
-    var drop: DropMode = .none;
-    while (lines.next()) |line| {
-        if (line.len == 0) break;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidHeader;
-        const name = std.mem.trim(u8, line[0..colon], " \t");
-        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
-            if (content_length != null) return error.DuplicateContentLength;
-            content_length = try std.fmt.parseInt(u64, value, 10);
-        } else if (std.ascii.eqlIgnoreCase(name, "Content-Type")) {
-            content_type_ok = std.ascii.eqlIgnoreCase(value, "application/json");
-        } else if (std.ascii.eqlIgnoreCase(name, "X-Latifa-Wire-Version")) {
-            wire_ok = std.mem.eql(u8, value, protocol.wire_version);
-        } else if (std.ascii.eqlIgnoreCase(name, "X-Latifa-Test-Drop-Reply")) {
-            drop = if (std.mem.eql(u8, value, "before-admission"))
-                .before_admission
-            else if (std.mem.eql(u8, value, "during-admission"))
-                .during_admission
-            else if (std.mem.eql(u8, value, "after-commit"))
-                .after_commit
-            else
-                return error.InvalidTestDropMode;
-        } else if (std.ascii.eqlIgnoreCase(name, "Transfer-Encoding")) {
-            return error.TransferEncodingUnsupported;
-        }
-    }
-    if (!wire_ok) return error.WrongWireVersion;
-    if (!content_type_ok) return error.InvalidContentType;
-    return .{ .route = route, .content_length = content_length orelse return error.MissingContentLength, .drop = drop };
-}
+};
 
 fn renderConfigureReply(
     response: *protocol.ResponseBuffer,
@@ -1225,6 +1354,70 @@ fn renderMessageReply(
     try response.append(",\"execution\":{\"status\":\"queued\"}}");
 }
 
+fn renderSessionStopReply(
+    response: *protocol.ResponseBuffer,
+    command: *const protocol.SessionStopCommand,
+    result: store_module.SessionStopReply,
+) !void {
+    try response.append("{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"");
+    try response.append(@tagName(result));
+    const replayed = switch (result) {
+        .accepted => |value| value.replayed,
+        .rejected => |value| value.replayed,
+        .conflict, .infrastructure_failure => false,
+    };
+    try response.append(if (replayed) "\",\"replayed\":true,\"session\":" else "\",\"replayed\":false,\"session\":");
+    try response.appendJsonString(command.session.slice());
+    switch (result) {
+        .accepted => |value| {
+            try response.append(",\"selection\":{\"turn\":");
+            if (value.selection.selected_turn_id) |turn_id| {
+                try response.appendFmt("\"{d}\"", .{turn_id});
+            } else try response.append("null");
+            try response.appendFmt(",\"admission_cutoff\":\"{d}\"}}", .{value.selection.admission_cutoff});
+        },
+        .rejected => |value| {
+            try response.append(",\"code\":");
+            try response.appendJsonString(@tagName(value.code));
+        },
+        .conflict => try response.append(",\"code\":\"idempotency_key_conflict\""),
+        .infrastructure_failure => try response.append(",\"code\":\"canonical_store_failure\""),
+    }
+    try response.append("},\"completion\":{\"status\":\"");
+    try response.append(if (result == .accepted) "completed" else "unavailable");
+    try response.append("\"}}");
+}
+
+fn renderModelInterruptionReply(
+    response: *protocol.ResponseBuffer,
+    command: *const protocol.ModelInterruptionCommand,
+    result: store_module.ModelInterruptionReply,
+) !void {
+    try response.append("{\"version\":\"1\",\"type\":\"model_interruption_reply\",\"answer\":{\"status\":\"");
+    try response.append(@tagName(result));
+    const replayed = switch (result) {
+        .accepted => |value| value.replayed,
+        .rejected => |value| value.replayed,
+        .conflict, .infrastructure_failure => false,
+    };
+    try response.append(if (replayed) "\",\"replayed\":true,\"target\":{\"session\":" else "\",\"replayed\":false,\"target\":{\"session\":");
+    try response.appendJsonString(command.session.slice());
+    try response.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{
+        command.turn_id,
+        command.operation_id,
+    });
+    switch (result) {
+        .rejected => |value| {
+            try response.append(",\"code\":");
+            try response.appendJsonString(@tagName(value.code));
+        },
+        .conflict => try response.append(",\"code\":\"idempotency_key_conflict\""),
+        .infrastructure_failure => try response.append(",\"code\":\"canonical_store_failure\""),
+        .accepted => {},
+    }
+    try response.append("}}");
+}
+
 fn renderCommandObservation(
     response: *protocol.ResponseBuffer,
     key: []const u8,
@@ -1260,11 +1453,22 @@ fn renderCommandObservation(
                 });
                 switch (accepted.state) {
                     .queued => {},
+                    .excluded => |excluded| {
+                        try response.append(",\"result\":{\"status\":\"cancelled\",\"code\":");
+                        try response.appendJsonString(excluded.code.slice());
+                        try response.append("}");
+                    },
                     .processing => |binding| try renderProcessingBinding(response, binding),
                     .completed => |completed| {
                         try renderProcessingBinding(response, completed.binding);
                         try response.append(",\"result\":{\"status\":\"completed\",\"text\":");
                         try renderContentReference(response, completed.answer);
+                        try response.append("}");
+                    },
+                    .cancelled => |cancelled| {
+                        try renderProcessingBinding(response, cancelled.binding);
+                        try response.append(",\"result\":{\"status\":\"cancelled\",\"code\":");
+                        try response.appendJsonString(cancelled.code.slice());
                         try response.append("}");
                     },
                     .failed => |failed| {
@@ -1275,6 +1479,24 @@ fn renderCommandObservation(
                     },
                 }
             }
+        }
+        if (observation.session_stop) |stop| {
+            try response.append(",\"selection\":{\"turn\":");
+            if (stop.selection.selected_turn_id) |turn_id| {
+                try response.appendFmt("\"{d}\"", .{turn_id});
+            } else try response.append("null");
+            try response.appendFmt(",\"admission_cutoff\":\"{d}\"}},\"completion\":{{\"status\":\"{s}\"}}", .{
+                stop.selection.admission_cutoff,
+                @tagName(stop.completion),
+            });
+        }
+        if (observation.model_interruption) |target| {
+            try response.append(",\"interruption_target\":{\"session\":");
+            try response.appendJsonString(target.session.slice());
+            try response.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{
+                target.turn_id,
+                target.operation_id,
+            });
         }
     }
     try response.append("}}");
@@ -1520,6 +1742,145 @@ test "message observation renders every closed queue state without fabricated re
     try Expect.rendered(
         observation,
         accepted_prefix ++ ",\"queue\":{\"status\":\"failed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}}}",
+    );
+
+    try code.set("cancelled");
+    observation.message.?.queue.?.state = .{ .cancelled = .{ .binding = processing, .code = code } };
+    try Expect.rendered(
+        observation,
+        accepted_prefix ++ ",\"queue\":{\"status\":\"cancelled\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}",
+    );
+}
+
+test "control response variants fit exact worst-case JSON bounds" {
+    const escaped_session = [_]u8{1} ** protocol.max_session_bytes;
+    const escaped_key = [_]u8{1} ** protocol.max_key_bytes;
+    var stop_command: protocol.SessionStopCommand = .{};
+    try stop_command.session.set(&escaped_session);
+    var interruption_command: protocol.ModelInterruptionCommand = .{
+        .turn_id = std.math.maxInt(u64),
+        .operation_id = std.math.maxInt(u64),
+    };
+    try interruption_command.session.set(&escaped_session);
+
+    const Cases = struct {
+        fn expectStop(
+            command: *const protocol.SessionStopCommand,
+            result: store_module.SessionStopReply,
+            expected: usize,
+        ) !void {
+            var response: protocol.ResponseBuffer = .{};
+            try renderSessionStopReply(&response, command, result);
+            try std.testing.expectEqual(expected, response.len);
+        }
+
+        fn expectInterruption(
+            command: *const protocol.ModelInterruptionCommand,
+            result: store_module.ModelInterruptionReply,
+            expected: usize,
+        ) !void {
+            var response: protocol.ResponseBuffer = .{};
+            try renderModelInterruptionReply(&response, command, result);
+            try std.testing.expectEqual(expected, response.len);
+        }
+
+        fn expectObservation(
+            key: []const u8,
+            observation: store_module.CommandObservation,
+            expected: usize,
+        ) !void {
+            var response: protocol.ResponseBuffer = .{};
+            try renderCommandObservation(&response, key, observation);
+            try std.testing.expectEqual(expected, response.len);
+        }
+    };
+
+    try Cases.expectStop(&stop_command, .{ .accepted = .{
+        .replayed = false,
+        .selection = .{
+            .selected_turn_id = std.math.maxInt(u64),
+            .admission_cutoff = std.math.maxInt(u64),
+        },
+    } }, protocol.max_session_stop_accepted_reply_bytes);
+    try Cases.expectStop(&stop_command, .{ .rejected = .{
+        .replayed = false,
+        .code = .invalid_session_reference,
+    } }, protocol.max_session_stop_rejected_reply_bytes);
+    try Cases.expectStop(&stop_command, .conflict, protocol.max_session_stop_conflict_reply_bytes);
+    try Cases.expectStop(
+        &stop_command,
+        .infrastructure_failure,
+        protocol.max_session_stop_infrastructure_reply_bytes,
+    );
+
+    try Cases.expectInterruption(
+        &interruption_command,
+        .{ .accepted = .{ .replayed = false } },
+        protocol.max_model_interruption_accepted_reply_bytes,
+    );
+    try Cases.expectInterruption(&interruption_command, .{ .rejected = .{
+        .replayed = false,
+        .code = .invalid_session_reference,
+    } }, protocol.max_model_interruption_rejected_reply_bytes);
+    try Cases.expectInterruption(
+        &interruption_command,
+        .conflict,
+        protocol.max_model_interruption_conflict_reply_bytes,
+    );
+    try Cases.expectInterruption(
+        &interruption_command,
+        .infrastructure_failure,
+        protocol.max_model_interruption_infrastructure_reply_bytes,
+    );
+
+    var stop_accepted = store_module.CommandObservation{
+        .status = .accepted,
+        .kind = .session_stop,
+        .session_stop = .{
+            .selection = .{
+                .selected_turn_id = std.math.maxInt(u64),
+                .admission_cutoff = std.math.maxInt(u64),
+            },
+            .completion = .completed,
+        },
+    };
+    try stop_accepted.target.set(&escaped_session);
+    try Cases.expectObservation(&escaped_key, stop_accepted, protocol.max_session_stop_accepted_observation_bytes);
+
+    var stop_rejected = store_module.CommandObservation{ .status = .rejected, .kind = .session_stop };
+    try stop_rejected.target.set(&escaped_session);
+    try stop_rejected.code.set("invalid_session_reference");
+    try Cases.expectObservation(&escaped_key, stop_rejected, protocol.max_session_stop_rejected_observation_bytes);
+
+    var target = store_module.ModelInterruptionTarget{
+        .session = .{},
+        .turn_id = std.math.maxInt(u64),
+        .operation_id = std.math.maxInt(u64),
+    };
+    try target.session.set(&escaped_session);
+    var interruption_accepted = store_module.CommandObservation{
+        .status = .accepted,
+        .kind = .model_interruption,
+        .model_interruption = target,
+    };
+    try interruption_accepted.target.set(&escaped_session);
+    try Cases.expectObservation(
+        &escaped_key,
+        interruption_accepted,
+        protocol.max_model_interruption_accepted_observation_bytes,
+    );
+
+    var interruption_rejected = store_module.CommandObservation{
+        .status = .rejected,
+        .kind = .model_interruption,
+        .model_interruption = target,
+    };
+    try interruption_rejected.target.set(&escaped_session);
+    try interruption_rejected.code.set("invalid_session_reference");
+    try Cases.expectObservation(
+        &escaped_key,
+        interruption_rejected,
+        protocol.max_model_interruption_rejected_observation_bytes,
     );
 }
 
