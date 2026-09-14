@@ -163,9 +163,6 @@ func (f *childFixture) request(deadline measurement.Deadline, route string) (pro
 	return summary, nil
 }
 
-func (f *childFixture) Snapshot(deadline measurement.Deadline) (provider.Summary, error) {
-	return f.request(deadline, "/control/snapshot")
-}
 func (f *childFixture) WaitReady(deadline measurement.Deadline) (provider.Summary, error) {
 	return f.request(deadline, "/control/wait-ready")
 }
@@ -1015,13 +1012,6 @@ func measureCapacityRound(binary, directory, store string, round, capacity int, 
 		return nil, err
 	}
 	sample10At := time.Now()
-	snapshot10, err := fixture.Snapshot(deadline)
-	if err != nil {
-		return nil, err
-	}
-	if err := facts.Write("second_10", map[string]any{"round": round, "host_cpu_seconds": cpu10, "sample_unix_ns": sample10At.UnixNano(), "provider": snapshot10}); err != nil {
-		return nil, err
-	}
 	if err := deadline.SleepUntil(offerStart.Add(50 * time.Second)); err != nil {
 		return nil, err
 	}
@@ -1030,15 +1020,11 @@ func measureCapacityRound(binary, directory, store string, round, capacity int, 
 		return nil, err
 	}
 	sample50At := time.Now()
-	snapshot50, err := fixture.Snapshot(deadline)
-	if err != nil {
-		return nil, err
-	}
-	if err := facts.Write("second_50", map[string]any{"round": round, "host_cpu_seconds": cpu50, "sample_unix_ns": sample50At.UnixNano(), "provider": snapshot50}); err != nil {
-		return nil, err
-	}
 	offer, err := fixture.WaitOffer(deadline)
 	if err != nil {
+		return nil, err
+	}
+	if err := facts.Write("cpu_window_and_offer", map[string]any{"round": round, "second_10": map[string]any{"host_cpu_seconds": cpu10, "sample_unix_ns": sample10At.UnixNano()}, "second_50": map[string]any{"host_cpu_seconds": cpu50, "sample_unix_ns": sample50At.UnixNano()}, "provider_offer": offer}); err != nil {
 		return nil, err
 	}
 	responseScratch := uint64(offer.OfferBytes)

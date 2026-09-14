@@ -250,6 +250,45 @@ func writePacedBody(writer io.Writer, flush func() error, body string, slotEnd t
 	return written, !now().After(slotEnd), nil
 }
 
+type scheduledSlot struct {
+	start time.Time
+	end   time.Time
+	wait  time.Duration
+}
+
+func absoluteSlot(startAt time.Time, interval time.Duration, ordinal int, now time.Time) scheduledSlot {
+	start := startAt.Add(time.Duration(ordinal) * interval)
+	end := start.Add(interval)
+	return scheduledSlot{
+		start: start,
+		end:   end,
+		wait:  max(start.Sub(now), 0),
+	}
+}
+
+func slotExpired(now, end time.Time) bool {
+	return !now.Before(end)
+}
+
+func waitForSlot(timer *time.Timer, delay time.Duration, done <-chan struct{}) bool {
+	if delay <= 0 {
+		return true
+	}
+	timer.Reset(delay)
+	select {
+	case <-timer.C:
+		return true
+	case <-done:
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		return false
+	}
+}
+
 func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 	f.handlers.Add(1)
 	defer f.handlers.Done()
@@ -316,29 +355,26 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 	offerBytes := 0
 	maximumLateNS := int64(0)
 	offerError := ""
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
 	for ordinal := 0; ordinal < f.batches; ordinal++ {
-		slotStart := f.startAt.Add(time.Duration(ordinal) * f.interval)
-		slotEnd := slotStart.Add(f.interval)
-		if delay := time.Until(slotStart); delay > 0 {
-			timer := time.NewTimer(delay)
-			select {
-			case <-timer.C:
-			case <-r.Context().Done():
-				timer.Stop()
-				offerError = r.Context().Err().Error()
-				ordinal = f.batches
-				continue
-			}
+		slot := absoluteSlot(f.startAt, f.interval, ordinal, time.Now())
+		if !waitForSlot(timer, slot.wait, r.Context().Done()) {
+			offerError = r.Context().Err().Error()
+			break
 		}
-		if !time.Now().Before(slotEnd) {
+		if slotExpired(time.Now(), slot.end) {
 			missed++
 			continue
 		}
-		if err := controller.SetWriteDeadline(slotEnd); err != nil {
+		if err := controller.SetWriteDeadline(slot.end); err != nil {
 			offerError = err.Error()
 			break
 		}
-		written, onTime, err := writePacedBody(w, controller.Flush, f.batch, slotEnd, time.Now)
+		written, onTime, err := writePacedBody(w, controller.Flush, f.batch, slot.end, time.Now)
 		offerBytes += written
 		if err != nil {
 			offerError = err.Error()
@@ -350,7 +386,7 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		completed++
-		lateness := finished.Sub(slotStart).Nanoseconds()
+		lateness := finished.Sub(slot.start).Nanoseconds()
 		if lateness > maximumLateNS {
 			maximumLateNS = lateness
 		}
@@ -677,9 +713,6 @@ func Start(config Config) (*Server, error) {
 			fixture.record("control_encode_error", map[string]any{"error": encodeError.Error()})
 		}
 	}
-	mux.HandleFunc("/control/snapshot", func(writer http.ResponseWriter, _ *http.Request) {
-		writeSummary(writer, result.Snapshot(), nil)
-	})
 	mux.HandleFunc("/control/wait-ready", func(writer http.ResponseWriter, request *http.Request) {
 		summary, waitError := result.WaitReady(request.Context())
 		writeSummary(writer, summary, waitError)

@@ -45,6 +45,54 @@ func TestPacedWriteCountsFullBodyThatFinishesLate(t *testing.T) {
 	}
 }
 
+func TestAbsoluteSlotsDoNotReplayExpiredWork(t *testing.T) {
+	origin := time.Unix(100, 0)
+	interval := 20 * time.Millisecond
+	before := absoluteSlot(origin, interval, 0, origin.Add(-5*time.Millisecond))
+	if before.start != origin || before.end != origin.Add(interval) || before.wait != 5*time.Millisecond || slotExpired(origin.Add(-5*time.Millisecond), before.end) {
+		t.Fatalf("before slot = %+v", before)
+	}
+	within := absoluteSlot(origin, interval, 0, origin.Add(5*time.Millisecond))
+	if within.wait != 0 || slotExpired(origin.Add(5*time.Millisecond), within.end) {
+		t.Fatalf("within slot = %+v", within)
+	}
+	atEnd := absoluteSlot(origin, interval, 0, origin.Add(interval))
+	if !slotExpired(origin.Add(interval), atEnd.end) {
+		t.Fatalf("slot-end equality was not expired: %+v", atEnd)
+	}
+	jumpedAt := origin.Add(65 * time.Millisecond)
+	for ordinal := 1; ordinal <= 2; ordinal++ {
+		if slot := absoluteSlot(origin, interval, ordinal, jumpedAt); !slotExpired(jumpedAt, slot.end) {
+			t.Fatalf("expired slot %d would be replayed: %+v", ordinal, slot)
+		}
+	}
+	later := absoluteSlot(origin, interval, 3, jumpedAt)
+	if later.start != origin.Add(60*time.Millisecond) || later.end != origin.Add(80*time.Millisecond) || later.wait != 0 || slotExpired(jumpedAt, later.end) {
+		t.Fatalf("later absolute slot moved after jump: %+v", later)
+	}
+}
+
+func TestReusableTimerCancelsAndRunsAgainWithoutStaleTick(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+	cancelled := make(chan struct{})
+	close(cancelled)
+	if waitForSlot(timer, time.Hour, cancelled) {
+		t.Fatal("cancelled long timer reported completion")
+	}
+	if !waitForSlot(timer, time.Millisecond, make(chan struct{})) {
+		t.Fatal("reused timer did not complete")
+	}
+	select {
+	case <-timer.C:
+		t.Fatal("reused timer retained a stale tick")
+	default:
+	}
+}
+
 func TestExactPacedOfferAndTerminal(t *testing.T) {
 	server, err := Start(Config{Streams: 1, Duration: 40 * time.Millisecond, ArtifactDir: filepath.Join(t.TempDir(), "provider")})
 	if err != nil {
@@ -123,10 +171,12 @@ func TestDisconnectedStreamCompletesFixtureAccounting(t *testing.T) {
 	if _, err := server.WaitReady(ctx); err != nil {
 		t.Fatal(err)
 	}
-	cancelRequest()
 	if _, err := server.StartOffer(); err != nil {
 		t.Fatal(err)
 	}
+	// StartOffer arms the reusable timer for the first absolute slot 500 ms later.
+	time.Sleep(50 * time.Millisecond)
+	cancelRequest()
 	if _, err := server.WaitOffer(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +184,7 @@ func TestDisconnectedStreamCompletesFixtureAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if completion.TerminalFinished != 1 || completion.FailedStreams != 1 {
+	if completion.TerminalFinished != 1 || completion.FailedStreams != 1 || completion.OfferBytes != 0 || completion.CompletedBatches != 0 {
 		t.Fatalf("completion = %+v", completion)
 	}
 }
