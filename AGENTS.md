@@ -16,10 +16,6 @@ Inspect source before claiming implementation. Keep accepted behavior, prototype
 
 Inspect the working-tree diff first and preserve concurrent work. Keep reviews read-only unless fixes are requested. Complete authorized work without reopening settled choices; stay within the requested scope.
 
-For every review, obtain a read-only opinion from an agent independent of the implementer and reviewer before implementing its findings. Check the finding against the accepted contract, trace the cause to its owning state or control flow, and recommend the smallest complete correction, including what can be removed and how memory and behavior will be verified. Prioritize simplicity, explainability and memory efficiency over implementation speed; do not accumulate patches or machinery to satisfy unproven assumptions.
-
-Give each independent design opinion one named programmer's lens: Rich Hickey by default, or John Ousterhout, Rob Pike or Joe Armstrong when their perspective better fits the finding. Explain what they would likely challenge and recommend, grounded in their published ideas and this code. Present this as an interpretation, not their actual opinion or endorsement; the accepted contract and evidence decide the outcome.
-
 Follow the [Zig 0.16 style guide](https://ziglang.org/documentation/0.16.0/#Style-Guide) and installed standard-library APIs. Use `TitleCase` for types/type-producing functions, `camelCase` for other functions, and `snake_case` for values and namespace files; files with top-level instance fields use `TitleCase`. Name declarations in their full namespace without redundant prefixes or miscellaneous utility buckets. Keep helpers with their consumer until a concrete shared responsibility warrants extraction.
 
 Keep state, validation and transitions together under their owner. Separate compact decision facts from effects within that owner, preserving atomic checks and resource lifetimes. Expose semantic intent and opaque, pointer-stable resource handles, not storage rows, internal lifecycle state or generic command buses. Use closed typed variants where different cases carry different authority.
@@ -33,6 +29,19 @@ Make allocator dependencies explicit where allocation occurs. Document returned 
 Respect the architecture's transaction and effect boundaries. One owner accesses each mutable handle. Do not free callback state or recycle custody before safe cleanup. Validate external syntax and consequential meaning; treat notifications as hints and committed facts as authority. Trust already-validated local/SQLite facts within their documented boundary rather than layering redundant validation.
 
 Assert programmer errors; return typed expected failures. Handle errors and explain intentionally ignored cleanup failures at their shared wrapper. Comments explain non-obvious invariants, not syntax. Put local exceptions beside the code and architectural exceptions in the owning contract, with their consumer, retained guarantee and evidence.
+
+## Code Review Rules
+
+Explicitly review every PR for simplicity alongside correctness, using the [simplicity gate](VERIFICATION.md#product-tenets-at-stage-completion). Apply these rules to Codex PR reviews as well as local reviews.
+
+- Flag unnecessary coupling introduced or worsened by the change: duplicated authority, policy scattered across owners, or callers depending on private representation, call order or cleanup details.
+- Examine added state, layers, caches, queues and per-slot allocations for a required behavior or demonstrated cost that justifies them. Recommend removal or consolidation when a smaller design preserves the contract.
+- For each finding, identify the affected code, concrete scenario and consequence, then describe the smallest correction and the guarantees it must preserve. Quantify memory multipliers when relevant; distinguish estimates from measurements.
+- Report actionable design consequences. Keep personal style preferences, speculative extensibility and formatting already checked by CI out of findings. Passing tests does not waive simplicity review.
+
+For every review, obtain a read-only opinion from an agent independent of the implementer and reviewer before implementing its findings. Check the finding against the accepted contract, trace the cause to its owning state or control flow, and recommend the smallest complete correction, including what can be removed and how memory and behavior will be verified. Prioritize simplicity, explainability and memory efficiency over implementation speed; do not accumulate patches or machinery to satisfy unproven assumptions.
+
+Give each independent design opinion one named programmer's lens: Rich Hickey by default, or John Ousterhout, Rob Pike or Joe Armstrong when their perspective better fits the finding. Explain what they would likely challenge and recommend, grounded in their published ideas and this code. Present this as an interpretation, not their actual opinion or endorsement; the accepted contract and evidence decide the outcome.
 
 ## Verify and finish
 
