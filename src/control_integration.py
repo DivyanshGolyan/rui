@@ -324,6 +324,61 @@ def check_schema(database_path):
         database.close()
 
 
+def fill_ordinary_capacity(socket_path):
+    held = []
+    for _ in range(10):
+        while len(held) < ORDINARY_CLIENTS:
+            candidate = open_partial(socket_path, "/v1/inspect-session")
+            time.sleep(0.05)
+            candidate.settimeout(0.001)
+            try:
+                early = candidate.recv(1, socket.MSG_PEEK)
+            except TimeoutError:
+                candidate.settimeout(3)
+                held.append(candidate)
+            else:
+                if early:
+                    head, body = read_http_response(candidate)
+                    assert b" 503 " in head, (head, body)
+                candidate.close()
+                time.sleep(0.05)
+        # A final pause lets the last accepted request line transfer before
+        # the sweep distinguishes blocked bodies from early busy replies.
+        time.sleep(1)
+        live = []
+        for candidate in held:
+            candidate.settimeout(0.001)
+            try:
+                early = candidate.recv(1, socket.MSG_PEEK)
+            except TimeoutError:
+                candidate.settimeout(3)
+                live.append(candidate)
+                continue
+            if early:
+                head, body = read_http_response(candidate)
+                assert b" 503 " in head, (head, body)
+            candidate.close()
+        held = live
+        if len(held) == ORDINARY_CLIENTS:
+            return held
+    for connection in held:
+        connection.close()
+    raise AssertionError("ordinary admission never stabilized at capacity")
+
+
+def assert_ordinary_capacity_busy(socket_path):
+    extra = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        extra.settimeout(3)
+        extra.connect(socket_path)
+        extra.sendall(b"POST /v1/inspect-session HTTP/1.1\r\n")
+        extra_head, extra_body = read_http_response(extra)
+        assert b" 503 " in extra_head, extra_head
+        assert b"ordinary_capacity_exhausted" in extra_body, extra_body
+    finally:
+        extra.close()
+
+
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="latifa-control-integration-"))
     store = state / "store"
@@ -372,52 +427,8 @@ def main():
         assert stopped_message["result"]["status"] == "cancelled", stopped_message
 
         configure(state, store, "headroom-config", "direct/headroom")
-        for _ in range(10):
-            while len(held) < ORDINARY_CLIENTS:
-                candidate = open_partial(socket_path, "/v1/inspect-session")
-                time.sleep(0.05)
-                candidate.settimeout(0.001)
-                try:
-                    early = candidate.recv(1, socket.MSG_PEEK)
-                except TimeoutError:
-                    candidate.settimeout(3)
-                    held.append(candidate)
-                else:
-                    if early:
-                        head, body = read_http_response(candidate)
-                        assert b" 503 " in head, (head, body)
-                    candidate.close()
-                    time.sleep(0.05)
-            # A final pause lets the last accepted request line transfer before
-            # the sweep distinguishes blocked bodies from early busy replies.
-            time.sleep(1)
-            live = []
-            for candidate in held:
-                candidate.settimeout(0.001)
-                try:
-                    early = candidate.recv(1, socket.MSG_PEEK)
-                except TimeoutError:
-                    candidate.settimeout(3)
-                    live.append(candidate)
-                    continue
-                if early:
-                    head, body = read_http_response(candidate)
-                    assert b" 503 " in head, (head, body)
-                candidate.close()
-            held = live
-            if len(held) == ORDINARY_CLIENTS:
-                break
-        else:
-            raise AssertionError("ordinary admission never stabilized at capacity")
-
-        extra = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        extra.settimeout(3)
-        extra.connect(socket_path)
-        extra.sendall(b"POST /v1/inspect-session HTTP/1.1\r\n")
-        extra_head, extra_body = read_http_response(extra)
-        extra.close()
-        assert b" 503 " in extra_head, extra_head
-        assert b"ordinary_capacity_exhausted" in extra_body, extra_body
+        held = fill_ordinary_capacity(socket_path)
+        assert_ordinary_capacity_busy(socket_path)
 
         latencies = []
         for index in range(25):
