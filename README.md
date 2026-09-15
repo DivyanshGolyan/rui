@@ -8,7 +8,7 @@ The source implements the first six redesigned runtime slices: an explicitly sta
 
 The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. The current build cross-compiles all four targets. Runtime and resource verification uses the available Apple Silicon Mac; the other targets remain compile-only evidence until exercised on their platforms.
 
-Clean Go reference reports pass the configuration-admission, message-admission, frozen-request dispatch, retry and control workloads. Historical model-output reports remain incomplete under their exact 20 ms, zero-miss cadence. The current fixture instead preserves every batch and applies an explicit bounded-delivery rule that admits one interval of completion variation while rejecting early completion, long gaps and large catch-up bursts; it awaits fresh clean-source qualification. This evidence does not complete #165 or production/live-provider qualification.
+Clean Go reference reports pass the configuration-admission, message-admission, frozen-request dispatch, retry and control workloads. Historical model-output reports remain incomplete under their exact 20 ms, zero-miss cadence. The current fixture instead preserves every batch and applies an explicit bounded-delivery rule that admits one interval of completion variation while rejecting early completion, long gaps and large catch-up bursts. Its first clean full matrix completed every expected batch, event, byte, result audit and cleanup, but remains `incomplete`: capacity 1 passed both rounds, while at least one round at capacities 10, 50, 100 and 1,000 exceeded the 40 ms adjacent-completion-gap limit. This evidence does not complete #165 or production/live-provider qualification.
 
 ## Intended experience
 
