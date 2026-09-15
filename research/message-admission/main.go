@@ -114,8 +114,20 @@ func stageSample(host *measurement.Host, store, directory, name string) (map[str
 	return map[string]any{"process": process, "database": database}, nil
 }
 
-func payloadProfile(binary, workspace, parent string) (rows []map[string]any, resultError error) {
-	directory := filepath.Join(parent, "payload")
+func payloadProfile(binary, workspace, parent string) ([]map[string]any, error) {
+	var rows []map[string]any
+	for _, size := range payloadBytes {
+		row, err := payloadCase(binary, workspace, parent, size)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+func payloadCase(binary, workspace, parent string, size int) (row map[string]any, resultError error) {
+	directory := filepath.Join(parent, fmt.Sprintf("payload-%d", size))
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return nil, err
 	}
@@ -131,41 +143,45 @@ func payloadProfile(binary, workspace, parent string) (rows []map[string]any, re
 	if err := configure(deadline, socket, store, workspace, session); err != nil {
 		return nil, err
 	}
-	for index, size := range payloadBytes {
-		key := fmt.Sprintf("payload-%d", size)
-		var answer map[string]any
-		admissionMS, err := measurement.TimedExchangeUnix(
-			deadline, socket, "/v1/message", messageValue(store, key, session, strings.Repeat("p", size)), &answer,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if field(answer, "answer", "status") != "accepted" || field(answer, "input", "bytes") != fmt.Sprint(size) {
-			return nil, fmt.Errorf("payload admission differed: %v", answer)
-		}
-		var observation map[string]any
-		observationMS, err := measurement.TimedExchangeUnix(
-			deadline, socket, "/v1/observe-command", observeValue(store, key), &observation,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if field(observation, "observation", "queue", "status") != "queued" {
-			return nil, fmt.Errorf("payload observation differed: %v", observation)
-		}
-		time.Sleep(50 * time.Millisecond)
-		sample, err := stageSample(host, store, directory, fmt.Sprint(size))
-		if err != nil {
-			return nil, err
-		}
-		row := map[string]any{
-			"payload_bytes": size, "queued_messages": index + 1,
-			"admission_elapsed_ms": admissionMS, "observation_elapsed_ms": observationMS,
-			"sample": sample,
-		}
-		rows = append(rows, row)
+	key := fmt.Sprintf("payload-%d", size)
+	var answer map[string]any
+	admissionMS, err := measurement.TimedExchangeUnix(
+		deadline, socket, "/v1/message", messageValue(store, key, session, strings.Repeat("p", size)), &answer,
+	)
+	if err != nil {
+		return nil, err
 	}
-	return rows, nil
+	if field(answer, "answer", "status") != "accepted" || field(answer, "input", "bytes") != fmt.Sprint(size) {
+		return nil, fmt.Errorf("payload admission differed: %v", answer)
+	}
+	var observation map[string]any
+	observationMS, err := measurement.TimedExchangeUnix(
+		deadline, socket, "/v1/observe-command", observeValue(store, key), &observation,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if field(observation, "observation", "queue", "status") != "queued" {
+		return nil, fmt.Errorf("payload observation differed: %v", observation)
+	}
+	var inspection map[string]any
+	if err := measurement.ExchangeUnix(deadline, socket, "/v1/inspect-session", inspectValue(store, session), &inspection); err != nil {
+		return nil, err
+	}
+	if inspection["pending_messages"] != "1" {
+		return nil, fmt.Errorf("payload pending count differed: %v", inspection)
+	}
+	time.Sleep(50 * time.Millisecond)
+	sample, err := stageSample(host, store, directory, fmt.Sprint(size))
+	if err != nil {
+		return nil, err
+	}
+	row = map[string]any{
+		"payload_bytes": size, "queued_messages": 1,
+		"admission_elapsed_ms": admissionMS, "observation_elapsed_ms": observationMS,
+		"sample": sample,
+	}
+	return row, nil
 }
 
 func historyProfile(binary, workspace, parent string) (rows []map[string]any, resultError error) {
@@ -278,7 +294,7 @@ func main() {
 		"elapsed_seconds": time.Since(started).Seconds(),
 		"limits": []string{
 			"macOS physical-footprint evidence only",
-			"payload and history use separate fresh Stores",
+			"each payload size uses a fresh Host/Store with one verified queued message; history grows separately",
 			"driver payload construction is excluded from Host counters",
 			"model processing is intentionally unavailable in this experiment",
 		},
