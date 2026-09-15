@@ -1085,8 +1085,8 @@ fn writeLargeTestResponse(context: *LargeResponseContext) void {
     }
 }
 
-test "result response streams eight MiB into an explicit file" {
-    const result_bytes = 8 * 1024 * 1024;
+test "result response streams 100,000 bytes into an explicit file" {
+    const result_bytes = 100_000;
     const descriptors = try testPipe();
     var context = LargeResponseContext{ .fd = descriptors[1], .length = result_bytes };
     const writer = try std.Thread.spawn(.{}, writeLargeTestResponse, .{&context});

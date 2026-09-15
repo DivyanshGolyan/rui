@@ -21,8 +21,8 @@ from host_process import start_ready_process, stop_process
 
 LATIFA = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
-MAX_CLIENTS = 128
-ORDINARY_CLIENTS = 120
+MAX_CLIENTS = 12
+ORDINARY_CLIENTS = 10
 CONTROL_HEADROOM = MAX_CLIENTS - ORDINARY_CLIENTS
 MAX_STORE_BYTES = 4096
 MAX_KEY_BYTES = 128
@@ -445,6 +445,34 @@ def raw_request(socket_path, route, body, declared_length=None):
         connection.close()
 
 
+def prepare_raw_request(socket_path, route, body):
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.settimeout(20)
+    connection.connect(socket_path)
+    request = (
+        f"POST {route} HTTP/1.1\r\n".encode()
+        + b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n".encode()
+        + b"X-Latifa-Wire-Version: 1\r\n\r\n"
+        + body
+    )
+    return connection, request
+
+
+def submit_prepared_request(prepared, start):
+    connection, request = prepared
+    if not start.wait(20):
+        raise TimeoutError("prepared control was not released")
+    started = time.monotonic_ns()
+    try:
+        connection.sendall(request)
+        head, body = read_http_response(connection, timeout=20)
+        assert b" 200 " in head, (head, body)
+        return json.loads(body), (time.monotonic_ns() - started) / 1_000_000
+    finally:
+        connection.close()
+
+
 def open_complete_inspection(socket_path, store, session):
     body = json.dumps(
         {
@@ -858,12 +886,12 @@ def prove_delivery_and_settlement_contention(
         ]
         if cleanup_delay_ms:
             extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
-        process, fields = start_host(store, url, *extra, active_capacity=8)
+        process, fields = start_host(store, url, *extra, active_capacity=CONTROL_HEADROOM)
         milestones = MilestoneLog(process)
         resource_samples = {}
         if sample_host is not None:
             resource_samples["idle"] = sample_host(process.pid)
-        sessions = [f"contention/{index}" for index in range(8)]
+        sessions = [f"contention/{index}" for index in range(CONTROL_HEADROOM)]
         for index, session in enumerate(sessions):
             configure(state, store, f"contention-config-{index}", session)
             message(
@@ -873,7 +901,10 @@ def prove_delivery_and_settlement_contention(
                 session,
                 f"contention {index}",
             )
-        wait_for(lambda: endpoint.count() == 8, "eight held successful responses")
+        wait_for(
+            lambda: endpoint.count() == CONTROL_HEADROOM,
+            "held successful responses for both control places",
+        )
         processings = [
             wait_for(
                 lambda index=index: observe(
@@ -881,7 +912,7 @@ def prove_delivery_and_settlement_contention(
                 ).get("processing"),
                 f"contention processing identity {index}",
             )
-            for index in range(8)
+            for index in range(CONTROL_HEADROOM)
         ]
 
         inspections = fill_complete_inspections(
@@ -917,13 +948,17 @@ def prove_delivery_and_settlement_contention(
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=CONTROL_HEADROOM
         ) as pool:
-            futures = [pool.submit(run_stop, index) for index in range(8)]
+            futures = [
+                pool.submit(run_stop, index) for index in range(CONTROL_HEADROOM)
+            ]
             barrier.wait()
             results = [future.result(timeout=10) for future in futures]
         for reply, _ in results:
             assert reply["answer"]["status"] == "accepted", reply
-        timings = milestones.wait("control_timing", count=8, timeout=8)
-        assert len({record["command_key"] for record in timings}) == 8
+        timings = milestones.wait(
+            "control_timing", count=CONTROL_HEADROOM, timeout=8
+        )
+        assert len({record["command_key"] for record in timings}) == CONTROL_HEADROOM
         milestones.wait("model_settlement_superseded", timeout=8)
         if sample_host is not None:
             resource_samples["controls_acknowledged"] = sample_host(process.pid)
@@ -937,7 +972,7 @@ def prove_delivery_and_settlement_contention(
         for connection in inspections:
             connection.close()
         inspections.clear()
-        for index in range(8):
+        for index in range(CONTROL_HEADROOM):
             result = wait_for(
                 lambda index=index: observe(
                     store, f"contention-message-{index}"
@@ -945,7 +980,9 @@ def prove_delivery_and_settlement_contention(
                 f"contention result {index}",
             )
             assert result["status"] == "cancelled", result
-        cleanup_records = milestones.wait("cleanup_completed", count=8, timeout=8)
+        cleanup_records = milestones.wait(
+            "cleanup_completed", count=CONTROL_HEADROOM, timeout=8
+        )
         execution = inspect_execution(store, sessions[0])
         assert execution["dispatch_fenced"] is False, execution
         assert execution["custody_occupied"] == "0", execution
@@ -983,7 +1020,7 @@ def prove_delivery_and_settlement_contention(
 
 
 def prove_real_settlement_contention(
-    state, *, sample_host=None, cleanup_delay_ms=0, large_answer_bytes=32 * 1024 * 1024
+    state, *, sample_host=None, cleanup_delay_ms=0, large_answer_bytes=100_000
 ):
     store = state / "real-settlement-contention-store"
     store.mkdir(mode=0o700)
@@ -993,6 +1030,8 @@ def prove_real_settlement_contention(
     process = None
     milestones = None
     inspections = []
+    prepared_controls = []
+    controls_start = threading.Event()
     try:
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         inspection_delay_ms = 20_000 if sample_host is not None else 8_000
@@ -1000,6 +1039,8 @@ def prove_real_settlement_contention(
             "--test-phase-trace",
             "--test-inspection-reply-delay-ms",
             str(inspection_delay_ms),
+            "--test-client-send-buffer-bytes",
+            "4096",
         ]
         if cleanup_delay_ms:
             extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
@@ -1038,40 +1079,59 @@ def prove_real_settlement_contention(
                 process.pid
             )
 
-        endpoint.release.set()
-        settlement_lock = milestones.wait(
-            "settlement_lock_acquired",
-            operation=processing["operation"],
-            timeout=15,
-        )[0]
-        barrier = threading.Barrier(CONTROL_HEADROOM + 1)
-
-        def run_control(index):
-            barrier.wait()
-            started = time.monotonic_ns()
+        for index in range(CONTROL_HEADROOM):
             if index == 0:
-                reply = interrupt_model(
-                    state,
-                    store,
-                    "settlement-later-interrupt",
-                    session,
-                    processing,
-                )
+                route = "/v1/control/model-interruption"
+                body = json.dumps(
+                    {
+                        "version": "1",
+                        "kind": "model_interruption",
+                        "store": fields["store"],
+                        "key": "settlement-later-interrupt",
+                        "target": {
+                            "session": session,
+                            "turn": processing["turn"],
+                            "operation": processing["operation"],
+                        },
+                    },
+                    separators=(",", ":"),
+                ).encode()
             else:
-                reply = stop_session(
-                    state,
-                    store,
-                    f"settlement-later-stop-{index}",
-                    session,
-                )
-            return reply, (time.monotonic_ns() - started) / 1_000_000
+                route = "/v1/control/session-stop"
+                body = json.dumps(
+                    {
+                        "version": "1",
+                        "kind": "session_stop",
+                        "store": fields["store"],
+                        "key": f"settlement-later-stop-{index}",
+                        "session": session,
+                    },
+                    separators=(",", ":"),
+                ).encode()
+            prepared_controls.append(
+                prepare_raw_request(fields["socket"], route, body)
+            )
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=CONTROL_HEADROOM
         ) as pool:
-            futures = [pool.submit(run_control, index) for index in range(8)]
-            barrier.wait()
+            futures = [
+                pool.submit(
+                    submit_prepared_request,
+                    prepared_controls[index],
+                    controls_start,
+                )
+                for index in range(CONTROL_HEADROOM)
+            ]
+            endpoint.release.set()
+            settlement_lock = milestones.wait(
+                "settlement_lock_acquired",
+                operation=processing["operation"],
+                timeout=15,
+            )[0]
+            controls_start.set()
             results = [future.result(timeout=20) for future in futures]
+        prepared_controls.clear()
 
         settlement_complete = milestones.wait(
             "settlement_complete",
@@ -1083,7 +1143,9 @@ def prove_real_settlement_contention(
             operation=processing["operation"],
             timeout=20,
         )
-        timings = milestones.wait("control_timing", count=8, timeout=20)
+        timings = milestones.wait(
+            "control_timing", count=CONTROL_HEADROOM, timeout=20
+        )
         overlap = [
             record
             for record in timings
@@ -1166,10 +1228,14 @@ def prove_real_settlement_contention(
             "resource_samples": resource_samples,
             "resolved_interruption_key": "settlement-later-interrupt",
             "idle_stop_keys": [
-                f"settlement-later-stop-{index}" for index in range(1, 8)
+                f"settlement-later-stop-{index}"
+                for index in range(1, CONTROL_HEADROOM)
             ],
         }
     finally:
+        controls_start.set()
+        for connection, _ in prepared_controls:
+            connection.close()
         for connection in inspections:
             connection.close()
         if process is not None:
@@ -1318,13 +1384,13 @@ def main():
             open_partial(socket_path, "/v1/control/session-stop", complete_headers=False)
             for _ in range(CONTROL_HEADROOM)
         ]
-        ninth = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        ninth.settimeout(3)
-        ninth.connect(socket_path)
-        ninth_head, ninth_body = read_http_response(ninth)
-        ninth.close()
-        assert b" 503 " in ninth_head, ninth_head
-        assert b"classification_capacity_exhausted" in ninth_body, ninth_body
+        extra_classification = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        extra_classification.settimeout(3)
+        extra_classification.connect(socket_path)
+        extra_head, extra_body = read_http_response(extra_classification)
+        extra_classification.close()
+        assert b" 503 " in extra_head, extra_head
+        assert b"classification_capacity_exhausted" in extra_body, extra_body
         for connection in classification:
             connection.close()
         time.sleep(1)

@@ -54,6 +54,7 @@ pub const Faults = struct {
     before_launch_delay_ms: i64 = 0,
     before_result_delay_ms: i64 = 0,
     inspection_reply_delay_ms: i64 = 0,
+    client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
     suppress_first_control_hint: bool = false,
 };
@@ -196,6 +197,18 @@ pub fn serve(
         if (host.effect_shutdown.load(.acquire)) {
             stream.close(io);
             return error.EffectAwareShutdown;
+        }
+        if (host.faults.client_send_buffer_bytes) |bytes| {
+            var value: c_int = @intCast(bytes);
+            std.posix.setsockopt(
+                stream.socket.handle,
+                std.posix.SOL.SOCKET,
+                std.posix.SO.SNDBUF,
+                std.mem.asBytes(&value),
+            ) catch |err| {
+                stream.close(io);
+                return err;
+            };
         }
         const previous = host.active_clients.fetchAdd(1, .acq_rel);
         if (previous >= max_clients) {

@@ -55,6 +55,9 @@ fn serve(io: std.Io, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--test-inspection-reply-delay-ms")) {
             faults.inspection_reply_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
             if (faults.inspection_reply_delay_ms < 0 or faults.inspection_reply_delay_ms > 60_000) return error.InvalidInspectionReplyDelay;
+        } else if (std.mem.eql(u8, arg, "--test-client-send-buffer-bytes")) {
+            faults.client_send_buffer_bytes = try std.fmt.parseInt(u32, try takeValue(args, &index), 10);
+            if (faults.client_send_buffer_bytes.? == 0 or faults.client_send_buffer_bytes.? > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
         } else if (std.mem.eql(u8, arg, "--test-phase-trace")) {
             faults.test_phase_trace = true;
         } else if (std.mem.eql(u8, arg, "--test-suppress-first-control-hint")) {

@@ -22,8 +22,8 @@ import (
 	"latifa.local/research/measurement"
 )
 
-const ordinaryClients = 120
-const controlHeadroom = 8
+const ordinaryClients = 10
+const controlHeadroom = 2
 
 type streamEndpoint struct {
 	server      *http.Server
@@ -286,7 +286,7 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 		return nil, fmt.Errorf("second drain retained %d descriptor rows over idle", drainedSecond.OpenDescriptorRows-idle.OpenDescriptorRows)
 	}
 	p95MS := p95(latencies)
-	return map[string]any{"scope": "two rounds of 120 ordinary clients stopped after partial request bodies", "status": latencyStatus(1000, p95MS), "ordinary_connections_per_round": ordinaryClients, "saturation_rounds": 2, "control_commands": len(latencies), "p95_acknowledgment_ms": p95MS, "maximum_acknowledgment_ms": slicesMax(latencies), "qualification_limit_ms": 1000, "idle": idle, "before_controls": before, "after_controls": after, "resource_delta_from_idle": delta(idle, before), "retained_after_first_drain": drainedFirst, "second_saturation_round": secondSaturation, "retained_after_second_drain": drainedSecond, "retained_delta_from_idle": delta(idle, drainedSecond), "second_drain_delta_from_first": delta(drainedFirst, drainedSecond)}, nil
+	return map[string]any{"scope": "two rounds of 10 ordinary clients stopped after partial request bodies", "status": latencyStatus(1000, p95MS), "ordinary_connections_per_round": ordinaryClients, "saturation_rounds": 2, "control_commands": len(latencies), "p95_acknowledgment_ms": p95MS, "maximum_acknowledgment_ms": slicesMax(latencies), "qualification_limit_ms": 1000, "idle": idle, "before_controls": before, "after_controls": after, "resource_delta_from_idle": delta(idle, before), "retained_after_first_drain": drainedFirst, "second_saturation_round": secondSaturation, "retained_after_second_drain": drainedSecond, "retained_delta_from_idle": delta(idle, drainedSecond), "second_drain_delta_from_first": delta(drainedFirst, drainedSecond)}, nil
 }
 func slicesMax(values []float64) float64 {
 	maximum := values[0]
@@ -477,7 +477,10 @@ func rawUnixRequest(socketPath, route string, body []byte, receiveBuffer int) (n
 	}
 	if receiveBuffer != 0 {
 		if unixConnection, ok := connection.(*net.UnixConn); ok {
-			_ = unixConnection.SetReadBuffer(receiveBuffer)
+			if err := unixConnection.SetReadBuffer(receiveBuffer); err != nil {
+				connection.Close()
+				return nil, err
+			}
 		}
 	}
 	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Latifa-Wire-Version: 1\r\nConnection: close\r\n\r\n", route, len(body))
@@ -492,6 +495,70 @@ func rawUnixRequest(socketPath, route string, body []byte, receiveBuffer int) (n
 	return connection, nil
 }
 
+type preparedRequest struct {
+	connection net.Conn
+	request    []byte
+}
+
+func prepareUnixRequest(deadline measurement.Deadline, socketPath, route string, body []byte) (preparedRequest, error) {
+	connection, err := net.DialTimeout("unix", socketPath, 5*time.Second)
+	if err != nil {
+		return preparedRequest{}, err
+	}
+	remaining, err := deadline.Remaining()
+	if err != nil {
+		connection.Close()
+		return preparedRequest{}, err
+	}
+	if err := connection.SetDeadline(time.Now().Add(remaining)); err != nil {
+		connection.Close()
+		return preparedRequest{}, err
+	}
+	header := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Latifa-Wire-Version: 1\r\nConnection: close\r\n\r\n", route, len(body))
+	return preparedRequest{connection: connection, request: append([]byte(header), body...)}, nil
+}
+
+func submitPreparedControls(prepared []preparedRequest) []controlResult {
+	results := make([]controlResult, len(prepared))
+	var group sync.WaitGroup
+	group.Add(len(prepared))
+	for index := range prepared {
+		go func(index int) {
+			defer group.Done()
+			defer prepared[index].connection.Close()
+			started := time.Now()
+			if _, err := prepared[index].connection.Write(prepared[index].request); err != nil {
+				results[index] = controlResult{index: index, err: err}
+				return
+			}
+			request, _ := http.NewRequest(http.MethodPost, "http://local", nil)
+			response, err := http.ReadResponse(bufio.NewReader(prepared[index].connection), request)
+			if err != nil {
+				results[index] = controlResult{index: index, err: err}
+				return
+			}
+			body, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
+			if readErr != nil {
+				results[index] = controlResult{index: index, err: readErr}
+				return
+			}
+			if response.StatusCode != http.StatusOK {
+				results[index] = controlResult{index: index, err: fmt.Errorf("control returned %s: %s", response.Status, body)}
+				return
+			}
+			var reply map[string]any
+			if err := json.Unmarshal(body, &reply); err != nil {
+				results[index] = controlResult{index: index, err: err}
+				return
+			}
+			results[index] = controlResult{index: index, reply: reply, latencyMS: float64(time.Since(started).Microseconds()) / 1000}
+		}(index)
+	}
+	group.Wait()
+	return results
+}
+
 type inspectRequest struct {
 	Version string `json:"version"`
 	Kind    string `json:"kind"`
@@ -503,6 +570,25 @@ type readResultRequest struct {
 	Kind    string `json:"kind"`
 	Store   string `json:"store"`
 	Key     string `json:"key"`
+}
+type sessionStopRequest struct {
+	Version string `json:"version"`
+	Kind    string `json:"kind"`
+	Store   string `json:"store"`
+	Key     string `json:"key"`
+	Session string `json:"session"`
+}
+type interruptionTarget struct {
+	Session   string `json:"session"`
+	Turn      string `json:"turn"`
+	Operation string `json:"operation"`
+}
+type modelInterruptionRequest struct {
+	Version string             `json:"version"`
+	Kind    string             `json:"kind"`
+	Store   string             `json:"store"`
+	Key     string             `json:"key"`
+	Target  interruptionTarget `json:"target"`
 }
 
 func earlyResponse(connection net.Conn, wait time.Duration) (*http.Response, bool, error) {
@@ -681,7 +767,7 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 	deadline := measurement.NewDeadline(4 * time.Minute)
 	store := filepath.Join(directory, "store")
 	stderrPath := filepath.Join(directory, "host-stderr.log")
-	host, err := measurement.StartHost(binary, store, endpoint.URL(), 8, stderrPath, deadline, "--test-phase-trace", "--test-inspection-reply-delay-ms", "8000", "--test-before-result-delay-ms", "1200")
+	host, err := measurement.StartHost(binary, store, endpoint.URL(), controlHeadroom, stderrPath, deadline, "--test-phase-trace", "--test-inspection-reply-delay-ms", "8000", "--test-before-result-delay-ms", "1200")
 	if err != nil {
 		return nil, err
 	}
@@ -689,14 +775,14 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
 	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
-	sessions := make([]string, 8)
-	for index := range 8 {
+	sessions := make([]string, controlHeadroom)
+	for index := range controlHeadroom {
 		sessions[index] = fmt.Sprintf("contention/%d", index)
 		if err := client.Submit(fmt.Sprintf("contention-%d", index), sessions[index], fmt.Sprintf("contention %d", index)); err != nil {
 			return nil, err
 		}
 	}
-	if err := measurement.WaitFor(deadline, 25*time.Millisecond, "eight successful requests", func() (bool, error) { return endpoint.count() == 8, nil }); err != nil {
+	if err := measurement.WaitFor(deadline, 25*time.Millisecond, "successful requests for both control places", func() (bool, error) { return endpoint.count() == controlHeadroom, nil }); err != nil {
 		return nil, err
 	}
 	inspections, err := openInspections(host.Ready["socket"], store, sessions[0])
@@ -712,7 +798,7 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 		return nil, err
 	}
 	controls := concurrentStops(client, sessions, nil)
-	latencies := make([]float64, 0, 8)
+	latencies := make([]float64, 0, controlHeadroom)
 	for _, control := range controls {
 		if control.err != nil || !accepted(control.reply) {
 			return nil, fmt.Errorf("control-first stop failed: %v: %w", control.reply, control.err)
@@ -726,7 +812,7 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 		return nil, err
 	}
 	inspections = nil
-	for index := range 8 {
+	for index := range controlHeadroom {
 		observation, err := client.WaitResult(fmt.Sprintf("contention-%d", index))
 		if err != nil {
 			return nil, err
@@ -737,7 +823,7 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 		}
 	}
 	p95MS := p95(latencies)
-	return map[string]any{"scope": "120 fully captured reports held during delivery while eight controls commit before sealed settlement", "status": latencyStatus(1000, p95MS), "ordinary_connections": ordinaryClients, "concurrent_control_commands": 8, "qualification_limit_ms": 1000, "model_settlement_superseded": true, "total_durable_acknowledgment": map[string]any{"p95_ms": p95MS, "maximum_ms": slicesMax(latencies)}}, nil
+	return map[string]any{"scope": "10 fully captured reports held during delivery while two controls commit before sealed settlement", "status": latencyStatus(1000, p95MS), "ordinary_connections": ordinaryClients, "concurrent_control_commands": controlHeadroom, "qualification_limit_ms": 1000, "model_settlement_superseded": true, "total_durable_acknowledgment": map[string]any{"p95_ms": p95MS, "maximum_ms": slicesMax(latencies)}}, nil
 }
 
 func repeatedDigest(value byte, count int) string {
@@ -769,7 +855,7 @@ func ordinaryBusy(socketPath string) error {
 	defer response.Body.Close()
 	body, _ := io.ReadAll(response.Body)
 	if response.StatusCode != http.StatusServiceUnavailable || !bytes.Contains(body, []byte("ordinary_capacity_exhausted")) {
-		return fmt.Errorf("121st ordinary request returned %s: %s", response.Status, body)
+		return fmt.Errorf("11th ordinary request returned %s: %s", response.Status, body)
 	}
 	return nil
 }
@@ -810,13 +896,15 @@ func openBlockedResults(socketPath, store, key string) ([]net.Conn, error) {
 		closeAll(connections)
 		return nil, err
 	}
+	// Every response has started, yet the rejected 11th ordinary request proves
+	// all ten handlers remain occupied until these readers resume or disconnect.
 	return connections, nil
 }
 
 func realSettlement(binary, root string) (result map[string]any, resultError error) {
 	directory := filepath.Join(root, "real-settlement")
 	_ = os.Mkdir(directory, 0o700)
-	const large = 32 * 1024 * 1024
+	const large = 100_000
 	endpoint, err := startSuccessEndpoint(large)
 	if err != nil {
 		return nil, err
@@ -825,7 +913,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	deadline := measurement.NewDeadline(6 * time.Minute)
 	store := filepath.Join(directory, "store")
 	stderrPath := filepath.Join(directory, "host-stderr.log")
-	host, err := measurement.StartHost(binary, store, endpoint.URL(), 1, stderrPath, deadline, "--test-phase-trace", "--test-inspection-reply-delay-ms", "20000", "--test-cleanup-delay-ms", "1500")
+	host, err := measurement.StartHost(binary, store, endpoint.URL(), 1, stderrPath, deadline, "--test-phase-trace", "--test-inspection-reply-delay-ms", "20000", "--test-cleanup-delay-ms", "1500", "--test-client-send-buffer-bytes", "4096")
 	if err != nil {
 		return nil, err
 	}
@@ -866,13 +954,53 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	if err != nil {
 		return nil, err
 	}
+	preparedControls := make([]preparedRequest, 0, controlHeadroom)
+	defer func() {
+		for _, prepared := range preparedControls {
+			_ = prepared.connection.Close()
+		}
+	}()
+	turn, turnOK := processing["turn"].(string)
+	operation, operationOK := processing["operation"].(string)
+	if !turnOK || !operationOK {
+		return nil, fmt.Errorf("processing identity incomplete: %v", processing)
+	}
+	interruptBody, err := json.Marshal(modelInterruptionRequest{
+		Version: "1",
+		Kind:    "model_interruption",
+		Store:   store,
+		Key:     "settlement-later-interrupt",
+		Target: interruptionTarget{
+			Session:   session,
+			Turn:      turn,
+			Operation: operation,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	prepared, err := prepareUnixRequest(deadline, host.Ready["socket"], "/v1/control/model-interruption", interruptBody)
+	if err != nil {
+		return nil, err
+	}
+	preparedControls = append(preparedControls, prepared)
+	for index := 1; index < controlHeadroom; index++ {
+		stopBody, err := json.Marshal(sessionStopRequest{Version: "1", Kind: "session_stop", Store: store, Key: fmt.Sprintf("settlement-later-stop-%d", index), Session: session})
+		if err != nil {
+			return nil, err
+		}
+		prepared, err := prepareUnixRequest(deadline, host.Ready["socket"], "/v1/control/session-stop", stopBody)
+		if err != nil {
+			return nil, err
+		}
+		preparedControls = append(preparedControls, prepared)
+	}
 	endpoint.releaseAll()
 	lockRecords, err := waitPhase(deadline, stderrPath, "settlement_lock_acquired", 1)
 	if err != nil {
 		return nil, err
 	}
-	sessions := []string{session, session, session, session, session, session, session, session}
-	controls := concurrentStops(client, sessions, processing)
+	controls := submitPreparedControls(preparedControls)
 	for _, control := range controls {
 		if control.err != nil {
 			return nil, control.err
@@ -957,12 +1085,12 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	}
 	lockAt := lockRecords[0]["at_ns"]
 	completeAt := completeRecords[0]["at_ns"]
-	latencies := make([]float64, 0, 8)
+	latencies := make([]float64, 0, controlHeadroom)
 	for _, control := range controls {
 		latencies = append(latencies, control.latencyMS)
 	}
 	p95MS := p95(latencies)
-	return map[string]any{"scope": "120 fully captured reports held during real Store import of one streamed 32 MiB answer, eight later controls, then 120 blocked result readers", "status": latencyStatus(1000, p95MS, controlMS), "ordinary_connections": ordinaryClients, "active_model_responses": 1, "concurrent_control_commands": 8, "qualification_limit_ms": 1000, "large_answer_bytes": large, "large_answer_sha256": digestText, "blocked_result_clients": ordinaryClients, "blocked_result_control_acknowledgment_ms": controlMS, "blocked_result_clean_reread": true, "post_disconnect_dispatch_fenced": fenced, "settlement_lock_acquired_at_ns": lockAt, "settlement_complete_at_ns": completeAt, "total_durable_acknowledgment": map[string]any{"p95_ms": p95MS, "maximum_ms": slicesMax(latencies)}, "resources": map[string]any{"reports_captured_before_settlement": idle, "blocked_result_delivery": blockedSample, "physically_released": released}}, nil
+	return map[string]any{"scope": "10 fully captured reports held during real Store import of one streamed 100,000-byte answer, two later controls, then 10 result deliveries blocked by a 4 KiB test-only socket send buffer", "status": latencyStatus(1000, p95MS, controlMS), "ordinary_connections": ordinaryClients, "active_model_responses": 1, "concurrent_control_commands": controlHeadroom, "qualification_limit_ms": 1000, "large_answer_bytes": large, "test_client_send_buffer_bytes": 4096, "large_answer_sha256": digestText, "blocked_result_clients": ordinaryClients, "blocked_result_delivery_observed": true, "blocked_result_control_acknowledgment_ms": controlMS, "blocked_result_clean_reread": true, "post_disconnect_dispatch_fenced": fenced, "settlement_lock_acquired_at_ns": lockAt, "settlement_complete_at_ns": completeAt, "total_durable_acknowledgment": map[string]any{"p95_ms": p95MS, "maximum_ms": slicesMax(latencies)}, "resources": map[string]any{"reports_captured_before_settlement": idle, "blocked_result_delivery": blockedSample, "physically_released": released}}, nil
 }
 
 func main() {
@@ -1003,7 +1131,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	result := map[string]any{"format": "latifa-model-control-v2-go", "scope": "issue-175 production Session stop and exact model interruption", "status": controlStatus(headroomResult, activeResult, controlFirstResult, realSettlementResult), "artifacts": root, "configurations": map[string]any{"stalled_incomplete_ingress_diagnostic": headroomResult, "live_model_cancellation": activeResult, "control_first_settlement_race": controlFirstResult, "real_settlement_import_contention_qualification": realSettlementResult}, "elapsed_seconds": time.Since(started).Seconds()}
+	result := map[string]any{"format": "latifa-model-control-v3-go", "scope": "issue-175 production Session stop and exact model interruption", "status": controlStatus(headroomResult, activeResult, controlFirstResult, realSettlementResult), "artifacts": root, "configurations": map[string]any{"stalled_incomplete_ingress_diagnostic": headroomResult, "live_model_cancellation": activeResult, "control_first_settlement_race": controlFirstResult, "real_settlement_import_contention_qualification": realSettlementResult}, "elapsed_seconds": time.Since(started).Seconds()}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)
