@@ -110,8 +110,11 @@ pub fn build(b: *std.Build) void {
     );
     measure_step.dependOn(&measure.step);
 
-    const measure_messages = b.addSystemCommand(&.{"python3"});
-    measure_messages.addFileArg(b.path("research/message-admission/measure.py"));
+    const measure_messages = b.addSystemCommand(&.{
+        "go", "run", "-mod=readonly", "./message-admission",
+    });
+    measure_messages.setCwd(b.path("research"));
+    measure_messages.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure_messages.addArtifactArg(release);
     const measure_messages_step = b.step(
         "measure-message-admission",
