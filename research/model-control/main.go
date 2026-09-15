@@ -133,6 +133,33 @@ func latencyStatus(limitMS float64, values ...float64) string {
 	return "passed"
 }
 
+func settlementQualificationStatus(overlapped bool, limitMS float64, values ...float64) string {
+	if !overlapped {
+		return "incomplete"
+	}
+	return latencyStatus(limitMS, values...)
+}
+
+func requireAcceptedIdleStop(reply map[string]any) error {
+	status, ok := measurement.StringField(reply, "answer", "status")
+	if !ok || status != "accepted" {
+		return fmt.Errorf("idle stop was not accepted: %v", reply)
+	}
+	answer, ok := reply["answer"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("idle stop answer missing: %v", reply)
+	}
+	selection, ok := answer["selection"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("idle stop selection missing: %v", reply)
+	}
+	turn, exists := selection["turn"]
+	if !exists || turn != nil {
+		return fmt.Errorf("idle stop selection.turn was not explicit null: %v", reply)
+	}
+	return nil
+}
+
 func controlStatus(results ...map[string]any) string {
 	for _, result := range results {
 		if result["status"] == "failed" {
@@ -150,6 +177,151 @@ func controlStatus(results ...map[string]any) string {
 		}
 	}
 	return "passed"
+}
+
+type expectedControlTiming struct {
+	key  string
+	kind string
+}
+
+type controlTimingEvidence struct {
+	CommandKey        string `json:"command_key"`
+	Kind              string `json:"kind"`
+	StoreQueuedAtNS   string `json:"store_queued_at_ns"`
+	LockAcquiredAtNS  string `json:"lock_acquired_at_ns"`
+	StoreCompleteAtNS string `json:"store_complete_at_ns"`
+	ReplyCompleteAtNS string `json:"reply_complete_at_ns"`
+	QueueWaitNS       string `json:"queue_wait_ns"`
+	StoreLockWaitNS   string `json:"store_lock_wait_ns"`
+	StoreServiceNS    string `json:"store_service_ns"`
+	PostCommitReplyNS string `json:"post_commit_reply_ns"`
+	HostTotalNS       string `json:"host_total_ns"`
+	storeQueued       uint64
+	lockAcquired      uint64
+	storeComplete     uint64
+	replyComplete     uint64
+}
+
+func parseUintString(record map[string]any, field string) (string, uint64, error) {
+	value, ok := record[field].(string)
+	if !ok || value == "" {
+		return "", 0, fmt.Errorf("%s missing string value", field)
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return "", 0, fmt.Errorf("%s malformed: %q", field, value)
+	}
+	return value, parsed, nil
+}
+
+func parseControlTiming(record map[string]any) (controlTimingEvidence, error) {
+	commandKey, keyOK := record["command_key"].(string)
+	kind, kindOK := record["kind"].(string)
+	if !keyOK || commandKey == "" || !kindOK || kind == "" {
+		return controlTimingEvidence{}, fmt.Errorf("control timing identity incomplete: %v", record)
+	}
+	values := make([]string, 9)
+	numbers := make([]uint64, 9)
+	fields := []string{"store_queued_at_ns", "lock_acquired_at_ns", "store_complete_at_ns", "reply_complete_at_ns", "queue_wait_ns", "store_lock_wait_ns", "store_service_ns", "post_commit_reply_ns", "host_total_ns"}
+	for index, field := range fields {
+		value, number, err := parseUintString(record, field)
+		if err != nil {
+			return controlTimingEvidence{}, fmt.Errorf("control %q: %w", commandKey, err)
+		}
+		values[index], numbers[index] = value, number
+	}
+	queued, locked, complete, reply := numbers[0], numbers[1], numbers[2], numbers[3]
+	if queued > locked || locked > complete || complete > reply {
+		return controlTimingEvidence{}, fmt.Errorf("control %q timestamps out of order", commandKey)
+	}
+	if numbers[5] != locked-queued || numbers[6] != complete-locked || numbers[7] != reply-complete {
+		return controlTimingEvidence{}, fmt.Errorf("control %q phase durations differ from timestamps", commandKey)
+	}
+	phaseTotal := numbers[4]
+	for _, value := range numbers[5:8] {
+		if ^uint64(0)-phaseTotal < value {
+			return controlTimingEvidence{}, fmt.Errorf("control %q duration total overflow", commandKey)
+		}
+		phaseTotal += value
+	}
+	if numbers[8] != phaseTotal {
+		return controlTimingEvidence{}, fmt.Errorf("control %q host total differs from phases", commandKey)
+	}
+	return controlTimingEvidence{
+		CommandKey: commandKey, Kind: kind,
+		StoreQueuedAtNS: values[0], LockAcquiredAtNS: values[1], StoreCompleteAtNS: values[2], ReplyCompleteAtNS: values[3],
+		QueueWaitNS: values[4], StoreLockWaitNS: values[5], StoreServiceNS: values[6], PostCommitReplyNS: values[7], HostTotalNS: values[8],
+		storeQueued: queued, lockAcquired: locked, storeComplete: complete, replyComplete: reply,
+	}, nil
+}
+
+func parseControlTimings(records []map[string]any, expected []expectedControlTiming) ([]controlTimingEvidence, error) {
+	byKey := make(map[string]controlTimingEvidence, len(records))
+	for _, record := range records {
+		timing, err := parseControlTiming(record)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := byKey[timing.CommandKey]; exists {
+			return nil, fmt.Errorf("duplicate control timing for %q", timing.CommandKey)
+		}
+		byKey[timing.CommandKey] = timing
+	}
+	result := make([]controlTimingEvidence, 0, len(expected))
+	for _, want := range expected {
+		timing, ok := byKey[want.key]
+		if !ok {
+			return nil, fmt.Errorf("missing control timing for %q", want.key)
+		}
+		if timing.Kind != want.kind {
+			return nil, fmt.Errorf("control %q kind %q, want %q", want.key, timing.Kind, want.kind)
+		}
+		result = append(result, timing)
+		delete(byKey, want.key)
+	}
+	if len(byKey) != 0 {
+		return nil, fmt.Errorf("unexpected control timing keys: %v", byKey)
+	}
+	return result, nil
+}
+
+func settlementOverlap(lockAcquiredAt, completeAt uint64, timings []controlTimingEvidence) (bool, error) {
+	if lockAcquiredAt == 0 || completeAt < lockAcquiredAt {
+		return false, fmt.Errorf("invalid settlement interval %d..%d", lockAcquiredAt, completeAt)
+	}
+	overlapped := false
+	for _, timing := range timings {
+		if timing.storeQueued < lockAcquiredAt {
+			return false, fmt.Errorf("control %q queued before settlement lock acquisition", timing.CommandKey)
+		}
+		if timing.storeQueued < completeAt && completeAt < timing.lockAcquired {
+			overlapped = true
+		}
+	}
+	return overlapped, nil
+}
+
+func operationPhaseTimestamp(records []map[string]any, phase, operation string) (uint64, error) {
+	if len(records) == 0 {
+		return 0, fmt.Errorf("missing %s record for operation %q", phase, operation)
+	}
+	var timestamp uint64
+	found := false
+	for _, record := range records {
+		recordOperation, ok := record["operation"].(string)
+		if !ok || recordOperation != operation {
+			return 0, fmt.Errorf("%s record has unexpected operation: %v", phase, record)
+		}
+		if found {
+			return 0, fmt.Errorf("duplicate %s record for operation %q", phase, operation)
+		}
+		_, value, err := parseUintString(record, "at_ns")
+		if err != nil {
+			return 0, fmt.Errorf("%s operation %q: %w", phase, operation, err)
+		}
+		timestamp, found = value, true
+	}
+	return timestamp, nil
 }
 
 func sample(host *measurement.Host, directory, name string) (measurement.ProcessSample, error) {
@@ -1001,6 +1173,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 		return nil, err
 	}
 	controls := submitPreparedControls(preparedControls)
+	idleStopSelectionTurns := map[string]any{}
 	for _, control := range controls {
 		if control.err != nil {
 			return nil, control.err
@@ -1011,11 +1184,38 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 			if status != "rejected" || code != "operation_resolved" {
 				return nil, fmt.Errorf("exact interruption differed: %v", control.reply)
 			}
-		} else if status != "accepted" {
-			return nil, fmt.Errorf("idle stop differed: %v", control.reply)
+		} else {
+			if err := requireAcceptedIdleStop(control.reply); err != nil {
+				return nil, err
+			}
+			idleStopSelectionTurns["settlement-later-stop-1"] = nil
 		}
 	}
 	completeRecords, err := waitPhase(deadline, stderrPath, "settlement_complete", 1)
+	if err != nil {
+		return nil, err
+	}
+	controlTimingRecords, err := waitPhase(deadline, stderrPath, "control_timing", controlHeadroom)
+	if err != nil {
+		return nil, err
+	}
+	expectedTimings := []expectedControlTiming{
+		{key: "settlement-later-interrupt", kind: "model_interruption"},
+		{key: "settlement-later-stop-1", kind: "session_stop"},
+	}
+	controlTimings, err := parseControlTimings(controlTimingRecords, expectedTimings)
+	if err != nil {
+		return nil, err
+	}
+	settlementLockAt, err := operationPhaseTimestamp(lockRecords, "settlement_lock_acquired", operation)
+	if err != nil {
+		return nil, err
+	}
+	settlementCompleteAt, err := operationPhaseTimestamp(completeRecords, "settlement_complete", operation)
+	if err != nil {
+		return nil, err
+	}
+	overlapped, err := settlementOverlap(settlementLockAt, settlementCompleteAt, controlTimings)
 	if err != nil {
 		return nil, err
 	}
@@ -1047,10 +1247,15 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	started := time.Now()
 	reply, err := stopSession(client, "blocked-result-stop", blockedSession)
 	controlMS := float64(time.Since(started).Microseconds()) / 1000
-	if err != nil || !accepted(reply) {
+	if err != nil {
 		closeAll(blocked)
 		return nil, fmt.Errorf("protected control failed: %v: %w", reply, err)
 	}
+	if err := requireAcceptedIdleStop(reply); err != nil {
+		closeAll(blocked)
+		return nil, err
+	}
+	idleStopSelectionTurns["blocked-result-stop"] = nil
 	closeAll(blocked)
 	destination := filepath.Join(directory, "large-answer.bin")
 	output, err := measurement.Run(deadline, binary, "read-result", "--store", store, "--key", "real-settlement-message")
@@ -1079,18 +1284,43 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	if err := measurement.WaitFor(deadline, 25*time.Millisecond, "physical release", func() (bool, error) { return inspectCustodyZero(client, session) }); err != nil {
 		return nil, err
 	}
+	cleanupRecords, err := waitPhase(deadline, stderrPath, "cleanup_completed", 1)
+	if err != nil {
+		return nil, err
+	}
+	cleanupCompleteAt, err := operationPhaseTimestamp(cleanupRecords, "cleanup_completed", operation)
+	if err != nil {
+		return nil, err
+	}
+	if cleanupCompleteAt < settlementCompleteAt {
+		return nil, fmt.Errorf("cleanup completed before settlement: %d < %d", cleanupCompleteAt, settlementCompleteAt)
+	}
 	released, err := sample(host, directory, "physically-released")
 	if err != nil {
 		return nil, err
 	}
-	lockAt := lockRecords[0]["at_ns"]
-	completeAt := completeRecords[0]["at_ns"]
 	latencies := make([]float64, 0, controlHeadroom)
+	latencySamples := make(map[string]float64, controlHeadroom)
 	for _, control := range controls {
 		latencies = append(latencies, control.latencyMS)
+		latencySamples[expectedTimings[control.index].key] = control.latencyMS
 	}
 	p95MS := p95(latencies)
-	return map[string]any{"scope": "10 fully captured reports held during real Store import of one streamed 100,000-byte answer, two later controls, then 10 result deliveries blocked by a 4 KiB test-only socket send buffer", "status": latencyStatus(1000, p95MS, controlMS), "ordinary_connections": ordinaryClients, "active_model_responses": 1, "concurrent_control_commands": controlHeadroom, "qualification_limit_ms": 1000, "large_answer_bytes": large, "test_client_send_buffer_bytes": 4096, "large_answer_sha256": digestText, "blocked_result_clients": ordinaryClients, "blocked_result_delivery_observed": true, "blocked_result_control_acknowledgment_ms": controlMS, "blocked_result_clean_reread": true, "post_disconnect_dispatch_fenced": fenced, "settlement_lock_acquired_at_ns": lockAt, "settlement_complete_at_ns": completeAt, "total_durable_acknowledgment": map[string]any{"p95_ms": p95MS, "maximum_ms": slicesMax(latencies)}, "resources": map[string]any{"reports_captured_before_settlement": idle, "blocked_result_delivery": blockedSample, "physically_released": released}}, nil
+	return map[string]any{
+		"scope":  "10 fully captured reports held during real Store import of one streamed 100,000-byte answer, two later controls, then 10 result deliveries blocked by a 4 KiB test-only socket send buffer",
+		"status": settlementQualificationStatus(overlapped, 1000, p95MS, controlMS), "ordinary_connections": ordinaryClients, "active_model_responses": 1, "concurrent_control_commands": controlHeadroom, "qualification_limit_ms": 1000,
+		"large_answer_bytes": large, "test_client_send_buffer_bytes": 4096, "large_answer_sha256": digestText, "blocked_result_clients": ordinaryClients, "blocked_result_delivery_observed": true,
+		"blocked_result_control_acknowledgment_ms": controlMS, "blocked_result_clean_reread": true, "post_disconnect_dispatch_fenced": fenced,
+		"settlement_lock_acquired_at_ns": strconv.FormatUint(settlementLockAt, 10), "settlement_complete_at_ns": strconv.FormatUint(settlementCompleteAt, 10),
+		"settlement_control_overlap_observed": overlapped, "host_control_timing": controlTimings,
+		"physical_cleanup_completed_at_ns": strconv.FormatUint(cleanupCompleteAt, 10), "physical_cleanup_after_settlement_ms": float64(cleanupCompleteAt-settlementCompleteAt) / 1_000_000,
+		"idle_stop_selection_turns": idleStopSelectionTurns,
+		"total_durable_acknowledgment": map[string]any{
+			"sample_count": len(latencies), "samples_ms": latencySamples, "p95_ms": p95MS, "maximum_ms": slicesMax(latencies),
+			"interpretation": "two observations only; nearest-rank p95 equals the maximum and does not describe a general latency distribution",
+		},
+		"resources": map[string]any{"reports_captured_before_settlement": idle, "blocked_result_delivery": blockedSample, "physically_released": released, "custody_occupied_after_cleanup": 0, "scratch_used_bytes_after_cleanup": 0},
+	}, nil
 }
 
 func main() {
