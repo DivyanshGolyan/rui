@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -192,7 +194,7 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 	i64 := func(value int64) *int64 { return &value }
 	text := func(value string) *string { return &value }
 	diagnostic := func(spills uint64, threshold int64) sqliteDiagnostic {
-		return sqliteDiagnostic{Subject: "measure/spill", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(3), JournalMode: text("delete"), CacheSizePages: i64(-32), CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills)}
+		return sqliteDiagnostic{Subject: "measure/spill", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(3), JournalMode: text("delete"), CacheSizeSetting: i64(-32), CacheSizeSettingScope: "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages", CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills)}
 	}
 	valid := []sqliteDiagnostic{diagnostic(0, 991), diagnostic(1, 991)}
 	if !spillDiagnosticsValid(valid, true, true) {
@@ -227,6 +229,28 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 	}
 	if !spillDiagnosticsValid([]sqliteDiagnostic{diagnostic(0, 0)}, false, false) {
 		t.Fatal("expected-exit initial diagnostic was rejected")
+	}
+}
+
+func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) {
+	decode := func(value string) sqliteDiagnostic {
+		t.Helper()
+		encoded := []byte(`{"latifa_test_phase":"sqlite_diagnostic","subject":"measure/spill","process_memory_scope":"SQLite process-global allocator; one Store per Host","cache_used_scope":"connection-current approximate pager bytes","cache_spills_scope":"connection cumulative mid-transaction spills","hard_heap_limit_bytes":16777216,"cache_spills":0,"cache_size_setting":` + value + `,"cache_size_setting_scope":"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages","cache_spill_threshold":991,"synchronous":3,"journal_mode":"delete"}`)
+		records, err := sqliteDiagnosticRecords(encoded)
+		if err != nil || len(records) != 1 {
+			t.Fatalf("decode %s: records=%d err=%v", value, len(records), err)
+		}
+		return records[0]
+	}
+	for _, value := range []int64{-32, -4096} {
+		record := decode(fmt.Sprintf("%d", value))
+		if record.CacheSizeSetting == nil || *record.CacheSizeSetting != value {
+			t.Fatalf("cache size setting = %v, want %d", record.CacheSizeSetting, value)
+		}
+	}
+	missing := decode("null")
+	if spillDiagnosticsValid([]sqliteDiagnostic{missing}, true, false) {
+		t.Fatal("missing cache_size_setting qualified")
 	}
 }
 
@@ -420,5 +444,103 @@ func TestCapacityAuditRejectsAttemptOneWithPriorFailure(t *testing.T) {
 		if capacityAuditRowsValid([]capacityAuditRow{changed}, []string{key}, []string{session}) {
 			t.Fatalf("mutated %s was accepted", name)
 		}
+	}
+}
+
+func TestOfflineCapacityAuditsRunOnlyAfterHostStopAndCoverBothRounds(t *testing.T) {
+	requests := []capacityAuditRequest{
+		{keys: []string{"round-1"}, sessions: []string{"session-1"}},
+		{keys: []string{"round-2"}, sessions: []string{"session-2"}},
+	}
+	events := []string{}
+	results, err := offlineCapacityAudits(
+		func() error {
+			events = append(events, "host-stopped")
+			return nil
+		},
+		requests,
+		func(_ measurement.Deadline, _ string, keys, _ []string) ([]capacityAuditRow, bool, error) {
+			events = append(events, "audit-"+keys[0])
+			return []capacityAuditRow{{Key: keys[0]}}, true, nil
+		},
+		measurement.NewDeadline(time.Minute),
+		"store",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(events, ","), "host-stopped,audit-round-1,audit-round-2"; got != want {
+		t.Fatalf("events = %s, want %s", got, want)
+	}
+	if len(results) != 2 || !results[0].complete || !results[1].complete {
+		t.Fatalf("offline audit results = %+v", results)
+	}
+	first := capacityAuditIdentity(2, 1)
+	second := capacityAuditIdentity(2, 2)
+	if strings.Join(first.keys, ",") != "capacity-2-round-1-0,capacity-2-round-1-1" || strings.Join(second.keys, ",") != "capacity-2-round-2-0,capacity-2-round-2-1" {
+		t.Fatalf("round-specific audit identities first=%v second=%v", first.keys, second.keys)
+	}
+}
+
+func TestOfflineCapacityAuditsRejectStopAuditAndMissingEvidenceFailures(t *testing.T) {
+	requests := []capacityAuditRequest{{keys: []string{"round-1"}, sessions: []string{"session-1"}}}
+	audits := 0
+	if _, err := offlineCapacityAudits(
+		func() error { return errors.New("stop failed") }, requests,
+		func(_ measurement.Deadline, _ string, _, _ []string) ([]capacityAuditRow, bool, error) {
+			audits++
+			return nil, true, nil
+		}, measurement.NewDeadline(time.Minute), "store",
+	); err == nil || audits != 0 {
+		t.Fatalf("stop failure err=%v audits=%d", err, audits)
+	}
+	if _, err := offlineCapacityAudits(
+		func() error { return nil }, requests,
+		func(_ measurement.Deadline, _ string, _, _ []string) ([]capacityAuditRow, bool, error) {
+			return nil, false, errors.New("audit failed")
+		}, measurement.NewDeadline(time.Minute), "store",
+	); err == nil {
+		t.Fatal("audit failure was accepted")
+	}
+	results, err := offlineCapacityAudits(
+		func() error { return nil }, requests,
+		func(_ measurement.Deadline, _ string, _, _ []string) ([]capacityAuditRow, bool, error) {
+			return nil, false, nil
+		}, measurement.NewDeadline(time.Minute), "store",
+	)
+	if err != nil || len(results) != 1 || results[0].complete {
+		t.Fatalf("missing audit evidence = %+v err=%v", results, err)
+	}
+	if got := dependentObservationStatus(true, true, results[0].complete); got == "passed" {
+		t.Fatal("missing offline audit evidence passed")
+	}
+}
+
+func TestApplyingMissingOfflineAuditEvidenceFailsRound(t *testing.T) {
+	row := map[string]any{
+		"status":                         "passed",
+		"durable_audit_prerequisite_met": true,
+		"host_dimensions":                map[string]any{},
+	}
+	if err := applyOfflineCapacityAudit(row, capacityAuditResult{}); err != nil {
+		t.Fatal(err)
+	}
+	if row["status"] != "failed" || row["all_results_audited"] != false || row["offline_audit_after_host_reaped"] != true {
+		t.Fatalf("missing audit evidence did not fail round: %v", row)
+	}
+	dimensions := row["host_dimensions"].(map[string]any)
+	if dimensions["durable_audit"] != "failed" {
+		t.Fatalf("durable audit dimension = %v", dimensions["durable_audit"])
+	}
+	passed := map[string]any{
+		"status":                         "passed",
+		"durable_audit_prerequisite_met": true,
+		"host_dimensions":                map[string]any{},
+	}
+	if err := applyOfflineCapacityAudit(passed, capacityAuditResult{complete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if passed["status"] != "passed" || passed["all_results_audited"] != true || passed["host_dimensions"].(map[string]any)["durable_audit"] != "passed" {
+		t.Fatalf("successful offline audit did not preserve qualification: %v", passed)
 	}
 }

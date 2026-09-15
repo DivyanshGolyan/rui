@@ -708,7 +708,7 @@ pub const SqliteDiagnostic = struct {
     cache_spills: ?u64 = null,
     hard_heap_limit_bytes: ?u64 = null,
     page_size_bytes: ?u64 = null,
-    cache_size_pages: ?i64 = null,
+    cache_size_setting: ?i64 = null,
     cache_spill_threshold: ?i64 = null,
     mmap_size_bytes: ?u64 = null,
     synchronous: ?i64 = null,
@@ -837,7 +837,7 @@ pub const Store = struct {
         const hard_heap_limit = c.sqlite3_hard_heap_limit64(-1);
         if (hard_heap_limit >= 0) result.hard_heap_limit_bytes = @intCast(hard_heap_limit);
         result.page_size_bytes = diagnosticUnsignedPragma(self.database, "PRAGMA page_size");
-        result.cache_size_pages = diagnosticSignedPragma(self.database, "PRAGMA cache_size");
+        result.cache_size_setting = diagnosticSignedPragma(self.database, "PRAGMA cache_size");
         result.cache_spill_threshold = diagnosticSignedPragma(self.database, "PRAGMA cache_spill");
         result.mmap_size_bytes = diagnosticUnsignedPragma(self.database, "PRAGMA mmap_size");
         result.synchronous = diagnosticSignedPragma(self.database, "PRAGMA synchronous");
@@ -4796,7 +4796,7 @@ test "production Store applies finite durable SQLite settings" {
     const diagnostic = storage.sqliteDiagnostic();
     try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
     try std.testing.expectEqual(@as(?u64, 4096), diagnostic.page_size_bytes);
-    try std.testing.expectEqual(@as(?i64, -4096), diagnostic.cache_size_pages);
+    try std.testing.expectEqual(@as(?i64, -4096), diagnostic.cache_size_setting);
     try std.testing.expect(diagnostic.cache_spill_threshold.? > 0);
     try std.testing.expectEqual(@as(?u64, 0), diagnostic.mmap_size_bytes);
     try std.testing.expectEqual(@as(?i64, 3), diagnostic.synchronous);
@@ -4851,7 +4851,7 @@ test "measurement Store can disable cache spill without changing other limits" {
     const diagnostic = storage.sqliteDiagnostic();
     try std.testing.expectEqual(@as(?i64, 0), diagnostic.cache_spill_threshold);
     try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
-    try std.testing.expectEqual(@as(?i64, -4096), diagnostic.cache_size_pages);
+    try std.testing.expectEqual(@as(?i64, -4096), diagnostic.cache_size_setting);
     try std.testing.expectEqual(@as(?i64, 3), diagnostic.synchronous);
     try std.testing.expectEqualStrings("delete", diagnostic.journal_mode.?.slice());
 }
@@ -4867,7 +4867,7 @@ test "measurement Store can force a smaller SQLite cache without changing produc
 
     var storage = try Store.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 32 });
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(?i64, -32), storage.sqliteDiagnostic().cache_size_pages);
+    try std.testing.expectEqual(@as(?i64, -32), storage.sqliteDiagnostic().cache_size_setting);
 
     try std.testing.expectError(
         error.InvalidSqliteCacheSize,

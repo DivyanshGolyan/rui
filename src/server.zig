@@ -1034,7 +1034,8 @@ fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
     trace.append(",") catch return;
     appendOptionalUnsigned(&trace, "page_size_bytes", value.page_size_bytes) catch return;
     trace.append(",") catch return;
-    appendOptionalSigned(&trace, "cache_size_pages", value.cache_size_pages) catch return;
+    appendOptionalSigned(&trace, "cache_size_setting", value.cache_size_setting) catch return;
+    trace.append(",\"cache_size_setting_scope\":\"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages\"") catch return;
     trace.append(",") catch return;
     appendOptionalSigned(&trace, "cache_spill_threshold", value.cache_spill_threshold) catch return;
     trace.append(",") catch return;

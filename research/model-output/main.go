@@ -460,7 +460,8 @@ type sqliteDiagnostic struct {
 	CacheSpillsScope          string  `json:"cache_spills_scope"`
 	HardHeapLimitBytes        *uint64 `json:"hard_heap_limit_bytes"`
 	PageSizeBytes             *uint64 `json:"page_size_bytes"`
-	CacheSizePages            *int64  `json:"cache_size_pages"`
+	CacheSizeSetting          *int64  `json:"cache_size_setting"`
+	CacheSizeSettingScope     string  `json:"cache_size_setting_scope"`
 	CacheSpillThreshold       *int64  `json:"cache_spill_threshold"`
 	MmapSizeBytes             *uint64 `json:"mmap_size_bytes"`
 	Synchronous               *int64  `json:"synchronous"`
@@ -550,7 +551,7 @@ func spillDiagnosticsValid(records []sqliteDiagnostic, enabled, completed bool) 
 		return false
 	}
 	for _, record := range records {
-		if record.Subject != "measure/spill" || record.HardHeapLimitBytes == nil || *record.HardHeapLimitBytes != 16*1024*1024 || record.Synchronous == nil || *record.Synchronous != 3 || record.JournalMode == nil || *record.JournalMode != "delete" || record.CacheSizePages == nil || *record.CacheSizePages != -32 || record.CacheSpillThreshold == nil || record.CacheSpills == nil {
+		if record.Subject != "measure/spill" || record.HardHeapLimitBytes == nil || *record.HardHeapLimitBytes != 16*1024*1024 || record.Synchronous == nil || *record.Synchronous != 3 || record.JournalMode == nil || *record.JournalMode != "delete" || record.CacheSizeSetting == nil || *record.CacheSizeSetting != -32 || record.CacheSizeSettingScope != "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages" || record.CacheSpillThreshold == nil || record.CacheSpills == nil {
 			return false
 		}
 		if (enabled && *record.CacheSpillThreshold <= 0) || (!enabled && *record.CacheSpillThreshold != 0) {
@@ -923,6 +924,33 @@ type capacityAuditRow struct {
 	LastFailureCode      *string `json:"last_failure_code"`
 }
 
+type capacityAuditRequest struct {
+	keys     []string
+	sessions []string
+}
+
+type capacityAuditResult struct {
+	rows     []capacityAuditRow
+	complete bool
+}
+
+type capacityAuditor func(measurement.Deadline, string, []string, []string) ([]capacityAuditRow, bool, error)
+
+func offlineCapacityAudits(stopHost func() error, requests []capacityAuditRequest, audit capacityAuditor, deadline measurement.Deadline, store string) ([]capacityAuditResult, error) {
+	if err := stopHost(); err != nil {
+		return nil, fmt.Errorf("stop and reap Host before capacity audits: %w", err)
+	}
+	results := make([]capacityAuditResult, 0, len(requests))
+	for index, request := range requests {
+		rows, complete, err := audit(deadline, store, request.keys, request.sessions)
+		if err != nil {
+			return nil, fmt.Errorf("offline capacity audit round %d: %w", index+1, err)
+		}
+		results = append(results, capacityAuditResult{rows: rows, complete: complete})
+	}
+	return results, nil
+}
+
 func capacityAuditRowsValid(rows []capacityAuditRow, keys, sessions []string) bool {
 	if len(rows) != len(keys) {
 		return false
@@ -1113,6 +1141,16 @@ func sampleCPU(target *process.Process) (bracketedCPUSample, error) {
 	return result, nil
 }
 
+func capacityAuditIdentity(capacity, round int) capacityAuditRequest {
+	keys := make([]string, capacity)
+	sessions := make([]string, capacity)
+	for index := range capacity {
+		keys[index] = fmt.Sprintf("capacity-%d-round-%d-%d", capacity, round, index)
+		sessions[index] = fmt.Sprintf("measure/capacity-%d/%d/%d", capacity, round, index)
+	}
+	return capacityAuditRequest{keys: keys, sessions: sessions}
+}
+
 func capacityCPUWindowValid(offerStart time.Time, first, second bracketedCPUSample, earliestFinalCompletion time.Time) bool {
 	return !first.QueryStart.Before(offerStart.Add(10*time.Second)) &&
 		!second.QueryStart.Before(offerStart.Add(50*time.Second)) &&
@@ -1154,11 +1192,10 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 		return nil, err
 	}
 	client := measurement.Client{Binary: binary, Artifacts: roundDirectory, Store: store, Deadline: deadline}
-	keys := make([]string, capacity)
-	sessions := make([]string, capacity)
+	identity := capacityAuditIdentity(capacity, round)
+	keys := identity.keys
+	sessions := identity.sessions
 	for index := range capacity {
-		keys[index] = fmt.Sprintf("capacity-%d-round-%d-%d", capacity, round, index)
-		sessions[index] = fmt.Sprintf("measure/capacity-%d/%d/%d", capacity, round, index)
 		if err := client.Configure(keys[index], sessions[index], "--tools", "none"); err != nil {
 			return nil, err
 		}
@@ -1254,10 +1291,6 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 			resultDeliveryComplete = false
 		}
 	}
-	auditRows, auditComplete, err := auditCapacity(deadline, store, keys, sessions)
-	if err != nil {
-		return nil, err
-	}
 	finalInspection, err := client.Inspect(sessions[0])
 	if err != nil {
 		return nil, err
@@ -1269,7 +1302,7 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 	if err != nil {
 		return nil, err
 	}
-	if err := facts.Write("host_complete", map[string]any{"round": round, "host_cpu_seconds": cpuEnd, "inspection": finalInspection, "audit_complete": auditComplete}); err != nil {
+	if err := facts.Write("host_complete", map[string]any{"round": round, "host_cpu_seconds": cpuEnd, "inspection": finalInspection}); err != nil {
 		return nil, err
 	}
 	retained, err := measurement.SampleProcess(host.Process, filepath.Join(roundDirectory, "host-footprint-retained.txt"))
@@ -1306,9 +1339,10 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 	requestComplete := offer.RequestBytes == expectedRequestBytes && offer.RequestSetSHA256 == expectedRequestDigest
 	offerWorkComplete := providerOfferWorkComplete(offer, capacity, expectedWork)
 	terminalComplete := providerTerminalComplete(completion, capacity)
+	auditPrerequisite := offerWorkComplete && terminalComplete
 	captureStatus := dependentObservationStatus(offerWorkComplete, heldScratchOK, captureComplete)
 	resultDeliveryStatus := dependentObservationStatus(offerWorkComplete && terminalComplete, true, resultDeliveryComplete)
-	durableAuditStatus := dependentObservationStatus(offerWorkComplete && terminalComplete, true, auditComplete)
+	successfulAuditStatus := dependentObservationStatus(auditPrerequisite, true, true)
 	cleanupStatus := observationStatus(finalScratchOK && finalCustodyOK, cleanupComplete)
 	requestIntegrityStatus := observationStatus(true, requestComplete)
 	initialWhole := wholeLatifa(initial)
@@ -1325,7 +1359,7 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 		CleanupStatus:          cleanupStatus,
 		RequestIntegrityStatus: requestIntegrityStatus,
 		ResultDeliveryStatus:   resultDeliveryStatus,
-		DurableAuditStatus:     durableAuditStatus,
+		DurableAuditStatus:     successfulAuditStatus,
 		MemoryStatus:           memoryVerdict,
 		SustainedCPUStatus:     sustainedCPUStatus,
 		SustainedAverageCores:  sustainedCores,
@@ -1342,12 +1376,34 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 			"average_cores_conservative": sustainedCores, "at_most_2_average_cores": cpuWindowValid && sustainedCores <= capacityMaximumAverageCores, "complete_work_cpu_seconds": completeCPU, "complete_work_at_most_120_cpu_seconds": completeCPU <= capacityMaximumCPUSeconds,
 		},
 		"initial": map[string]any{"host": initial, "whole_latifa": initialWhole}, "retained": map[string]any{"host": retained, "whole_latifa": retainedWhole},
-		"provider_process":    map[string]any{"pid": fixture.cmd.Process.Pid, "initial": fixtureInitial, "retained": fixtureRetained},
-		"host_dimensions":     map[string]any{"capture": captureStatus, "cleanup": cleanupStatus, "request_integrity": requestIntegrityStatus, "result_delivery": resultDeliveryStatus, "durable_audit": durableAuditStatus},
-		"all_results_audited": auditComplete, "result_delivery_complete": resultDeliveryComplete, "audit_rows": auditRows, "retained_request_scratch_bytes": baselineScratch, "expected_response_scratch_delta_bytes": responseScratch, "expected_retained_scratch_bytes": expectedScratch, "capture_observation_complete": captureComplete, "cleanup_observation_complete": cleanupComplete,
+		"provider_process":               map[string]any{"pid": fixture.cmd.Process.Pid, "initial": fixtureInitial, "retained": fixtureRetained},
+		"host_dimensions":                map[string]any{"capture": captureStatus, "cleanup": cleanupStatus, "request_integrity": requestIntegrityStatus, "result_delivery": resultDeliveryStatus},
+		"durable_audit_prerequisite_met": auditPrerequisite, "result_delivery_complete": resultDeliveryComplete, "retained_request_scratch_bytes": baselineScratch, "expected_response_scratch_delta_bytes": responseScratch, "expected_retained_scratch_bytes": expectedScratch, "capture_observation_complete": captureComplete, "cleanup_observation_complete": cleanupComplete,
 		"expected_provider_work": expectedWork,
 		"request_integrity":      map[string]any{"status": requestIntegrityStatus, "expected_bytes": expectedRequestBytes, "observed_bytes": offer.RequestBytes, "expected_set_sha256": expectedRequestDigest, "observed_set_sha256": offer.RequestSetSHA256},
 	}, nil
+}
+
+func applyOfflineCapacityAudit(row map[string]any, audit capacityAuditResult) error {
+	prerequisite, ok := row["durable_audit_prerequisite_met"].(bool)
+	if !ok {
+		return errors.New("capacity round lacks durable audit prerequisite evidence")
+	}
+	status := dependentObservationStatus(prerequisite, true, audit.complete)
+	dimensions, ok := row["host_dimensions"].(map[string]any)
+	if !ok {
+		return errors.New("capacity round lacks Host dimensions")
+	}
+	dimensions["durable_audit"] = status
+	row["all_results_audited"] = audit.complete
+	row["audit_rows"] = audit.rows
+	row["offline_audit_after_host_reaped"] = true
+	if status == "failed" {
+		row["status"] = "failed"
+	} else if status == "unavailable" && row["status"] == "passed" {
+		return errors.New("capacity round passed without durable audit prerequisites")
+	}
+	return nil
 }
 
 func measureCapacity(binary, root string, scenario capacityScenario, duration time.Duration) (result map[string]any, resultError error) {
@@ -1376,8 +1432,11 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 	if err != nil {
 		return nil, err
 	}
+	hostNeedsStop := true
 	defer func() {
-		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
+		if hostNeedsStop {
+			measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
+		}
 	}()
 	if os.Getpid() == fixture.cmd.Process.Pid || host.Cmd.Process.Pid == fixture.cmd.Process.Pid || os.Getpid() == host.Cmd.Process.Pid {
 		return nil, errors.New("controller, provider fixture and Host must have distinct process identities")
@@ -1389,6 +1448,28 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 			return nil, err
 		}
 		rounds = append(rounds, row)
+	}
+	auditRequests := []capacityAuditRequest{
+		capacityAuditIdentity(capacity, 1),
+		capacityAuditIdentity(capacity, 2),
+	}
+	audits, err := offlineCapacityAudits(func() error {
+		err := host.Stop(measurement.TeardownAllowance)
+		if err == nil {
+			hostNeedsStop = false
+		}
+		return err
+	}, auditRequests, auditCapacity, deadline, store)
+	if err != nil {
+		return nil, err
+	}
+	for index, audit := range audits {
+		if err := applyOfflineCapacityAudit(rounds[index], audit); err != nil {
+			return nil, err
+		}
+		if err := facts.Write("offline_capacity_audit", map[string]any{"round": index + 1, "host_reaped": true, "complete": audit.complete, "rows": audit.rows}); err != nil {
+			return nil, err
+		}
 	}
 	return map[string]any{
 		"status": reduceStatuses(rounds), "active_capacity": capacity, "events_per_second_per_stream": scenario.EventsPerSecond, "same_host_rounds": 2, "rounds": rounds,
@@ -1550,7 +1631,7 @@ func main() {
 		spillStatusRows = append(spillStatusRows, spillRows)
 	}
 	overallStatus := reduceStatuses(byteRows, itemRows, spillStatusRows, capacityRows)
-	result := map[string]any{"format": "latifa-model-output-v5-go", "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification", "status": overallStatus, "artifacts": root, "answer_byte_growth": byteRows, "item_count_growth": itemRows, "sqlite_cache_spill_comparison": spillRows, "active_capacity_growth": capacityRows, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "deterministic loopback HTTP qualifies no live-provider behavior", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "rational target scheduling emits exactly 1,800 or 6,000 events per stream without interval-truncation drift and records adapted pacing violations", "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous valid offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "every result key is audited before final global custody and scratch release is accepted", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"}}
+	result := map[string]any{"format": "latifa-model-output-v6-go", "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification", "status": overallStatus, "artifacts": root, "answer_byte_growth": byteRows, "item_count_growth": itemRows, "sqlite_cache_spill_comparison": spillRows, "active_capacity_growth": capacityRows, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "deterministic loopback HTTP qualifies no live-provider behavior", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "rational target scheduling emits exactly 1,800 or 6,000 events per stream without interval-truncation drift and records adapted pacing violations", "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous valid offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after both rounds and confirmed Host stop/reap", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"}}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)
