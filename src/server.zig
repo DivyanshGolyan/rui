@@ -610,14 +610,10 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
                 return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
             };
             var response: protocol.ResponseBuffer = .{};
-            const scratch_used = host.scratch_used.load(.acquire);
-            std.debug.assert(scratch_used >= header.content_length);
             try renderSessionObservation(&response, observation, .{
                 .dispatch_fenced = host.dispatch_fenced.load(.acquire),
                 .custody_occupied = host.custody.occupied(),
-                // Report workload scratch, not the inspection request that is
-                // currently using the shared ingress scratch pool.
-                .scratch_used_bytes = scratch_used - header.content_length,
+                .scratch_used_bytes = host.scratch_used.load(.acquire),
             });
             deliverResponse(host.io, fd, 200, response.slice());
         },
