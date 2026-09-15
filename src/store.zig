@@ -290,6 +290,9 @@ pub const Store = struct {
         if (configuration.permission_mode.state == .value) {
             next.permission_mode = if (configuration.permission_mode.value.eql("ask")) 0 else 1;
         }
+        if (!created and next.revision == std.math.maxInt(i64)) {
+            return try self.saveConfigurationRejection(command, &digest, .revision_exhausted, faults);
+        }
         const command_instructions_id = if (configuration.instructions.state == .value)
             try self.importContent(&configuration.instructions, faults)
         else
@@ -307,9 +310,6 @@ pub const Store = struct {
             .omitted => {},
             .explicit_null => next.output_schema_id = null,
             .value => next.output_schema_id = command_output_schema_id,
-        }
-        if (!created and next.revision == std.math.maxInt(i64)) {
-            return try self.saveConfigurationRejection(command, &digest, .revision_exhausted, faults);
         }
         next.revision = if (created) 1 else next.revision + 1;
 
@@ -345,14 +345,6 @@ pub const Store = struct {
         code: ConfigurationRejection,
         faults: Faults,
     ) !ConfigureReply {
-        const instructions_id = if (command.configuration.instructions.state == .value)
-            try self.importContent(&command.configuration.instructions, faults)
-        else
-            null;
-        const output_schema_id = if (command.configuration.output_schema.state == .value)
-            try self.importContent(&command.configuration.output_schema, faults)
-        else
-            null;
         var answer = StoredAnswer{ .accepted = false };
         try answer.code.set(@tagName(code));
         try self.insertCommand(
@@ -360,8 +352,8 @@ pub const Store = struct {
             .configure,
             command.session.slice(),
             digest,
-            instructions_id,
-            output_schema_id,
+            null,
+            null,
             answer,
         );
         if (faults.before_commit) return error.InjectedCommitFailure;
@@ -409,14 +401,13 @@ pub const Store = struct {
             .unknown_session
         else
             .model_processing_unavailable_in_issue_170;
-        const text_id = try self.importContent(&command.text, faults);
         try answer.code.set(@tagName(code));
         try self.insertCommand(
             command.key.slice(),
             .message,
             command.session.slice(),
             &digest,
-            text_id,
+            null,
             null,
             answer,
         );
@@ -1003,6 +994,37 @@ fn canonicalCwd(io: std.Io, buffer: []u8) ![]const u8 {
     return buffer[0..length];
 }
 
+fn testingContent(tmp: *std.testing.TmpDir, name: []const u8, fill: u8, length: usize) !protocol.ContentField {
+    const file = try tmp.dir.createFile(std.testing.io, name, .{ .read = true });
+    errdefer file.close(std.testing.io);
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    @memset(&buffer, fill);
+    var remaining = length;
+    var hash = protocol.contentHasher();
+    while (remaining != 0) {
+        const count = @min(remaining, buffer.len);
+        try file.writeStreamingAll(std.testing.io, buffer[0..count]);
+        hash.update(buffer[0..count]);
+        remaining -= count;
+    }
+    try file.sync(std.testing.io);
+    return .{
+        .state = .value,
+        .file = file,
+        .length = length,
+        .digest = hash.finalResult(),
+    };
+}
+
+fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
+    const statement = try prepare(database, sql);
+    defer _ = c.sqlite3_finalize(statement);
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.QueryFailed;
+    const value = c.sqlite3_column_int64(statement, 0);
+    if (value < 0) return error.CorruptStore;
+    return @intCast(value);
+}
+
 test "configuration answers replay without reverting newer settings" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1238,4 +1260,69 @@ test "external content identity is verified before canonical import" {
 
     try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
     try std.testing.expectError(error.StoreFenced, storage.observeCommand("changed"));
+}
+
+test "definite rejections retain decisions without retaining payloads" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var initial = try completeConfiguration("initial", "direct/exhausted", workspace, "model-a");
+    try std.testing.expect(storage.configure(&initial, .{}) == .accepted);
+    try exec(storage.database, "UPDATE session SET revision=9223372036854775807 WHERE session_ref='direct/exhausted'");
+
+    var unknown_message: protocol.MessageCommand = .{};
+    try unknown_message.key.set("unknown-message");
+    try unknown_message.session.set("direct/unknown");
+    unknown_message.text = try testingContent(&tmp, "unknown-message", 'm', 64 * 1024);
+    defer unknown_message.removeTemporaryContent(std.testing.io) catch unreachable;
+    const unknown_reply = storage.rejectMessage(&unknown_message, .{});
+    try std.testing.expect(unknown_reply == .rejected);
+    try std.testing.expectEqual(MessageRejection.unknown_session, unknown_reply.rejected.code);
+
+    var incomplete: protocol.ConfigureCommand = .{};
+    try incomplete.key.set("incomplete");
+    try incomplete.session.set("direct/incomplete");
+    incomplete.configuration.instructions = try testingContent(&tmp, "incomplete", 'i', 64 * 1024);
+    defer incomplete.removeTemporaryContent(std.testing.io) catch unreachable;
+    const incomplete_reply = storage.configure(&incomplete, .{});
+    try std.testing.expect(incomplete_reply == .rejected);
+    try std.testing.expectEqual(ConfigurationRejection.incomplete_initial_configuration, incomplete_reply.rejected.code);
+
+    var exhausted: protocol.ConfigureCommand = .{};
+    try exhausted.key.set("exhausted");
+    try exhausted.session.set("direct/exhausted");
+    exhausted.configuration.instructions = try testingContent(&tmp, "exhausted", 'e', 64 * 1024);
+    defer exhausted.removeTemporaryContent(std.testing.io) catch unreachable;
+    const exhausted_reply = storage.configure(&exhausted, .{});
+    try std.testing.expect(exhausted_reply == .rejected);
+    try std.testing.expectEqual(ConfigurationRejection.revision_exhausted, exhausted_reply.rejected.code);
+
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM content"));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM core_command WHERE accepted=0 AND (primary_content_id IS NOT NULL OR secondary_content_id IS NOT NULL)",
+    ));
+
+    try storage.close();
+    storage = try testingStore(&tmp, std.testing.io);
+    try std.testing.expect(storage.rejectMessage(&unknown_message, .{}).rejected.replayed);
+    try std.testing.expect(storage.configure(&incomplete, .{}).rejected.replayed);
+    try std.testing.expect(storage.configure(&exhausted, .{}).rejected.replayed);
+
+    var changed = unknown_message;
+    changed.text.digest[0] ^= 1;
+    try std.testing.expect(storage.rejectMessage(&changed, .{}) == .conflict);
+    var retargeted = incomplete;
+    try retargeted.session.set("direct/other");
+    try std.testing.expect(storage.configure(&retargeted, .{}) == .conflict);
+    var changed_kind: protocol.MessageCommand = .{};
+    try changed_kind.key.set("incomplete");
+    try changed_kind.session.set("direct/incomplete");
+    changed_kind.text = unknown_message.text;
+    try std.testing.expect(storage.rejectMessage(&changed_kind, .{}) == .conflict);
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM content"));
 }
