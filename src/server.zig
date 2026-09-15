@@ -321,7 +321,6 @@ fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) A
     }) catch |err| {
         request.deinit();
         std.debug.print("latifa: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, token, binding, "provider_transport_failure");
         finishCustodyNow(host, token);
         return .admitted;
     };
@@ -336,7 +335,6 @@ fn admitAttempt(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) A
             finishCustodyNow(host, token);
             return .admitted;
         }
-        settleAttemptFailure(host, token, binding, "provider_transport_failure");
         finishCustodyNow(host, token);
         return .admitted;
     };
@@ -361,17 +359,16 @@ fn completeTransfer(
     reactor.remove(&slot.transfer);
     const evidence = slot.transfer.evidence(completion.result) catch |err| {
         std.debug.print("latifa: invalid provider evidence for operation {d}: {s}\n", .{ slot.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, slot.token, slot.binding, "provider_transport_failure");
         beginCleanup(host, slot);
         return;
     };
-    var code_buffer: [96]u8 = undefined;
-    const code = switch (evidence.class) {
-        .permanent_http => std.fmt.bufPrint(&code_buffer, "provider_http_{d}", .{evidence.http_status}) catch unreachable,
-        .temporary_http => std.fmt.bufPrint(&code_buffer, "provider_temporary_http_{d}", .{evidence.http_status}) catch unreachable,
-        .transport_failure => "provider_transport_failure",
-    };
-    settleAttemptFailure(host, slot.token, slot.binding, code);
+    // Retry settlement enters in a later slice. Transport uncertainty must
+    // not become an immutable failure or recreate the consumed dispatch permit.
+    if (evidence.class == .permanent_http) {
+        var code_buffer: [96]u8 = undefined;
+        const code = std.fmt.bufPrint(&code_buffer, "provider_http_{d}", .{evidence.http_status}) catch unreachable;
+        settleAttemptFailure(host, slot.token, slot.binding, code);
+    }
     beginCleanup(host, slot);
 }
 

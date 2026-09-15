@@ -64,8 +64,17 @@ class FailureHandler(http.server.BaseHTTPRequestHandler):
             return
         if not self.server.release.wait(10):
             raise RuntimeError("fixture response was never released")
+        if self.path == "/disconnect":
+            self.close_connection = True
+            return
         payload = b'{"error":"deterministic permanent failure"}'
-        self.send_response(422)
+        status = 422
+        if self.path.startswith("/large-"):
+            payload = b"x" * (128 * 1024)
+            status = int(self.path.rsplit("-", 1)[1])
+        elif self.path in ("/429", "/503"):
+            status = int(self.path[1:])
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Connection", "close")
@@ -527,19 +536,56 @@ def main():
         processes.append(host)
         configure(state, stall_store, "stall-config", "direct/stall", "model-a")
         message(state, stall_store, "stall-message", "direct/stall", "stall")
-        stalled = wait_for(
-            lambda: (value := observe(stall_store, "stall-message")).get("result", {}).get("code")
-            == "provider_transport_failure"
-            and value,
-            "stalled response inactivity failure",
-            timeout=8,
+        wait_for(
+            lambda: observe(stall_store, "stall-message")["queue"]["status"] == "processing" and command(
+                "inspect-session", "--store", stall_store, "--session", "direct/stall"
+            )["execution"]["custody_occupied"] == "0",
+            "stalled response cleanup",
         )
-        assert stalled["queue"]["status"] == "failed"
+        stalled = observe(stall_store, "stall-message")
+        assert stalled["queue"]["status"] == "processing" and "result" not in stalled, stalled
         stop_host(host)
         processes.remove(host)
 
-        # A canonical read fault published after the final historical read but
-        # before launch wins the synchronized Store handoff and launches zero.
+        # Discarding large bodies must preserve HTTP classification. Retryable
+        # evidence releases physical custody without inventing a final result.
+        for path in ("/large-422", "/large-429", "/429", "/503", "/disconnect"):
+            case_state = state / (path[1:] + "-records")
+            case_state.mkdir(mode=0o700)
+            endpoint.requests.clear()
+            endpoint.release.set()
+            transient_store = state / (path[1:] + "-store")
+            host = start_host(transient_store, f"http://127.0.0.1:{endpoint.server_port}{path}")
+            processes.append(host)
+            configure(case_state, transient_store, "config", "direct/transient", "model-a")
+            message(case_state, transient_store, "message", "direct/transient", "input")
+            wait_for(lambda: len(endpoint.requests) == 1, "one endpoint request")
+            wait_for(lambda: command(
+                "inspect-session", "--store", transient_store, "--session", "direct/transient"
+            )["execution"]["custody_occupied"] == "0", "response cleanup")
+            observation = observe(transient_store, "message")
+            resources = command("inspect-session", "--store", transient_store, "--session", "direct/transient")["execution"]
+            assert resources["scratch_used_bytes"] == "0", resources
+            if path == "/large-422":
+                assert observation["result"]["code"] == "provider_http_422", observation
+            else:
+                assert observation["queue"]["status"] == "processing" and "result" not in observation, observation
+                assert observation["processing"]["attempt"] == "1", observation
+                with sqlite3.connect(transient_store / "latifa.sqlite3") as database:
+                    assert database.execute("SELECT allowance_used,uncertain,resolution_code FROM model_operation").fetchall() == [(1, 1, None)]
+                message(case_state, transient_store, "later", "direct/transient", "later")
+                assert observe(transient_store, "later")["queue"]["status"] == "queued"
+            stop_host(host)
+            processes.remove(host)
+            host = start_host(transient_store, f"http://127.0.0.1:{endpoint.server_port}{path}")
+            processes.append(host)
+            assert observe(transient_store, "message") == observation
+            assert len(endpoint.requests) == 1, "restart recreated a consumed permit"
+            stop_host(host)
+            processes.remove(host)
+
+        # A canonical read fault published before launch fences the Store
+        # and prevents the synchronized dispatch handoff.
         endpoint.requests.clear()
         endpoint.release.clear()
         race_store = state / "fence-race-store"
@@ -548,16 +594,12 @@ def main():
         configure(state, race_store, "race-config", "direct/race", "model-a")
         message(state, race_store, "race-message", "direct/race", "race")
 
-        def admitted_race_attempt():
-            database = sqlite3.connect(race_store / "latifa.sqlite3", timeout=5)
-            try:
-                return database.execute(
-                    "SELECT COUNT(*) FROM model_operation"
-                ).fetchone()[0] == 1
-            finally:
-                database.close()
-
-        wait_for(admitted_race_attempt, "admitted request before launch")
+        # Observe through the Store owner: an external SQLite reader can
+        # contend with admission in DELETE-journal/zero-busy-timeout mode.
+        wait_for(
+            lambda: observe(race_store, "race-message")["queue"]["status"] == "processing",
+            "admitted request before launch",
+        )
         database = sqlite3.connect(race_store / "latifa.sqlite3", timeout=5)
         original_instructions = database.execute(
             "SELECT instructions_content_id FROM session WHERE session_ref='direct/race'"

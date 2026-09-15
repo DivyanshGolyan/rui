@@ -12,7 +12,6 @@ const c = @cImport({
 pub const curl_version = "8.22.0";
 pub const openssl_version = "OpenSSL/3.6.3";
 pub const request_scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
-pub const response_observation_limit_bytes: usize = 64 * 1024;
 pub const max_endpoint_bytes = 2048;
 const per_input_framing_charge: u64 = 128;
 
@@ -370,7 +369,6 @@ const ReadContext = struct {
 
 const WriteContext = struct {
     bytes: u64 = 0,
-    overflow: bool = false,
 };
 
 const TimeoutContext = struct {
@@ -446,7 +444,7 @@ pub const Transfer = struct {
     }
 
     pub fn evidence(self: *Transfer, result: c.CURLcode) !TransportEvidence {
-        if (result != c.CURLE_OK or self.read_context.failed or self.write_context.overflow) {
+        if (result != c.CURLE_OK or self.read_context.failed) {
             return .{ .class = .transport_failure, .response_bytes = self.write_context.bytes };
         }
         var response_code: c_long = 0;
@@ -538,10 +536,6 @@ fn writeCallback(_: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopa
     const context: *WriteContext = @ptrCast(@alignCast(context_pointer orelse return 0));
     const bytes = std.math.mul(usize, size, count) catch return 0;
     const next = std.math.add(u64, context.bytes, bytes) catch return 0;
-    if (next > response_observation_limit_bytes) {
-        context.overflow = true;
-        return 0;
-    }
     context.bytes = next;
     return bytes;
 }
