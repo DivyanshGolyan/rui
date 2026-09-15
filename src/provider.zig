@@ -497,29 +497,6 @@ pub const ResponseCapture = struct {
     }
 };
 
-fn retainedNamedScratch(
-    io: std.Io,
-    file: std.Io.File,
-    secondary_file: ?std.Io.File,
-    scratch_path: []const u8,
-    name: []const u8,
-    budget: ScratchBudget,
-    charged: u64,
-) RetainedScratch {
-    var retained = RetainedScratch{
-        .io = io,
-        .file = file,
-        .secondary_file = secondary_file,
-        .scratch_path = .{},
-        .name = .{},
-        .charged = charged,
-        .budget = budget,
-    };
-    retained.scratch_path.set(scratch_path) catch unreachable;
-    retained.name.set(name) catch unreachable;
-    return retained;
-}
-
 const HeaderContext = struct {
     request_id: protocol.Bounded(256) = .{},
     openai_model: protocol.Bounded(protocol.max_model_bytes) = .{},
