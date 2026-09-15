@@ -65,6 +65,43 @@ contains() {
 
 start_host
 
+# SIGKILL skips capture.abort; revisiting the same record recovers its temporary.
+python3 - "$latifa" "$store" "$records" "$root" <<'PYCAPTURE'
+import json, pathlib, subprocess, sys, time
+binary, store, records, workspace = sys.argv[1:]
+record = pathlib.Path(records) / 'capture-recovery.json'
+args = [binary, 'configure', '--store', store, '--record', str(record),
+        '--key', 'capture-recovery', '--session', 'direct/capture-recovery',
+        '--workspace', workspace, '--model', 'model-a', '--instructions', '-']
+writer = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    writer.stdin.write(b'x' * 8192)
+    writer.stdin.flush()
+    temporary = record.with_name('.' + record.name + '.capture.tmp')
+    deadline = time.monotonic() + 5
+    while not temporary.exists() or temporary.stat().st_size == 0:
+        if writer.poll() is not None or time.monotonic() > deadline:
+            raise RuntimeError('capture did not reach streamed temporary')
+        time.sleep(.01)
+    contender = subprocess.run(args, input=b'other', capture_output=True, timeout=5)
+    assert contender.returncode != 0 and b'RecordCaptureBusy' in contender.stderr
+    assert not record.exists()
+finally:
+    writer.kill()
+    writer.wait(timeout=5)
+    writer.stdin.close()
+assert temporary.exists()
+recovered = subprocess.run(args, input=b'new capture', capture_output=True, timeout=10)
+assert recovered.returncode == 0, recovered.stderr
+assert json.loads(record.read_text())['configuration']['instructions']['value'] == 'new capture'
+assert not temporary.exists()
+saved = record.read_bytes()
+duplicate = subprocess.run(args, input=b'replacement', capture_output=True, timeout=5)
+assert duplicate.returncode != 0 and b'RecordAlreadyExists' in duplicate.stderr
+assert record.read_bytes() == saved
+assert record.with_name('.' + record.name + '.capture.lock').exists()
+PYCAPTURE
+
 # The OS-held lock rejects a competing owner without relying on PID/socket state.
 if "$latifa" serve --store "$store" >"$state/competing.out" 2>"$state/competing.err"; then
     echo "competing Host acquired the Store" >&2

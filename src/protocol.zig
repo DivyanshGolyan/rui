@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "1";
 pub const max_key_bytes = 128;
@@ -47,6 +48,8 @@ pub const ContentField = struct {
     // A parsed request owns an unlinked file descriptor. The Store imports
     // through this sealed custody; no pathname can be swapped after capture.
     file: ?std.Io.File = null,
+    scratch_budget: ?ScratchBudget = null,
+    charged: u64 = 0,
     length: u64 = 0,
     digest: [32]u8 = [_]u8{0} ** 32,
 
@@ -161,6 +164,8 @@ pub const Request = union(Kind) {
 
 fn removeContent(content: *ContentField, io: std.Io) !void {
     if (content.file) |file| file.close(io);
+    if (content.scratch_budget) |budget| budget.release(content.charged);
+    content.charged = 0;
     content.file = null;
     content.state = .omitted;
 }
@@ -207,6 +212,7 @@ pub const ParseOptions = struct {
     request_number: u64,
     fault_content_write: bool = false,
     cleanup_failed: *bool,
+    scratch_budget: ?ScratchBudget = null,
 };
 
 pub fn parseRequest(options: ParseOptions) !Request {
@@ -461,31 +467,36 @@ const Parser = struct {
             .permissions = .fromMode(0o600),
         });
         var writer_open = true;
-        errdefer if (writer_open) writer.close(self.options.io);
-        errdefer std.Io.Dir.deleteFileAbsolute(self.options.io, path) catch {
-            self.options.cleanup_failed.* = true;
-        };
-        var transferred = false;
         var sealed: ?std.Io.File = null;
-        errdefer if (!transferred) if (sealed) |file| file.close(self.options.io);
-        var sink = ContentSink{ .io = self.options.io, .file = writer };
+        var transferred = false;
+        var sink = ContentSink{ .io = self.options.io, .file = writer, .scratch_budget = self.options.scratch_budget };
+        defer if (!transferred) {
+            if (writer_open) writer.close(self.options.io);
+            if (sealed) |file| file.close(self.options.io);
+            const removed = if (std.Io.Dir.deleteFileAbsolute(self.options.io, path)) |_| true else |err| switch (err) {
+                error.FileNotFound => true,
+                else => false,
+            };
+            if (removed) {
+                if (sink.scratch_budget) |budget| budget.release(sink.charged);
+            } else {
+                self.options.cleanup_failed.* = true;
+            }
+        };
         try self.readJsonString(&sink);
         if (self.options.fault_content_write) return error.InjectedContentWriteFailure;
         try sink.finish();
         writer.sync(self.options.io) catch return error.ContentSyncFailed;
         field.length = sink.length;
         field.digest = sink.hash.finalResult();
-        if (field.length > max_sqlite_content_bytes) return error.ContentTooLarge;
-        // Downgrade custody at seal: retain a read-only descriptor, close the
-        // sole writer, then unlink the name before admission can observe it.
+        // Seal custody before admission; the charge follows the read-only file.
         sealed = try std.Io.Dir.openFileAbsolute(self.options.io, path, .{});
         writer.close(self.options.io);
         writer_open = false;
-        std.Io.Dir.deleteFileAbsolute(self.options.io, path) catch |err| {
-            self.options.cleanup_failed.* = true;
-            return err;
-        };
+        try std.Io.Dir.deleteFileAbsolute(self.options.io, path);
         field.file = sealed.?;
+        field.scratch_budget = sink.scratch_budget;
+        field.charged = sink.charged;
         transferred = true;
     }
 
@@ -599,6 +610,8 @@ fn SmallSink(comptime T: type) type {
 }
 
 const ContentSink = struct {
+    scratch_budget: ?ScratchBudget = null,
+    charged: u64 = 0,
     io: std.Io,
     file: std.Io.File,
     buffer: [content_window_bytes]u8 = undefined,
@@ -633,6 +646,12 @@ const ContentSink = struct {
 
     fn flush(self: *ContentSink) !void {
         if (self.used == 0) return;
+        if (self.scratch_budget) |budget| {
+            if (!budget.reserve(self.used)) return error.ScratchCapacityExhausted;
+            // A failed streaming write may have written a prefix. Retain the
+            // complete submitted increment until this file is safely removed.
+            self.charged += self.used;
+        }
         try self.file.writeStreamingAll(self.io, self.buffer[0..self.used]);
         self.used = 0;
     }
@@ -760,4 +779,132 @@ test "response JSON preserves control bytes and enforces capacity" {
     try response.appendJsonString("");
     try std.testing.expectEqual(response.bytes.len, response.len);
     try std.testing.expectError(error.ResponseTooLarge, response.appendJsonString("x"));
+}
+
+test "ingress charges decoded growth and transfers file charge through cleanup" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &root);
+    var used = std.atomic.Value(u64).init(0);
+    var cleanup_failed = false;
+    for ([_][]const u8{ "\"abc\"", "\"\\u0061\\u0062\\u0063\"" }, 0..) |json, ordinal| {
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..json.len], json);
+        source.end = json.len;
+        var parser = Parser{ .source = &source, .options = .{
+            .io = io,
+            .fd = -1,
+            .content_length = 999999,
+            .scratch_path = root[0..n],
+            .request_number = ordinal,
+            .cleanup_failed = &cleanup_failed,
+            .scratch_budget = .{ .used = &used, .limit = 3 },
+        } };
+        var field = ContentField{};
+        try parser.readContentString(&field);
+        try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+        try std.testing.expectEqual(@as(u64, 3), field.length);
+        try removeContent(&field, io);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+    const file = try tmp.dir.createFile(io, "bounded", .{});
+    defer file.close(io);
+    var sink = ContentSink{ .io = io, .file = file, .scratch_budget = .{ .used = &used, .limit = 3 } };
+    try sink.write("abcd");
+    try std.testing.expectError(error.ScratchCapacityExhausted, sink.finish());
+    try std.testing.expectEqual(@as(u64, 0), try file.length(io));
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "failed ingress unlink retains only the affected file charge" {
+    const FailDelete = struct {
+        fn delete(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
+            return error.AccessDenied;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &root);
+    var used = std.atomic.Value(u64).init(0);
+    var cleanup_failed = false;
+    var vtable = io.vtable.*;
+    vtable.dirDeleteFile = FailDelete.delete;
+    const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const json = "\"abc\"";
+    var source = SocketBody.init(-1, 0);
+    @memcpy(source.buffer[0..json.len], json);
+    source.end = json.len;
+    var parser = Parser{ .source = &source, .options = .{
+        .io = failing_io,
+        .fd = -1,
+        .content_length = json.len,
+        .scratch_path = root[0..n],
+        .request_number = 1,
+        .cleanup_failed = &cleanup_failed,
+        .scratch_budget = .{ .used = &used, .limit = 8 },
+    } };
+    const good_file = try tmp.dir.createFile(io, "good", .{});
+    try good_file.writeStreamingAll(io, "ok");
+    try tmp.dir.deleteFile(io, "good");
+    const budget = ScratchBudget{ .used = &used, .limit = 8 };
+    try std.testing.expect(budget.reserve(2));
+    var good_field = ContentField{ .file = good_file, .scratch_budget = budget, .charged = 2 };
+    var field = ContentField{};
+    try std.testing.expectError(error.AccessDenied, parser.readContentString(&field));
+    try std.testing.expect(cleanup_failed);
+    try std.testing.expect(!field.hasFile());
+    try std.testing.expectEqual(@as(u64, 5), used.load(.acquire));
+    try removeContent(&good_field, io);
+    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 3), (try tmp.dir.statFile(io, "request-1-1.tmp", .{})).size);
+}
+
+test "ingress unknown write failure keeps submitted charge until close" {
+    const FailWrite = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming) return .{ .file_write_streaming = error.NoSpaceLeft };
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "failed", .{});
+    var used = std.atomic.Value(u64).init(0);
+    var vtable = io.vtable.*;
+    vtable.operate = FailWrite.operate;
+    const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var sink = ContentSink{ .io = failing_io, .file = file, .scratch_budget = .{ .used = &used, .limit = 3 } };
+    try sink.write("abc");
+    try std.testing.expectError(error.NoSpaceLeft, sink.finish());
+    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+    try tmp.dir.deleteFile(io, "failed");
+    var field = ContentField{ .file = file, .scratch_budget = sink.scratch_budget, .charged = sink.charged };
+    try removeContent(&field, io);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "observation needs no scratch at a full budget" {
+    const json = "{\"version\":\"1\",\"kind\":\"observe_command\",\"store\":\"store\",\"key\":\"key\"}";
+    var source = SocketBody.init(-1, 0);
+    @memcpy(source.buffer[0..json.len], json);
+    source.end = json.len;
+    var used = std.atomic.Value(u64).init(3);
+    var cleanup_failed = false;
+    var parser = Parser{ .source = &source, .options = .{
+        .io = std.testing.io,
+        .fd = -1,
+        .content_length = json.len,
+        .scratch_path = "unused",
+        .request_number = 0,
+        .cleanup_failed = &cleanup_failed,
+        .scratch_budget = .{ .used = &used, .limit = 3 },
+    } };
+    const request = try parser.parse();
+    try std.testing.expect(request == .observe_command);
+    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
 }

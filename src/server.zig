@@ -198,12 +198,6 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
     if (header.route == .unsupported_control) {
         return respondStatic(host.io, fd, 501, "unsupported", "control_surface_enters_in_later_slice");
     }
-    if (!try reserveScratch(host, header.content_length)) {
-        return respondStatic(host.io, fd, 507, "invocation_error", "scratch_capacity_exhausted");
-    }
-    var release_scratch = true;
-    defer if (release_scratch) releaseScratch(host, header.content_length);
-
     const request_number = nextRequestNumber(host) catch {
         return respondStatic(host.io, fd, 500, "invocation_error", "request_identity_exhausted");
     };
@@ -216,12 +210,12 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
         .request_number = request_number,
         .fault_content_write = host.faults.content_write,
         .cleanup_failed = &cleanup_failed,
+        .scratch_budget = .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },
     }) catch |err| {
-        if (cleanup_failed) release_scratch = false;
-        return respondStatic(host.io, fd, 400, "invocation_error", @errorName(err));
+        if (cleanup_failed) std.debug.print("latifa: retained ingress file and charge after cleanup failure\n", .{});
+        return respondStatic(host.io, fd, if (err == error.ScratchCapacityExhausted) @as(u16, 507) else 400, "invocation_error", @errorName(err));
     };
     defer request.removeTemporaryContent(host.io) catch |err| {
-        release_scratch = false;
         std.debug.print("latifa: retained scratch charge after cleanup failure: {s}\n", .{@errorName(err)});
     };
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
@@ -286,21 +280,6 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
             deliverResponse(host.io, fd, 200, response.slice());
         },
     }
-}
-
-fn reserveScratch(host: *Host, amount: u64) !bool {
-    if (amount > scratch_limit_bytes) return false;
-    var current = host.scratch_used.load(.acquire);
-    while (true) {
-        const next = std.math.add(u64, current, amount) catch return false;
-        if (next > scratch_limit_bytes) return false;
-        current = host.scratch_used.cmpxchgWeak(current, next, .acq_rel, .acquire) orelse return true;
-    }
-}
-
-fn releaseScratch(host: *Host, amount: u64) void {
-    const prior = host.scratch_used.fetchSub(amount, .acq_rel);
-    std.debug.assert(prior >= amount);
 }
 
 fn nextRequestNumber(host: *Host) !u64 {

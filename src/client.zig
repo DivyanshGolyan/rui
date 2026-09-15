@@ -141,6 +141,7 @@ fn captureMessage(io: std.Io, paths: *const platform.Paths, input: MessageInput)
 const Capture = struct {
     io: std.Io,
     file: std.Io.File,
+    lock_file: std.Io.File,
     parent: std.Io.Dir,
     writer: std.Io.File.Writer,
     final_name: protocol.Bounded(std.Io.Dir.max_name_bytes) = .{},
@@ -160,21 +161,37 @@ const Capture = struct {
         errdefer parent.close(io);
         const stat = try parent.stat(io);
         if (stat.permissions.toMode() & 0o077 != 0) return error.InsecureRecordDirectory;
+        var lock_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
+        const lock_name = try std.fmt.bufPrint(&lock_buffer, ".{s}.capture.lock", .{final_name});
+        const lock_file = parent.createFile(io, lock_name, .{
+            .read = true,
+            .truncate = false,
+            .lock = .exclusive,
+            .lock_nonblocking = true,
+            .permissions = .fromMode(0o600),
+        }) catch |err| switch (err) {
+            error.WouldBlock => return error.RecordCaptureBusy,
+            else => return err,
+        };
+        errdefer lock_file.close(io);
         if (parent.statFile(io, final_name, .{})) |_| return error.RecordAlreadyExists else |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         }
         var temporary_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
-        const temporary = try std.fmt.bufPrint(&temporary_buffer, ".{s}.capture-{d}", .{
-            final_name,
-            std.c.getpid(),
-        });
+        const temporary = try std.fmt.bufPrint(&temporary_buffer, ".{s}.capture.tmp", .{final_name});
+        // This stable lock also owns recovery. Never unlink its inode: another
+        // opener could otherwise acquire an unrelated lock for the same record.
+        parent.deleteFile(io, temporary) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
         const file = try parent.createFile(io, temporary, .{
             .read = true,
             .exclusive = true,
             .permissions = .fromMode(0o600),
         });
-        var capture = Capture{ .io = io, .file = file, .parent = parent, .writer = file.writerStreaming(io, buffer) };
+        var capture = Capture{ .io = io, .file = file, .lock_file = lock_file, .parent = parent, .writer = file.writerStreaming(io, buffer) };
         try capture.final_name.set(final_name);
         try capture.temporary_name.set(temporary);
         return capture;
@@ -186,6 +203,7 @@ const Capture = struct {
         if (!self.published) self.parent.deleteFile(self.io, self.temporary_name.slice()) catch |err| {
             std.debug.print("latifa: retained caller capture after cleanup failure: {s}\n", .{@errorName(err)});
         };
+        self.lock_file.close(self.io);
         self.parent.close(self.io);
         self.active = false;
     }
@@ -203,6 +221,7 @@ const Capture = struct {
         );
         self.published = true;
         if (std.c.fsync(self.parent.handle) != 0) return error.RecordDirectorySyncFailed;
+        self.lock_file.close(self.io);
         self.parent.close(self.io);
         self.active = false;
     }
@@ -240,6 +259,10 @@ const Capture = struct {
     }
 
     fn writeJsonFile(self: *Capture, path: []const u8) !void {
+        return self.writeJsonFileBounded(path, protocol.max_sqlite_content_bytes);
+    }
+
+    fn writeJsonFileBounded(self: *Capture, path: []const u8, limit: u64) !void {
         var file = if (std.mem.eql(u8, path, "-"))
             std.Io.File.stdin()
         else
@@ -248,12 +271,16 @@ const Capture = struct {
         try self.write("\"");
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var validator = Utf8Validator{};
+        var decoded_bytes: u64 = 0;
         while (true) {
             const count = file.readStreaming(self.io, &.{&buffer}) catch |err| switch (err) {
                 error.EndOfStream => 0,
                 else => return err,
             };
             if (count == 0) break;
+            const next = std.math.add(u64, decoded_bytes, count) catch return error.ContentTooLarge;
+            if (next > limit) return error.ContentTooLarge;
+            decoded_bytes = next;
             try validator.feed(buffer[0..count]);
             // Default encoding copies non-ASCII bytes unchanged, including a UTF-8
             // sequence split across reads; the streaming validator owns validity.
@@ -644,4 +671,82 @@ test "capture validates split UTF8 and does not publish after final flush failur
     capture.abort();
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, capture.temporary_name.slice(), .{}));
+}
+
+test "capture bounds decoded bytes and preserves record ownership" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/record", .{root[0..n]});
+    var source_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const source_path = try std.fmt.bufPrint(&source_buffer, "{s}/source", .{root[0..n]});
+    const source = try tmp.dir.createFile(io, "source", .{});
+    try source.writeStreamingAll(io, "\x00\n€");
+    source.close(io);
+    var buffer: [32]u8 = undefined;
+    var other_buffer: [32]u8 = undefined;
+    var capture = try Capture.open(io, path, &buffer);
+    defer capture.abort();
+    try std.testing.expectError(error.RecordCaptureBusy, Capture.open(io, path, &other_buffer));
+    try std.testing.expectError(error.ContentTooLarge, capture.writeJsonFileBounded(source_path, 4));
+    capture.abort();
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
+    capture = try Capture.open(io, path, &buffer);
+    try capture.writeJsonFileBounded(source_path, 5);
+    try capture.commit();
+    try std.testing.expectError(error.RecordAlreadyExists, Capture.open(io, path, &other_buffer));
+    const saved = try tmp.dir.openFile(io, "record", .{});
+    defer saved.close(io);
+    var bytes: [32]u8 = undefined;
+    const count = try saved.readStreaming(io, &.{&bytes});
+    try std.testing.expectEqualStrings("\"\\u0000\\n€\"", bytes[0..count]);
+}
+
+test "stdin capture uses the same decoded bound before publication" {
+    const Stdin = struct {
+        var sent: bool = false;
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_read_streaming and operation.file_read_streaming.file.handle == std.Io.File.stdin().handle) {
+                if (sent) return .{ .file_read_streaming = error.EndOfStream };
+                sent = true;
+                @memcpy(operation.file_read_streaming.data[0][0..3], "a\nb");
+                return .{ .file_read_streaming = 3 };
+            }
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/record", .{root[0..n]});
+    var vtable = io.vtable.*;
+    vtable.operate = Stdin.operate;
+    const input_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var buffer: [32]u8 = undefined;
+    for ([_]u64{ 2, 3 }) |limit| {
+        Stdin.sent = false;
+        var capture = try Capture.open(input_io, path, &buffer);
+        defer capture.abort();
+        if (limit == 2) {
+            try std.testing.expectError(error.ContentTooLarge, capture.writeJsonFileBounded("-", limit));
+            capture.abort();
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
+        } else {
+            try capture.writeJsonFileBounded("-", limit);
+            try capture.commit();
+            const saved = try tmp.dir.openFile(io, "record", .{});
+            defer saved.close(io);
+            var bytes: [16]u8 = undefined;
+            const count = try saved.readStreaming(io, &.{&bytes});
+            try std.testing.expectEqualStrings("\"a\\nb\"", bytes[0..count]);
+        }
+    }
 }
