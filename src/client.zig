@@ -608,25 +608,14 @@ fn socketPair() ![2]std.posix.fd_t {
 }
 
 fn delayedResponse(io: std.Io, fd: std.posix.fd_t, delay: std.Io.Duration, response: []const u8) void {
-    defer std.debug.assert(std.c.close(fd) == 0);
+    defer closeTestDescriptor(fd);
     std.Io.sleep(io, delay, .awake) catch return;
     writeAll(fd, response) catch {};
 }
 
-// The Zig test runner owns stdout; response output must not enter its protocol.
-fn responseTestOperate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-    if (operation == .file_write_streaming and operation.file_write_streaming.file.handle == std.Io.File.stdout().handle) {
-        const write = operation.file_write_streaming;
-        var count = write.header.len;
-        for (write.data, 0..) |bytes, index| count += bytes.len * (if (index + 1 == write.data.len) write.splat else 1);
-        return .{ .file_write_streaming = count };
-    }
-    return std.testing.io.vtable.operate(userdata, operation);
-}
-
 test "Host processing wait does not consume response transfer inactivity" {
     const sockets = try socketPair();
-    defer std.debug.assert(std.c.close(sockets[0]) == 0);
+    defer closeTestDescriptor(sockets[0]);
     const writer = try std.Thread.spawn(.{}, delayedResponse, .{
         std.testing.io,
         sockets[1],
@@ -641,7 +630,7 @@ test "Host processing wait does not consume response transfer inactivity" {
 
 test "response transfer inactivity begins after the first byte" {
     const sockets = try socketPair();
-    defer std.debug.assert(std.c.close(sockets[0]) == 0);
+    defer closeTestDescriptor(sockets[0]);
     const writer = try std.Thread.spawn(.{}, delayedResponse, .{
         std.testing.io,
         sockets[1],
@@ -659,18 +648,18 @@ test "response transfer inactivity begins after the first byte" {
 test "response closure and truncation stay explicit" {
     {
         const sockets = try socketPair();
-        defer std.posix.close(sockets[0]);
-        std.posix.close(sockets[1]);
+        defer closeTestDescriptor(sockets[0]);
+        closeTestDescriptor(sockets[1]);
         try std.testing.expectError(error.TruncatedResponse, readResponseHead(sockets[0]));
     }
     {
         const sockets = try socketPair();
-        defer std.debug.assert(std.c.close(sockets[0]) == 0);
+        defer closeTestDescriptor(sockets[0]);
         try writeAll(
             sockets[1],
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Latifa-Wire-Version: 1\r\n\r\nx",
         );
-        std.posix.close(sockets[1]);
+        closeTestDescriptor(sockets[1]);
         var buffer: ReplyBuffer = .{};
         try std.testing.expectError(error.TruncatedResponse, readCommandResponse(sockets[0], &buffer));
     }
