@@ -174,6 +174,7 @@ pub const HistoricalContent = struct {
 pub const RetryPolicyInput = struct {
     waits_ms: [3]u64,
     retry_after_ms: ?u64 = null,
+    retry_after_deadline_ms: ?i64 = null,
 };
 
 pub const ModelFailureDisposition = union(enum) {
@@ -182,7 +183,7 @@ pub const ModelFailureDisposition = union(enum) {
 };
 
 const ModelRetryDecision = union(enum) {
-    schedule_after_ms: u64,
+    schedule_at_ms: i64,
     exhausted,
 };
 
@@ -1617,10 +1618,8 @@ pub const Store = struct {
                 try expectDone(settle_turn);
                 if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
             },
-            .retryable => |policy| switch (try decideModelRetry(binding.attempt_ordinal, policy)) {
-                .schedule_after_ms => |delay_ms| {
-                    const now_ms = try readUnixMilliseconds(self.database);
-                    const due_at_ms = try std.math.add(i64, now_ms, @intCast(delay_ms));
+            .retryable => |policy| switch (try decideModelRetry(binding.attempt_ordinal, policy, try readUnixMilliseconds(self.database))) {
+                .schedule_at_ms => |due_at_ms| {
                     const update = try prepare(
                         self.database,
                         "UPDATE model_operation SET uncertain=0,retry_due_at_ms=?2,last_failure_code=?3 " ++
@@ -2763,7 +2762,7 @@ fn readUnixMilliseconds(database: *c.sqlite3) !i64 {
     return value;
 }
 
-fn decideModelRetry(attempt_ordinal: u64, policy: RetryPolicyInput) !ModelRetryDecision {
+fn decideModelRetry(attempt_ordinal: u64, policy: RetryPolicyInput, now_ms: i64) !ModelRetryDecision {
     if (attempt_ordinal == 0 or attempt_ordinal > maximum_model_attempts) {
         return error.InvalidAttemptOrdinal;
     }
@@ -2775,10 +2774,14 @@ fn decideModelRetry(attempt_ordinal: u64, policy: RetryPolicyInput) !ModelRetryD
     }
     if (attempt_ordinal == maximum_model_attempts) return .exhausted;
     const index: usize = @intCast(attempt_ordinal - 1);
-    return .{ .schedule_after_ms = @max(
-        policy.waits_ms[index],
-        policy.retry_after_ms orelse 0,
-    ) };
+    var due_at_ms = try std.math.add(i64, now_ms, @intCast(policy.waits_ms[index]));
+    if (policy.retry_after_ms) |delay_ms| {
+        // An external constraint that cannot name a deadline is invalid, not
+        // an infrastructure failure. Preserve normal backoff and valid dates.
+        const provider_due = std.math.add(i64, now_ms, @intCast(delay_ms)) catch due_at_ms;
+        due_at_ms = @max(due_at_ms, provider_due);
+    }
+    return .{ .schedule_at_ms = @max(due_at_ms, policy.retry_after_deadline_ms orelse 0) };
 }
 
 fn bindCurrent(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *const CurrentConfiguration) !void {
@@ -4474,8 +4477,9 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
 
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const retry_policy = RetryPolicyInput{
-        .waits_ms = .{ 20, 1, 1 },
-        .retry_after_ms = 50,
+        .waits_ms = .{ 50, 1, 1 },
+        // This valid integer cannot name a deadline at the settlement clock.
+        .retry_after_ms = 9_223_372_036_854_775_000,
     };
     try storage.settleModelAttemptFailure(
         first,
@@ -4483,6 +4487,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
         .{ .retryable = retry_policy },
         .{},
     );
+    try std.testing.expect(!storage.isFenced());
     try std.testing.expect((try admitRetryForTesting(&storage)) == null);
     {
         const statement = try prepare(
@@ -4566,49 +4571,87 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
 test "model retry decision applies configured waits Retry-After and exhaustion" {
     const defaults = RetryPolicyInput{ .waits_ms = .{ 2_000, 4_000, 8_000 } };
     try std.testing.expectEqual(
-        ModelRetryDecision{ .schedule_after_ms = 2_000 },
-        try decideModelRetry(1, defaults),
+        ModelRetryDecision{ .schedule_at_ms = 2_000 },
+        try decideModelRetry(1, defaults, 0),
     );
     try std.testing.expectEqual(
-        ModelRetryDecision{ .schedule_after_ms = 4_000 },
-        try decideModelRetry(2, defaults),
+        ModelRetryDecision{ .schedule_at_ms = 4_000 },
+        try decideModelRetry(2, defaults, 0),
     );
     try std.testing.expectEqual(
-        ModelRetryDecision{ .schedule_after_ms = 8_000 },
-        try decideModelRetry(3, defaults),
+        ModelRetryDecision{ .schedule_at_ms = 8_000 },
+        try decideModelRetry(3, defaults, 0),
     );
     try std.testing.expectEqual(
         ModelRetryDecision.exhausted,
-        try decideModelRetry(4, defaults),
+        try decideModelRetry(4, defaults, 0),
     );
 
     try std.testing.expectEqual(
-        ModelRetryDecision{ .schedule_after_ms = 6_000 },
+        ModelRetryDecision{ .schedule_at_ms = 6_000 },
         try decideModelRetry(2, .{
             .waits_ms = defaults.waits_ms,
             .retry_after_ms = 6_000,
-        }),
+        }, 0),
     );
     try std.testing.expectEqual(
-        ModelRetryDecision{ .schedule_after_ms = 8_000 },
+        ModelRetryDecision{ .schedule_at_ms = 8_000 },
         try decideModelRetry(3, .{
             .waits_ms = defaults.waits_ms,
             .retry_after_ms = 6_000,
-        }),
+        }, 0),
     );
 
-    try std.testing.expectError(error.InvalidAttemptOrdinal, decideModelRetry(0, defaults));
-    try std.testing.expectError(error.InvalidAttemptOrdinal, decideModelRetry(5, defaults));
+    try std.testing.expectError(error.InvalidAttemptOrdinal, decideModelRetry(0, defaults, 0));
+    try std.testing.expectError(error.InvalidAttemptOrdinal, decideModelRetry(5, defaults, 0));
     try std.testing.expectError(error.InvalidRetryWait, decideModelRetry(1, .{
         .waits_ms = .{ 0, 4_000, 8_000 },
-    }));
+    }, 0));
     try std.testing.expectError(error.InvalidRetryWait, decideModelRetry(1, .{
         .waits_ms = .{ @as(u64, @intCast(std.math.maxInt(i64))) + 1, 4_000, 8_000 },
-    }));
+    }, 0));
     try std.testing.expectError(error.InvalidRetryWait, decideModelRetry(1, .{
         .waits_ms = defaults.waits_ms,
         .retry_after_ms = @as(u64, @intCast(std.math.maxInt(i64))) + 1,
-    }));
+    }, 0));
+}
+
+test "retry dates stay absolute across body transfer and checked settlement arithmetic" {
+    const now_ms: i64 = 1_700_000_015_000;
+    const waits = [3]u64{ 2_000, 4_000, 8_000 };
+    // Headers arrived fifteen seconds ago with a date ten seconds ahead.
+    // A progressing body crossed that deadline: only normal backoff remains.
+    for ([_]i64{ now_ms - 5_000, now_ms, now_ms + 1_000 }) |deadline| {
+        try std.testing.expectEqual(ModelRetryDecision{ .schedule_at_ms = now_ms + 2_000 }, try decideModelRetry(1, .{
+            .waits_ms = waits,
+            .retry_after_deadline_ms = deadline,
+        }, now_ms));
+    }
+    try std.testing.expectEqual(ModelRetryDecision{ .schedule_at_ms = now_ms + 10_000 }, try decideModelRetry(1, .{
+        .waits_ms = waits,
+        .retry_after_deadline_ms = now_ms + 10_000,
+        .retry_after_ms = 6_000,
+    }, now_ms));
+    try std.testing.expectEqual(ModelRetryDecision{ .schedule_at_ms = now_ms + 6_000 }, try decideModelRetry(1, .{
+        .waits_ms = waits,
+        .retry_after_deadline_ms = now_ms + 3_000,
+        .retry_after_ms = 6_000,
+    }, now_ms));
+    try std.testing.expectEqual(ModelRetryDecision.exhausted, try decideModelRetry(4, .{
+        .waits_ms = waits,
+        .retry_after_deadline_ms = std.math.maxInt(i64),
+    }, now_ms));
+    const extreme_delay: u64 = 9_223_372_036_854_775_000;
+    try std.testing.expectEqual(ModelRetryDecision{ .schedule_at_ms = now_ms + 2_000 }, try decideModelRetry(1, .{
+        .waits_ms = waits,
+        .retry_after_ms = extreme_delay,
+    }, now_ms));
+    try std.testing.expectEqual(ModelRetryDecision{ .schedule_at_ms = now_ms + 10_000 }, try decideModelRetry(1, .{
+        .waits_ms = waits,
+        .retry_after_ms = extreme_delay,
+        .retry_after_deadline_ms = now_ms + 10_000,
+    }, now_ms));
+    try std.testing.expectError(error.Overflow, decideModelRetry(1, .{ .waits_ms = waits }, std.math.maxInt(i64) - 1));
 }
 
 test "canonical historical read failure fences dispatch without a fabricated outcome" {

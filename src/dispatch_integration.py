@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import email.utils
 import http.server
 import hashlib
 import json
@@ -225,10 +226,13 @@ class SuccessEndpoint(http.server.ThreadingHTTPServer):
 
 
 class ResponseSpec:
-    def __init__(self, body, headers, status=200):
+    def __init__(self, body, headers, status=200, *, retry_date_seconds=None, chunk_delay=0):
         self.body = body
         self.headers = headers
         self.status = status
+        self.retry_date_seconds = retry_date_seconds
+        self.chunk_delay = chunk_delay
+        self.body_finished_at = None
 
 
 class SuccessHandler(http.server.BaseHTTPRequestHandler):
@@ -258,10 +262,14 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
                 raise RuntimeError("success fixture response was never released")
         headers = {"X-Request-Id": f"request-{len(self.server.requests)}", "OpenAI-Model": "model-a-served"}
         status = 200
-        if isinstance(payload, ResponseSpec):
+        spec = payload if isinstance(payload, ResponseSpec) else None
+        if spec is not None:
             headers = payload.headers
             status = payload.status
             payload = payload.body
+            if spec.retry_date_seconds is not None:
+                headers = dict(headers)
+                headers["Retry-After"] = email.utils.formatdate(time.time() + spec.retry_date_seconds, usegmt=True)
         self.send_response(status)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(payload)))
@@ -275,6 +283,8 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
         cursor = 0
         index = 0
         while cursor < len(payload):
+            if spec is not None and spec.chunk_delay:
+                time.sleep(spec.chunk_delay)
             size = offsets[index % len(offsets)]
             try:
                 self.wfile.write(payload[cursor : cursor + size])
@@ -283,6 +293,8 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
                 break
             cursor += size
             index += 1
+        if spec is not None:
+            spec.body_finished_at = time.monotonic()
         self.close_connection = True
 
     def log_message(self, _format, *_args):
@@ -652,6 +664,39 @@ def main():
         retry_endpoint.shutdown()
         retry_endpoint.server_close()
         retry_thread.join(timeout=5)
+
+        # A date four seconds ahead expires during five seconds of progressing
+        # error-body transfer. It must not add the original delay again.
+        dated_failure = ResponseSpec(
+            b"123456789012345678", {}, 503,
+            retry_date_seconds=4, chunk_delay=1,
+        )
+        dated_endpoint = SuccessEndpoint([dated_failure, retry_sse])
+        dated_thread = threading.Thread(target=dated_endpoint.serve_forever, daemon=True)
+        dated_thread.start()
+        dated_store = state / "dated-retry-store"
+        dated_host = start_host(dated_store, f"http://127.0.0.1:{dated_endpoint.server_port}/responses")
+        processes.append(dated_host)
+        configure(state, dated_store, "dated-config", "direct/dated", "model-a")
+        message(state, dated_store, "dated-message", "direct/dated", "retry date")
+        dated_complete = wait_for(
+            lambda: completed_observation(dated_store, "dated-message"),
+            "expired Retry-After date after progressing body", timeout=12,
+        )
+        assert dated_complete["processing"]["attempt"] == "2", dated_complete
+        assert read_result(dated_store, "dated-message") == b"recovered answer"
+        assert len(dated_endpoint.requests) == 2
+        assert dated_endpoint.requests[0] == dated_endpoint.requests[1]
+        # Allows the one-second discovery tick; the old conversion adds at
+        # least three seconds after the body and cannot pass this bound.
+        assert dated_failure.body_finished_at is not None
+        after_body = dated_endpoint.request_times[1] - dated_failure.body_finished_at
+        assert 0.04 <= after_body < 2.5, after_body
+        stop_host(dated_host)
+        processes.remove(dated_host)
+        dated_endpoint.shutdown()
+        dated_endpoint.server_close()
+        dated_thread.join(timeout=5)
 
         # A permanent request/authentication-class HTTP failure is terminal
         # after one Attempt and is never blindly retried.

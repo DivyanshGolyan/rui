@@ -313,6 +313,7 @@ pub const TransportEvidence = struct {
     http_status: u16 = 0,
     response_bytes: u64 = 0,
     retry_after_ms: ?u64 = null,
+    retry_after_deadline_ms: ?i64 = null,
 };
 
 pub const CaptureFailure = enum { scratch_exhausted, write_failed };
@@ -563,6 +564,7 @@ const HeaderContext = struct {
     openai_model: protocol.Bounded(protocol.max_model_bytes) = .{},
     x_openai_model: protocol.Bounded(protocol.max_model_bytes) = .{},
     retry_after_ms: ?u64 = null,
+    retry_after_deadline_ms: ?i64 = null,
     invalid: bool = false,
 };
 
@@ -690,6 +692,7 @@ pub const Transfer = struct {
             .disposition = disposition,
             .response_bytes = self.response.length,
             .retry_after_ms = self.header_context.retry_after_ms,
+            .retry_after_deadline_ms = self.header_context.retry_after_deadline_ms,
         };
         var response_code: c_long = 0;
         if (c.curl_easy_getinfo(self.easy, c.CURLINFO_RESPONSE_CODE, &response_code) != c.CURLE_OK or
@@ -709,6 +712,7 @@ pub const Transfer = struct {
             .http_status = status,
             .response_bytes = self.response.length,
             .retry_after_ms = self.header_context.retry_after_ms,
+            .retry_after_deadline_ms = self.header_context.retry_after_deadline_ms,
         };
     }
 
@@ -840,9 +844,10 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
     const name = std.mem.trim(u8, line[0..colon], " \t");
     const value = std.mem.trim(u8, line[colon + 1 ..], " \t\r\n");
     if (std.ascii.eqlIgnoreCase(name, "retry-after")) {
-        if (retryAfterMilliseconds(value, c.time(null))) |retry_after_ms| {
-            context.retry_after_ms = @max(context.retry_after_ms orelse 0, retry_after_ms);
-        }
+        if (parseRetryAfter(value, c.time(null))) |constraint| switch (constraint) {
+            .delay_ms => |delay| context.retry_after_ms = @max(context.retry_after_ms orelse 0, delay),
+            .deadline_ms => |deadline| context.retry_after_deadline_ms = @max(context.retry_after_deadline_ms orelse 0, deadline),
+        };
         return bytes;
     }
     const destination = if (std.ascii.eqlIgnoreCase(name, "x-request-id"))
@@ -864,24 +869,26 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
     return bytes;
 }
 
-fn retryAfterMilliseconds(value: []const u8, now_seconds: c.time_t) ?u64 {
+const RetryAfter = union(enum) {
+    delay_ms: u64,
+    deadline_ms: i64,
+};
+
+fn parseRetryAfter(value: []const u8, now_seconds: c.time_t) ?RetryAfter {
     if (value.len == 0 or value.len > 128) return null;
-    const now_ms = std.math.mul(i64, @as(i64, @intCast(now_seconds)), 1000) catch return null;
     if (std.fmt.parseInt(u64, value, 10)) |seconds| {
         const delay_ms = std.math.mul(u64, seconds, 1000) catch return null;
         if (delay_ms > std.math.maxInt(i64)) return null;
+        const now_ms = std.math.mul(i64, @intCast(now_seconds), 1000) catch return null;
         _ = std.math.add(i64, now_ms, @intCast(delay_ms)) catch return null;
-        return delay_ms;
+        return .{ .delay_ms = delay_ms };
     } else |_| {}
     var buffer: [129:0]u8 = undefined;
     const value_z = std.fmt.bufPrintZ(&buffer, "{s}", .{value}) catch return null;
     const due_seconds = c.curl_getdate(value_z.ptr, null);
     if (due_seconds < 0) return null;
-    if (due_seconds <= now_seconds) return 0;
-    const delay_ms = std.math.mul(u64, @intCast(due_seconds - now_seconds), 1000) catch return null;
-    if (delay_ms > std.math.maxInt(i64)) return null;
-    _ = std.math.add(i64, now_ms, @intCast(delay_ms)) catch return null;
-    return delay_ms;
+    const deadline_ms = std.math.mul(i64, @intCast(due_seconds), 1000) catch return null;
+    return .{ .deadline_ms = deadline_ms };
 }
 
 fn setOpt(easy: *c.CURL, option: c.CURLoption, value: anytype) !void {
@@ -994,18 +1001,30 @@ test "request JSON encoding preserves controls and split UTF-8 with write failur
     try std.testing.expectEqual(@as(u64, count), try file.length(std.testing.io));
 }
 
-test "Retry-After accepts delay seconds and dates without unchecked arithmetic" {
-    try std.testing.expectEqual(@as(?u64, 12_000), retryAfterMilliseconds("12", 1_700_000_000));
-    try std.testing.expectEqual(
-        @as(?u64, 1_000),
-        retryAfterMilliseconds("Tue, 14 Nov 2023 22:13:21 GMT", 1_700_000_000),
-    );
-    try std.testing.expectEqual(
-        @as(?u64, 0),
-        retryAfterMilliseconds("Tue, 14 Nov 2023 22:13:19 GMT", 1_700_000_000),
-    );
-    try std.testing.expect(retryAfterMilliseconds("invalid", 1_700_000_000) == null);
-    try std.testing.expect(retryAfterMilliseconds("18446744073709551615", 1_700_000_000) == null);
+test "Retry-After preserves dates and delays without unchecked arithmetic" {
+    try std.testing.expectEqual(RetryAfter{ .delay_ms = 12_000 }, parseRetryAfter("12", 1_700_000_000).?);
+    try std.testing.expectEqual(RetryAfter{ .deadline_ms = 1_700_000_001_000 }, parseRetryAfter("Tue, 14 Nov 2023 22:13:21 GMT", 1_700_000_000).?);
+    try std.testing.expectEqual(RetryAfter{ .deadline_ms = 1_699_999_999_000 }, parseRetryAfter("Tue, 14 Nov 2023 22:13:19 GMT", 1_700_000_000).?);
+    try std.testing.expect(parseRetryAfter("9223372036854775", 1_700_000_000) == null);
+    try std.testing.expect(parseRetryAfter("invalid", 1_700_000_000) == null);
+    try std.testing.expect(parseRetryAfter("18446744073709551615", 1_700_000_000) == null);
+}
+
+test "duplicate Retry-After headers retain both independent constraints" {
+    var context: HeaderContext = .{};
+    const lines = [_][]const u8{
+        "Retry-After: 12\r\n",
+        "Retry-After: Tue, 14 Nov 2023 22:13:21 GMT\r\n",
+        "Retry-After: 3\r\n",
+        "Retry-After: 9223372036854775\r\n",
+        "Retry-After: Tue, 14 Nov 2023 22:13:19 GMT\r\n",
+        "Retry-After: invalid\r\n",
+    };
+    for (lines) |line| {
+        try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &context));
+    }
+    try std.testing.expectEqual(@as(?u64, 12_000), context.retry_after_ms);
+    try std.testing.expectEqual(@as(?i64, 1_700_000_001_000), context.retry_after_deadline_ms);
 }
 
 test "curl disposition retries only temporary connection and explicit inactivity failures" {

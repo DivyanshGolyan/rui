@@ -629,6 +629,7 @@ fn completeTransfer(
             .{ .retryable = .{
                 .waits_ms = host.faults.retry_waits_ms,
                 .retry_after_ms = evidence.retry_after_ms,
+                .retry_after_deadline_ms = evidence.retry_after_deadline_ms,
             } }
         else
             .terminal;
