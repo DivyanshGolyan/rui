@@ -3209,7 +3209,7 @@ test "configuration planning preserves sparse defaults and rejection precedence"
     }
 }
 
-test "configuration rejection content imports roll back and replay committed answer" {
+test "configuration rejections bypass content effects and replay committed answer" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -3239,7 +3239,10 @@ test "configuration rejection content imports roll back and replay committed ans
 
     {
         var storage = try testingStore(&tmp, std.testing.io);
-        try std.testing.expect(storage.configure(&command, .{ .content_import = true }) == .infrastructure_failure);
+        try std.testing.expect(storage.configure(&command, .{
+            .content_import = true,
+            .before_commit = true,
+        }) == .infrastructure_failure);
         try storage.close();
     }
     {
@@ -3251,28 +3254,26 @@ test "configuration rejection content imports roll back and replay committed ans
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(rolled_back_content));
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(rolled_back_content, 0));
 
-        const rejected = storage.configure(&command, .{});
+        const rejected = storage.configure(&command, .{ .content_import = true });
         try std.testing.expect(rejected == .rejected);
         try std.testing.expectEqual(ConfigurationRejection.invalid_session_reference, rejected.rejected.code);
         const committed_content = try prepare(
             storage.database,
-            "SELECT COUNT(*) FROM core_command command " ++
-                "JOIN content instructions ON instructions.content_id=command.primary_content_id " ++
-                "JOIN content schema ON schema.content_id=command.secondary_content_id " ++
-                "WHERE command.command_key='rejected-content'",
+            "SELECT COUNT(*) FROM core_command WHERE command_key='rejected-content' " ++
+                "AND primary_content_id IS NULL AND secondary_content_id IS NULL",
         );
         defer _ = c.sqlite3_finalize(committed_content);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(committed_content));
         try std.testing.expectEqual(@as(i64, 1), c.sqlite3_column_int64(committed_content, 0));
 
-        const replay = storage.configure(&command, .{});
+        const replay = storage.configure(&command, .{ .content_import = true });
         try std.testing.expect(replay == .rejected);
         try std.testing.expect(replay.rejected.replayed);
         try std.testing.expectEqual(ConfigurationRejection.invalid_session_reference, replay.rejected.code);
         const retained_content = try prepare(storage.database, "SELECT COUNT(*) FROM content");
         defer _ = c.sqlite3_finalize(retained_content);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(retained_content));
-        try std.testing.expectEqual(@as(i64, 2), c.sqlite3_column_int64(retained_content, 0));
+        try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(retained_content, 0));
     }
 }
 
