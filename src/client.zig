@@ -385,14 +385,20 @@ fn sendSource(
 }
 
 fn readResponse(io: std.Io, fd: std.posix.fd_t) !u16 {
+    return readResponseWithInactivity(io, fd, 60_000);
+}
+
+fn readResponseWithInactivity(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32) !u16 {
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
-    var used: usize = 0;
+    const first_count = try std.posix.read(fd, header_buffer[0..1]);
+    if (first_count == 0) return error.TruncatedResponse;
+    var used: usize = first_count;
     while (used < header_buffer.len) {
-        if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
+        if (used >= 4 and std.mem.eql(u8, header_buffer[used - 4 .. used], "\r\n\r\n")) break;
+        if (!try waitReadable(fd, inactivity_ms)) return error.ResponseInactive;
         const count = try std.posix.read(fd, header_buffer[used .. used + 1]);
         if (count == 0) return error.TruncatedResponse;
         used += count;
-        if (used >= 4 and std.mem.eql(u8, header_buffer[used - 4 .. used], "\r\n\r\n")) break;
     } else return error.ResponseHeaderTooLarge;
     var lines = std.mem.splitSequence(u8, header_buffer[0..used], "\r\n");
     const status_line = lines.next() orelse return error.InvalidResponse;
@@ -419,7 +425,7 @@ fn readResponse(io: std.Io, fd: std.posix.fd_t) !u16 {
     var body: [protocol.max_response_bytes]u8 = undefined;
     var offset: usize = 0;
     while (offset < body_length) {
-        if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
+        if (!try waitReadable(fd, inactivity_ms)) return error.ResponseInactive;
         const count = try std.posix.read(fd, body[offset..body_length]);
         if (count == 0) return error.TruncatedResponse;
         offset += count;
@@ -451,5 +457,75 @@ fn writeAll(fd: std.posix.fd_t, value: []const u8) !void {
         if (count < 0) return error.WriteFailed;
         if (count == 0) return error.ConnectionClosed;
         offset += @intCast(count);
+    }
+}
+
+const empty_test_response =
+    "HTTP/1.1 200 OK\r\n" ++
+    "Content-Type: application/json\r\n" ++
+    "Content-Length: 0\r\n" ++
+    "Connection: close\r\n" ++
+    "X-Latifa-Wire-Version: 1\r\n\r\n";
+
+fn socketPair() ![2]std.posix.fd_t {
+    var sockets: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) {
+        return error.SocketPairFailed;
+    }
+    return sockets;
+}
+
+fn delayedResponse(io: std.Io, fd: std.posix.fd_t, delay: std.Io.Duration, response: []const u8) void {
+    defer std.posix.close(fd);
+    std.Io.sleep(io, delay, .awake) catch return;
+    writeAll(fd, response) catch {};
+}
+
+test "Host processing wait does not consume response transfer inactivity" {
+    const sockets = try socketPair();
+    defer std.posix.close(sockets[0]);
+    const writer = try std.Thread.spawn(.{}, delayedResponse, .{
+        std.testing.io,
+        sockets[1],
+        std.Io.Duration.fromSeconds(61),
+        empty_test_response,
+    });
+    defer writer.join();
+    try std.testing.expectEqual(@as(u16, 200), try readResponse(std.testing.io, sockets[0]));
+}
+
+test "response transfer inactivity begins after the first byte" {
+    const sockets = try socketPair();
+    defer std.posix.close(sockets[0]);
+    const writer = try std.Thread.spawn(.{}, delayedResponse, .{
+        std.testing.io,
+        sockets[1],
+        std.Io.Duration.fromMilliseconds(50),
+        empty_test_response[1..],
+    });
+    defer writer.join();
+    try writeAll(sockets[1], empty_test_response[0..1]);
+    try std.testing.expectError(
+        error.ResponseInactive,
+        readResponseWithInactivity(std.testing.io, sockets[0], 10),
+    );
+}
+
+test "response closure and truncation stay explicit" {
+    {
+        const sockets = try socketPair();
+        defer std.posix.close(sockets[0]);
+        std.posix.close(sockets[1]);
+        try std.testing.expectError(error.TruncatedResponse, readResponse(std.testing.io, sockets[0]));
+    }
+    {
+        const sockets = try socketPair();
+        defer std.posix.close(sockets[0]);
+        try writeAll(
+            sockets[1],
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Latifa-Wire-Version: 1\r\n\r\nx",
+        );
+        std.posix.close(sockets[1]);
+        try std.testing.expectError(error.TruncatedResponse, readResponse(std.testing.io, sockets[0]));
     }
 }
