@@ -432,7 +432,7 @@ const ItemFields = Fields(item_field_names);
 fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
     try optionalCompleted(io, file, try fields.get("status"));
     if (try fields.get("text") != null) return error.UnsupportedProviderOutput;
-    const encrypted = try fields.required("encrypted_content");
+    const encrypted = (try fields.get("encrypted_content")) orelse return error.ContinuationUnavailable;
     var ignored: protocol.Bounded(max_evidence_bytes) = .{};
     const parsed = readString(io, file, encrypted, &ignored) catch |err| switch (err) {
         error.ProviderValueTooLong => blk: {

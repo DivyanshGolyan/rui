@@ -958,6 +958,18 @@ def main():
         late_malformed = first_sse.replace(
             b"data: [DONE]\n\n", b"data: {malformed\n\ndata: [DONE]\n\n"
         )
+        encrypted_cases = []
+        for encrypted in (None, "", 42, [], {}, True):
+            item = dict(invalid_reasoning)
+            item["encrypted_content"] = encrypted
+            encrypted_cases.append(encode_sse([
+                {"type": "response.output_item.done", "output_index": 0, "item": item}
+            ], done=False))
+        missing = dict(invalid_reasoning)
+        del missing["encrypted_content"]
+        encrypted_cases.append(encode_sse([
+            {"type": "response.output_item.done", "output_index": 0, "item": missing}
+        ], done=False))
         invalid_endpoint = SuccessEndpoint(
             [
                 first_sse[:-1],
@@ -966,6 +978,7 @@ def main():
                 duplicate_identity,
                 late_malformed,
                 unsupported_tool,
+                *encrypted_cases,
             ]
         )
         invalid_thread = threading.Thread(target=invalid_endpoint.serve_forever, daemon=True)
@@ -978,6 +991,13 @@ def main():
                 "malformed_provider_output",
                 "malformed_provider_output",
                 "unsupported_provider_output",
+                "malformed_provider_output",
+                "continuation_unavailable",
+                "malformed_provider_output",
+                "malformed_provider_output",
+                "malformed_provider_output",
+                "malformed_provider_output",
+                "continuation_unavailable",
             )
         ):
             invalid_store = state / f"invalid-output-{index}"
