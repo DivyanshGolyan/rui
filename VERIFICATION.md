@@ -266,3 +266,7 @@ Hold export delivery open across diagnostic rotation and inject partial record/c
 Package under the Latifa identity; verify executable/package names, state and credential identifiers, build/distribution references and fixtures without losing existing user data.
 
 Release demonstrations cover explicit start, no-client progress, restart, direct Sessions, first configuration, cross-Workflow inspected-reference reuse, fan-out/joins, permissions, ordered tools, uncertain Bash/Edit and shared cancellation. Independent native/Cloudflare walkthroughs may expose hidden coupling; they add no embedding/cloud release requirement. Keep evidence attached to the real owners and label remaining gaps before claiming release readiness.
+
+## Memory explanation evidence
+
+For changes affecting allocation, buffers, threads or external-resource lifetimes, retain the affected memory explanation with the applicable existing evidence: measured build/workload, allocation origin and owner where known, population multiplier, lifetime, and explicit attribution gaps. Distinguish live allocations, allocation volume, physical footprint and virtual reservation; overlapping counters are not additive. The [small Host memory trial](research/memory-trial/README.md) provides a reproducible collection example, not a new quota or replacement for simultaneous-workload qualification. Unrelated changes do not require rerunning it.
