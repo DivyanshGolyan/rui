@@ -9,6 +9,7 @@ pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 9;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
+pub const max_content_read_bytes: usize = 64 * 1024;
 const runnable_probe_sql =
     "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending " ++
     "WHERE m.turn_id IS NULL AND NOT EXISTS(" ++
@@ -2530,7 +2531,7 @@ pub const Store = struct {
     }
 
     fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !usize {
-        if (destination.len > protocol.content_window_bytes) return error.WindowTooLarge;
+        if (destination.len > max_content_read_bytes) return error.WindowTooLarge;
         if (start > reader.reference.length) return error.RangeOutOfBounds;
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);

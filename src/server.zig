@@ -18,6 +18,7 @@ pub const control_headroom = 2;
 // production resource-measurement path.
 pub const connection_stack_bytes = 1024 * 1024;
 pub const maximum_connection_stack_reservation_bytes = max_clients * connection_stack_bytes;
+pub const maximum_result_delivery_buffers_bytes = max_ordinary_clients * store_module.max_content_read_bytes;
 
 pub const Faults = struct {
     content_acquire: bool = false,
@@ -1762,7 +1763,7 @@ fn deliverContent(io: std.Io, fd: std.posix.fd_t, reader: *store_module.ContentR
     var header_buffer: [256]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\nX-Latifa-Wire-Version: 1\r\n\r\n", .{reader.reference.length});
     try writeAll(fd, header);
-    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var buffer: [store_module.max_content_read_bytes]u8 = undefined;
     var offset: u64 = 0;
     while (offset < reader.reference.length) {
         const wanted: usize = @intCast(@min(reader.reference.length - offset, buffer.len));
@@ -1810,6 +1811,7 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
 test "connection populations preserve two control places" {
     try std.testing.expectEqual(max_clients, max_ordinary_clients + control_headroom);
     try std.testing.expectEqual(@as(usize, 12 * 1024 * 1024), maximum_connection_stack_reservation_bytes);
+    try std.testing.expectEqual(@as(usize, 10 * 64 * 1024), maximum_result_delivery_buffers_bytes);
 }
 
 test "model retry and inactivity defaults match the owning resource contract" {
