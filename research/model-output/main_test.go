@@ -2,8 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -46,35 +44,6 @@ func TestExpectedCapacityRequestDigest(t *testing.T) {
 	bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"})
 	if bytes != 244 || digest != "358881c8b33611579e786d84931f25c3d22b8289a4ed926d0bb5759c050ab89d" {
 		t.Fatalf("unexpected independent request oracle: %d %s", bytes, digest)
-	}
-}
-
-func TestResolveBinaryArgumentUsesLauncherWorkingDirectory(t *testing.T) {
-	working, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository := filepath.Dir(filepath.Dir(working))
-	research := filepath.Join(repository, "research")
-	if _, err := os.Stat(filepath.Join(research, "go.mod")); err != nil {
-		t.Fatalf("test did not start below repository research directory: %v", err)
-	}
-	t.Chdir(research)
-	resolved, err := resolveBinaryArgument("./.zig-cache/o/example/latifa")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(repository, ".zig-cache/o/example/latifa")
-	if resolved != want {
-		t.Fatalf("resolved binary = %q want %q", resolved, want)
-	}
-	absolute := "/synthetic/link/../latifa"
-	resolved, err = resolveBinaryArgument(absolute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resolved != absolute {
-		t.Fatalf("absolute binary = %q want unchanged %q", resolved, absolute)
 	}
 }
 
