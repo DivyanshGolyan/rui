@@ -19,14 +19,17 @@ import (
 )
 
 const (
-	event                        = "data: {\"type\":\"response.in_progress\"}\n\n"
-	deliveryMethod               = "bounded_delivery_v1"
-	eventsPerBatch               = 2
-	batchInterval                = 20 * time.Millisecond
-	allowedDeliveryVariation     = batchInterval
-	maximumCompletionGap         = 2 * batchInterval
+	eventRecordBytes             = 260
+	deliveryMethod               = "rational_pacing_v1"
+	eventsPerBatch               = 1
 	maximumBatchesPerBurstWindow = 2
 )
+
+var event = func() string {
+	const prefix = "data: {\"type\":\"response.in_progress\",\"padding\":\""
+	const suffix = "\"}\n\n"
+	return prefix + strings.Repeat("x", eventRecordBytes-len(prefix)-len(suffix)) + suffix
+}()
 
 type stream struct {
 	id            string
@@ -42,6 +45,8 @@ type fixture struct {
 	mu               sync.Mutex
 	expected         int
 	duration         time.Duration
+	eventsPerSecond  int
+	batchInterval    time.Duration
 	batches          int
 	batch            string
 	perStreamWork    workExpectation
@@ -66,10 +71,11 @@ type fixture struct {
 }
 
 type Config struct {
-	Streams     int
-	Duration    time.Duration
-	ArtifactDir string
-	Rounds      int
+	Streams         int
+	Duration        time.Duration
+	EventsPerSecond int
+	ArtifactDir     string
+	Rounds          int
 }
 
 type Server struct {
@@ -146,6 +152,7 @@ type Summary struct {
 	EventsPerBatch                int                      `json:"events_per_batch"`
 	BatchesPerStream              int                      `json:"batches_per_stream"`
 	OfferSeconds                  float64                  `json:"offer_seconds"`
+	EventsPerSecond               int                      `json:"events_per_second"`
 }
 
 type deliveryRule struct {
@@ -244,12 +251,12 @@ type summaryTimingWitness struct {
 	ObservedNS int64  `json:"observed_ns"`
 }
 
-func selectedDeliveryRule() deliveryRule {
+func selectedDeliveryRule(interval time.Duration) deliveryRule {
 	return deliveryRule{
-		BatchIntervalNS:              batchInterval.Nanoseconds(),
-		AllowedDeliveryVariationNS:   allowedDeliveryVariation.Nanoseconds(),
-		MaximumCompletionGapNS:       maximumCompletionGap.Nanoseconds(),
-		BurstWindowNS:                batchInterval.Nanoseconds(),
+		BatchIntervalNS:              interval.Nanoseconds(),
+		AllowedDeliveryVariationNS:   interval.Nanoseconds(),
+		MaximumCompletionGapNS:       (2 * interval).Nanoseconds(),
+		BurstWindowNS:                interval.Nanoseconds(),
 		MaximumBatchesPerBurstWindow: maximumBatchesPerBurstWindow,
 	}
 }
@@ -288,43 +295,61 @@ func (e *violationEvidence) record(ordinal int, violation time.Duration) {
 	}
 }
 
-func (e *deliveryEvidence) waitTarget(start time.Time, ordinal int) time.Time {
-	target := start.Add(time.Duration(ordinal) * batchInterval)
+func rationalOffset(duration time.Duration, count, ordinal int) time.Duration {
+	quotient := duration / time.Duration(count)
+	remainder := duration % time.Duration(count)
+	return time.Duration(ordinal)*quotient + time.Duration((int64(remainder)*int64(ordinal))/int64(count))
+}
+
+func rationalTarget(start time.Time, duration time.Duration, count, ordinal int) time.Time {
+	return start.Add(rationalOffset(duration, count, ordinal))
+}
+
+func (e *deliveryEvidence) waitTarget(start time.Time, duration time.Duration, batches int, interval time.Duration, ordinal int) time.Time {
+	target := rationalTarget(start, duration, batches, ordinal)
 	if ordinal >= 2 {
-		burstTarget := e.completions[ordinal%2].Add(batchInterval)
-		if burstTarget.After(target) {
-			target = burstTarget
+		paced := e.completions[ordinal%2].Add(interval)
+		if paced.After(target) {
+			target = paced
 		}
 	}
 	return target
+}
+
+func ceilingInterval(duration time.Duration, count int) time.Duration {
+	quotient := duration / time.Duration(count)
+	if duration%time.Duration(count) != 0 {
+		quotient++
+	}
+	return quotient
 }
 
 func (e *deliveryEvidence) addWritten(written int) {
 	e.offerBytes += uint64(written)
 }
 
-func (e *deliveryEvidence) recordCompletion(start time.Time, ordinal int, completedAt time.Time) {
-	release := start.Add(time.Duration(ordinal) * batchInterval)
+func (e *deliveryEvidence) recordCompletion(start time.Time, duration time.Duration, batches int, interval time.Duration, ordinal int, completedAt time.Time) {
+	release := rationalTarget(start, duration, batches, ordinal)
 	e.maximumDelay.record(ordinal, completedAt.Sub(release))
 	if completedAt.Before(release) {
 		e.early.record(ordinal, release.Sub(completedAt))
 	}
-	latest := release.Add(batchInterval + allowedDeliveryVariation)
+	latest := release.Add(2 * interval)
 	if completedAt.After(latest) {
 		e.late.record(ordinal, completedAt.Sub(latest))
 	}
 	if ordinal > 0 {
 		gap := completedAt.Sub(e.lastCompletion)
 		e.maximumGap.record(ordinal, gap)
-		if gap > maximumCompletionGap {
-			e.gap.record(ordinal, gap-maximumCompletionGap)
+		if gap > 2*interval {
+			e.gap.record(ordinal, gap-2*interval)
 		}
 	}
 	if ordinal >= 2 {
 		span := completedAt.Sub(e.completions[ordinal%2])
 		e.minimumTwoBack.record(ordinal, span)
-		if span < batchInterval {
-			e.burst.record(ordinal, batchInterval-span)
+		if span < interval {
+			e.burst.record(ordinal, interval-span)
 		}
 	}
 	if ordinal == 0 {
@@ -369,8 +394,15 @@ func (e *deliveryEvidence) fact(start time.Time) deliveryEvidenceFact {
 	return result
 }
 
-func newFixture(expected int, duration time.Duration, artifactDir string, facts *os.File) (*fixture, error) {
-	batches := uint64(duration / batchInterval)
+func newFixture(expected int, duration time.Duration, eventsPerSecond int, artifactDir string, facts *os.File) (*fixture, error) {
+	if duration%time.Second != 0 || eventsPerSecond <= 0 {
+		return nil, errors.New("event rate requires a whole-second duration and positive rate")
+	}
+	batches := uint64(duration/time.Second) * uint64(eventsPerSecond)
+	if batches == 0 || batches > uint64(^uint(0)>>1) {
+		return nil, errors.New("event population exceeds fixture representation")
+	}
+	interval := ceilingInterval(duration, int(batches))
 	perStreamWork, err := expectedWork(1, batches, uint64(len(event)), eventsPerBatch)
 	if err != nil {
 		return nil, err
@@ -380,21 +412,23 @@ func newFixture(expected int, duration time.Duration, artifactDir string, facts 
 		return nil, err
 	}
 	return &fixture{
-		expected:      expected,
-		duration:      duration,
-		batches:       int(batches),
-		batch:         event + event,
-		perStreamWork: perStreamWork,
-		totalWork:     totalWork,
-		artifactDir:   artifactDir,
-		facts:         facts,
-		streams:       make(map[string]*stream, expected),
-		readyCh:       make(chan struct{}),
-		startCh:       make(chan struct{}),
-		offerCh:       make(chan struct{}),
-		terminalCh:    make(chan struct{}),
-		doneCh:        make(chan struct{}),
-		cancelCh:      make(chan struct{}),
+		expected:        expected,
+		duration:        duration,
+		eventsPerSecond: eventsPerSecond,
+		batchInterval:   interval,
+		batches:         int(batches),
+		batch:           event,
+		perStreamWork:   perStreamWork,
+		totalWork:       totalWork,
+		artifactDir:     artifactDir,
+		facts:           facts,
+		streams:         make(map[string]*stream, expected),
+		readyCh:         make(chan struct{}),
+		startCh:         make(chan struct{}),
+		offerCh:         make(chan struct{}),
+		terminalCh:      make(chan struct{}),
+		doneCh:          make(chan struct{}),
+		cancelCh:        make(chan struct{}),
 	}, nil
 }
 
@@ -523,14 +557,14 @@ func waitForSlot(timer *time.Timer, delay time.Duration, done <-chan struct{}) b
 
 var errOfferHardDeadline = errors.New("offer hard deadline expired")
 
-func offerBatches(start time.Time, duration time.Duration, batches int, now func() time.Time, waitUntil func(time.Time) error, write func() (int, time.Time, error)) (deliveryEvidence, error) {
+func offerBatches(start time.Time, duration time.Duration, batches int, interval time.Duration, now func() time.Time, waitUntil func(time.Time) error, write func() (int, time.Time, error)) (deliveryEvidence, error) {
 	var delivery deliveryEvidence
-	hardDeadline := start.Add(duration + maximumCompletionGap)
+	hardDeadline := start.Add(duration + 2*interval)
 	for ordinal := 0; ordinal < batches; ordinal++ {
 		if !now().Before(hardDeadline) {
 			return delivery, errOfferHardDeadline
 		}
-		target := delivery.waitTarget(start, ordinal)
+		target := delivery.waitTarget(start, duration, batches, interval, ordinal)
 		if target.After(hardDeadline) {
 			return delivery, errors.New("offer target exceeds hard deadline")
 		}
@@ -545,7 +579,7 @@ func offerBatches(start time.Time, duration time.Duration, batches int, now func
 		if err != nil {
 			return delivery, err
 		}
-		delivery.recordCompletion(start, ordinal, completedAt)
+		delivery.recordCompletion(start, duration, batches, interval, ordinal, completedAt)
 	}
 	return delivery, nil
 }
@@ -611,7 +645,7 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hardDeadline := f.startAt.Add(f.duration + maximumCompletionGap)
+	hardDeadline := f.startAt.Add(f.duration + 2*f.batchInterval)
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
 		<-timer.C
@@ -622,7 +656,7 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 	if err := controller.SetWriteDeadline(hardDeadline); err != nil {
 		offerErr = err
 	} else {
-		delivery, offerErr = offerBatches(f.startAt, f.duration, f.batches, time.Now, func(target time.Time) error {
+		delivery, offerErr = offerBatches(f.startAt, f.duration, f.batches, f.batchInterval, time.Now, func(target time.Time) error {
 			if waitForSlot(timer, max(target.Sub(time.Now()), 0), r.Context().Done()) {
 				return nil
 			}
@@ -705,7 +739,7 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	result := Summary{
 		DeliveryMethod:     deliveryMethod,
-		DeliveryRule:       selectedDeliveryRule(),
+		DeliveryRule:       selectedDeliveryRule(f.batchInterval),
 		ExpectedStreams:    f.expected,
 		ReadyStreams:       f.ready,
 		OfferFinished:      f.offerFinished,
@@ -718,6 +752,7 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 		EventsPerBatch:     eventsPerBatch,
 		BatchesPerStream:   f.batches,
 		OfferSeconds:       f.duration.Seconds(),
+		EventsPerSecond:    f.eventsPerSecond,
 	}
 	if len(rows) == 0 {
 		result.MinimumBatches = 0
@@ -770,8 +805,8 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 	result.RequestSetSHA256 = hex.EncodeToString(requestSet.Sum(nil))
 	if f.started {
 		result.StartUnixNS = f.startAt.UnixNano()
-		result.OfferHorizonUnixNS = f.startAt.Add(f.duration + allowedDeliveryVariation).UnixNano()
-		result.HardDeadlineUnixNS = f.startAt.Add(f.duration + maximumCompletionGap).UnixNano()
+		result.OfferHorizonUnixNS = f.startAt.Add(f.duration + f.batchInterval).UnixNano()
+		result.HardDeadlineUnixNS = f.startAt.Add(f.duration + 2*f.batchInterval).UnixNano()
 	}
 	return rows, result
 }
@@ -947,7 +982,7 @@ func (s *Server) Reset() error {
 	if err != nil {
 		return err
 	}
-	prepared, err := newFixture(s.config.Streams, s.config.Duration, artifactDir, facts)
+	prepared, err := newFixture(s.config.Streams, s.config.Duration, s.config.EventsPerSecond, artifactDir, facts)
 	if err != nil {
 		facts.Close()
 		return err
@@ -970,7 +1005,7 @@ func Start(config Config) (*Server, error) {
 	if config.Rounds == 0 {
 		config.Rounds = 1
 	}
-	if config.Streams <= 0 || config.Duration <= 0 || config.Duration%(20*time.Millisecond) != 0 || config.ArtifactDir == "" || config.Rounds <= 0 {
+	if config.Streams <= 0 || config.Duration <= 0 || config.Duration%time.Second != 0 || config.EventsPerSecond <= 0 || config.ArtifactDir == "" || config.Rounds <= 0 {
 		return nil, errors.New("invalid fixture configuration")
 	}
 	if err := os.MkdirAll(config.ArtifactDir, 0o700); err != nil {
@@ -987,7 +1022,7 @@ func Start(config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	fixture, err := newFixture(config.Streams, config.Duration, fixtureDir, facts)
+	fixture, err := newFixture(config.Streams, config.Duration, config.EventsPerSecond, fixtureDir, facts)
 	if err != nil {
 		facts.Close()
 		return nil, err

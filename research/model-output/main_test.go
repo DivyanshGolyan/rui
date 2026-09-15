@@ -192,7 +192,7 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 	i64 := func(value int64) *int64 { return &value }
 	text := func(value string) *string { return &value }
 	diagnostic := func(spills uint64, threshold int64) sqliteDiagnostic {
-		return sqliteDiagnostic{Subject: "measure/spill", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(3), JournalMode: text("delete"), CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills)}
+		return sqliteDiagnostic{Subject: "measure/spill", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(3), JournalMode: text("delete"), CacheSizePages: i64(-32), CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills)}
 	}
 	valid := []sqliteDiagnostic{diagnostic(0, 991), diagnostic(1, 991)}
 	if !spillDiagnosticsValid(valid, true, true) {
@@ -242,12 +242,19 @@ func TestSpillDiagnosticDecoderRejectsMalformedAndDuplicateFields(t *testing.T) 
 }
 
 func TestExpectedCapacityWorkUsesIndependentCheckedArithmetic(t *testing.T) {
-	work, err := expectedCapacityWork(1000, 60*time.Second)
+	work, err := expectedCapacityWork(1, 60*time.Second, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if work != (capacityWork{Batches: 3_000_000, Events: 6_000_000, Bytes: 234_000_000}) {
+	if work != (capacityWork{Batches: 1800, Events: 1800, Bytes: 468_000}) {
 		t.Fatalf("work = %+v", work)
+	}
+	stress, err := expectedCapacityWork(100, 60*time.Second, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stress != (capacityWork{Batches: 600_000, Events: 600_000, Bytes: 156_000_000}) {
+		t.Fatalf("stress work = %+v", stress)
 	}
 	if _, err := checkedCapacityMultiply(^uint64(0), 2); err == nil {
 		t.Fatal("overflow unexpectedly accepted")
@@ -260,19 +267,19 @@ func TestExpectedCapacityWorkUsesIndependentCheckedArithmetic(t *testing.T) {
 func validProviderSummary(t *testing.T) provider.Summary {
 	t.Helper()
 	encoded := `{
-		"delivery_method":"bounded_delivery_v1",
-		"delivery_rule":{"batch_interval_ns":20000000,"allowed_delivery_variation_ns":20000000,"maximum_completion_gap_ns":40000000,"burst_window_ns":20000000,"maximum_batches_per_burst_window":2},
+		"delivery_method":"rational_pacing_v1",
+		"delivery_rule":{"batch_interval_ns":33333334,"allowed_delivery_variation_ns":33333334,"maximum_completion_gap_ns":66666668,"burst_window_ns":33333334,"maximum_batches_per_burst_window":2},
 		"expected_streams":1,"ready_streams":1,"offer_finished_streams":1,"terminal_finished_streams":1,
 		"valid_offer_streams":1,"timing_invalid_streams":0,"offer_failed_streams":0,"terminal_failed_streams":0,
-		"minimum_completed_batches":3000,"maximum_completed_batches":3000,
-		"completed_batches":3000,"completed_events":6000,"offer_bytes":234000,
-		"expected_batches":3000,"expected_events":6000,"expected_offer_bytes":234000,
-		"maximum_completion_delay":{"id":"stream","ordinal":7,"observed_ns":40000000},
-		"maximum_adjacent_gap":{"id":"stream","ordinal":8,"observed_ns":40000000},
-		"minimum_two_back_span":{"id":"stream","ordinal":9,"observed_ns":20000000},
-		"start_unix_ns":100000000000,"offer_horizon_unix_ns":160020000000,"hard_deadline_unix_ns":160040000000,
-		"earliest_final_completion_unix_ns":159980000000,
-		"event_bytes":39,"events_per_batch":2,"batches_per_stream":3000,"offer_seconds":60
+		"minimum_completed_batches":1800,"maximum_completed_batches":1800,
+		"completed_batches":1800,"completed_events":1800,"offer_bytes":468000,
+		"expected_batches":1800,"expected_events":1800,"expected_offer_bytes":468000,
+		"maximum_completion_delay":{"id":"stream","ordinal":7,"observed_ns":66666668},
+		"maximum_adjacent_gap":{"id":"stream","ordinal":8,"observed_ns":66666668},
+		"minimum_two_back_span":{"id":"stream","ordinal":9,"observed_ns":33333334},
+		"start_unix_ns":100000000000,"offer_horizon_unix_ns":160033333334,"hard_deadline_unix_ns":160066666668,
+		"earliest_final_completion_unix_ns":159966666666,
+		"event_bytes":260,"events_per_batch":1,"batches_per_stream":1800,"offer_seconds":60,"events_per_second":30
 	}`
 	var summary provider.Summary
 	if err := json.Unmarshal([]byte(encoded), &summary); err != nil {
@@ -284,8 +291,8 @@ func validProviderSummary(t *testing.T) provider.Summary {
 func TestCapacityVerdictKeepsInvalidProviderEvidenceIncomplete(t *testing.T) {
 	offer := validProviderSummary(t)
 	valid := capacityVerdictInput{
-		Capacity: 1, Duration: 60 * time.Second, Offer: offer, Completion: offer,
-		ExpectedWork:  capacityWork{Batches: 3000, Events: 6000, Bytes: 234000},
+		Capacity: 1, EventsPerSecond: 30, Duration: 60 * time.Second, Offer: offer, Completion: offer,
+		ExpectedWork:  capacityWork{Batches: 1800, Events: 1800, Bytes: 468000},
 		CaptureStatus: "passed", CleanupStatus: "passed", RequestIntegrityStatus: "passed",
 		ResultDeliveryStatus: "passed", DurableAuditStatus: "passed", MemoryStatus: "passed", SustainedCPUStatus: "passed",
 	}
@@ -316,13 +323,13 @@ func TestCapacityVerdictKeepsInvalidProviderEvidenceIncomplete(t *testing.T) {
 		"minimum batches": func(summary *provider.Summary) { summary.MinimumBatches-- },
 		"event bytes":     func(summary *provider.Summary) { summary.EventBytes++ },
 		"maximum delay": func(summary *provider.Summary) {
-			summary.MaximumCompletionDelay.ObservedNS = (40 * time.Millisecond).Nanoseconds() + 1
+			summary.MaximumCompletionDelay.ObservedNS = 66_666_668 + 1
 		},
 		"maximum gap": func(summary *provider.Summary) {
-			summary.MaximumAdjacentGap.ObservedNS = (40 * time.Millisecond).Nanoseconds() + 1
+			summary.MaximumAdjacentGap.ObservedNS = 66_666_668 + 1
 		},
 		"two-back span": func(summary *provider.Summary) {
-			summary.MinimumTwoBackSpan.ObservedNS = (20 * time.Millisecond).Nanoseconds() - 1
+			summary.MinimumTwoBackSpan.ObservedNS = 33_333_334 - 1
 		},
 		"missing delay":    func(summary *provider.Summary) { summary.MaximumCompletionDelay = nil },
 		"missing gap":      func(summary *provider.Summary) { summary.MaximumAdjacentGap = nil },
@@ -342,8 +349,8 @@ func TestTerminalFixtureFailureLeavesDependentHostFactsUnavailable(t *testing.T)
 	completion := offer
 	completion.TerminalFailedStreams = 1
 	input := capacityVerdictInput{
-		Capacity: 1, Duration: 60 * time.Second, Offer: offer, Completion: completion,
-		ExpectedWork:  capacityWork{Batches: 3000, Events: 6000, Bytes: 234000},
+		Capacity: 1, EventsPerSecond: 30, Duration: 60 * time.Second, Offer: offer, Completion: completion,
+		ExpectedWork:  capacityWork{Batches: 1800, Events: 1800, Bytes: 468000},
 		CaptureStatus: "passed", CleanupStatus: "passed", RequestIntegrityStatus: "passed",
 		ResultDeliveryStatus: dependentObservationStatus(providerTerminalComplete(completion, 1), true, false),
 		DurableAuditStatus:   dependentObservationStatus(providerTerminalComplete(completion, 1), true, false),

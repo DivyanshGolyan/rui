@@ -698,6 +698,7 @@ fn planConfigurationUpdate(
 
 pub const OpenOptions = struct {
     cache_spill: bool = true,
+    cache_kib: u32 = 4096,
 };
 
 pub const SqliteDiagnostic = struct {
@@ -733,6 +734,7 @@ pub const Store = struct {
         selector: []const u8,
         options: OpenOptions,
     ) !Store {
+        if (options.cache_kib == 0 or options.cache_kib > 4096) return error.InvalidSqliteCacheSize;
         if (c.sqlite3_hard_heap_limit64(@intCast(sqlite_heap_bytes)) < 0) {
             return error.SqliteHeapLimitConfigurationFailed;
         }
@@ -782,7 +784,9 @@ pub const Store = struct {
         try exec(database.?, "PRAGMA foreign_keys=ON");
         try exec(database.?, "PRAGMA mmap_size=0");
         try exec(database.?, "PRAGMA temp_store=FILE");
-        try exec(database.?, "PRAGMA cache_size=-4096");
+        var cache_size_buffer: [64:0]u8 = undefined;
+        const cache_size = try std.fmt.bufPrintZ(&cache_size_buffer, "PRAGMA cache_size=-{d}", .{options.cache_kib});
+        try exec(database.?, cache_size);
         try exec(database.?, if (options.cache_spill) "PRAGMA cache_spill=ON" else "PRAGMA cache_spill=OFF");
         try exec(database.?, "PRAGMA synchronous=EXTRA");
         if (@import("builtin").os.tag == .macos) try exec(database.?, "PRAGMA fullfsync=ON");
@@ -4850,6 +4854,29 @@ test "measurement Store can disable cache spill without changing other limits" {
     try std.testing.expectEqual(@as(?i64, -4096), diagnostic.cache_size_pages);
     try std.testing.expectEqual(@as(?i64, 3), diagnostic.synchronous);
     try std.testing.expectEqualStrings("delete", diagnostic.journal_mode.?.slice());
+}
+
+test "measurement Store can force a smaller SQLite cache without changing production defaults" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+
+    var storage = try Store.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 32 });
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(?i64, -32), storage.sqliteDiagnostic().cache_size_pages);
+
+    try std.testing.expectError(
+        error.InvalidSqliteCacheSize,
+        Store.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 0 }),
+    );
+    try std.testing.expectError(
+        error.InvalidSqliteCacheSize,
+        Store.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 4097 }),
+    );
 }
 
 test "fresh Store uses current schema and rejects the prior version" {

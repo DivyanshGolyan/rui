@@ -60,6 +60,7 @@ pub const Faults = struct {
     suppress_first_control_hint: bool = false,
     sqlite_diagnostics: bool = false,
     sqlite_cache_spill: bool = true,
+    sqlite_cache_kib: u32 = 4096,
 };
 
 const Host = struct {
@@ -121,7 +122,7 @@ pub fn serve(
         io,
         lease.paths.database.slice(),
         lease.paths.store.slice(),
-        .{ .cache_spill = faults.sqlite_cache_spill },
+        .{ .cache_spill = faults.sqlite_cache_spill, .cache_kib = faults.sqlite_cache_kib },
     );
     defer storage.close() catch |err| std.debug.print("latifa: Store close failed: {s}\n", .{@errorName(err)});
     try storage.validateRetryWaits(faults.retry_waits_ms);
