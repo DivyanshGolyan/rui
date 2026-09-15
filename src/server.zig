@@ -5,12 +5,12 @@ const store_module = @import("store.zig");
 
 pub const default_active_capacity = 1000;
 pub const scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
-pub const max_clients = 128;
-pub const max_ordinary_clients = 120;
-pub const control_headroom = 8;
+pub const max_clients = 12;
+pub const max_ordinary_clients = 10;
+pub const control_headroom = 2;
 // The complete Debug request -> SQLite -> response path exceeds 512 KiB.
-// One MiB is the next fixed tested bound; at 128 clients the maximum virtual
-// stack reservation is therefore 128 MiB, while physical use remains on the
+// One MiB is the next fixed tested bound; at 12 clients the maximum virtual
+// stack reservation is therefore 12 MiB, while physical use remains on the
 // production resource-measurement path.
 pub const connection_stack_bytes = 1024 * 1024;
 pub const maximum_connection_stack_reservation_bytes = max_clients * connection_stack_bytes;
@@ -583,9 +583,9 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
     }
 }
 
-test "connection populations preserve eight control places" {
+test "connection populations preserve two control places" {
     try std.testing.expectEqual(max_clients, max_ordinary_clients + control_headroom);
-    try std.testing.expectEqual(@as(usize, 128 * 1024 * 1024), maximum_connection_stack_reservation_bytes);
+    try std.testing.expectEqual(@as(usize, 12 * 1024 * 1024), maximum_connection_stack_reservation_bytes);
 }
 
 test "Session observation buffer covers worst-case JSON escaping" {

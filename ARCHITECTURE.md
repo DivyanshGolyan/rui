@@ -632,7 +632,7 @@ At fixed configured capacity, retained orchestration memory and open-handle popu
 | --- | --- |
 | Active Capacity | Startup default 1,000 shared model/Bash/Edit executions and cleanup; adjustable, no independent hard maximum. |
 | Shared scratch | Startup default 8 GiB logical owned bytes, including pending growth and overlapping copies; no allowance-sized allocation/reservation. |
-| Clients | Startup default 128 total, at most 120 ordinary, 8 classification/control headroom, independent of execution capacity. |
+| Clients | Startup default 12 total, at most 10 ordinary, 2 classification/control headroom, independent of execution capacity. |
 | Exchange bounds | Request line+headers 16 KiB; derive short-control request, acknowledgment and error bounds separately from supported fields and their maximum encoded sizes. Reject oversized requests before mutation. |
 | Client deadlines | Startup defaults 10 s total headers; 60 s transfer inactivity excluding host processing/backpressure. |
 | Evaluator | One full lifecycle; initial 16 MiB JS allocation ceiling; 1 s process CPU and 5 s parent elapsed lifetime. Native/parent memory additional. |

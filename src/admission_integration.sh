@@ -183,8 +183,8 @@ fi
 extra_pid=
 
 # Fill all ordinary places with sealed headers and incomplete bodies. A short
-# control classification still receives its explicit development response;
-# eight additional classifiers bring the exact total to 128, and the next
+# control classification still receives its explicit development response; two
+# additional classifiers bring the exact total to 12, and the next
 # connection is rejected without displacing existing custody.
 socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$ready")
 python3 - "$socket" <<'PY'
@@ -192,7 +192,7 @@ import select, socket, sys, time
 
 socket_path = sys.argv[1]
 ordinary = []
-for _ in range(120):
+for _ in range(10):
     client = socket.socket(socket.AF_UNIX)
     client.connect(socket_path)
     client.sendall(
@@ -207,7 +207,7 @@ for _ in range(120):
 time.sleep(0.05)
 ready, _, _ = select.select(ordinary, [], [], 0)
 if ready:
-    raise SystemExit("ordinary capacity rejected before 120 connections")
+    raise SystemExit("ordinary capacity rejected before 10 connections")
 
 control = socket.socket(socket.AF_UNIX)
 control.connect(socket_path)
@@ -229,7 +229,7 @@ if not control_response.startswith(b"HTTP/1.1 501 "):
     raise SystemExit("control headroom was not serviceable")
 
 classification = []
-for _ in range(8):
+for _ in range(2):
     client = socket.socket(socket.AF_UNIX)
     client.connect(socket_path)
     classification.append(client)
@@ -239,7 +239,7 @@ overflow.connect(socket_path)
 overflow_response = overflow.recv(4096)
 overflow.close()
 if not overflow_response.startswith(b"HTTP/1.1 503 "):
-    raise SystemExit("129th connection was not rejected")
+    raise SystemExit("13th connection was not rejected")
 
 for client in classification + ordinary:
     client.close()
