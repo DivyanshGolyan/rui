@@ -17,8 +17,8 @@ import (
 	"latifa.local/research/measurement"
 )
 
-var payloadBytes = []int{0, 1024 * 1024, 8 * 1024 * 1024}
-var capacities = []int{1, 16, 256, 1000}
+var inputBytes = []int{100_000, 500_000, 1_000_000, 4_000_000}
+var capacities = []int{1, 8, 16, 100}
 
 type endpoint struct {
 	server   *http.Server
@@ -246,8 +246,8 @@ func idleCapacity(binary, root string, fixture *endpoint) ([]map[string]any, err
 }
 
 func requestGrowth(binary, root string, fixture *endpoint) ([]map[string]any, error) {
-	rows := make([]map[string]any, 0, len(payloadBytes))
-	for _, size := range payloadBytes {
+	rows := make([]map[string]any, 0, len(inputBytes))
+	for _, size := range inputBytes {
 		fixture.reset()
 		directory := filepath.Join(root, fmt.Sprintf("payload-%d", size))
 		if err := os.Mkdir(directory, 0o700); err != nil {
@@ -378,12 +378,12 @@ func main() {
 		panic(err)
 	}
 	result := map[string]any{
-		"format": "latifa-model-dispatch-v2-go", "scope": "issue-172 production frozen-request dispatch", "status": "passed",
+		"format": "latifa-model-dispatch-v3-go", "scope": "issue-172 production frozen-request dispatch", "status": "passed",
 		"artifacts":            root,
 		"transport":            map[string]string{"curl": "8.22.0", "openssl": "3.6.3", "resolver": "threaded"},
 		"idle_capacity_growth": idle, "request_growth_and_delayed_cleanup": growth, "overlapping_transport": overlapping,
 		"elapsed_seconds": time.Since(started).Seconds(),
-		"limits":          []string{"macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only", "endpoint is deterministic loopback HTTP and qualifies no TLS trust store or live provider behavior", "idle CPU is process CPU-time growth over a two-second quiet interval and must remain below 1% of one core", "process termination is crash evidence, not power-loss qualification"},
+		"limits":          []string{"macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only", "endpoint is deterministic loopback HTTP and qualifies no TLS trust store or live provider behavior", "request cases size aggregate context input; endpoint_request_bytes reports the complete serialized request including envelope", "idle CPU is process CPU-time growth over a two-second quiet interval and must remain below 1% of one core", "process termination is crash evidence, not power-loss qualification"},
 	}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), os.Args[1], "")
 	if err != nil {
