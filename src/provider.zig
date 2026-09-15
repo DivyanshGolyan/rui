@@ -123,7 +123,7 @@ const RequestWriter = struct {
         try self.write("\"");
     }
 
-    fn jsonContent(self: *RequestWriter, reader: *store.ContentReader) !void {
+    fn jsonContent(self: *RequestWriter, reader: *store.HistoricalReader) !void {
         try self.write("\"");
         var offset: u64 = 0;
         var buffer: [protocol.content_window_bytes]u8 = undefined;
@@ -137,7 +137,7 @@ const RequestWriter = struct {
         try self.write("\"");
     }
 
-    fn rawContent(self: *RequestWriter, reader: *store.ContentReader) !void {
+    fn rawContent(self: *RequestWriter, reader: *store.HistoricalReader) !void {
         var offset: u64 = 0;
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         while (offset < reader.reference.length) {

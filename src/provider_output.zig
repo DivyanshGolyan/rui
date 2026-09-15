@@ -829,7 +829,7 @@ pub fn failureCode(err: anyerror) []const u8 {
 }
 
 const ContentSource = struct {
-    reader: *store.ContentReader,
+    reader: *store.HistoricalReader,
     position: u64 = 0,
     buffer_start: u64 = 0,
     buffer_length: usize = 0,
@@ -878,7 +878,7 @@ const ContentSource = struct {
 /// Rebuild one trusted canonical provider item without the one demonstrated
 /// response-only top-level field. Unknown open fields and their raw spelling
 /// are copied through bounded reads.
-pub fn writeReplayItem(reader: *store.ContentReader, writer: anytype) !void {
+pub fn writeReplayItem(reader: *store.HistoricalReader, writer: anytype) !void {
     var source = ContentSource{ .reader = reader };
     try source.expect('{');
     try writer.write("{");
@@ -910,7 +910,7 @@ pub fn writeReplayItem(reader: *store.ContentReader, writer: anytype) !void {
     try writer.write("}");
 }
 
-fn copyCanonicalRange(reader: *store.ContentReader, start: u64, length: u64, writer: anytype) !void {
+fn copyCanonicalRange(reader: *store.HistoricalReader, start: u64, length: u64, writer: anytype) !void {
     var offset: u64 = 0;
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     while (offset < length) {

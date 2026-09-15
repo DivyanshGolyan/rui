@@ -103,7 +103,6 @@ pub const CommandObservation = struct {
 pub const ContentReference = struct {
     length: u64,
     digest: [32]u8,
-    private: bool = false,
 };
 
 pub const MessageObservation = struct {
@@ -143,10 +142,22 @@ pub const AttemptAdmission = struct {
     selected_messages: u64,
 };
 
+/// Borrowed from one pointer-stable preparation view. Invalid after it closes.
+pub const HistoricalContent = struct {
+    view: *HistoricalView,
+    length: u64,
+    digest: [32]u8,
+    private: bool = false,
+
+    fn belongsTo(self: HistoricalContent, view: *HistoricalView) bool {
+        return self.view == view and view.active;
+    }
+};
+
 pub const HistoricalSettings = struct {
     model: protocol.Bounded(protocol.max_model_bytes),
-    baseline_instructions: ContentReference,
-    output_schema: ?ContentReference,
+    baseline_instructions: HistoricalContent,
+    output_schema: ?HistoricalContent,
     tools_mask: u8,
 };
 
@@ -155,31 +166,57 @@ pub const HistoricalEntryKind = enum { user, instruction, provider_output };
 pub const HistoricalEntry = struct {
     position: u64,
     kind: HistoricalEntryKind,
-    content: ContentReference,
+    content: HistoricalContent,
 };
 
+/// The preparation owner keeps this value at one address until every borrowed
+/// handle/reader is discarded. Readers must close before the view closes.
 pub const HistoricalView = struct {
     store: *Store,
     binding: AttemptBinding,
     active: bool = true,
+    readers: usize = 0,
 
     pub fn settings(self: *HistoricalView) !HistoricalSettings {
         std.debug.assert(self.active);
-        return self.store.readHistoricalSettings(self.binding);
+        return self.store.readHistoricalSettings(self);
     }
 
     pub fn nextEntry(self: *HistoricalView, after_position: u64) !?HistoricalEntry {
         std.debug.assert(self.active);
-        return self.store.readHistoricalEntry(self.binding, after_position);
+        return self.store.readHistoricalEntry(self, after_position);
     }
 
-    pub fn openContent(self: *HistoricalView, reference: ContentReference) !ContentReader {
-        std.debug.assert(self.active);
-        return self.store.openHistoricalContent(reference);
+    pub fn openContent(self: *HistoricalView, reference: HistoricalContent) !HistoricalReader {
+        std.debug.assert(reference.belongsTo(self));
+        try self.store.validateContentReference(.{ .length = reference.length, .digest = reference.digest }, reference.private);
+        self.readers += 1;
+        return .{ .view = self, .reference = reference };
     }
 
     pub fn close(self: *HistoricalView) void {
-        std.debug.assert(self.active);
+        std.debug.assert(self.active and self.readers == 0);
+        self.active = false;
+    }
+};
+
+pub const HistoricalReader = struct {
+    view: *HistoricalView,
+    reference: HistoricalContent,
+    active: bool = true,
+
+    fn usable(self: *const HistoricalReader) bool {
+        return self.active and self.reference.belongsTo(self.view);
+    }
+
+    pub fn read(self: *HistoricalReader, start: u64, destination: []u8) !usize {
+        std.debug.assert(self.usable());
+        return self.view.store.readContentRange(.{ .length = self.reference.length, .digest = self.reference.digest }, start, destination, self.reference.private);
+    }
+
+    pub fn close(self: *HistoricalReader) void {
+        std.debug.assert(self.usable());
+        self.view.readers -= 1;
         self.active = false;
     }
 };
@@ -409,7 +446,7 @@ pub const ContentReader = struct {
 
     pub fn read(self: *ContentReader, start: u64, destination: []u8) !usize {
         std.debug.assert(self.active);
-        return self.store.readContentRange(self.reference, start, destination);
+        return self.store.readContentRange(self.reference, start, destination, false);
     }
 
     pub fn close(self: *ContentReader) void {
@@ -1144,18 +1181,18 @@ pub const Store = struct {
         }
     }
 
-    fn readHistoricalSettings(self: *Store, binding: AttemptBinding) !HistoricalSettings {
+    fn readHistoricalSettings(self: *Store, view: *HistoricalView) !HistoricalSettings {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.readHistoricalSettingsLocked(binding) catch |err| switch (err) {
+        return self.readHistoricalSettingsLocked(view) catch |err| switch (err) {
             error.StaleAttemptBinding => err,
             else => self.fenceReadFailure(err),
         };
     }
 
-    fn readHistoricalSettingsLocked(self: *Store, binding: AttemptBinding) !HistoricalSettings {
-        try self.validateCurrentAttempt(binding);
+    fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView) !HistoricalSettings {
+        try self.validateCurrentAttempt(view.binding);
         const statement = try prepare(
             self.database,
             "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask " ++
@@ -1163,7 +1200,7 @@ pub const Store = struct {
                 "AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
         );
         defer _ = c.sqlite3_finalize(statement);
-        try bindU64(statement, 1, binding.operation_id);
+        try bindU64(statement, 1, view.binding.operation_id);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
         var model: protocol.Bounded(protocol.max_model_bytes) = .{};
         try readText(statement, 0, &model);
@@ -1174,28 +1211,28 @@ pub const Store = struct {
         const instructions = try self.readContentMetadata(instructions_id);
         const output_schema = if (output_schema_id) |content_id| blk: {
             const metadata = try self.readContentMetadata(content_id);
-            break :blk ContentReference{ .length = metadata.length, .digest = metadata.digest };
+            break :blk HistoricalContent{ .view = view, .length = metadata.length, .digest = metadata.digest };
         } else null;
         return .{
             .model = model,
-            .baseline_instructions = .{ .length = instructions.length, .digest = instructions.digest },
+            .baseline_instructions = .{ .view = view, .length = instructions.length, .digest = instructions.digest },
             .output_schema = output_schema,
             .tools_mask = @intCast(tools),
         };
     }
 
-    fn readHistoricalEntry(self: *Store, binding: AttemptBinding, after_position: u64) !?HistoricalEntry {
+    fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !?HistoricalEntry {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.readHistoricalEntryLocked(binding, after_position) catch |err| switch (err) {
+        return self.readHistoricalEntryLocked(view, after_position) catch |err| switch (err) {
             error.StaleAttemptBinding => err,
             else => self.fenceReadFailure(err),
         };
     }
 
-    fn readHistoricalEntryLocked(self: *Store, binding: AttemptBinding, after_position: u64) !?HistoricalEntry {
-        try self.validateCurrentAttempt(binding);
+    fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64) !?HistoricalEntry {
+        try self.validateCurrentAttempt(view.binding);
         const statement = try prepare(
             self.database,
             "SELECT position,kind,content_id FROM (" ++
@@ -1209,7 +1246,7 @@ pub const Store = struct {
                 ") ORDER BY position LIMIT 1",
         );
         defer _ = c.sqlite3_finalize(statement);
-        try bindU64(statement, 1, binding.operation_id);
+        try bindU64(statement, 1, view.binding.operation_id);
         try bindU64(statement, 2, after_position);
         const result = c.sqlite3_step(statement);
         if (result == c.SQLITE_DONE) return null;
@@ -1229,6 +1266,7 @@ pub const Store = struct {
             .position = @intCast(position),
             .kind = kind,
             .content = .{
+                .view = view,
                 .length = metadata.length,
                 .digest = metadata.digest,
                 .private = kind == .provider_output,
@@ -1566,17 +1604,16 @@ pub const Store = struct {
     }
 
     pub fn openContent(self: *Store, reference: ContentReference) !ContentReader {
-        if (reference.private) return error.PrivateContent;
-        return self.openHistoricalContent(reference);
+        try self.validateContentReference(reference, false);
+        return .{ .store = self, .reference = reference };
     }
 
-    fn openHistoricalContent(self: *Store, reference: ContentReference) !ContentReader {
+    fn validateContentReference(self: *Store, reference: ContentReference, private: bool) !void {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
-        _ = self.resolveContentReference(reference) catch |err| return self.fenceReadFailure(err);
-        return .{ .store = self, .reference = reference };
+        _ = self.resolveContentReference(reference, private) catch |err| return self.fenceReadFailure(err);
     }
 
     fn readContentRange(
@@ -1584,13 +1621,14 @@ pub const Store = struct {
         reference: ContentReference,
         start: u64,
         destination: []u8,
+        private: bool,
     ) !usize {
         if (destination.len > protocol.content_window_bytes) return error.WindowTooLarge;
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
-        const content_id = self.resolveContentReference(reference) catch |err| return self.fenceReadFailure(err);
+        const content_id = self.resolveContentReference(reference, private) catch |err| return self.fenceReadFailure(err);
         if (start > reference.length) return error.RangeOutOfBounds;
         const wanted: u64 = @min(destination.len, reference.length - start);
         if (wanted == 0) return 0;
@@ -1883,12 +1921,12 @@ pub const Store = struct {
         return .{ .length = @intCast(length), .digest = try readDigest(statement, 1) };
     }
 
-    fn resolveContentReference(self: *Store, reference: ContentReference) !i64 {
+    fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
         const statement = try prepare(self.database, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3");
         defer _ = c.sqlite3_finalize(statement);
         try bindBlob(statement, 1, &reference.digest);
         try bindU64(statement, 2, reference.length);
-        try bindI64(statement, 3, @as(i64, if (reference.private) 1 else 0));
+        try bindI64(statement, 3, @as(i64, if (private) 1 else 0));
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
@@ -2493,9 +2531,6 @@ test "configuration answers replay without reverting newer settings" {
     var content_window: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), try reader.read(0, &content_window));
     try std.testing.expectError(error.RangeOutOfBounds, reader.read(1, &content_window));
-    var private_reference = observation.instructions;
-    private_reference.private = true;
-    try std.testing.expectError(error.PrivateContent, storage.openContent(private_reference));
     try std.testing.expect((try storage.observeCommand("first")).status == .accepted);
 
     first.configuration.model.value.len = 0;
@@ -3115,7 +3150,7 @@ test "one committed selection freezes its settings and input prefix" {
     );
 
     var view = try storage.openHistoricalView(binding);
-    defer view.close();
+    defer if (view.active) view.close();
     const settings = try view.settings();
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
     const first_input = (try view.nextEntry(0)).?;
@@ -3124,10 +3159,21 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect(instruction.kind == .instruction);
     try std.testing.expect((try view.nextEntry(instruction.position)) == null);
     var first_reader = try view.openContent(first_input.content);
-    defer first_reader.close();
+    defer if (first_reader.active) first_reader.close();
     var actual: [5]u8 = undefined;
     try std.testing.expectEqual(actual.len, try first_reader.read(0, &actual));
     try std.testing.expectEqualStrings("first", &actual);
+
+    var foreign_view = try storage.openHistoricalView(binding);
+    try std.testing.expect(first_input.content.belongsTo(&view));
+    try std.testing.expect(!first_input.content.belongsTo(&foreign_view));
+    foreign_view.close();
+    try std.testing.expectEqual(@as(usize, 1), view.readers);
+    first_reader.close();
+    try std.testing.expectEqual(@as(usize, 0), view.readers);
+    view.close();
+    try std.testing.expect(!first_input.content.belongsTo(&view));
+    try std.testing.expect(!first_reader.usable());
 
     try storage.settleModelFailure(binding, "provider_http_422", .{});
     const failed = (try storage.observeCommand("dispatch-1")).message.?;
