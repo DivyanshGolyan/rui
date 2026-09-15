@@ -248,7 +248,8 @@ fn captureMessage(io: std.Io, paths: *const platform.Paths, input: MessageInput)
 }
 
 fn captureSessionStop(io: std.Io, paths: *const platform.Paths, input: SessionStopInput) !void {
-    var capture = try Capture.open(io, input.record);
+    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var capture = try Capture.open(io, input.record, &output_buffer);
     errdefer capture.abort();
     try capture.write("{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":");
     try capture.writeJsonString(paths.store.slice());
@@ -265,7 +266,8 @@ fn captureModelInterruption(
     paths: *const platform.Paths,
     input: ModelInterruptionInput,
 ) !void {
-    var capture = try Capture.open(io, input.record);
+    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var capture = try Capture.open(io, input.record, &output_buffer);
     errdefer capture.abort();
     try capture.write("{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":");
     try capture.writeJsonString(paths.store.slice());
