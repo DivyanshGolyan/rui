@@ -505,9 +505,9 @@ def main():
             and value,
             "exact-capacity result",
         )
-        # The request itself fits exactly and reaches HTTP. Its held charge
-        # intentionally leaves no shared scratch for the fixture response.
-        assert exact_result["result"]["code"] == "response_scratch_exhausted", exact_result
+        # The request itself fits exactly, reaches HTTP, and releases its
+        # complete emitted-byte charge when this layer classifies the response.
+        assert exact_result["result"]["code"] == "provider_http_422", exact_result
         resources = command(
             "inspect-session",
             "--store",
