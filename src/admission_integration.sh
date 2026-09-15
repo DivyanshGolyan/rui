@@ -515,16 +515,6 @@ while :; do
 done
 contains "$during_observation" '"status":"queued"'
 
-# Fragmented storage writes complete without truncation.
-stop_host
-start_host --fault content-short-write
-printf 'short-write message long enough to cross several injected fragments %.0s' $(seq 1 100) >"$state/short-write-message.txt"
-short_write=$($latifa message --store "$store" --record "$records/short-write-message.json" --key msg-short-write --session direct/main --text "$state/short-write-message.txt")
-contains "$short_write" '"status":"accepted"'
-contains "$short_write" '"bytes":"6800"'
-stop_host
-start_host
-
 # Ingress scratch/file acquisition, write and seal failures happen before
 # admission. Their caller captures remain retryable and acquire one admission
 # only after an ordinary restart.

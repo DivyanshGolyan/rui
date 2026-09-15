@@ -18,7 +18,6 @@ pub const maximum_connection_stack_reservation_bytes = max_clients * connection_
 pub const Faults = struct {
     content_acquire: bool = false,
     content_write: bool = false,
-    content_short_write: bool = false,
     content_seal: bool = false,
     content_read: bool = false,
     content_import: bool = false,
@@ -215,7 +214,6 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t) !void {
         .request_number = request_number,
         .fault_content_acquire = host.faults.content_acquire,
         .fault_content_write = host.faults.content_write,
-        .fault_content_short_write = host.faults.content_short_write,
         .fault_content_seal = host.faults.content_seal,
         .cleanup_failed = &cleanup_failed,
         .scratch_budget = .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },

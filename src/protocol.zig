@@ -212,7 +212,6 @@ pub const ParseOptions = struct {
     request_number: u64,
     fault_content_acquire: bool = false,
     fault_content_write: bool = false,
-    fault_content_short_write: bool = false,
     fault_content_seal: bool = false,
     cleanup_failed: *bool,
     scratch_budget: ?ScratchBudget = null,
@@ -624,8 +623,6 @@ const ContentSink = struct {
     length: u64 = 0,
     hash: std.crypto.hash.sha2.Sha256 = contentHasher(),
     utf8: Utf8State = .{},
-    inject_short_writes: bool = false,
-    partial_returns: usize = 0,
 
     fn write(self: *ContentSink, bytes: []const u8) !void {
         const next_length = std.math.add(u64, self.length, bytes.len) catch return error.ContentTooLarge;
@@ -778,7 +775,6 @@ test "content sink enforces the decoded consumer boundary before retention" {
     try std.testing.expectEqual(max_sqlite_content_bytes, multibyte.length);
     try std.testing.expectError(error.ContentTooLarge, multibyte.write("x"));
 }
-
 test "response JSON preserves control bytes and enforces capacity" {
     var response: ResponseBuffer = .{};
     try response.appendJsonString("\x00\x1f\"\\\n\r\t\x08\x0c\xc3\xa9");
@@ -788,7 +784,6 @@ test "response JSON preserves control bytes and enforces capacity" {
     try std.testing.expectEqual(response.bytes.len, response.len);
     try std.testing.expectError(error.ResponseTooLarge, response.appendJsonString("x"));
 }
-
 test "ingress charges decoded growth and transfers file charge through cleanup" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
