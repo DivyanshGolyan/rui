@@ -1,5 +1,20 @@
 # Third-party notices
 
+## gopsutil v4.26.7
+
+The opt-in Go measurement runners use gopsutil to read Host process CPU,
+memory, thread, descendant and Darwin disk-I/O counters. It is not linked into
+the Latifa runtime.
+
+- Source: `https://github.com/shirou/gopsutil/releases/tag/v4.26.7`
+- Go module: `github.com/shirou/gopsutil/v4 v4.26.7`
+- License: MIT
+
+Copyright (c) 2014-2017 shirou. Permission is granted, free of charge, to use,
+copy, modify, merge, publish, distribute, sublicense and/or sell copies under
+the conditions in the source distribution's `LICENSE` file. The software is
+provided without warranty.
+
 ## SQLite 3.53.4
 
 Latifa compiles the pinned SQLite 3.53.4 amalgamation from Fossil check-in

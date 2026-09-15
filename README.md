@@ -27,7 +27,7 @@ V1 excludes conversation branching/editing, attachments, automatic provider fall
 
 ## Build and try the current implementation
 
-Requirements: Zig 0.16.0 and Python 3 for the process-level verification fixture. SQLite is pinned by the build.
+Requirements: Zig 0.16.0 and Python 3 for the process-level verification fixture. The opt-in production measurement command additionally requires Go 1.27.1. SQLite is pinned by the build.
 
 ```sh
 zig build

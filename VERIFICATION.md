@@ -8,6 +8,8 @@ For clean-start implementation, verify that the production build graph contains 
 
 Confirm commands in [build.zig](build.zig). `zig build check` covers source validation, native ReleaseSafe tests and ReleaseSmall deliverables. Evaluator/protocol/QuickJS/build-graph changes also run `zig build workflow-check`, including applicable sanitizer, mutation/property, fuzz and leak checks. Dependency, build, persisted-format and CI-bootstrap changes additionally run from an empty cache. Documentation-only changes check references, consistency and `git diff --check`.
 
+Production measurement runners use the Go 1.27.1 toolchain pinned by `research/go.mod` and only the modules pinned by `research/go.sum`. Run `GOTOOLCHAIN=local go -C research mod download`, then `zig build measurement-check` before an applicable `zig build measure-*` step. Every result records the exact Go and gopsutil versions, `go.sum` hash, binary hash, platform, Git revision and dirty state. The Go measurement dependency enters neither the Zig Host nor ordinary production clients; Python remains only where an unrelated integration test or research probe owns it.
+
 Release evidence includes deterministic Session, model, tool, permission, context, compaction, workflow and server fixtures; hard-termination recovery at each distinct acknowledgement/effect boundary; compiler-backed discovery of both production graphs; and the opt-in live Codex repair through those same owners. Classify intentionally unused/conditional/test declarations and remove obsolete interfaces rather than hiding them. Never label interrupted/unrun checks passed. Live provider calls remain opt-in.
 
 ### Product tenets at stage completion

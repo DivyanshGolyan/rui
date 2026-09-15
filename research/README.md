@@ -12,7 +12,7 @@
 
 These artifacts answer bounded questions; they are not production implementation or release certification. [ARCHITECTURE.md](../ARCHITECTURE.md) owns current behavior and [VERIFICATION.md](../VERIFICATION.md) owns required proof. Recorded native measurements are Mac-specific. Synthetic SQLite schemas, historical evaluator binaries, model assumptions and experimental limits do not establish current Linux behavior, wire compatibility or whole-Host guarantees.
 
-Run commands below from the repository root, sequentially in a disposable checkout: some runners overwrite adjacent results or generate reports. Native probes generally need macOS, Apple Clang, Python 3, Zig 0.16 and the pinned SQLite package; inspect each runner's dependency handling. Pure Python probes use the standard library unless stated. Keep source, compiler/library metadata, raw results and counterexamples together. New observations must identify their own machine/build rather than silently inheriting recorded provenance.
+Run commands below from the repository root, sequentially in a disposable checkout: some runners overwrite adjacent results or generate reports. Native probes generally need macOS, Apple Clang, Python 3, Zig 0.16 and the pinned SQLite package; inspect each runner's dependency handling. Production measurement runners use Go 1.27.1 and the modules pinned by `go.sum`; bootstrap them with `GOTOOLCHAIN=local go -C research mod download` and check them with `zig build measurement-check`. Pure Python probes use the standard library unless stated. Keep source, compiler/library metadata, raw results and counterexamples together. New observations must identify their own machine/build rather than silently inheriting recorded provenance.
 
 Historical contract snapshots and longer reports are available at [commit 4ee987e](https://github.com/DivyanshGolyan/onepage/tree/4ee987e6479b8010d052b3fd31a5acca044eb269). Retained provenance JSON refers to that revision's files and hashes, including removed snapshots. This index replaces their narrative, not their measured data.
 
@@ -42,7 +42,7 @@ These models assume atomic durable transitions. Their finite states and checker-
 
 ## Resources and inspection
 
-[Configuration admission](configuration-admission/measure.py): `zig build measure-admission`; [recorded results](configuration-admission/results.json). Measures the production issue-170 Host at 0/100/1,000/10,000 dormant Sessions with fixed active capacity 1,000, plus one direct-client peak RSS. The run is macOS-only and sequential; it does not qualify concurrent connections, complete Stage 1 workloads, Linux runtime behavior or power loss.
+[Configuration admission](configuration-admission/main.go): `zig build measure-admission`; [recorded results](configuration-admission/results.json). Measures the production issue-170 Host at 0/100/1,000/10,000 dormant Sessions with fixed active capacity 1,000, plus one direct-client peak RSS. The run is macOS-only and sequential; it does not qualify concurrent connections, complete Stage 1 workloads, Linux runtime behavior or power loss.
 
 [Pinned transport memory](transport-memory/README.md): `python3 research/transport-memory/build.py` then `python3 research/transport-memory/run.py --output /tmp/new-transport-results`. Local verified TLS, 1/100/1,000 transfers, upload/receive buffers, HTTP/2 pauses, cache cleanup and delayed capture validation; separate allocation/physical/OS evidence. Experimental dependency pins and Mac-only prototype, not production or Linux qualification.
 
