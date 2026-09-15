@@ -1,0 +1,245 @@
+{
+  "active_capacity": 1000,
+  "artifacts": "/private/tmp/latifa-message-measure-3078496828",
+  "binary": "./../.zig-cache/o/c864cfdd9554585b9a0b796835b7d18c/latifa-release-small-check",
+  "binary_sha256": "7e0d72e96fb44c33bc8fa202aa2a52f2a805c617c20f448cc19d903303aedac1",
+  "client_capacity": {
+    "control_headroom": 2,
+    "ordinary": 10,
+    "total": 12
+  },
+  "content_window_bytes": 4096,
+  "elapsed_seconds": 2.287051791,
+  "format": "latifa-message-admission-v3-go",
+  "limits": [
+    "macOS physical-footprint evidence only",
+    "payload and history use separate fresh Stores",
+    "driver payload construction is excluded from Host counters",
+    "model processing is intentionally unavailable in this experiment"
+  ],
+  "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+  "measurement_runtime": {
+    "go_arch": "arm64",
+    "go_os": "darwin",
+    "go_version": "go1.27.1",
+    "gopsutil_version": "v4.26.7",
+    "logical_cpus": 10,
+    "module_path": "latifa.local/research",
+    "physical_memory_bytes": 17179869184
+  },
+  "payload_growth": [
+    {
+      "admission_elapsed_ms": 16.455,
+      "observation_elapsed_ms": 1.362,
+      "payload_bytes": 0,
+      "queued_messages": 1,
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 57344,
+          "database_logical_bytes": 57344
+        },
+        "process": {
+          "rss_bytes": 3194880,
+          "virtual_bytes": 420590206976,
+          "cpu_user_seconds": 0.003424833333333333,
+          "cpu_system_seconds": 0.010159375,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 11,
+          "disk_read_bytes": 1110016,
+          "disk_write_bytes": 274432,
+          "footprint": {
+            "physical_footprint_bytes": 2212864,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 2376704,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      }
+    },
+    {
+      "admission_elapsed_ms": 20.541,
+      "observation_elapsed_ms": 0.917,
+      "payload_bytes": 1000,
+      "queued_messages": 2,
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 57344,
+          "database_logical_bytes": 57344
+        },
+        "process": {
+          "rss_bytes": 3309568,
+          "virtual_bytes": 420733861888,
+          "cpu_user_seconds": 0.00397075,
+          "cpu_system_seconds": 0.012254375,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 11,
+          "disk_read_bytes": 1110016,
+          "disk_write_bytes": 389120,
+          "footprint": {
+            "physical_footprint_bytes": 2343936,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 2507776,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      }
+    },
+    {
+      "admission_elapsed_ms": 22.938,
+      "observation_elapsed_ms": 0.625,
+      "payload_bytes": 10000,
+      "queued_messages": 3,
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 65536,
+          "database_logical_bytes": 65536
+        },
+        "process": {
+          "rss_bytes": 3604480,
+          "virtual_bytes": 420733861888,
+          "cpu_user_seconds": 0.0045697916666666664,
+          "cpu_system_seconds": 0.014156041666666666,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 11,
+          "disk_read_bytes": 1110016,
+          "disk_write_bytes": 520192,
+          "footprint": {
+            "physical_footprint_bytes": 2638848,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 2802688,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      }
+    },
+    {
+      "admission_elapsed_ms": 30.806,
+      "observation_elapsed_ms": 1.059,
+      "payload_bytes": 100000,
+      "queued_messages": 4,
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 172032,
+          "database_logical_bytes": 172032
+        },
+        "process": {
+          "rss_bytes": 3981312,
+          "virtual_bytes": 420733861888,
+          "cpu_user_seconds": 0.006644,
+          "cpu_system_seconds": 0.01684075,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 11,
+          "disk_read_bytes": 1110016,
+          "disk_write_bytes": 847872,
+          "footprint": {
+            "physical_footprint_bytes": 3015680,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3179520,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      }
+    }
+  ],
+  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+  "queued_history_growth": [
+    {
+      "last_admission_elapsed_ms": null,
+      "queued_messages": 0,
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 57344,
+          "database_logical_bytes": 57344
+        },
+        "process": {
+          "rss_bytes": 2621440,
+          "virtual_bytes": 420418240512,
+          "cpu_user_seconds": 0.0025271666666666667,
+          "cpu_system_seconds": 0.004353333333333333,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 11,
+          "disk_read_bytes": 20480,
+          "disk_write_bytes": 172032,
+          "footprint": {
+            "physical_footprint_bytes": 1655808,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 1819648,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      },
+      "session_observation_elapsed_ms": 0.9
+    },
+    {
+      "last_admission_elapsed_ms": 24.337,
+      "newest_observation_elapsed_ms": 0.498,
+      "oldest_observation_elapsed_ms": 0.472,
+      "queued_messages": 1,
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 57344,
+          "database_logical_bytes": 57344
+        },
+        "process": {
+          "rss_bytes": 3244032,
+          "virtual_bytes": 420857593856,
+          "cpu_user_seconds": 0.0031674166666666665,
+          "cpu_system_seconds": 0.006748458333333333,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 11,
+          "disk_read_bytes": 20480,
+          "disk_write_bytes": 274432,
+          "footprint": {
+            "physical_footprint_bytes": 2343936,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 2507776,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      },
+      "session_observation_elapsed_ms": 0.605
+    },
+    {
+      "last_admission_elapsed_ms": 15.588,
+      "newest_observation_elapsed_ms": 0.542,
+      "oldest_observation_elapsed_ms": 0.947,
+      "queued_messages": 10,
+      "sample": {
+        "database": {
+          "database_allocated_bytes": 57344,
+          "database_logical_bytes": 57344
+        },
+        "process": {
+          "rss_bytes": 4079616,
+          "virtual_bytes": 420869128192,
+          "cpu_user_seconds": 0.006394541666666666,
+          "cpu_system_seconds": 0.02254958333333333,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 11,
+          "disk_read_bytes": 20480,
+          "disk_write_bytes": 1196032,
+          "footprint": {
+            "physical_footprint_bytes": 3654656,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3818496,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        }
+      },
+      "session_observation_elapsed_ms": 1.037
+    }
+  ],
+  "scope": "issue-171 production Host message admission and observation",
+  "sqlite_heap_limit_bytes": 16777216,
+  "status": "passed",
+  "tested_revision": "20a9e2aba544117b1d34f7b4acdea97dc0ccc87d",
+  "working_tree_dirty": false,
+  "zig": "0.16.0"
+}

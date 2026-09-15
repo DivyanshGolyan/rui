@@ -1,111 +1,58 @@
 # Third-party notices
 
-## libcurl
+## gopsutil v4.26.7
 
-OnePage dynamically links the supported macOS system libcurl for Codex model
-transport. It requires libcurl 7.85.0 or newer and does not vendor libcurl.
+The opt-in Go measurement runners use gopsutil to read Host process CPU,
+memory, thread, descendant and Darwin disk-I/O counters. It is not linked into
+the Latifa runtime.
 
-- Source: `https://curl.se/libcurl/`
-- License: curl license
-
-COPYRIGHT AND PERMISSION NOTICE
-
-Copyright (c) 1996 - 2026, Daniel Stenberg, daniel@haxx.se, and many contributors, see the THANKS file.
-
-All rights reserved.
-
-Permission to use, copy, modify, and distribute this software for any purpose
-with or without fee is hereby granted, provided that the above copyright notice
-and this permission notice appear in all copies.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS. IN
-NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
-DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
-OR OTHER DEALINGS IN THE SOFTWARE.
-
-Except as contained in this notice, the name of a copyright holder shall not
-be used in advertising or otherwise to promote the sale, use, or other
-dealings in this Software without prior written authorization of the copyright
-holder.
-
-## QuickJS-ng v0.16.2
-
-OnePage's disposable Workflow Evaluator links unmodified QuickJS-ng v0.16.2 at commit
-`1ab8676f4b6d6d669baeb5f21790fb9734636a20`.
-
-- Source: `https://github.com/quickjs-ng/quickjs/archive/1ab8676f4b6d6d669baeb5f21790fb9734636a20.tar.gz`
-- Upstream archive SHA-256: `c788fe4f65c95ecfa4055c8778e7cb221f68fcc3315686627b0856da5c38514e`
-- Zig package content hash: `N-V-__8AAC-eRACa__taXkae9pRIZde7nn8oQSxb9n9rhkFp`
+- Source: `https://github.com/shirou/gopsutil/releases/tag/v4.26.7`
+- Go module: `github.com/shirou/gopsutil/v4 v4.26.7`
 - License: MIT
 
-The MIT License (MIT)
+Copyright (c) 2014-2017 shirou. Permission is granted, free of charge, to use,
+copy, modify, merge, publish, distribute, sublicense and/or sell copies under
+the conditions in the source distribution's `LICENSE` file. The software is
+provided without warranty.
 
-Copyright (c) 2017-2026 Fabrice Bellard
-Copyright (c) 2017-2024 Charlie Gordon
-Copyright (c) 2023-2026 Ben Noordhuis
-Copyright (c) 2023-2026 Saúl Ibarra Corretgé
+## SQLite 3.53.4
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Latifa compiles the pinned SQLite 3.53.4 amalgamation from Fossil check-in
+`bf7c7f30031888f4e796e429ab3978879485`.
 
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
+- Source: `https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip`
+- Zig package content hash: `N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8`
+- License: public domain
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
-THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
+The author disclaims copyright to this source code. In place of a legal
+notice, SQLite includes this blessing:
 
-## Unicode data in QuickJS-ng
+> May you do good and not evil.
+> May you find forgiveness for yourself and forgive others.
+> May you share freely, never taking more than you give.
 
-QuickJS-ng's compiled `libunicode-table.h` contains data distributed under Unicode License V3.
+## curl 8.22.0
 
-UNICODE LICENSE V3
+Latifa builds a pinned static curl 8.22.0 with HTTP, OpenSSL, Apple SecTrust on
+macOS and the supported threaded asynchronous resolver.
 
-COPYRIGHT AND PERMISSION NOTICE
+- Source: `https://curl.se/download/curl-8.22.0.tar.xz`
+- Zig package content hash: `N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM`
+- License: curl license, reproduced in the source archive's `COPYING` file
 
-Copyright © 1991-2026 Unicode, Inc.
+Copyright (c) Daniel Stenberg and contributors. Permission to use, copy,
+modify and distribute the software for any purpose with or without fee is
+granted under the conditions in that notice. The software is provided
+without warranty.
 
-NOTICE TO USER: Carefully read the following legal agreement. BY
-DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
-SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
-TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
-DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+## OpenSSL 3.6.3
 
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of data files and any associated documentation (the "Data Files") or
-software and any associated documentation (the "Software") to deal in the
-Data Files or Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, and/or sell
-copies of the Data Files or Software, and to permit persons to whom the
-Data Files or Software are furnished to do so, provided that either (a)
-this copyright and permission notice appear with all copies of the Data
-Files or Software, or (b) this copyright and permission notice appear in
-associated Documentation.
+Latifa builds pinned static OpenSSL 3.6.3 as curl's TLS implementation.
 
-THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
-KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
-THIRD PARTY RIGHTS.
+- Source: `https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz`
+- Zig package content hash: `N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM`
+- License: Apache License 2.0, reproduced in the source archive's `LICENSE.txt`
 
-IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
-BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
-OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
-WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
-ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
-FILES OR SOFTWARE.
-
-Except as contained in this notice, the name of a copyright holder shall
-not be used in advertising or otherwise to promote the sale, use or other
-dealings in these Data Files or Software without prior written
-authorization of the copyright holder.
+Copyright (c) 1998-2026 The OpenSSL Project Authors and copyright holders
+identified in the source. Licensed under the Apache License, Version 2.0;
+the license is available at `https://www.apache.org/licenses/LICENSE-2.0`.

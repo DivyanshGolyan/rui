@@ -4,9 +4,9 @@ Latifa (formerly OnePage) is a resource-bounded, crash-resumable local runtime f
 
 ## Status
 
-The source currently implements the earlier single-Session runtime, SQLite Store, Codex adapter, permissioned Bash and Git-backed patch execution, and a disposable QuickJS evaluator. Reusable Sessions/Turns, durable Workflow Runtime, the disk-first Host and native exact Edit are accepted designs awaiting implementation. Documentation and research results are not release certification.
+The source implements the first six redesigned runtime slices: an explicitly started Host, exclusive Store ownership, direct configuration/message/control clients, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, immutable ordered message admission, completed text-model Turns, conserved model retries after temporary failure or Host loss, Session stop and exact Model Interruption. Core selects an eligible queued prefix, freezes its historical view, launches disk-backed Responses Attempts, captures and validates complete SSE output, and atomically saves ordered private provider output with the public answer. The answer references validated text ranges in those items, so delivery decodes sequentially without retaining a second full payload. The original message key reads its complete answer after client or Host restart. Replacement Attempts retain the same historical request and remaining allowance; later Turns reconstruct the Session from canonical host input and private provider output without relying on provider-side storage. A stop freezes its active-Turn and admission-cutoff selection; an exact interruption resolves only the supplied active model Operation. Both recover their original answer after lost replies and promptly cancel superseded local transport. Every Workflow, tool and permission surface enters in later implementation issues.
 
-The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. Current build instructions support macOS on Apple Silicon. Runtime verification uses the available Mac; source/API evidence and cross-compilation support other targets, whose unexecuted behavior remains unverified.
+The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. The current build cross-compiles all four targets. Runtime and resource verification uses the available Apple Silicon Mac; the other targets remain compile-only evidence until exercised on their platforms.
 
 ## Intended experience
 
@@ -27,26 +27,105 @@ V1 excludes conversation branching/editing, attachments, automatic provider fall
 
 ## Build and try the current implementation
 
-The current build still produces `onepage` and `onepage-workflow-evaluator`; the commands below use those names.
-
-Requirements: macOS on Apple Silicon, Zig 0.16.0, `/usr/bin/git`, and system libcurl 7.85.0 or newer with HTTPS, asynchronous DNS and thread-safe global initialization. SQLite and QuickJS sources are pinned by the build.
+Requirements: Zig 0.16.0, Python 3, Perl, a C toolchain and Make. The opt-in production measurement commands additionally require Go 1.27.1. SQLite 3.53.4, curl 8.22.0 and OpenSSL 3.6.3 are pinned by the build.
 
 ```sh
 zig build
-zig build fixture-answer -Doptimize=ReleaseSmall
-zig build fixture-bash -Doptimize=ReleaseSmall
-zig build fixture-patch-deny -Doptimize=ReleaseSmall
-zig build fixture-repair -Doptimize=ReleaseSmall
+./zig-out/bin/latifa serve --store /absolute/path/to/private-store
 ```
 
-Fixtures use the same model, permission and recovery paths as the current live adapter. See [verification gates](VERIFICATION.md#canonical-gates) for checks appropriate to a change.
+The partial development transport is opt-in so it cannot make a live provider call. To exercise this slice, start the Host with an HTTPS endpoint, or with loopback HTTP for a deterministic local fixture. The Host rejects non-loopback plaintext endpoints. No authentication is attached in this slice.
 
-Latifa is its own Codex client; it invokes neither the Codex CLI nor an OpenAI SDK. Login uses OpenAI's browser/device flow and stores credentials in macOS Keychain. Live checks are opt-in:
+Temporary connection, 408/429/5xx and body-inactivity failures receive at most three retries after the initial Attempt, with default 2/4/8-second waits. A longer valid Retry-After wins. Restart conserves the consumed allowance and may repeat remote work or billing when the prior outcome is unknown; it never recreates the old one-shot permit or imports leftover scratch.
 
 ```sh
-./zig-out/bin/onepage --codex-login
-zig build codex-live-repair
-./zig-out/bin/onepage --codex-logout
+./zig-out/bin/latifa serve \
+  --store /absolute/path/to/private-store \
+  --provider-endpoint http://127.0.0.1:8000/responses
 ```
 
-Credentials stay out of SQLite, repository files, conversations and child-tool environments. The designed Linux credential mechanisms are not implemented by these commands. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+In another shell, configure a Session. The record path must be in a private directory; retry reuses that durable capture after a lost reply or client restart.
+
+```sh
+./zig-out/bin/latifa configure \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/configure.json \
+  --key configure-1 \
+  --session direct/reviewer \
+  --workspace /absolute/path/to/workspace \
+  --model gpt-6-astra
+
+./zig-out/bin/latifa retry \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/configure.json \
+  --kind configure
+```
+
+Submit a complete message from a file or from stdin. Acceptance identifies its immutable queued admission; retry reuses the captured record and never reads the original source again.
+
+```sh
+./zig-out/bin/latifa message \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/message.json \
+  --key message-1 \
+  --session direct/reviewer \
+  --text -
+
+./zig-out/bin/latifa retry \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/message.json \
+  --kind message
+
+./zig-out/bin/latifa observe-command \
+  --store /absolute/path/to/private-store \
+  --key message-1
+
+./zig-out/bin/latifa read-result \
+  --store /absolute/path/to/private-store \
+  --key message-1
+```
+
+Stop a Session with a fresh durable key. This acknowledges the frozen selection; retrying the captured record recovers that same selection rather than stopping newer work.
+
+```sh
+./zig-out/bin/latifa stop-session \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/stop.json \
+  --key stop-1 \
+  --session direct/reviewer
+
+./zig-out/bin/latifa retry \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/stop.json \
+  --kind session-stop
+```
+
+Interrupt one exact active model Operation using the Turn and Operation identities returned by message observation. If independently admitted input is already waiting, it may continue the same Turn through a new Operation; otherwise the Turn is cancelled.
+
+```sh
+./zig-out/bin/latifa interrupt-model \
+  --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-records/interruption.json \
+  --key interruption-1 \
+  --session direct/reviewer \
+  --turn 1 \
+  --operation 1
+```
+
+The applicable gates are:
+
+```sh
+zig build check
+zig build cross-check
+zig build dispatch-integration
+zig build control-integration
+zig build measure-admission
+zig build measure-message-admission
+zig build measure-model-dispatch
+zig build measure-model-output
+zig build measure-model-retry
+zig build measure-model-control
+```
+
+The measurement steps are opt-in macOS resource runs. Provider authentication, structured-answer validation, tool execution and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+`check` exercises both the ReleaseSafe production gate and the default Debug artifact shown above; `cross-check` compiles ReleaseSmall deliverables.
