@@ -518,7 +518,7 @@ contains "$during_observation" '"status":"queued"'
 # Ingress scratch/file acquisition, write and seal failures happen before
 # admission. Their caller captures remain retryable and acquire one admission
 # only after an ordinary restart.
-for fault in scratch-acquire content-acquire content-write content-seal; do
+for fault in content-acquire content-write content-seal; do
     key="msg-$fault"
     record="$records/$key.json"
     stop_host

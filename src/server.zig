@@ -21,7 +21,6 @@ pub const Faults = struct {
     content_seal: bool = false,
     content_read: bool = false,
     content_import: bool = false,
-    scratch_acquire: bool = false,
     before_commit: bool = false,
     startup_cleanup: bool = false,
     shutdown_after_accept: bool = false,
