@@ -1740,7 +1740,7 @@ test "definite rejections retain decisions without retaining payloads" {
     try unknown_message.session.set("direct/unknown");
     unknown_message.text = try testingContent(&tmp, "unknown-message", 'm', 64 * 1024);
     defer unknown_message.removeTemporaryContent(std.testing.io) catch unreachable;
-    const unknown_reply = storage.rejectMessage(&unknown_message, .{});
+    const unknown_reply = storage.submitMessage(&unknown_message, .{});
     try std.testing.expect(unknown_reply == .rejected);
     try std.testing.expectEqual(MessageRejection.unknown_session, unknown_reply.rejected.code);
 
@@ -1770,13 +1770,13 @@ test "definite rejections retain decisions without retaining payloads" {
 
     try storage.close();
     storage = try testingStore(&tmp, std.testing.io);
-    try std.testing.expect(storage.rejectMessage(&unknown_message, .{}).rejected.replayed);
+    try std.testing.expect(storage.submitMessage(&unknown_message, .{}).rejected.replayed);
     try std.testing.expect(storage.configure(&incomplete, .{}).rejected.replayed);
     try std.testing.expect(storage.configure(&exhausted, .{}).rejected.replayed);
 
     var changed = unknown_message;
     changed.text.digest[0] ^= 1;
-    try std.testing.expect(storage.rejectMessage(&changed, .{}) == .conflict);
+    try std.testing.expect(storage.submitMessage(&changed, .{}) == .conflict);
     var retargeted = incomplete;
     try retargeted.session.set("direct/other");
     try std.testing.expect(storage.configure(&retargeted, .{}) == .conflict);
@@ -1784,6 +1784,6 @@ test "definite rejections retain decisions without retaining payloads" {
     try changed_kind.key.set("incomplete");
     try changed_kind.session.set("direct/incomplete");
     changed_kind.text = unknown_message.text;
-    try std.testing.expect(storage.rejectMessage(&changed_kind, .{}) == .conflict);
+    try std.testing.expect(storage.submitMessage(&changed_kind, .{}) == .conflict);
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM content"));
 }
