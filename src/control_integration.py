@@ -959,6 +959,20 @@ def prove_delivery_and_settlement_contention(
             "control_timing", count=CONTROL_HEADROOM, timeout=8
         )
         assert len({record["command_key"] for record in timings}) == CONTROL_HEADROOM
+        publications = milestones.wait(
+            "control_hint_published", count=CONTROL_HEADROOM, timeout=8
+        )
+        publication_by_key = {
+            record["subject"]: record for record in publications
+        }
+        assert set(publication_by_key) == {
+            f"contention-stop-{index}" for index in range(CONTROL_HEADROOM)
+        }
+        timing_by_key = {record["command_key"]: record for record in timings}
+        for command_key, publication in publication_by_key.items():
+            assert int(publication["at_ns"]) <= int(
+                timing_by_key[command_key]["reply_complete_at_ns"]
+            )
         milestones.wait("model_settlement_superseded", timeout=8)
         if sample_host is not None:
             resource_samples["controls_acknowledged"] = sample_host(process.pid)
@@ -988,7 +1002,6 @@ def prove_delivery_and_settlement_contention(
         assert execution["custody_occupied"] == "0", execution
         if sample_host is not None:
             resource_samples["physically_released"] = sample_host(process.pid)
-        timing_by_key = {record["command_key"]: record for record in timings}
         cleanup_by_operation = {
             record["operation"]: record for record in cleanup_records
         }
@@ -1292,6 +1305,12 @@ def main():
             timeout=15,
         )
         assert dropped_exact.returncode != 0, dropped_exact
+        wait_for(
+            lambda: endpoint.counts()[1] >= 1,
+            "exact transport cancellation before acknowledgment replay",
+        )
+        exact_message = observe(store, "exact-message")
+        assert exact_message["result"]["status"] == "cancelled", exact_message
         started = time.monotonic()
         exact = command(
             "retry",
@@ -1306,9 +1325,6 @@ def main():
         assert exact["answer"]["status"] == "accepted", exact
         assert exact["answer"]["replayed"] is True, exact
         assert exact_latency_ms < 1000, exact_latency_ms
-        wait_for(lambda: endpoint.counts()[1] >= 1, "exact transport cancellation")
-        exact_message = observe(store, "exact-message")
-        assert exact_message["result"]["status"] == "cancelled", exact_message
 
         configure(state, store, "stop-config", "direct/stop")
         message(state, store, "stop-message", "direct/stop", "second")
