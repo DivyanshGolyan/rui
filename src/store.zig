@@ -492,17 +492,14 @@ pub const Store = struct {
         };
         observation.target = command.target;
         observation.code = command.code;
-        if (command.kind == .message) {
+        if (command.kind == .message and command.accepted) {
             const content_id = command.primary_content_id orelse
                 return self.fenceReadFailure(error.CorruptStore);
             const metadata = self.readContentMetadata(content_id) catch |err|
                 return self.fenceReadFailure(err);
             observation.message = .{
-                .admission_id = if (command.accepted)
-                    self.readMessageAdmission(key, command.target.slice(), content_id) catch |err|
-                        return self.fenceReadFailure(err)
-                else
-                    null,
+                .admission_id = self.readMessageAdmission(key, command.target.slice(), content_id) catch |err|
+                    return self.fenceReadFailure(err),
                 .status = .queued,
                 .content = .{ .length = metadata.length, .digest = metadata.digest },
             };
@@ -1382,7 +1379,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     try std.testing.expectEqual(@as(u64, 2), (try storage.inspectSession("direct/messages")).pending_messages);
 }
 
-test "message rejections retain input and replay before current Session checks" {
+test "message rejections replay before current Session checks without retained input" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -1411,8 +1408,7 @@ test "message rejections retain input and replay before current Session checks" 
 
     const observed = try storage.observeCommand("rejected-message");
     try std.testing.expect(observed.status == .rejected);
-    try std.testing.expect(observed.message != null);
-    try std.testing.expect(observed.message.?.admission_id == null);
+    try std.testing.expect(observed.message == null);
 }
 
 test "message conflicts and failed commits cannot create another admission" {
