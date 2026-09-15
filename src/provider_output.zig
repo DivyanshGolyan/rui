@@ -285,27 +285,52 @@ fn keyName(source: anytype, destination: *protocol.Bounded(max_evidence_bytes)) 
     if (decoded.overflow) destination.len = 0;
 }
 
-fn findField(io: std.Io, file: std.Io.File, object: Range, wanted: []const u8) !?Range {
-    var source = try FileSource.init(io, file, object);
+// Ranges borrow the sealed source. Fixed slots depend on the consumer's field
+// names, never on provider object size. Unknown fields still receive full syntax
+// validation. Defer duplicate errors until lookup so unused fields stay open.
+fn Fields(comptime names: []const []const u8) type {
+    return struct {
+        values: [names.len]?Range = @splat(null),
+        duplicates: [names.len]bool = @splat(false),
+
+        fn get(self: @This(), comptime name: []const u8) !?Range {
+            inline for (names, 0..) |candidate, index| {
+                if (comptime std.mem.eql(u8, candidate, name)) {
+                    if (self.duplicates[index]) return error.DuplicateJsonField;
+                    return self.values[index];
+                }
+            }
+            @compileError("uncollected provider field: " ++ name);
+        }
+
+        fn required(self: @This(), comptime name: []const u8) !Range {
+            return try self.get(name) orelse error.MissingProviderField;
+        }
+    };
+}
+
+fn collectFields(source: *FileSource, comptime names: []const []const u8) !Fields(names) {
+    var fields: Fields(names) = .{};
     try source.expect('{');
     try source.space();
     if (try source.peek() == '}') {
         _ = try source.take();
         try source.expectEnd();
-        return null;
+        return fields;
     }
-    var found: ?Range = null;
     while (true) {
         var key: protocol.Bounded(max_evidence_bytes) = .{};
-        try keyName(&source, &key);
+        try keyName(source, &key);
         try source.expect(':');
         try source.space();
         const start = source.offset();
-        try skipValue(&source, 1);
+        try skipValue(source, 1);
         const value = Range{ .start = start, .length = source.offset() - start };
-        if (key.eql(wanted)) {
-            if (found != null) return error.DuplicateJsonField;
-            found = value;
+        inline for (names, 0..) |name, index| {
+            if (key.eql(name)) {
+                fields.duplicates[index] = fields.values[index] != null;
+                fields.values[index] = value;
+            }
         }
         try source.space();
         const delimiter = try source.take();
@@ -313,7 +338,12 @@ fn findField(io: std.Io, file: std.Io.File, object: Range, wanted: []const u8) !
         if (delimiter != ',') return error.UnexpectedJsonDelimiter;
     }
     try source.expectEnd();
-    return found;
+    return fields;
+}
+
+fn readFields(io: std.Io, file: std.Io.File, object: Range, comptime names: []const []const u8) !Fields(names) {
+    var source = try FileSource.init(io, file, object);
+    return collectFields(&source, names);
 }
 
 fn readString(io: std.Io, file: std.Io.File, value: Range, destination: *protocol.Bounded(max_evidence_bytes)) !ParsedString {
@@ -381,28 +411,28 @@ const Array = struct {
     }
 };
 
-fn requiredField(io: std.Io, file: std.Io.File, object: Range, name: []const u8) !Range {
-    return try findField(io, file, object, name) orelse error.MissingProviderField;
-}
-
-fn optionalCompleted(io: std.Io, file: std.Io.File, object: Range) !void {
-    const status = try findField(io, file, object, "status") orelse return;
+fn optionalCompleted(io: std.Io, file: std.Io.File, status_range: ?Range) !void {
+    const status = status_range orelse return;
     var value: protocol.Bounded(max_evidence_bytes) = .{};
     _ = try readString(io, file, status, &value);
     if (!value.eql("completed")) return error.UnsupportedProviderOutput;
 }
 
-fn validateMetadataAuthority(io: std.Io, file: std.Io.File, item: Range) !void {
-    const metadata = try findField(io, file, item, "internal_chat_message_metadata_passthrough") orelse return;
+fn validateMetadataAuthority(io: std.Io, file: std.Io.File, metadata_range: ?Range) !void {
+    const metadata = metadata_range orelse return;
+    const fields = try readFields(io, file, metadata, &.{ "cell_id", "executed_tool_calls", "tool_calls_complete" });
     inline for (.{ "cell_id", "executed_tool_calls", "tool_calls_complete" }) |field| {
-        if (try findField(io, file, metadata, field) != null) return error.UnsupportedProviderOutput;
+        if (try fields.get(field) != null) return error.UnsupportedProviderOutput;
     }
 }
 
-fn validateReasoning(io: std.Io, file: std.Io.File, item: Range) !void {
-    try optionalCompleted(io, file, item);
-    if (try findField(io, file, item, "text") != null) return error.UnsupportedProviderOutput;
-    const encrypted = try requiredField(io, file, item, "encrypted_content");
+const item_field_names = &.{ "type", "id", "status", "role", "phase", "internal_chat_message_metadata_passthrough", "content", "text", "encrypted_content", "summary" };
+const ItemFields = Fields(item_field_names);
+
+fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
+    try optionalCompleted(io, file, try fields.get("status"));
+    if (try fields.get("text") != null) return error.UnsupportedProviderOutput;
+    const encrypted = try fields.required("encrypted_content");
     var ignored: protocol.Bounded(max_evidence_bytes) = .{};
     const parsed = readString(io, file, encrypted, &ignored) catch |err| switch (err) {
         error.ProviderValueTooLong => blk: {
@@ -414,29 +444,32 @@ fn validateReasoning(io: std.Io, file: std.Io.File, item: Range) !void {
     if (parsed.decoded_length == 0) return error.ContinuationUnavailable;
     const field_names = [_][]const u8{ "summary", "content" };
     const type_names = [_][]const u8{ "summary_text", "reasoning_text" };
-    for (field_names, type_names) |field_name, type_name| {
-        const array_range = try findField(io, file, item, field_name) orelse continue;
-        var array = try Array.init(io, file, array_range);
-        while (try array.next()) |block| {
-            var kind: protocol.Bounded(max_evidence_bytes) = .{};
-            _ = try readString(io, file, try requiredField(io, file, block, "type"), &kind);
-            if (!kind.eql(type_name)) return error.UnsupportedProviderOutput;
-            var text: protocol.Bounded(max_evidence_bytes) = .{};
-            _ = readString(io, file, try requiredField(io, file, block, "text"), &text) catch |err| switch (err) {
-                error.ProviderValueTooLong => {},
-                else => return err,
-            };
+    inline for (field_names, type_names) |field_name, type_name| {
+        if (try fields.get(field_name)) |array_range| {
+            var array = try Array.init(io, file, array_range);
+            while (try array.next()) |block| {
+                const block_fields = try readFields(io, file, block, &.{ "type", "text", "annotations" });
+                var kind: protocol.Bounded(max_evidence_bytes) = .{};
+                _ = try readString(io, file, try block_fields.required("type"), &kind);
+                if (!kind.eql(type_name)) return error.UnsupportedProviderOutput;
+                var text: protocol.Bounded(max_evidence_bytes) = .{};
+                _ = readString(io, file, try block_fields.required("text"), &text) catch |err| switch (err) {
+                    error.ProviderValueTooLong => {},
+                    else => return err,
+                };
+            }
         }
     }
-    try validateMetadataAuthority(io, file, item);
+    try validateMetadataAuthority(io, file, try fields.get("internal_chat_message_metadata_passthrough"));
 }
 
-fn validateAnnotations(io: std.Io, file: std.Io.File, block: Range) !void {
-    const annotations = try findField(io, file, block, "annotations") orelse return;
+fn validateAnnotations(io: std.Io, file: std.Io.File, annotations_range: ?Range) !void {
+    const annotations = annotations_range orelse return;
     var array = try Array.init(io, file, annotations);
     while (try array.next()) |annotation| {
+        const fields = try readFields(io, file, annotation, &.{"type"});
         var kind: protocol.Bounded(max_evidence_bytes) = .{};
-        _ = try readString(io, file, try requiredField(io, file, annotation, "type"), &kind);
+        _ = try readString(io, file, try fields.required("type"), &kind);
         if (!kind.eql("url_citation")) return error.UnsupportedProviderOutput;
     }
 }
@@ -454,33 +487,35 @@ fn validateItem(
     metadata: *store.OutputMetadataWriter,
     answer_hash: *std.crypto.hash.sha2.Sha256,
 ) !ItemValidation {
+    const fields = try readFields(io, file, item, item_field_names);
     var kind_name: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, try requiredField(io, file, item, "type"), &kind_name);
-    const id_digest = try stringDigest(io, file, try requiredField(io, file, item, "id"));
+    _ = try readString(io, file, try fields.required("type"), &kind_name);
+    const id_digest = try stringDigest(io, file, try fields.required("id"));
     if (kind_name.eql("reasoning")) {
-        try validateReasoning(io, file, item);
+        try validateReasoning(io, file, fields);
         return .{ .kind = .reasoning, .id_digest = id_digest };
     }
     if (!kind_name.eql("message")) return error.UnsupportedProviderOutput;
-    try optionalCompleted(io, file, item);
+    try optionalCompleted(io, file, try fields.get("status"));
     var role: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, try requiredField(io, file, item, "role"), &role);
+    _ = try readString(io, file, try fields.required("role"), &role);
     if (!role.eql("assistant")) return error.UnsupportedProviderOutput;
-    if (try findField(io, file, item, "phase")) |phase_range| {
+    if (try fields.get("phase")) |phase_range| {
         var phase: protocol.Bounded(max_evidence_bytes) = .{};
         _ = try readString(io, file, phase_range, &phase);
         if (!phase.eql("commentary") and !phase.eql("final_answer")) return error.UnsupportedProviderOutput;
     }
-    try validateMetadataAuthority(io, file, item);
-    const content = try requiredField(io, file, item, "content");
+    try validateMetadataAuthority(io, file, try fields.get("internal_chat_message_metadata_passthrough"));
+    const content = try fields.required("content");
     var array = try Array.init(io, file, content);
     var text_records: u64 = 0;
     while (try array.next()) |block| {
+        const block_fields = try readFields(io, file, block, &.{ "type", "text", "annotations" });
         var block_kind: protocol.Bounded(max_evidence_bytes) = .{};
-        _ = try readString(io, file, try requiredField(io, file, block, "type"), &block_kind);
+        _ = try readString(io, file, try block_fields.required("type"), &block_kind);
         if (!block_kind.eql("output_text")) return error.UnsupportedProviderOutput;
-        try validateAnnotations(io, file, block);
-        const text_value = try requiredField(io, file, block, "text");
+        try validateAnnotations(io, file, try block_fields.get("annotations"));
+        const text_value = try block_fields.required("text");
         var source = try FileSource.init(io, file, text_value);
         var decoded = Decoded{ .hash = answer_hash };
         const text = try parseString(&source, &decoded);
@@ -509,8 +544,9 @@ fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
     id_digest: [32]u8,
     content_digest: [32]u8,
 } {
+    const fields = try readFields(io, file, item, &.{ "type", "id" });
     var kind_name: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, try requiredField(io, file, item, "type"), &kind_name);
+    _ = try readString(io, file, try fields.required("type"), &kind_name);
     const kind: store.OutputItemKind = if (kind_name.eql("reasoning"))
         .reasoning
     else if (kind_name.eql("message"))
@@ -519,36 +555,32 @@ fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
         return error.UnsupportedProviderOutput;
     return .{
         .kind = kind,
-        .id_digest = try stringDigest(io, file, try requiredField(io, file, item, "id")),
+        .id_digest = try stringDigest(io, file, try fields.required("id")),
         .content_digest = try contentDigestRange(io, file, item),
     };
-}
-
-fn eventType(io: std.Io, file: std.Io.File, event: Range, value: *protocol.Bounded(max_evidence_bytes)) !void {
-    _ = try readString(io, file, try requiredField(io, file, event, "type"), value);
 }
 
 fn validateCompleted(
     io: std.Io,
     file: std.Io.File,
-    event: Range,
+    response: Range,
     metadata: *store.OutputMetadataWriter,
     expected_items: u64,
     evidence: *Evidence,
 ) !void {
-    const response = try requiredField(io, file, event, "response");
+    const fields = try readFields(io, file, response, &.{ "status", "id", "model", "output", "usage" });
     var status: protocol.Bounded(max_evidence_bytes) = .{};
-    _ = try readString(io, file, try requiredField(io, file, response, "status"), &status);
+    _ = try readString(io, file, try fields.required("status"), &status);
     if (!status.eql("completed")) return error.UnsupportedProviderOutput;
-    _ = try readString(io, file, try requiredField(io, file, response, "id"), &evidence.response_id);
+    _ = try readString(io, file, try fields.required("id"), &evidence.response_id);
     if (evidence.response_id.len == 0) return error.EmptyProviderIdentity;
-    if (try findField(io, file, response, "model")) |model| {
+    if (try fields.get("model")) |model| {
         var wide: protocol.Bounded(max_evidence_bytes) = .{};
         _ = try readString(io, file, model, &wide);
         if (wide.len == 0) return error.EmptyProviderIdentity;
         try evidence.served_model.set(wide.slice());
     }
-    const output = try requiredField(io, file, response, "output");
+    const output = try fields.required("output");
     var array = try Array.init(io, file, output);
     var reader = try store.OutputMetadataReader.init(io, metadata.file, expected_items);
     var index: u64 = 0;
@@ -561,8 +593,9 @@ fn validateCompleted(
         index += 1;
     }
     if (index != expected_items or try reader.nextItem() != null) return error.ContradictoryProviderOutput;
-    if (try findField(io, file, response, "usage")) |usage| {
-        _ = try findField(io, file, usage, "total_tokens");
+    if (try fields.get("usage")) |usage| {
+        const usage_fields = try readFields(io, file, usage, &.{"total_tokens"});
+        _ = try usage_fields.get("total_tokens");
         try metadata.append(.{
             .tag = .usage,
             .start = usage.start,
@@ -614,19 +647,20 @@ fn processEvent(
 ) !void {
     if (completed.*) return error.LateProviderOutput;
     var kind: protocol.Bounded(max_evidence_bytes) = .{};
-    try eventType(io, file, event, &kind);
+    const fields = try readFields(io, file, event, &.{ "type", "output_index", "item", "response" });
+    _ = try readString(io, file, try fields.required("type"), &kind);
     if (kind.eql("response.output_item.added")) {
         if (added.active) return error.ContradictoryProviderOutput;
-        const index = try readIndex(io, file, try requiredField(io, file, event, "output_index"));
+        const index = try readIndex(io, file, try fields.required("output_index"));
         if (index != item_count.*) return error.ContradictoryProviderOutput;
-        const identity = try itemIdentity(io, file, try requiredField(io, file, event, "item"));
+        const identity = try itemIdentity(io, file, try fields.required("item"));
         added.* = .{ .active = true, .index = index, .kind = identity.kind, .id_digest = identity.id_digest };
         return;
     }
     if (kind.eql("response.output_item.done")) {
-        const index = try readIndex(io, file, try requiredField(io, file, event, "output_index"));
+        const index = try readIndex(io, file, try fields.required("output_index"));
         if (index != item_count.*) return error.ContradictoryProviderOutput;
-        const item = try requiredField(io, file, event, "item");
+        const item = try fields.required("item");
         const validation = try validateItem(io, file, item, metadata, answer_hash);
         if (try identityAlreadySeen(metadata, &validation.id_digest)) return error.ContradictoryProviderOutput;
         if (added.active and (added.index != index or added.kind != validation.kind or
@@ -648,7 +682,7 @@ fn processEvent(
     }
     if (kind.eql("response.completed")) {
         if (added.active or item_count.* == 0 or message_count.* != 1) return error.IncompleteProviderOutput;
-        try validateCompleted(io, file, event, metadata, item_count.*, evidence);
+        try validateCompleted(io, file, try fields.required("response"), metadata, item_count.*, evidence);
         try metadata.sealForRead();
         completed.* = true;
         return;
@@ -886,4 +920,76 @@ fn copyCanonicalRange(reader: *store.ContentReader, start: u64, length: u64, wri
         try writer.write(buffer[0..count]);
         offset += count;
     }
+}
+
+fn testingObject(tmp: *std.testing.TmpDir, bytes: []const u8) !FileSource {
+    const file = try tmp.dir.createFile(std.testing.io, "object", .{ .read = true });
+    errdefer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, bytes);
+    return FileSource.init(std.testing.io, file, .{ .start = 0, .length = bytes.len });
+}
+
+test "provider field collection traverses large open values once for all lookups" {
+    const input = "{\"unknown\":\"" ++ "x" ** (protocol.content_window_bytes * 4) ++
+        "\",\"type\":\"message\",\"id\":\"m1\",\"status\":\"completed\",\"role\":\"assistant\"," ++
+        "\"phase\":\"final_answer\",\"content\":[],\"internal_chat_message_metadata_passthrough\":{}}";
+    const names = &.{ "type", "id", "status", "role", "phase", "content", "internal_chat_message_metadata_passthrough" };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try testingObject(&tmp, input);
+    defer source.file.close(std.testing.io);
+    const fields = try collectFields(&source, names);
+    inline for (names) |name| _ = try fields.required(name);
+    try std.testing.expectEqual(input.len, source.position);
+    // The former per-field lookup restarted at byte zero for each of these
+    // seven names. The collector consumes exactly one object, with no rereads
+    // on lookup, including an unknown value larger than the file window.
+    const kind = try fields.required("type");
+    try std.testing.expectEqualStrings("\"message\"", input[@intCast(kind.start)..][0..@intCast(kind.length)]);
+}
+
+test "provider field collection preserves escaped keys duplicates and missing fields" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try testingObject(&tmp, "{\"ty\\u0070e\":\"message\",\"unused\":1,\"unused\":2}");
+    defer source.file.close(std.testing.io);
+    const fields = try collectFields(&source, &.{ "type", "id", "unused" });
+    _ = try fields.required("type");
+    try std.testing.expectEqual(null, try fields.get("id"));
+    try std.testing.expectError(error.MissingProviderField, fields.required("id"));
+    try std.testing.expectError(error.DuplicateJsonField, fields.get("unused"));
+    var duplicate = try testingObject(&tmp, "{\"type\":1,\"ty\\u0070e\":2,\"type\":3}");
+    defer duplicate.file.close(std.testing.io);
+    const repeated = try collectFields(&duplicate, &.{"type"});
+    try std.testing.expectError(error.DuplicateJsonField, repeated.required("type"));
+}
+
+test "provider field collection validates unknown and late syntax" {
+    const cases = .{
+        .{ "{\"type\":1,\"unknown\":\"\xff\"}", error.InvalidJsonUtf8 },
+        .{ "{\"type\":1,\"unknown\":\"\\uD800x\"}", error.InvalidJsonSurrogate },
+        .{ "{\"type\":1,\"unknown\":[1,]}", error.InvalidJsonValue },
+        .{ "{\"type\":1} false", error.TrailingJson },
+        .{ "{\"type\":1,\"unknown\":01}", error.InvalidJsonNumber },
+        .{ "{\"type\":1,\"unknown\":" ++ "[" ** (protocol.max_json_depth + 1) ++ "0" ++ "]" ** (protocol.max_json_depth + 1) ++ "}", error.JsonTooDeep },
+    };
+    inline for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var source = try testingObject(&tmp, case[0]);
+        defer source.file.close(std.testing.io);
+        try std.testing.expectError(case[1], collectFields(&source, &.{"type"}));
+    }
+}
+
+test "provider field collection cannot grant authority through escaped metadata keys" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try testingObject(&tmp, "{\"cell_\\u0069d\":null,\"unknown\":{\"nested\":[1,true]}}");
+    defer source.file.close(std.testing.io);
+    try std.testing.expectError(error.UnsupportedProviderOutput, validateMetadataAuthority(
+        std.testing.io,
+        source.file,
+        .{ .start = 0, .length = source.end },
+    ));
 }
