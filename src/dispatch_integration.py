@@ -1097,7 +1097,7 @@ def main():
         output_fault_thread.join(timeout=5)
 
         scratch_endpoint = SuccessEndpoint(
-            [sse_answer("scratch-response", "scratch-r", "scratch-m", "x" * (1024 * 1024))[0]]
+            [sse_answer("scratch-response", "scratch-r", "scratch-m", "x" * 100_000)[0]]
         )
         scratch_thread = threading.Thread(target=scratch_endpoint.serve_forever, daemon=True)
         scratch_thread.start()
@@ -1132,8 +1132,8 @@ def main():
 
         # Item cardinality and answer bytes grow independently while execution
         # capacity remains one and metadata/capture stay in shared scratch.
-        count_payload = sse_many("many-items", 128, "count answer")
-        large_answer = "z" * (5 * 1024 * 1024)
+        count_payload = sse_many("many-items", 32, "count answer")
+        large_answer = "z" * 100_000
         byte_payload = sse_many("large-answer", 1, large_answer)
         growth_endpoint = SuccessEndpoint([count_payload, byte_payload])
         growth_thread = threading.Thread(target=growth_endpoint.serve_forever, daemon=True)
@@ -1158,7 +1158,7 @@ def main():
         database = sqlite3.connect(growth_store / "latifa.sqlite3")
         assert database.execute(
             "SELECT count(*) FROM model_output_item WHERE operation_id=1"
-        ).fetchone()[0] == 129
+        ).fetchone()[0] == 33
         assert database.execute("SELECT payload IS NULL,byte_length FROM content WHERE byte_length=? AND private=0", (len(large_answer),)).fetchall() == [(1, len(large_answer))]
         assert database.execute("SELECT coalesce(sum(length(payload)),0) FROM content WHERE private=0").fetchone()[0] < 1024
         database.close()

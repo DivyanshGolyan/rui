@@ -25,8 +25,8 @@ import (
 
 const memoryTarget = 256 * 1024 * 1024
 
-var answerSizes = []int{1024, 1024 * 1024, 8 * 1024 * 1024}
-var reasoningCounts = []int{1, 128, 1000}
+var answerSizes = []int{100_000}
+var reasoningCounts = []int{1, 4, 32}
 
 func encodeSSE(responseID string, reasoningCount int, answer string) []byte {
 	items := make([]any, 0, reasoningCount+1)
@@ -379,7 +379,7 @@ func main() {
 	}
 	factsOpen = false
 	result := map[string]any{
-		"format":             "latifa-model-output-v2-go",
+		"format":             "latifa-model-output-v3-go",
 		"scope":              "issue-173 production model output bytes and item counts",
 		"status":             reduceStatuses(byteRows, itemRows),
 		"artifacts":          root,

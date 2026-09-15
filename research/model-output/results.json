@@ -1,257 +1,530 @@
 {
-  "scope": "issue-173 production model-output capture, import, and retained idle",
-  "status": "passed",
-  "tested_revision": "69baf26c96a148fddff34f11c8782d6ed762244c",
-  "working_tree_dirty": false,
-  "binary_sha256": "787cbcd1de46a63bd77e48baa2d608f27e3e34047d097747b6f0060405dc8118",
-  "zig": "0.16.0",
-  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
   "active_capacity": 1,
   "answer_byte_growth": [
     {
-      "answer_bytes": 1024,
-      "reasoning_items": 1,
-      "total_output_items": 2,
-      "sse_bytes": 3117,
-      "request_bytes": 239,
-      "scratch_limit_bytes": 8589934592,
-      "canonical_output_items": 2,
-      "private_content_rows": 3,
-      "assistant_projections": 1,
-      "database_bytes": 118784,
+      "answer_bytes": 100000,
+      "answer_sha256": "d69e68988157833272305aaf21f453c800346e8a3640db6578e260215542e5d4",
+      "client_delivery": {
+        "delivery_and_verification_seconds": 0.026408541,
+        "destination_bytes": 100000,
+        "destination_sha256": "d69e68988157833272305aaf21f453c800346e8a3640db6578e260215542e5d4",
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3473408  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 465  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 154  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  34  involuntary context switches\n            36601668  instructions retired\n            15929351  cycles elapsed\n             2163328  peak memory footprint\n"
+      },
       "cold": {
-        "rss_bytes": 8044544,
-        "virtual_bytes": 420267982848,
-        "physical_footprint_bytes": 3621888,
-        "lifetime_peak_physical_footprint_bytes": 3621888,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
+        "host": {
+          "rss_bytes": 7913472,
+          "virtual_bytes": 420544806912,
+          "cpu_user_seconds": 0.009438708333333332,
+          "cpu_system_seconds": 0.01015175,
+          "threads": 4,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "disk_read_bytes": 81920,
+          "disk_write_bytes": 135168,
+          "footprint": {
+            "physical_footprint_bytes": 3605504,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3605504,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 3605504,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3606016,
+          "physical_footprint_bytes": 3605504,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 7913472,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
       },
-      "retained_idle": {
-        "rss_bytes": 9502720,
-        "virtual_bytes": 420699521024,
-        "physical_footprint_bytes": 5014528,
-        "lifetime_peak_physical_footprint_bytes": 5178368,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
-      },
+      "completion_seconds": 0.124421292,
       "execution_after_completion": {
-        "status": "partial",
-        "dispatch_fenced": false,
         "custody_occupied": "0",
+        "dispatch_fenced": false,
         "scratch_used_bytes": "0",
+        "status": "partial",
         "unavailable": [
           "structured_output",
           "retry_and_restart_resolution"
         ]
       },
-      "answer_sha256": "49abd65bbf7f7e40c7055093ed2e3fd75f2f602f2c5fcf955c213e3135eb03f7"
-    },
-    {
-      "answer_bytes": 1048576,
+      "observation": {
+        "input": {
+          "bytes": "7",
+          "sha256": "76df5db2e650c56ab4bca45eec60a928840072ca3fb4fcb1cfae9b6f1194f144",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1",
+          "turn": "1"
+        },
+        "queue": {
+          "admission": "1",
+          "status": "completed"
+        },
+        "result": {
+          "status": "completed",
+          "text": {
+            "bytes": "100000",
+            "sha256": "91c16b9649aa393fd2a592e1b408da06a0c12a3c5129d320d7a9319fa0812950",
+            "type": "text"
+          }
+        },
+        "status": "accepted",
+        "target": "measure/bytes-100000"
+      },
+      "offline_audit": {
+        "public_payload_bytes": 7,
+        "projection_rows": 1,
+        "database_bytes": 225280,
+        "canonical_output_items": 2,
+        "private_content_rows": 3,
+        "assistant_projections": 1
+      },
       "reasoning_items": 1,
-      "total_output_items": 2,
-      "sse_bytes": 2098242,
       "request_bytes": 239,
-      "scratch_limit_bytes": 8589934592,
-      "canonical_output_items": 2,
-      "private_content_rows": 3,
-      "assistant_projections": 1,
-      "database_bytes": 2215936,
-      "cold": {
-        "rss_bytes": 7716864,
-        "virtual_bytes": 420256448512,
-        "physical_footprint_bytes": 3277824,
-        "lifetime_peak_physical_footprint_bytes": 3277824,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
-      },
       "retained_idle": {
-        "rss_bytes": 10960896,
-        "virtual_bytes": 420391239680,
-        "physical_footprint_bytes": 6390784,
-        "lifetime_peak_physical_footprint_bytes": 6554624,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
+        "host": {
+          "rss_bytes": 9682944,
+          "virtual_bytes": 420831641600,
+          "cpu_user_seconds": 0.023289416666666663,
+          "cpu_system_seconds": 0.018107291666666664,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "disk_read_bytes": 102400,
+          "disk_write_bytes": 1101824,
+          "footprint": {
+            "physical_footprint_bytes": 5261312,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 5425152,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 5425152,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 5425664,
+          "physical_footprint_bytes": 5261312,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 9682944,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
       },
-      "execution_after_completion": {
-        "status": "partial",
-        "dispatch_fenced": false,
-        "custody_occupied": "0",
-        "scratch_used_bytes": "0",
-        "unavailable": [
-          "structured_output",
-          "retry_and_restart_resolution"
-        ]
-      },
-      "answer_sha256": "8f990ba0b577b51cf009ea049368c16bbda1b21e1b93be07a824758bb253c39b"
-    },
-    {
-      "answer_bytes": 8388608,
-      "reasoning_items": 1,
-      "total_output_items": 2,
-      "sse_bytes": 16778306,
-      "request_bytes": 239,
-      "scratch_limit_bytes": 8589934592,
-      "canonical_output_items": 2,
-      "private_content_rows": 3,
-      "assistant_projections": 1,
-      "database_bytes": 16912384,
-      "cold": {
-        "rss_bytes": 7913472,
-        "virtual_bytes": 420122230784,
-        "physical_footprint_bytes": 3458048,
-        "lifetime_peak_physical_footprint_bytes": 3458048,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
-      },
-      "retained_idle": {
-        "rss_bytes": 13598720,
-        "virtual_bytes": 420553228288,
-        "physical_footprint_bytes": 9077760,
-        "lifetime_peak_physical_footprint_bytes": 9225216,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
-      },
-      "execution_after_completion": {
-        "status": "partial",
-        "dispatch_fenced": false,
-        "custody_occupied": "0",
-        "scratch_used_bytes": "0",
-        "unavailable": [
-          "structured_output",
-          "retry_and_restart_resolution"
-        ]
-      },
-      "answer_sha256": "0c77bc0a0795a93612d45256897456d0fcb24f151c44c150d07ecd03f4ef5168"
+      "scratch_limit_bytes": "8589934592",
+      "sse_bytes": 201083,
+      "status": "passed",
+      "total_output_items": 2
     }
   ],
+  "artifacts": "/private/tmp/latifa-output-measure-90701537",
+  "binary": "/Users/divyanshgolyan/.codex/worktrees/ff16/latifa/.zig-cache/o/d03b2da2e5dbeede90fe30981b208ad3/latifa-release-small-check",
+  "binary_sha256": "177b5360730b3c530c931b2572bc8906982676bd6994c15b736e7ecae0807904",
+  "elapsed_seconds": 2.200643417,
+  "format": "latifa-model-output-v3-go",
   "item_count_growth": [
     {
       "answer_bytes": 6,
+      "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+      "client_delivery": {
+        "delivery_and_verification_seconds": 0.027210833,
+        "destination_bytes": 6,
+        "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3473408  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   9  involuntary context switches\n            34459518  instructions retired\n            13815243  cycles elapsed\n             2163328  peak memory footprint\n"
+      },
+      "cold": {
+        "host": {
+          "rss_bytes": 7979008,
+          "virtual_bytes": 420420026368,
+          "cpu_user_seconds": 0.004960083333333333,
+          "cpu_system_seconds": 0.004665583333333333,
+          "threads": 4,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "disk_read_bytes": 28672,
+          "disk_write_bytes": 135168,
+          "footprint": {
+            "physical_footprint_bytes": 3572736,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3572736,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 3572736,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3573248,
+          "physical_footprint_bytes": 3572736,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 7979008,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "completion_seconds": 0.136983583,
+      "execution_after_completion": {
+        "custody_occupied": "0",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output",
+          "retry_and_restart_resolution"
+        ]
+      },
+      "observation": {
+        "input": {
+          "bytes": "7",
+          "sha256": "76df5db2e650c56ab4bca45eec60a928840072ca3fb4fcb1cfae9b6f1194f144",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1",
+          "turn": "1"
+        },
+        "queue": {
+          "admission": "1",
+          "status": "completed"
+        },
+        "result": {
+          "status": "completed",
+          "text": {
+            "bytes": "6",
+            "sha256": "819d1bdbc293acf2c143f80d594379df62940f4c7db70fcdfdc8dafbff0d8906",
+            "type": "text"
+          }
+        },
+        "status": "accepted",
+        "target": "measure/items-1"
+      },
+      "offline_audit": {
+        "public_payload_bytes": 7,
+        "projection_rows": 1,
+        "database_bytes": 126976,
+        "canonical_output_items": 2,
+        "private_content_rows": 3,
+        "assistant_projections": 1
+      },
       "reasoning_items": 1,
-      "total_output_items": 2,
+      "request_bytes": 239,
+      "retained_idle": {
+        "host": {
+          "rss_bytes": 9879552,
+          "virtual_bytes": 420841078784,
+          "cpu_user_seconds": 0.007919791666666665,
+          "cpu_system_seconds": 0.01149025,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "disk_read_bytes": 28672,
+          "disk_write_bytes": 802816,
+          "footprint": {
+            "physical_footprint_bytes": 5407744,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 5571584,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 5571584,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 5572096,
+          "physical_footprint_bytes": 5407744,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 9879552,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "scratch_limit_bytes": "8589934592",
       "sse_bytes": 1060,
-      "request_bytes": 239,
-      "scratch_limit_bytes": 8589934592,
-      "canonical_output_items": 2,
-      "private_content_rows": 3,
-      "assistant_projections": 1,
-      "database_bytes": 118784,
-      "cold": {
-        "rss_bytes": 8044544,
-        "virtual_bytes": 420141105152,
-        "physical_footprint_bytes": 3589120,
-        "lifetime_peak_physical_footprint_bytes": 3589120,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
-      },
-      "retained_idle": {
-        "rss_bytes": 9224192,
-        "virtual_bytes": 420275896320,
-        "physical_footprint_bytes": 4637696,
-        "lifetime_peak_physical_footprint_bytes": 4801536,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
-      },
-      "execution_after_completion": {
-        "status": "partial",
-        "dispatch_fenced": false,
-        "custody_occupied": "0",
-        "scratch_used_bytes": "0",
-        "unavailable": [
-          "structured_output",
-          "retry_and_restart_resolution"
-        ]
-      },
-      "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9"
+      "status": "passed",
+      "total_output_items": 2
     },
     {
       "answer_bytes": 6,
-      "reasoning_items": 128,
-      "total_output_items": 129,
-      "sse_bytes": 56875,
-      "request_bytes": 239,
-      "scratch_limit_bytes": 8589934592,
-      "canonical_output_items": 129,
-      "private_content_rows": 130,
-      "assistant_projections": 1,
-      "database_bytes": 151552,
+      "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+      "client_delivery": {
+        "delivery_and_verification_seconds": 0.015412709,
+        "destination_bytes": 6,
+        "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+        "time_stderr": "        0.00 real         0.00 user         0.00 sys\n             3473408  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  10  involuntary context switches\n            34374096  instructions retired\n            14088348  cycles elapsed\n             2163328  peak memory footprint\n"
+      },
       "cold": {
-        "rss_bytes": 7667712,
-        "virtual_bytes": 420256448512,
-        "physical_footprint_bytes": 3212288,
-        "lifetime_peak_physical_footprint_bytes": 3212288,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
+        "host": {
+          "rss_bytes": 7913472,
+          "virtual_bytes": 420409540608,
+          "cpu_user_seconds": 0.004979583333333333,
+          "cpu_system_seconds": 0.004434375,
+          "threads": 4,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "disk_read_bytes": 24576,
+          "disk_write_bytes": 135168,
+          "footprint": {
+            "physical_footprint_bytes": 3507200,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3507200,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 3507200,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3507712,
+          "physical_footprint_bytes": 3507200,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 7913472,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
       },
-      "retained_idle": {
-        "rss_bytes": 8945664,
-        "virtual_bytes": 420266459136,
-        "physical_footprint_bytes": 4375552,
-        "lifetime_peak_physical_footprint_bytes": 4539392,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
-      },
+      "completion_seconds": 0.127887292,
       "execution_after_completion": {
-        "status": "partial",
-        "dispatch_fenced": false,
         "custody_occupied": "0",
+        "dispatch_fenced": false,
         "scratch_used_bytes": "0",
+        "status": "partial",
         "unavailable": [
           "structured_output",
           "retry_and_restart_resolution"
         ]
       },
-      "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9"
+      "observation": {
+        "input": {
+          "bytes": "7",
+          "sha256": "76df5db2e650c56ab4bca45eec60a928840072ca3fb4fcb1cfae9b6f1194f144",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1",
+          "turn": "1"
+        },
+        "queue": {
+          "admission": "1",
+          "status": "completed"
+        },
+        "result": {
+          "status": "completed",
+          "text": {
+            "bytes": "6",
+            "sha256": "819d1bdbc293acf2c143f80d594379df62940f4c7db70fcdfdc8dafbff0d8906",
+            "type": "text"
+          }
+        },
+        "status": "accepted",
+        "target": "measure/items-4"
+      },
+      "offline_audit": {
+        "public_payload_bytes": 7,
+        "projection_rows": 1,
+        "database_bytes": 126976,
+        "canonical_output_items": 5,
+        "private_content_rows": 6,
+        "assistant_projections": 1
+      },
+      "reasoning_items": 4,
+      "request_bytes": 239,
+      "retained_idle": {
+        "host": {
+          "rss_bytes": 9175040,
+          "virtual_bytes": 420553768960,
+          "cpu_user_seconds": 0.008029208333333333,
+          "cpu_system_seconds": 0.011220666666666665,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "disk_read_bytes": 24576,
+          "disk_write_bytes": 802816,
+          "footprint": {
+            "physical_footprint_bytes": 4654080,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 4834304,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 4834304,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 4834816,
+          "physical_footprint_bytes": 4654080,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 9175040,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "scratch_limit_bytes": "8589934592",
+      "sse_bytes": 2329,
+      "status": "passed",
+      "total_output_items": 5
     },
     {
       "answer_bytes": 6,
-      "reasoning_items": 1000,
-      "total_output_items": 1001,
-      "sse_bytes": 449665,
-      "request_bytes": 239,
-      "scratch_limit_bytes": 8589934592,
-      "canonical_output_items": 1001,
-      "private_content_rows": 1002,
-      "assistant_projections": 1,
-      "database_bytes": 454656,
+      "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+      "client_delivery": {
+        "delivery_and_verification_seconds": 0.02735875,
+        "destination_bytes": 6,
+        "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3473408  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 463  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   8  involuntary context switches\n            34402282  instructions retired\n            13562502  cycles elapsed\n             2163328  peak memory footprint\n"
+      },
       "cold": {
-        "rss_bytes": 7897088,
-        "virtual_bytes": 420543758336,
-        "physical_footprint_bytes": 3556352,
-        "lifetime_peak_physical_footprint_bytes": 3556352,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
+        "host": {
+          "rss_bytes": 8208384,
+          "virtual_bytes": 420410589184,
+          "cpu_user_seconds": 0.005174208333333333,
+          "cpu_system_seconds": 0.004796541666666666,
+          "threads": 4,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "disk_read_bytes": 20480,
+          "disk_write_bytes": 135168,
+          "footprint": {
+            "physical_footprint_bytes": 3802112,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3802112,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 3802112,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3802624,
+          "physical_footprint_bytes": 3802112,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 8208384,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
       },
-      "retained_idle": {
-        "rss_bytes": 9306112,
-        "virtual_bytes": 420678549504,
-        "physical_footprint_bytes": 4834304,
-        "lifetime_peak_physical_footprint_bytes": 4981760,
-        "open_descriptor_rows": 15,
-        "open_response_file_descriptors": 0
-      },
+      "completion_seconds": 0.13911775,
       "execution_after_completion": {
-        "status": "partial",
-        "dispatch_fenced": false,
         "custody_occupied": "0",
+        "dispatch_fenced": false,
         "scratch_used_bytes": "0",
+        "status": "partial",
         "unavailable": [
           "structured_output",
           "retry_and_restart_resolution"
         ]
       },
-      "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9"
+      "observation": {
+        "input": {
+          "bytes": "7",
+          "sha256": "76df5db2e650c56ab4bca45eec60a928840072ca3fb4fcb1cfae9b6f1194f144",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1",
+          "turn": "1"
+        },
+        "queue": {
+          "admission": "1",
+          "status": "completed"
+        },
+        "result": {
+          "status": "completed",
+          "text": {
+            "bytes": "6",
+            "sha256": "819d1bdbc293acf2c143f80d594379df62940f4c7db70fcdfdc8dafbff0d8906",
+            "type": "text"
+          }
+        },
+        "status": "accepted",
+        "target": "measure/items-32"
+      },
+      "offline_audit": {
+        "public_payload_bytes": 7,
+        "projection_rows": 1,
+        "database_bytes": 135168,
+        "canonical_output_items": 33,
+        "private_content_rows": 34,
+        "assistant_projections": 1
+      },
+      "reasoning_items": 32,
+      "request_bytes": 239,
+      "retained_idle": {
+        "host": {
+          "rss_bytes": 10633216,
+          "virtual_bytes": 420975296512,
+          "cpu_user_seconds": 0.010250541666666666,
+          "cpu_system_seconds": 0.013451791666666666,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "disk_read_bytes": 45056,
+          "disk_write_bytes": 823296,
+          "footprint": {
+            "physical_footprint_bytes": 6211584,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 6375424,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 6375424,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 6375936,
+          "physical_footprint_bytes": 6211584,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 10633216,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "scratch_limit_bytes": "8589934592",
+      "sse_bytes": 14473,
+      "status": "passed",
+      "total_output_items": 33
     }
   ],
-  "elapsed_seconds": 7.477,
   "limits": [
     "macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only",
-    "deterministic loopback HTTP qualifies no TLS trust store, live provider, billing, or backend continuation",
-    "each row uses a fresh Store and Host so answer bytes and item count grow independently of durable history",
-    "physical footprint peak is the macOS lifetime counter; retained idle is sampled after canonical commit, result verification, zero scratch charge, and released custody",
-    "SQLite file bytes include complete private provider items and one public answer; rows do not isolate filesystem cache from process footprint",
-    "process termination and restart tests are crash evidence, not power-loss qualification"
-  ]
+    "deterministic loopback HTTP qualifies no TLS trust or live-provider behavior",
+    "answer bytes and item counts grow independently in fresh Stores",
+    "retry of interrupted Attempts and power loss remain outside this slice"
+  ],
+  "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+  "measurement_runtime": {
+    "go_arch": "arm64",
+    "go_os": "darwin",
+    "go_version": "go1.27.1",
+    "gopsutil_version": "v4.26.7",
+    "logical_cpus": 10,
+    "module_path": "latifa.local/research",
+    "physical_memory_bytes": 17179869184
+  },
+  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+  "scope": "issue-173 production model output bytes and item counts",
+  "status": "passed",
+  "tested_revision": "f3bec1f5cc6a8fdf6105aa58409191d73e2e3af5",
+  "working_tree_dirty": false,
+  "zig": "0.16.0"
 }

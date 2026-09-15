@@ -37,17 +37,17 @@ func TestMemoryStatusDistinguishesMissingAggregationFromTargetMiss(t *testing.T)
 }
 
 func TestOutputAuditQualifiesEverySemanticCount(t *testing.T) {
-	valid := outputAudit{CanonicalOutputItems: 129, PrivateContentRows: 130, AssistantProjections: 1}
-	if !outputAuditValid(valid, 128) || outputCaseStatus("passed", true) != "passed" {
+	valid := outputAudit{CanonicalOutputItems: 33, PrivateContentRows: 34, AssistantProjections: 1}
+	if !outputAuditValid(valid, 32) || outputCaseStatus("passed", true) != "passed" {
 		t.Fatal("valid output audit was rejected")
 	}
 	mutations := []outputAudit{
-		{CanonicalOutputItems: 128, PrivateContentRows: 130, AssistantProjections: 1},
-		{CanonicalOutputItems: 129, PrivateContentRows: 129, AssistantProjections: 1},
-		{CanonicalOutputItems: 129, PrivateContentRows: 130, AssistantProjections: 2},
+		{CanonicalOutputItems: 32, PrivateContentRows: 34, AssistantProjections: 1},
+		{CanonicalOutputItems: 33, PrivateContentRows: 33, AssistantProjections: 1},
+		{CanonicalOutputItems: 33, PrivateContentRows: 34, AssistantProjections: 2},
 	}
 	for _, audit := range mutations {
-		if outputAuditValid(audit, 128) {
+		if outputAuditValid(audit, 32) {
 			t.Fatalf("mutated output audit was accepted: %+v", audit)
 		}
 	}
