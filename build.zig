@@ -139,8 +139,11 @@ pub fn build(b: *std.Build) void {
     );
     measure_messages_step.dependOn(&measure_messages.step);
 
-    const measure_dispatch = b.addSystemCommand(&.{"python3"});
-    measure_dispatch.addFileArg(b.path("research/model-dispatch/measure.py"));
+    const measure_dispatch = b.addSystemCommand(&.{
+        "go", "run", "-mod=readonly", "./model-dispatch",
+    });
+    measure_dispatch.setCwd(b.path("research"));
+    measure_dispatch.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure_dispatch.addArtifactArg(release);
     const measure_dispatch_step = b.step(
         "measure-model-dispatch",
