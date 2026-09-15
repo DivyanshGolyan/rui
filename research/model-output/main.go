@@ -1391,6 +1391,17 @@ func runProviderChild(streams int, duration time.Duration, rounds int, artifacts
 	return server.Close()
 }
 
+func resolveBinaryArgument(value string) (string, error) {
+	if filepath.IsAbs(value) {
+		return value, nil
+	}
+	repository, err := measurement.RepositoryRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(repository, value), nil
+}
+
 func main() {
 	output := flag.String("output", "", "write the final JSON to this path")
 	capacityOnly := flag.Int("capacity", 0, "measure one active capacity")
@@ -1420,7 +1431,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	binary, err := filepath.Abs(flag.Arg(0))
+	binary, err := resolveBinaryArgument(flag.Arg(0))
 	if err != nil {
 		panic(err)
 	}
