@@ -27,7 +27,14 @@ import (
 	"latifa.local/research/model-output/provider"
 )
 
-const memoryTarget = 256 * 1024 * 1024
+const (
+	memoryTarget                = 256 * 1024 * 1024
+	capacityBatchInterval       = 20 * time.Millisecond
+	capacityEventsPerBatch      = 2
+	capacityEventBytes          = 39
+	capacityMaximumAverageCores = 2.0
+	capacityMaximumCPUSeconds   = 120.0
+)
 
 var answerSizes = []int{1024, 1024 * 1024, 8 * 1024 * 1024}
 var reasoningCounts = []int{1, 128, 1000}
@@ -842,6 +849,49 @@ func expectedCapacityRequests(keys []string) (int, string) {
 	return totalBytes, hex.EncodeToString(set.Sum(nil))
 }
 
+type capacityWork struct {
+	Batches uint64 `json:"batches"`
+	Events  uint64 `json:"events"`
+	Bytes   uint64 `json:"bytes"`
+}
+
+func checkedCapacityMultiply(values ...uint64) (uint64, error) {
+	result := uint64(1)
+	for _, value := range values {
+		if value != 0 && result > ^uint64(0)/value {
+			return 0, errors.New("capacity work expectation overflows uint64")
+		}
+		result *= value
+	}
+	return result, nil
+}
+
+func checkedCapacityAdd(left, right uint64) (uint64, error) {
+	if left > ^uint64(0)-right {
+		return 0, errors.New("capacity work expectation overflows uint64")
+	}
+	return left + right, nil
+}
+
+func expectedCapacityWork(capacity int, duration time.Duration) (capacityWork, error) {
+	if capacity <= 0 || duration <= 0 || duration%capacityBatchInterval != 0 {
+		return capacityWork{}, errors.New("invalid capacity work dimensions")
+	}
+	batches, err := checkedCapacityMultiply(uint64(capacity), uint64(duration/capacityBatchInterval))
+	if err != nil {
+		return capacityWork{}, err
+	}
+	events, err := checkedCapacityMultiply(batches, capacityEventsPerBatch)
+	if err != nil {
+		return capacityWork{}, err
+	}
+	bytes, err := checkedCapacityMultiply(events, capacityEventBytes)
+	if err != nil {
+		return capacityWork{}, err
+	}
+	return capacityWork{Batches: batches, Events: events, Bytes: bytes}, nil
+}
+
 type capacityAuditRow struct {
 	Key                  string  `json:"key"`
 	Session              string  `json:"session"`
@@ -919,32 +969,146 @@ func processDelta(firstValue, secondValue any) map[string]any {
 
 type capacityVerdictInput struct {
 	Capacity               int
+	Duration               time.Duration
 	Offer                  provider.Summary
 	Completion             provider.Summary
-	CaptureAvailable       bool
-	CaptureValid           bool
-	CleanupAvailable       bool
-	CleanupValid           bool
-	RequestIntegrityValid  bool
-	ResultDeliveryValid    bool
-	DurableAuditValid      bool
+	ExpectedWork           capacityWork
+	CaptureStatus          string
+	CleanupStatus          string
+	RequestIntegrityStatus string
+	ResultDeliveryStatus   string
+	DurableAuditStatus     string
 	MemoryStatus           string
+	SustainedCPUStatus     string
 	SustainedAverageCores  float64
 	CompleteWorkCPUSeconds float64
 }
 
+func providerOfferWorkComplete(summary provider.Summary, capacity int, expected capacityWork) bool {
+	return summary.ExpectedStreams == capacity &&
+		summary.ReadyStreams == capacity &&
+		summary.OfferFinished == capacity &&
+		summary.OfferFailedStreams == 0 &&
+		summary.CompletedBatches == expected.Batches &&
+		summary.CompletedEvents == expected.Events &&
+		summary.OfferBytes == expected.Bytes
+}
+
+func providerOfferQualified(summary provider.Summary, capacity int, duration time.Duration, expected capacityWork) bool {
+	perStreamBatches := uint64(duration / capacityBatchInterval)
+	start := time.Unix(0, summary.StartUnixNS)
+	horizon := start.Add(duration + capacityBatchInterval).UnixNano()
+	hardDeadline := start.Add(duration + 2*capacityBatchInterval).UnixNano()
+	return providerOfferWorkComplete(summary, capacity, expected) &&
+		summary.DeliveryMethod == "bounded_delivery_v1" &&
+		summary.DeliveryRule.BatchIntervalNS == capacityBatchInterval.Nanoseconds() &&
+		summary.DeliveryRule.AllowedDeliveryVariationNS == capacityBatchInterval.Nanoseconds() &&
+		summary.DeliveryRule.MaximumCompletionGapNS == (2*capacityBatchInterval).Nanoseconds() &&
+		summary.DeliveryRule.BurstWindowNS == capacityBatchInterval.Nanoseconds() &&
+		summary.DeliveryRule.MaximumBatchesPerBurstWindow == 2 &&
+		summary.ValidOfferStreams == capacity &&
+		summary.TimingInvalidStreams == 0 &&
+		summary.MinimumBatches == perStreamBatches &&
+		summary.MaximumBatches == perStreamBatches &&
+		summary.ExpectedBatches == expected.Batches &&
+		summary.ExpectedEvents == expected.Events &&
+		summary.ExpectedOfferBytes == expected.Bytes &&
+		summary.EarlyCompletionViolations == 0 && summary.WorstEarlyCompletion == nil &&
+		summary.LateCompletionViolations == 0 && summary.WorstLateCompletion == nil &&
+		summary.CompletionGapViolations == 0 && summary.WorstCompletionGap == nil &&
+		summary.BurstWindowViolations == 0 && summary.WorstBurstWindow == nil &&
+		summary.MaximumCompletionDelay != nil && summary.MaximumCompletionDelay.ObservedNS >= 0 && summary.MaximumCompletionDelay.ObservedNS <= (2*capacityBatchInterval).Nanoseconds() &&
+		summary.MaximumAdjacentGap != nil && summary.MaximumAdjacentGap.ObservedNS >= 0 && summary.MaximumAdjacentGap.ObservedNS <= (2*capacityBatchInterval).Nanoseconds() &&
+		summary.MinimumTwoBackSpan != nil && summary.MinimumTwoBackSpan.ObservedNS >= capacityBatchInterval.Nanoseconds() &&
+		summary.EventBytes == capacityEventBytes &&
+		summary.EventsPerBatch == capacityEventsPerBatch &&
+		summary.BatchesPerStream == int(perStreamBatches) &&
+		summary.OfferSeconds == duration.Seconds() &&
+		summary.StartUnixNS != 0 &&
+		summary.OfferHorizonUnixNS == horizon &&
+		summary.HardDeadlineUnixNS == hardDeadline &&
+		summary.EarliestFinalCompletionUnixNS >= summary.StartUnixNS &&
+		summary.EarliestFinalCompletionUnixNS <= summary.OfferHorizonUnixNS
+}
+
+func providerTerminalComplete(summary provider.Summary, capacity int) bool {
+	return summary.TerminalFinished == capacity && summary.TerminalFailedStreams == 0
+}
+
 func capacityVerdict(input capacityVerdictInput) string {
-	fixtureComplete := input.Offer.ExpectedStreams == input.Capacity && input.Offer.ReadyStreams == input.Capacity && input.Offer.ExactStreams == input.Capacity && input.Offer.MissedBatches == 0 && input.Offer.FailedStreams == 0 && input.Completion.TerminalFinished == input.Capacity && input.Completion.FailedStreams == 0
-	if !fixtureComplete {
+	statuses := []string{input.CaptureStatus, input.CleanupStatus, input.RequestIntegrityStatus, input.ResultDeliveryStatus, input.DurableAuditStatus, input.MemoryStatus, input.SustainedCPUStatus}
+	for _, status := range statuses {
+		if status == "failed" {
+			return "failed"
+		}
+	}
+	providerValid := providerOfferQualified(input.Offer, input.Capacity, input.Duration, input.ExpectedWork) && providerTerminalComplete(input.Completion, input.Capacity)
+	if !providerValid {
 		return "incomplete"
 	}
-	if !input.CaptureAvailable || !input.CleanupAvailable || input.MemoryStatus == "incomplete" {
-		return "incomplete"
+	for _, status := range statuses {
+		if status == "incomplete" || status == "unavailable" || status == "" {
+			return "incomplete"
+		}
 	}
-	if !input.CaptureValid || !input.CleanupValid || !input.RequestIntegrityValid || !input.ResultDeliveryValid || !input.DurableAuditValid {
+	if input.MemoryStatus == "target_miss" || input.SustainedCPUStatus == "target_miss" || input.SustainedAverageCores > capacityMaximumAverageCores || input.CompleteWorkCPUSeconds > capacityMaximumCPUSeconds {
+		return "target_miss"
+	}
+	for _, status := range statuses {
+		if status != "passed" {
+			return "incomplete"
+		}
+	}
+	return "passed"
+}
+
+func observationStatus(available, valid bool) string {
+	if !available {
+		return "unavailable"
+	}
+	if !valid {
 		return "failed"
 	}
-	if input.MemoryStatus == "target_miss" || input.SustainedAverageCores > 2 || input.CompleteWorkCPUSeconds > 120 {
+	return "passed"
+}
+
+func dependentObservationStatus(prerequisite, available, valid bool) string {
+	if !prerequisite {
+		return "unavailable"
+	}
+	return observationStatus(available, valid)
+}
+
+type bracketedCPUSample struct {
+	CPUSeconds float64   `json:"host_cpu_seconds"`
+	QueryStart time.Time `json:"query_start"`
+	QueryEnd   time.Time `json:"query_finish"`
+}
+
+func sampleCPU(target *process.Process) (bracketedCPUSample, error) {
+	result := bracketedCPUSample{QueryStart: time.Now()}
+	value, err := measurement.CPUSeconds(target)
+	result.QueryEnd = time.Now()
+	if err != nil {
+		return bracketedCPUSample{}, err
+	}
+	result.CPUSeconds = value
+	return result, nil
+}
+
+func capacityCPUWindowValid(offerStart time.Time, first, second bracketedCPUSample, earliestFinalCompletion time.Time) bool {
+	return !first.QueryStart.Before(offerStart.Add(10*time.Second)) &&
+		!second.QueryStart.Before(offerStart.Add(50*time.Second)) &&
+		second.QueryStart.Sub(first.QueryEnd) >= 40*time.Second &&
+		!earliestFinalCompletion.IsZero() &&
+		!second.QueryEnd.After(earliestFinalCompletion)
+}
+
+func sustainedCPUQualificationStatus(offerQualified, windowValid bool, averageCores float64) string {
+	if !offerQualified || !windowValid {
+		return "unavailable"
+	}
+	if averageCores > capacityMaximumAverageCores {
 		return "target_miss"
 	}
 	return "passed"
@@ -959,6 +1123,10 @@ func measureCapacityRound(binary, directory, store string, round, capacity int, 
 		if err := fixture.Reset(deadline); err != nil {
 			return nil, err
 		}
+	}
+	expectedWork, err := expectedCapacityWork(capacity, duration)
+	if err != nil {
+		return nil, err
 	}
 	fixtureInitial, err := measurement.SampleProcess(fixture.Process, filepath.Join(roundDirectory, "provider-footprint-initial.txt"))
 	if err != nil {
@@ -1007,28 +1175,33 @@ func measureCapacityRound(binary, directory, store string, round, capacity int, 
 	if err := deadline.SleepUntil(offerStart.Add(10 * time.Second)); err != nil {
 		return nil, err
 	}
-	cpu10, err := measurement.CPUSeconds(host.Process)
+	cpu10, err := sampleCPU(host.Process)
 	if err != nil {
 		return nil, err
 	}
-	sample10At := time.Now()
-	if err := deadline.SleepUntil(offerStart.Add(50 * time.Second)); err != nil {
+	secondTarget := offerStart.Add(50 * time.Second)
+	if afterFirst := cpu10.QueryEnd.Add(40 * time.Second); afterFirst.After(secondTarget) {
+		secondTarget = afterFirst
+	}
+	if err := deadline.SleepUntil(secondTarget); err != nil {
 		return nil, err
 	}
-	cpu50, err := measurement.CPUSeconds(host.Process)
+	cpu50, err := sampleCPU(host.Process)
 	if err != nil {
 		return nil, err
 	}
-	sample50At := time.Now()
 	offer, err := fixture.WaitOffer(deadline)
 	if err != nil {
 		return nil, err
 	}
-	if err := facts.Write("cpu_window_and_offer", map[string]any{"round": round, "second_10": map[string]any{"host_cpu_seconds": cpu10, "sample_unix_ns": sample10At.UnixNano()}, "second_50": map[string]any{"host_cpu_seconds": cpu50, "sample_unix_ns": sample50At.UnixNano()}, "provider_offer": offer}); err != nil {
+	if err := facts.Write("cpu_window_and_offer", map[string]any{"round": round, "first": cpu10, "second": cpu50, "provider_offer": offer}); err != nil {
 		return nil, err
 	}
-	responseScratch := uint64(offer.OfferBytes)
-	expectedScratch := baselineScratch + responseScratch
+	responseScratch := expectedWork.Bytes
+	expectedScratch, err := checkedCapacityAdd(baselineScratch, responseScratch)
+	if err != nil {
+		return nil, err
+	}
 	heldInspection, err := client.Inspect(sessions[0])
 	if err != nil {
 		return nil, err
@@ -1090,47 +1263,72 @@ func measureCapacityRound(binary, directory, store string, round, capacity int, 
 	if err != nil {
 		return nil, err
 	}
-	sustainedCPU, err := measurement.CheckedCPUDelta(cpu10, cpu50)
+	sustainedCPU, err := measurement.CheckedCPUDelta(cpu10.CPUSeconds, cpu50.CPUSeconds)
 	if err != nil {
 		return nil, err
 	}
-	sampleWindow := sample50At.Sub(sample10At).Seconds()
-	if sampleWindow <= 0 {
-		return nil, errors.New("nonpositive CPU sample window")
+	minimumSampleWindow := cpu50.QueryStart.Sub(cpu10.QueryEnd)
+	maximumSampleWindow := cpu50.QueryEnd.Sub(cpu10.QueryStart)
+	sustainedCores := 0.0
+	if minimumSampleWindow > 0 {
+		sustainedCores = sustainedCPU / minimumSampleWindow.Seconds()
 	}
-	sustainedCores := sustainedCPU / sampleWindow
+	var earliestFinalCompletion time.Time
+	if offer.EarliestFinalCompletionUnixNS != 0 {
+		earliestFinalCompletion = time.Unix(0, offer.EarliestFinalCompletionUnixNS)
+	}
+	offerQualified := providerOfferQualified(offer, capacity, duration, expectedWork)
+	bracketValid := capacityCPUWindowValid(offerStart, cpu10, cpu50, earliestFinalCompletion)
+	cpuWindowValid := offerQualified && bracketValid
+	sustainedCPUStatus := sustainedCPUQualificationStatus(offerQualified, bracketValid, sustainedCores)
 	completeCPU, err := measurement.CheckedCPUDelta(cpuAdmissionStart, cpuEnd)
 	if err != nil {
 		return nil, err
 	}
 	expectedRequestBytes, expectedRequestDigest := expectedCapacityRequests(keys)
 	requestComplete := offer.RequestBytes == expectedRequestBytes && offer.RequestSetSHA256 == expectedRequestDigest
+	offerWorkComplete := providerOfferWorkComplete(offer, capacity, expectedWork)
+	terminalComplete := providerTerminalComplete(completion, capacity)
+	captureStatus := dependentObservationStatus(offerWorkComplete, heldScratchOK, captureComplete)
+	resultDeliveryStatus := dependentObservationStatus(offerWorkComplete && terminalComplete, true, resultDeliveryComplete)
+	durableAuditStatus := dependentObservationStatus(offerWorkComplete && terminalComplete, true, auditComplete)
+	cleanupStatus := observationStatus(finalScratchOK && finalCustodyOK, cleanupComplete)
+	requestIntegrityStatus := observationStatus(true, requestComplete)
 	initialWhole := wholeLatifa(initial)
 	retainedWhole := wholeLatifa(retained)
 	memoryVerdict := memoryStatus(initialWhole, retainedWhole)
 	status := capacityVerdict(capacityVerdictInput{
 		Capacity:               capacity,
+		Duration:               duration,
 		Offer:                  offer,
 		Completion:             completion,
-		CaptureAvailable:       heldScratchOK,
-		CaptureValid:           captureComplete,
-		CleanupAvailable:       finalScratchOK && finalCustodyOK,
-		CleanupValid:           cleanupComplete,
-		RequestIntegrityValid:  requestComplete,
-		ResultDeliveryValid:    resultDeliveryComplete,
-		DurableAuditValid:      auditComplete,
+		ExpectedWork:           expectedWork,
+		CaptureStatus:          captureStatus,
+		CleanupStatus:          cleanupStatus,
+		RequestIntegrityStatus: requestIntegrityStatus,
+		ResultDeliveryStatus:   resultDeliveryStatus,
+		DurableAuditStatus:     durableAuditStatus,
 		MemoryStatus:           memoryVerdict,
+		SustainedCPUStatus:     sustainedCPUStatus,
 		SustainedAverageCores:  sustainedCores,
 		CompleteWorkCPUSeconds: completeCPU,
 	})
 	return map[string]any{
 		"status": status, "round": round, "active_capacity": capacity, "offer_seconds": duration.Seconds(), "fixture_ready": ready, "paced_offer": offer, "fixture_completion": completion,
 		"retained_request_baseline": baselineInspection, "capture_before_terminal": heldInspection, "completion_inspection": finalInspection,
-		"cpu":     map[string]any{"seconds_10_to_50": sustainedCPU, "sample_window_seconds": sampleWindow, "sample_10_unix_ns": sample10At.UnixNano(), "sample_50_unix_ns": sample50At.UnixNano(), "average_cores_10_to_50": sustainedCores, "at_most_2_average_cores": sustainedCores <= 2, "complete_work_cpu_seconds": completeCPU, "complete_work_at_most_120_cpu_seconds": completeCPU <= 120},
+		"cpu": map[string]any{
+			"status": sustainedCPUStatus, "provider_offer_qualified": offerQualified, "bracket_valid": bracketValid, "cpu_seconds": sustainedCPU,
+			"first_query":                   map[string]any{"start_unix_ns": cpu10.QueryStart.UnixNano(), "finish_unix_ns": cpu10.QueryEnd.UnixNano(), "host_cpu_seconds": cpu10.CPUSeconds},
+			"second_query":                  map[string]any{"start_unix_ns": cpu50.QueryStart.UnixNano(), "finish_unix_ns": cpu50.QueryEnd.UnixNano(), "host_cpu_seconds": cpu50.CPUSeconds},
+			"minimum_sample_window_seconds": minimumSampleWindow.Seconds(), "maximum_sample_window_seconds": maximumSampleWindow.Seconds(), "earliest_valid_stream_final_completion_unix_ns": offer.EarliestFinalCompletionUnixNS,
+			"average_cores_conservative": sustainedCores, "at_most_2_average_cores": cpuWindowValid && sustainedCores <= capacityMaximumAverageCores, "complete_work_cpu_seconds": completeCPU, "complete_work_at_most_120_cpu_seconds": completeCPU <= capacityMaximumCPUSeconds,
+		},
 		"initial": map[string]any{"host": initial, "whole_latifa": initialWhole}, "retained": map[string]any{"host": retained, "whole_latifa": retainedWhole},
 		"provider_process":    map[string]any{"pid": fixture.cmd.Process.Pid, "initial": fixtureInitial, "retained": fixtureRetained},
+		"host_dimensions":     map[string]any{"capture": captureStatus, "cleanup": cleanupStatus, "request_integrity": requestIntegrityStatus, "result_delivery": resultDeliveryStatus, "durable_audit": durableAuditStatus},
 		"all_results_audited": auditComplete, "result_delivery_complete": resultDeliveryComplete, "audit_rows": auditRows, "retained_request_scratch_bytes": baselineScratch, "expected_response_scratch_delta_bytes": responseScratch, "expected_retained_scratch_bytes": expectedScratch, "capture_observation_complete": captureComplete, "cleanup_observation_complete": cleanupComplete,
-		"request_integrity": map[string]any{"status": map[bool]string{true: "passed", false: "failed"}[requestComplete], "expected_bytes": expectedRequestBytes, "observed_bytes": offer.RequestBytes, "expected_set_sha256": expectedRequestDigest, "observed_set_sha256": offer.RequestSetSHA256},
+		"expected_provider_work": expectedWork,
+		"request_integrity":      map[string]any{"status": requestIntegrityStatus, "expected_bytes": expectedRequestBytes, "observed_bytes": offer.RequestBytes, "expected_set_sha256": expectedRequestDigest, "observed_set_sha256": offer.RequestSetSHA256},
 	}, nil
 }
 
@@ -1305,7 +1503,7 @@ func main() {
 		spillStatusRows = append(spillStatusRows, spillRows)
 	}
 	overallStatus := reduceStatuses(byteRows, itemRows, spillStatusRows, capacityRows)
-	result := map[string]any{"format": "latifa-model-output-v3-go", "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification", "status": overallStatus, "artifacts": root, "answer_byte_growth": byteRows, "item_count_growth": itemRows, "sqlite_cache_spill_comparison": spillRows, "active_capacity_growth": capacityRows, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "deterministic loopback HTTP qualifies no live-provider behavior", "the reference offer is 60 seconds at 100 small SSE events per second per stream", "Host CPU from seconds 10 through 50 must average at most two cores and complete work must consume at most 120 CPU seconds", "every result key is audited before final global custody and scratch release is accepted", "spill rows record per-process Darwin disk-write growth; direct sync-call observation is unavailable"}}
+	result := map[string]any{"format": "latifa-model-output-v4-go", "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification", "status": overallStatus, "artifacts": root, "answer_byte_growth": byteRows, "item_count_growth": itemRows, "sqlite_cache_spill_comparison": spillRows, "active_capacity_growth": capacityRows, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "deterministic loopback HTTP qualifies no live-provider behavior", "the reference offer is 60 seconds at 100 small SSE events per second per stream under the explicit bounded-delivery-v1 timing rule", "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous valid offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "every result key is audited before final global custody and scratch release is accepted", "spill rows record per-process Darwin disk-write growth; direct sync-call observation is unavailable"}}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)

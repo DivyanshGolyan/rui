@@ -35,80 +35,197 @@ func TestPacedWriteCountsPartialBodyBytes(t *testing.T) {
 	}
 }
 
-type countingWriter struct {
-	writes int
-	body   bytes.Buffer
+func TestExpectedWorkUsesCheckedArithmetic(t *testing.T) {
+	work, err := expectedWork(1000, 3000, uint64(len(event)), eventsPerBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work != (workExpectation{Batches: 3_000_000, Events: 6_000_000, Bytes: 234_000_000}) {
+		t.Fatalf("work = %+v", work)
+	}
+	if _, err := expectedWork(^uint64(0), 2, 1, 1); err == nil {
+		t.Fatal("overflow unexpectedly accepted")
+	}
 }
 
-func (w *countingWriter) Write(value []byte) (int, error) {
-	w.writes++
-	return w.body.Write(value)
-}
-
-func (w *countingWriter) String() string { return w.body.String() }
-
-func TestScheduledBatchClassifiesDeadlineBoundaries(t *testing.T) {
-	origin := time.Unix(100, 0)
-	slot := scheduledSlot{start: origin, end: origin.Add(20 * time.Millisecond)}
-	for _, wakeAt := range []time.Time{slot.end, slot.end.Add(time.Nanosecond)} {
-		writer := &countingWriter{}
-		flushes := 0
-		result, err := offerScheduledBatch(writer, func() error { flushes++; return nil }, "abcdef", slot, wakeAt, func() time.Time {
-			t.Fatal("late wake sampled a write completion time")
-			return time.Time{}
-		})
-		if err != nil || result.written != 0 || result.completed || result.missedStage != lateWake || result.overdue != wakeAt.Sub(slot.end) || writer.writes != 0 || flushes != 0 {
-			t.Fatalf("late wake %s = result %+v writes %d flushes %d err %v", wakeAt, result, writer.writes, flushes, err)
+func directBurstWindowValid(completions []time.Time, interval time.Duration) bool {
+	for index, start := range completions {
+		if index > 0 && start.Equal(completions[index-1]) {
+			continue
+		}
+		count := 0
+		end := start.Add(interval)
+		for _, completion := range completions {
+			if !completion.Before(start) && completion.Before(end) {
+				count++
+			}
+		}
+		if count > maximumBatchesPerBurstWindow {
+			return false
 		}
 	}
-	for _, test := range []struct {
-		name      string
-		finished  time.Time
-		completed bool
-		stage     missStage
-		overdue   time.Duration
-	}{
-		{name: "at deadline", finished: slot.end, completed: true},
-		{name: "after deadline", finished: slot.end.Add(time.Nanosecond), stage: lateFlush, overdue: time.Nanosecond},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			writer := &countingWriter{}
-			flushes := 0
-			result, err := offerScheduledBatch(writer, func() error { flushes++; return nil }, "abcdef", slot, slot.start, func() time.Time { return test.finished })
-			if err != nil || result.written != 6 || result.completed != test.completed || result.missedStage != test.stage || result.overdue != test.overdue || writer.String() != "abcdef" || writer.writes != 1 || flushes != 1 {
-				t.Fatalf("scheduled write = result %+v body %q writes %d flushes %d err %v", result, writer.String(), writer.writes, flushes, err)
+	return true
+}
+
+func productionBurstWindowValid(completions []time.Time) bool {
+	var evidence deliveryEvidence
+	start := time.Unix(100, 0)
+	for ordinal, completion := range completions {
+		evidence.recordCompletion(start, ordinal, completion)
+	}
+	return evidence.burst.Count == 0
+}
+
+func TestBurstRuleMatchesIndependentHalfOpenWindowOracle(t *testing.T) {
+	origin := time.Unix(100, 0)
+	explicit := [][]time.Time{
+		{origin, origin, origin.Add(batchInterval), origin.Add(batchInterval)},
+		{origin, origin, origin.Add(batchInterval - time.Nanosecond)},
+		{origin, origin, origin},
+		{origin, origin.Add(batchInterval), origin.Add(2 * batchInterval)},
+		{origin, origin.Add(batchInterval + time.Nanosecond), origin.Add(2 * batchInterval)},
+	}
+	for _, completions := range explicit {
+		if got, want := productionBurstWindowValid(completions), directBurstWindowValid(completions, batchInterval); got != want {
+			t.Fatalf("explicit completions %v: production %t oracle %t", completions, got, want)
+		}
+	}
+	var generate func([]time.Time, int)
+	generate = func(prefix []time.Time, minimumTick int) {
+		if len(prefix) >= 3 {
+			if got, want := productionBurstWindowValid(prefix), directBurstWindowValid(prefix, batchInterval); got != want {
+				t.Fatalf("generated completions %v: production %t oracle %t", prefix, got, want)
 			}
+		}
+		if len(prefix) == 6 {
+			return
+		}
+		for tick := minimumTick; tick <= 8; tick++ {
+			next := append(append([]time.Time(nil), prefix...), origin.Add(time.Duration(tick)*5*time.Millisecond))
+			generate(next, tick)
+		}
+	}
+	generate(nil, 0)
+}
+
+func TestDeliveryTimingBoundariesAndWaitTarget(t *testing.T) {
+	origin := time.Unix(100, 0)
+	var boundary deliveryEvidence
+	boundary.recordCompletion(origin, 0, origin.Add(2*batchInterval))
+	boundary.recordCompletion(origin, 1, origin.Add(3*batchInterval))
+	if !boundary.timingValid() {
+		t.Fatalf("inclusive late and gap boundaries rejected: %+v", boundary)
+	}
+	var gapBoundary deliveryEvidence
+	gapBoundary.recordCompletion(origin, 0, origin)
+	gapBoundary.recordCompletion(origin, 1, origin.Add(maximumCompletionGap))
+	if gapBoundary.gap.Count != 0 || gapBoundary.maximumGap.witness.ObservedNS != maximumCompletionGap.Nanoseconds() {
+		t.Fatalf("inclusive 40ms gap boundary rejected: %+v", gapBoundary)
+	}
+
+	var late deliveryEvidence
+	late.recordCompletion(origin, 0, origin.Add(2*batchInterval+time.Nanosecond))
+	if late.late.Count != 1 || late.late.Worst.ViolationNS != 1 {
+		t.Fatalf("late evidence = %+v", late.late)
+	}
+
+	var early deliveryEvidence
+	early.recordCompletion(origin, 1, origin.Add(batchInterval-time.Nanosecond))
+	if early.early.Count != 1 || early.early.Worst.ViolationNS != 1 {
+		t.Fatalf("early evidence = %+v", early.early)
+	}
+
+	var gap deliveryEvidence
+	gap.recordCompletion(origin, 0, origin)
+	gap.recordCompletion(origin, 1, origin.Add(maximumCompletionGap+time.Nanosecond))
+	if gap.gap.Count != 1 || gap.gap.Worst.ViolationNS != 1 {
+		t.Fatalf("gap evidence = %+v", gap.gap)
+	}
+
+	var delayed deliveryEvidence
+	delayed.recordCompletion(origin, 0, origin.Add(35*time.Millisecond))
+	if target := delayed.waitTarget(origin, 2); !target.Equal(origin.Add(55 * time.Millisecond)) {
+		t.Fatalf("two-back completion did not constrain catch-up: %s", target)
+	}
+}
+
+func runDeterministicOffer(start time.Time, duration time.Duration, completions []time.Time, failureOrdinal int) (deliveryEvidence, error, []time.Time, int) {
+	now := start
+	targets := make([]time.Time, 0, len(completions))
+	writes := 0
+	delivery, err := offerBatches(start, duration, len(completions), func() time.Time { return now }, func(target time.Time) error {
+		targets = append(targets, target)
+		if target.After(now) {
+			now = target
+		}
+		return nil
+	}, func() (int, time.Time, error) {
+		ordinal := writes
+		writes++
+		if ordinal == failureOrdinal {
+			return 3, time.Time{}, io.ErrUnexpectedEOF
+		}
+		now = completions[ordinal]
+		return 6, now, nil
+	})
+	return delivery, err, targets, writes
+}
+
+func TestOfferLoopPreservesLateWorkAndConstrainsCatchUp(t *testing.T) {
+	start := time.Unix(100, 0)
+	completions := []time.Time{start.Add(25 * time.Millisecond), start.Add(40 * time.Millisecond), start.Add(55 * time.Millisecond)}
+	delivery, err, targets, writes := runDeterministicOffer(start, 60*time.Millisecond, completions, -1)
+	if err != nil || writes != 3 || delivery.completed != 3 || delivery.offerBytes != 18 || !delivery.timingValid() {
+		t.Fatalf("allowed late offer = delivery %+v writes %d err %v", delivery, writes, err)
+	}
+	wantTargets := []time.Time{start, start.Add(20 * time.Millisecond), start.Add(45 * time.Millisecond)}
+	for index := range wantTargets {
+		if !targets[index].Equal(wantTargets[index]) {
+			t.Fatalf("target %d = %s want %s", index, targets[index], wantTargets[index])
+		}
+	}
+
+	invalidCompletions := []time.Time{start.Add(40*time.Millisecond + time.Nanosecond), start.Add(42 * time.Millisecond), start.Add(61*time.Millisecond + time.Nanosecond)}
+	invalid, err, _, writes := runDeterministicOffer(start, 60*time.Millisecond, invalidCompletions, -1)
+	if err != nil || writes != 3 || invalid.completed != 3 || invalid.late.Count == 0 {
+		t.Fatalf("timing-invalid work was skipped: delivery %+v writes %d err %v", invalid, writes, err)
+	}
+}
+
+func TestOfferLoopStopsOnTransportFailureAndHardDeadline(t *testing.T) {
+	start := time.Unix(100, 0)
+	completions := []time.Time{start, start.Add(batchInterval), start.Add(2 * batchInterval)}
+	delivery, err, _, writes := runDeterministicOffer(start, 60*time.Millisecond, completions, 1)
+	if !errors.Is(err, io.ErrUnexpectedEOF) || writes != 2 || delivery.completed != 1 || delivery.offerBytes != 9 {
+		t.Fatalf("transport failure = delivery %+v writes %d err %v", delivery, writes, err)
+	}
+
+	for _, offset := range []time.Duration{60 * time.Millisecond, 60*time.Millisecond + time.Nanosecond} {
+		writes := 0
+		_, err := offerBatches(start, 20*time.Millisecond, 1, func() time.Time { return start.Add(offset) }, func(time.Time) error { return nil }, func() (int, time.Time, error) {
+			writes++
+			return 6, start.Add(offset), nil
 		})
+		if !errors.Is(err, errOfferHardDeadline) || writes != 0 {
+			t.Fatalf("hard deadline offset %s = writes %d err %v", offset, writes, err)
+		}
+	}
+
+	now := start
+	writes = 0
+	_, err = offerBatches(start, 20*time.Millisecond, 1, func() time.Time { return now }, func(time.Time) error {
+		now = start.Add(60 * time.Millisecond)
+		return nil
+	}, func() (int, time.Time, error) {
+		writes++
+		return 6, now, nil
+	})
+	if !errors.Is(err, errOfferHardDeadline) || writes != 0 {
+		t.Fatalf("deadline reached while waiting = writes %d err %v", writes, err)
 	}
 }
 
-func TestMissEvidenceOwnsExactBoundedAccounting(t *testing.T) {
-	var evidence missEvidence
-	if evidence.total() != 0 || evidence.fact().Witnesses == nil {
-		t.Fatalf("zero evidence = %+v", evidence.fact())
-	}
-	evidence.record(2, lateWake, 3*time.Nanosecond)
-	evidence.record(3, lateFlush, 5*time.Nanosecond)
-	evidence.record(4, lateWake, 3*time.Nanosecond)
-	if evidence.lateWake.MaximumOverdueOrdinal != 2 {
-		t.Fatal("equal overdue duration replaced the earlier deterministic witness")
-	}
-	for ordinal := 5; ordinal <= 10; ordinal++ {
-		evidence.record(ordinal, lateWake, time.Duration(ordinal)*time.Nanosecond)
-	}
-	fact := evidence.fact()
-	if evidence.total() != 9 || evidence.total() != fact.LateWake.Count+fact.LateFlush.Count || fact.LateWake.Count != 8 || fact.LateFlush.Count != 1 {
-		t.Fatalf("counts = total %d fact %+v", evidence.total(), fact)
-	}
-	if fact.LateWake.FirstOrdinal != 2 || fact.LateWake.LastOrdinal != 10 || fact.LateWake.MaximumOverdueOrdinal != 10 || fact.LateWake.MaximumOverdueNS != 10 || fact.LateFlush.FirstOrdinal != 3 || fact.LateFlush.LastOrdinal != 3 || fact.LateFlush.MaximumOverdueOrdinal != 3 || fact.LateFlush.MaximumOverdueNS != 5 {
-		t.Fatalf("stage evidence = %+v", fact)
-	}
-	if len(fact.Witnesses) != missWitnessLimit || fact.WitnessesOmitted != 1 || fact.Witnesses[0].Ordinal != 2 || fact.Witnesses[7].Ordinal != 9 {
-		t.Fatalf("bounded witnesses = %+v", fact)
-	}
-}
-
-func TestWaitOfferPersistsMissEvidenceAndResetClearsIt(t *testing.T) {
+func TestWaitOfferPersistsBoundedDeliveryEvidenceAndResetClearsIt(t *testing.T) {
 	root := t.TempDir()
 	roundOne := filepath.Join(root, "round-1")
 	if err := os.Mkdir(roundOne, 0o700); err != nil {
@@ -118,11 +235,14 @@ func TestWaitOfferPersistsMissEvidenceAndResetClearsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := newFixture(1, 40*time.Millisecond, roundOne, facts)
-	var misses missEvidence
-	misses.record(7, lateWake, 11*time.Nanosecond)
-	misses.record(8, lateFlush, 13*time.Nanosecond)
-	fixture.streams["stream-a"] = &stream{id: "stream-a", completed: 0, misses: misses, offerBytes: len(event) * 2}
+	fixture, err := newFixture(1, 40*time.Millisecond, roundOne, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delivery deliveryEvidence
+	delivery.addWritten(len(event) * eventsPerBatch)
+	delivery.recordCompletion(time.Unix(100, 0), 0, time.Unix(100, 0).Add(2*batchInterval+11*time.Nanosecond))
+	fixture.streams["stream-a"] = &stream{id: "stream-a", delivery: delivery}
 	fixture.ready = 1
 	fixture.offerFinished = 1
 	fixture.terminalFinished = 1
@@ -139,14 +259,14 @@ func TestWaitOfferPersistsMissEvidenceAndResetClearsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.MissedBatches != 2 || summary.LateWakeMissedBatches != 1 || summary.LateFlushMissedBatches != 1 || summary.MaximumLateWake == nil || summary.MaximumLateWake.ID != "stream-a" || summary.MaximumLateWake.Ordinal != 7 || summary.MaximumLateWake.OverdueNS != 11 || summary.MaximumLateFlush == nil || summary.MaximumLateFlush.Ordinal != 8 || summary.MaximumLateFlush.OverdueNS != 13 {
+	if summary.DeliveryMethod != deliveryMethod || summary.LateCompletionViolations != 1 || summary.WorstLateCompletion == nil || summary.WorstLateCompletion.ID != "stream-a" || summary.WorstLateCompletion.Ordinal != 0 || summary.WorstLateCompletion.ViolationNS != 11 {
 		t.Fatalf("summary = %+v", summary)
 	}
 	encodedSummary, err := json.Marshal(summary)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(encodedSummary, []byte("maximum_lateness_ms")) || !bytes.Contains(encodedSummary, []byte("late_wake_missed_batches")) {
+	if bytes.Contains(encodedSummary, []byte("missed_batches")) || !bytes.Contains(encodedSummary, []byte("bounded_delivery_v1")) {
 		t.Fatalf("summary JSON = %s", encodedSummary)
 	}
 	encodedRows, err := os.ReadFile(filepath.Join(roundOne, "offer-streams.json"))
@@ -157,7 +277,7 @@ func TestWaitOfferPersistsMissEvidenceAndResetClearsIt(t *testing.T) {
 	if err := json.Unmarshal(encodedRows, &rows); err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 || rows[0].Missed != 2 || len(rows[0].MissEvidence.Witnesses) != 2 || rows[0].MissEvidence.Witnesses[0].Ordinal != 7 || rows[0].MissEvidence.Witnesses[1].Stage != lateFlush {
+	if len(rows) != 1 || rows[0].Delivery.CompletedBatches != 1 || rows[0].Delivery.LateCompletionViolations.Count != 1 {
 		t.Fatalf("offer-streams.json = %+v", rows)
 	}
 	if err := server.Reset(); err != nil {
@@ -165,35 +285,43 @@ func TestWaitOfferPersistsMissEvidenceAndResetClearsIt(t *testing.T) {
 	}
 	defer server.facts.Close()
 	reset := server.Snapshot()
-	if reset.MissedBatches != 0 || reset.LateWakeMissedBatches != 0 || reset.LateFlushMissedBatches != 0 || reset.MaximumLateWake != nil || reset.MaximumLateFlush != nil {
-		t.Fatalf("reset summary retained miss evidence: %+v", reset)
+	if reset.LateCompletionViolations != 0 || reset.WorstLateCompletion != nil || reset.CompletedBatches != 0 {
+		t.Fatalf("reset summary retained delivery evidence: %+v", reset)
 	}
 }
 
-func TestAbsoluteSlotsDoNotReplayExpiredWork(t *testing.T) {
-	origin := time.Unix(100, 0)
-	interval := 20 * time.Millisecond
-	before := absoluteSlot(origin, interval, 0, origin.Add(-5*time.Millisecond))
-	if before.start != origin || before.end != origin.Add(interval) || before.wait != 5*time.Millisecond || slotExpired(origin.Add(-5*time.Millisecond), before.end) {
-		t.Fatalf("before slot = %+v", before)
+func TestFactsSnapshotAggregatesPassingTimingHeadroom(t *testing.T) {
+	fixture, err := newFixture(2, 60*time.Millisecond, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	within := absoluteSlot(origin, interval, 0, origin.Add(5*time.Millisecond))
-	if within.wait != 0 || slotExpired(origin.Add(5*time.Millisecond), within.end) {
-		t.Fatalf("within slot = %+v", within)
-	}
-	atEnd := absoluteSlot(origin, interval, 0, origin.Add(interval))
-	if !slotExpired(origin.Add(interval), atEnd.end) {
-		t.Fatalf("slot-end equality was not expired: %+v", atEnd)
-	}
-	jumpedAt := origin.Add(65 * time.Millisecond)
-	for ordinal := 1; ordinal <= 2; ordinal++ {
-		if slot := absoluteSlot(origin, interval, ordinal, jumpedAt); !slotExpired(jumpedAt, slot.end) {
-			t.Fatalf("expired slot %d would be replayed: %+v", ordinal, slot)
+	fixture.started = true
+	fixture.startAt = time.Unix(100, 0)
+	fixture.ready = 2
+	fixture.offerFinished = 2
+	for id, offsets := range map[string][]time.Duration{
+		"stream-a": {40 * time.Millisecond, 40 * time.Millisecond, 60 * time.Millisecond},
+		"stream-b": {0, 40 * time.Millisecond, 40 * time.Millisecond},
+	} {
+		var delivery deliveryEvidence
+		for ordinal, offset := range offsets {
+			delivery.addWritten(len(event) * eventsPerBatch)
+			delivery.recordCompletion(fixture.startAt, ordinal, fixture.startAt.Add(offset))
 		}
+		fixture.streams[id] = &stream{id: id, delivery: delivery}
 	}
-	later := absoluteSlot(origin, interval, 3, jumpedAt)
-	if later.start != origin.Add(60*time.Millisecond) || later.end != origin.Add(80*time.Millisecond) || later.wait != 0 || slotExpired(jumpedAt, later.end) {
-		t.Fatalf("later absolute slot moved after jump: %+v", later)
+	_, summary := fixture.factsSnapshot()
+	if summary.ValidOfferStreams != 2 {
+		t.Fatalf("passing streams = %d summary %+v", summary.ValidOfferStreams, summary)
+	}
+	if summary.MaximumCompletionDelay == nil || summary.MaximumCompletionDelay.ID != "stream-a" || summary.MaximumCompletionDelay.Ordinal != 0 || summary.MaximumCompletionDelay.ObservedNS != (40*time.Millisecond).Nanoseconds() {
+		t.Fatalf("maximum completion delay = %+v", summary.MaximumCompletionDelay)
+	}
+	if summary.MaximumAdjacentGap == nil || summary.MaximumAdjacentGap.ID != "stream-b" || summary.MaximumAdjacentGap.Ordinal != 1 || summary.MaximumAdjacentGap.ObservedNS != (40*time.Millisecond).Nanoseconds() {
+		t.Fatalf("maximum adjacent gap = %+v", summary.MaximumAdjacentGap)
+	}
+	if summary.MinimumTwoBackSpan == nil || summary.MinimumTwoBackSpan.ID != "stream-a" || summary.MinimumTwoBackSpan.Ordinal != 2 || summary.MinimumTwoBackSpan.ObservedNS != batchInterval.Nanoseconds() {
+		t.Fatalf("minimum two-back span = %+v", summary.MinimumTwoBackSpan)
 	}
 }
 
@@ -257,7 +385,7 @@ func TestExactPacedOfferAndTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if offer.ExactStreams != 1 || offer.MissedBatches != 0 {
+	if offer.ValidOfferStreams != 1 || offer.TimingInvalidStreams != 0 || offer.CompletedBatches != 2 || offer.CompletedEvents != 4 || offer.OfferBytes != uint64(4*len(event)) {
 		t.Fatalf("offer = %+v", offer)
 	}
 	if err := server.ReleaseTerminal(); err != nil {
@@ -267,7 +395,7 @@ func TestExactPacedOfferAndTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if complete.TerminalFinished != 1 || complete.FailedStreams != 0 {
+	if complete.TerminalFinished != 1 || complete.TerminalFailedStreams != 0 {
 		t.Fatalf("completion = %+v", complete)
 	}
 	result := <-response
@@ -309,7 +437,7 @@ func TestDisconnectedStreamCompletesFixtureAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if completion.TerminalFinished != 1 || completion.FailedStreams != 1 || completion.OfferBytes != 0 || completion.CompletedBatches != 0 {
+	if completion.TerminalFinished != 1 || completion.OfferFailedStreams != 1 || completion.TerminalFailedStreams != 1 || completion.OfferBytes != 0 || completion.CompletedBatches != 0 {
 		t.Fatalf("completion = %+v", completion)
 	}
 }
