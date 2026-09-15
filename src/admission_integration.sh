@@ -77,6 +77,7 @@ contains "$(cat "$state/competing.err")" "StoreAlreadyOwned"
 drain_store="$state/drain-store"
 drain_ready="$state/drain-ready"
 drain_error="$state/drain-error"
+drain_client_ready="$state/drain-client-ready"
 "$latifa" serve --store "$drain_store" --fault shutdown-after-accept >"$drain_ready" 2>"$drain_error" &
 extra_pid=$!
 attempts=0
@@ -93,23 +94,81 @@ while ! grep -q '^ready ' "$drain_ready"; do
     sleep 0.01
 done
 drain_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$drain_ready")
-python3 - "$drain_socket" <<'PY' &
-import socket, sys, time
+python3 - "$drain_socket" "$drain_store" "$root" "$drain_client_ready" <<'PY' &
+import json, os, socket, sys, time
+socket_path, store, workspace, client_ready = sys.argv[1:]
+body = json.dumps({
+    "version": "1",
+    "kind": "configure",
+    "store": os.path.realpath(store),
+    "key": "draining-request",
+    "session": "direct/draining",
+    "configuration": {
+        "workspace": {"state": "value", "value": workspace},
+        "model": {"state": "value", "value": "model-a"},
+        "instructions": {"state": "omitted"},
+        "tools": {"state": "omitted"},
+        "permission_mode": {"state": "omitted"},
+        "output_schema": {"state": "omitted"},
+    },
+}, separators=(",", ":")).encode()
 client = socket.socket(socket.AF_UNIX)
-client.connect(sys.argv[1])
-client.sendall(
-    b"POST /v1/configure HTTP/1.1\r\n"
-    b"Host: local\r\n"
-    b"Content-Type: application/json\r\n"
-    b"Content-Length: 1024\r\n"
-    b"X-Latifa-Wire-Version: 1\r\n\r\n{"
-)
+client.connect(socket_path)
+header = (
+    "POST /v1/configure HTTP/1.1\r\n"
+    "Host: local\r\n"
+    "Content-Type: application/json\r\n"
+    f"Content-Length: {len(body)}\r\n"
+    "X-Latifa-Wire-Version: 1\r\n\r\n"
+).encode()
+client.sendall(header + body[:1])
+with open(client_ready, "xb"):
+    pass
 time.sleep(0.5)
+client.sendall(body[1:])
+response = b""
+while True:
+    chunk = client.recv(4096)
+    if not chunk:
+        break
+    response += chunk
 client.close()
+if not response.startswith(b"HTTP/1.1 200 "):
+    raise SystemExit("transferred request did not finish during drain")
 PY
 client_pid=$!
-sleep 0.05
+attempts=0
+while [ ! -e "$drain_client_ready" ]; do
+    if ! kill -0 "$client_pid" 2>/dev/null; then
+        wait "$client_pid"
+    fi
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 500 ]; then
+        echo "drain fixture client did not transfer custody" >&2
+        exit 1
+    fi
+    sleep 0.01
+done
 kill -0 "$extra_pid"
+python3 - "$drain_socket" <<'PY'
+import socket, sys, time
+deadline = time.monotonic() + 1.0
+while True:
+    client = socket.socket(socket.AF_UNIX)
+    client.settimeout(0.2)
+    try:
+        client.connect(sys.argv[1])
+        data = client.recv(1)
+        if not data:
+            break
+    except (ConnectionRefusedError, FileNotFoundError, ConnectionResetError, BrokenPipeError):
+        break
+    except socket.timeout:
+        if time.monotonic() >= deadline:
+            raise SystemExit("connection remained stranded after listener shutdown")
+    finally:
+        client.close()
+PY
 if "$latifa" serve --store "$drain_store" >"$state/drain-competing.out" 2>"$state/drain-competing.err"; then
     echo "draining Host released its Store lock early" >&2
     exit 1

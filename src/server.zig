@@ -74,12 +74,14 @@ pub fn serve(
 
     const address = try std.Io.net.UnixAddress.init(lease.paths.socket.slice());
     var listener = try address.listen(io, .{ .kernel_backlog = max_clients });
-    defer listener.deinit(io);
-    defer std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
-        // The lock still protects this failed cleanup. A later startup will
-        // remove the owned socket or refuse to serve if it cannot do so.
-        std.debug.print("latifa: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
-    };
+    var listener_open = true;
+    var socket_owned = true;
+    errdefer {
+        if (listener_open) listener.deinit(io);
+        if (socket_owned) std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
+            std.debug.print("latifa: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
+        };
+    }
     var socket_path: [257:0]u8 = undefined;
     const socket_z = try std.fmt.bufPrintZ(&socket_path, "{s}", .{lease.paths.socket.slice()});
     if (std.c.chmod(socket_z, 0o600) != 0) return error.SocketProtectionFailed;
@@ -91,9 +93,19 @@ pub fn serve(
         .store = &storage,
         .faults = faults,
     };
-    // The listener stops accepting before this defer runs; draining keeps the
-    // stack-owned Host, Store and lock alive through every transferred Stream.
-    defer host.drain();
+    defer {
+        // Stop admitting new connections before waiting for transferred
+        // streams. Store and lease defers run only after the drain completes.
+        listener.deinit(io);
+        listener_open = false;
+        std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
+            // The lock still protects this failed cleanup. A later startup
+            // removes the owned socket or refuses to serve if it cannot.
+            std.debug.print("latifa: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
+        };
+        socket_owned = false;
+        host.drain();
+    }
     var ready: protocol.ResponseBuffer = .{};
     try ready.appendFmt("ready store={s} socket={s} active_capacity={d}\n", .{
         lease.paths.store.slice(),
