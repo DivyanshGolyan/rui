@@ -6,14 +6,18 @@ For clean-start implementation, verify that the production build graph contains 
 
 ## Canonical gates
 
-Confirm commands in [build.zig](build.zig). `zig build check` covers source validation, native ReleaseSafe tests and ReleaseSmall deliverables. Evaluator/protocol/QuickJS/build-graph changes also run `zig build workflow-check`, including applicable sanitizer, mutation/property, fuzz and leak checks. Dependency, build, persisted-format and bootstrap changes additionally run locally from empty caches. With Zig 0.16.0, serially fetch the pinned OpenSSL URL and assert its declared package hash before `zig build --fetch=all`; both commands use the same global cache, and the complete graph fetch remains authoritative. Reevaluate and remove this bootstrap exception when the pinned Zig toolchain changes. A reproducible isolated bootstrap is:
+Confirm commands in [build.zig](build.zig). `zig build check` covers source validation, native ReleaseSafe tests and ReleaseSmall deliverables. Evaluator/protocol/QuickJS/build-graph changes also run `zig build workflow-check`, including applicable sanitizer, mutation/property, fuzz and leak checks. Dependency, build, persisted-format and bootstrap changes additionally run locally from empty caches. With Zig 0.16.0, serially fetch the pinned OpenSSL URL and assert its declared package hash before `zig build --fetch=all`; both commands use the same global cache, and the complete graph fetch remains authoritative. Reevaluate and remove this bootstrap exception when the pinned Zig toolchain changes. From an exact clean source export with no `zig-pkg` directory, run:
 
 ```sh
+(
+set -eu
+test ! -e zig-pkg
 LATIFA_ZIG_LOCAL_CACHE="$(mktemp -d)"
 LATIFA_ZIG_GLOBAL_CACHE="$(mktemp -d)"
 mkdir -p "$LATIFA_ZIG_LOCAL_CACHE/tmp" "$LATIFA_ZIG_GLOBAL_CACHE/tmp"
 test "$(zig fetch --global-cache-dir "$LATIFA_ZIG_GLOBAL_CACHE" https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz)" = "N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM"
 zig build --cache-dir "$LATIFA_ZIG_LOCAL_CACHE" --global-cache-dir "$LATIFA_ZIG_GLOBAL_CACHE" --fetch=all
+)
 ```
 
 Documentation-only changes check references, consistency and `git diff --check`. Measurement provenance reports a Git revision and dirty state only when `git -C` resolves the exact measurement root as its top level; extracted packages outside Git or nested below an unrelated repository report both fields as unavailable.
