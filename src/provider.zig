@@ -968,7 +968,6 @@ test "request JSON encoding preserves controls and split UTF-8 with write failur
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(std.testing.io, "request", .{ .read = true });
-    defer file.close(std.testing.io);
     var used = std.atomic.Value(u64).init(0);
     var writer = RequestWriter{
         .io = std.testing.io,
@@ -976,6 +975,7 @@ test "request JSON encoding preserves controls and split UTF-8 with write failur
         .budget = .{ .used = &used, .limit = 1024 },
         .fail_write = false,
     };
+    defer writer.deinit();
     const input = "quote\" slash\\ newline\n\r\t\x00\x08\x0b\x0c\x1f café";
     try writer.write("\"");
     // Canonical read windows can divide a multibyte character.
