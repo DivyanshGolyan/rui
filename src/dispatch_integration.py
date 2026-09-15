@@ -3047,14 +3047,18 @@ def main():
         processes.remove(host)
 
         # Discarding large bodies must preserve HTTP classification. Retryable
-        # evidence releases physical custody without inventing a final result.
+        # evidence releases physical custody and saves the next eligible retry.
         for path in ("/large-422", "/large-429", "/429", "/503", "/disconnect"):
             case_state = state / (path[1:] + "-records")
             case_state.mkdir(mode=0o700)
             endpoint.requests.clear()
             endpoint.release.set()
             transient_store = state / (path[1:] + "-store")
-            host = start_host(transient_store, f"http://127.0.0.1:{endpoint.server_port}{path}")
+            host = start_host(
+                transient_store,
+                f"http://127.0.0.1:{endpoint.server_port}{path}",
+                accelerated_retries=False,
+            )
             processes.append(host)
             configure(case_state, transient_store, "config", "direct/transient", "model-a")
             message(case_state, transient_store, "message", "direct/transient", "input")
@@ -3071,12 +3075,24 @@ def main():
                 assert observation["queue"]["status"] == "processing" and "result" not in observation, observation
                 assert observation["processing"]["attempt"] == "1", observation
                 with sqlite3.connect(transient_store / "latifa.sqlite3") as database:
-                    assert database.execute("SELECT allowance_used,uncertain,resolution_code FROM model_operation").fetchall() == [(1, 1, None)]
+                    retry = database.execute(
+                        "SELECT allowance_used,uncertain,resolution_code,last_failure_code,retry_due_at_ms>CAST(unixepoch('subsec')*1000 AS INTEGER) FROM model_operation"
+                    ).fetchall()
+                    expected_code = (
+                        "provider_transport_failure"
+                        if path == "/disconnect"
+                        else f"provider_temporary_http_{path.rsplit('-', 1)[-1].lstrip('/')}"
+                    )
+                    assert retry == [(1, 0, None, expected_code, 1)], retry
                 message(case_state, transient_store, "later", "direct/transient", "later")
                 assert observe(transient_store, "later")["queue"]["status"] == "queued"
             stop_host(host)
             processes.remove(host)
-            host = start_host(transient_store, f"http://127.0.0.1:{endpoint.server_port}{path}")
+            host = start_host(
+                transient_store,
+                f"http://127.0.0.1:{endpoint.server_port}{path}",
+                accelerated_retries=False,
+            )
             processes.append(host)
             assert observe(transient_store, "message") == observation
             assert len(endpoint.requests) == 1, "restart recreated a consumed permit"
