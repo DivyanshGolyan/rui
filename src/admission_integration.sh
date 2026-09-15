@@ -621,17 +621,43 @@ start_host
 write_retry=$($latifa retry --store "$store" --record "$records/write-fault.json" --kind configure)
 contains "$write_retry" '"status":"accepted"'
 
+# Crash the first request while its streamed instructions still have a name.
+stop_host
+start_host
+python3 - "$ready" "$store" "$host_pid" <<'PYCRASH'
+import json, os, signal, socket, sys, time
+ready, store, pid = sys.argv[1:]
+fields = dict(part.split("=", 1) for part in open(ready).read().split()[1:])
+request = {"version":"1", "kind":"configure", "store":store, "key":"crashed-first", "session":"direct/crash", "configuration":{"workspace":{"state":"omitted"}, "model":{"state":"omitted"}}}
+prefix = json.dumps(request)[:-2] + ',"instructions":{"state":"value","value":"'
+with socket.socket(socket.AF_UNIX) as connection:
+    connection.connect(fields["socket"])
+    body = prefix.encode() + b'x' * 32768
+    connection.sendall(b'POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: 1000000\r\nX-Latifa-Wire-Version: 1\r\n\r\n' + body)
+    path = os.path.join(store, 'scratch', 'request-0-1.tmp')
+    deadline = time.monotonic() + 5
+    while not os.path.exists(path):
+        if time.monotonic() > deadline: raise RuntimeError('first request scratch never appeared')
+        time.sleep(.01)
+    os.kill(int(pid), signal.SIGKILL)
+PYCRASH
+wait "$host_pid" 2>/dev/null || true
+host_pid=
+test -f "$store/scratch/request-0-1.tmp"
+
 # Failed owned-leftover cleanup refuses startup and retains the accounting
 # evidence; an ordinary restart then removes only that owned temporary.
-stop_host
-printf 'leftover' >"$store/scratch/request-999-1.tmp"
+printf unrelated >"$store/scratch/request-00-1.tmp"
 if "$latifa" serve --store "$store" --fault startup-cleanup >"$state/startup.out" 2>"$state/startup.err"; then
     echo "Host admitted after failed startup cleanup" >&2
     exit 1
 fi
-test -f "$store/scratch/request-999-1.tmp"
+test -f "$store/scratch/request-0-1.tmp"
 start_host
-test ! -e "$store/scratch/request-999-1.tmp"
+test ! -e "$store/scratch/request-0-1.tmp"
+test -f "$store/scratch/request-00-1.tmp"
+recovered=$($latifa configure --store "$store" --record "$records/first-recovered.json" --key first-recovered --session direct/first-recovered --workspace "$root" --model model-a --instructions "$state/fault-content.txt")
+contains "$recovered" '"status":"accepted"'
 
 # Exact public identity bounds are independent and count decoded UTF-8 bytes.
 key128=$(python3 -c 'print("k" * 128)')

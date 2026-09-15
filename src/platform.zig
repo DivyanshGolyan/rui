@@ -123,7 +123,8 @@ fn isOwnedNumericScratch(name: []const u8, prefix: []const u8) bool {
     const middle = name[prefix.len .. name.len - ".tmp".len];
     const separator = std.mem.indexOfScalar(u8, middle, '-') orelse return false;
     if (std.mem.indexOfScalar(u8, middle[separator + 1 ..], '-') != null) return false;
-    return isCanonicalPositiveDecimal(middle[0..separator]) and
+    const request_zero = std.mem.eql(u8, prefix, "request-") and std.mem.eql(u8, middle[0..separator], "0");
+    return (request_zero or isCanonicalPositiveDecimal(middle[0..separator])) and
         isCanonicalPositiveDecimal(middle[separator + 1 ..]);
 }
 
@@ -184,7 +185,9 @@ test "startup cleanup recognizes only owned ingress names" {
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}--.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}x-2.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}12-x.tmp", .{prefix})));
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}0-2.tmp", .{prefix})));
+        try std.testing.expectEqual(std.mem.eql(u8, prefix, "request-"), isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}0-2.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-0.tmp", .{prefix})));
+        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}00-2.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}02-2.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}18446744073709551616-2.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-18446744073709551616.tmp", .{prefix})));
