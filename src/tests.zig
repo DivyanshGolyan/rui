@@ -3,4 +3,5 @@ test {
     _ = @import("platform.zig");
     _ = @import("store.zig");
     _ = @import("server.zig");
+    _ = @import("client.zig");
 }

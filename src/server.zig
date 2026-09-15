@@ -525,11 +525,8 @@ fn renderSessionObservation(
     try response.append("},\"execution\":{\"status\":\"unavailable\",\"reason\":\"model_processing_enters_in_issue_171\"}}");
 }
 
-fn appendHex(response: *protocol.ResponseBuffer, bytes: []const u8) !void {
-    const alphabet = "0123456789abcdef";
-    for (bytes) |byte| {
-        try response.append(&.{ alphabet[byte >> 4], alphabet[byte & 0x0f] });
-    }
+fn appendHex(response: *protocol.ResponseBuffer, bytes: *const [32]u8) !void {
+    try response.append(&std.fmt.bytesToHex(bytes.*, .lower));
 }
 
 fn sendStatic(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8) !void {

@@ -97,7 +97,8 @@ fn validateIdentityInputs(key: []const u8, session: []const u8) !void {
 }
 
 fn captureConfigure(io: std.Io, paths: *const platform.Paths, input: ConfigureInput) !void {
-    var capture = try Capture.open(io, input.record);
+    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var capture = try Capture.open(io, input.record, &output_buffer);
     errdefer capture.abort();
     try capture.write("{\"version\":\"1\",\"kind\":\"configure\",\"store\":");
     try capture.writeJsonString(paths.store.slice());
@@ -122,7 +123,8 @@ fn captureConfigure(io: std.Io, paths: *const platform.Paths, input: ConfigureIn
 }
 
 fn captureMessage(io: std.Io, paths: *const platform.Paths, input: MessageInput) !void {
-    var capture = try Capture.open(io, input.record);
+    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var capture = try Capture.open(io, input.record, &output_buffer);
     errdefer capture.abort();
     try capture.write("{\"version\":\"1\",\"kind\":\"message\",\"store\":");
     try capture.writeJsonString(paths.store.slice());
@@ -140,13 +142,15 @@ const Capture = struct {
     io: std.Io,
     file: std.Io.File,
     parent: std.Io.Dir,
+    writer: std.Io.File.Writer,
     final_name: protocol.Bounded(std.Io.Dir.max_name_bytes) = .{},
     temporary_name: protocol.Bounded(std.Io.Dir.max_name_bytes) = .{},
     active: bool = true,
     file_open: bool = true,
     published: bool = false,
 
-    fn open(io: std.Io, record_path: []const u8) !Capture {
+    // The caller owns buffer through commit/abort and keeps Capture pointer-stable.
+    fn open(io: std.Io, record_path: []const u8, buffer: []u8) !Capture {
         const parent_path = std.fs.path.dirname(record_path) orelse ".";
         const final_name = std.fs.path.basename(record_path);
         if (final_name.len == 0) return error.InvalidRecordPath;
@@ -170,7 +174,7 @@ const Capture = struct {
             .exclusive = true,
             .permissions = .fromMode(0o600),
         });
-        var capture = Capture{ .io = io, .file = file, .parent = parent };
+        var capture = Capture{ .io = io, .file = file, .parent = parent, .writer = file.writerStreaming(io, buffer) };
         try capture.final_name.set(final_name);
         try capture.temporary_name.set(temporary);
         return capture;
@@ -187,6 +191,7 @@ const Capture = struct {
     }
 
     fn commit(self: *Capture) !void {
+        try self.writer.flush();
         try self.file.sync(self.io);
         self.file.close(self.io);
         self.file_open = false;
@@ -203,33 +208,13 @@ const Capture = struct {
     }
 
     fn write(self: *Capture, bytes: []const u8) !void {
-        try self.file.writeStreamingAll(self.io, bytes);
+        self.writer.interface.writeAll(bytes) catch return self.writer.err orelse error.WriteFailed;
     }
 
     fn writeJsonString(self: *Capture, value: []const u8) !void {
         if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
-        try self.write("\"");
-        for (value) |byte| try self.writeEscapedByte(byte);
-        try self.write("\"");
-    }
-
-    fn writeEscapedByte(self: *Capture, byte: u8) !void {
-        switch (byte) {
-            '"' => try self.write("\\\""),
-            '\\' => try self.write("\\\\"),
-            '\x08' => try self.write("\\b"),
-            '\x0c' => try self.write("\\f"),
-            '\n' => try self.write("\\n"),
-            '\r' => try self.write("\\r"),
-            '\t' => try self.write("\\t"),
-            0...7, 11, 14...0x1f => {
-                const alphabet = "0123456789abcdef";
-                var escaped: [6]u8 = undefined;
-                escaped = .{ '\\', 'u', '0', '0', alphabet[byte >> 4], alphabet[byte & 0x0f] };
-                try self.write(&escaped);
-            },
-            else => try self.write(&.{byte}),
-        }
+        std.json.Stringify.encodeJsonString(value, .{}, &self.writer.interface) catch
+            return self.writer.err orelse error.WriteFailed;
     }
 
     fn writeOptionalText(self: *Capture, value: OptionalText) !void {
@@ -270,7 +255,10 @@ const Capture = struct {
             };
             if (count == 0) break;
             try validator.feed(buffer[0..count]);
-            for (buffer[0..count]) |byte| try self.writeEscapedByte(byte);
+            // Default encoding copies non-ASCII bytes unchanged, including a UTF-8
+            // sequence split across reads; the streaming validator owns validity.
+            std.json.Stringify.encodeJsonStringChars(buffer[0..count], .{}, &self.writer.interface) catch
+                return self.writer.err orelse error.WriteFailed;
         }
         if (!validator.complete()) return error.InvalidUtf8;
         try self.write("\"");
@@ -476,14 +464,28 @@ fn socketPair() ![2]std.posix.fd_t {
 }
 
 fn delayedResponse(io: std.Io, fd: std.posix.fd_t, delay: std.Io.Duration, response: []const u8) void {
-    defer std.posix.close(fd);
+    defer std.debug.assert(std.c.close(fd) == 0);
     std.Io.sleep(io, delay, .awake) catch return;
     writeAll(fd, response) catch {};
 }
 
+// The Zig test runner owns stdout; response output must not enter its protocol.
+fn responseTestOperate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+    if (operation == .file_write_streaming and operation.file_write_streaming.file.handle == std.Io.File.stdout().handle) {
+        const write = operation.file_write_streaming;
+        var count = write.header.len;
+        for (write.data, 0..) |bytes, index| count += bytes.len * (if (index + 1 == write.data.len) write.splat else 1);
+        return .{ .file_write_streaming = count };
+    }
+    return std.testing.io.vtable.operate(userdata, operation);
+}
+
 test "Host processing wait does not consume response transfer inactivity" {
+    var vtable = std.testing.io.vtable.*;
+    vtable.operate = responseTestOperate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     const sockets = try socketPair();
-    defer std.posix.close(sockets[0]);
+    defer std.debug.assert(std.c.close(sockets[0]) == 0);
     const writer = try std.Thread.spawn(.{}, delayedResponse, .{
         std.testing.io,
         sockets[1],
@@ -491,12 +493,15 @@ test "Host processing wait does not consume response transfer inactivity" {
         empty_test_response,
     });
     defer writer.join();
-    try std.testing.expectEqual(@as(u16, 200), try readResponse(std.testing.io, sockets[0]));
+    try std.testing.expectEqual(@as(u16, 200), try readResponse(io, sockets[0]));
 }
 
 test "response transfer inactivity begins after the first byte" {
+    var vtable = std.testing.io.vtable.*;
+    vtable.operate = responseTestOperate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     const sockets = try socketPair();
-    defer std.posix.close(sockets[0]);
+    defer std.debug.assert(std.c.close(sockets[0]) == 0);
     const writer = try std.Thread.spawn(.{}, delayedResponse, .{
         std.testing.io,
         sockets[1],
@@ -507,25 +512,136 @@ test "response transfer inactivity begins after the first byte" {
     try writeAll(sockets[1], empty_test_response[0..1]);
     try std.testing.expectError(
         error.ResponseInactive,
-        readResponseWithInactivity(std.testing.io, sockets[0], 10),
+        readResponseWithInactivity(io, sockets[0], 10),
     );
 }
 
 test "response closure and truncation stay explicit" {
+    var vtable = std.testing.io.vtable.*;
+    vtable.operate = responseTestOperate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     {
         const sockets = try socketPair();
-        defer std.posix.close(sockets[0]);
-        std.posix.close(sockets[1]);
-        try std.testing.expectError(error.TruncatedResponse, readResponse(std.testing.io, sockets[0]));
+        defer std.debug.assert(std.c.close(sockets[0]) == 0);
+        std.debug.assert(std.c.close(sockets[1]) == 0);
+        try std.testing.expectError(error.TruncatedResponse, readResponse(io, sockets[0]));
     }
     {
         const sockets = try socketPair();
-        defer std.posix.close(sockets[0]);
+        defer std.debug.assert(std.c.close(sockets[0]) == 0);
         try writeAll(
             sockets[1],
             "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Latifa-Wire-Version: 1\r\n\r\nx",
         );
-        std.posix.close(sockets[1]);
-        try std.testing.expectError(error.TruncatedResponse, readResponse(std.testing.io, sockets[0]));
+        std.debug.assert(std.c.close(sockets[1]) == 0);
+        try std.testing.expectError(error.TruncatedResponse, readResponse(io, sockets[0]));
     }
+}
+
+test "capture batches escaped file output and flushes before publication" {
+    const Probe = struct {
+        var writes: usize = 0;
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming) writes += 1;
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root);
+    var source_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const source_path = try std.fmt.bufPrint(&source_path_buffer, "{s}/source", .{root[0..root_len]});
+    var record_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const record_path = try std.fmt.bufPrint(&record_path_buffer, "{s}/record", .{root[0..root_len]});
+    const source = try tmp.dir.createFile(std.testing.io, "source", .{});
+    const chunk = [_]u8{'x'} ** protocol.content_window_bytes;
+    const chunks = 8192;
+    for (0..chunks) |_| try source.writeStreamingAll(std.testing.io, &chunk);
+    source.close(std.testing.io);
+    var vtable = std.testing.io.vtable.*;
+    vtable.operate = Probe.operate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    Probe.writes = 0;
+    var output: [protocol.content_window_bytes]u8 = undefined;
+    var capture = try Capture.open(io, record_path, &output);
+    errdefer capture.abort();
+    try capture.writeJsonFile(source_path);
+    try capture.commit();
+    try std.testing.expect(Probe.writes <= chunks + 2);
+    const record = try tmp.dir.openFile(std.testing.io, "record", .{});
+    defer record.close(std.testing.io);
+    var read_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var offset: usize = 0;
+    while (true) {
+        const n = record.readStreaming(std.testing.io, &.{&read_buffer}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        for (read_buffer[0..n]) |byte| {
+            const expected: u8 = if (offset == 0 or offset == chunks * chunk.len + 1) '"' else 'x';
+            try std.testing.expectEqual(expected, byte);
+            offset += 1;
+        }
+    }
+    try std.testing.expectEqual(chunks * chunk.len + 2, offset);
+}
+
+test "capture validates split UTF8 and does not publish after final flush failure" {
+    const FailWrite = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming) return .{ .file_write_streaming = error.NoSpaceLeft };
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    var source_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const source_path = try std.fmt.bufPrint(&source_path_buffer, "{s}/source", .{root[0..root_len]});
+    var record_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const record_path = try std.fmt.bufPrint(&record_path_buffer, "{s}/record", .{root[0..root_len]});
+    var input = [_]u8{'x'} ** (protocol.content_window_bytes + 1);
+    input[input.len - 2] = 0xc3;
+    input[input.len - 1] = 0xa9;
+    for ([_]bool{ false, true }) |truncated| {
+        const source = try tmp.dir.createFile(io, "source", .{});
+        try source.writeStreamingAll(io, input[0 .. input.len - @intFromBool(truncated)]);
+        source.close(io);
+        var buffer: [protocol.content_window_bytes]u8 = undefined;
+        var capture = try Capture.open(io, record_path, &buffer);
+        defer capture.abort();
+        if (truncated) {
+            try std.testing.expectError(error.InvalidUtf8, capture.writeJsonFile(source_path));
+            capture.abort();
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, capture.temporary_name.slice(), .{}));
+        } else {
+            try capture.writeJsonFile(source_path);
+            try capture.commit();
+            const file = try tmp.dir.openFile(io, "record", .{});
+            defer file.close(io);
+            var bytes: [input.len + 2]u8 = undefined;
+            const n = try file.readStreaming(io, &.{&bytes});
+            try std.testing.expectEqual(bytes.len, n);
+            try std.testing.expectEqualStrings(&input, bytes[1 .. bytes.len - 1]);
+            try tmp.dir.deleteFile(io, "record");
+        }
+    }
+    var vtable = io.vtable.*;
+    vtable.operate = FailWrite.operate;
+    const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var capture = try Capture.open(failing_io, record_path, &buffer);
+    defer capture.abort();
+    try capture.writeJsonString("buffered until commit");
+    try std.testing.expectError(error.NoSpaceLeft, capture.commit());
+    capture.abort();
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, capture.temporary_name.slice(), .{}));
 }

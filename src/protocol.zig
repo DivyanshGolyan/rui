@@ -700,22 +700,9 @@ pub const ResponseBuffer = struct {
     }
 
     pub fn appendJsonString(self: *ResponseBuffer, value: []const u8) !void {
-        try self.append("\"");
-        for (value) |byte| switch (byte) {
-            '"' => try self.append("\\\""),
-            '\\' => try self.append("\\\\"),
-            '\x08' => try self.append("\\b"),
-            '\x0c' => try self.append("\\f"),
-            '\n' => try self.append("\\n"),
-            '\r' => try self.append("\\r"),
-            '\t' => try self.append("\\t"),
-            0...7, 11, 14...0x1f => {
-                const alphabet = "0123456789abcdef";
-                try self.append(&.{ '\\', 'u', '0', '0', alphabet[byte >> 4], alphabet[byte & 0x0f] });
-            },
-            else => try self.append(&.{byte}),
-        };
-        try self.append("\"");
+        var writer = std.Io.Writer.fixed(self.bytes[self.len..]);
+        defer self.len += writer.end;
+        std.json.Stringify.encodeJsonString(value, .{}, &writer) catch return error.ResponseTooLarge;
     }
 
     pub fn slice(self: *const ResponseBuffer) []const u8 {
@@ -763,4 +750,14 @@ test "content sink enforces the decoded consumer boundary before retention" {
     try multibyte.write("€");
     try std.testing.expectEqual(max_sqlite_content_bytes, multibyte.length);
     try std.testing.expectError(error.ContentTooLarge, multibyte.write("x"));
+}
+
+test "response JSON preserves control bytes and enforces capacity" {
+    var response: ResponseBuffer = .{};
+    try response.appendJsonString("\x00\x1f\"\\\n\r\t\x08\x0c\xc3\xa9");
+    try std.testing.expectEqualStrings("\"\\u0000\\u001f\\\"\\\\\\n\\r\\t\\b\\f\xc3\xa9\"", response.slice());
+    response.len = response.bytes.len - 2;
+    try response.appendJsonString("");
+    try std.testing.expectEqual(response.bytes.len, response.len);
+    try std.testing.expectError(error.ResponseTooLarge, response.appendJsonString("x"));
 }
