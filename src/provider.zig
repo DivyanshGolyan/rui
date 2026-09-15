@@ -124,34 +124,34 @@ const RequestWriter = struct {
     }
 
     fn jsonBytes(self: *RequestWriter, bytes: []const u8) !void {
-        var run_start: usize = 0;
-        for (bytes, 0..) |byte, index| {
-            const needs_escape = switch (byte) {
-                '"', '\\', '\n', '\r', '\t', 0...7, 11, 12, 14...31 => true,
-                else => false,
-            };
-            if (!needs_escape) continue;
-            if (run_start != index) try self.write(bytes[run_start..index]);
-            try self.jsonByte(byte);
-            run_start = index + 1;
-        }
-        if (run_start != bytes.len) try self.write(bytes[run_start..]);
+        var encoder = JsonSink{ .request = self };
+        std.json.Stringify.encodeJsonStringChars(bytes, .{}, &encoder.writer) catch {
+            return encoder.failure.?;
+        };
     }
 
-    fn jsonByte(self: *RequestWriter, byte: u8) !void {
-        switch (byte) {
-            '"' => try self.write("\\\""),
-            '\\' => try self.write("\\\\"),
-            '\n' => try self.write("\\n"),
-            '\r' => try self.write("\\r"),
-            '\t' => try self.write("\\t"),
-            0...7, 11, 12, 14...31 => {
-                const hex = "0123456789abcdef";
-                try self.write(&.{ '\\', 'u', '0', '0', hex[byte >> 4], hex[byte & 0x0f] });
-            },
-            else => try self.write(&.{byte}),
+    // Keep encoded writes under the request's failure and offset accounting.
+    const JsonSink = struct {
+        request: *RequestWriter,
+        failure: ?anyerror = null,
+        writer: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+
+        fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *JsonSink = @fieldParentPtr("writer", writer);
+            var count: usize = 0;
+            for (data, 0..) |bytes, index| {
+                const repeats = if (index == data.len - 1) splat else 1;
+                for (0..repeats) |_| {
+                    self.request.write(bytes) catch |err| {
+                        self.failure = err;
+                        return error.WriteFailed;
+                    };
+                    count += bytes.len;
+                }
+            }
+            return count;
         }
-    }
+    };
 };
 
 pub fn materialize(
@@ -606,4 +606,28 @@ test "endpoint validation permits TLS and loopback fixture HTTP only" {
     );
     try std.testing.expectError(error.InvalidProviderEndpoint, validateEndpoint("https://user@example.com/fail"));
     try std.testing.expectError(error.InsecureProviderEndpoint, validateEndpoint("http://[::1]evil:80/fail"));
+}
+
+test "request JSON encoding preserves controls and split UTF-8 with write failures" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "request", .{ .read = true });
+    defer file.close(std.testing.io);
+    var writer = RequestWriter{ .io = std.testing.io, .file = file, .fail_write = false };
+    const input = "quote\" slash\\ newline\n\r\t\x00\x08\x0b\x0c\x1f café";
+    try writer.write("\"");
+    // Canonical read windows can divide a multibyte character.
+    try writer.jsonBytes(input[0 .. input.len - 1]);
+    try writer.jsonBytes(input[input.len - 1 ..]);
+    try writer.write("\"");
+    var buffer: [256]u8 = undefined;
+    const count = try file.readPositionalAll(std.testing.io, &buffer, 0);
+    try std.testing.expectEqual(writer.offset, count);
+    const parsed = try std.json.parseFromSlice([]const u8, std.testing.allocator, buffer[0..count], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(input, parsed.value);
+    writer.fail_write = true;
+    try std.testing.expectError(error.InjectedRequestWriteFailure, writer.jsonBytes("\x0c"));
+    try std.testing.expectEqual(@as(u64, count), writer.offset);
+    try std.testing.expectEqual(@as(u64, count), try file.length(std.testing.io));
 }
