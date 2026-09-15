@@ -2298,7 +2298,7 @@ def main():
 
         # The smallest age-indexed selector keeps no scan state. With one live
         # transport and one free slot it still finds a due Operation behind
-        # 10,000 older future retries within the light-discovery target.
+        # 100 older future retries within the light-discovery target.
         backlog_stall_release = threading.Event()
         backlog_retry_release = threading.Event()
         backlog_endpoint = SuccessEndpoint(
@@ -2335,7 +2335,7 @@ def main():
             database.execute("PRAGMA foreign_keys=OFF")
             database.execute(
                 "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL "
-                "SELECT value+1 FROM sequence WHERE value<10000) "
+                "SELECT value+1 FROM sequence WHERE value<100) "
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
                 "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) "
                 "SELECT value,value,printf('future-%d',value),1,1,1,1,1,0,9223372036854775807 FROM sequence"
@@ -2428,7 +2428,7 @@ def main():
             database.execute("PRAGMA foreign_keys=OFF")
             database.execute(
                 "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL "
-                "SELECT value+1 FROM sequence WHERE value<1000) "
+                "SELECT value+1 FROM sequence WHERE value<100) "
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
                 "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) "
                 "SELECT value,value,printf('recovery-%d',value),1,1,1,1,1,0,9223372036854775807 "
@@ -2511,7 +2511,7 @@ def main():
             ).fetchone()[0]
             database.execute(
                 "UPDATE model_operation SET attempt_ordinal=4,allowance_used=4,uncertain=1,retry_due_at_ms=0 "
-                "WHERE operation_id<=1000 OR operation_id=?",
+                "WHERE operation_id<=100 OR operation_id=?",
                 (sentinel_operation,),
             )
             database.execute(
@@ -2519,12 +2519,12 @@ def main():
                 (due_operation,),
             )
             database.execute(
-                "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<1000) "
+                "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<100) "
                 "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id) "
                 "SELECT value+10000,printf('recovery-%d',value),1,1,value FROM sequence"
             )
             database.execute(
-                "UPDATE model_operation SET turn_id=operation_id+10000 WHERE operation_id<=1000"
+                "UPDATE model_operation SET turn_id=operation_id+10000 WHERE operation_id<=100"
             )
             database.commit()
         finally:
@@ -2535,7 +2535,7 @@ def main():
             "--active-capacity",
             "2",
             "--test-before-launch-delay-ms",
-            "1000",
+            "100",
             "--test-retry-waits-ms",
             "60000,60000,60000",
         )

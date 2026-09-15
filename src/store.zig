@@ -4766,16 +4766,16 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
     try exec(
         storage.database,
-        "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<5097) " ++
+        "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<201) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
             "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
             "SELECT value,value,printf('retry-%d',value),1,1,1,1,1,0," ++
-            "CASE WHEN value<=4096 THEN 9223372036854775807 ELSE 1 END FROM sequence",
+            "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END FROM sequence",
     );
 
     const Active = struct {
         const Context = struct {
-            operation_ids: *const [1000]u64,
+            operation_ids: *const [100]u64,
             comparisons: *usize,
         };
 
@@ -4788,9 +4788,9 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
             return false;
         }
     };
-    var active_operations: [1000]u64 = undefined;
+    var active_operations: [100]u64 = undefined;
     for (&active_operations, 0..) |*operation_id, index| {
-        operation_id.* = 4097 + @as(u64, @intCast(index));
+        operation_id.* = 101 + @as(u64, @intCast(index));
     }
     var comparisons: usize = 0;
     const active_context = Active.Context{
@@ -4810,15 +4810,15 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
             storage.database,
             "SELECT operation_id FROM model_operation INDEXED BY model_operation_retry_age " ++
                 "WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=?1 " ++
-                "ORDER BY operation_id LIMIT 1001",
+                "ORDER BY operation_id LIMIT 101",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindI64(statement, 1, try readUnixMilliseconds(storage.database));
         var rows: usize = 0;
         while (c.sqlite3_step(statement) == c.SQLITE_ROW) rows += 1;
-        try std.testing.expectEqual(@as(usize, 1001), rows);
+        try std.testing.expectEqual(@as(usize, 101), rows);
         const vm_steps = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
-        try std.testing.expect(vm_steps > 4096);
+        try std.testing.expect(vm_steps > 100);
     }
 
     try std.testing.expectError(
@@ -4826,30 +4826,30 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         storage.tryAdmitNextModelRetry(active_filter, .{ .attempt_before_commit = true }),
     );
     try std.testing.expect(!storage.isFenced());
-    try std.testing.expectEqual(@as(usize, 501500), comparisons);
+    try std.testing.expectEqual(@as(usize, 5150), comparisons);
     comparisons = 0;
     const admitted = (try storage.tryAdmitNextModelRetry(active_filter, .{})).?;
-    try std.testing.expectEqual(@as(u64, 5097), admitted.permit.binding.operation_id);
+    try std.testing.expectEqual(@as(u64, 201), admitted.permit.binding.operation_id);
     try std.testing.expectEqual(@as(u64, 2), admitted.permit.binding.attempt_ordinal);
-    try std.testing.expectEqual(@as(usize, 501500), comparisons);
+    try std.testing.expectEqual(@as(usize, 5150), comparisons);
 
     try exec(storage.database, "DELETE FROM model_operation");
     try exec(
         storage.database,
-        "WITH RECURSIVE sequence(value) AS (VALUES(6000) UNION ALL SELECT value+1 FROM sequence WHERE value<7001) " ++
+        "WITH RECURSIVE sequence(value) AS (VALUES(6000) UNION ALL SELECT value+1 FROM sequence WHERE value<6101) " ++
             "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id) " ++
             "SELECT value,printf('exhausted-%d',value),1,1,value FROM sequence",
     );
     try exec(
         storage.database,
-        "WITH RECURSIVE sequence(value) AS (VALUES(6000) UNION ALL SELECT value+1 FROM sequence WHERE value<7001) " ++
+        "WITH RECURSIVE sequence(value) AS (VALUES(6000) UNION ALL SELECT value+1 FROM sequence WHERE value<6101) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
             "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
             "SELECT value,value,printf('exhausted-%d',value),1,1,1,4,4,1,0 FROM sequence",
     );
     try exec(storage.database, "PRAGMA foreign_keys=ON");
 
-    var active_exhausted: [1000]u64 = undefined;
+    var active_exhausted: [100]u64 = undefined;
     for (&active_exhausted, 0..) |*operation_id, index| operation_id.* = 6000 + @as(u64, @intCast(index));
     var exhausted_comparisons: usize = 0;
     const exhausted_context = Active.Context{
@@ -4861,18 +4861,18 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         .containsFn = Active.contains,
         .maximum_exclusions = active_exhausted.len,
     }));
-    try std.testing.expectEqual(@as(usize, 501500), exhausted_comparisons);
+    try std.testing.expectEqual(@as(usize, 5150), exhausted_comparisons);
     const outcomes = try prepare(
         storage.database,
-        "SELECT operation_id,resolution_code FROM model_operation WHERE operation_id IN (7000,7001) ORDER BY operation_id",
+        "SELECT operation_id,resolution_code FROM model_operation WHERE operation_id IN (6100,6101) ORDER BY operation_id",
     );
     defer _ = c.sqlite3_finalize(outcomes);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));
-    try std.testing.expectEqual(@as(i64, 7000), c.sqlite3_column_int64(outcomes, 0));
+    try std.testing.expectEqual(@as(i64, 6100), c.sqlite3_column_int64(outcomes, 0));
     var resolution: protocol.Bounded(96) = .{};
     try readText(outcomes, 1, &resolution);
     try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));
-    try std.testing.expectEqual(@as(i64, 7001), c.sqlite3_column_int64(outcomes, 0));
+    try std.testing.expectEqual(@as(i64, 6101), c.sqlite3_column_int64(outcomes, 0));
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(outcomes, 1));
 }

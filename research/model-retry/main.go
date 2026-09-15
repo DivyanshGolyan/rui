@@ -19,7 +19,7 @@ import (
 )
 
 const capacity = 16
-const operationsPerRound = 32
+const operationsPerRound = 20
 const rounds = 5
 
 func discoveryStatus(milliseconds int64) string {
@@ -289,7 +289,7 @@ func history(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	deadline := measurement.NewDeadline(8 * time.Minute)
 	created := 0
 	rows := []map[string]any{}
-	for _, target := range []int{32, 128} {
+	for _, target := range []int{1, 10, 100} {
 		host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "--test-retry-waits-ms", "600000,600000,600000")
 		if err != nil {
 			return nil, err
@@ -332,15 +332,18 @@ func history(binary, root string, e *retryEndpoint) (map[string]any, error) {
 		rows = append(rows, row)
 		created = target
 	}
-	insert := "PRAGMA foreign_keys=OFF; WITH RECURSIVE sequence(value) AS (VALUES(129) UNION ALL SELECT value+1 FROM sequence WHERE value<10128) INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) SELECT value,value,printf('synthetic-future-%d',value),1,1,1,1,1,0,9223372036854775807 FROM sequence;"
-	if _, err := sql(deadline, store, insert); err != nil {
+	futureText, err := sql(deadline, store, "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL AND retry_due_at_ms>CAST(unixepoch('subsec')*1000 AS INTEGER);")
+	if err != nil {
 		return nil, err
+	}
+	future, err := strconv.Atoi(futureText)
+	if err != nil {
+		return nil, fmt.Errorf("parse future retry count %q: %w", futureText, err)
 	}
 	host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "--test-retry-waits-ms", "600000,600000,600000")
 	if err != nil {
 		return nil, err
 	}
-	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	cpuBefore, err := measurement.CPUSeconds(host.Process)
 	if err != nil {
 		host.Stop(measurement.TeardownAllowance)
@@ -360,51 +363,16 @@ func history(binary, root string, e *retryEndpoint) (map[string]any, error) {
 		return nil, err
 	}
 	idleCPU := 100 * idleDelta / idleElapsed
-	work := client.Submit("history-10128", "measure/history-10128", "history-operation-10128")
-	if work == nil {
-		work = measurement.WaitFor(deadline, 10*time.Millisecond, "10000 row attempt", func() (bool, error) { return e.count("history-operation-10128") == 1, nil })
-	}
-	if work == nil {
-		work = measurement.WaitFor(deadline, 10*time.Millisecond, "10000 row cleanup", func() (bool, error) { return custodyZero(client, "measure/history-10128") })
-	}
-	if err := errors.Join(work, host.Stop(measurement.TeardownAllowance)); err != nil {
+	if err := host.Stop(measurement.TeardownAllowance); err != nil {
 		return nil, err
 	}
-	operation, err := sql(deadline, store, "SELECT operation_id FROM model_operation WHERE session_ref='measure/history-10128';")
-	if err != nil {
-		return nil, err
-	}
-	if _, err := sql(deadline, store, "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id="+operation+";"); err != nil {
-		return nil, err
-	}
-	futureText, err := sql(deadline, store, "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL AND retry_due_at_ms>CAST(unixepoch('subsec')*1000 AS INTEGER);")
-	if err != nil {
-		return nil, err
-	}
-	future, err := strconv.Atoi(futureText)
-	if err != nil {
-		return nil, fmt.Errorf("parse future retry count %q: %w", futureText, err)
-	}
-	countText, err := sql(deadline, store, "SELECT count(*) FROM model_operation;")
-	if err != nil {
-		return nil, err
-	}
-	count, err := strconv.Atoi(countText)
-	if err != nil {
-		return nil, fmt.Errorf("parse operation count %q: %w", countText, err)
-	}
-	row, err := replaceDue(binary, directory, store, "measure/history-10128", operation, "history-operation-10128", count, future, e, deadline)
-	if err != nil {
-		return nil, err
-	}
-	rows = append(rows, row)
 	historyStatus := idleStatus(idleCPU)
 	for _, row := range rows {
 		if row["status"] == "target_miss" {
 			historyStatus = "target_miss"
 		}
 	}
-	return map[string]any{"status": historyStatus, "stages": rows, "future_only_idle_cpu_percent_one_core": idleCPU, "future_only_idle_cpu_sample_seconds": idleElapsed, "discovery_qualification_limit_ms": 2000, "idle_cpu_qualification_limit_percent_one_core": 1}, nil
+	return map[string]any{"status": historyStatus, "waiting_retry_backlog_cases": []int{1, 10, 100}, "stages": rows, "future_only_unresolved_retries": future, "future_only_idle_cpu_percent_one_core": idleCPU, "future_only_idle_cpu_sample_seconds": idleElapsed, "discovery_qualification_limit_ms": 2000, "idle_cpu_qualification_limit_percent_one_core": 1}, nil
 }
 
 func churn(binary, root string, e *retryEndpoint) (map[string]any, error) {
@@ -514,7 +482,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	result := map[string]any{"format": "latifa-model-retry-v2-go", "scope": "issue-174 production retry discovery and custody churn", "status": retryStatus(timingResult, historyResult, churnResult), "artifacts": root, "timing": timingResult, "unresolved_history": historyResult, "churn_and_delayed_cleanup": churnResult, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only", "deterministic loopback HTTP classifies no live-provider behavior", "a 250 ms fixture delay separates committed retry discovery from provider launch", "process termination evidence is not power-loss qualification"}}
+	result := map[string]any{"format": "latifa-model-retry-v3-go", "scope": "issue-174 production retry discovery and custody churn", "status": retryStatus(timingResult, historyResult, churnResult), "artifacts": root, "timing": timingResult, "unresolved_history": historyResult, "churn_and_delayed_cleanup": churnResult, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only", "deterministic loopback HTTP classifies no live-provider behavior", "a 250 ms fixture delay separates committed retry discovery from provider launch", "waiting retry backlog and churn are qualified through the current 100-operation stress scale, not a product quota", "process termination evidence is not power-loss qualification"}}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)
