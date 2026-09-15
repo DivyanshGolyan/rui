@@ -11,8 +11,8 @@ import (
 	"latifa.local/research/measurement"
 )
 
-var payloadBytes = []int{0, 4 * 1024, 8 * 1024 * 1024, 32 * 1024 * 1024}
-var historyCounts = []int{0, 100, 1_000, 10_000}
+var payloadBytes = []int{0, 1_000, 10_000, 100_000}
+var historyCounts = []int{0, 1, 10}
 
 type optionalField struct {
 	State string  `json:"state"`
@@ -268,11 +268,11 @@ func main() {
 		panic(err)
 	}
 	result := map[string]any{
-		"format": "latifa-message-admission-v2-go",
+		"format": "latifa-message-admission-v3-go",
 		"scope":  "issue-171 production Host message admission and observation",
 		"status": "passed", "artifacts": parent,
 		"active_capacity":      1000,
-		"client_capacity":      map[string]int{"total": 128, "ordinary": 120, "control_headroom": 8},
+		"client_capacity":      map[string]int{"total": 12, "ordinary": 10, "control_headroom": 2},
 		"content_window_bytes": 4096, "sqlite_heap_limit_bytes": 16 * 1024 * 1024,
 		"payload_growth": payload, "queued_history_growth": history,
 		"elapsed_seconds": time.Since(started).Seconds(),
