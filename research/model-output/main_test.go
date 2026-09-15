@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"latifa.local/research/measurement"
 	"latifa.local/research/model-output/provider"
@@ -239,31 +241,152 @@ func TestSpillDiagnosticDecoderRejectsMalformedAndDuplicateFields(t *testing.T) 
 	}
 }
 
-func TestCapacityVerdictKeepsFixtureMissesIncomplete(t *testing.T) {
+func TestExpectedCapacityWorkUsesIndependentCheckedArithmetic(t *testing.T) {
+	work, err := expectedCapacityWork(1000, 60*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work != (capacityWork{Batches: 3_000_000, Events: 6_000_000, Bytes: 234_000_000}) {
+		t.Fatalf("work = %+v", work)
+	}
+	if _, err := checkedCapacityMultiply(^uint64(0), 2); err == nil {
+		t.Fatal("overflow unexpectedly accepted")
+	}
+	if _, err := checkedCapacityAdd(^uint64(0), 1); err == nil {
+		t.Fatal("addition overflow unexpectedly accepted")
+	}
+}
+
+func validProviderSummary(t *testing.T) provider.Summary {
+	t.Helper()
+	encoded := `{
+		"delivery_method":"bounded_delivery_v1",
+		"delivery_rule":{"batch_interval_ns":20000000,"allowed_delivery_variation_ns":20000000,"maximum_completion_gap_ns":40000000,"burst_window_ns":20000000,"maximum_batches_per_burst_window":2},
+		"expected_streams":1,"ready_streams":1,"offer_finished_streams":1,"terminal_finished_streams":1,
+		"valid_offer_streams":1,"timing_invalid_streams":0,"offer_failed_streams":0,"terminal_failed_streams":0,
+		"minimum_completed_batches":3000,"maximum_completed_batches":3000,
+		"completed_batches":3000,"completed_events":6000,"offer_bytes":234000,
+		"expected_batches":3000,"expected_events":6000,"expected_offer_bytes":234000,
+		"maximum_completion_delay":{"id":"stream","ordinal":7,"observed_ns":40000000},
+		"maximum_adjacent_gap":{"id":"stream","ordinal":8,"observed_ns":40000000},
+		"minimum_two_back_span":{"id":"stream","ordinal":9,"observed_ns":20000000},
+		"start_unix_ns":100000000000,"offer_horizon_unix_ns":160020000000,"hard_deadline_unix_ns":160040000000,
+		"earliest_final_completion_unix_ns":159980000000,
+		"event_bytes":39,"events_per_batch":2,"batches_per_stream":3000,"offer_seconds":60
+	}`
+	var summary provider.Summary
+	if err := json.Unmarshal([]byte(encoded), &summary); err != nil {
+		t.Fatal(err)
+	}
+	return summary
+}
+
+func TestCapacityVerdictKeepsInvalidProviderEvidenceIncomplete(t *testing.T) {
+	offer := validProviderSummary(t)
 	valid := capacityVerdictInput{
-		Capacity:         1,
-		Offer:            provider.Summary{ExpectedStreams: 1, ReadyStreams: 1, ExactStreams: 1},
-		Completion:       provider.Summary{TerminalFinished: 1},
-		CaptureAvailable: true, CaptureValid: true, CleanupAvailable: true, CleanupValid: true,
-		RequestIntegrityValid: true, ResultDeliveryValid: true, DurableAuditValid: true, MemoryStatus: "passed",
+		Capacity: 1, Duration: 60 * time.Second, Offer: offer, Completion: offer,
+		ExpectedWork:  capacityWork{Batches: 3000, Events: 6000, Bytes: 234000},
+		CaptureStatus: "passed", CleanupStatus: "passed", RequestIntegrityStatus: "passed",
+		ResultDeliveryStatus: "passed", DurableAuditStatus: "passed", MemoryStatus: "passed", SustainedCPUStatus: "passed",
 	}
 	if got := capacityVerdict(valid); got != "passed" {
 		t.Fatalf("valid capacity reduced to %s", got)
 	}
-	missed := valid
-	missed.Offer.MissedBatches = 1
-	if got := capacityVerdict(missed); got != "incomplete" {
-		t.Fatalf("missed fixture slot reduced to %s", got)
+	incomplete := valid
+	incomplete.Offer.CompletedBatches--
+	if got := capacityVerdict(incomplete); got != "incomplete" {
+		t.Fatalf("incomplete provider work reduced to %s", got)
 	}
 	terminalFailure := valid
-	terminalFailure.Completion.FailedStreams = 1
+	terminalFailure.Completion.TerminalFailedStreams = 1
 	if got := capacityVerdict(terminalFailure); got != "incomplete" {
 		t.Fatalf("terminal fixture failure reduced to %s", got)
 	}
 	hostFailure := valid
-	hostFailure.DurableAuditValid = false
+	hostFailure.DurableAuditStatus = "failed"
+	hostFailure.Offer.CompletedBatches--
 	if got := capacityVerdict(hostFailure); got != "failed" {
-		t.Fatalf("Host semantic failure reduced to %s", got)
+		t.Fatalf("Host semantic failure did not precede incomplete provider evidence: %s", got)
+	}
+	for name, mutate := range map[string]func(*provider.Summary){
+		"early":           func(summary *provider.Summary) { summary.EarlyCompletionViolations = 1 },
+		"late":            func(summary *provider.Summary) { summary.LateCompletionViolations = 1 },
+		"gap":             func(summary *provider.Summary) { summary.CompletionGapViolations = 1 },
+		"burst":           func(summary *provider.Summary) { summary.BurstWindowViolations = 1 },
+		"minimum batches": func(summary *provider.Summary) { summary.MinimumBatches-- },
+		"event bytes":     func(summary *provider.Summary) { summary.EventBytes++ },
+		"maximum delay": func(summary *provider.Summary) {
+			summary.MaximumCompletionDelay.ObservedNS = (40 * time.Millisecond).Nanoseconds() + 1
+		},
+		"maximum gap": func(summary *provider.Summary) {
+			summary.MaximumAdjacentGap.ObservedNS = (40 * time.Millisecond).Nanoseconds() + 1
+		},
+		"two-back span": func(summary *provider.Summary) {
+			summary.MinimumTwoBackSpan.ObservedNS = (20 * time.Millisecond).Nanoseconds() - 1
+		},
+		"missing delay":    func(summary *provider.Summary) { summary.MaximumCompletionDelay = nil },
+		"missing gap":      func(summary *provider.Summary) { summary.MaximumAdjacentGap = nil },
+		"missing two-back": func(summary *provider.Summary) { summary.MinimumTwoBackSpan = nil },
+	} {
+		changed := valid
+		changed.Offer = validProviderSummary(t)
+		mutate(&changed.Offer)
+		if got := capacityVerdict(changed); got != "incomplete" {
+			t.Fatalf("inconsistent %s evidence reduced to %s", name, got)
+		}
+	}
+}
+
+func TestTerminalFixtureFailureLeavesDependentHostFactsUnavailable(t *testing.T) {
+	offer := validProviderSummary(t)
+	completion := offer
+	completion.TerminalFailedStreams = 1
+	input := capacityVerdictInput{
+		Capacity: 1, Duration: 60 * time.Second, Offer: offer, Completion: completion,
+		ExpectedWork:  capacityWork{Batches: 3000, Events: 6000, Bytes: 234000},
+		CaptureStatus: "passed", CleanupStatus: "passed", RequestIntegrityStatus: "passed",
+		ResultDeliveryStatus: dependentObservationStatus(providerTerminalComplete(completion, 1), true, false),
+		DurableAuditStatus:   dependentObservationStatus(providerTerminalComplete(completion, 1), true, false),
+		MemoryStatus:         "passed", SustainedCPUStatus: "passed",
+	}
+	if input.ResultDeliveryStatus != "unavailable" || input.DurableAuditStatus != "unavailable" {
+		t.Fatalf("terminal prerequisite produced result %s audit %s", input.ResultDeliveryStatus, input.DurableAuditStatus)
+	}
+	if got := capacityVerdict(input); got != "incomplete" {
+		t.Fatalf("terminal fixture failure reduced to %s", got)
+	}
+	input.CleanupStatus = "failed"
+	if got := capacityVerdict(input); got != "failed" {
+		t.Fatalf("independent Host contradiction reduced to %s", got)
+	}
+	if got := dependentObservationStatus(true, true, false); got != "failed" {
+		t.Fatalf("available dependent contradiction reduced to %s", got)
+	}
+}
+
+func TestCapacityCPUWindowUsesConservativeQueryBrackets(t *testing.T) {
+	start := time.Unix(100, 0)
+	first := bracketedCPUSample{QueryStart: start.Add(10 * time.Second), QueryEnd: start.Add(10*time.Second + 5*time.Millisecond)}
+	second := bracketedCPUSample{QueryStart: first.QueryEnd.Add(40 * time.Second), QueryEnd: first.QueryEnd.Add(40*time.Second + 5*time.Millisecond)}
+	final := second.QueryEnd
+	if !capacityCPUWindowValid(start, first, second, final) {
+		t.Fatal("inclusive 40-second and final-completion boundaries were rejected")
+	}
+	tooShort := second
+	tooShort.QueryStart = first.QueryEnd.Add(40*time.Second - time.Nanosecond)
+	if capacityCPUWindowValid(start, first, tooShort, final) {
+		t.Fatal("short conservative interval was accepted")
+	}
+	afterWork := second
+	afterWork.QueryEnd = final.Add(time.Nanosecond)
+	if capacityCPUWindowValid(start, first, afterWork, final) {
+		t.Fatal("query extending past simultaneous work was accepted")
+	}
+	if capacityCPUWindowValid(start, first, second, time.Time{}) {
+		t.Fatal("missing provider completion boundary was accepted")
+	}
+	if status := sustainedCPUQualificationStatus(false, true, 1); status != "unavailable" {
+		t.Fatalf("partial valid-stream subset labeled CPU %s", status)
 	}
 }
 
