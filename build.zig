@@ -167,8 +167,11 @@ pub fn build(b: *std.Build) void {
     );
     measure_output_step.dependOn(&measure_output.step);
 
-    const measure_retry = b.addSystemCommand(&.{"python3"});
-    measure_retry.addFileArg(b.path("research/model-retry/measure.py"));
+    const measure_retry = b.addSystemCommand(&.{
+        "go", "run", "-mod=readonly", "./model-retry",
+    });
+    measure_retry.setCwd(b.path("research"));
+    measure_retry.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure_retry.addArtifactArg(release);
     const measure_retry_step = b.step(
         "measure-model-retry",
