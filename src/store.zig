@@ -21,6 +21,10 @@ const continuation_risk_sql =
     "SELECT 1 FROM model_output_item WHERE session_ref=?1 UNION ALL " ++
     "SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND current.resolution_code IS NULL LIMIT 1";
+const retry_admission_select_sql =
+    "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation " ++
+    "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND allowance_used<4 " ++
+    "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2";
 
 pub const Faults = struct {
     content_read: bool = false,
@@ -1339,12 +1343,7 @@ pub const Store = struct {
             1,
         );
         if (selection_limit > std.math.maxInt(i64)) return error.RetrySelectionLimitExceeded;
-        const select = try prepare(
-            self.database,
-            "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation " ++
-                "INDEXED BY model_operation_retry_age WHERE resolution_code IS NULL AND allowance_used<4 " ++
-                "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2",
-        );
+        const select = try prepare(self.database, retry_admission_select_sql);
         var select_open = true;
         defer {
             if (select_open) _ = c.sqlite3_finalize(select);
@@ -2694,7 +2693,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\) STRICT, WITHOUT ROWID;
         \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id);
         \\CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL;
-        \\CREATE INDEX model_operation_retry_age ON model_operation(operation_id) WHERE resolution_code IS NULL AND allowance_used<4;
+        \\CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND allowance_used<4;
         \\CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0;
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
         \\CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
@@ -2717,7 +2716,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry','model_output_item','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','model_operation','conversation_entry','model_output_item','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','turn_one_active_per_session','model_operation_retry_age','model_operation_retry_exhausted','conversation_entry_history','model_output_history')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','conversation_entry_history','model_output_history')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -4715,19 +4714,19 @@ test "continuation risk follows output and active Turn indexes without Operation
     try std.testing.expect(!scans_model_operations);
 }
 
-test "retry admission and exhausted recovery use age indexes without temporary sorting" {
+test "retry admission and exhausted recovery use their selection indexes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    const queries = [_]struct { sql: [:0]const u8, index: []const u8 }{
+    const queries = [_]struct { sql: [:0]const u8, index: []const u8, no_temporary_sort: bool }{
         .{
             .sql = "EXPLAIN QUERY PLAN SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms " ++
-                "FROM model_operation INDEXED BY model_operation_retry_age " ++
-                "WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=99 " ++
-                "ORDER BY operation_id LIMIT 64",
-            .index = "model_operation_retry_age",
+                "FROM model_operation INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL " ++
+                "AND allowance_used<4 AND retry_due_at_ms<=99 ORDER BY operation_id LIMIT 64",
+            .index = "model_operation_retry_due",
+            .no_temporary_sort = false,
         },
         .{
             .sql = "EXPLAIN QUERY PLAN SELECT turn_id,operation_id FROM model_operation " ++
@@ -4735,6 +4734,7 @@ test "retry admission and exhausted recovery use age indexes without temporary s
                 "AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0 " ++
                 "ORDER BY operation_id LIMIT 64",
             .index = "model_operation_retry_exhausted",
+            .no_temporary_sort = true,
         },
     };
     for (queries) |query| {
@@ -4748,13 +4748,113 @@ test "retry admission and exhausted recovery use age indexes without temporary s
                 if (length < 0) return error.InvalidQueryPlan;
                 const detail = pointer[0..@intCast(length)];
                 uses_index = uses_index or std.mem.indexOf(u8, detail, query.index) != null;
-                try std.testing.expect(std.mem.indexOf(u8, detail, "TEMP B-TREE") == null);
+                if (query.no_temporary_sort) {
+                    try std.testing.expect(std.mem.indexOf(u8, detail, "TEMP B-TREE") == null);
+                }
             },
             c.SQLITE_DONE => break,
             else => return error.InvalidQueryPlan,
         };
         try std.testing.expect(uses_index);
     }
+}
+
+test "retry due index excludes future population and preserves age ordering" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try exec(storage.database, "PRAGMA foreign_keys=OFF");
+    const QueryCost = struct {
+        fn measure(database: *c.sqlite3, sql: [:0]const u8, snapshot_ms: i64, limit: i64) !i32 {
+            const statement = try prepare(database, sql);
+            defer _ = c.sqlite3_finalize(statement);
+            try bindI64(statement, 1, snapshot_ms);
+            try bindI64(statement, 2, limit);
+            while (true) switch (c.sqlite3_step(statement)) {
+                c.SQLITE_ROW => {},
+                c.SQLITE_DONE => break,
+                else => return error.RetrySelectionFailed,
+            };
+            return c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+        }
+    };
+
+    var future_costs: [3]i32 = undefined;
+    var age_control_costs: [3]i32 = undefined;
+    try exec(
+        storage.database,
+        "CREATE INDEX test_model_operation_retry_age ON model_operation(operation_id) " ++
+            "WHERE resolution_code IS NULL AND allowance_used<4",
+    );
+    const age_control_sql =
+        "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation " ++
+        "INDEXED BY test_model_operation_retry_age WHERE resolution_code IS NULL AND allowance_used<4 " ++
+        "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2";
+    for ([_]usize{ 100, 1_000, 10_000 }, 0..) |future_count, index| {
+        try exec(storage.database, "DELETE FROM model_operation");
+        const insert = try std.fmt.allocPrintSentinel(
+            std.testing.allocator,
+            "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
+                "SELECT value,value,printf('future-%d',value),1,1,1,1,1,0,9223372036854775807 FROM sequence; " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) VALUES" ++
+                "({1},{1},'older-due',1,1,1,1,1,0,99),({2},{2},'earlier-deadline',1,1,1,1,1,0,1)",
+            .{ future_count, future_count + 1, future_count + 2 },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try exec(storage.database, insert);
+        future_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99, 2);
+        age_control_costs[index] = try QueryCost.measure(storage.database, age_control_sql, 99, 2);
+    }
+    const minimum_future_cost = @min(future_costs[0], future_costs[1], future_costs[2]);
+    const maximum_future_cost = @max(future_costs[0], future_costs[1], future_costs[2]);
+    try std.testing.expect(maximum_future_cost - minimum_future_cost <= 16);
+    try std.testing.expect(age_control_costs[2] > age_control_costs[0] * 10);
+
+    var due_costs: [3]i32 = undefined;
+    for ([_]usize{ 10, 100, 1_000 }, 0..) |due_count, index| {
+        try exec(storage.database, "DELETE FROM model_operation");
+        const insert = try std.fmt.allocPrintSentinel(
+            std.testing.allocator,
+            "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
+                "SELECT value,value,printf('due-%d',value),1,1,1,1,1,0,1 FROM sequence",
+            .{due_count},
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try exec(storage.database, insert);
+        due_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99, 2);
+    }
+    try std.testing.expect(due_costs[1] > due_costs[0]);
+    try std.testing.expect(due_costs[2] > due_costs[1]);
+
+    try exec(storage.database, "DELETE FROM model_operation");
+    try exec(
+        storage.database,
+        "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
+            "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) VALUES" ++
+            "(1,1,'oldest-active',1,1,1,1,1,0,99)," ++
+            "(2,2,'oldest-free',1,1,1,1,1,0,50)," ++
+            "(3,3,'earliest-deadline',1,1,1,1,1,0,1)",
+    );
+    const Active = struct {
+        fn contains(_: *const anyopaque, operation_id: u64) bool {
+            return operation_id == 1;
+        }
+    };
+    const admitted = (try storage.tryAdmitNextModelRetry(.{
+        .context = &empty_active_context,
+        .containsFn = Active.contains,
+        .maximum_exclusions = 1,
+    }, .{})).?;
+    try std.testing.expectEqual(@as(u64, 2), admitted.permit.binding.operation_id);
 }
 
 test "retry transitions preserve age and settle one exhausted outcome per call" {
@@ -4802,24 +4902,6 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         .containsFn = Active.contains,
         .maximum_exclusions = active_operations.len,
     };
-
-    // The simple age index deliberately scans the durable future prefix. This
-    // records that real work rather than asserting a synthetic constant bound.
-    {
-        const statement = try prepare(
-            storage.database,
-            "SELECT operation_id FROM model_operation INDEXED BY model_operation_retry_age " ++
-                "WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=?1 " ++
-                "ORDER BY operation_id LIMIT 101",
-        );
-        defer _ = c.sqlite3_finalize(statement);
-        try bindI64(statement, 1, try readUnixMilliseconds(storage.database));
-        var rows: usize = 0;
-        while (c.sqlite3_step(statement) == c.SQLITE_ROW) rows += 1;
-        try std.testing.expectEqual(@as(usize, 101), rows);
-        const vm_steps = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
-        try std.testing.expect(vm_steps > 100);
-    }
 
     try std.testing.expectError(
         error.InjectedAttemptCommitFailure,
