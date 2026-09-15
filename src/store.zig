@@ -647,7 +647,7 @@ pub const Store = struct {
     fn importContent(self: *Store, content: *const protocol.ContentField, faults: Faults) !i64 {
         std.debug.assert(content.state == .value);
         if (content.file) |source| {
-            try verifyExternalContent(self.io, source, content.length, &content.digest, faults);
+            if (try source.length(self.io) != content.length) return error.ContentChanged;
         } else if (content.length != 0 or
             !std.mem.eql(u8, &protocol.contentDigest(""), &content.digest))
         {
@@ -661,6 +661,9 @@ pub const Store = struct {
         if (find_result == c.SQLITE_ROW) {
             const content_id = c.sqlite3_column_int64(find, 0);
             if (content_id <= 0) return error.CorruptStore;
+            if (content.file) |source| {
+                try verifyExternalContent(self.io, source, content.length, &content.digest, null, faults);
+            }
             return content_id;
         }
         if (find_result != c.SQLITE_DONE) return error.ContentReadFailed;
@@ -674,6 +677,9 @@ pub const Store = struct {
         if (content_id <= 0) return error.ContentWriteFailed;
 
         if (content.length == 0) {
+            if (content.file) |source| {
+                try verifyExternalContent(self.io, source, content.length, &content.digest, null, faults);
+            }
             return content_id;
         }
         var blob: ?*c.sqlite3_blob = null;
@@ -682,18 +688,9 @@ pub const Store = struct {
         }
         defer _ = c.sqlite3_blob_close(blob);
         const file = content.file orelse return error.MissingContentCustody;
-        var buffer: [protocol.content_window_bytes]u8 = undefined;
-        var offset: u64 = 0;
-        while (offset < content.length) {
-            const wanted: usize = @intCast(@min(content.length - offset, buffer.len));
-            const count = try file.readPositionalAll(self.io, buffer[0..wanted], offset);
-            if (count != wanted) return error.ContentReadFailed;
-            if (offset > std.math.maxInt(c_int)) return error.ContentTooLarge;
-            if (c.sqlite3_blob_write(blob, buffer[0..count].ptr, @intCast(count), @intCast(offset)) != c.SQLITE_OK) {
-                return error.ContentWriteFailed;
-            }
-            offset += count;
-        }
+        // Verify the exact bytes copied while the row is still uncommitted.
+        // The caller rolls back the whole transaction if verification fails.
+        try verifyExternalContent(self.io, file, content.length, &content.digest, blob, faults);
         return content_id;
     }
 
@@ -736,9 +733,9 @@ fn verifyExternalContent(
     file: std.Io.File,
     expected_length: u64,
     expected_digest: *const [32]u8,
+    destination: ?*c.sqlite3_blob,
     faults: Faults,
 ) !void {
-    if (try file.length(io) != expected_length) return error.ContentChanged;
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var offset: u64 = 0;
     var hash = protocol.contentHasher();
@@ -748,8 +745,15 @@ fn verifyExternalContent(
         if (count != wanted) return error.ContentReadFailed;
         if (faults.content_read) return error.InjectedContentReadFailure;
         hash.update(buffer[0..count]);
+        if (destination) |blob| {
+            if (offset > std.math.maxInt(c_int)) return error.ContentTooLarge;
+            if (c.sqlite3_blob_write(blob, buffer[0..count].ptr, @intCast(count), @intCast(offset)) != c.SQLITE_OK) {
+                return error.ContentWriteFailed;
+            }
+        }
         offset += count;
     }
+    if (try file.length(io) != expected_length) return error.ContentChanged;
     if (!std.mem.eql(u8, &hash.finalResult(), expected_digest)) return error.ContentChanged;
 }
 
@@ -1237,7 +1241,7 @@ test "external content import follows sealed descriptor custody" {
     try std.testing.expectEqualStrings(captured, &bytes);
 }
 
-test "external content identity is verified before canonical import" {
+test "external content identity is verified before canonical commit" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -1260,6 +1264,133 @@ test "external content identity is verified before canonical import" {
 
     try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
     try std.testing.expectError(error.StoreFenced, storage.observeCommand("changed"));
+}
+
+test "content verification failure rolls back new imports and deduplicated inputs" {
+    const Case = enum { digest, short, long, empty_digest, read_failure };
+    inline for (.{ false, true }) |deduplicated| {
+        inline for (std.meta.tags(Case)) |case| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const length: usize = if (case == .empty_digest) 0 else protocol.content_window_bytes * 2 + 17;
+
+            var initial = try completeConfiguration("initial", "direct/import", workspace, "model-a");
+            initial.configuration.instructions = try testingContent(&tmp, "original", 'a', length);
+            defer initial.removeTemporaryContent(std.testing.io) catch unreachable;
+            if (deduplicated) try std.testing.expect(storage.configure(&initial, .{}) == .accepted);
+            const content_count = try queryU64(storage.database, "SELECT count(*) FROM content");
+            const command_count = try queryU64(storage.database, "SELECT count(*) FROM core_command");
+            const revision_count = try queryU64(storage.database, "SELECT count(*) FROM session_revision");
+
+            var command = try completeConfiguration("invalid", "direct/import", workspace, "model-b");
+            command.configuration.instructions = try testingContent(&tmp, "invalid", 'b', length);
+            defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+            const content = &command.configuration.instructions;
+            switch (case) {
+                .digest => {
+                    // A dedup hit must check supplied bytes, not trust the claimed digest.
+                    content.digest = initial.configuration.instructions.digest;
+                },
+                .short => content.length += 1,
+                .long => content.length -= 1,
+                .empty_digest => content.digest[0] ^= 1,
+                .read_failure => {
+                    if (deduplicated) content.digest = initial.configuration.instructions.digest;
+                },
+            }
+            try std.testing.expect(storage.configure(&command, .{ .content_read = case == .read_failure }) == .infrastructure_failure);
+            try std.testing.expectError(error.StoreFenced, storage.observeCommand("invalid"));
+            try std.testing.expectEqual(content_count, try queryU64(storage.database, "SELECT count(*) FROM content"));
+            try std.testing.expectEqual(command_count, try queryU64(storage.database, "SELECT count(*) FROM core_command"));
+            try std.testing.expectEqual(revision_count, try queryU64(storage.database, "SELECT count(*) FROM session_revision"));
+            try std.testing.expectEqual(@as(u64, if (deduplicated) 1 else 0), try queryU64(storage.database, "SELECT count(*) FROM session"));
+        }
+    }
+}
+
+test "content import reads once and rolls back sources that change during reading" {
+    const Probe = struct {
+        const Change = enum { none, truncate, grow };
+        var change: Change = .none;
+        var bytes_read: usize = 0;
+
+        fn read(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+            const count = try std.testing.io.vtable.fileReadPositional(userdata, file, data, offset);
+            bytes_read += count;
+            if (offset == 0) switch (change) {
+                .none => {},
+                .truncate => file.setLength(std.testing.io, count) catch return error.Unexpected,
+                .grow => file.setLength(std.testing.io, protocol.content_window_bytes * 2 + 18) catch return error.Unexpected,
+            };
+            return count;
+        }
+    };
+    for (std.meta.tags(Probe.Change)) |change| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        var vtable = std.testing.io.vtable.*;
+        vtable.fileReadPositional = Probe.read;
+        storage.io.vtable = &vtable;
+        Probe.change = change;
+        Probe.bytes_read = 0;
+
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+        var command = try completeConfiguration("read-probe", "direct/import", workspace, "model-a");
+        const length = protocol.content_window_bytes * 2 + 17;
+        command.configuration.instructions = try testingContent(&tmp, "source", 'q', length);
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        if (change == .none) {
+            try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+            try std.testing.expectEqual(length, Probe.bytes_read);
+            Probe.bytes_read = 0;
+            try command.key.set("deduplicated");
+            try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+            try std.testing.expectEqual(length, Probe.bytes_read);
+        } else {
+            try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
+            try std.testing.expectError(error.StoreFenced, storage.observeCommand("read-probe"));
+            try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM content"));
+            try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM core_command"));
+            try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM session"));
+        }
+    }
+}
+
+test "multiwindow content import and deduplication preserve all bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("first", "direct/import", workspace, "model-a");
+    const length = protocol.content_window_bytes * 2 + 17;
+    command.configuration.instructions = try testingContent(&tmp, "source", 'q', length);
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    try command.key.set("second");
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM content"));
+    const observation = try storage.inspectSession("direct/import");
+    try std.testing.expectEqual(@as(u64, 2), observation.revision);
+    var reader = try storage.openContent(observation.instructions);
+    defer reader.close();
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < length) {
+        const count = try reader.read(offset, buffer[0..@min(buffer.len, length - offset)]);
+        try std.testing.expect(count != 0);
+        for (buffer[0..count]) |byte| try std.testing.expectEqual(@as(u8, 'q'), byte);
+        offset += count;
+    }
+    try std.testing.expectEqual(length, offset);
 }
 
 test "definite rejections retain decisions without retaining payloads" {
