@@ -1462,7 +1462,7 @@ def main():
         stop_process(process)
         process = None
 
-        process, _ = start_host(store, None, "--fault", "scratch-acquire")
+        process, _ = start_host(store, None, "--fault", "content-acquire")
         no_scratch = stop_session(
             state, store, "no-scratch-stop", "direct/headroom"
         )
