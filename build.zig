@@ -64,8 +64,9 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&release.step);
 
     const measurement_tests = b.addSystemCommand(&.{
-        "go", "-C", b.pathFromRoot("research"), "test", "-mod=readonly", "./...",
+        "go", "test", "-mod=readonly", "./...",
     });
+    measurement_tests.setCwd(b.path("research"));
     measurement_tests.setEnvironmentVariable("GOTOOLCHAIN", "local");
     const measurement_test_step = b.step(
         "measurement-check",
@@ -98,8 +99,9 @@ pub fn build(b: *std.Build) void {
     }
 
     const measure = b.addSystemCommand(&.{
-        "go", "-C", b.pathFromRoot("research"), "run", "-mod=readonly", "./configuration-admission",
+        "go", "run", "-mod=readonly", "./configuration-admission",
     });
+    measure.setCwd(b.path("research"));
     measure.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure.addArtifactArg(release);
     const measure_step = b.step(
