@@ -1178,16 +1178,12 @@ pub const Store = struct {
         var interrupted_operation_id: ?u64 = null;
         if (selected_turn_id) |turn_id| {
             if (operation_unresolved) {
-                const update_operation = try prepare(
-                    self.database,
-                    "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='interrupted'," ++
-                        "interrupted_by_command_key=?2 WHERE operation_id=?1 AND resolution_code IS NULL",
-                );
-                defer _ = c.sqlite3_finalize(update_operation);
-                try bindU64(update_operation, 1, current_operation_id.?);
-                try bindText(update_operation, 2, command.key.slice());
-                try expectDone(update_operation);
-                if (c.sqlite3_changes(self.database) != 1) return error.StopSelectionChanged;
+                self.interruptOperation(current_operation_id.?, command.key.slice()) catch |err| {
+                    return switch (err) {
+                        error.InterruptionTargetChanged => error.StopSelectionChanged,
+                        else => err,
+                    };
+                };
                 interrupted_operation_id = current_operation_id;
             }
             const update_turn = try prepare(
@@ -1340,18 +1336,7 @@ pub const Store = struct {
         if (current_result != c.SQLITE_ROW) return error.InterruptionTargetReadFailed;
 
         try self.insertModelInterruptionCommand(command, &digest, .{ .accepted = true });
-        {
-            const update = try prepare(
-                self.database,
-                "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='interrupted'," ++
-                    "interrupted_by_command_key=?2 WHERE operation_id=?1 AND resolution_code IS NULL",
-            );
-            defer _ = c.sqlite3_finalize(update);
-            try bindU64(update, 1, command.operation_id);
-            try bindText(update, 2, command.key.slice());
-            try expectDone(update);
-            if (c.sqlite3_changes(self.database) != 1) return error.InterruptionTargetChanged;
-        }
+        try self.interruptOperation(command.operation_id, command.key.slice());
         if (!try self.hasApplicablePendingMessage(command.session.slice())) {
             const settle_turn = try prepare(
                 self.database,
@@ -1366,6 +1351,20 @@ pub const Store = struct {
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
         return .{ .accepted = .{ .replayed = false } };
+    }
+
+    // The caller owns the Store lock and transaction, including the causing command.
+    fn interruptOperation(self: *Store, operation_id: u64, command_key: []const u8) !void {
+        const update = try prepare(
+            self.database,
+            "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='interrupted'," ++
+                "interrupted_by_command_key=?2 WHERE operation_id=?1 AND resolution_code IS NULL",
+        );
+        defer _ = c.sqlite3_finalize(update);
+        try bindU64(update, 1, operation_id);
+        try bindText(update, 2, command_key);
+        try expectDone(update);
+        if (c.sqlite3_changes(self.database) != 1) return error.InterruptionTargetChanged;
     }
 
     fn saveModelInterruptionAnswer(
