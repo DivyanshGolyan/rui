@@ -121,10 +121,10 @@ def sse_answer(
         "content": [
             {
                 "type": "output_text",
-                "text": answer,
+                "text": part,
                 "annotations": [],
                 "extension": {"kept": True},
-            }
+            } for part in (answer if isinstance(answer, list) else [answer])
         ],
     }
     completed_response = {
@@ -1159,6 +1159,8 @@ def main():
         assert database.execute(
             "SELECT count(*) FROM model_output_item WHERE operation_id=1"
         ).fetchone()[0] == 129
+        assert database.execute("SELECT payload IS NULL,byte_length FROM content WHERE byte_length=? AND private=0", (len(large_answer),)).fetchall() == [(1, len(large_answer))]
+        assert database.execute("SELECT coalesce(sum(length(payload)),0) FROM content WHERE private=0").fetchone()[0] < 1024
         database.close()
         resources = command(
             "inspect-session", "--store", growth_store, "--session", "direct/growth-b"
@@ -1169,6 +1171,47 @@ def main():
         growth_endpoint.shutdown()
         growth_endpoint.server_close()
         growth_thread.join(timeout=5)
+
+        # Public answers are projections of immutable provider items. Exercise
+        # both dedup orders: answer then caller input, and caller then answer.
+        parts = ["", "x" * 4093 + "\n", "🙂\t\\", ""]
+        projected_answer = "".join(parts).encode()
+        projection_endpoint = SuccessEndpoint([
+            sse_answer("projection-1", "p-r1", "p-m1", parts)[0],
+            sse_answer("projection-2", "p-r2", "p-m2", "caller-first")[0],
+        ])
+        projection_thread = threading.Thread(target=projection_endpoint.serve_forever, daemon=True)
+        projection_thread.start()
+        projection_store = state / "projection-store"
+        projection_url = f"http://127.0.0.1:{projection_endpoint.server_port}/responses"
+        host = start_host(projection_store, projection_url)
+        processes.append(host)
+        configure(state, projection_store, "projection-config", "direct/projection", "model-a", instructions="caller-first")
+        message(state, projection_store, "projection-first", "direct/projection", "first")
+        wait_for(lambda: completed_observation(projection_store, "projection-first"), "projected answer")
+        assert read_result(projection_store, "projection-first") == projected_answer
+        configure(state, projection_store, "projection-update", "direct/projection", "model-a", instructions=projected_answer.decode())
+        message(state, projection_store, "projection-second", "direct/projection", projected_answer.decode())
+        wait_for(lambda: completed_observation(projection_store, "projection-second"), "deduplicated answer")
+        assert read_result(projection_store, "projection-second") == b"caller-first"
+        replay = json.loads(projection_endpoint.requests[1])["input"]
+        assert replay[-1]["content"][0]["text"] == projected_answer.decode(), replay
+        assert replay[-2]["content"][0]["text"] == projected_answer.decode(), replay
+        stop_host(host)
+        processes.remove(host)
+        with sqlite3.connect(projection_store / "latifa.sqlite3") as database:
+            assert database.execute("SELECT c.payload IS NULL FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id ORDER BY o.operation_id").fetchall() == [(1,), (0,)]
+            assert database.execute("SELECT count(*) FROM answer_text_projection").fetchone()[0] == len(parts)
+            assert database.execute("SELECT count(*) FROM answer_text_projection p JOIN content c ON c.content_id=p.source_content_id WHERE c.private<>1 OR c.payload IS NULL").fetchone()[0] == 0
+        host = start_host(projection_store, projection_url)
+        processes.append(host)
+        assert read_result(projection_store, "projection-first") == projected_answer
+        assert read_result(projection_store, "projection-second") == b"caller-first"
+        stop_host(host)
+        processes.remove(host)
+        projection_endpoint.shutdown()
+        projection_endpoint.server_close()
+        projection_thread.join(timeout=5)
 
         # A committed permit launches exactly one complete frozen request. The
         # endpoint holds the response so later settings and input arrive while

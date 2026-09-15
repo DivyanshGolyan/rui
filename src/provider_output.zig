@@ -484,6 +484,7 @@ fn validateItem(
     io: std.Io,
     file: std.Io.File,
     item: Range,
+    ordinal: u64,
     metadata: *store.OutputMetadataWriter,
     answer_hash: *std.crypto.hash.sha2.Sha256,
 ) !ItemValidation {
@@ -522,6 +523,7 @@ fn validateItem(
         try source.expectEnd();
         try metadata.append(.{
             .tag = .text,
+            .ordinal = ordinal,
             .start = text.encoded.start,
             .length = text.encoded.length,
             .decoded_length = text.decoded_length,
@@ -661,7 +663,7 @@ fn processEvent(
         const index = try readIndex(io, file, try fields.required("output_index"));
         if (index != item_count.*) return error.ContradictoryProviderOutput;
         const item = try fields.required("item");
-        const validation = try validateItem(io, file, item, metadata, answer_hash);
+        const validation = try validateItem(io, file, item, index, metadata, answer_hash);
         if (try identityAlreadySeen(metadata, &validation.id_digest)) return error.ContradictoryProviderOutput;
         if (added.active and (added.index != index or added.kind != validation.kind or
             !std.mem.eql(u8, &added.id_digest, &validation.id_digest))) return error.ContradictoryProviderOutput;

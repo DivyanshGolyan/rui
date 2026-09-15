@@ -169,6 +169,7 @@ func readResult(deadline measurement.Deadline, binary, store, key, destination s
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "/usr/bin/time", "-l", binary, "read-result", "--store", store, "--key", key)
 	cmd.Stdout, cmd.Stderr = file, &stderr
+	deliveryStarted := time.Now()
 	runError := cmd.Run()
 	closeError := file.Close()
 	if err := errors.Join(runError, closeError); err != nil {
@@ -182,19 +183,24 @@ func readResult(deadline measurement.Deadline, binary, store, key, destination s
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"destination_bytes": info.Size(), "destination_sha256": digest, "time_stderr": stderr.String()}, nil
+	return map[string]any{"delivery_and_verification_seconds": time.Since(deliveryStarted).Seconds(), "destination_bytes": info.Size(), "destination_sha256": digest, "time_stderr": stderr.String()}, nil
 }
 
 type outputAudit struct {
-	CanonicalOutputItems int `json:"canonical_output_items"`
-	PrivateContentRows   int `json:"private_content_rows"`
-	AssistantProjections int `json:"assistant_projections"`
+	PublicPayloadBytes   int64 `json:"public_payload_bytes"`
+	ProjectionRows       int64 `json:"projection_rows"`
+	DatabaseBytes        int64 `json:"database_bytes"`
+	CanonicalOutputItems int   `json:"canonical_output_items"`
+	PrivateContentRows   int   `json:"private_content_rows"`
+	AssistantProjections int   `json:"assistant_projections"`
 }
 
 func readOutputAudit(deadline measurement.Deadline, store string) (outputAudit, error) {
 	query := "SELECT (SELECT count(*) FROM model_output_item) AS canonical_output_items," +
 		"(SELECT count(*) FROM content WHERE private=1) AS private_content_rows," +
-		"(SELECT count(*) FROM conversation_entry WHERE entry_kind=3) AS assistant_projections;"
+		"(SELECT count(*) FROM conversation_entry WHERE entry_kind=3) AS assistant_projections," +
+		"(SELECT coalesce(sum(length(payload)),0) FROM content WHERE private=0) AS public_payload_bytes," +
+		"(SELECT count(*) FROM answer_text_projection) AS projection_rows;"
 	encoded, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-json", filepath.Join(store, "latifa.sqlite3"), query)
 	if err != nil {
 		return outputAudit{}, err
@@ -203,6 +209,11 @@ func readOutputAudit(deadline measurement.Deadline, store string) (outputAudit, 
 	if err := json.Unmarshal(encoded, &rows); err != nil || len(rows) != 1 {
 		return outputAudit{}, fmt.Errorf("decode output audit: rows=%d: %w", len(rows), err)
 	}
+	info, err := os.Stat(filepath.Join(store, "latifa.sqlite3"))
+	if err != nil {
+		return outputAudit{}, err
+	}
+	rows[0].DatabaseBytes = info.Size()
 	return rows[0], nil
 }
 
@@ -238,6 +249,7 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 		return nil, err
 	}
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
+	importStarted := time.Now()
 	if err := client.Submit(name, "measure/"+name, "measure"); err != nil {
 		return nil, err
 	}
@@ -245,6 +257,7 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	if err != nil {
 		return nil, err
 	}
+	importSeconds := time.Since(importStarted).Seconds()
 	delivery, err := readResult(deadline, binary, store, name, filepath.Join(directory, "answer.bin"))
 	if err != nil {
 		return nil, err
@@ -254,14 +267,22 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	if delivery["destination_bytes"] != int64(len(answer)) || delivery["destination_sha256"] != expectedDigest {
 		return nil, errors.New("saved result differs from response")
 	}
-	inspection, err := client.Inspect("measure/" + name)
+	var inspection map[string]any
+	err = measurement.WaitFor(deadline, 25*time.Millisecond, "post-result resource cleanup", func() (bool, error) {
+		var err error
+		inspection, err = client.Inspect("measure/" + name)
+		if err != nil {
+			return false, err
+		}
+		scratch, scratchOK := measurement.IntStringField(inspection, "execution", "scratch_used_bytes")
+		custody, custodyOK := measurement.IntStringField(inspection, "execution", "custody_occupied")
+		if !scratchOK || !custodyOK {
+			return false, fmt.Errorf("missing resource observation: %v", inspection)
+		}
+		return scratch == 0 && custody == 0, nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	scratch, scratchOK := measurement.IntStringField(inspection, "execution", "scratch_used_bytes")
-	custody, custodyOK := measurement.IntStringField(inspection, "execution", "custody_occupied")
-	if !scratchOK || !custodyOK || scratch != 0 || custody != 0 {
-		return nil, fmt.Errorf("retained resources after completion: %v", inspection)
 	}
 	retained, err := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-retained.txt"))
 	if err != nil {
@@ -275,7 +296,7 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	retainedWhole := wholeLatifa(retained)
 	status := outputCaseStatus(memoryStatus(coldWhole, retainedWhole), outputAuditValid(audit, reasoning))
 	return map[string]any{
-		"status": status, "answer_bytes": len(answer), "reasoning_items": reasoning, "total_output_items": reasoning + 1,
+		"completion_seconds": importSeconds, "status": status, "answer_bytes": len(answer), "reasoning_items": reasoning, "total_output_items": reasoning + 1,
 		"sse_bytes": len(payload), "request_bytes": endpoint.lastRequestBytes(), "scratch_limit_bytes": host.Ready["scratch_limit_bytes"],
 		"offline_audit": audit, "cold": map[string]any{"host": cold, "whole_latifa": coldWhole},
 		"retained_idle": map[string]any{"host": retained, "whole_latifa": retainedWhole}, "client_delivery": delivery,
@@ -284,8 +305,13 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 }
 
 func main() {
+	projection := flag.Bool("projection", false, "measure 1/4/8 KiB and 100 KB plain and escaped answer projections")
 	output := flag.String("output", "", "write the final JSON to this path")
 	flag.Parse()
+	if *projection {
+		answerSizes = []int{1024, 4096, 8192, 100000}
+		reasoningCounts = nil
+	}
 	if flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: measure-model-output [--output path] /absolute/path/to/latifa")
 		os.Exit(2)
@@ -325,6 +351,14 @@ func main() {
 			panic(err)
 		}
 		byteRows = append(byteRows, row)
+		if *projection {
+			escaped, err := measureCase(binary, root, endpoint, fmt.Sprintf("escaped-%d", size), 1, strings.Repeat("\n", size))
+			if err != nil {
+				panic(err)
+			}
+			escaped["escaped"] = true
+			byteRows = append(byteRows, escaped)
+		}
 		if err := facts.Write("answer_growth", row); err != nil {
 			panic(err)
 		}
