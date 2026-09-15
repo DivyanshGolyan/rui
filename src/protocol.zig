@@ -608,9 +608,11 @@ const ContentSink = struct {
     utf8: Utf8State = .{},
 
     fn write(self: *ContentSink, bytes: []const u8) !void {
+        const next_length = std.math.add(u64, self.length, bytes.len) catch return error.ContentTooLarge;
+        if (next_length > max_sqlite_content_bytes) return error.ContentTooLarge;
         try self.utf8.feed(bytes);
         self.hash.update(bytes);
-        self.length = std.math.add(u64, self.length, bytes.len) catch return error.ContentTooLarge;
+        self.length = next_length;
         var offset: usize = 0;
         while (offset < bytes.len) {
             const count = @min(self.buffer.len - self.used, bytes.len - offset);
@@ -740,4 +742,25 @@ test "captured content cleanup closes sealed custody" {
     var content: ContentField = .{ .state = .value, .file = file };
     try removeContent(&content, std.testing.io);
     try std.testing.expect(!content.hasFile());
+}
+
+test "content sink enforces the decoded consumer boundary before retention" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "content", .{});
+    defer file.close(std.testing.io);
+
+    var escaped = ContentSink{ .io = std.testing.io, .file = file };
+    escaped.length = max_sqlite_content_bytes - 1;
+    try escaped.write("\n");
+    try std.testing.expectEqual(max_sqlite_content_bytes, escaped.length);
+    try std.testing.expectError(error.ContentTooLarge, escaped.write("x"));
+    try escaped.finish();
+    try std.testing.expectEqual(@as(u64, 1), try file.length(std.testing.io));
+
+    var multibyte = ContentSink{ .io = std.testing.io, .file = file };
+    multibyte.length = max_sqlite_content_bytes - 3;
+    try multibyte.write("€");
+    try std.testing.expectEqual(max_sqlite_content_bytes, multibyte.length);
+    try std.testing.expectError(error.ContentTooLarge, multibyte.write("x"));
 }
