@@ -168,17 +168,12 @@ pub fn materialize(
     var maximum: u64 = 1024;
     maximum = try addEscapedMaximum(maximum, settings.model.len);
     if (settings.output_schema) |schema| maximum = try std.math.add(u64, maximum, schema.length);
-    var after_revision: u64 = 0;
-    while (try view.nextInstruction(after_revision)) |instruction| {
-        maximum = try addEscapedMaximum(maximum, instruction.content.length);
+    maximum = try addEscapedMaximum(maximum, settings.baseline_instructions.length);
+    var after_position: u64 = 0;
+    while (try view.nextEntry(after_position)) |entry| {
+        maximum = try addEscapedMaximum(maximum, entry.content.length);
         maximum = try std.math.add(u64, maximum, per_input_framing_charge);
-        after_revision = instruction.revision;
-    }
-    var after: u64 = 0;
-    while (try view.nextInput(after)) |input| {
-        maximum = try addEscapedMaximum(maximum, input.content.length);
-        maximum = try std.math.add(u64, maximum, per_input_framing_charge);
-        after = input.admission_id;
+        after_position = entry.position;
     }
     if (!budget.reserve(maximum)) return error.RequestScratchExhausted;
     var budget_owned = true;
@@ -231,37 +226,26 @@ pub fn materialize(
     try writer.write("{\"model\":");
     try writer.jsonString(settings.model.slice());
     try writer.write(",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[");
-    var input_comma = false;
-    after_revision = 0;
-    if (try view.nextInstruction(after_revision)) |baseline| {
+    {
         try writer.write("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
-        var instructions = try view.openContent(baseline.content);
+        var instructions = try view.openContent(settings.baseline_instructions);
+        defer instructions.close();
         try writer.jsonContent(&instructions);
-        instructions.close();
         try writer.write("}]}");
-        input_comma = true;
-        after_revision = baseline.revision;
     }
-    after = 0;
-    while (try view.nextInput(after)) |input| {
-        if (input_comma) try writer.write(",");
-        try writer.write("{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":");
-        var content = try view.openContent(input.content);
+    after_position = 0;
+    while (try view.nextEntry(after_position)) |entry| {
+        try writer.write(",{\"role\":");
+        try writer.jsonString(switch (entry.kind) {
+            .user => "user",
+            .instruction => "system",
+        });
+        try writer.write(",\"content\":[{\"type\":\"input_text\",\"text\":");
+        var content = try view.openContent(entry.content);
+        defer content.close();
         try writer.jsonContent(&content);
-        content.close();
         try writer.write("}]}");
-        input_comma = true;
-        after = input.admission_id;
-    }
-    while (try view.nextInstruction(after_revision)) |instruction| {
-        if (input_comma) try writer.write(",");
-        try writer.write("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
-        var instructions = try view.openContent(instruction.content);
-        try writer.jsonContent(&instructions);
-        instructions.close();
-        try writer.write("}]}");
-        input_comma = true;
-        after_revision = instruction.revision;
+        after_position = entry.position;
     }
     try writer.write("],\"tools\":[");
     var comma = false;

@@ -6,7 +6,7 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 5;
+pub const schema_version: u32 = 6;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const runnable_probe_sql =
     "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending " ++
@@ -136,18 +136,16 @@ pub const AttemptAdmission = struct {
 
 pub const HistoricalSettings = struct {
     model: protocol.Bounded(protocol.max_model_bytes),
-    instructions: ContentReference,
+    baseline_instructions: ContentReference,
     output_schema: ?ContentReference,
     tools_mask: u8,
 };
 
-pub const HistoricalInput = struct {
-    admission_id: u64,
-    content: ContentReference,
-};
+pub const HistoricalEntryKind = enum { user, instruction };
 
-pub const HistoricalInstruction = struct {
-    revision: u64,
+pub const HistoricalEntry = struct {
+    position: u64,
+    kind: HistoricalEntryKind,
     content: ContentReference,
 };
 
@@ -161,14 +159,9 @@ pub const HistoricalView = struct {
         return self.store.readHistoricalSettings(self.binding);
     }
 
-    pub fn nextInput(self: *HistoricalView, after_admission: u64) !?HistoricalInput {
+    pub fn nextEntry(self: *HistoricalView, after_position: u64) !?HistoricalEntry {
         std.debug.assert(self.active);
-        return self.store.readHistoricalInput(self.binding, after_admission);
-    }
-
-    pub fn nextInstruction(self: *HistoricalView, after_revision: u64) !?HistoricalInstruction {
-        std.debug.assert(self.active);
-        return self.store.readHistoricalInstruction(self.binding, after_revision);
+        return self.store.readHistoricalEntry(self.binding, after_position);
     }
 
     pub fn openContent(self: *HistoricalView, reference: ContentReference) !ContentReader {
@@ -219,6 +212,7 @@ const CurrentConfiguration = struct {
     permission_mode: u8 = 0,
     output_schema_id: ?i64 = null,
     revision: u64 = 0,
+    next_position: u64 = 1,
 };
 
 pub const Store = struct {
@@ -691,7 +685,7 @@ pub const Store = struct {
 
         const select = try prepare(
             self.database,
-            "SELECT m.session_ref,min(m.admission_id),max(m.admission_id),count(*),s.revision " ++
+            "SELECT m.session_ref,min(m.admission_id),max(m.admission_id),count(*),s.revision,s.next_position " ++
                 "FROM message_admission m JOIN session s ON s.session_ref=m.session_ref " ++
                 "WHERE m.turn_id IS NULL AND NOT EXISTS(" ++
                 " SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL" ++
@@ -710,7 +704,8 @@ pub const Store = struct {
         const cutoff = c.sqlite3_column_int64(select, 2);
         const selected = c.sqlite3_column_int64(select, 3);
         const revision = c.sqlite3_column_int64(select, 4);
-        if (first_admission <= 0 or cutoff < first_admission or selected <= 0 or revision <= 0) {
+        const initial_position = c.sqlite3_column_int64(select, 5);
+        if (first_admission <= 0 or cutoff < first_admission or selected <= 0 or revision <= 0 or initial_position <= 0) {
             return error.CorruptStore;
         }
 
@@ -745,22 +740,67 @@ pub const Store = struct {
         {
             const project = try prepare(
                 self.database,
-                "INSERT INTO conversation_entry(session_ref,entry_ordinal,turn_id,source_admission_id,content_id) " ++
+                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,content_id) " ++
                     "SELECT ?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0) + " ++
-                    "row_number() OVER (ORDER BY admission_id),?2,admission_id,content_id " ++
-                    "FROM message_admission WHERE turn_id=?2 ORDER BY admission_id",
+                    "row_number() OVER (ORDER BY admission_id),?3 + row_number() OVER (ORDER BY admission_id) - 1,1,?2,admission_id,NULL,content_id " ++
+                    "FROM message_admission WHERE turn_id=?2 AND admission_id>=?4 ORDER BY admission_id",
             );
             defer _ = c.sqlite3_finalize(project);
             try bindText(project, 1, session_ref.slice());
             try bindU64(project, 2, turn_id);
+            try bindI64(project, 3, initial_position);
+            try bindI64(project, 4, first_admission);
             try expectDone(project);
             if (c.sqlite3_changes(self.database) != selected) return error.ProjectionFailed;
+        }
+        var next_position: u64 = try std.math.add(u64, @intCast(initial_position), @intCast(selected));
+        const instruction_count = blk: {
+            const count = try prepare(
+                self.database,
+                "SELECT count(*) FROM session_revision r WHERE r.session_ref=?1 AND r.revision>1 AND " ++
+                    "r.revision<=?2 AND r.instructions_updated=1 AND NOT EXISTS(" ++
+                    "SELECT 1 FROM conversation_entry e WHERE e.session_ref=r.session_ref AND e.source_revision=r.revision)",
+            );
+            defer _ = c.sqlite3_finalize(count);
+            try bindText(count, 1, session_ref.slice());
+            try bindI64(count, 2, revision);
+            if (c.sqlite3_step(count) != c.SQLITE_ROW) return error.InstructionSelectionFailed;
+            const value = c.sqlite3_column_int64(count, 0);
+            if (value < 0) return error.CorruptStore;
+            break :blk value;
+        };
+        if (instruction_count != 0) {
+            const project = try prepare(
+                self.database,
+                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,content_id) " ++
+                    "SELECT ?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0) + " ++
+                    "row_number() OVER (ORDER BY revision),?3 + row_number() OVER (ORDER BY revision) - 1,2,?2,NULL,revision,instructions_content_id " ++
+                    "FROM session_revision r WHERE r.session_ref=?1 AND r.revision>1 AND r.revision<=?4 AND r.instructions_updated=1 AND NOT EXISTS(" ++
+                    "SELECT 1 FROM conversation_entry e WHERE e.session_ref=r.session_ref AND e.source_revision=r.revision) ORDER BY revision",
+            );
+            defer _ = c.sqlite3_finalize(project);
+            try bindText(project, 1, session_ref.slice());
+            try bindU64(project, 2, turn_id);
+            try bindU64(project, 3, next_position);
+            try bindI64(project, 4, revision);
+            try expectDone(project);
+            if (c.sqlite3_changes(self.database) != instruction_count) return error.InstructionSelectionFailed;
+            next_position = try std.math.add(u64, next_position, @intCast(instruction_count));
+        }
+        {
+            const update = try prepare(self.database, "UPDATE session SET next_position=?2 WHERE session_ref=?1 AND next_position=?3");
+            defer _ = c.sqlite3_finalize(update);
+            try bindText(update, 1, session_ref.slice());
+            try bindU64(update, 2, try std.math.add(u64, next_position, 1));
+            try bindI64(update, 3, initial_position);
+            try expectDone(update);
+            if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
         }
         {
             const insert = try prepare(
                 self.database,
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                    "attempt_ordinal,allowance_used,uncertain,resolution_code) VALUES(?1,?2,?3,?4,?5,1,1,1,NULL)",
+                    "admission_position,attempt_ordinal,allowance_used,uncertain,resolution_code) VALUES(?1,?2,?3,?4,?5,?6,1,1,1,NULL)",
             );
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, operation_id);
@@ -768,6 +808,7 @@ pub const Store = struct {
             try bindText(insert, 3, session_ref.slice());
             try bindI64(insert, 4, revision);
             try bindI64(insert, 5, cutoff);
+            try bindU64(insert, 6, next_position);
             try expectDone(insert);
         }
         if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
@@ -832,9 +873,9 @@ pub const Store = struct {
         try self.validateCurrentAttempt(binding);
         const statement = try prepare(
             self.database,
-            "SELECT r.model,r.instructions_content_id,r.output_schema_content_id,r.tools_mask " ++
+            "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask " ++
                 "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref " ++
-                "AND r.revision=o.settings_revision WHERE o.operation_id=?1",
+                "AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, binding.operation_id);
@@ -852,95 +893,54 @@ pub const Store = struct {
         } else null;
         return .{
             .model = model,
-            .instructions = .{ .length = instructions.length, .digest = instructions.digest },
+            .baseline_instructions = .{ .length = instructions.length, .digest = instructions.digest },
             .output_schema = output_schema,
             .tools_mask = @intCast(tools),
         };
     }
 
-    fn readHistoricalInstruction(
-        self: *Store,
-        binding: AttemptBinding,
-        after_revision: u64,
-    ) !?HistoricalInstruction {
+    fn readHistoricalEntry(self: *Store, binding: AttemptBinding, after_position: u64) !?HistoricalEntry {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.readHistoricalInstructionLocked(binding, after_revision) catch |err| switch (err) {
+        return self.readHistoricalEntryLocked(binding, after_position) catch |err| switch (err) {
             error.StaleAttemptBinding => err,
             else => self.fenceReadFailure(err),
         };
     }
 
-    fn readHistoricalInstructionLocked(
-        self: *Store,
-        binding: AttemptBinding,
-        after_revision: u64,
-    ) !?HistoricalInstruction {
+    fn readHistoricalEntryLocked(self: *Store, binding: AttemptBinding, after_position: u64) !?HistoricalEntry {
         try self.validateCurrentAttempt(binding);
         const statement = try prepare(
             self.database,
-            "SELECT r.revision,r.instructions_content_id FROM model_operation o " ++
-                "JOIN session_revision r ON r.session_ref=o.session_ref " ++
-                "WHERE o.operation_id=?1 AND r.revision>?2 AND r.revision<=o.settings_revision " ++
-                "AND r.instructions_updated=1 ORDER BY r.revision LIMIT 1",
+            "SELECT e.session_position,e.entry_kind,e.content_id " ++
+                "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
+                "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
+                "ORDER BY e.session_position LIMIT 1",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, binding.operation_id);
-        try bindU64(statement, 2, after_revision);
+        try bindU64(statement, 2, after_position);
         const result = c.sqlite3_step(statement);
         if (result == c.SQLITE_DONE) return null;
-        if (result != c.SQLITE_ROW) return error.HistoricalInstructionReadFailed;
-        const revision = c.sqlite3_column_int64(statement, 0);
-        const content_id = c.sqlite3_column_int64(statement, 1);
-        if (revision <= 0 or content_id <= 0) return error.CorruptStore;
+        if (result != c.SQLITE_ROW) return error.HistoricalEntryReadFailed;
+        const position = c.sqlite3_column_int64(statement, 0);
+        const kind_value = c.sqlite3_column_int(statement, 1);
+        const content_id = c.sqlite3_column_int64(statement, 2);
+        if (position <= 0 or content_id <= 0) return error.CorruptStore;
+        const kind: HistoricalEntryKind = switch (kind_value) {
+            1 => .user,
+            2 => .instruction,
+            else => return error.CorruptStore,
+        };
         const metadata = try self.readContentMetadata(content_id);
         return .{
-            .revision = @intCast(revision),
-            .content = .{ .length = metadata.length, .digest = metadata.digest },
-        };
-    }
-
-    fn readHistoricalInput(
-        self: *Store,
-        binding: AttemptBinding,
-        after_admission: u64,
-    ) !?HistoricalInput {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        return self.readHistoricalInputLocked(binding, after_admission) catch |err| switch (err) {
-            error.StaleAttemptBinding => err,
-            else => self.fenceReadFailure(err),
-        };
-    }
-
-    fn readHistoricalInputLocked(
-        self: *Store,
-        binding: AttemptBinding,
-        after_admission: u64,
-    ) !?HistoricalInput {
-        try self.validateCurrentAttempt(binding);
-        const statement = try prepare(
-            self.database,
-            "SELECT m.admission_id,m.content_id FROM model_operation o " ++
-                "JOIN message_admission m ON m.turn_id=o.turn_id " ++
-                "WHERE o.operation_id=?1 AND m.admission_id>?2 AND m.admission_id<=o.input_cutoff " ++
-                "ORDER BY m.admission_id LIMIT 1",
-        );
-        defer _ = c.sqlite3_finalize(statement);
-        try bindU64(statement, 1, binding.operation_id);
-        try bindU64(statement, 2, after_admission);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return null;
-        if (result != c.SQLITE_ROW) return error.HistoricalInputReadFailed;
-        const admission_id = c.sqlite3_column_int64(statement, 0);
-        const content_id = c.sqlite3_column_int64(statement, 1);
-        if (admission_id <= 0 or content_id <= 0) return error.CorruptStore;
-        const metadata = try self.readContentMetadata(content_id);
-        return .{
-            .admission_id = @intCast(admission_id),
-            .content = .{ .length = metadata.length, .digest = metadata.digest },
+            .position = @intCast(position),
+            .kind = kind,
+            .content = .{
+                .length = metadata.length,
+                .digest = metadata.digest,
+            },
         };
     }
 
@@ -1145,7 +1145,7 @@ pub const Store = struct {
     }
 
     fn readSession(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
-        const statement = try prepare(self.database, "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision FROM session WHERE session_ref=?1");
+        const statement = try prepare(self.database, "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position FROM session WHERE session_ref=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         const step_result = c.sqlite3_step(statement);
@@ -1166,18 +1166,21 @@ pub const Store = struct {
         const revision = c.sqlite3_column_int64(statement, 6);
         if (revision <= 0) return error.CorruptStore;
         current.revision = @intCast(revision);
+        const next_position = c.sqlite3_column_int64(statement, 7);
+        if (next_position <= 0) return error.CorruptStore;
+        current.next_position = @intCast(next_position);
         return current;
     }
 
     fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-        const statement = try prepare(self.database, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)");
+        const statement = try prepare(self.database, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)");
         defer _ = c.sqlite3_finalize(statement);
         try bindCurrent(statement, session_ref, current);
         try expectDone(statement);
     }
 
     fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-        const statement = try prepare(self.database, "UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8 WHERE session_ref=?1");
+        const statement = try prepare(self.database, "UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,next_position=?9 WHERE session_ref=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindCurrent(statement, session_ref, current);
         try expectDone(statement);
@@ -1424,7 +1427,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ tools_mask INTEGER NOT NULL CHECK(tools_mask BETWEEN 0 AND 3),
         \\ permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),
         \\ output_schema_content_id INTEGER REFERENCES content(content_id),
-        \\ revision INTEGER NOT NULL CHECK(revision>0)
+        \\ revision INTEGER NOT NULL CHECK(revision>0),
+        \\ next_position INTEGER NOT NULL CHECK(next_position>0)
         \\) STRICT;
         \\CREATE TABLE core_command(
         \\ command_key TEXT PRIMARY KEY CHECK(length(CAST(command_key AS BLOB))<=128),
@@ -1473,6 +1477,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ session_ref TEXT NOT NULL,
         \\ settings_revision INTEGER NOT NULL CHECK(settings_revision>0),
         \\ input_cutoff INTEGER NOT NULL CHECK(input_cutoff>0),
+        \\ admission_position INTEGER NOT NULL CHECK(admission_position>0),
         \\ attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal>0),
         \\ allowance_used INTEGER NOT NULL CHECK(allowance_used BETWEEN 1 AND 4),
         \\ uncertain INTEGER NOT NULL CHECK(uncertain IN (0,1)),
@@ -1483,17 +1488,25 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE TABLE conversation_entry(
         \\ session_ref TEXT NOT NULL,
         \\ entry_ordinal INTEGER NOT NULL CHECK(entry_ordinal>0),
+        \\ session_position INTEGER NOT NULL CHECK(session_position>0),
+        \\ entry_kind INTEGER NOT NULL CHECK(entry_kind IN (1,2)),
         \\ turn_id INTEGER NOT NULL REFERENCES turn(turn_id),
-        \\ source_admission_id INTEGER NOT NULL UNIQUE REFERENCES message_admission(admission_id),
+        \\ source_admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id),
+        \\ source_revision INTEGER,
         \\ content_id INTEGER NOT NULL REFERENCES content(content_id),
-        \\ PRIMARY KEY(session_ref,entry_ordinal)
+        \\ PRIMARY KEY(session_ref,entry_ordinal),
+        \\ UNIQUE(session_ref,session_position),
+        \\ UNIQUE(session_ref,source_revision),
+        \\ FOREIGN KEY(session_ref,source_revision) REFERENCES session_revision(session_ref,revision),
+        \\ CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL) OR
+        \\       (entry_kind=2 AND source_admission_id IS NULL AND source_revision IS NOT NULL))
         \\) STRICT, WITHOUT ROWID;
         \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id);
         \\CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL;
         \\CREATE INDEX model_operation_runnable ON model_operation(resolution_code,operation_id);
     );
     try exec(database, "PRAGMA application_id=1280591409");
-    try exec(database, "PRAGMA user_version=5");
+    try exec(database, "PRAGMA user_version=6");
     const statement = try prepare(database, "INSERT INTO store_meta(key,value) VALUES('wire_version','1'),('store_selector',?1)");
     defer _ = c.sqlite3_finalize(statement);
     try bindText(statement, 1, selector);
@@ -1554,6 +1567,7 @@ fn bindCurrent(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *co
     try bindI64(statement, 6, current.permission_mode);
     try bindNullableI64(statement, 7, current.output_schema_id);
     try bindU64(statement, 8, current.revision);
+    try bindU64(statement, 9, current.next_position);
 }
 
 fn nextIdentity(database: *c.sqlite3, comptime table: []const u8, comptime column: []const u8) !u64 {
@@ -2346,11 +2360,22 @@ test "one committed selection freezes its settings and input prefix" {
     defer second.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expect(storage.submitMessage(&second, .{}) == .accepted);
 
+    var instructions_update: protocol.ConfigureCommand = .{};
+    try instructions_update.key.set("instructions-before-selection");
+    try instructions_update.session.set("direct/dispatch");
+    instructions_update.configuration.instructions = try testingContent(&tmp, "instructions-before", 'b', 1);
+    defer instructions_update.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&instructions_update, .{}) == .accepted);
+
     try std.testing.expectError(
         error.InjectedAttemptCommitFailure,
         storage.admitNextModelAttempt(.{ .attempt_before_commit = true }),
     );
     try std.testing.expect((try storage.observeCommand("dispatch-1")).message.?.status == .queued);
+
+    // Failed admission publishes neither projection nor instruction inclusion.
+    try std.testing.expectEqual(@as(i64, 0), try pragmaInt(storage.database, "SELECT count(*) FROM conversation_entry"));
+    try std.testing.expectEqual(@as(i64, 1), try pragmaInt(storage.database, "SELECT next_position FROM session"));
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     try std.testing.expectEqual(@as(u64, 2), admitted.selected_messages);
@@ -2379,9 +2404,11 @@ test "one committed selection freezes its settings and input prefix" {
     defer view.close();
     const settings = try view.settings();
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
-    const first_input = (try view.nextInput(0)).?;
-    const second_input = (try view.nextInput(first_input.admission_id)).?;
-    try std.testing.expect((try view.nextInput(second_input.admission_id)) == null);
+    const first_input = (try view.nextEntry(0)).?;
+    const second_input = (try view.nextEntry(first_input.position)).?;
+    const instruction = (try view.nextEntry(second_input.position)).?;
+    try std.testing.expect(instruction.kind == .instruction);
+    try std.testing.expect((try view.nextEntry(instruction.position)) == null);
     var first_reader = try view.openContent(first_input.content);
     defer first_reader.close();
     var actual: [5]u8 = undefined;
@@ -2399,6 +2426,13 @@ test "one committed selection freezes its settings and input prefix" {
     var later_view = try storage.openHistoricalView(later.permit.binding);
     defer later_view.close();
     try std.testing.expectEqualStrings("model-b", (try later_view.settings()).model.slice());
+    var position: u64 = 0;
+    for ([_]HistoricalEntryKind{ .user, .user, .instruction, .user }) |kind| {
+        const entry = (try later_view.nextEntry(position)).?;
+        try std.testing.expectEqual(kind, entry.kind);
+        position = entry.position;
+    }
+    try std.testing.expect((try later_view.nextEntry(position)) == null);
 }
 
 test "saved model failure is atomic and retains consumed uncertainty on save fault" {

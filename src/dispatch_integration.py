@@ -280,6 +280,21 @@ def main():
         stop_host(offline)
         processes.remove(offline)
 
+        # A successor reuses complete projected history in its original order.
+        # The prior failed Turn's messages and each distinct instruction update
+        # survive restart, including repeated equal text and reversals.
+        host = start_host(store, url)
+        processes.append(host)
+        wait_for(lambda: len(endpoint.requests) == 2, "successor history request")
+        successor = json.loads(endpoint.requests[1])
+        assert successor["input"] == expected["input"] + [
+            {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
+        ], successor
+        assert successor["model"] == "model-b", successor
+        wait_for(lambda: observe(store, "message-b").get("result", {}).get("code") == "provider_http_422", "successor failure")
+        stop_host(host)
+        processes.remove(host)
+
         # One reactor fills two fixed custody records without allocating a
         # worker per Session. Both requests reach the endpoint before either
         # response is released.
