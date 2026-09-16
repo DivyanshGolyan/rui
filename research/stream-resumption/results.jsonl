@@ -1,0 +1,20 @@
+{"utc":"2026-09-13T14:06:33.987686+00:00","action":"create","mode":"background","kind":"request","requested_model":"gpt-6-astra","background":true,"store":false}
+{"utc":"2026-09-13T14:06:34.589212+00:00","action":"create","mode":"background","kind":"headers","http_status":400,"content_type":"application/json","request_id":null,"served_model":null,"elapsed_s":0.6}
+{"utc":"2026-09-13T14:06:34.589461+00:00","action":"create","mode":"background","kind":"rejection","error":"{\"message\": \"Unsupported parameter: background\"}"}
+{"utc":"2026-09-13T14:06:44.249360+00:00","action":"create","mode":"ordinary","kind":"request","requested_model":"gpt-6-astra","background":false,"store":false}
+{"utc":"2026-09-13T14:06:45.181497+00:00","action":"create","mode":"ordinary","kind":"headers","http_status":200,"content_type":null,"request_id":null,"served_model":null,"elapsed_s":0.927}
+{"utc":"2026-09-13T14:06:45.182947+00:00","action":"create","mode":"ordinary","kind":"created","response_id":"resp_0dba3dc5fcd75746016aa6adf4cbdc87d0bfeb449f07ffe797","background":false,"store":false,"status":"in_progress","reported_model":"gpt-6-astra"}
+{"utc":"2026-09-13T14:06:46.913688+00:00","action":"create","mode":"ordinary","kind":"exception","exception_type":"TypeError"}
+{"utc":"2026-09-13T14:07:02.092173+00:00","action":"create","mode":"ordinary","kind":"request","requested_model":"gpt-6-astra","background":false,"store":false}
+{"utc":"2026-09-13T14:07:03.203325+00:00","action":"create","mode":"ordinary","kind":"headers","http_status":200,"content_type":null,"request_id":null,"served_model":null,"elapsed_s":1.109}
+{"utc":"2026-09-13T14:07:03.203807+00:00","action":"create","mode":"ordinary","kind":"created","response_id":"resp_0ccff619fa701b51016aa6ae06c1e887d09be40a6d85773b79","background":false,"store":false,"status":"in_progress","reported_model":"gpt-6-astra"}
+{"utc":"2026-09-13T14:07:04.764078+00:00","action":"create","mode":"ordinary","kind":"hard_exit_after_first_text_delta","response_id":"resp_0ccff619fa701b51016aa6ae06c1e887d09be40a6d85773b79","sequence_number":4,"events":5,"exit_code":73}
+{"utc":"2026-09-13T14:07:11.933890+00:00","action":"resume","mode":"ordinary","kind":"request","response_id":"resp_0ccff619fa701b51016aa6ae06c1e887d09be40a6d85773b79","starting_after":4}
+{"utc":"2026-09-13T14:07:11.986797+00:00","action":"resume","mode":"ordinary","kind":"headers","http_status":403,"content_type":"text/html; charset=UTF-8","request_id":null,"served_model":null,"elapsed_s":0.051}
+{"utc":"2026-09-13T14:07:11.997687+00:00","action":"resume","mode":"ordinary","kind":"rejection","error_body_bytes":10749}
+{"utc":"2026-09-13T14:07:19.326732+00:00","action":"retrieve","mode":"ordinary","kind":"request","response_id":"resp_0ccff619fa701b51016aa6ae06c1e887d09be40a6d85773b79","starting_after":null}
+{"utc":"2026-09-13T14:07:19.369337+00:00","action":"retrieve","mode":"ordinary","kind":"headers","http_status":403,"content_type":"text/html; charset=UTF-8","request_id":null,"served_model":null,"elapsed_s":0.042}
+{"utc":"2026-09-13T14:07:19.372746+00:00","action":"retrieve","mode":"ordinary","kind":"rejection","error_body_bytes":10589}
+{"utc":"2026-09-13T14:07:34.841898+00:00","action":"create","mode":"stored","kind":"request","requested_model":"gpt-6-astra","background":false,"store":true}
+{"utc":"2026-09-13T14:07:35.485534+00:00","action":"create","mode":"stored","kind":"headers","http_status":400,"content_type":"application/json","request_id":null,"served_model":null,"elapsed_s":0.637}
+{"utc":"2026-09-13T14:07:35.486943+00:00","action":"create","mode":"stored","kind":"rejection","error":"{\"message\": \"Store must be set to false\"}"}
