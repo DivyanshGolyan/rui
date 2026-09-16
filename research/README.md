@@ -33,6 +33,10 @@
 
 [Host memory explanation](memory-trial/README.md) reproduces a small ReleaseSafe macOS workload with native heap/VM tools and optional Instruments. Includes field/population arithmetic, ownership gaps and an interactive recorded explanation; no new runtime policy or demo qualification.
 
+[Proportionate testing evidence](testing-practices-sources.md) compares primary-source guidance on product goals, failure checks, noisy measurements and explicit assumptions; recommendations only, with no qualification-contract change.
+
+[Resource profiling sources](resource-profiling-sources.md) evaluates reusable CPU, memory, waiting and I/O evidence, platform tools and measurement validity; recommendations only, with no runtime or qualification change.
+
 [Permission ownership prior art](permission-prior-art.md) compares Pi, DeepSeek Harness, OpenCode v2 and Codex CLI approval ownership, grant lifetimes and client reconnect versus process restart; pinned source evidence only, with no accepted contract change.
 
 [Output retention prior art](output-retention-prior-art.md) compares byte/count budgets, disk-backed FIFO bookkeeping and cleanup behavior in primary sources; design evidence only, with no accepted contract change or runtime qualification.
