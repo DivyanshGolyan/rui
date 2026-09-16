@@ -1,131 +1,31 @@
 # Rui
 
-Rui (रुई, Hindi for cotton) is a resource-bounded, crash-resumable local runtime for programmable coding-agent workflows. JavaScript coordinates reusable conversations; native Zig owns execution, permissions, recovery and SQLite storage. Codex subscription is the first live provider.
+Rui (रुई, Hindi for cotton) is a local runtime for coding-agent workflows. The goal: compose reusable conversations in JavaScript, let work continue after clients disconnect, and recover after crashes with bounded memory and temporary storage. Zig owns execution and recovery; SQLite stores durable state.
 
 ## Status
 
-The source implements the first six redesigned runtime slices: an explicitly started Host, exclusive Store ownership, direct configuration/message/control clients, durable caller-side request capture, exact idempotent answer recovery, sparse Session updates, immutable ordered message admission, completed text-model Turns, conserved model retries after temporary failure or Host loss, Session stop and exact Model Interruption. Core selects an eligible queued prefix, freezes its historical view, launches disk-backed Responses Attempts, captures and validates complete SSE output, and atomically saves ordered private provider output with the public answer. The answer references validated text ranges in those items, so delivery decodes sequentially without retaining a second full payload. The original message key reads its complete answer after client or Host restart. Replacement Attempts retain the same historical request and remaining allowance; later Turns reconstruct the Session from canonical host input and private provider output without relying on provider-side storage. A stop freezes its active-Turn and admission-cutoff selection; an exact interruption resolves only the supplied active model Operation. Both recover their original answer after lost replies and promptly cancel superseded local transport. Every Workflow, tool and permission surface enters in later implementation issues.
+In development. The current runtime supports direct CLI Sessions, queued messages, text-model responses, retries, stops and exact model interruption. Saved request keys recover original answers after a lost reply or restart.
 
-The redesigned V1 targets Linux and macOS on x86-64 and ARM64 through capability-based prerequisites. The current build cross-compiles all four targets. Runtime and resource verification uses the available Apple Silicon Mac; the other targets remain compile-only evidence until exercised on their platforms.
+JavaScript workflows, Bash/Edit tools, permissions, structured answers and provider authentication are not implemented yet. Codex subscription is the planned first live provider; production and live-provider qualification remain outstanding.
 
-## Intended experience
+Targets Linux and macOS on x86-64 and ARM64. All four cross-compile; runtime and resource checks have run only on Apple Silicon macOS.
 
-Start one local server explicitly, then use direct CLI/script calls or JavaScript workflows. Clients can disconnect while saved work continues. Restart recovers unfinished work under its original inputs and remaining budgets.
+## Build
 
-- Construct a Session reference locally. First complete configuration establishes its conversation and Workspace; later configuration changes apply in order. Messages enter its queue and start or join work at an input boundary. Eligible queued input resumes work after failure without another message.
-- Workflow authors name submissions; Runtime saves an internal UUIDv4 with each durable intent for delivery retries. Direct callers and Workflow launchers retain their request keys and captured inputs before sending.
-- Use stable idempotency keys for every state-changing core command to recover its original acceptance or rejection after a lost reply. Retried stops retain their original work selection, including idle stops. Configuration completes at commit; accepted messages retain their queue admission identity and bind to a Turn when taken for processing. Workflow message calls wait for that processing result, not an earlier Turn's failure.
-- Compose work with ordinary JavaScript functions, loops and deterministic Promise joins. Inspect a Workflow to find exact Session references and reuse selected conversations in later workflows.
-- Approve exact Bash/Edit actions or explicitly configure permission bypass. Bash reads and creates files; Edit applies checked whole-line replacements to one existing file. Uncertain tool effects are never automatically replayed.
-- Retain immutable conversation and provider continuation in SQLite. Bound orchestration memory and temporary storage independently of model-requested subprocess memory.
-
-[ARCHITECTURE.md](ARCHITECTURE.md) defines these behaviors, interfaces, recovery rules and limits. It includes their necessary rationale and terminology. [VERIFICATION.md](VERIFICATION.md) defines the evidence required to implement them. [AGENTS.md](AGENTS.md) contains working rules. These are the maintained documents; historical discussions remain in Git and issues, and [current qualification](tests/qualification/README.md#current-checks-and-qualification), [retained design research](research/README.md#retained-design-research) and [archived experiments](research/README.md#archived-experiments) are indexed separately.
-
-V1 excludes conversation branching/editing, attachments, automatic provider fallback, incompatible model switching, multi-host execution, plugins/dynamic tools, MCP execution, retained workflow VMs, storage migration, public event-stream/watch/webhook/push interfaces, TUI/editor/Web UI and a separate daemon manager. Native embedding and Durable Objects are design probes, not initial supported deployments.
-
-[V1 design readiness was accepted](https://github.com/DivyanshGolyan/rui/issues/124#issuecomment-5651285657) on 2026-09-13 after the integrated walkthrough. The [readiness map](https://github.com/DivyanshGolyan/rui/issues/2) records the completed design work. Implementation proceeds in bounded slices under the accepted contract; production and live-provider qualification remain required. Retired planning tickets do not mean implementation is complete.
-
-## Build and try the current implementation
-
-Requirements: Zig 0.16.0, Python 3, Perl, a C toolchain and Make. The opt-in production measurement commands additionally require Go 1.27.1. SQLite 3.53.4, curl 8.22.0 and OpenSSL 3.6.3 are pinned by the build.
+Requires Zig 0.16.0, Python 3, Perl, a C toolchain and Make. The build pins native dependencies.
 
 ```sh
 zig build
+zig build check
 ./zig-out/bin/rui serve --store /absolute/path/to/private-store
 ```
 
-The partial development transport is opt-in so it cannot make a live provider call. To exercise this slice, start the Host with an HTTPS endpoint, or with loopback HTTP for a deterministic local fixture. The Host rejects non-loopback plaintext endpoints. No authentication is attached in this slice.
+Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS or loopback HTTP, with no authentication attached. Run `./zig-out/bin/rui` to print command usage.
 
-Temporary connection, 408/429/5xx and body-inactivity failures receive at most three retries after the initial Attempt, with default 2/4/8-second waits. A longer valid Retry-After wins. Restart conserves the consumed allowance and may repeat remote work or billing when the prior outcome is unknown; it never recreates the old one-shot permit or imports leftover scratch.
+## Documentation
 
-```sh
-./zig-out/bin/rui serve \
-  --store /absolute/path/to/private-store \
-  --provider-endpoint http://127.0.0.1:8000/responses
-```
-
-In another shell, configure a Session. The record path must be in a private directory; retry reuses that durable capture after a lost reply or client restart.
-
-```sh
-./zig-out/bin/rui configure \
-  --store /absolute/path/to/private-store \
-  --record /absolute/path/to/private-records/configure.json \
-  --key configure-1 \
-  --session direct/reviewer \
-  --workspace /absolute/path/to/workspace \
-  --model gpt-6-astra
-
-./zig-out/bin/rui retry \
-  --store /absolute/path/to/private-store \
-  --record /absolute/path/to/private-records/configure.json \
-  --kind configure
-```
-
-Submit a complete message from a file or from stdin. Acceptance identifies its immutable queued admission; retry reuses the captured record and never reads the original source again.
-
-```sh
-./zig-out/bin/rui message \
-  --store /absolute/path/to/private-store \
-  --record /absolute/path/to/private-records/message.json \
-  --key message-1 \
-  --session direct/reviewer \
-  --text -
-
-./zig-out/bin/rui retry \
-  --store /absolute/path/to/private-store \
-  --record /absolute/path/to/private-records/message.json \
-  --kind message
-
-./zig-out/bin/rui observe-command \
-  --store /absolute/path/to/private-store \
-  --key message-1
-
-./zig-out/bin/rui read-result \
-  --store /absolute/path/to/private-store \
-  --key message-1
-```
-
-Stop a Session with a fresh durable key. This acknowledges the frozen selection; retrying the captured record recovers that same selection rather than stopping newer work.
-
-```sh
-./zig-out/bin/rui stop-session \
-  --store /absolute/path/to/private-store \
-  --record /absolute/path/to/private-records/stop.json \
-  --key stop-1 \
-  --session direct/reviewer
-
-./zig-out/bin/rui retry \
-  --store /absolute/path/to/private-store \
-  --record /absolute/path/to/private-records/stop.json \
-  --kind session-stop
-```
-
-Interrupt one exact active model Operation using the Turn and Operation identities returned by message observation. If independently admitted input is already waiting, it may continue the same Turn through a new Operation; otherwise the Turn is cancelled.
-
-```sh
-./zig-out/bin/rui interrupt-model \
-  --store /absolute/path/to/private-store \
-  --record /absolute/path/to/private-records/interruption.json \
-  --key interruption-1 \
-  --session direct/reviewer \
-  --turn 1 \
-  --operation 1
-```
-
-The applicable gates are:
-
-```sh
-zig build check
-zig build cross-check
-zig build dispatch-integration
-zig build control-integration
-zig build measure-admission
-zig build measure-message-admission
-zig build measure-model-dispatch
-zig build measure-model-output
-zig build measure-model-retry
-zig build measure-model-control
-```
-
-The measurement steps are opt-in macOS resource runs. Provider authentication, structured-answer validation, tool execution and live checks are not available in this slice. Dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-`check` exercises both the ReleaseSafe production gate and the default Debug artifact shown above; `cross-check` compiles ReleaseSmall deliverables.
+- [Architecture](ARCHITECTURE.md): accepted behavior, scope and recovery rules.
+- [Verification](VERIFICATION.md): required checks and measurement setup.
+- [Current qualification](tests/qualification/README.md#current-checks-and-qualification): evidence and remaining limits.
+- [Research](research/README.md): design evidence and archived experiments.
+- [Working rules](AGENTS.md) and [dependency notices](THIRD_PARTY_NOTICES.md).

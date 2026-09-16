@@ -2,9 +2,8 @@
 
 ## gopsutil v4.26.7
 
-The opt-in Go measurement runners use gopsutil to read Host process CPU,
-memory, thread, descendant and Darwin disk-I/O counters. It is not linked into
-the Rui runtime.
+Only the opt-in Go measurement runners use gopsutil, for Host CPU, memory,
+thread, descendant and Darwin disk-I/O counters; the runtime does not link it.
 
 - Source: `https://github.com/shirou/gopsutil/releases/tag/v4.26.7`
 - Go module: `github.com/shirou/gopsutil/v4 v4.26.7`
