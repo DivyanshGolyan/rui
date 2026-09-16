@@ -3,7 +3,7 @@ set -euo pipefail
 
 artifact_dir="${0:A:h}"
 source "$artifact_dir/probe_helpers.sh"
-matrix_root="${OUTPUT_ROOT:-$(mktemp -d /tmp/onepage-rotated-matrix.XXXXXX)}"
+matrix_root="${OUTPUT_ROOT:-$(mktemp -d /tmp/rui-rotated-matrix.XXXXXX)}"
 seconds="${STREAM_SECONDS:-10}"
 repetitions="${REPETITIONS:-4}"
 binary="$matrix_root/integrated_capacity"

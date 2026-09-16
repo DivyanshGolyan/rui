@@ -7,7 +7,7 @@ import struct
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-EXE = ROOT / 'zig-out/bin/onepage-workflow-evaluator'
+EXE = ROOT / 'zig-out/bin/rui-workflow-evaluator'
 
 
 def string(value):

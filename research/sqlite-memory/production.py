@@ -2,7 +2,7 @@
 """Run the existing production Store density fixture without changing its source."""
 import datetime,fcntl,hashlib,json,os,pathlib,platform,signal,subprocess,time
 here=pathlib.Path(__file__).resolve().parent
-with open('/tmp/onepage-memory-experiments.lock','a') as lock:
+with open('/tmp/rui-memory-experiments.lock','a') as lock:
     print('Waiting for production fixture lock',flush=True)
     fcntl.flock(lock,fcntl.LOCK_EX)
     print('Running production Store density fixture',flush=True)

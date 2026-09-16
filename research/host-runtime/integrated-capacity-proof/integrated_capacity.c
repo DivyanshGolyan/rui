@@ -198,12 +198,12 @@ static int write_all(int fd, const void *bytes, size_t length) {
 
 static int open_unlinked_spool(const char *directory) {
     char path[1024];
-    int length = snprintf(path, sizeof(path), "%s/onepage-integrated.XXXXXX", directory);
+    int length = snprintf(path, sizeof(path), "%s/rui-integrated.XXXXXX", directory);
     if (length <= 0 || (size_t)length >= sizeof(path)) return -1;
     int fd = mkstemp(path);
     if (fd < 0) return -1;
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) { close(fd); return -1; }
-    if (getenv("ONEPAGE_PROOF_SPOOL_NOCACHE") && fcntl(fd, F_NOCACHE, 1) != 0) {
+    if (getenv("RUI_PROOF_SPOOL_NOCACHE") && fcntl(fd, F_NOCACHE, 1) != 0) {
         close(fd);
         return -1;
     }
@@ -702,7 +702,7 @@ static void *reactor_main(void *opaque) {
 static int prepare_patch_target(struct Runtime *runtime) {
     if (!runtime->patch_target[0]) {
         int length = snprintf(runtime->patch_target, sizeof(runtime->patch_target),
-                              "%s/onepage-patch-target-%d", runtime->scratch, getpid());
+                              "%s/rui-patch-target-%d", runtime->scratch, getpid());
         if (length <= 0 || (size_t)length >= sizeof(runtime->patch_target)) return -1;
     }
     (void)unlink(runtime->patch_target);
@@ -1055,10 +1055,10 @@ static int run_integrated(int argc, char **argv) {
         strcmp(profile, "bash-only") != 0 && strcmp(profile, "patch-race") != 0)) return 2;
     runtime.bash_term_grace_ns = 250000000ULL;
     runtime.bash_pipe_grace_ns = 500000000ULL;
-    const char *effect_limit_text = getenv("ONEPAGE_PROOF_EFFECT_OUTPUT_LIMIT");
-    const char *host_quota_text = getenv("ONEPAGE_PROOF_HOST_SCRATCH_QUOTA");
-    const char *fatal_loops_text = getenv("ONEPAGE_PROOF_INJECT_REACTOR_FATAL_AFTER_LOOPS");
-    const char *cycles_text = getenv("ONEPAGE_PROOF_CYCLES");
+    const char *effect_limit_text = getenv("RUI_PROOF_EFFECT_OUTPUT_LIMIT");
+    const char *host_quota_text = getenv("RUI_PROOF_HOST_SCRATCH_QUOTA");
+    const char *fatal_loops_text = getenv("RUI_PROOF_INJECT_REACTOR_FATAL_AFTER_LOOPS");
+    const char *cycles_text = getenv("RUI_PROOF_CYCLES");
     runtime.effect_output_limit = effect_limit_text ? strtoull(effect_limit_text, NULL, 10) : UINT64_MAX;
     runtime.host_scratch_quota = host_quota_text ? strtoull(host_quota_text, NULL, 10) : UINT64_MAX;
     runtime.inject_reactor_fatal_after_loops = fatal_loops_text
@@ -1211,10 +1211,10 @@ static int run_integrated(int argc, char **argv) {
         atomic_store_explicit(&runtime.fatal, true, memory_order_release);
 
     size_t allocator_relief_return = 0;
-    if (getenv("ONEPAGE_PROOF_PRESSURE_RELIEF"))
+    if (getenv("RUI_PROOF_PRESSURE_RELIEF"))
         allocator_relief_return = malloc_zone_pressure_relief(NULL, 0);
     if (!observe(&idle)) atomic_store_explicit(&runtime.fatal, true, memory_order_release);
-    const char *idle_hold_text = getenv("ONEPAGE_PROOF_IDLE_HOLD_SECONDS");
+    const char *idle_hold_text = getenv("RUI_PROOF_IDLE_HOLD_SECONDS");
     int idle_hold_seconds = idle_hold_text ? atoi(idle_hold_text) : 0;
     if (idle_hold_seconds > 0) {
         fprintf(stderr, "phase=idle pid=%d seconds=%d\n", getpid(), idle_hold_seconds);
@@ -1330,7 +1330,7 @@ static int run_integrated(int argc, char **argv) {
     printf("\"sqlite_cache_supported\":%s,\"sqlite_cache_current\":%d,",
            sqlite_cache_status == SQLITE_OK ? "true" : "false", sqlite_cache_current);
     printf("\"spool_nocache\":%s,\"allocator_relief_return\":%zu,",
-           getenv("ONEPAGE_PROOF_SPOOL_NOCACHE") ? "true" : "false",
+           getenv("RUI_PROOF_SPOOL_NOCACHE") ? "true" : "false",
            allocator_relief_return);
     long long idle_physical_drift = (long long)final_cycle_idle.physical -
         (long long)first_cycle_idle.physical;

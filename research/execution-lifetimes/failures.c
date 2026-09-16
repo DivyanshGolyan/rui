@@ -42,7 +42,7 @@ static int cleanup(Owner *o) {
 }
 int main(int argc, char **argv) {
   Owner o = {.occupied = 1, .pending = 1};
-  char target[] = "/tmp/onepage-lifetime-pending-XXXXXX";
+  char target[] = "/tmp/rui-lifetime-pending-XXXXXX";
   o.target = mkstemp(target);
   assert(o.target >= 0 && unlink(target) == 0);
   o.window = malloc(16384);
@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
   /* A saved result can outlive a delayed callback's physical cleanup. */
   Owner settled = {
       .occupied = 1, .pending = 1, .fenced = 1, .sealed = 1, .published = 1};
-  char second[] = "/tmp/onepage-lifetime-settled-XXXXXX";
+  char second[] = "/tmp/rui-lifetime-settled-XXXXXX";
   settled.target = mkstemp(second);
   assert(settled.target >= 0 && unlink(second) == 0);
   settled.window = malloc(16384);
@@ -85,7 +85,7 @@ int main(int argc, char **argv) {
   close(settled.gate[0]);
   close(settled.gate[1]);
   /* A real failed syscall cannot become a complete capture or success. */
-  char name[] = "/tmp/onepage-lifetime-fault-XXXXXX";
+  char name[] = "/tmp/rui-lifetime-fault-XXXXXX";
   int fd = mkstemp(name);
   assert(fd >= 0);
   unlink(name);

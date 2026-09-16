@@ -7,7 +7,7 @@ import tempfile
 
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parent.parent
-with tempfile.TemporaryDirectory(prefix='onepage-lifetime-check-') as tmp:
+with tempfile.TemporaryDirectory(prefix='rui-lifetime-check-') as tmp:
     exe=str(Path(tmp)/'faults')
     prod=str(Path(tmp)/'production-bash')
     capture=str(Path(tmp)/'production-capture')
@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory(prefix='onepage-lifetime-check-') as tmp:
     subprocess.run(['zig','build-exe','-O','ReleaseSafe','-lc','--dep','provider','--dep','metrics',
                     '-Mroot='+str(HERE/'production_capture.zig'),'-Mprovider='+str(ROOT/'src/codex_provider.zig'),
                     '-Mmetrics='+str(ROOT/'src/process_metrics.zig'),'-femit-bin='+capture],check=True)
-    with open('/tmp/onepage-memory-experiments.lock','a') as lock:
+    with open('/tmp/rui-memory-experiments.lock','a') as lock:
         print('Waiting for shared benchmark lock',flush=True)
         fcntl.flock(lock,fcntl.LOCK_EX)
         good=subprocess.run([exe],capture_output=True,text=True,timeout=15)

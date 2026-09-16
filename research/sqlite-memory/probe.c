@@ -31,7 +31,7 @@ static void sample(const char *stage){
  malloc_statistics_t ms={0};malloc_zone_statistics(NULL,&ms);struct rusage ru;getrusage(RUSAGE_SELF,&ru);
  printf("{\"stage\":\"%s\",\"sqlite_live\":%lld,\"sqlite_peak\":%lld,\"largest_alloc\":%lld,\"app_buffers_live\":%zu,\"app_buffers_peak\":%zu,\"malloc_in_use\":%zu,\"malloc_reserved\":%zu,\"rss\":%llu,\"footprint\":%llu,\"sampled_footprint_peak\":%lld,\"peak_rss\":%ld,\"cache\":%d,\"statements\":%d,\"spills\":%d,\"db_bytes\":%lld,\"db_blocks_bytes\":%lld,\"journal_bytes\":%lld,\"fd_count\":%d}\n",stage,cur,hi,big,app_live,app_peak,ms.size_in_use,ms.size_allocated,(unsigned long long)v.resident_size,(unsigned long long)v.phys_footprint,footprint_peak,ru.ru_maxrss,cache,stmt,spills,st.st_size,(long long)st.st_blocks*512,jt.st_size,fd_count());fflush(stdout);
 }
-static void digest_source(int size,unsigned char digest[32]){CC_SHA256_CTX c;CC_SHA256_Init(&c);CC_SHA256_Update(&c,"onepage-probe-content-v1",24);for(int off=0;off<size;off+=4096){int n=size-off<4096?size-off:4096;assert(pread(source,a,n,off)==n);CC_SHA256_Update(&c,a,n);}CC_SHA256_Final(digest,&c);}
+static void digest_source(int size,unsigned char digest[32]){CC_SHA256_CTX c;CC_SHA256_Init(&c);CC_SHA256_Update(&c,"rui-probe-content-v1",24);for(int off=0;off<size;off+=4096){int n=size-off<4096?size-off:4096;assert(pread(source,a,n,off)==n);CC_SHA256_Update(&c,a,n);}CC_SHA256_Final(digest,&c);}
 static int import(int size,int id,int returning,const unsigned char digest[32]){
  sqlite3_stmt*s=0;sqlite3_blob*blob=0;int rc=sqlite3_prepare_v2(db,returning?"INSERT INTO content(session_id,content_ref,byte_length,digest,payload) VALUES(zeroblob(8),?1,?2,?3,zeroblob(?2)) RETURNING content_id":"INSERT INTO content(session_id,content_ref,byte_length,digest,payload) VALUES(zeroblob(8),?1,?2,?3,zeroblob(?2))",-1,&s,0);
  if(rc!=SQLITE_OK)return rc;
@@ -40,7 +40,7 @@ static int import(int size,int id,int returning,const unsigned char digest[32]){
  if(id==1||rc!=SQLITE_DONE)sample("insert_step");
  sqlite3_int64 row=sqlite3_last_insert_rowid(db);sqlite3_finalize(s);if(rc!=SQLITE_DONE)return rc;
  rc=sqlite3_blob_open(db,"main","content","payload",row,1,&blob);if(rc!=SQLITE_OK)return rc;
- CC_SHA256_CTX c;CC_SHA256_Init(&c);CC_SHA256_Update(&c,"onepage-probe-content-v1",24);
+ CC_SHA256_CTX c;CC_SHA256_Init(&c);CC_SHA256_Update(&c,"rui-probe-content-v1",24);
  for(int off=0;off<size;off+=4096){int n=size-off<4096?size-off:4096;ssize_t got=pread(source,a,n,off);if(got!=n){rc=1001;break;}CC_SHA256_Update(&c,a,n);rc=sqlite3_blob_write(blob,a,n,off);if(rc!=SQLITE_OK)break;if(id==1&&off&&off%(4*1024*1024)==0)sample("importing");}
  unsigned char actual[32];CC_SHA256_Final(actual,&c);if(rc==SQLITE_OK&&memcmp(actual,digest,32))rc=1002;
  int close_rc=sqlite3_blob_close(blob);if(rc==SQLITE_OK)rc=close_rc;

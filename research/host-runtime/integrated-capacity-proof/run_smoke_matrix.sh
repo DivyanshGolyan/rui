@@ -3,7 +3,7 @@ set -euo pipefail
 
 artifact_dir="${0:A:h}"
 source "$artifact_dir/probe_helpers.sh"
-output_root="${OUTPUT_ROOT:-$(mktemp -d /tmp/onepage-integrated-proof.XXXXXX)}"
+output_root="${OUTPUT_ROOT:-$(mktemp -d /tmp/rui-integrated-proof.XXXXXX)}"
 seconds="${STREAM_SECONDS:-1}"
 token_rate="${TOKEN_RATE:-50}"
 terminal_bytes="${TERMINAL_BYTES:-4096}"
@@ -65,7 +65,7 @@ run_case() {
     "server readiness for $name"
 
   local client_json
-  client_json="$(ONEPAGE_PROOF_CYCLES="$cycles" "$binary" integrated "$capacity" \
+  client_json="$(RUI_PROOF_CYCLES="$cycles" "$binary" integrated "$capacity" \
     "https://localhost:$port/responses" "$cert_file" "$output_root/spools" \
     "$case_root/proof.sqlite3" "$patch_mode" 60)"
   local expected_attempts=$((capacity * cycles))
@@ -161,7 +161,7 @@ jq -cn --argjson client "$client_json" \
 
 limit_root="$output_root/output-limit"
 mkdir -p "$limit_root"
-client_json="$(ONEPAGE_PROOF_EFFECT_OUTPUT_LIMIT=4096 "$binary" integrated 1 \
+client_json="$(RUI_PROOF_EFFECT_OUTPUT_LIMIT=4096 "$binary" integrated 1 \
   unused unused "$output_root/spools" "$limit_root/proof.sqlite3" lane 10 \
   bash-only normal)"
 jq -e '
@@ -175,7 +175,7 @@ jq -cn --argjson client "$client_json" \
 fatal_root="$output_root/reactor-fatal"
 mkdir -p "$fatal_root"
 set +e
-ONEPAGE_PROOF_INJECT_REACTOR_FATAL_AFTER_LOOPS=1 "$binary" integrated 10 \
+RUI_PROOF_INJECT_REACTOR_FATAL_AFTER_LOOPS=1 "$binary" integrated 10 \
   unused unused "$output_root/spools" "$fatal_root/proof.sqlite3" lane 10 \
   bash-only normal > "$fatal_root/client.json"
 fatal_exit=$?

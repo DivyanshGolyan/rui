@@ -47,14 +47,14 @@ _,compile_err=run(cmd)
 run(['cc','-O2','-Wall','-Wextra',HERE/'granularity.c','-o',OUT/'calibration'])
 meta={'recorded_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'source_revision':run(['git','rev-parse','HEAD'])[0].strip(),'machine':platform.platform(),'base_provenance':'write-attribution-provenance.json','modified_wrapper_sha256':hashlib.sha256(s.encode()).hexdigest(),'compile_stderr':compile_err,'source_sha256':{n:hashlib.sha256((HERE/n).read_bytes()).hexdigest() for n in ['write_probe.c','write_granularity.py','granularity.c']},'instrumentation':'Additional 32 KiB static bitmaps record unique system-page-sized units dirtied by successful xWrite calls since last successful xSync, separately per file class. A second predictor clips the last dirty unit at file length rounded to the measured filesystem fragment size. No write coalescing or semantic change. This fixture has at most one open file per class.'}
 records=[]
-with open('/tmp/onepage-memory-experiments.lock','a') as lock:
+with open('/tmp/rui-memory-experiments.lock','a') as lock:
  print('Waiting for shared experiment lock',flush=True);fcntl.flock(lock,fcntl.LOCK_EX)
  for cache in [64,128]:
-  env=os.environ.copy();env['ONEPAGE_PROBE_CACHE_KIB']=str(cache);env['ONEPAGE_PROBE_OS_ATTRIBUTION']='1'
+  env=os.environ.copy();env['RUI_PROBE_CACHE_KIB']=str(cache);env['RUI_PROBE_OS_ATTRIBUTION']='1'
   t=time.monotonic();out,err=run([OUT/'unit-probe'],env)
   records.append({'cache_kib':cache,'seconds':time.monotonic()-t,'records':[json.loads(x) for x in out.splitlines() if x.startswith('{')],'stderr':err})
   print('Dirty-unit case',cache,'complete',flush=True)
- with tempfile.TemporaryDirectory(prefix='onepage-write-calibration-',dir=ROOT/'.zig-cache') as td:
+ with tempfile.TemporaryDirectory(prefix='rui-write-calibration-',dir=ROOT/'.zig-cache') as td:
   out,err=run([OUT/'calibration',pathlib.Path(td)/'calibration.bin'])
   calibration=[json.loads(x) for x in out.splitlines()]
 (HERE/'write-granularity-results.json').write_text(json.dumps({'production':records,'calibration':calibration},indent=2)+'\n')

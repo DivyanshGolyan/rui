@@ -23,12 +23,12 @@ def capture(*args):
 
 # Build before copying, so the measured executable belongs to this checkout.
 run('zig', 'build', '-Doptimize=ReleaseSafe')
-binary = out / 'latifa'
-shutil.copy2(root / 'zig-out/bin/latifa', binary)
-run('xcrun', 'dsymutil', str(binary), '-o', str(out / 'latifa.dSYM'))
+binary = out / 'rui'
+shutil.copy2(root / 'zig-out/bin/rui', binary)
+run('xcrun', 'dsymutil', str(binary), '-o', str(out / 'rui.dSYM'))
 with (out / 'types.txt').open('w') as f:
     subprocess.run(['xcrun', 'dwarfdump', '--regex', '--name=ExecutionSlot|CustodyRecord',
-                    '--show-children', str(out / 'latifa.dSYM')], check=True, stdout=f)
+                    '--show-children', str(out / 'rui.dSYM')], check=True, stdout=f)
 (out / 'source.patch').write_text(capture('git', 'diff', 'HEAD', '--', 'src', 'build.zig', 'build.zig.zon'))
 shutil.copytree(pathlib.Path(__file__).parent, out / 'collector', ignore=shutil.ignore_patterns('__pycache__'))
 metadata = {'commit': capture('git', 'rev-parse', 'HEAD'),
@@ -42,7 +42,7 @@ for mode in ['baseline', 'logged']:
     if mode == 'logged': args.append('--logging')
     run(*args)
 if a.instruments:
-    profile = out / 'latifa-profile'
+    profile = out / 'rui-profile'
     shutil.copy2(binary, profile)
     entitlements = out / 'profile.entitlements'
     entitlements.write_text('<?xml version="1.0"?><plist version="1.0"><dict>'

@@ -3,7 +3,7 @@
 import sys,argparse,fcntl,hashlib,json,pathlib,platform,re,resource,signal,socket,subprocess,tempfile,time
 from paced_format import dimensions
 HERE=pathlib.Path(__file__).resolve().parent
-p=argparse.ArgumentParser();p.add_argument('--build',type=pathlib.Path,default=pathlib.Path('/tmp/onepage-transport-memory-build'));p.add_argument('--output',type=pathlib.Path,required=True);p.add_argument('--match',default='');p.add_argument('--quick',action='store_true');p.add_argument('--sanitize',action='store_true');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--build',type=pathlib.Path,default=pathlib.Path('/tmp/rui-transport-memory-build'));p.add_argument('--output',type=pathlib.Path,required=True);p.add_argument('--match',default='');p.add_argument('--quick',action='store_true');p.add_argument('--sanitize',action='store_true');a=p.parse_args()
 b=a.build.resolve();out=a.output.resolve()
 if out.exists() and any(out.iterdir()):p.error('output must be empty')
 out.mkdir(parents=True,exist_ok=True)
@@ -34,12 +34,12 @@ cases.append(case('upper2000-rate128k',20,100,131072))
 if a.quick:cases=[case('paced-smoke',5,20,32768,3000,n=8,duration=2)]
 cases=[c for c in cases if re.search(a.match,c[0])]
 if not cases:p.error('no matching cases')
-with open('/tmp/onepage-memory-experiments.lock','a') as lock:
+with open('/tmp/rui-memory-experiments.lock','a') as lock:
  print('Waiting for shared benchmark lock',flush=True);fcntl.flock(lock,fcntl.LOCK_EX);print('Acquired shared benchmark lock',flush=True)
  for case in cases:
   name,n,protocol,bursts,payload,strategy,delay,stall,slots,cache,fail,*extra=case
   warm,rate,receive,hosts,streams,servercap,known,tokens,events,hz=extra
-  with tempfile.TemporaryDirectory(prefix='onepage-capture-',dir='/tmp') as tmp:
+  with tempfile.TemporaryDirectory(prefix='rui-capture-',dir='/tmp') as tmp:
    scratch=pathlib.Path(tmp)
    subprocess.run([str(ssl/'bin/openssl'),'req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(scratch/'key.pem'),'-out',str(scratch/'cert.pem'),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
    with socket.socket() as port_socket:port_socket.bind(('127.0.0.1',0));port=port_socket.getsockname()[1]

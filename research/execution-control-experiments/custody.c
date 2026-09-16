@@ -1,4 +1,4 @@
-/* Throwaway protocol fixture, not OnePage runtime code. SQLite owns durable
+/* Throwaway protocol fixture, not Rui runtime code. SQLite owns durable
  * Attempt/Resolution facts; one process-local slot owns its child and pipes. */
 #define _POSIX_C_SOURCE 200809L
 #include <sqlite3.h>

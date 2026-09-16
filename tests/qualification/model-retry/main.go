@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"latifa.local/qualification/measurement"
+	"rui.local/qualification/measurement"
 )
 
 const capacity = 16
@@ -168,7 +168,7 @@ func custodyZero(client measurement.Client, session string) (bool, error) {
 }
 
 func sql(deadline measurement.Deadline, store, query string) (string, error) {
-	output, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-noheader", filepath.Join(store, "latifa.sqlite3"), query)
+	output, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-noheader", filepath.Join(store, "rui.sqlite3"), query)
 	return strings.TrimSpace(string(output)), err
 }
 
@@ -277,7 +277,7 @@ func replaceDue(binary, directory, store, session, operation, marker string, mod
 	if err != nil || facts != "2,2,provider_http_422" {
 		return nil, fmt.Errorf("unexpected replacement facts %s: %w", facts, err)
 	}
-	database, _ := os.Stat(filepath.Join(store, "latifa.sqlite3"))
+	database, _ := os.Stat(filepath.Join(store, "rui.sqlite3"))
 	discoveryMS := admitted - started
 	return map[string]any{"status": discoveryStatus(discoveryMS), "qualification_limit_ms": 2000, "model_operations": modelOperations, "older_unresolved_future_retries": future, "replacement_admitted_after_start_ms": discoveryMS, "replacement_launched_after_start_ms": launched - started, "database_bytes": database.Size()}, nil
 }
@@ -410,7 +410,7 @@ func churn(binary, root string, e *retryEndpoint) (map[string]any, error) {
 			if err != nil {
 				return err
 			}
-			database, _ := os.Stat(filepath.Join(store, "latifa.sqlite3"))
+			database, _ := os.Stat(filepath.Join(store, "rui.sqlite3"))
 			rows = append(rows, map[string]any{"round": round + 1, "terminal_operations": expected, "database_bytes": database.Size(), "process": sample})
 		}
 		return nil
@@ -452,7 +452,7 @@ func main() {
 	output := flag.String("output", "", "write JSON to path")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: measure-model-retry [--output path] /absolute/path/to/latifa")
+		fmt.Fprintln(os.Stderr, "usage: measure-model-retry [--output path] /absolute/path/to/rui")
 		os.Exit(2)
 	}
 	if err := measurement.RequireRuntime(); err != nil {
@@ -460,7 +460,7 @@ func main() {
 		os.Exit(1)
 	}
 	binary, _ := filepath.Abs(flag.Arg(0))
-	root, err := os.MkdirTemp("/private/tmp", "latifa-retry-measure-")
+	root, err := os.MkdirTemp("/private/tmp", "rui-retry-measure-")
 	if err != nil {
 		panic(err)
 	}
@@ -482,7 +482,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	result := map[string]any{"format": "latifa-model-retry-v3-go", "scope": "issue-174 production retry discovery and custody churn", "status": retryStatus(timingResult, historyResult, churnResult), "artifacts": root, "timing": timingResult, "unresolved_history": historyResult, "churn_and_delayed_cleanup": churnResult, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only", "deterministic loopback HTTP classifies no live-provider behavior", "a 250 ms fixture delay separates committed retry discovery from provider launch", "waiting retry backlog and churn are qualified through the current 100-operation stress scale, not a product quota", "process termination evidence is not power-loss qualification"}}
+	result := map[string]any{"format": "rui-model-retry-v3-go", "scope": "issue-174 production retry discovery and custody churn", "status": retryStatus(timingResult, historyResult, churnResult), "artifacts": root, "timing": timingResult, "unresolved_history": historyResult, "churn_and_delayed_cleanup": churnResult, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only", "deterministic loopback HTTP classifies no live-provider behavior", "a 250 ms fixture delay separates committed retry discovery from provider launch", "waiting retry backlog and churn are qualified through the current 100-operation stress scale, not a product quota", "process termination evidence is not power-loss qualification"}}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)

@@ -1,11 +1,11 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 
-pub const database_suffix = "/latifa.sqlite3";
+pub const database_suffix = "/rui.sqlite3";
 pub const scratch_suffix = "/scratch";
 pub const max_database_path_bytes = protocol.max_store_bytes + database_suffix.len;
 pub const max_scratch_path_bytes = protocol.max_store_bytes + scratch_suffix.len;
-const runtime_prefix = "/tmp/latifa-";
+const runtime_prefix = "/tmp/rui-";
 const max_uid_bytes = "4294967295".len;
 const socket_suffix = ".sock";
 pub const max_runtime_directory_bytes = runtime_prefix.len + max_uid_bytes;
@@ -89,7 +89,7 @@ pub fn resolveClientPaths(io: std.Io, supplied_path: []const u8) !Paths {
 
 fn pathsFromOpenStore(store_dir: std.Io.Dir, io: std.Io) !Paths {
     // A full Linux readlink buffer can mean truncation. One extra byte makes
-    // both an exact 490-byte path and any truncated longer path reject.
+    // both an exact 493-byte path and any truncated longer path reject.
     var canonical_buffer: [protocol.max_store_bytes + 1]u8 = undefined;
     const canonical_length = store_dir.realPath(io, &canonical_buffer) catch |err| switch (err) {
         error.NameTooLong => return error.StorePathTooLong,
@@ -220,7 +220,7 @@ fn expectNoStoreEffects(path: []const u8, io: std.Io) !void {
     var directory = try std.Io.Dir.cwd().openDir(io, path, .{});
     defer directory.close(io);
     try std.testing.expectError(error.FileNotFound, directory.statFile(io, "host.lock", .{}));
-    try std.testing.expectError(error.FileNotFound, directory.statFile(io, "latifa.sqlite3", .{}));
+    try std.testing.expectError(error.FileNotFound, directory.statFile(io, "rui.sqlite3", .{}));
     var socket_buffer: [max_socket_path_bytes]u8 = undefined;
     const socket_path = try socketPathForCanonical(path, &socket_buffer);
     try std.testing.expectError(
@@ -248,10 +248,10 @@ test "Store paths canonicalize aliases to one socket" {
 }
 
 test "Store path capacities follow the SQLite VFS and derived suffixes" {
-    try std.testing.expectEqual(@as(usize, 489), protocol.max_store_bytes);
+    try std.testing.expectEqual(@as(usize, 492), protocol.max_store_bytes);
     try std.testing.expectEqual(@as(usize, 504), max_database_path_bytes);
-    try std.testing.expectEqual(@as(usize, 497), max_scratch_path_bytes);
-    try std.testing.expectEqual(@as(usize, 60), max_socket_path_bytes);
+    try std.testing.expectEqual(@as(usize, 500), max_scratch_path_bytes);
+    try std.testing.expectEqual(@as(usize, 57), max_socket_path_bytes);
     var runtime_buffer: [max_runtime_directory_bytes]u8 = undefined;
     try std.testing.expectEqual(
         @as(usize, max_runtime_directory_bytes),

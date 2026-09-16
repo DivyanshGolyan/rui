@@ -3,7 +3,7 @@ set -euo pipefail
 
 artifact_dir="${0:A:h}"
 source "$artifact_dir/probe_helpers.sh"
-probe_root="${OUTPUT_ROOT:-$(mktemp -d /tmp/onepage-duration-cache-proof.XXXXXX)}"
+probe_root="${OUTPUT_ROOT:-$(mktemp -d /tmp/rui-duration-cache-proof.XXXXXX)}"
 short_seconds="${SHORT_SECONDS:-10}"
 long_seconds="${LONG_SECONDS:-60}"
 binary="$probe_root/integrated_capacity"
@@ -48,7 +48,7 @@ run_probe() {
 
   local client_json
   if [[ "$nocache" == "yes" ]]; then
-    client_json="$(ONEPAGE_PROOF_SPOOL_NOCACHE=1 \
+    client_json="$(RUI_PROOF_SPOOL_NOCACHE=1 \
       "$binary" integrated 100 "https://localhost:$port/responses" \
       "$cert_file" "$probe_root/spools" "$case_root/proof.sqlite3" lane 120)"
   else

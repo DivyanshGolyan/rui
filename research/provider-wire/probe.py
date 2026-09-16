@@ -139,7 +139,7 @@ def reopen(path):
 def run():
     fixture = json.loads((HERE / "fixtures.json").read_text())
     passed = []
-    with tempfile.TemporaryDirectory(prefix="onepage-wire-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="rui-wire-") as tmp:
         path = str(Path(tmp) / "model.sqlite")
         db = database(path)
         assert accept(db, "answer", fixture["response"])

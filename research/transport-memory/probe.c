@@ -169,7 +169,7 @@ typedef struct {
   double resume;
 } T;
 static int scratch(void) {
-  char p[] = "/tmp/onepage-transport-capture-XXXXXX";
+  char p[] = "/tmp/rui-transport-capture-XXXXXX";
   int fd = mkstemp(p);
   assert(fd >= 0);
   assert(!unlink(p));

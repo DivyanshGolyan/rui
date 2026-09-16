@@ -43,14 +43,14 @@ print('Building measurement-only fixture',flush=True)
 out,err=run(cmd)
 metadata={'recorded_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'source_revision':run(['git','rev-parse','HEAD'])[0].strip(),'machine':platform.platform(),'hardware':run(['sysctl','-n','hw.model','hw.memsize','hw.ncpu'])[0],'zig_version':run(['zig','version'])[0].strip(),'macros':macros,'sqlite_sha256':hashlib.sha256(sqlite.read_bytes()).hexdigest(),'source_sha256':{name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ['src/host_store_density.zig','src/host_store.zig','src/session.zig','build.zig','build.zig.zon','research/sqlite-memory/write_probe.c','research/sqlite-memory/write_attribution.py']},'modified_fixture_sha256':hashlib.sha256(modified.encode()).hexdigest(),'compile_command':cmd,'compile_stderr':err,'fixture_changes':'Add passthrough VFS/SQL trace installation, reset/report calls, and select an existing supported cache profile. Session.create, SQL, schema, identity randomness, transaction count and durability unchanged. All three original population loops and post-population transient fixtures execute.','instrumentation_bytes':'32 KiB static page-write bitmap plus 4 fixed aggregate metric records and wrapper file headers; per-operation OS sampling enabled only for heavy attribution cases.'}
 records=[]
-with open('/tmp/onepage-memory-experiments.lock','a') as lock:
+with open('/tmp/rui-memory-experiments.lock','a') as lock:
     print('Waiting for shared experiment lock',flush=True);fcntl.flock(lock,fcntl.LOCK_EX)
     print('Running serial production write attribution',flush=True)
     metadata['filesystem']=run(['df','-k',str(ROOT)])[0]
     metadata['vm_stat_before']=run(['vm_stat'])[0]
     cases=[('baseline',64,False),('attributed',64,True),('light',64,False),('light',128,False),('light',64,False),('light',128,False),('attributed',128,True)]
     for kind,cache,heavy in cases:
-        env=os.environ.copy();env['ONEPAGE_PROBE_CACHE_KIB']=str(cache);env['ONEPAGE_PROBE_OS_ATTRIBUTION']=str(int(heavy))
+        env=os.environ.copy();env['RUI_PROBE_CACHE_KIB']=str(cache);env['RUI_PROBE_OS_ATTRIBUTION']=str(int(heavy))
         command=['zig','build','host-store-density'] if kind=='baseline' else [OUT/'probe']
         start=time.monotonic();stdout,stderr=run(command,env=env)
         sample={'kind':kind,'cache_kib':cache,'os_attribution':heavy,'wall_seconds_including_startup':time.monotonic()-start,'records':[json.loads(x) for x in stdout.splitlines() if x.startswith('{')],'stderr':stderr}

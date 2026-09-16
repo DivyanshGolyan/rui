@@ -54,7 +54,7 @@ def build(source, scratch):
     for name, expected in PIN['source_sha256'].items():
         assert hashlib.sha256((source/name).read_bytes()).hexdigest() == expected, name
     translated = scratch/'quickjs-reader.c'
-    translated.write_bytes((source/'quickjs.c').read_bytes()+b'\n#include "onepage_string_reader.inc"\n')
+    translated.write_bytes((source/'quickjs.c').read_bytes()+b'\n#include "rui_string_reader.inc"\n')
     binary = scratch/'reader-probe'
     command = ['clang', '-O2', '-g', '-std=gnu11', '-funsigned-char', '-D_GNU_SOURCE', '-DQUICKJS_NG_BUILD=1',
                '-I', str(source), '-I', str(HERE), str(translated), str(HERE/'probe.c')]
@@ -114,10 +114,10 @@ def cases():
             yield dict(name=f'read-failure-{read_at}',value='abc',staged=staged,window=16384,read_fail=read_at,failure='injected_read_failure')
 
 
-with open('/tmp/onepage-memory-experiments.lock','a') as lock:
+with open('/tmp/rui-memory-experiments.lock','a') as lock:
     print('Waiting for shared experiment lock',flush=True)
     fcntl.flock(lock,fcntl.LOCK_EX)
-    with tempfile.TemporaryDirectory(prefix='onepage-string-reader-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='rui-string-reader-') as tmp:
         scratch=pathlib.Path(tmp)
         source=args.source.resolve() if args.source else None
         if source is None:

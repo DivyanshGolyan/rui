@@ -146,7 +146,7 @@ static size_t read_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
 
 static int open_unlinked_spool(const char *directory) {
     char path[1024];
-    int length = snprintf(path, sizeof(path), "%s/onepage-spool.XXXXXX", directory);
+    int length = snprintf(path, sizeof(path), "%s/rui-spool.XXXXXX", directory);
     if (length <= 0 || (size_t)length >= sizeof(path)) return -1;
     int fd = mkstemp(path);
     if (fd < 0) return -1;
@@ -269,7 +269,7 @@ int main(int argc, char **argv) {
 
     uint64_t last_backlog_sample = 0;
     uint64_t last_process_sample = 0;
-    const char *backlog_interval_text = getenv("ONEPAGE_BACKLOG_SAMPLE_MS");
+    const char *backlog_interval_text = getenv("RUI_BACKLOG_SAMPLE_MS");
     uint64_t backlog_interval_ns = backlog_interval_text
         ? (uint64_t)(atof(backlog_interval_text) * 1000000.0)
         : 0;

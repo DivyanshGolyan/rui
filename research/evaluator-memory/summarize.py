@@ -18,5 +18,5 @@ for r in x['runs']:
  if r['buffered'] or not r['case'].startswith('saved-'):continue
  p=r['preparation'];m=r['measurements'][-1]
  lines.append(f"| {r['visible_results']:,} | {p['scratch_logical_bytes']:,} | {p['scratch_allocated_bytes']:,} | {p['parent_python_peak']:,} | {p['parent_prepared_physical_footprint']:,} | {m['read_bytes']:,} |")
-lines+=['',f"Parent cold physical footprint after dependency build/loading: {x['parent_cold_physical_footprint']:,} bytes. Each native child receives one read-only prepared file plus three stdio streams. Preparation and integrity checking reuse bounded chunks; the child never reads unselected records. Global vm_stat snapshots in the saved-1024 rows are contextual system-wide cache/page counts, not attributable OnePage memory.",'']
+lines+=['',f"Parent cold physical footprint after dependency build/loading: {x['parent_cold_physical_footprint']:,} bytes. Each native child receives one read-only prepared file plus three stdio streams. Preparation and integrity checking reuse bounded chunks; the child never reads unselected records. Global vm_stat snapshots in the saved-1024 rows are contextual system-wide cache/page counts, not attributable Rui memory.",'']
 (here/'measurements.md').write_text('\n'.join(lines))

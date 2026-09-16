@@ -272,15 +272,15 @@ fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
 fn usage() error{InvalidArguments} {
     std.debug.print(
         \\usage:
-        \\  latifa serve --store PATH [--active-capacity N] [--provider-endpoint URL] [--fault NAME]
-        \\  latifa configure --store PATH --record FILE --key KEY --session REF [settings]
-        \\  latifa message --store PATH --record FILE --key KEY --session REF --text FILE|-
-        \\  latifa stop-session --store PATH --record FILE --key KEY --session REF
-        \\  latifa interrupt-model --store PATH --record FILE --key KEY --session REF --turn ID --operation ID
-        \\  latifa retry --store PATH --record FILE --kind configure|message|session-stop|model-interruption
-        \\  latifa observe-command --store PATH --key KEY
-        \\  latifa read-result --store PATH --key KEY
-        \\  latifa inspect-session --store PATH --session REF
+        \\  rui serve --store PATH [--active-capacity N] [--provider-endpoint URL] [--fault NAME]
+        \\  rui configure --store PATH --record FILE --key KEY --session REF [settings]
+        \\  rui message --store PATH --record FILE --key KEY --session REF --text FILE|-
+        \\  rui stop-session --store PATH --record FILE --key KEY --session REF
+        \\  rui interrupt-model --store PATH --record FILE --key KEY --session REF --turn ID --operation ID
+        \\  rui retry --store PATH --record FILE --kind configure|message|session-stop|model-interruption
+        \\  rui observe-command --store PATH --key KEY
+        \\  rui read-result --store PATH --key KEY
+        \\  rui inspect-session --store PATH --session REF
         \\
     , .{});
     return error.InvalidArguments;

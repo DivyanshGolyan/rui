@@ -1,4 +1,4 @@
-module latifa.local/qualification
+module rui.local/qualification
 
 go 1.27.0
 

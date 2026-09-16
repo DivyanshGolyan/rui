@@ -17,7 +17,7 @@ For a described workload: where does elapsed time go, what consumes CPU, what me
 
 CPU sampling and allocation histories answer different questions. Apple documents allocation/free history, VM snapshots and footprint as complementary views; Linux documents separate RSS/PSS mappings and process I/O counters. [Apple heap analysis](https://developer.apple.com/videos/play/wwdc2024/10173/), [Linux proc](https://cdn.kernel.org/doc/html/latest/filesystems/proc.html).
 
-Recommendation: extend the existing research measurement package, not a second framework. The published stack's `research/measurement/measurement.go` and `research/model-output/main.go` already collect process CPU, RSS, footprint, descriptors, custody and scratch evidence. The root README describes the older single-Session implementation; code in `/Users/divyanshgolyan/.codex/worktrees/1e5b/latifa` describes the reviewed stacked implementation. Do not benchmark the root and label it the current stack.
+Recommendation: extend the existing research measurement package, not a second framework. The published stack's `research/measurement/measurement.go` and `research/model-output/main.go` already collect process CPU, RSS, footprint, descriptors, custody and scratch evidence. The root README describes the older single-Session implementation; code in `/Users/divyanshgolyan/.codex/worktrees/1e5b/rui` describes the reviewed stacked implementation. Do not benchmark the root and label it the current stack.
 
 ## Preserve evidence before choosing a viewer
 
@@ -34,7 +34,7 @@ run/
   report/               # reproducible derived tables, timeline and profiles
 ```
 
-Record offered/admitted/completed/cancelled work and arrival delay; otherwise backpressure can make an overloaded system appear inexpensive. Record Host and Latifa helpers as orchestration, model-requested Bash descendants as workload, fixture and collector processes separately. CPU totals need matching windows; process RSS sums double-count shared pages. Linux PSS apportions sharing; cgroup memory is a different group accounting scope including charges beyond process heaps. [Linux proc](https://cdn.kernel.org/doc/html/latest/filesystems/proc.html), [cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html).
+Record offered/admitted/completed/cancelled work and arrival delay; otherwise backpressure can make an overloaded system appear inexpensive. Record Host and Rui helpers as orchestration, model-requested Bash descendants as workload, fixture and collector processes separately. CPU totals need matching windows; process RSS sums double-count shared pages. Linux PSS apportions sharing; cgroup memory is a different group accounting scope including charges beyond process heaps. [Linux proc](https://cdn.kernel.org/doc/html/latest/filesystems/proc.html), [cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html).
 
 Keep raw integer timestamps (strings in JSON when precision requires), unit, clock source, process/thread identity and calibration/anchor information. Never subtract unrelated clocks. Preserve raw native profiles; conversion can discard stack, scheduling or clock metadata. A Perfetto-compatible timeline is a useful derived view, not a requirement to embed a new tracing SDK. [Perfetto external formats](https://perfetto.dev/docs/getting-started/other-formats), [track-event clocks](https://perfetto.dev/docs/instrumentation/track-events).
 
@@ -50,7 +50,7 @@ Processor Trace is a later targeted tool, not the default capture: supported rec
 
 ### Memory explanations
 
-Capture whole-process footprint plus Allocations and VM Tracker on separate focused runs. Allocations exposes allocation/free history; VM Tracker and `vmmap` explain mappings that heap-only tools cannot. `vmmap` is useful at cold idle, peak owner occupancy and retained idle; system-wide `vm_stat` describes machine pressure, not Latifa's ownership. [Apple heap analysis](https://developer.apple.com/videos/play/wwdc2024/10173/), [Apple virtual-memory tools](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/Articles/VMPages.html).
+Capture whole-process footprint plus Allocations and VM Tracker on separate focused runs. Allocations exposes allocation/free history; VM Tracker and `vmmap` explain mappings that heap-only tools cannot. `vmmap` is useful at cold idle, peak owner occupancy and retained idle; system-wide `vm_stat` describes machine pressure, not Rui's ownership. [Apple heap analysis](https://developer.apple.com/videos/play/wwdc2024/10173/), [Apple virtual-memory tools](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/Articles/VMPages.html).
 
 Do not equate malloc events with every Zig allocation: arenas or page-backed allocators may suballocate from a larger native mapping. An allocator wrapper can count requested live bytes and churn at selected owning boundaries, while VM tools explain physical backing. Label coverage; do not claim the difference between totals is a proven leak or fragmentation measurement. This is a recommendation derived from the distinction between heap events and VM regions, pending an explicit allocator-path inventory of the measured build.
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 artifact_dir="${0:A:h}"
 source "$artifact_dir/probe_helpers.sh"
-probe_root="${OUTPUT_ROOT:-$(mktemp -d /tmp/onepage-vmmap-proof.XXXXXX)}"
+probe_root="${OUTPUT_ROOT:-$(mktemp -d /tmp/rui-vmmap-proof.XXXXXX)}"
 binary="$probe_root/integrated_capacity"
 cert_file="$probe_root/cert.pem"
 key_file="$probe_root/key.pem"
@@ -40,7 +40,7 @@ server_pid=$!
 wait_for_pattern '"ready": true' "$probe_root/server.jsonl" 0.05 200 \
   "vmmap server readiness"
 
-ONEPAGE_PROOF_IDLE_HOLD_SECONDS=10 \
+RUI_PROOF_IDLE_HOLD_SECONDS=10 \
   "$binary" integrated 100 https://localhost:19850/responses \
   "$cert_file" "$probe_root/spools" "$probe_root/proof.sqlite3" lane 30 \
   > "$probe_root/client.json" 2> "$probe_root/client.stderr" &

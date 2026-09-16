@@ -2,7 +2,7 @@
 """Run serially under the lock shared by the four memory experiments."""
 import argparse, re, shutil, fcntl, hashlib, json, os, pathlib, platform, resource, signal, socket, subprocess, time
 HERE=pathlib.Path(__file__).resolve().parent
-p=argparse.ArgumentParser();p.add_argument('--build',type=pathlib.Path,default=pathlib.Path('/tmp/onepage-transport-memory-build'));p.add_argument('--quick',action='store_true');p.add_argument('--match',default='');p.add_argument('--sanitize',action='store_true');p.add_argument('--repeat',type=int,default=1);p.add_argument('--output',type=pathlib.Path,default=HERE/'results');args=p.parse_args();b=args.build.resolve();out=args.output.resolve()
+p=argparse.ArgumentParser();p.add_argument('--build',type=pathlib.Path,default=pathlib.Path('/tmp/rui-transport-memory-build'));p.add_argument('--quick',action='store_true');p.add_argument('--match',default='');p.add_argument('--sanitize',action='store_true');p.add_argument('--repeat',type=int,default=1);p.add_argument('--output',type=pathlib.Path,default=HERE/'results');args=p.parse_args();b=args.build.resolve();out=args.output.resolve()
 if args.repeat < 1:p.error("--repeat must be positive")
 if out.exists() and any(out.iterdir()):p.error("output directory must be empty; existing evidence is never overwritten")
 out.mkdir(parents=True,exist_ok=True)
@@ -40,7 +40,7 @@ if args.quick:cases=[('smoke-h1',1,1024,65536,1,0,16,16384,1),('smoke-h2',8,1024
 cases=[c for c in cases if re.search(args.match,c[0])]
 if not cases:p.error('no cases match --match')
 if args.repeat>1:cases=[(c[0]+f'-rep{r+1}',*c[1:]) for r in range(args.repeat) for c in cases]
-with open('/tmp/onepage-memory-experiments.lock','a') as lock:
+with open('/tmp/rui-memory-experiments.lock','a') as lock:
  print('Waiting for shared benchmark lock',flush=True);fcntl.flock(lock,fcntl.LOCK_EX);print('Acquired shared benchmark lock',flush=True)
  for case in cases:
   name,n,r,o,items,mode,cache,buf,proto,*extra=case

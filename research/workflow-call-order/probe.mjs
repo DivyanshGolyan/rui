@@ -1,5 +1,5 @@
 // Illustrates replay call order, with all previously blocked calls settled.
-// Uses native ECMAScript promises; does not execute OnePage or make model calls.
+// Uses native ECMAScript promises; does not execute Rui or make model calls.
 import assert from 'node:assert/strict';
 
 async function evaluate(visible) {

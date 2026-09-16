@@ -1,6 +1,6 @@
 # SQLite content memory experiment
 
-The pinned SQLite representation admitted, imported and exactly reread 64 MiB of file-backed content with **523,248 bytes of peak SQLite heap and 8,192 bytes of explicit application buffers**. It did not allocate a complete serialized value. This is a native representation prototype, not implementation or qualification of the redesigned OnePage runtime. SQLite's overflow-page index still grows with value size, so this is not evidence of constant memory or arbitrary-size support.
+The pinned SQLite representation admitted, imported and exactly reread 64 MiB of file-backed content with **523,248 bytes of peak SQLite heap and 8,192 bytes of explicit application buffers**. It did not allocate a complete serialized value. This is a native representation prototype, not implementation or qualification of the redesigned Rui runtime. SQLite's overflow-page index still grows with value size, so this is not evidence of constant memory or arbitrary-size support.
 
 ## Reproduce and evidence
 
@@ -11,7 +11,7 @@ python3 research/sqlite-memory/run.py
 python3 research/sqlite-memory/production.py
 ```
 
-Both runners hold `/tmp/onepage-memory-experiments.lock` through their heavy work, share the sibling tasks' advisory lock, use bounded cases and delete disposable database/source directories. Compilation and dependency preparation can precede the lock. The native runner compiles the repository-pinned amalgamation with Apple Clang, using build.zig's macros, then uses `THREADSAFE=1` for the selected-contract cases and `0` for two compatibility controls. It does not use Apple's system SQLite. Generated dependencies/binaries stay in ignored `generated/`; no provider, credential or root-checkout writes are involved.
+Both runners hold `/tmp/rui-memory-experiments.lock` through their heavy work, share the sibling tasks' advisory lock, use bounded cases and delete disposable database/source directories. Compilation and dependency preparation can precede the lock. The native runner compiles the repository-pinned amalgamation with Apple Clang, using build.zig's macros, then uses `THREADSAFE=1` for the selected-contract cases and `0` for two compatibility controls. It does not use Apple's system SQLite. Generated dependencies/binaries stay in ignored `generated/`; no provider, credential or root-checkout writes are involved.
 
 - [Raw native results](results.json): 22 fresh-process cases; all expected-outcome, hard-bound and cleanup assertions passed. Exit 77 is intentional only in the crash case; its fresh recovery process passed.
 - [Provenance](provenance.json): revision `b1d25138f70e6a7b4c1d27523d5b051f6de34d7a`, file hashes, exact macros/schema, dependency hash, compiler, machine, filesystem and system VM counters. Recorded on macOS 15.7.7 ARM64, MacBookPro18,1, 16 GiB RAM; SQLite 3.53.4; Zig 0.16.0; Apple Clang 17.0.0.
@@ -25,7 +25,7 @@ Both runners hold `/tmp/onepage-memory-experiments.lock` through their heavy wor
 
 Production still rejects content above 1 MiB; its schema and SQLite row-length limit enforce that earlier boundary. Duplicate content handling compares length/digest and rejects an existing reference; it is not the redesigned exact request-key comparison. The current build also has `SQLITE_THREADSAFE=0`, a database page quota, and a 64 KiB default cache. These are implementation facts, not the accepted redesign. This experiment removes none of those production guards.
 
-The prototype extracts the actual content schema, changing only its 1 MiB CHECK for large cases. Its reduced parent table and `accepted` relation model atomic content plus first reference, not the full Session/Turn schema. A pre-existing committed witness must survive every failure. A real source file is generated incrementally, hashed through a bounded window, then imported and compared byte-for-byte. The SHA-256 probe domain is local to this harness, not OnePage's persisted binding encoding. Every content byte participates; a last-byte source mutation must conflict. Restoring that byte must restore equality. No preloaded whole-value buffer or item collection is used.
+The prototype extracts the actual content schema, changing only its 1 MiB CHECK for large cases. Its reduced parent table and `accepted` relation model atomic content plus first reference, not the full Session/Turn schema. A pre-existing committed witness must survive every failure. A real source file is generated incrementally, hashed through a bounded window, then imported and compared byte-for-byte. The SHA-256 probe domain is local to this harness, not Rui's persisted binding encoding. Every content byte participates; a last-byte source mutation must conflict. Restoring that byte must restore equality. No preloaded whole-value buffer or item collection is used.
 
 ## Allocation and item-count results
 

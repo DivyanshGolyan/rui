@@ -18,7 +18,7 @@ def run(*args):
 def main():
     flags = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-pthread"]
     rows = []
-    with tempfile.TemporaryDirectory(prefix="onepage-idle-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="rui-idle-") as tmp:
         binary = str(Path(tmp) / "idle")
         subprocess.run(["cc", *flags, str(ROOT / "idle.c"), "-o", binary], check=True)
         for repeat in range(3):
@@ -67,7 +67,7 @@ def main():
                          f"(range {min(samples):.4f}%–{max(samples):.4f}%).")
     lines += ["", "## Interpretation and limits", "",
               "This measures synthetic idle scheduling cost, including the helper thread's creation, sleep, "
-              "signal, and join; memory allocation and destruction are outside timing. It is not OnePage's "
+              "signal, and join; memory allocation and destruction are outside timing. It is not Rui's "
               "whole-Host idle CPU baseline and does not include SQLite polling, real I/O multiplexing, "
               "transports, or evaluator work. Short one-second samples on an unpinned laptop cannot provide "
               "fine-grained energy or cross-machine guarantees. Capacity 1,000 is exploratory only.", "",

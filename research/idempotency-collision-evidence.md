@@ -30,7 +30,7 @@ TigerBeetle recommends that the initiating client generate and persist the trans
 
 Its API distinguishes matching existing transfers from existing IDs with different fields. It also remembers certain state-dependent failed attempts, preventing a retry from succeeding merely because database state changed. Intentionally attempting that failed operation again requires a new ID. That is a new attempt after a known outcome, not recovery of an uncertain request. [TigerBeetle create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/)
 
-TigerBeetle's recommended IDs contain a timestamp and random component. Their documented collision risk is insignificant, not mathematically impossible; they avoid a central ID oracle and optimize storage access. This is useful evidence that a durable financial system can explicitly rely on probabilistic identity uniqueness rather than engineer recovery for every theoretical collision. It does not justify replacing UUIDv4 for Latifa absent a demonstrated storage need. [TigerBeetle data modeling](https://docs.tigerbeetle.com/coding/data-modeling/)
+TigerBeetle's recommended IDs contain a timestamp and random component. Their documented collision risk is insignificant, not mathematically impossible; they avoid a central ID oracle and optimize storage access. This is useful evidence that a durable financial system can explicitly rely on probabilistic identity uniqueness rather than engineer recovery for every theoretical collision. It does not justify replacing UUIDv4 for Rui absent a demonstrated storage need. [TigerBeetle data modeling](https://docs.tigerbeetle.com/coding/data-modeling/)
 
 ## Cases that must remain distinct
 

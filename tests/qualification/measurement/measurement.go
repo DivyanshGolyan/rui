@@ -348,7 +348,7 @@ func ExchangeUnix(deadline Deadline, socketPath string, route string, value any,
 		return err
 	}
 	header := fmt.Sprintf(
-		"POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Latifa-Wire-Version: 1\r\nConnection: close\r\n\r\n",
+		"POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 1\r\nConnection: close\r\n\r\n",
 		route,
 		len(body),
 	)
@@ -384,7 +384,7 @@ func TimedExchangeUnix(deadline Deadline, socketPath string, route string, value
 }
 
 func DatabaseSize(store string) (map[string]uint64, error) {
-	info, err := os.Stat(filepath.Join(store, "latifa.sqlite3"))
+	info, err := os.Stat(filepath.Join(store, "rui.sqlite3"))
 	if err != nil {
 		return nil, err
 	}

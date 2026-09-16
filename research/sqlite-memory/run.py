@@ -38,12 +38,12 @@ for mode in ['heap','full','short','digest','select','crash']:
     cases.append((1,16777216,3 if mode in ['short','digest'] else 1,0,1,mode))
 cases.extend([(1,16777216,1,0,2,'normal'),(1,16777216,1,0,0,'normal'),(0,1048576,1,1,1,'normal'),(0,16777216,1,0,1,'normal'),(1,1048576,1,0,1,'select')])
 results=[]
-with open('/tmp/onepage-memory-experiments.lock','a') as lock:
+with open('/tmp/rui-memory-experiments.lock','a') as lock:
     print('Waiting for shared benchmark lock',flush=True)
     fcntl.flock(lock,fcntl.LOCK_EX)
     print('Acquired shared benchmark lock',flush=True)
     metadata['vm_stat_before']=command(['vm_stat'])
-    with tempfile.TemporaryDirectory(prefix='onepage-sqlite-memory-') as td:
+    with tempfile.TemporaryDirectory(prefix='rui-sqlite-memory-') as td:
         metadata['filesystem']=command(['df','-k',td])
         for idx,(ts,n,rows,ret,spill,mode) in enumerate(cases):
             with tempfile.TemporaryDirectory(dir=td) as case_dir:

@@ -21,7 +21,7 @@ def main():
     compiler = os.environ.get("CC", "cc")
     flags = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"]
     results = []
-    with tempfile.TemporaryDirectory(prefix="onepage-slots-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="rui-slots-") as tmp:
         binary = str(Path(tmp) / "slots")
         subprocess.run([compiler, *flags, str(ROOT / "slots.c"), "-o", binary], check=True)
         for capacity in [1, 10, 50, 100, 1000]:

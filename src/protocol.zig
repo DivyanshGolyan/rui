@@ -5,9 +5,9 @@ pub const wire_version = "1";
 pub const max_key_bytes = 128;
 pub const max_session_bytes = 128;
 // SQLite's Unix VFS needs eight bytes beyond the database path for journals.
-// The Store selector plus "/latifa.sqlite3" and the journal suffix must stay
+// The Store selector plus "/rui.sqlite3" and the journal suffix must stay
 // within its compiled 512-byte pathname limit.
-pub const max_store_bytes = 489;
+pub const max_store_bytes = 492;
 pub const max_workspace_bytes = 4096;
 pub const max_model_bytes = 256;
 pub const max_header_bytes = 16 * 1024;
@@ -105,7 +105,7 @@ pub const ConfigureCommand = struct {
 
     pub fn semanticDigest(self: *const ConfigureCommand) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "latifa/core/configure/v1");
+        hashField(&hash, "rui/core/configure/v1");
         hashField(&hash, self.session.slice());
         hashOptional(&hash, &self.configuration.workspace);
         hashOptional(&hash, &self.configuration.model);
@@ -135,7 +135,7 @@ pub const MessageCommand = struct {
 
     pub fn semanticDigest(self: *const MessageCommand) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "latifa/core/message/v1");
+        hashField(&hash, "rui/core/message/v1");
         hashField(&hash, self.session.slice());
         hashContent(&hash, &self.text);
         return hash.finalResult();
@@ -149,7 +149,7 @@ pub const SessionStopCommand = struct {
 
     pub fn semanticDigest(self: *const SessionStopCommand) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "latifa/core/session-stop/v1");
+        hashField(&hash, "rui/core/session-stop/v1");
         hashField(&hash, self.session.slice());
         return hash.finalResult();
     }
@@ -164,7 +164,7 @@ pub const ModelInterruptionCommand = struct {
 
     pub fn semanticDigest(self: *const ModelInterruptionCommand) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "latifa/core/model-interruption/v1");
+        hashField(&hash, "rui/core/model-interruption/v1");
         hashField(&hash, self.session.slice());
         var value: [8]u8 = undefined;
         std.mem.writeInt(u64, &value, self.turn_id, .big);
@@ -247,7 +247,7 @@ fn hashContent(hash: *std.crypto.hash.sha2.Sha256, field: *const ContentField) v
 
 pub fn contentHasher() std.crypto.hash.sha2.Sha256 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hashField(&hash, "latifa/content/v1");
+    hashField(&hash, "rui/content/v1");
     return hash;
 }
 

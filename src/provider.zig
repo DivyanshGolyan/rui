@@ -268,7 +268,7 @@ pub fn materialize(
     }
     try writer.write("]");
     if (settings.output_schema) |schema_reference| {
-        try writer.write(",\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"latifa_output\",\"strict\":true,\"schema\":");
+        try writer.write(",\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":");
         {
             var schema = try view.openContent(schema_reference);
             defer schema.close();

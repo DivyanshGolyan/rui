@@ -49,9 +49,9 @@ def prepare(path,total,count,results,width=1,corrupt=None):
         with path.open('r+b') as f:f.seek(8);f.write(struct.pack('<I',0xffffffff))
     return written//results,{'scratch_logical_bytes':path.stat().st_size,'scratch_allocated_bytes':path.stat().st_blocks*512,'sha256_before_fault':h.hexdigest(),'parent_python_current_delta':parent_current-before,'parent_python_peak':parent_peak}
 
-with open('/tmp/onepage-memory-experiments.lock','a') as lock:
+with open('/tmp/rui-memory-experiments.lock','a') as lock:
     print('Waiting for shared experiment lock',flush=True);fcntl.flock(lock,fcntl.LOCK_EX)
-    with tempfile.TemporaryDirectory(prefix='onepage-evaluator-memory-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='rui-evaluator-memory-') as tmp:
         tmp=pathlib.Path(tmp)
         if args.source:source=args.source.resolve();archive_hash=None
         else:

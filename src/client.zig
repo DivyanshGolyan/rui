@@ -174,7 +174,7 @@ pub fn readResult(
     defer stream.close(io);
     const fd = stream.socket.handle;
     var header_buffer: [512]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/read-result HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Latifa-Wire-Version: 1\r\n\r\n", .{body.len});
+    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/read-result HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{body.len});
     try writeAll(fd, header);
     try writeAll(fd, body.slice());
     return readResultResponse(io, fd, destination, reply_buffer);
@@ -347,7 +347,7 @@ const Capture = struct {
         if (!self.active) return;
         if (self.file_open) self.file.close(self.io);
         if (!self.published) self.parent.deleteFile(self.io, self.temporary_name.slice()) catch |err| {
-            std.debug.print("latifa: retained caller capture after cleanup failure: {s}\n", .{@errorName(err)});
+            std.debug.print("rui: retained caller capture after cleanup failure: {s}\n", .{@errorName(err)});
         };
         self.lock_file.close(self.io);
         self.parent.close(self.io);
@@ -530,9 +530,9 @@ fn sendSource(
     const fd = stream.socket.handle;
     var header_buffer: [512]u8 = undefined;
     const header = if (drop_reply) |drop|
-        try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Latifa-Wire-Version: 1\r\nX-Latifa-Test-Drop-Reply: {s}\r\n\r\n", .{ route, length, drop })
+        try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\nX-Rui-Test-Drop-Reply: {s}\r\n\r\n", .{ route, length, drop })
     else
-        try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Latifa-Wire-Version: 1\r\n\r\n", .{ route, length });
+        try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ route, length });
     try writeAll(fd, header);
     if (file) |source| {
         var buffer: [protocol.content_window_bytes]u8 = undefined;
@@ -588,7 +588,7 @@ fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !Respo
         if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
             if (length != null) return error.InvalidResponse;
             length = try std.fmt.parseInt(u64, value, 10);
-        } else if (std.ascii.eqlIgnoreCase(name, "X-Latifa-Wire-Version")) {
+        } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
             wire_ok = std.mem.eql(u8, value, protocol.wire_version);
         } else if (std.ascii.eqlIgnoreCase(name, "Content-Type")) {
             if (kind != null) return error.InvalidResponse;
@@ -687,7 +687,7 @@ const empty_test_response =
     "Content-Type: application/json\r\n" ++
     "Content-Length: 0\r\n" ++
     "Connection: close\r\n" ++
-    "X-Latifa-Wire-Version: 1\r\n\r\n";
+    "X-Rui-Wire-Version: 1\r\n\r\n";
 
 fn socketPair() ![2]std.posix.fd_t {
     var sockets: [2]std.posix.fd_t = undefined;
@@ -747,7 +747,7 @@ test "response closure and truncation stay explicit" {
         defer closeTestDescriptor(sockets[0]);
         try writeAll(
             sockets[1],
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Latifa-Wire-Version: 1\r\n\r\nx",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\nx",
         );
         closeTestDescriptor(sockets[1]);
         var buffer: ReplyBuffer = .{};
@@ -960,7 +960,7 @@ test "command reply borrows the caller buffer" {
     defer closeTestDescriptor(descriptors[0]);
     try writeTestResponse(
         descriptors[1],
-        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Latifa-Wire-Version: 1\r\n\r\n{\"status\":\"error\"}",
+        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Rui-Wire-Version: 1\r\n\r\n{\"status\":\"error\"}",
     );
     var buffer: ReplyBuffer = .{};
     const reply = try readCommandResponse(descriptors[0], &buffer);
@@ -1039,7 +1039,7 @@ test "response parsing rejects truncated head and command body" {
         defer closeTestDescriptor(descriptors[0]);
         try writeTestResponse(
             descriptors[1],
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4\r\nX-Latifa-Wire-Version: 1\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
         );
         var buffer: ReplyBuffer = .{};
         try std.testing.expectError(error.TruncatedResponse, readCommandResponse(descriptors[0], &buffer));
@@ -1062,7 +1062,7 @@ fn writeLargeTestResponse(context: *LargeResponseContext) void {
     var header_buffer: [256]u8 = undefined;
     const header = std.fmt.bufPrint(
         &header_buffer,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nX-Latifa-Wire-Version: 1\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 1\r\n\r\n",
         .{context.length},
     ) catch |err| {
         context.failure = err;
@@ -1134,7 +1134,7 @@ test "read result returns bounded command errors without touching destination" {
     defer closeTestDescriptor(descriptors[0]);
     try writeTestResponse(
         descriptors[1],
-        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Latifa-Wire-Version: 1\r\n\r\n{\"status\":\"error\"}",
+        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 18\r\nX-Rui-Wire-Version: 1\r\n\r\n{\"status\":\"error\"}",
     );
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1157,7 +1157,7 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
     defer closeTestDescriptor(descriptors[0]);
     try writeTestResponse(
         descriptors[1],
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 4\r\nX-Latifa-Wire-Version: 1\r\n\r\nab",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 4\r\nX-Rui-Wire-Version: 1\r\n\r\nab",
     );
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

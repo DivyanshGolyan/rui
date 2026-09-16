@@ -10,12 +10,12 @@ import tempfile
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
-PREFIX = pathlib.Path('/tmp/onepage-transport-memory-build/ng')
+PREFIX = pathlib.Path('/tmp/rui-transport-memory-build/ng')
 
 
 class CompiledDependencyIdentity(unittest.TestCase):
     def test_prefix_identity_is_checked_before_results_are_published(self):
-        with tempfile.TemporaryDirectory(prefix='onepage-header-test-') as tmp:
+        with tempfile.TemporaryDirectory(prefix='rui-header-test-') as tmp:
             root = pathlib.Path(tmp)
             prefix = root / 'prefix'
             headers = prefix / 'include' / 'nghttp2'

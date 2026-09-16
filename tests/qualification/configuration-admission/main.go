@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"latifa.local/qualification/measurement"
+	"rui.local/qualification/measurement"
 )
 
 var sessionCounts = []int{0, 100, 1_000, 10_000}
@@ -63,7 +63,7 @@ func configuration(store, workspace, identity string) configurationCommand {
 
 func run(binary string) (result map[string]any, resultError error) {
 	started := time.Now()
-	directory, err := os.MkdirTemp("/private/tmp", "latifa-configuration-measure-")
+	directory, err := os.MkdirTemp("/private/tmp", "rui-configuration-measure-")
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func run(binary string) (result map[string]any, resultError error) {
 		return nil, err
 	}
 	result = map[string]any{
-		"format":                       "latifa-configuration-admission-v2-go",
+		"format":                       "rui-configuration-admission-v2-go",
 		"scope":                        "issue-170 production Host configuration admission",
 		"status":                       "passed",
 		"artifacts":                    directory,
@@ -146,7 +146,7 @@ func run(binary string) (result map[string]any, resultError error) {
 
 func main() {
 	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: measure-admission /absolute/path/to/latifa")
+		fmt.Fprintln(os.Stderr, "usage: measure-admission /absolute/path/to/rui")
 		os.Exit(2)
 	}
 	if err := measurement.RequireRuntime(); err != nil {

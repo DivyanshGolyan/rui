@@ -5,7 +5,7 @@ Research pin: `anomalyco/opencode` commit
 `/tmp/opencode-src.FyoefB` on 2026-09-13. The commit is the September 12
 “sync release versions for v2.0.3” pin. This is current stable v2 source
 evidence; the earlier `2.0` exploratory branch was the wrong research target.
-This note makes no Latifa product decision.
+This note makes no Rui product decision.
 
 ## Authority owner and tool boundary
 

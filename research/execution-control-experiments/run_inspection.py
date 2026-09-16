@@ -47,7 +47,7 @@ def main():
              (1000000, 128, 100, 1)]
     if args.smoke:
         cases = [(10000, 128, 10, 4)]
-    with tempfile.TemporaryDirectory(prefix="onepage-inspection-load-") as temp:
+    with tempfile.TemporaryDirectory(prefix="rui-inspection-load-") as temp:
         temp = Path(temp)
         binary = temp / "inspection"
         data["build"] = build(HERE / "inspection.c", binary, args.sanitize)
@@ -55,7 +55,7 @@ def main():
         invoke(binary, cleanup_db, "seed", 10000, 128, 10, 4)
         data["cleanup_checks"] = []
         for requested_signal in (signal.SIGABRT, signal.SIGTERM):
-            env = dict(os.environ, ONEPAGE_PROBE_SIGNAL=str(int(requested_signal)))
+            env = dict(os.environ, RUI_PROBE_SIGNAL=str(int(requested_signal)))
             result = subprocess.run(list(map(str, (binary, cleanup_db, "fifo", 10000, 128, 10, 4))),
                                     env=env, text=True, capture_output=True, timeout=20)
             assert result.returncode == 128 + requested_signal, (result.returncode, result.stderr)

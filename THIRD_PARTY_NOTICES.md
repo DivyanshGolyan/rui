@@ -4,7 +4,7 @@
 
 The opt-in Go measurement runners use gopsutil to read Host process CPU,
 memory, thread, descendant and Darwin disk-I/O counters. It is not linked into
-the Latifa runtime.
+the Rui runtime.
 
 - Source: `https://github.com/shirou/gopsutil/releases/tag/v4.26.7`
 - Go module: `github.com/shirou/gopsutil/v4 v4.26.7`
@@ -17,7 +17,7 @@ provided without warranty.
 
 ## SQLite 3.53.4
 
-Latifa compiles the pinned SQLite 3.53.4 amalgamation from Fossil check-in
+Rui compiles the pinned SQLite 3.53.4 amalgamation from Fossil check-in
 `bf7c7f30031888f4e796e429ab3978879485`.
 
 - Source: `https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip`
@@ -33,7 +33,7 @@ notice, SQLite includes this blessing:
 
 ## curl 8.22.0
 
-Latifa builds a pinned static curl 8.22.0 with HTTP, OpenSSL, Apple SecTrust on
+Rui builds a pinned static curl 8.22.0 with HTTP, OpenSSL, Apple SecTrust on
 macOS and the supported threaded asynchronous resolver.
 
 - Source: `https://curl.se/download/curl-8.22.0.tar.xz`
@@ -47,7 +47,7 @@ without warranty.
 
 ## OpenSSL 3.6.3
 
-Latifa builds pinned static OpenSSL 3.6.3 as curl's TLS implementation.
+Rui builds pinned static OpenSSL 3.6.3 as curl's TLS implementation.
 
 - Source: `https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz`
 - Zig package content hash: `N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM`

@@ -1,6 +1,6 @@
-# Latifa
+# Rui
 
-Latifa (formerly OnePage) is a resource-bounded, crash-resumable local runtime for programmable coding-agent workflows. JavaScript coordinates reusable conversations; native Zig owns execution, permissions, recovery and SQLite storage. Codex subscription is the first live provider.
+Rui (रुई, Hindi for cotton) is a resource-bounded, crash-resumable local runtime for programmable coding-agent workflows. JavaScript coordinates reusable conversations; native Zig owns execution, permissions, recovery and SQLite storage. Codex subscription is the first live provider.
 
 ## Status
 
@@ -23,7 +23,7 @@ Start one local server explicitly, then use direct CLI/script calls or JavaScrip
 
 V1 excludes conversation branching/editing, attachments, automatic provider fallback, incompatible model switching, multi-host execution, plugins/dynamic tools, MCP execution, retained workflow VMs, storage migration, public event-stream/watch/webhook/push interfaces, TUI/editor/Web UI and a separate daemon manager. Native embedding and Durable Objects are design probes, not initial supported deployments.
 
-[V1 design readiness was accepted](https://github.com/DivyanshGolyan/latifa/issues/124#issuecomment-5651285657) on 2026-09-13 after the integrated walkthrough. The [readiness map](https://github.com/DivyanshGolyan/latifa/issues/2) records the completed design work. Implementation proceeds in bounded slices under the accepted contract; production and live-provider qualification remain required. Retired planning tickets do not mean implementation is complete.
+[V1 design readiness was accepted](https://github.com/DivyanshGolyan/rui/issues/124#issuecomment-5651285657) on 2026-09-13 after the integrated walkthrough. The [readiness map](https://github.com/DivyanshGolyan/rui/issues/2) records the completed design work. Implementation proceeds in bounded slices under the accepted contract; production and live-provider qualification remain required. Retired planning tickets do not mean implementation is complete.
 
 ## Build and try the current implementation
 
@@ -31,7 +31,7 @@ Requirements: Zig 0.16.0, Python 3, Perl, a C toolchain and Make. The opt-in pro
 
 ```sh
 zig build
-./zig-out/bin/latifa serve --store /absolute/path/to/private-store
+./zig-out/bin/rui serve --store /absolute/path/to/private-store
 ```
 
 The partial development transport is opt-in so it cannot make a live provider call. To exercise this slice, start the Host with an HTTPS endpoint, or with loopback HTTP for a deterministic local fixture. The Host rejects non-loopback plaintext endpoints. No authentication is attached in this slice.
@@ -39,7 +39,7 @@ The partial development transport is opt-in so it cannot make a live provider ca
 Temporary connection, 408/429/5xx and body-inactivity failures receive at most three retries after the initial Attempt, with default 2/4/8-second waits. A longer valid Retry-After wins. Restart conserves the consumed allowance and may repeat remote work or billing when the prior outcome is unknown; it never recreates the old one-shot permit or imports leftover scratch.
 
 ```sh
-./zig-out/bin/latifa serve \
+./zig-out/bin/rui serve \
   --store /absolute/path/to/private-store \
   --provider-endpoint http://127.0.0.1:8000/responses
 ```
@@ -47,7 +47,7 @@ Temporary connection, 408/429/5xx and body-inactivity failures receive at most t
 In another shell, configure a Session. The record path must be in a private directory; retry reuses that durable capture after a lost reply or client restart.
 
 ```sh
-./zig-out/bin/latifa configure \
+./zig-out/bin/rui configure \
   --store /absolute/path/to/private-store \
   --record /absolute/path/to/private-records/configure.json \
   --key configure-1 \
@@ -55,7 +55,7 @@ In another shell, configure a Session. The record path must be in a private dire
   --workspace /absolute/path/to/workspace \
   --model gpt-6-astra
 
-./zig-out/bin/latifa retry \
+./zig-out/bin/rui retry \
   --store /absolute/path/to/private-store \
   --record /absolute/path/to/private-records/configure.json \
   --kind configure
@@ -64,23 +64,23 @@ In another shell, configure a Session. The record path must be in a private dire
 Submit a complete message from a file or from stdin. Acceptance identifies its immutable queued admission; retry reuses the captured record and never reads the original source again.
 
 ```sh
-./zig-out/bin/latifa message \
+./zig-out/bin/rui message \
   --store /absolute/path/to/private-store \
   --record /absolute/path/to/private-records/message.json \
   --key message-1 \
   --session direct/reviewer \
   --text -
 
-./zig-out/bin/latifa retry \
+./zig-out/bin/rui retry \
   --store /absolute/path/to/private-store \
   --record /absolute/path/to/private-records/message.json \
   --kind message
 
-./zig-out/bin/latifa observe-command \
+./zig-out/bin/rui observe-command \
   --store /absolute/path/to/private-store \
   --key message-1
 
-./zig-out/bin/latifa read-result \
+./zig-out/bin/rui read-result \
   --store /absolute/path/to/private-store \
   --key message-1
 ```
@@ -88,13 +88,13 @@ Submit a complete message from a file or from stdin. Acceptance identifies its i
 Stop a Session with a fresh durable key. This acknowledges the frozen selection; retrying the captured record recovers that same selection rather than stopping newer work.
 
 ```sh
-./zig-out/bin/latifa stop-session \
+./zig-out/bin/rui stop-session \
   --store /absolute/path/to/private-store \
   --record /absolute/path/to/private-records/stop.json \
   --key stop-1 \
   --session direct/reviewer
 
-./zig-out/bin/latifa retry \
+./zig-out/bin/rui retry \
   --store /absolute/path/to/private-store \
   --record /absolute/path/to/private-records/stop.json \
   --kind session-stop
@@ -103,7 +103,7 @@ Stop a Session with a fresh durable key. This acknowledges the frozen selection;
 Interrupt one exact active model Operation using the Turn and Operation identities returned by message observation. If independently admitted input is already waiting, it may continue the same Turn through a new Operation; otherwise the Turn is cancelled.
 
 ```sh
-./zig-out/bin/latifa interrupt-model \
+./zig-out/bin/rui interrupt-model \
   --store /absolute/path/to/private-store \
   --record /absolute/path/to/private-records/interruption.json \
   --key interruption-1 \

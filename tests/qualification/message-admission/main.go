@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"latifa.local/qualification/measurement"
+	"rui.local/qualification/measurement"
 )
 
 var payloadBytes = []int{0, 1_000, 10_000, 100_000}
@@ -259,7 +259,7 @@ func historyProfile(binary, workspace, parent string) (rows []map[string]any, re
 
 func main() {
 	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: measure-message-admission /absolute/path/to/latifa")
+		fmt.Fprintln(os.Stderr, "usage: measure-message-admission /absolute/path/to/rui")
 		os.Exit(2)
 	}
 	if err := measurement.RequireRuntime(); err != nil {
@@ -267,7 +267,7 @@ func main() {
 		os.Exit(1)
 	}
 	started := time.Now()
-	parent, err := os.MkdirTemp("/private/tmp", "latifa-message-measure-")
+	parent, err := os.MkdirTemp("/private/tmp", "rui-message-measure-")
 	if err != nil {
 		panic(err)
 	}
@@ -284,7 +284,7 @@ func main() {
 		panic(err)
 	}
 	result := map[string]any{
-		"format": "latifa-message-admission-v3-go",
+		"format": "rui-message-admission-v3-go",
 		"scope":  "issue-171 production Host message admission and observation",
 		"status": "passed", "artifacts": parent,
 		"active_capacity":      1000,

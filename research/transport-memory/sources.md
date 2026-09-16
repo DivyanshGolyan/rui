@@ -1,6 +1,6 @@
 # Transport dependency evidence
 
-Checked 2026-09-10. curl 8.22.0, OpenSSL 3.6.3 and nghttp2 1.70.0 are **experiment pins**, not an accepted OnePage dependency decision. Results apply to the built configuration and negotiated protocol recorded by the harness; system curl is not an equivalent substitute. Source links below target the curl release tag; line references were checked against downloaded raw source.
+Checked 2026-09-10. curl 8.22.0, OpenSSL 3.6.3 and nghttp2 1.70.0 are **experiment pins**, not an accepted Rui dependency decision. Results apply to the built configuration and negotiated protocol recorded by the harness; system curl is not an equivalent substitute. Source links below target the curl release tag; line references were checked against downloaded raw source.
 
 ## Receive buffers and paused streams
 

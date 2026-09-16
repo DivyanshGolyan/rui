@@ -17,7 +17,7 @@ import time
 from host_process import start_ready_process, stop_process
 
 
-LATIFA = pathlib.Path(sys.argv[1]).resolve()
+RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
 
 
@@ -303,7 +303,7 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
 
 def command(*args, expect=0):
     completed = subprocess.run(
-        [str(LATIFA), *map(str, args)],
+        [str(RUI), *map(str, args)],
         text=True,
         capture_output=True,
         timeout=15,
@@ -318,7 +318,7 @@ def command(*args, expect=0):
 
 def start_host(store, endpoint, *extra, accelerated_retries=True):
     args = [
-        str(LATIFA),
+        str(RUI),
         "serve",
         "--store",
         str(store),
@@ -390,7 +390,7 @@ def configure(state, store, key, session, model, schema=None, instructions=None)
 def configure_lost_reply(state, store, key, session, model):
     completed = subprocess.run(
         [
-            str(LATIFA),
+            str(RUI),
             "configure",
             "--store",
             str(store),
@@ -438,7 +438,7 @@ def message_lost_reply(state, store, key, session, text):
     text_path.write_text(text)
     completed = subprocess.run(
         [
-            str(LATIFA),
+            str(RUI),
             "message",
             "--store",
             str(store),
@@ -466,7 +466,7 @@ def observe(store, key):
 
 def read_result(store, key):
     completed = subprocess.run(
-        [str(LATIFA), "read-result", "--store", str(store), "--key", key],
+        [str(RUI), "read-result", "--store", str(store), "--key", key],
         capture_output=True,
         timeout=15,
     )
@@ -494,7 +494,7 @@ def completed_observation(store, key):
 
 
 def main():
-    state = pathlib.Path(tempfile.mkdtemp(prefix="latifa-dispatch."))
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-dispatch."))
     endpoint = FailureEndpoint()
     endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     endpoint_thread.start()
@@ -675,7 +675,7 @@ def main():
         stop_host(success_host)
         processes.remove(success_host)
 
-        database = sqlite3.connect(success_store / "latifa.sqlite3")
+        database = sqlite3.connect(success_store / "rui.sqlite3")
         try:
             assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 4
             assert database.execute(
@@ -761,7 +761,7 @@ def main():
         assert retry_endpoint.request_times[2] - retry_endpoint.request_times[1] >= 0.90
         assert retry_endpoint.requests[0] == retry_endpoint.requests[1]
         assert retry_endpoint.requests[1] == retry_endpoint.requests[2]
-        database = sqlite3.connect(retry_store / "latifa.sqlite3")
+        database = sqlite3.connect(retry_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code FROM model_operation"
         ).fetchone() == (
@@ -953,7 +953,7 @@ def main():
         )
         assert local_read_host.returncode != 0
         processes.remove(local_read_host)
-        database = sqlite3.connect(local_read_store / "latifa.sqlite3")
+        database = sqlite3.connect(local_read_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code FROM model_operation"
         ).fetchone() == (1, 1, 1, None)
@@ -1020,7 +1020,7 @@ def main():
             stderr = identity_host.stderr.read()
             assert expected_error.encode() in stderr, stderr
             assert len(identity_endpoint.requests) == index + 1
-            database = sqlite3.connect(identity_store / "latifa.sqlite3")
+            database = sqlite3.connect(identity_store / "rui.sqlite3")
             assert database.execute(
                 "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code FROM model_operation"
             ).fetchone() == (1, 1, 1, None)
@@ -1213,7 +1213,7 @@ def main():
             reopened = start_host(evidence_store, None)
             processes.append(reopened)
             assert read_result(evidence_store, f"evidence-{name}-message") == f"answer-{name}".encode()
-            database = sqlite3.connect(evidence_store / "latifa.sqlite3")
+            database = sqlite3.connect(evidence_store / "rui.sqlite3")
             actual_evidence = database.execute(
                 "SELECT body_model,openai_model,x_openai_model,request_id FROM model_operation"
             ).fetchone()
@@ -1280,7 +1280,7 @@ def main():
             contradictory_failure["result"]["code"] == "contradictory_provider_output"
         ), contradictory_failure
         assert len(contradictory_endpoint.requests) == 1
-        database = sqlite3.connect(contradictory_store / "latifa.sqlite3")
+        database = sqlite3.connect(contradictory_store / "rui.sqlite3")
         assert database.execute(
             "SELECT uncertain,resolution_code,response_id,body_model,openai_model,x_openai_model,request_id FROM model_operation"
         ).fetchone() == (0, "contradictory_provider_output", None, None, None, None, None)
@@ -1302,7 +1302,7 @@ def main():
         }, restarted_failure
         unreadable_result = subprocess.run(
             [
-                str(LATIFA),
+                str(RUI),
                 "read-result",
                 "--store",
                 str(contradictory_store),
@@ -1418,7 +1418,7 @@ def main():
         )
         assert schema_failure["result"]["code"] == "unsupported_output_schema", schema_failure
         assert len(schema_endpoint.requests) == 1
-        database = sqlite3.connect(schema_store / "latifa.sqlite3")
+        database = sqlite3.connect(schema_store / "rui.sqlite3")
         assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
         assert database.execute(
             "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
@@ -1566,7 +1566,7 @@ def main():
                 f"invalid output {index}",
             )
             assert rejected["result"]["code"] == expected_code, rejected
-            database = sqlite3.connect(invalid_store / "latifa.sqlite3")
+            database = sqlite3.connect(invalid_store / "rui.sqlite3")
             assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
             assert database.execute(
                 "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
@@ -1631,7 +1631,7 @@ def main():
             wait_for(lambda: fault_host.poll() is not None, f"{fault} fenced shutdown")
             assert fault_host.returncode != 0
             processes.remove(fault_host)
-            database = sqlite3.connect(fault_store / "latifa.sqlite3")
+            database = sqlite3.connect(fault_store / "rui.sqlite3")
             assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
             assert database.execute(
                 "SELECT uncertain,resolution_code FROM model_operation"
@@ -1705,7 +1705,7 @@ def main():
         read_fd, write_fd = os.pipe()
         failed_destination = subprocess.Popen(
             [
-                str(LATIFA),
+                str(RUI),
                 "read-result",
                 "--store",
                 str(growth_store),
@@ -1725,7 +1725,7 @@ def main():
         with complete_path.open("wb") as complete_destination:
             completed_read = subprocess.run(
                 [
-                    str(LATIFA),
+                    str(RUI),
                     "read-result",
                     "--store",
                     str(growth_store),
@@ -1741,7 +1741,7 @@ def main():
         with complete_path.open("rb") as complete_source:
             actual_digest = hashlib.file_digest(complete_source, "sha256").digest()
         assert actual_digest == hashlib.sha256(large_answer.encode()).digest()
-        database = sqlite3.connect(growth_store / "latifa.sqlite3")
+        database = sqlite3.connect(growth_store / "rui.sqlite3")
         assert database.execute(
             "SELECT count(*) FROM model_output_item WHERE operation_id=1"
         ).fetchone()[0] == 33
@@ -1785,7 +1785,7 @@ def main():
         assert replay[-2]["content"][0]["text"] == projected_answer.decode(), replay
         stop_host(host)
         processes.remove(host)
-        with sqlite3.connect(projection_store / "latifa.sqlite3") as database:
+        with sqlite3.connect(projection_store / "rui.sqlite3") as database:
             assert database.execute("SELECT c.payload IS NULL FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id ORDER BY o.operation_id").fetchall() == [(1,), (0,)]
             assert database.execute("SELECT count(*) FROM answer_text_projection").fetchone()[0] == len(parts)
             assert database.execute("SELECT count(*) FROM answer_text_projection p JOIN content c ON c.content_id=p.source_content_id WHERE c.private<>1 OR c.payload IS NULL").fetchone()[0] == 0
@@ -1876,7 +1876,7 @@ def main():
             "text": {
                 "format": {
                     "type": "json_schema",
-                    "name": "latifa_output",
+                    "name": "rui_output",
                     "strict": True,
                     "schema": output_schema,
                 }
@@ -1981,7 +1981,7 @@ def main():
             "endpoint_requests": preparation_endpoint.requests,
             "state": str(state),
         }
-        database = sqlite3.connect(preparation_store / "latifa.sqlite3")
+        database = sqlite3.connect(preparation_store / "rui.sqlite3")
         try:
             preparation_fact = database.execute(
                 "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code FROM model_operation"
@@ -2083,7 +2083,7 @@ def main():
             "endpoint_requests": prelaunch_endpoint.requests,
             "state": str(state),
         }
-        database = sqlite3.connect(prelaunch_store / "latifa.sqlite3")
+        database = sqlite3.connect(prelaunch_store / "rui.sqlite3")
         try:
             prelaunch_fact = database.execute(
                 "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code FROM model_operation"
@@ -2212,7 +2212,7 @@ def main():
         )
         wait_for(lambda: len(sealed_endpoint.requests) == 1, "sealed response delivery")
         time.sleep(0.5)
-        database = sqlite3.connect(sealed_store / "latifa.sqlite3")
+        database = sqlite3.connect(sealed_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,uncertain,resolution_code FROM model_operation"
         ).fetchone() == (1, 1, None)
@@ -2356,7 +2356,7 @@ def main():
             "direct/capacity-wait-b",
         )["execution"]["scratch_used_bytes"]
         assert scratch_after == scratch_before
-        database = sqlite3.connect(durable_wait_store / "latifa.sqlite3")
+        database = sqlite3.connect(durable_wait_store / "rui.sqlite3")
         assert database.execute("SELECT count(*) FROM model_operation").fetchone()[0] == 1
         assert database.execute(
             "SELECT turn_id FROM message_admission WHERE command_key='capacity-wait-message-b'"
@@ -2424,7 +2424,7 @@ def main():
                 lambda expected=expected_requests: len(stale_endpoint.requests) >= expected,
                 f"{name} initial Attempt",
             )
-        database = sqlite3.connect(stale_store / "latifa.sqlite3")
+        database = sqlite3.connect(stale_store / "rui.sqlite3")
         try:
             now_ms = time.time_ns() // 1_000_000
             database.execute(
@@ -2489,7 +2489,7 @@ def main():
         assert backlog_endpoint.requests == []
         stop_host(backlog_host)
         processes.remove(backlog_host)
-        database = sqlite3.connect(backlog_store / "latifa.sqlite3")
+        database = sqlite3.connect(backlog_store / "rui.sqlite3")
         try:
             database.execute("PRAGMA foreign_keys=OFF")
             database.execute(
@@ -2582,7 +2582,7 @@ def main():
         processes.append(recovery_host)
         stop_host(recovery_host)
         processes.remove(recovery_host)
-        database = sqlite3.connect(recovery_store / "latifa.sqlite3")
+        database = sqlite3.connect(recovery_store / "rui.sqlite3")
         try:
             database.execute("PRAGMA foreign_keys=OFF")
             database.execute(
@@ -2659,7 +2659,7 @@ def main():
         assert len(recovery_endpoint.requests) == 2
         stop_host(recovery_host)
         processes.remove(recovery_host)
-        database = sqlite3.connect(recovery_store / "latifa.sqlite3")
+        database = sqlite3.connect(recovery_store / "rui.sqlite3")
         try:
             database.execute("PRAGMA foreign_keys=OFF")
             due_operation = database.execute(
@@ -2784,7 +2784,7 @@ def main():
                   "recovery settled before the first nonterminal observation")
         stop_host(recovery_host)
         processes.remove(recovery_host)
-        database = sqlite3.connect(recovery_store / "latifa.sqlite3")
+        database = sqlite3.connect(recovery_store / "rui.sqlite3")
         try:
             assert database.execute(
                 "SELECT count(*) FROM model_operation WHERE uncertain=1 AND allowance_used=4 "
@@ -2866,7 +2866,7 @@ def main():
         )
         assert observe(exhaustion_store, "exhaustion-first")["result"]["code"] == "retry_exhausted"
         assert read_result(exhaustion_store, "exhaustion-later") == b"later input answer"
-        database = sqlite3.connect(exhaustion_store / "latifa.sqlite3")
+        database = sqlite3.connect(exhaustion_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,allowance_used,resolution_code FROM model_operation ORDER BY operation_id"
         ).fetchall() == [(4, 4, "retry_exhausted"), (1, 1, "completed")]
@@ -3012,7 +3012,7 @@ def main():
         wait_for(lambda: len(endpoint.requests) == 1, "save-fault endpoint request")
         time.sleep(0.2)
         failed_observation = subprocess.run(
-            [str(LATIFA), "observe-command", "--store", str(save_store), "--key", "save-message"],
+            [str(RUI), "observe-command", "--store", str(save_store), "--key", "save-message"],
             text=True,
             capture_output=True,
             timeout=10,
@@ -3151,7 +3151,7 @@ def main():
         endpoint.requests.clear()
         deceptive = subprocess.run(
             [
-                str(LATIFA), "serve", "--store", str(state / "deceptive-store"),
+                str(RUI), "serve", "--store", str(state / "deceptive-store"),
                 "--provider-endpoint", f"http://127.0.0.1:80@127.0.0.1:{endpoint.server_port}/responses",
             ],
             text=True,
@@ -3235,7 +3235,7 @@ def main():
             else:
                 assert observation["queue"]["status"] == "processing" and "result" not in observation, observation
                 assert observation["processing"]["attempt"] == "1", observation
-                with sqlite3.connect(transient_store / "latifa.sqlite3") as database:
+                with sqlite3.connect(transient_store / "rui.sqlite3") as database:
                     retry = database.execute(
                         "SELECT allowance_used,uncertain,resolution_code,last_failure_code,retry_due_at_ms>CAST(unixepoch('subsec')*1000 AS INTEGER) FROM model_operation"
                     ).fetchall()
@@ -3276,7 +3276,7 @@ def main():
             lambda: observe(race_store, "race-message")["queue"]["status"] == "processing",
             "admitted request before launch",
         )
-        database = sqlite3.connect(race_store / "latifa.sqlite3", timeout=5)
+        database = sqlite3.connect(race_store / "rui.sqlite3", timeout=5)
         original_instructions = database.execute(
             "SELECT instructions_content_id FROM session WHERE session_ref='direct/race'"
         ).fetchone()[0]
@@ -3287,7 +3287,7 @@ def main():
         database.commit()
         database.close()
         canonical_read = subprocess.run(
-            [str(LATIFA), "inspect-session", "--store", str(race_store), "--session", "direct/race"],
+            [str(RUI), "inspect-session", "--store", str(race_store), "--session", "direct/race"],
             text=True,
             capture_output=True,
             timeout=10,
@@ -3297,7 +3297,7 @@ def main():
         assert host.returncode != 0
         processes.remove(host)
         assert endpoint.requests == []
-        database = sqlite3.connect(race_store / "latifa.sqlite3")
+        database = sqlite3.connect(race_store / "rui.sqlite3")
         uncertain = database.execute(
             "SELECT attempt_ordinal,uncertain,resolution_code FROM model_operation"
         ).fetchone()
@@ -3343,7 +3343,7 @@ def main():
             assert resources["dispatch_fenced"] is True, resources
             assert resources["custody_occupied"] == "1", resources
             assert len(unlink_endpoint.requests) == (1 if launched else 0)
-            database = sqlite3.connect(owned_store / "latifa.sqlite3")
+            database = sqlite3.connect(owned_store / "rui.sqlite3")
             assert database.execute(
                 "SELECT uncertain,resolution_code FROM model_operation"
             ).fetchone() == (1, None)
@@ -3355,7 +3355,7 @@ def main():
 
             failed_cleanup = subprocess.run(
                 [
-                    str(LATIFA),
+                    str(RUI),
                     "serve",
                     "--store",
                     str(owned_store),

@@ -127,7 +127,7 @@ func TestAcceptedIdleStopRequiresExplicitNullSelectionTurn(t *testing.T) {
 }
 
 func TestOperationPhaseTimestampRequiresOneExactRecord(t *testing.T) {
-	record := map[string]any{"latifa_test_phase": "settlement_complete", "operation": "operation-1", "at_ns": "200"}
+	record := map[string]any{"rui_test_phase": "settlement_complete", "operation": "operation-1", "at_ns": "200"}
 	value, err := operationPhaseTimestamp([]map[string]any{record}, "settlement_complete", "operation-1")
 	if err != nil {
 		t.Fatal(err)

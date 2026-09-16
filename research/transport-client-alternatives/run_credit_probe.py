@@ -24,9 +24,9 @@ def run(prefix, output):
     expected = {'nghttp2.h': api['sha256'],
                 'nghttp2ver.h': pin['generated_header_sha256']}
     source = HERE / 'credit_probe.c'
-    with open('/tmp/onepage-memory-experiments.lock', 'a') as lock:
+    with open('/tmp/rui-memory-experiments.lock', 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        with tempfile.TemporaryDirectory(prefix='onepage-credit-probe-') as tmp:
+        with tempfile.TemporaryDirectory(prefix='rui-credit-probe-') as tmp:
             stage = pathlib.Path(tmp)
             include = stage / 'include' / 'nghttp2'
             include.mkdir(parents=True)
@@ -74,7 +74,7 @@ def run(prefix, output):
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
-    p.add_argument('--prefix', type=pathlib.Path, default=pathlib.Path('/tmp/onepage-transport-memory-build/ng'))
+    p.add_argument('--prefix', type=pathlib.Path, default=pathlib.Path('/tmp/rui-transport-memory-build/ng'))
     p.add_argument('--output', type=pathlib.Path, required=True)
     a = p.parse_args()
     if a.output.exists():

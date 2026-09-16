@@ -7,7 +7,7 @@ FANOUTS = tuple(map(int, os.environ.get('PROBE_FANOUTS', '0,1,1000,100000').spli
 REPEATS = 7
 output = {'sqlite': sqlite3.sqlite_version, 'platform': platform.platform(),
           'unrelated_waiters': N, 'repeats': REPEATS, 'cases': []}
-with tempfile.TemporaryDirectory(prefix='onepage-readiness-') as root:
+with tempfile.TemporaryDirectory(prefix='rui-readiness-') as root:
     for fanout in FANOUTS:
         db = sqlite3.connect(str(Path(root) / f'{fanout}.db'))
         db.executescript('''

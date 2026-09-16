@@ -124,7 +124,7 @@ pub fn serve(
         lease.paths.store.slice(),
         .{ .cache_spill = faults.sqlite_cache_spill, .cache_kib = faults.sqlite_cache_kib },
     );
-    defer storage.close() catch |err| std.debug.print("latifa: Store close failed: {s}\n", .{@errorName(err)});
+    defer storage.close() catch |err| std.debug.print("rui: Store close failed: {s}\n", .{@errorName(err)});
     try storage.validateRetryWaits(faults.retry_waits_ms);
     try lease.prepareForServing(faults.startup_cleanup);
 
@@ -135,7 +135,7 @@ pub fn serve(
     errdefer {
         if (listener_open) listener.deinit(io);
         if (socket_owned) std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
-            std.debug.print("latifa: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
+            std.debug.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
     }
     var socket_path: [257:0]u8 = undefined;
@@ -168,7 +168,7 @@ pub fn serve(
         std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
             // The lock still protects this failed cleanup. A later startup
             // removes the owned socket or refuses to serve if it cannot.
-            std.debug.print("latifa: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
+            std.debug.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
         socket_owned = false;
         if (execution_thread) |thread| {
@@ -589,7 +589,7 @@ fn beginAdmittedAttempt(
             retainDispatchFence(host, "response scratch unlink", err);
             return .admitted;
         }
-        std.debug.print("latifa: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        std.debug.print("rui: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         if (err == error.ResponseCaptureAcquisitionFailed) {
             settleAttemptFailure(host, token, binding, "response_capture_failed", .terminal);
         } else {
@@ -605,7 +605,7 @@ fn beginAdmittedAttempt(
     }
     host.custody.consumeLaunchAuthority(token, binding) catch |err| {
         active.transfer.deinit();
-        std.debug.print("latifa: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        std.debug.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
         slot.* = .free;
@@ -627,7 +627,7 @@ fn beginAdmittedAttempt(
             slot.* = .free;
             return .admitted;
         }
-        std.debug.print("latifa: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        std.debug.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
         slot.* = .free;
@@ -723,7 +723,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     const owner = active.owner;
     const structured_output = active.transfer.hasStructuredOutput();
     active.transfer.response.seal(host.faults.response_seal) catch |err| {
-        std.debug.print("latifa: response seal failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+        std.debug.print("rui: response seal failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, owner.token, owner.binding, "response_seal_failed", .terminal);
         active.transfer.deinit();
         return .cleanup;
@@ -762,7 +762,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
             retainDispatchFence(host, "response metadata unlink", err);
             return .{ .retained_metadata = retained };
         }
-        std.debug.print("latifa: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+        std.debug.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, owner.token, owner.binding, "response_metadata_exhausted", .terminal);
         return .cleanup;
     };
@@ -770,7 +770,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     const validated = provider_output.validate(host.io, response.file, response.length, &metadata, .{
         .metadata = host.faults.response_metadata,
     }) catch |err| {
-        std.debug.print("latifa: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+        std.debug.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, owner.token, owner.binding, provider_output.failureCode(err), .terminal);
         return .cleanup;
     };
@@ -875,7 +875,7 @@ fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []Execution
         },
         .retained_scratch => |*retained| {
             retained.scratch.cleanup(host.lease.paths.scratch.slice()) catch |err| {
-                std.debug.print("latifa: retained named scratch after cleanup failure: {s}\n", .{@errorName(err)});
+                std.debug.print("rui: retained named scratch after cleanup failure: {s}\n", .{@errorName(err)});
                 continue;
             };
             host.custody.detach(retained.token) catch unreachable;
@@ -883,7 +883,7 @@ fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []Execution
         },
         .retained_metadata => |*retained| {
             retained.metadata.cleanup(host.lease.paths.scratch.slice()) catch |err| {
-                std.debug.print("latifa: retained named response metadata after cleanup failure: {s}\n", .{@errorName(err)});
+                std.debug.print("rui: retained named response metadata after cleanup failure: {s}\n", .{@errorName(err)});
                 continue;
             };
             host.custody.detach(retained.token) catch unreachable;
@@ -931,16 +931,16 @@ fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
 fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
     if (host.effect_shutdown.swap(true, .acq_rel)) return;
     host.dispatch_fenced.store(true, .release);
-    std.debug.print("latifa: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
+    std.debug.print("rui: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
     // Waking accept transfers shutdown to serve's owner. That owner stops new
     // connections, joins the execution thread (which detaches any active
     // effects under custody), drains existing clients, then releases Store.
     const address = std.Io.net.UnixAddress.init(host.lease.paths.socket.slice()) catch |address_err| {
-        std.debug.print("latifa: listener wake address after dispatch fence failed: {s}\n", .{@errorName(address_err)});
+        std.debug.print("rui: listener wake address after dispatch fence failed: {s}\n", .{@errorName(address_err)});
         return;
     };
     const wake = address.connect(host.io) catch |connect_err| {
-        std.debug.print("latifa: listener wake after dispatch fence failed: {s}\n", .{@errorName(connect_err)});
+        std.debug.print("rui: listener wake after dispatch fence failed: {s}\n", .{@errorName(connect_err)});
         return;
     };
     wake.close(host.io);
@@ -948,7 +948,7 @@ fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
 
 fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
     host.dispatch_fenced.store(true, .release);
-    std.debug.print("latifa: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
+    std.debug.print("rui: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
 }
 
 fn nowNs(host: *Host) u64 {
@@ -966,7 +966,7 @@ fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer) void {
 fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
     if (!host.faults.test_phase_trace) return;
     var trace: protocol.ResponseBuffer = .{};
-    trace.append("{\"latifa_test_phase\":") catch return;
+    trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"subject_kind\":", .{nowNs(host)}) catch return;
     trace.appendJsonString(subject_kind) catch return;
@@ -979,7 +979,7 @@ fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subjec
 fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
     if (!host.faults.test_phase_trace) return;
     var trace: protocol.ResponseBuffer = .{};
-    trace.append("{\"latifa_test_phase\":") catch return;
+    trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{
         nowNs(host),
@@ -1017,7 +1017,7 @@ fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
     if (!host.faults.test_phase_trace or !host.faults.sqlite_diagnostics) return;
     const value = host.store.sqliteDiagnostic();
     var trace: protocol.ResponseBuffer = .{};
-    trace.append("{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
+    trace.append("{\"rui_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
     trace.appendFmt("{d}", .{nowNs(host)}) catch return;
     trace.append("\",\"subject\":") catch return;
     trace.appendJsonString(subject) catch return;
@@ -1102,7 +1102,7 @@ const ControlTiming = struct {
         const reply_complete_ns = nowNs(self.host);
         if (self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
         var trace: protocol.ResponseBuffer = .{};
-        trace.append("{\"latifa_test_phase\":\"control_timing\",\"command_key\":") catch return;
+        trace.append("{\"rui_test_phase\":\"control_timing\",\"command_key\":") catch return;
         trace.appendJsonString(self.command_key) catch return;
         trace.append(",\"kind\":") catch return;
         trace.appendJsonString(self.kind) catch return;
@@ -1232,11 +1232,11 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         .cleanup_failed = &cleanup_failed,
         .scratch_budget = .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },
     }) catch |err| {
-        if (cleanup_failed) std.debug.print("latifa: retained ingress file and charge after cleanup failure\n", .{});
+        if (cleanup_failed) std.debug.print("rui: retained ingress file and charge after cleanup failure\n", .{});
         return respondStatic(host.io, fd, if (err == error.ScratchCapacityExhausted) @as(u16, 507) else 400, "invocation_error", @errorName(err));
     };
     defer request.removeTemporaryContent(host.io) catch |err| {
-        std.debug.print("latifa: retained scratch charge after cleanup failure: {s}\n", .{@errorName(err)});
+        std.debug.print("rui: retained scratch charge after cleanup failure: {s}\n", .{@errorName(err)});
     };
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(host.io, fd, 409, "invocation_error", "wrong_store_identity");
@@ -1464,9 +1464,9 @@ const HeaderReader = struct {
                 content_length = try std.fmt.parseInt(u64, value, 10);
             } else if (std.ascii.eqlIgnoreCase(name, "Content-Type")) {
                 content_type_ok = std.ascii.eqlIgnoreCase(value, "application/json");
-            } else if (std.ascii.eqlIgnoreCase(name, "X-Latifa-Wire-Version")) {
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
                 wire_ok = std.mem.eql(u8, value, protocol.wire_version);
-            } else if (std.ascii.eqlIgnoreCase(name, "X-Latifa-Test-Drop-Reply")) {
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Test-Drop-Reply")) {
                 drop = if (std.mem.eql(u8, value, "before-admission"))
                     .before_admission
                 else if (std.mem.eql(u8, value, "during-admission"))
@@ -1835,7 +1835,7 @@ fn deliverResponse(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8
 fn deliverContent(io: std.Io, fd: std.posix.fd_t, reader: *store_module.ContentReader) !void {
     _ = io;
     var header_buffer: [256]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\nX-Latifa-Wire-Version: 1\r\n\r\n", .{reader.reference.length});
+    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{reader.reference.length});
     try writeAll(fd, header);
     var buffer: [store_module.ContentReader.content_window_bytes]u8 = undefined;
     var offset: u64 = 0;
@@ -1861,7 +1861,7 @@ fn writeHttp(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) !voi
         else => "Error",
     };
     var header_buffer: [256]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Latifa-Wire-Version: 1\r\n\r\n", .{ status, reason, body.len });
+    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ status, reason, body.len });
     try writeAll(fd, header);
     try writeAll(fd, body);
 }

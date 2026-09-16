@@ -1,4 +1,4 @@
-// Measurement fixture, not the proposed OnePage schema or server implementation.
+// Measurement fixture, not the proposed Rui schema or server implementation.
 // One owner thread, DELETE journal, bounded buffers, indexed relational lookup.
 #include "sqlite3.h"
 #include <assert.h>

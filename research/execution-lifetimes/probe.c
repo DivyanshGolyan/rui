@@ -94,7 +94,7 @@ static size_t bytes;
 static const char *kind, *variant;
 static int owned_fds;
 static int scratch(void) {
-  char p[] = "/tmp/onepage-lifetime-XXXXXX";
+  char p[] = "/tmp/rui-lifetime-XXXXXX";
   int fd = mkstemp(p);
   assert(fd >= 0);
   assert(fcntl(fd, F_SETFD, FD_CLOEXEC) == 0);

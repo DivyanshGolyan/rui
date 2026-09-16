@@ -39,7 +39,7 @@ def main():
     headers = {
         'Authorization': 'Bearer ' + tokens['access_token'],
         'ChatGPT-Account-Id': tokens['account_id'],
-        'Originator': 'onepage', 'Accept': 'text/event-stream',
+        'Originator': 'rui', 'Accept': 'text/event-stream',
         'Content-Type': 'application/json', 'Accept-Encoding': 'identity',
         'OpenAI-Beta': 'responses=experimental',
     }

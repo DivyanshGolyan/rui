@@ -66,11 +66,11 @@ static int trace(unsigned event,void*ctx,void*p,void*x){
  return 0;
 }
 static int attach(sqlite3*db,char**error,const sqlite3_api_routines*api){(void)error;(void)api;connection=db;return sqlite3_trace_v2(db,SQLITE_TRACE_STMT|SQLITE_TRACE_PROFILE,trace,0);}
-int write_probe_install(void){parent=sqlite3_vfs_find(NULL);assert(parent);wrapper=*parent;wrapper.zName="onepage-write-probe";wrapper.szOsFile=sizeof(File)+parent->szOsFile;wrapper.xOpen=open_file;wrapper.xDelete=delete_file;int rc=sqlite3_vfs_register(&wrapper,1);if(rc!=SQLITE_OK)return rc;return sqlite3_auto_extension((void(*)(void))attach);}
-unsigned short write_probe_cache(void){const char*s=getenv("ONEPAGE_PROBE_CACHE_KIB");int n=s?atoi(s):64;assert(n==32||n==64||n==128);return n;}
+int write_probe_install(void){parent=sqlite3_vfs_find(NULL);assert(parent);wrapper=*parent;wrapper.zName="rui-write-probe";wrapper.szOsFile=sizeof(File)+parent->szOsFile;wrapper.xOpen=open_file;wrapper.xDelete=delete_file;int rc=sqlite3_vfs_register(&wrapper,1);if(rc!=SQLITE_OK)return rc;return sqlite3_auto_extension((void(*)(void))attach);}
+unsigned short write_probe_cache(void){const char*s=getenv("RUI_PROBE_CACHE_KIB");int n=s?atoi(s):64;assert(n==32||n==64||n==128);return n;}
 static long long number(const char*sql){sqlite3_stmt*q;assert(sqlite3_prepare_v2(connection,sql,-1,&q,0)==SQLITE_OK);assert(sqlite3_step(q)==SQLITE_ROW);long long n=sqlite3_column_int64(q,0);assert(sqlite3_finalize(q)==SQLITE_OK);return n;}
 void write_probe_reset(void){
- const char*e=getenv("ONEPAGE_PROBE_OS_ATTRIBUTION");heavy=e&&atoi(e);sqlite3_stmt*q;assert(sqlite3_prepare_v2(connection,"PRAGMA journal_mode",-1,&q,0)==SQLITE_OK);assert(sqlite3_step(q)==SQLITE_ROW);assert(!strcmp((const char*)sqlite3_column_text(q,0),"delete"));assert(sqlite3_finalize(q)==SQLITE_OK);
+ const char*e=getenv("RUI_PROBE_OS_ATTRIBUTION");heavy=e&&atoi(e);sqlite3_stmt*q;assert(sqlite3_prepare_v2(connection,"PRAGMA journal_mode",-1,&q,0)==SQLITE_OK);assert(sqlite3_step(q)==SQLITE_ROW);assert(!strcmp((const char*)sqlite3_column_text(q,0),"delete"));assert(sqlite3_finalize(q)==SQLITE_OK);
  printf("{\"probe_settings\":true,\"cache_kib\":%u,\"os_attribution\":%d,\"journal\":\"delete\",\"synchronous\":%lld,\"fullfsync\":%lld,\"mmap\":%lld,\"page_size\":%lld,\"cache_spill\":%lld}\n",write_probe_cache(),heavy,number("PRAGMA synchronous"),number("PRAGMA fullfsync"),number("PRAGMA mmap_size"),number("PRAGMA page_size"),number("PRAGMA cache_spill"));fflush(stdout);
  memset(metrics,0,sizeof metrics);memset(written,0,sizeof written);begins=commits=rollbacks=statements=inserts=selects=sql_profile_ns=unique_main_pages=repeated_main_pages=0;
 }

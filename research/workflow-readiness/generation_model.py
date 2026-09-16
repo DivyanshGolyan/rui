@@ -4,7 +4,7 @@ from pathlib import Path
 
 checks = []
 views = {}
-with tempfile.TemporaryDirectory(prefix='onepage-generation-model-') as root:
+with tempfile.TemporaryDirectory(prefix='rui-generation-model-') as root:
     path = str(Path(root) / 'model.db')
     db = sqlite3.connect(path)
     db.executescript('''

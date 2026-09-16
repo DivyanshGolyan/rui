@@ -3,7 +3,7 @@ set -euo pipefail
 
 artifact_dir="${0:A:h}"
 source "$artifact_dir/probe_helpers.sh"
-probe_root="${OUTPUT_ROOT:-$(mktemp -d /tmp/onepage-churn-proof.XXXXXX)}"
+probe_root="${OUTPUT_ROOT:-$(mktemp -d /tmp/rui-churn-proof.XXXXXX)}"
 cycles="${CYCLES:-10}"
 seconds="${STREAM_SECONDS:-1}"
 binary="$probe_root/integrated_capacity"
@@ -45,11 +45,11 @@ run_probe() {
 
   local client_json
   if [[ "$relief" == "yes" ]]; then
-    client_json="$(ONEPAGE_PROOF_CYCLES="$cycles" ONEPAGE_PROOF_PRESSURE_RELIEF=1 \
+    client_json="$(RUI_PROOF_CYCLES="$cycles" RUI_PROOF_PRESSURE_RELIEF=1 \
       "$binary" integrated 100 "https://localhost:$port/responses" \
       "$cert_file" "$probe_root/spools" "$case_root/proof.sqlite3" lane 60)"
   else
-    client_json="$(ONEPAGE_PROOF_CYCLES="$cycles" \
+    client_json="$(RUI_PROOF_CYCLES="$cycles" \
       "$binary" integrated 100 "https://localhost:$port/responses" \
       "$cert_file" "$probe_root/spools" "$case_root/proof.sqlite3" lane 60)"
   fi

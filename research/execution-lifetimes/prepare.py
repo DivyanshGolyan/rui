@@ -11,7 +11,7 @@ import tarfile
 import urllib.request
 
 p=argparse.ArgumentParser()
-p.add_argument('--build',type=Path,default=Path('/tmp/onepage-execution-lifetimes-deps'))
+p.add_argument('--build',type=Path,default=Path('/tmp/rui-execution-lifetimes-deps'))
 a=p.parse_args()
 b=a.build.resolve()
 b.mkdir(parents=True,exist_ok=True)

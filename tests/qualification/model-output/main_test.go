@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"latifa.local/qualification/measurement"
-	"latifa.local/qualification/model-output/provider"
+	"rui.local/qualification/measurement"
+	"rui.local/qualification/model-output/provider"
 )
 
 func TestReduceStatusesIncludesEveryFamilyAndPreservesPrecedence(t *testing.T) {
@@ -32,11 +32,11 @@ func TestReduceStatusesIncludesEveryFamilyAndPreservesPrecedence(t *testing.T) {
 }
 
 func TestMemoryStatusDistinguishesMissingAggregationFromTargetMiss(t *testing.T) {
-	incomplete := wholeLatifa(measurement.ProcessSample{LiveDescendantProcesses: 1})
+	incomplete := wholeRui(measurement.ProcessSample{LiveDescendantProcesses: 1})
 	if got := memoryStatus(incomplete); got != "incomplete" {
 		t.Fatalf("live descendant reduced to %s", got)
 	}
-	miss := wholeLatifa(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: memoryTarget + 1}})
+	miss := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: memoryTarget + 1}})
 	if got := memoryStatus(miss); got != "target_miss" {
 		t.Fatalf("memory miss reduced to %s", got)
 	}
@@ -235,7 +235,7 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) {
 	decode := func(value string) sqliteDiagnostic {
 		t.Helper()
-		encoded := []byte(`{"latifa_test_phase":"sqlite_diagnostic","subject":"measure/spill","process_memory_scope":"SQLite process-global allocator; one Store per Host","cache_used_scope":"connection-current approximate pager bytes","cache_spills_scope":"connection cumulative mid-transaction spills","hard_heap_limit_bytes":16777216,"cache_spills":0,"cache_size_setting":` + value + `,"cache_size_setting_scope":"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages","cache_spill_threshold":991,"synchronous":3,"journal_mode":"delete"}`)
+		encoded := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"measure/spill","process_memory_scope":"SQLite process-global allocator; one Store per Host","cache_used_scope":"connection-current approximate pager bytes","cache_spills_scope":"connection cumulative mid-transaction spills","hard_heap_limit_bytes":16777216,"cache_spills":0,"cache_size_setting":` + value + `,"cache_size_setting_scope":"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages","cache_spill_threshold":991,"synchronous":3,"journal_mode":"delete"}`)
 		records, err := sqliteDiagnosticRecords(encoded)
 		if err != nil || len(records) != 1 {
 			t.Fatalf("decode %s: records=%d err=%v", value, len(records), err)
@@ -255,11 +255,11 @@ func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) 
 }
 
 func TestSpillDiagnosticDecoderRejectsMalformedAndDuplicateFields(t *testing.T) {
-	malformed := []byte(`{"latifa_test_phase":"sqlite_diagnostic"`)
+	malformed := []byte(`{"rui_test_phase":"sqlite_diagnostic"`)
 	if _, err := sqliteDiagnosticRecords(malformed); err == nil {
 		t.Fatal("malformed diagnostic was accepted")
 	}
-	duplicate := []byte(`{"latifa_test_phase":"sqlite_diagnostic","subject":"measure/spill","cache_spills":0,"cache_spills":1}`)
+	duplicate := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"measure/spill","cache_spills":0,"cache_spills":1}`)
 	if _, err := sqliteDiagnosticRecords(duplicate); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("duplicate diagnostic error = %v", err)
 	}

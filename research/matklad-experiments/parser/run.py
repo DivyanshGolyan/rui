@@ -24,7 +24,7 @@ def main():
     opts = ap.parse_args()
     output = opts.output or HERE / ('smoke.json' if opts.smoke else 'results.json')
     rows, checks, transcript_metadata = [], [], []
-    with tempfile.TemporaryDirectory(prefix='onepage-parser-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='rui-parser-') as tmp:
         temp = pathlib.Path(tmp); binary = temp/'probe'
         zon = (REPO/'build.zig.zon').read_text()
         pkg = re.search(r'\.sqlite = .*?\.hash = "([^"]+)"', zon, re.S)[1]

@@ -1,6 +1,6 @@
 /* Compiled at the end of pinned quickjs.c. Only op_allocate_string below touches
  * string layout; sizing also uses the pin's JS_STRING_LEN_MAX bound. */
-#include "onepage_string_reader.h"
+#include "rui_string_reader.h"
 #include <assert.h>
 
 typedef struct {

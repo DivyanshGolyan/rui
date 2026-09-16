@@ -1,4 +1,4 @@
-// Measurement fixture, not the proposed OnePage schema or server implementation.
+// Measurement fixture, not the proposed Rui schema or server implementation.
 // One owner thread, DELETE journal, bounded buffers, indexed relational lookup.
 #include "sqlite3.h"
 #include <assert.h>
@@ -153,7 +153,7 @@ int main(int argc,char **argv) {
     if(!fair){sql("BEGIN IMMEDIATE; UPDATE head SET revision=revision+1; COMMIT");settle_ms=(now()-start)*1000;}
     // Delivery occurs after both commits, with no connection resource retained.
     if(held) {
-        const char *export_path=getenv("ONEPAGE_PROBE_REPORT");
+        const char *export_path=getenv("RUI_PROBE_REPORT");
         FILE *export=export_path?fopen(export_path,"wb"):NULL;assert(!export_path || export);
         assert(fseeko(held,0,SEEK_SET)==0);char buffer[4096];size_t n;long delivered=0,newlines=0;
         while((n=fread(buffer,1,sizeof(buffer),held))){assert(sqlite3_get_autocommit(db));delivered+=(long)n;if(export)assert(fwrite(buffer,1,n,export)==n);for(size_t j=0;j<n;j++)newlines+=buffer[j]=='\n';}

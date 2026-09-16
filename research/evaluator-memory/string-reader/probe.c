@@ -1,4 +1,4 @@
-#include "onepage_string_reader.h"
+#include "rui_string_reader.h"
 #include "allocation_tracker.h"
 #include <stdio.h>
 #include <unistd.h>

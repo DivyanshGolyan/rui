@@ -62,7 +62,7 @@ def check_file(path, expected):
     require(observation(path) == expected, f'{path.name}: expected {expected!r}, observed {observation(path)!r}')
 
 results, controls = [], []
-with tempfile.TemporaryDirectory(prefix='onepage-scenarios-') as temp:
+with tempfile.TemporaryDirectory(prefix='rui-scenarios-') as temp:
     for name,kind,start,exit_code,steps,file_check in CASES:
         case = pathlib.Path(temp)/name
         state,repo = case/'state',case/'repo'

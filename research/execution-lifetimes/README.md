@@ -9,7 +9,7 @@ These are **native prototypes**, not the redesigned production Host. No architec
 On this Mac, using the sibling transport experiment's existing read-only dependency build:
 
 ```sh
-CURL_BUILD=/tmp/onepage-transport-memory-build python3 research/execution-lifetimes/run.py
+CURL_BUILD=/tmp/rui-transport-memory-build python3 research/execution-lifetimes/run.py
 python3 research/execution-lifetimes/check.py
 python3 research/execution-lifetimes/summarize.py --output /tmp/execution-lifetimes-rerun-audit.json
 ```
@@ -17,8 +17,8 @@ python3 research/execution-lifetimes/summarize.py --output /tmp/execution-lifeti
 For a fresh dependency build, with OpenSSL **3.6.3** installed at the exact Homebrew path checked by the script:
 
 ```sh
-python3 research/execution-lifetimes/prepare.py --build /tmp/onepage-execution-lifetimes-deps
-CURL_BUILD=/tmp/onepage-execution-lifetimes-deps python3 research/execution-lifetimes/run.py
+python3 research/execution-lifetimes/prepare.py --build /tmp/rui-execution-lifetimes-deps
+CURL_BUILD=/tmp/rui-execution-lifetimes-deps python3 research/execution-lifetimes/run.py
 python3 research/execution-lifetimes/check.py
 python3 research/execution-lifetimes/summarize.py --output /tmp/execution-lifetimes-rerun-audit.json
 ```
@@ -34,7 +34,7 @@ Reproduction overwrites local `results.json` and `checks.json`; use the separate
 
 `run.py --smoke` uses one execution per effect/variant. Compilation uses Apple Clang 17; production probes use Zig 0.16.0 ReleaseSafe. `prepare.py` pins source archive hashes for curl 8.22.0 and nghttp2 1.70.0. Matrix output records the static library hash (the legacy field is named `curl_archive_sha256`), configure/link command, runtime library versions, source hashes and revision. That hash identifies the built static library, not its downloaded source archive; source archive hashes are pinned in `prepare.py`. Production/fault output has no independent per-run source/command manifest; the original artifact hashes and build commands in `check.py` are its available provenance. The matrix was run on revision `b1d25138f70e6a7b4c1d27523d5b051f6de34d7a`, Apple M1 Pro / MacBookPro18,1, 16 GiB RAM, Darwin 24.6.0, Python 3.14.6, with disk scratch on the Data volume.
 
-Every benchmark runner holds `/tmp/onepage-memory-experiments.lock` with `fcntl.flock`. The matrix runs one measured process at a time; its HTTP fixture runs outside that process. Each cell has a 120-second external timeout, and the runner kills the process group on failure/timeout. Successful runs reap every child and close every owned descriptor; scratch is immediately unlinked. No provider credentials or live providers are used. Bash receives only PATH and LC_ALL. Preparation does not take the benchmark lock.
+Every benchmark runner holds `/tmp/rui-memory-experiments.lock` with `fcntl.flock`. The matrix runs one measured process at a time; its HTTP fixture runs outside that process. Each cell has a 120-second external timeout, and the runner kills the process group on failure/timeout. Successful runs reap every child and close every owned descriptor; scratch is immediately unlinked. No provider credentials or live providers are used. Bash receives only PATH and LC_ALL. Preparation does not take the benchmark lock.
 
 ## What was executed
 
@@ -73,7 +73,7 @@ Actual process physical bytes for the 1,000-execution cells; these are snapshots
 | Edit baseline | 1,491,584 | 19,120,960 | 19,120,960 | 80,384 |
 | Edit shared | 1,475,136 | 1,966,720 | 1,966,720 | 80,384 |
 
-The 1,000 Bash workloads separately account for **2,822,513,728 / 2,814,783,232 summed child physical bytes** in baseline/early mode before reaping. Those are native fixture workloads, not OnePage helpers or Host allocation, and not a unique-machine-memory sum. Both modes have all 1,000 children alive at that snapshot. This cost must not be hidden by reducing actual subprocess concurrency.
+The 1,000 Bash workloads separately account for **2,822,513,728 / 2,814,783,232 summed child physical bytes** in baseline/early mode before reaping. Those are native fixture workloads, not Rui helpers or Host allocation, and not a unique-machine-memory sum. Both modes have all 1,000 children alive at that snapshot. This cost must not be hidden by reducing actual subprocess concurrency.
 
 Model records 3,007 total descriptors during transport, 2,007 after capture, then 1,007 after early request/transport cleanup. Bash records 5,003 before cleanup and 2,003 with only sealed captures retained. Edit retains 2,003. Counts include standard/library descriptors; `owned_fds` separately counts fixture-owned files/pipes. Every final `closed` sample has zero tracked allocation and zero fixture-owned descriptors.
 

@@ -35,7 +35,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     summary = {'recorded_at': datetime.now(timezone.utc).isoformat(), 'platform': platform.platform(), 'java_version': subprocess.run([args.java, '-version'], text=True, capture_output=True, check=True).stderr.strip(), 'jar_source': 'https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar', 'jar_sha256': JAR_SHA256, 'model_sha256': hashlib.sha256((ROOT / 'SessionContinuation.tla').read_bytes()).hexdigest(), 'cases': {}}
     for name, expected in CASES.items():
-        with tempfile.TemporaryDirectory(prefix='onepage-session-tlc-') as tmp:
+        with tempfile.TemporaryDirectory(prefix='rui-session-tlc-') as tmp:
             # TLC may generate trace modules on failure. Run on temporary copies
             # so the model folder contains only authored sources and saved logs.
             work = Path(tmp)

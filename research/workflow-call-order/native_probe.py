@@ -1,6 +1,6 @@
 import struct, subprocess, json, hashlib
 from pathlib import Path
-exe=Path(__file__).resolve().parents[2] / 'zig-out/bin/onepage-workflow-evaluator'
+exe=Path(__file__).resolve().parents[2] / 'zig-out/bin/rui-workflow-evaluator'
 source='''export default async function ({ agent }) {
   let ordinal = 0;
   const call = (name) => agent({key: String(++ordinal), task: name});

@@ -46,7 +46,7 @@ case "$target" in
         ;;
 esac
 
-build_root=$(mktemp -d "${TMPDIR:-/tmp}/latifa-transport.XXXXXX")
+build_root=$(mktemp -d "${TMPDIR:-/tmp}/rui-transport.XXXXXX")
 openssl_build="$build_root/openssl"
 curl_build="$build_root/curl"
 log="$build_root/build.log"

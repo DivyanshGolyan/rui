@@ -28,7 +28,7 @@ def child(source, pid_file):
 
 
 def assert_reaped(source, description, *, timeout=0.2, required_fields=None):
-    with tempfile.TemporaryDirectory(prefix="latifa-host-start-test-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="rui-host-start-test-") as temporary:
         pid_file = pathlib.Path(temporary) / "pid"
         started = time.monotonic()
         try:
@@ -75,7 +75,7 @@ def main():
     assert stdout_elapsed < 1
     assert "readiness exceeded 16 KiB" in str(stdout_error)
     assert len(str(stdout_error)) <= error_text_limit
-    with tempfile.TemporaryDirectory(prefix="latifa-host-start-test-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="rui-host-start-test-") as temporary:
         pid_file = pathlib.Path(temporary) / "pid"
         process, fields = start_ready_process(
             child("print('ready execution=enabled curl=8.22.0'); time.sleep(10)", pid_file),

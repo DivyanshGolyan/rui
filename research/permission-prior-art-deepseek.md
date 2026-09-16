@@ -1,6 +1,6 @@
 # DeepSeek Harness permission prior art
 
-This is an evidence report for Latifa, based on the freshly pulled
+This is an evidence report for Rui, based on the freshly pulled
 `deepseek-ai/deepseek-harness` tree at revision
 `c291e7961a515f6d7af9304e7fd1d257929aef26` (the checkout has no published
 GitHub release to cite). Links below are pinned to that revision.
@@ -139,4 +139,4 @@ The inspected Cordis UI flow is interactive; this report found no unattended
 Cordis approval policy or durable pending payload mechanism. The evidence
 supports a small design boundary: durable session policy/settings can survive
 session reuse, while pending request payloads and per-process grants need an
-explicit owner and recovery policy if Latifa wants them to survive restart.
+explicit owner and recovery policy if Rui wants them to survive restart.

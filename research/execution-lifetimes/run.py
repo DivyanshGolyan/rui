@@ -80,9 +80,9 @@ def main():
                   started=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                   sources={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in HERE.glob('*') if p.suffix in ('.py','.c','.zig')},
                   cases=[])
-    with tempfile.TemporaryDirectory(prefix='onepage-lifetime-build-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='rui-lifetime-build-') as tmp:
         exe = str(Path(tmp)/'probe')
-        build = Path(os.environ.get('CURL_BUILD', '/tmp/onepage-transport-memory-build')).resolve()
+        build = Path(os.environ.get('CURL_BUILD', '/tmp/rui-transport-memory-build')).resolve()
         curl = build/'curl-8.22.0'
         library = curl/'lib/.libs/libcurl.a'
         if not library.exists():
@@ -93,7 +93,7 @@ def main():
         result['curl_archive_sha256'] = hashlib.sha256(library.read_bytes()).hexdigest()
         result['curl_config'] = command(str(curl/'curl-config'),'--configure')
         subprocess.run(compile_command,check=True)
-        with open('/tmp/onepage-memory-experiments.lock','a') as lock:
+        with open('/tmp/rui-memory-experiments.lock','a') as lock:
             print('Waiting for shared benchmark lock', flush=True)
             fcntl.flock(lock,fcntl.LOCK_EX)
             print('Acquired shared benchmark lock', flush=True)

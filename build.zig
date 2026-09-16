@@ -5,8 +5,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const pinned_transport = addPinnedTransport(b, target);
 
-    const latifa = addLatifa(b, target, optimize, "latifa", pinned_transport);
-    b.installArtifact(latifa);
+    const rui = addRui(b, target, optimize, "rui", pinned_transport);
+    b.installArtifact(rui);
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 
     const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit, Store, and protocol tests");
     test_step.dependOn(&run_tests.step);
 
-    const release_safe = addLatifa(b, target, .ReleaseSafe, "latifa-release-safe-check", pinned_transport);
+    const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     integration.addArtifactArg(release_safe);
@@ -53,7 +53,7 @@ pub fn build(b: *std.Build) void {
     );
     control_integration_step.dependOn(&control_integration.step);
 
-    const debug = addLatifa(b, target, .Debug, "latifa-debug-check", pinned_transport);
+    const debug = addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     debug_integration.addArtifactArg(debug);
@@ -86,7 +86,7 @@ pub fn build(b: *std.Build) void {
     host_process_test.addFileArg(b.path("tests/integration/host_process_test.py"));
     check_step.dependOn(&host_process_test.step);
 
-    const release = addLatifa(b, target, .ReleaseSmall, "latifa-release-small-check", pinned_transport);
+    const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
     check_step.dependOn(&release.step);
 
     const measurement_tests = b.addSystemCommand(&.{
@@ -116,11 +116,11 @@ pub fn build(b: *std.Build) void {
             pinned_transport
         else
             addPinnedTransport(b, resolved);
-        const executable = addLatifa(
+        const executable = addRui(
             b,
             resolved,
             .ReleaseSmall,
-            b.fmt("latifa-{s}-{s}", .{
+            b.fmt("rui-{s}-{s}", .{
                 @tagName(resolved.result.cpu.arch),
                 @tagName(resolved.result.os.tag),
             }),
@@ -208,7 +208,7 @@ fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget)
         a.result.abi == b.result.abi;
 }
 
-fn addLatifa(
+fn addRui(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,

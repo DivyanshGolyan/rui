@@ -19,12 +19,12 @@ import time
 from host_process import start_ready_process, stop_process
 
 
-LATIFA = pathlib.Path(sys.argv[1]).resolve()
+RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
 MAX_CLIENTS = 12
 ORDINARY_CLIENTS = 10
 CONTROL_HEADROOM = MAX_CLIENTS - ORDINARY_CLIENTS
-MAX_STORE_BYTES = 489
+MAX_STORE_BYTES = 492
 MAX_KEY_BYTES = 128
 MAX_SESSION_BYTES = 128
 
@@ -178,7 +178,7 @@ class SuccessfulHandler(http.server.BaseHTTPRequestHandler):
             self.server.condition.notify_all()
         if not self.server.release.wait(10):
             raise RuntimeError("successful fixture response was never released")
-        marker = "LATIFA_STREAMED_ANSWER_MARKER"
+        marker = "RUI_STREAMED_ANSWER_MARKER"
         if self.server.large_answer_bytes and index == 1:
             body_parts = successful_sse(index, marker).split(marker.encode())
             assert len(body_parts) == 3
@@ -274,7 +274,7 @@ class MilestoneLog:
                 record = json.loads(raw_line)
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
-            if "latifa_test_phase" not in record:
+            if "rui_test_phase" not in record:
                 continue
             with self.condition:
                 self.records.append(record)
@@ -285,7 +285,7 @@ class MilestoneLog:
             return [
                 record
                 for record in self.records
-                if record["latifa_test_phase"] == phase
+                if record["rui_test_phase"] == phase
                 and all(record.get(name) == value for name, value in fields.items())
             ]
 
@@ -296,7 +296,7 @@ class MilestoneLog:
                 matches = [
                     record
                     for record in self.records
-                    if record["latifa_test_phase"] == phase
+                    if record["rui_test_phase"] == phase
                     and all(
                         record.get(name) == value for name, value in fields.items()
                     )
@@ -317,7 +317,7 @@ class MilestoneLog:
 
 def command(*args, expect=0, timeout=15):
     completed = subprocess.run(
-        [str(LATIFA), *map(str, args)],
+        [str(RUI), *map(str, args)],
         text=True,
         capture_output=True,
         timeout=timeout,
@@ -332,7 +332,7 @@ def command(*args, expect=0, timeout=15):
 
 def start_host(store, endpoint=None, *extra, active_capacity=2):
     args = [
-        str(LATIFA),
+        str(RUI),
         "serve",
         "--store",
         str(store),
@@ -466,7 +466,7 @@ def open_partial(socket_path, route, *, complete_headers=True):
         connection.sendall(
             b"Content-Type: application/json\r\n"
             b"Content-Length: 1024\r\n"
-            b"X-Latifa-Wire-Version: 1\r\n\r\n{"
+            b"X-Rui-Wire-Version: 1\r\n\r\n{"
         )
     return connection
 
@@ -481,7 +481,7 @@ def raw_request(socket_path, route, body, declared_length=None):
             f"POST {route} HTTP/1.1\r\n".encode()
             + b"Content-Type: application/json\r\n"
             + f"Content-Length: {length}\r\n".encode()
-            + b"X-Latifa-Wire-Version: 1\r\n\r\n"
+            + b"X-Rui-Wire-Version: 1\r\n\r\n"
             + body
         )
         return read_http_response(connection)
@@ -497,7 +497,7 @@ def prepare_raw_request(socket_path, route, body):
         f"POST {route} HTTP/1.1\r\n".encode()
         + b"Content-Type: application/json\r\n"
         + f"Content-Length: {len(body)}\r\n".encode()
-        + b"X-Latifa-Wire-Version: 1\r\n\r\n"
+        + b"X-Rui-Wire-Version: 1\r\n\r\n"
         + body
     )
     return connection, request
@@ -534,7 +534,7 @@ def open_complete_inspection(socket_path, store, session):
         b"POST /v1/inspect-session HTTP/1.1\r\n"
         b"Content-Type: application/json\r\n"
         + f"Content-Length: {len(body)}\r\n".encode()
-        + b"X-Latifa-Wire-Version: 1\r\n\r\n"
+        + b"X-Rui-Wire-Version: 1\r\n\r\n"
         + body
     )
     return connection
@@ -598,7 +598,7 @@ def result_digest(store, key, destination):
     with destination.open("wb") as output:
         completed = subprocess.run(
             [
-                str(LATIFA),
+                str(RUI),
                 "read-result",
                 "--store",
                 str(store),
@@ -639,7 +639,7 @@ def open_blocked_result(socket_path, store, key):
         b"Host: local\r\n"
         b"Content-Type: application/json\r\n"
         + f"Content-Length: {len(body)}\r\n".encode()
-        + b"X-Latifa-Wire-Version: 1\r\n"
+        + b"X-Rui-Wire-Version: 1\r\n"
         b"Connection: close\r\n\r\n"
         + body
     )
@@ -925,7 +925,7 @@ def prove_sealed_interruption_and_cleanup(state):
         ) == 1
         unavailable = subprocess.run(
             [
-                str(LATIFA),
+                str(RUI),
                 "read-result",
                 "--store",
                 str(store),
@@ -1456,7 +1456,7 @@ def prove_retry_wait_control(state, kind):
         control_key = f"retry-wait-{kind}-control"
         record = state / f"{control_key}.json"
         args = [
-            str(LATIFA),
+            str(RUI),
             "stop-session" if kind == "stop" else "interrupt-model",
             "--store",
             str(store),
@@ -1515,7 +1515,7 @@ def prove_retry_wait_control(state, kind):
         assert cancelled["result"]["status"] == "cancelled", cancelled
         unreadable = subprocess.run(
             [
-                str(LATIFA),
+                str(RUI),
                 "read-result",
                 "--store",
                 str(store),
@@ -1536,7 +1536,7 @@ def prove_retry_wait_control(state, kind):
 
         stop_process(process)
         process = None
-        database = sqlite3.connect(store / "latifa.sqlite3")
+        database = sqlite3.connect(store / "rui.sqlite3")
         try:
             assert database.execute(
                 "SELECT attempt_ordinal FROM model_operation"
@@ -1557,7 +1557,7 @@ def prove_retry_wait_control(state, kind):
 
 
 def main():
-    state = pathlib.Path(tempfile.mkdtemp(prefix="latifa-control-integration-"))
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-control-integration-"))
     store = state / "store"
     store.mkdir(mode=0o700)
     endpoint = StreamingEndpoint()
@@ -1581,7 +1581,7 @@ def main():
         exact_record = state / "exact-interrupt.json"
         dropped_exact = subprocess.run(
             [
-                str(LATIFA),
+                str(RUI),
                 "interrupt-model",
                 "--store",
                 str(store),
@@ -1642,7 +1642,7 @@ def main():
         lost_stop_record = state / "lost-stop.json"
         dropped_stop = subprocess.run(
             [
-                str(LATIFA),
+                str(RUI),
                 "stop-session",
                 "--store",
                 str(store),
@@ -1732,7 +1732,7 @@ def main():
 
         stop_process(process)
         process = None
-        check_schema(store / "latifa.sqlite3")
+        check_schema(store / "rui.sqlite3")
 
         process, _ = start_host(store)
         replay_stop = command(

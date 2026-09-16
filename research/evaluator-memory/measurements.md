@@ -51,4 +51,4 @@ All numbers are bytes. `engine peak` is backing allocator usable bytes, includin
 | 32 | 2,097,536 | 2,101,248 | 50,338 | 24,168,256 | 65,548 |
 | 1,024 | 67,121,152 | 67,121,152 | 50,338 | 24,119,104 | 65,548 |
 
-Parent cold physical footprint after dependency build/loading: 23,676,736 bytes. Each native child receives one read-only prepared file plus three stdio streams. Preparation and integrity checking reuse bounded chunks; the child never reads unselected records. Global vm_stat snapshots in the saved-1024 rows are contextual system-wide cache/page counts, not attributable OnePage memory.
+Parent cold physical footprint after dependency build/loading: 23,676,736 bytes. Each native child receives one read-only prepared file plus three stdio streams. Preparation and integrity checking reuse bounded chunks; the child never reads unselected records. Global vm_stat snapshots in the saved-1024 rows are contextual system-wide cache/page counts, not attributable Rui memory.

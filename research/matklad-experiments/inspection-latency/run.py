@@ -35,7 +35,7 @@ cases=[
  ('batch-1000',10000,128,1000,0,0,0,1),
 ]
 rows=[]
-with tempfile.TemporaryDirectory(prefix='onepage-inspection-') as td:
+with tempfile.TemporaryDirectory(prefix='rui-inspection-') as td:
  td=pathlib.Path(td)
  jobs=[(case,rep) for case in cases for rep in range(3)]
  random.Random(906).shuffle(jobs)
@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix='onepage-inspection-') as td:
   subprocess.run([binary,db,'seed',*args],check=True,capture_output=True,timeout=120)
   export=td/'report.jsonl'
   child_env=dict(os.environ)
-  if name=='small' and rep==0 and not opts.bytewise:child_env['ONEPAGE_PROBE_REPORT']=str(export)
+  if name=='small' and rep==0 and not opts.bytewise:child_env['RUI_PROBE_REPORT']=str(export)
   p=subprocess.run([binary,db,'run',*args],capture_output=True,text=True,timeout=120,env=child_env)
   if export.exists():
    lines=[json.loads(x) for x in export.read_bytes().splitlines()]

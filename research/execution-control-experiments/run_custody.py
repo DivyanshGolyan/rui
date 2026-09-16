@@ -22,7 +22,7 @@ def main():
     result = {"created_utc": datetime.now(timezone.utc).isoformat(),
               "environment": metadata(), "kind": "throwaway protocol fixture",
               "repetitions_per_variant": 10, "builds": [], "runs": []}
-    with tempfile.TemporaryDirectory(prefix="onepage-custody-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="rui-custody-") as temporary:
         temporary = Path(temporary)
         for sanitize in (False, True):
             binary = temporary / ("custody-sanitized" if sanitize else "custody")

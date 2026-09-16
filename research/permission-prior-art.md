@@ -1,6 +1,6 @@
 # Permission ownership and disconnected clients: prior art
 
-Inspected 2026-09-13 for [Choose permission policy ownership and disconnected-client behavior](https://github.com/DivyanshGolyan/latifa/issues/159). Four Luna researchers inspected one harness each; the parent checked source references and reconciled the findings. This is source evidence, not a Latifa decision or runtime qualification. Accepted behavior remains in [ARCHITECTURE.md](../ARCHITECTURE.md#model-output-tools-and-permission).
+Inspected 2026-09-13 for [Choose permission policy ownership and disconnected-client behavior](https://github.com/DivyanshGolyan/rui/issues/159). Four Luna researchers inspected one harness each; the parent checked source references and reconciled the findings. This is source evidence, not a Rui decision or runtime qualification. Accepted behavior remains in [ARCHITECTURE.md](../ARCHITECTURE.md#model-output-tools-and-permission).
 
 ## Source revisions
 
@@ -28,13 +28,13 @@ Each linked report contains owning source paths, pinned links and the limits of 
 
 These are interpretations of the source evidence, not accepted changes:
 
-- **Closing the UI need not own permission lifetime.** DeepSeek and Codex keep the request with the running Host and let another connection present it. Latifa can keep its stronger committed-request recovery without giving the UI authority over execution.
-- **An advance policy and an exact approval are different facts.** A Session can retain policy across reuse while an approval authorizes one action. Codex additionally exposes narrower grants and saved rules; that breadth is precedent, not evidence Latifa needs the same machinery.
-- **“Always” needs an explicit scope.** OpenCode demonstrates why: “always” can persist project-scoped matching grants and can also answer other pending requests. It differs from Latifa's current rule that changing `ask` to `bypass` does not answer existing requests.
+- **Closing the UI need not own permission lifetime.** DeepSeek and Codex keep the request with the running Host and let another connection present it. Rui can keep its stronger committed-request recovery without giving the UI authority over execution.
+- **An advance policy and an exact approval are different facts.** A Session can retain policy across reuse while an approval authorizes one action. Codex additionally exposes narrower grants and saved rules; that breadth is precedent, not evidence Rui needs the same machinery.
+- **“Always” needs an explicit scope.** OpenCode demonstrates why: “always” can persist project-scoped matching grants and can also answer other pending requests. It differs from Rui's current rule that changing `ask` to `bypass` does not answer existing requests.
 - **Unattended does not mean auto-approve every request.** DeepSeek and Codex separate the execution boundary from whether interactive escalation is available. OpenCode v2 also has a client-local auto-approver that sends one-time replies and sweeps known pending work after reconnect; it is not server-side bypass. Pi relies on its extension/deployment policy.
-- **None of these inspected approval paths establishes Latifa's durable, bounded wait guarantee.** A logged policy or conversation is not a saved exact request plus recoverable authorization and execution state. Source-only inspection also does not establish a memory bound or crash qualification.
+- **None of these inspected approval paths establishes Rui's durable, bounded wait guarantee.** A logged policy or conversation is not a saved exact request plus recoverable authorization and execution state. Source-only inspection also does not establish a memory bound or crash qualification.
 
-The subsequent [user decision](https://github.com/DivyanshGolyan/latifa/issues/159#issuecomment-5651237684) retains core-owned per-Session policy, configured by Runtime and other clients through the ordinary API. The owning contract records that decision; this comparison preserves its source evidence.
+The subsequent [user decision](https://github.com/DivyanshGolyan/rui/issues/159#issuecomment-5651237684) retains core-owned per-Session policy, configured by Runtime and other clients through the ordinary API. The owning contract records that decision; this comparison preserves its source evidence.
 
 ## Reproduction and limits
 

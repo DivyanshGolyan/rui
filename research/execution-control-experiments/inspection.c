@@ -1,5 +1,5 @@
 // THROWAWAY: one SQLite owner, independent I/O reactor, fake streams and one real shell.
-// Synthetic report schema and command queue; not the OnePage server or its semantic proof.
+// Synthetic report schema and command queue; not the Rui server or its semantic proof.
 #include "sqlite3.h"
 #include <assert.h>
 #include <errno.h>
@@ -58,7 +58,7 @@ static void seed(long rows,int width) {
     }
     assert(sqlite3_finalize(t)==SQLITE_OK);assert(sqlite3_finalize(m)==SQLITE_OK);sql("COMMIT; ANALYZE;");
 }
-static int scratch(void) { char p[]="/tmp/onepage-cancel-probe-XXXXXX";int fd=mkstemp(p);assert(fd>=0);assert(unlink(p)==0);return fd; }
+static int scratch(void) { char p[]="/tmp/rui-cancel-probe-XXXXXX";int fd=mkstemp(p);assert(fd>=0);assert(unlink(p)==0);return fd; }
 static void nonblock(int fd) { int f=fcntl(fd,F_GETFL);assert(f>=0&&fcntl(fd,F_SETFL,f|O_NONBLOCK)==0); }
 static void write_all(int fd,const char *data,size_t n) { while(n) {ssize_t r=write(fd,data,n);if(r<0&&errno==EINTR)continue;assert(r>0);data+=r;n-=r;} }
 static void setup_io(void) {
@@ -141,7 +141,7 @@ int main(int argc,char **argv) {
     uint64_t warmup=now_ns();while(!atomic_load(&shell_bytes)){assert(now_ns()-warmup<5000000000ULL);sleep_ns(1000000);}
     sleep_ns(20000000); // establish traffic, not included in measured work interval.
     uint64_t started=now_ns(),base_footprint=footprint();double cpu_start=cpu_ms();
-    const char *fault=getenv("ONEPAGE_PROBE_SIGNAL");
+    const char *fault=getenv("RUI_PROBE_SIGNAL");
     if(fault){fprintf(stderr,"owned_shell_group=%d\n",(int)shell_pid);fflush(stderr);raise(atoi(fault));assert(0);}
     sqlite3_int64 ignored,peak;sqlite3_status64(SQLITE_STATUS_MEMORY_USED,&ignored,&peak,1);
     double captures[8]={0};int completed=0;

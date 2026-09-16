@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/shirou/gopsutil/v4/process"
-	"latifa.local/qualification/measurement"
-	"latifa.local/qualification/model-output/provider"
+	"rui.local/qualification/measurement"
+	"rui.local/qualification/model-output/provider"
 )
 
 const (
@@ -298,7 +298,7 @@ func (e *payloadEndpoint) lastRequestBytes() int {
 }
 func (e *payloadEndpoint) Close() error { return e.server.Close() }
 
-func wholeLatifa(sample measurement.ProcessSample) map[string]any {
+func wholeRui(sample measurement.ProcessSample) map[string]any {
 	if sample.LiveDescendantProcesses != 0 {
 		return map[string]any{"status": "incomplete", "reason": "live descendants require aggregation", "descendant_processes": sample.LiveDescendantProcesses}
 	}
@@ -388,7 +388,7 @@ func readOutputAudit(deadline measurement.Deadline, store string) (outputAudit, 
 	query := "SELECT (SELECT count(*) FROM model_output_item) AS canonical_output_items," +
 		"(SELECT count(*) FROM content WHERE private=1) AS private_content_rows," +
 		"(SELECT count(*) FROM conversation_entry WHERE entry_kind=3) AS assistant_projections;"
-	encoded, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-json", filepath.Join(store, "latifa.sqlite3"), query)
+	encoded, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-json", filepath.Join(store, "rui.sqlite3"), query)
 	if err != nil {
 		return outputAudit{}, err
 	}
@@ -436,7 +436,7 @@ func readSpillFacts(deadline measurement.Deadline, store string) (spillFacts, er
 		"(SELECT uncertain FROM model_operation ORDER BY operation_id LIMIT 1) AS uncertain," +
 		"(SELECT retry_due_at_ms FROM model_operation ORDER BY operation_id LIMIT 1) AS retry_due_at_ms," +
 		"(SELECT last_failure_code FROM model_operation ORDER BY operation_id LIMIT 1) AS last_failure_code;"
-	output, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-json", filepath.Join(store, "latifa.sqlite3"), query)
+	output, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-json", filepath.Join(store, "rui.sqlite3"), query)
 	if err != nil {
 		return spillFacts{}, err
 	}
@@ -448,7 +448,7 @@ func readSpillFacts(deadline measurement.Deadline, store string) (spillFacts, er
 }
 
 type sqliteDiagnostic struct {
-	Phase                     string  `json:"latifa_test_phase"`
+	Phase                     string  `json:"rui_test_phase"`
 	AtNS                      string  `json:"at_ns"`
 	Subject                   string  `json:"subject"`
 	ProcessMemoryScope        string  `json:"process_memory_scope"`
@@ -517,7 +517,7 @@ func sqliteDiagnosticRecords(report []byte) ([]sqliteDiagnostic, error) {
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		var envelope struct {
-			Phase string `json:"latifa_test_phase"`
+			Phase string `json:"rui_test_phase"`
 		}
 		if err := json.Unmarshal(line, &envelope); err != nil {
 			if bytes.Contains(line, []byte("sqlite_diagnostic")) {
@@ -677,14 +677,14 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	if err != nil {
 		return nil, err
 	}
-	coldWhole := wholeLatifa(cold)
-	retainedWhole := wholeLatifa(retained)
+	coldWhole := wholeRui(cold)
+	retainedWhole := wholeRui(retained)
 	status := outputCaseStatus(memoryStatus(coldWhole, retainedWhole), outputAuditValid(audit, reasoning))
 	return map[string]any{
 		"status": status, "answer_bytes": len(answer), "reasoning_items": reasoning, "total_output_items": reasoning + 1,
 		"sse_bytes": len(payload), "request_bytes": endpoint.lastRequestBytes(), "scratch_limit_bytes": host.Ready["scratch_limit_bytes"],
-		"offline_audit": audit, "cold": map[string]any{"host": cold, "whole_latifa": coldWhole},
-		"retained_idle": map[string]any{"host": retained, "whole_latifa": retainedWhole}, "client_delivery": delivery,
+		"offline_audit": audit, "cold": map[string]any{"host": cold, "whole_rui": coldWhole},
+		"retained_idle": map[string]any{"host": retained, "whole_rui": retainedWhole}, "client_delivery": delivery,
 		"execution_after_completion": inspection["execution"], "observation": observation, "answer_sha256": expectedDigest,
 	}, nil
 }
@@ -792,17 +792,17 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 		return nil, fmt.Errorf("observed Host exit lacks expected nonzero status: %+v", hostExit)
 	}
 	databaseSize := int64(0)
-	if info, statError := os.Stat(filepath.Join(store, "latifa.sqlite3")); statError == nil {
+	if info, statError := os.Stat(filepath.Join(store, "rui.sqlite3")); statError == nil {
 		databaseSize = info.Size()
 	}
 	diagnostics, err := sqliteDiagnosticRecords(stderr)
 	if err != nil {
 		return nil, err
 	}
-	initialWhole := wholeLatifa(initial)
+	initialWhole := wholeRui(initial)
 	finalWhole := map[string]any(nil)
 	if final != nil {
-		finalWhole = wholeLatifa(*final)
+		finalWhole = wholeRui(*final)
 	}
 	execution := map[string]any(nil)
 	if inspection != nil {
@@ -816,7 +816,7 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 	if !diagnosticsValid {
 		status = "failed"
 	}
-	return map[string]any{"status": status, "cache_spill_requested": enabled, "test_cache_kib": 32, "answer_bytes": len(answer), "sse_bytes": len(payload), "provider_requests": providerRequests, "duration_seconds": duration, "initial": map[string]any{"host": initial, "whole_latifa": initialWhole, "execution": initialInspection["execution"]}, "final": map[string]any{"host": final, "whole_latifa": finalWhole}, "client_delivery": delivery, "execution": execution, "observed_outcome": outcome, "offline_after_host_reaped": offline, "database_bytes_after_host_reaped": databaseSize, "host_stderr_tail": string(stderr), "host_exit_after_reap": hostExit, "process_disk_write_evidence": writeEvidence, "host_sqlite_diagnostics": diagnostics, "effective_sqlite_configuration_valid": diagnosticsValid, "clean_transaction_rollback": cleanRollback, "expected_spill_off_memory_failure": expectedMemoryFailure}, nil
+	return map[string]any{"status": status, "cache_spill_requested": enabled, "test_cache_kib": 32, "answer_bytes": len(answer), "sse_bytes": len(payload), "provider_requests": providerRequests, "duration_seconds": duration, "initial": map[string]any{"host": initial, "whole_rui": initialWhole, "execution": initialInspection["execution"]}, "final": map[string]any{"host": final, "whole_rui": finalWhole}, "client_delivery": delivery, "execution": execution, "observed_outcome": outcome, "offline_after_host_reaped": offline, "database_bytes_after_host_reaped": databaseSize, "host_stderr_tail": string(stderr), "host_exit_after_reap": hostExit, "process_disk_write_evidence": writeEvidence, "host_sqlite_diagnostics": diagnostics, "effective_sqlite_configuration_valid": diagnosticsValid, "clean_transaction_rollback": cleanRollback, "expected_spill_off_memory_failure": expectedMemoryFailure}, nil
 }
 
 func spillComparison(binary, root string, endpoint *payloadEndpoint) (map[string]any, error) {
@@ -978,7 +978,7 @@ func auditCapacity(deadline measurement.Deadline, store string, keys, sessions [
 		"(SELECT count(*) FROM conversation_entry ce WHERE ce.source_operation_id=mo.operation_id AND ce.entry_kind=3) AS assistant_projections " +
 		"FROM message_admission ma JOIN content c ON c.content_id=ma.content_id JOIN turn t ON t.turn_id=ma.turn_id " +
 		"JOIN model_operation mo ON mo.operation_id=t.operation_id WHERE ma.command_key GLOB '" + prefix + "*' ORDER BY ma.admission_id;"
-	output, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-json", filepath.Join(store, "latifa.sqlite3"), query)
+	output, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-json", filepath.Join(store, "rui.sqlite3"), query)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1329,8 +1329,8 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 	successfulAuditStatus := dependentObservationStatus(auditPrerequisite, true, true)
 	cleanupStatus := observationStatus(finalScratchOK && finalCustodyOK, cleanupComplete)
 	requestIntegrityStatus := observationStatus(true, requestComplete)
-	initialWhole := wholeLatifa(initial)
-	retainedWhole := wholeLatifa(retained)
+	initialWhole := wholeRui(initial)
+	retainedWhole := wholeRui(retained)
 	memoryVerdict := memoryStatus(initialWhole, retainedWhole)
 	status := capacityVerdict(capacityVerdictInput{
 		Capacity:               capacity,
@@ -1364,7 +1364,7 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 			"minimum_sample_window_seconds": minimumSampleWindow.Seconds(), "maximum_sample_window_seconds": maximumSampleWindow.Seconds(), "earliest_stream_final_completion_unix_ns": offer.EarliestFinalCompletionUnixNS,
 			"average_cores_conservative": sustainedCores, "at_most_2_average_cores": cpuWindowValid && sustainedCores <= capacityMaximumAverageCores, "complete_work_cpu_seconds": completeCPU, "complete_work_at_most_120_cpu_seconds": completeCPU <= capacityMaximumCPUSeconds,
 		},
-		"initial": map[string]any{"host": initial, "whole_latifa": initialWhole}, "retained": map[string]any{"host": retained, "whole_latifa": retainedWhole},
+		"initial": map[string]any{"host": initial, "whole_rui": initialWhole}, "retained": map[string]any{"host": retained, "whole_rui": retainedWhole},
 		"provider_process":               map[string]any{"pid": fixture.cmd.Process.Pid, "initial": fixtureInitial, "retained": fixtureRetained},
 		"host_dimensions":                map[string]any{"capture": captureStatus, "cleanup": cleanupStatus, "request_integrity": requestIntegrityStatus, "result_delivery": resultDeliveryStatus},
 		"durable_audit_prerequisite_met": auditPrerequisite, "result_delivery_complete": resultDeliveryComplete, "retained_request_scratch_bytes": baselineScratch, "expected_response_scratch_delta_bytes": responseScratch, "expected_retained_scratch_bytes": expectedScratch, "capture_observation_complete": captureComplete, "cleanup_observation_complete": cleanupComplete,
@@ -1510,7 +1510,7 @@ func main() {
 		*growthOnly = true
 	}
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: measure-model-output [--output path] [--capacity N | --growth-only | --projection] /absolute/path/to/latifa")
+		fmt.Fprintln(os.Stderr, "usage: measure-model-output [--output path] [--capacity N | --growth-only | --projection] /absolute/path/to/rui")
 		os.Exit(2)
 	}
 	if err := measurement.RequireRuntime(); err != nil {
@@ -1521,7 +1521,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	root, err := os.MkdirTemp("/private/tmp", "latifa-output-measure-")
+	root, err := os.MkdirTemp("/private/tmp", "rui-output-measure-")
 	if err != nil {
 		panic(err)
 	}
@@ -1621,7 +1621,7 @@ func main() {
 		spillStatusRows = append(spillStatusRows, spillRows)
 	}
 	overallStatus := reduceStatuses(byteRows, itemRows, spillStatusRows, capacityRows)
-	result := map[string]any{"format": "latifa-model-output-v7-go", "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification", "status": overallStatus, "artifacts": root, "answer_byte_growth": byteRows, "item_count_growth": itemRows, "sqlite_cache_spill_comparison": spillRows, "active_capacity_growth": capacityRows, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "deterministic loopback HTTP qualifies no live-provider behavior", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "rational target scheduling aims at 60 seconds and emits exactly 1,800 or 6,000 events per stream; per-event pacing is diagnostic, collection stops at 120 seconds, and measured rate is not maximum sustainable throughput", "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after both rounds and confirmed Host stop/reap", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"}}
+	result := map[string]any{"format": "rui-model-output-v7-go", "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification", "status": overallStatus, "artifacts": root, "answer_byte_growth": byteRows, "item_count_growth": itemRows, "sqlite_cache_spill_comparison": spillRows, "active_capacity_growth": capacityRows, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "deterministic loopback HTTP qualifies no live-provider behavior", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "rational target scheduling aims at 60 seconds and emits exactly 1,800 or 6,000 events per stream; per-event pacing is diagnostic, collection stops at 120 seconds, and measured rate is not maximum sustainable throughput", "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after both rounds and confirmed Host stop/reap", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"}}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)

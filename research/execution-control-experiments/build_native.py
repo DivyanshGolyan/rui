@@ -1,4 +1,4 @@
-"""Throwaway probes: build against OnePage's cached, pinned SQLite amalgamation."""
+"""Throwaway probes: build against Rui's cached, pinned SQLite amalgamation."""
 import argparse
 import json
 from pathlib import Path
@@ -31,7 +31,7 @@ def build(source, destination, sanitize=False):
     cache = Path(re.search(r'\.global_cache_dir = "([^"]+)"', output("zig", "env"))[1])
     flags = [f"-D{k}={v}" for k, v in re.findall(
         r'addCMacro\("(SQLITE_[^"]+)", "([^"]+)"\)', (ROOT / "build.zig").read_text())]
-    with tempfile.TemporaryDirectory(prefix="onepage-probe-build-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="rui-probe-build-") as tmp:
         tmp = Path(tmp)
         with tarfile.open(cache / "p" / (package + ".tar.gz")) as archive:
             for filename in ("sqlite3.c", "sqlite3.h"):

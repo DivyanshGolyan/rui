@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite representation experiment; deliberately not a OnePage implementation."""
+"""SQLite representation experiment; deliberately not a Rui implementation."""
 import argparse, hashlib, json, os, sqlite3, subprocess, sys, tempfile, time
 from pathlib import Path
 
@@ -279,7 +279,7 @@ def main():
     if args.read:
         db=sqlite3.connect(args.read); print(json.dumps([replay(db,args.mode,int(i)) for i in args.ids.split(',')])); return
     output={'description':'Exploratory Python/SQLite representation experiment; no production guarantee','sqlite_version':sqlite3.sqlite_version,'python':sys.version,'cursor_batch_rows':WINDOW,'semantics':{},'measurements':[]}
-    with tempfile.TemporaryDirectory(prefix='onepage-manifests-') as temp:
+    with tempfile.TemporaryDirectory(prefix='rui-manifests-') as temp:
         temp=Path(temp)
         for mode in ('enumerated','range'):
             p=temp/(mode+'.sqlite'); meta=fixture(p,mode)

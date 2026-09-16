@@ -22,7 +22,7 @@ for kind in ['system','pinned']:
  cmd+=['-lsqlite3'] if kind=='system' else ['-I'+str(sqlite.parent),str(sqlite),*macros]
  subprocess.run(cmd,check=True)
 records=[]
-with tempfile.TemporaryDirectory(prefix='onepage-sqlite-probe-') as td:
+with tempfile.TemporaryDirectory(prefix='rui-sqlite-probe-') as td:
  for kind in ['system','pinned']:
   for size in [1,4,16]:
    for returning in [0,1]:

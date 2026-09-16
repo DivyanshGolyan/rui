@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"latifa.local/qualification/measurement"
+	"rui.local/qualification/measurement"
 )
 
 var inputBytes = []int{100_000, 500_000, 1_000_000, 4_000_000}
@@ -348,7 +348,7 @@ func overlap(binary, root string, fixture *endpoint) (map[string]any, error) {
 
 func main() {
 	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: measure-model-dispatch /absolute/path/to/latifa")
+		fmt.Fprintln(os.Stderr, "usage: measure-model-dispatch /absolute/path/to/rui")
 		os.Exit(2)
 	}
 	if err := measurement.RequireRuntime(); err != nil {
@@ -356,7 +356,7 @@ func main() {
 		os.Exit(1)
 	}
 	started := time.Now()
-	root, err := os.MkdirTemp("/private/tmp", "latifa-dispatch-measure-")
+	root, err := os.MkdirTemp("/private/tmp", "rui-dispatch-measure-")
 	if err != nil {
 		panic(err)
 	}
@@ -378,7 +378,7 @@ func main() {
 		panic(err)
 	}
 	result := map[string]any{
-		"format": "latifa-model-dispatch-v3-go", "scope": "issue-172 production frozen-request dispatch", "status": "passed",
+		"format": "rui-model-dispatch-v3-go", "scope": "issue-172 production frozen-request dispatch", "status": "passed",
 		"artifacts":            root,
 		"transport":            map[string]string{"curl": "8.22.0", "openssl": "3.6.3", "resolver": "threaded"},
 		"idle_capacity_growth": idle, "request_growth_and_delayed_cleanup": growth, "overlapping_transport": overlapping,

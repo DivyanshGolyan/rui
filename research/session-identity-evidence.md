@@ -1,6 +1,6 @@
 # Session identity source evidence
 
-Primary-source reading on 2026-09-11; no runtime measurements or qualification. [ARCHITECTURE.md](../ARCHITECTURE.md#workflow-identity-and-saved-calls) owns Latifa identity behavior.
+Primary-source reading on 2026-09-11; no runtime measurements or qualification. [ARCHITECTURE.md](../ARCHITECTURE.md#workflow-identity-and-saved-calls) owns Rui identity behavior.
 
 ## Integer storage IDs
 

@@ -1,7 +1,7 @@
 # Pi permission prior art
 
-This is source evidence for Latifa's open choice about permission ownership and
-disconnected clients. It is not a proposed Latifa contract or production
+This is source evidence for Rui's open choice about permission ownership and
+disconnected clients. It is not a proposed Rui contract or production
 qualification. Sources were read from Pi commit
 `71dca871bc80b6bc97be37f0ca3189399d651fff` (`main`, 2026-09-13), with the
 released `v0.85.1` tag checked separately. The permission paths below are

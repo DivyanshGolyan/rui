@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Experimental pins only; does not change OnePage production dependencies."""
+"""Experimental pins only; does not change Rui production dependencies."""
 import argparse,hashlib,pathlib,subprocess,tarfile,urllib.request
-p=argparse.ArgumentParser();p.add_argument('--build',type=pathlib.Path,default=pathlib.Path('/tmp/onepage-transport-memory-build'));a=p.parse_args();b=a.build.resolve();b.mkdir(parents=True,exist_ok=True)
+p=argparse.ArgumentParser();p.add_argument('--build',type=pathlib.Path,default=pathlib.Path('/tmp/rui-transport-memory-build'));a=p.parse_args();b=a.build.resolve();b.mkdir(parents=True,exist_ok=True)
 ssl=pathlib.Path('/opt/homebrew/Cellar/openssl@3/3.6.3')
 assert (ssl/'lib/libssl.3.dylib').exists(),'Requires exact OpenSSL 3.6.3 installation; do not substitute system curl/TLS'
 def run(argv,cwd,log):

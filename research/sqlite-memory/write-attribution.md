@@ -2,7 +2,7 @@
 
 The earlier **2,334,601,216-byte** process-write result was not 2.33 GB of new database content or repeated whole-database saves. It measured 10,000 independently committed Session creations. A fresh baseline reproduced **2,320,719,872 bytes** with a **5,423,104-byte** final database. The instrumented production path requested about **963 MB** of database plus rollback-journal writes; macOS charged about **2.36 GB** during the corresponding sync calls. Small writes being flushed at larger units explain most of that difference.
 
-There is a modest avoidable cost from the current small cache: an existing 128 KiB profile reduced journal syncs and process-accounted writes without changing any transaction or durability boundary. There is no evidence here of redundant database-page rewrites within a transaction, unnecessary full-value rewriting by OnePage, or WAL/checkpoint amplification.
+There is a modest avoidable cost from the current small cache: an existing 128 KiB profile reduced journal syncs and process-accounted writes without changing any transaction or durability boundary. There is no evidence here of redundant database-page rewrites within a transaction, unnecessary full-value rewriting by Rui, or WAL/checkpoint amplification.
 
 ## Reproduction and provenance
 
@@ -16,7 +16,7 @@ python3 research/sqlite-memory/write_granularity.py
 python3 research/sqlite-memory/summarize_writes.py
 ```
 
-The first command reruns the original fixture and overwrites its adjacent historical result. The follow-up runners overwrite only their own adjacent result/provenance files. Run sequentially. Every heavy run holds `/tmp/onepage-memory-experiments.lock`; children have bounded lifetimes and their own process groups for timeout cleanup. Completed fixture scratch and calibration files are removed; generated source/binaries remain under ignored `generated/`.
+The first command reruns the original fixture and overwrites its adjacent historical result. The follow-up runners overwrite only their own adjacent result/provenance files. Run sequentially. Every heavy run holds `/tmp/rui-memory-experiments.lock`; children have bounded lifetimes and their own process groups for timeout cleanup. Completed fixture scratch and calibration files are removed; generated source/binaries remain under ignored `generated/`.
 
 - [Attribution raw data](write-attribution-results.json) and [provenance](write-attribution-provenance.json): an unmodified baseline, two light measurements at each cache profile and one detailed attribution run at each profile. Every run includes the original 100/1,000/10,000 population loops and subsequent transient fixtures.
 - [Granularity raw data](write-granularity-results.json) and [provenance](write-granularity-provenance.json): a second diagnostic at both profiles plus an independent filesystem control.

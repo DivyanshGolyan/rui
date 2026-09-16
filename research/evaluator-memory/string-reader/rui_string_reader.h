@@ -1,5 +1,5 @@
-#ifndef ONEPAGE_STRING_READER_H
-#define ONEPAGE_STRING_READER_H
+#ifndef RUI_STRING_READER_H
+#define RUI_STRING_READER_H
 #include "quickjs.h"
 #include <stdint.h>
 #include <stddef.h>

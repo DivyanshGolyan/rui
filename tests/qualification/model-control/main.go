@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"latifa.local/qualification/measurement"
+	"rui.local/qualification/measurement"
 )
 
 const ordinaryClients = 10
@@ -337,7 +337,7 @@ func openPartial(socket string) (net.Conn, error) {
 		return nil, err
 	}
 	_ = connection.SetWriteDeadline(time.Now().Add(3 * time.Second))
-	_, err = io.WriteString(connection, "POST /v1/inspect-session HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 1024\r\nX-Latifa-Wire-Version: 1\r\n\r\n{")
+	_, err = io.WriteString(connection, "POST /v1/inspect-session HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 1024\r\nX-Rui-Wire-Version: 1\r\n\r\n{")
 	if err != nil {
 		connection.Close()
 		return nil, err
@@ -644,7 +644,7 @@ func (e *successEndpoint) serve(writer http.ResponseWriter, request *http.Reques
 	case <-request.Context().Done():
 		return
 	}
-	marker := "LATIFA_STREAMED_ANSWER_MARKER"
+	marker := "RUI_STREAMED_ANSWER_MARKER"
 	body := successfulSSE(index, marker)
 	parts := bytes.Split(body, []byte(marker))
 	if e.answerBytes == 0 || index != 1 {
@@ -705,7 +705,7 @@ func rawUnixRequest(socketPath, route string, body []byte, receiveBuffer int) (n
 			}
 		}
 	}
-	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Latifa-Wire-Version: 1\r\nConnection: close\r\n\r\n", route, len(body))
+	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 1\r\nConnection: close\r\n\r\n", route, len(body))
 	if _, err := io.WriteString(connection, request); err != nil {
 		connection.Close()
 		return nil, err
@@ -736,7 +736,7 @@ func prepareUnixRequest(deadline measurement.Deadline, socketPath, route string,
 		connection.Close()
 		return preparedRequest{}, err
 	}
-	header := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Latifa-Wire-Version: 1\r\nConnection: close\r\n\r\n", route, len(body))
+	header := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 1\r\nConnection: close\r\n\r\n", route, len(body))
 	return preparedRequest{connection: connection, request: append([]byte(header), body...)}, nil
 }
 
@@ -926,7 +926,7 @@ func phaseRecords(path, phase string) ([]map[string]any, error) {
 	scanner.Buffer(buffer, 1024*1024)
 	for scanner.Scan() {
 		var record map[string]any
-		if json.Unmarshal(scanner.Bytes(), &record) == nil && record["latifa_test_phase"] == phase {
+		if json.Unmarshal(scanner.Bytes(), &record) == nil && record["rui_test_phase"] == phase {
 			result = append(result, record)
 		}
 	}
@@ -1377,7 +1377,7 @@ func main() {
 	output := flag.String("output", "", "write JSON to path")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: measure-model-control [--output path] /absolute/path/to/latifa")
+		fmt.Fprintln(os.Stderr, "usage: measure-model-control [--output path] /absolute/path/to/rui")
 		os.Exit(2)
 	}
 	if err := measurement.RequireRuntime(); err != nil {
@@ -1385,7 +1385,7 @@ func main() {
 		os.Exit(1)
 	}
 	binary, _ := filepath.Abs(flag.Arg(0))
-	root, err := os.MkdirTemp("/private/tmp", "latifa-control-measure-")
+	root, err := os.MkdirTemp("/private/tmp", "rui-control-measure-")
 	if err != nil {
 		panic(err)
 	}
@@ -1411,7 +1411,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	result := map[string]any{"format": "latifa-model-control-v4-go", "scope": "issue-175 production Session stop and exact model interruption", "status": controlStatus(headroomResult, activeResult, controlFirstResult, realSettlementResult), "artifacts": root, "configurations": map[string]any{"stalled_incomplete_ingress_diagnostic": headroomResult, "live_model_cancellation": activeResult, "control_first_settlement_race": controlFirstResult, "real_settlement_import_contention_qualification": realSettlementResult}, "elapsed_seconds": time.Since(started).Seconds()}
+	result := map[string]any{"format": "rui-model-control-v4-go", "scope": "issue-175 production Session stop and exact model interruption", "status": controlStatus(headroomResult, activeResult, controlFirstResult, realSettlementResult), "artifacts": root, "configurations": map[string]any{"stalled_incomplete_ingress_diagnostic": headroomResult, "live_model_cancellation": activeResult, "control_first_settlement_race": controlFirstResult, "real_settlement_import_contention_qualification": realSettlementResult}, "elapsed_seconds": time.Since(started).Seconds()}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)
