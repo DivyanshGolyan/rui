@@ -26,7 +26,7 @@ Use [Abseil Performance Hints](https://abseil.io/fast/hints.html) when implement
 
 Make allocator dependencies explicit at allocation sites. Document returned pointers/slices as owned or borrowed, including invalidation. Use `defer`/`errdefer` when scope exit is the release boundary; transferred/asynchronous resources stay owned until cleanup is safe.
 
-Respect architectural transaction/effect boundaries. Give each mutable handle one owner; retain callback state and custody through safe cleanup. Validate external syntax and consequential meaning. Notifications are hints; committed facts are authority. Trust validated local/SQLite facts within their documented boundary.
+Respect architectural transaction/effect boundaries. Give each mutable handle one owner. Construct callback state in its final storage before registration; retain its address and custody through safe cleanup. Validate external syntax and consequential meaning. Notifications are hints; committed facts are authority. Trust validated local/SQLite facts within their documented boundary.
 
 Assert programmer errors; return typed expected failures. Handle errors and explain intentionally ignored cleanup failures at their shared wrapper. Comments explain non-obvious invariants. Put exceptions beside their owning code or contract, with consumer, retained guarantee and evidence.
 
