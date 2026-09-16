@@ -24,7 +24,7 @@ The default Matt Pocock triage vocabulary is used. See [docs/agents/triage-label
 
 ### Domain docs
 
-Rui uses a single-context domain-doc layout. See [docs/agents/domain.md](docs/agents/domain.md).
+Rui keeps accepted domain terminology and decisions in its owning contract. See [docs/agents/domain.md](docs/agents/domain.md).
 
 ## Make changes
 
