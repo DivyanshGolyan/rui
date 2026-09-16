@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"latifa.local/research/measurement"
+	"latifa.local/qualification/measurement"
 )
 
 var payloadBytes = []int{0, 1_000, 10_000, 100_000}

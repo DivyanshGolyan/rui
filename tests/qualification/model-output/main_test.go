@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"latifa.local/research/measurement"
-	"latifa.local/research/model-output/provider"
+	"latifa.local/qualification/measurement"
+	"latifa.local/qualification/model-output/provider"
 )
 
 func TestReduceStatusesIncludesEveryFamilyAndPreservesPrecedence(t *testing.T) {

@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/shirou/gopsutil/v4/process"
-	"latifa.local/research/measurement"
-	"latifa.local/research/model-output/provider"
+	"latifa.local/qualification/measurement"
+	"latifa.local/qualification/model-output/provider"
 )
 
 const (

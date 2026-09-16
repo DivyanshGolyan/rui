@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"latifa.local/research/measurement"
+	"latifa.local/qualification/measurement"
 )
 
 const ordinaryClients = 10

@@ -6,8 +6,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 p=argparse.ArgumentParser();p.add_argument('binary');p.add_argument('output');p.add_argument('--logging',action='store_true');p.add_argument('--instruments',action='store_true');a=p.parse_args()
 root=pathlib.Path(__file__).resolve().parents[2]; out=pathlib.Path(a.output).resolve();out.mkdir(parents=True,exist_ok=False)
 store=out/'store';store.mkdir(mode=0o700); records=out/'records';records.mkdir(mode=0o700)
-sys.path.insert(0,str(root/'src'))
-spec=importlib.util.spec_from_file_location('fixture',root/'src/dispatch_integration.py');fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+sys.path.insert(0,str(root/'tests/integration'))
+spec=importlib.util.spec_from_file_location('fixture',root/'tests/integration/dispatch_integration.py');fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
 received=threading.Event();release=threading.Event()
 class Endpoint(BaseHTTPRequestHandler):
  def log_message(self,*args):pass

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"latifa.local/research/measurement"
+	"latifa.local/qualification/measurement"
 )
 
 var inputBytes = []int{100_000, 500_000, 1_000_000, 4_000_000}

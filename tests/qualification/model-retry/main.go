@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"latifa.local/research/measurement"
+	"latifa.local/qualification/measurement"
 )
 
 const capacity = 16

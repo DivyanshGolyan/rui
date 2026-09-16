@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
 
     const release_safe = addLatifa(b, target, .ReleaseSafe, "latifa-release-safe-check", pinned_transport);
     const integration = b.addSystemCommand(&.{"sh"});
-    integration.addFileArg(b.path("src/admission_integration.sh"));
+    integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     integration.addArtifactArg(release_safe);
     const integration_step = b.step(
         "admission-integration",
@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
     integration_step.dependOn(&integration.step);
 
     const dispatch_integration = b.addSystemCommand(&.{"python3"});
-    dispatch_integration.addFileArg(b.path("src/dispatch_integration.py"));
+    dispatch_integration.addFileArg(b.path("tests/integration/dispatch_integration.py"));
     dispatch_integration.addArtifactArg(release_safe);
     const dispatch_integration_step = b.step(
         "dispatch-integration",
@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
     const control_integration = b.addSystemCommand(&.{"python3"});
-    control_integration.addFileArg(b.path("src/control_integration.py"));
+    control_integration.addFileArg(b.path("tests/integration/control_integration.py"));
     control_integration.addArtifactArg(release_safe);
     const control_integration_step = b.step(
         "control-integration",
@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) void {
 
     const debug = addLatifa(b, target, .Debug, "latifa-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
-    debug_integration.addFileArg(b.path("src/admission_integration.sh"));
+    debug_integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     debug_integration.addArtifactArg(debug);
     const debug_integration_step = b.step(
         "admission-debug-integration",
@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&debug_integration.step);
 
     const host_process_test = b.addSystemCommand(&.{"python3"});
-    host_process_test.addFileArg(b.path("src/host_process_test.py"));
+    host_process_test.addFileArg(b.path("tests/integration/host_process_test.py"));
     check_step.dependOn(&host_process_test.step);
 
     const release = addLatifa(b, target, .ReleaseSmall, "latifa-release-small-check", pinned_transport);
@@ -92,7 +92,7 @@ pub fn build(b: *std.Build) void {
     const measurement_tests = b.addSystemCommand(&.{
         "go", "test", "-mod=readonly", "./...",
     });
-    measurement_tests.setCwd(b.path("research"));
+    measurement_tests.setCwd(b.path("tests/qualification"));
     measurement_tests.setEnvironmentVariable("GOTOOLCHAIN", "local");
     const measurement_test_step = b.step(
         "measurement-check",
@@ -132,7 +132,7 @@ pub fn build(b: *std.Build) void {
     const measure = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./configuration-admission",
     });
-    measure.setCwd(b.path("research"));
+    measure.setCwd(b.path("tests/qualification"));
     measure.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure.addArtifactArg(release);
     const measure_step = b.step(
@@ -144,7 +144,7 @@ pub fn build(b: *std.Build) void {
     const measure_messages = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./message-admission",
     });
-    measure_messages.setCwd(b.path("research"));
+    measure_messages.setCwd(b.path("tests/qualification"));
     measure_messages.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure_messages.addArtifactArg(release);
     const measure_messages_step = b.step(
@@ -156,7 +156,7 @@ pub fn build(b: *std.Build) void {
     const measure_dispatch = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-dispatch",
     });
-    measure_dispatch.setCwd(b.path("research"));
+    measure_dispatch.setCwd(b.path("tests/qualification"));
     measure_dispatch.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure_dispatch.addArtifactArg(release);
     const measure_dispatch_step = b.step(
@@ -168,7 +168,7 @@ pub fn build(b: *std.Build) void {
     const measure_output = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-output",
     });
-    measure_output.setCwd(b.path("research"));
+    measure_output.setCwd(b.path("tests/qualification"));
     measure_output.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure_output.addArtifactArg(release);
     const measure_output_step = b.step(
@@ -180,7 +180,7 @@ pub fn build(b: *std.Build) void {
     const measure_retry = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-retry",
     });
-    measure_retry.setCwd(b.path("research"));
+    measure_retry.setCwd(b.path("tests/qualification"));
     measure_retry.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure_retry.addArtifactArg(release);
     const measure_retry_step = b.step(
@@ -192,7 +192,7 @@ pub fn build(b: *std.Build) void {
     const measure_control = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-control",
     });
-    measure_control.setCwd(b.path("research"));
+    measure_control.setCwd(b.path("tests/qualification"));
     measure_control.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure_control.addArtifactArg(release);
     const measure_control_step = b.step(
