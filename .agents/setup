@@ -56,6 +56,23 @@ download_verified() {
     printf '%s  %s\n' "$expected" "$destination" | sha256sum --check --status
 }
 
+fetch_zig_dependency() {
+    local url=$1
+    local expected=$2
+    local filename=$3
+    if [[ -f "$zig_cache/p/$expected.tar.gz" ]]; then
+        printf 'Zig dependency %s already cached.\n' "$filename"
+        return
+    fi
+
+    curl --fail --location --retry 3 --silent --show-error \
+        "$url" \
+        --output "$dependency_downloads/$filename"
+    local actual
+    actual="$(zig fetch --global-cache-dir "$zig_cache" "$dependency_downloads/$filename")"
+    [[ "$actual" == "$expected" ]]
+}
+
 install_zig() (
     if [[ -x "$local_bin/zig" ]] && [[ "$($local_bin/zig version)" == "$zig_version" ]]; then
         printf 'Zig %s already installed.\n' "$zig_version"
@@ -161,10 +178,23 @@ persist_path
 export PATH="$local_bin:$PATH"
 
 step 'Fetching pinned Zig dependencies'
-openssl_hash="$(zig fetch --global-cache-dir "$HOME/.cache/zig" \
-    https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz)"
-[[ "$openssl_hash" == N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM ]]
-(cd "$repo_root" && zig build --global-cache-dir "$HOME/.cache/zig" --fetch=all)
+zig_cache="$HOME/.cache/zig"
+dependency_downloads="$(mktemp -d)"
+trap 'rm -rf "$dependency_downloads"' EXIT
+mkdir -p "$zig_cache/tmp"
+fetch_zig_dependency \
+    https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz \
+    N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM \
+    openssl-3.6.3.tar.gz
+fetch_zig_dependency \
+    https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip \
+    N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8 \
+    sqlite-amalgamation-3530400.zip
+fetch_zig_dependency \
+    https://curl.se/download/curl-8.22.0.tar.xz \
+    N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM \
+    curl-8.22.0.tar.xz
+(cd "$repo_root" && zig build --global-cache-dir "$zig_cache" --fetch=all)
 
 step 'Fetching pinned Go measurement dependencies'
 GOTOOLCHAIN=local go -C "$repo_root/tests/qualification" mod download
