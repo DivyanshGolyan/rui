@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Rui has no development services or authentication to reconnect on wake.
+printf 'Rui orb ready.\n'

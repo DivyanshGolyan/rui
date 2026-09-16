@@ -3,6 +3,7 @@ zig-out/
 zig-pkg/
 snapshots/
 consults/
+.amp/portals/*
 
 # Generated Python bytecode
 __pycache__/

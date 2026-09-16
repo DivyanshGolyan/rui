@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+zig_version=0.16.0
+go_version=1.27.1
+local_bin="$HOME/.local/bin"
+local_opt="$HOME/.local/opt"
+
+step() {
+    printf '\n==> %s\n' "$1"
+}
+
+install_system_packages() {
+    local packages=(
+        bash
+        build-essential
+        ca-certificates
+        curl
+        git
+        make
+        perl
+        pkg-config
+        python3
+        xz-utils
+    )
+    local missing=()
+    local package
+    for package in "${packages[@]}"; do
+        if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q '^install ok installed$'; then
+            missing+=("$package")
+        fi
+    done
+    if ((${#missing[@]} == 0)); then
+        printf 'System packages already installed.\n'
+        return
+    fi
+
+    local apt=(apt-get)
+    if ((EUID != 0)); then
+        command -v sudo >/dev/null || {
+            printf 'Missing sudo; cannot install: %s\n' "${missing[*]}" >&2
+            return 1
+        }
+        apt=(sudo apt-get)
+    fi
+    "${apt[@]}" update
+    DEBIAN_FRONTEND=noninteractive "${apt[@]}" install -y --no-install-recommends "${missing[@]}"
+}
+
+download_verified() {
+    local url=$1
+    local expected=$2
+    local destination=$3
+    curl --fail --location --retry 3 --silent --show-error "$url" --output "$destination"
+    printf '%s  %s\n' "$expected" "$destination" | sha256sum --check --status
+}
+
+install_zig() (
+    if [[ -x "$local_bin/zig" ]] && [[ "$($local_bin/zig version)" == "$zig_version" ]]; then
+        printf 'Zig %s already installed.\n' "$zig_version"
+        return
+    fi
+
+    local archive_arch checksum
+    case "$(uname -m)" in
+        x86_64)
+            archive_arch=x86_64
+            checksum=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+            ;;
+        aarch64 | arm64)
+            archive_arch=aarch64
+            checksum=ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+            ;;
+        *)
+            printf 'Unsupported Linux architecture for Zig: %s\n' "$(uname -m)" >&2
+            return 1
+            ;;
+    esac
+
+    local temporary archive extracted destination
+    temporary="$(mktemp -d)"
+    trap 'rm -rf "$temporary"' EXIT
+    archive="$temporary/zig.tar.xz"
+    extracted="$temporary/zig-$archive_arch-linux-$zig_version"
+    destination="$local_opt/zig-$zig_version"
+    download_verified \
+        "https://ziglang.org/download/$zig_version/zig-$archive_arch-linux-$zig_version.tar.xz" \
+        "$checksum" \
+        "$archive"
+    tar -xJf "$archive" -C "$temporary"
+    rm -rf "$destination"
+    mv "$extracted" "$destination"
+    ln -sfn "$destination/zig" "$local_bin/zig"
+)
+
+install_go() (
+    if [[ -x "$local_bin/go" ]] && [[ "$($local_bin/go version)" == "go version go$go_version "* ]]; then
+        printf 'Go %s already installed.\n' "$go_version"
+        return
+    fi
+
+    local archive_arch checksum
+    case "$(uname -m)" in
+        x86_64)
+            archive_arch=amd64
+            checksum=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
+            ;;
+        aarch64 | arm64)
+            archive_arch=arm64
+            checksum=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec
+            ;;
+        *)
+            printf 'Unsupported Linux architecture for Go: %s\n' "$(uname -m)" >&2
+            return 1
+            ;;
+    esac
+
+    local temporary archive destination
+    temporary="$(mktemp -d)"
+    trap 'rm -rf "$temporary"' EXIT
+    archive="$temporary/go.tar.gz"
+    destination="$local_opt/go-$go_version"
+    download_verified \
+        "https://go.dev/dl/go$go_version.linux-$archive_arch.tar.gz" \
+        "$checksum" \
+        "$archive"
+    tar -xzf "$archive" -C "$temporary"
+    rm -rf "$destination"
+    mv "$temporary/go" "$destination"
+    ln -sfn "$destination/bin/go" "$local_bin/go"
+    ln -sfn "$destination/bin/gofmt" "$local_bin/gofmt"
+)
+
+persist_path() {
+    local marker='# Rui orb toolchain'
+    local profile="$HOME/.bash_profile"
+    [[ -e "$profile" ]] || profile="$HOME/.profile"
+    touch "$profile"
+    if ! grep -Fqx "$marker" "$profile"; then
+        cat >>"$profile" <<'EOF'
+
+# Rui orb toolchain
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+EOF
+    fi
+}
+
+mkdir -p "$local_bin" "$local_opt"
+
+step 'Installing system packages'
+install_system_packages
+
+step 'Installing pinned toolchains'
+install_zig
+install_go
+persist_path
+export PATH="$local_bin:$PATH"
+
+step 'Fetching pinned Zig dependencies'
+openssl_hash="$(zig fetch --global-cache-dir "$HOME/.cache/zig" \
+    https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz)"
+[[ "$openssl_hash" == N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM ]]
+(cd "$repo_root" && zig build --global-cache-dir "$HOME/.cache/zig" --fetch=all)
+
+step 'Fetching pinned Go measurement dependencies'
+GOTOOLCHAIN=local go -C "$repo_root/tests/qualification" mod download
+
+step 'Orb setup complete'
+zig version
+go version
