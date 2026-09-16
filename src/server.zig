@@ -1119,6 +1119,10 @@ const ControlTiming = struct {
         var candidates = std.mem.splitScalar(u8, keys, ',');
         while (candidates.next()) |candidate| {
             if (!std.mem.eql(u8, candidate, self.command_key)) continue;
+            // Integration tests deliberately hold this acquired Store mutex
+            // until a competing control reaches lock_requested. Their keeper
+            // descriptor prevents FIFO-open deadlock; process teardown bounds
+            // a missing release without granting this gate semantic authority.
             var gate = std.Io.Dir.cwd().openFile(self.host.io, path, .{}) catch return;
             defer gate.close(self.host.io);
             var release: [1]u8 = undefined;

@@ -580,6 +580,7 @@ def main():
     proposal_endpoint = None
     proposal_thread = None
     proposal_milestones = None
+    proposal_gate_keeper = None
     completed = False
     try:
         forbidden_effect = state / "proposal-must-not-launch"
@@ -643,6 +644,9 @@ def main():
         processes.remove(proposal_host)
         control_gate = state / "proposal-control-gate"
         os.mkfifo(control_gate)
+        # Keep both FIFO ends present so neither the Host reader nor fixture
+        # writer can hang during open if its peer fails between milestones.
+        proposal_gate_keeper = os.open(control_gate, os.O_RDWR | os.O_NONBLOCK)
         proposal_host = start_host(
             proposal_store,
             proposal_url,
@@ -771,6 +775,8 @@ def main():
         processes.remove(proposal_host)
         proposal_milestones.close()
         proposal_milestones = None
+        os.close(proposal_gate_keeper)
+        proposal_gate_keeper = None
 
         first_answer = 'First "answer"\n🙂'.encode()
         second_answer = ("second answer " + "x" * 5000).encode()
@@ -3775,6 +3781,8 @@ def main():
             proposal_thread.join(timeout=5)
         if proposal_milestones is not None:
             proposal_milestones.close()
+        if proposal_gate_keeper is not None:
+            os.close(proposal_gate_keeper)
         if completed:
             shutil.rmtree(state)
         else:
