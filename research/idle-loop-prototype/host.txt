@@ -1,6 +1,0 @@
-Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64
-Apple M1 Pro
-Apple clang version 17.0.0 (clang-1700.0.13.5)
-Target: arm64-apple-darwin24.6.0
-Thread model: posix
-InstalledDir: /Library/Developer/CommandLineTools/usr/bin
