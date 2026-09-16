@@ -1,0 +1,33 @@
+# Proportionate testing evidence
+
+Research date: 2026-09-16. Primary-source guidance and recommendations for discussion, not an accepted contract, replacement qualification or runtime evidence. No tests were run. ARCHITECTURE.md and VERIFICATION.md remain the behavior and proof owners.
+
+## Findings from primary sources
+
+| Source | Finding and relevance |
+| --- | --- |
+| Google, [Testing for Reliability](https://sre.google/sre-book/testing-reliability/), sections “Traditional Tests” and “Creating a Test and Build Environment” | Testing effort depends on reliability requirements. Tests consume engineering time and compute; Google recommends starting where impact is greatest for the effort, prioritizing critical behavior and turning discovered bugs into regression tests. Integration tests exercise assembled components; performance tests detect unacceptable cost or slowdown. This supports a small assembled caller-flow suite and targeted failure cases, rather than making every diagnostic a release gate. |
+| Google, [Implementing SLOs](https://sre.google/workbook/implementing-slos/), sections “What to Measure,” “Moving from SLI Specification to SLI Implementation” and “Continuous Improvement” | Define user outcomes separately from their measurement. Start with common tasks and critical activities, a small number of indicators, and measurements requiring minimal engineering. Improve them when they miss user pain or report violations unrelated to user experience. This supports choosing Latifa's practical responsiveness and resource expectations before refining fixture timing. It does not supply numeric targets for this runtime. |
+| Google, [Embracing Risk](https://sre.google/sre-book/embracing-risk/), sections “Managing Risk” and “Risk Tolerance of Services” | Reliability improvements have resource and opportunity costs. The appropriate tolerance follows product needs; optimizing every metric to its maximum can consume effort better spent elsewhere. Different workloads legitimately prefer different latency/throughput tradeoffs. This supports explicitly accepting bounded uncertainty, without claiming unmeasured properties have passed. Availability error budgets do not automatically justify relaxing durable-data invariants. |
+| Google Testing Blog, [Test Flakiness](https://testing.googleblog.com/2020/12/test-flakiness-one-of-main-challenges.html), 2020-12-16 | Sources of nondeterminism include tests, test frameworks, production code and dependencies, and OS/hardware. Timing assumptions and insufficient resources can cause failures; production races and leaks can too. Therefore an intermittent timing failure cannot be classified as harmless machine noise merely because output is eventually correct. |
+| Brendan Gregg, [Evaluating the Evaluation: A Benchmarking Checklist](https://www.brendangregg.com/blog/2018-06-30/benchmarking-checklist.html), 2018-06-30 | Benchmark review should establish the limiting resource, errors, reproducibility, real-world relevance and whether the intended activity occurred. Unrelated system work and caching can perturb results. The useful lesson here is to restrict the claim to work actually delivered and ask whether tighter pacing answers a product question before investing in benchmark machinery. |
+| SQLite, [How SQLite Is Tested](https://www.sqlite.org/testing.html), sections 3.1–3.4 and 5 | SQLite injects allocation and I/O failures, checks database integrity after faults, and simulates crash states to verify complete commit or rollback. It separately checks resource leaks. These are examples of outcome-based failure oracles: inspect the durable state and resource lifecycle after the fault. SQLite's unusually extensive suite is not a suggested infrastructure budget for Latifa; upstream evidence also does not prove Latifa's transaction boundaries or external-effect handling. |
+
+## Recommendations to discuss
+
+These are interpretations of the sources, not requirements from them or changes to Latifa's contract.
+
+1. **Keep a small strict core.** Check completed work, saved-result reuse, correct retry inputs, atomic visibility, budget conservation and resource release through the public caller flow and its important failure boundaries. A lost result or incorrectly repeated effect deserves investigation even if rare.
+2. **Measure the product experience.** For a declared workload, measure completion, stop/control responsiveness, memory at peak and after repeated fill/drain, and absence of hangs. Use the existing runner and evidence wherever adequate. Select workload and acceptable times with the user; do not infer a required per-chunk deadline from a fixture's timer.
+3. **Give each result its own status.** Correctness can pass while a performance measurement is inconclusive. Conversely, low memory does not prove the intended offered load was sustained. A report can preserve both facts without forcing one pass/fail bit to carry every claim.
+4. **Make one bounded attribution attempt when it changes a decision.** For an unexplained timing miss, compare once under a quieter environment or against a simple receiver, using available instrumentation. If no product goal depends on that precision, record the uncertainty and defer deeper work. Do not repeatedly rerun until green.
+5. **Use explicit assumptions to stop.** A supported environment, representative workload envelope and documented exclusions can make qualification finite. Accepting these assumptions narrows the promise; it does not establish the excluded behavior.
+
+### Application to the reported failures
+
+The descriptions below come from the current discussion and were not independently reproduced for this research.
+
+- **Recovery ends before twenty samples:** separately assess recovered state and completion. If twenty observations are needed to characterize resource or control behavior, report that measurement as insufficient. Do not slow successful recovery merely to satisfy a sample counter. A smaller deterministic check at the important recovery boundary may answer the actual correctness question.
+- **Capacity 100 exceeds a stream-gap limit:** preserve the successful result and cleanup evidence, but do not claim sustained-load CPU qualification from a workload whose requested timing was not delivered. Decide whether the product needs strict per-stream pacing. If it only needs practical completion and responsive controls while 100 operations are active, qualification can be framed around those outcomes after an explicit contract decision.
+
+The sources do not establish that either failure is caused by the machine, nor do they establish that the current implementation meets an unstated product goal.
