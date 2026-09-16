@@ -277,6 +277,8 @@ Edit owns target/scratch/buffers/offsets/cleanup within one trusted in-process m
 
 Relational constraints enforce identities, parentage, ordering, message projection uniqueness, one active Turn per Session, one terminal Turn outcome, one optional final Resolution per Operation, exact request bindings and content publication with its first durable reference. No ledger/reducer image, permanent Completion, separate Resolution ID, cached lifecycle phase or shadow frontier duplicates authority. Unreleased databases/fixtures are recreated: no migration, compatibility reader, dual-write or alias layer.
 
+Implement the redesigned runtime on a fresh branch with the old production code removed. Preserve revision `6a9b9b7aa993c853f0ff998533ab5aa3e74fe719` in Git as the reference for selective extraction; the old runtime is not a production fallback. Retain the accepted contract, verification requirements and research evidence. Assess build setup, dependency integration and tests individually against this contract rather than preserving obsolete interfaces or behavior. The first implementation slice must complete an ordinary caller flow and its failure/recovery boundaries; removing old code is preparation within that slice, not a separate completion milestone.
+
 One meaningful mutation owns one cohesive function: bounded syntax/content validation; reserve custody if admitting execution; `BEGIN IMMEDIATE`; bounded current-state checks and guarded writes; verify affected rows; commit; release consequence. State-dependent checks stay inside. Rollback releases unused reservation and grants no dispatch. Private helpers may simplify calculation/query mechanics without a mandatory classifier framework.
 
 ### Admitting an attempt

@@ -2,6 +2,8 @@
 
 [ARCHITECTURE.md](ARCHITECTURE.md) defines behavior; this document defines evidence required to claim it. Exercise production interfaces, real SQLite transactions and independent expected results. Crash tests terminate a fixture process and reopen in a fresh process; injected returned errors are fault tests, not crash evidence. Record tested revision, machine, dependency versions, inputs and measurements. Prototypes, source inspection, compilation and accepted decisions are not production qualification; [research evidence](research/README.md) retains their scope and limitations.
 
+For clean-start implementation, verify that the production build graph contains only the redesigned path and deliberately retained dependencies. Classify extracted tests against the accepted contract; obsolete behavior is not a compatibility requirement. The first complete slice must prove original request-answer recovery, no dispatch after rollback, indeterminate tool outcomes without replay after lost custody, safe delayed cleanup and isolation of old request bindings from later Turns.
+
 ## Canonical gates
 
 Confirm commands in [build.zig](build.zig). `zig build check` covers source validation, native ReleaseSafe tests and ReleaseSmall deliverables. Evaluator/protocol/QuickJS/build-graph changes also run `zig build workflow-check`, including applicable sanitizer, mutation/property, fuzz and leak checks. Dependency, build, persisted-format and CI-bootstrap changes additionally run from an empty cache. Documentation-only changes check references, consistency and `git diff --check`.
@@ -183,6 +185,6 @@ Verify configurable **128 MiB** retained history, at most **16 files** including
 
 Hold export delivery open across diagnostic rotation and inject partial record/chunk writes. Source handles close between bounded export turns; exported scratch stays charged through its last pending delivery read. Count concurrent exports against ordinary client capacity, including failed construction and rotation overlap. Fail export scratch and log deletion independently: neither changes committed execution, and neither reports incomplete output as complete.
 
-Package under the approved final project identity; verify executable/package names, state and credential identifiers, build/distribution references and fixtures without losing existing user data.
+Package under the approved final project identity; verify executable/package names, state and credential identifiers, build/distribution references and fixtures without unintended deletion or overwrite of unrelated user files or credentials. Unreleased semantic Stores follow the clean-start rule above; packaging does not imply migration compatibility.
 
 Release demonstrations cover explicit start, no-client progress, restart, direct Sessions, first configuration, cross-Run inspected-key reuse, fan-out/joins, permissions, ordered tools, uncertain Bash/Edit and shared cancellation. Independent native/Cloudflare walkthroughs may expose hidden coupling; they add no embedding/cloud release requirement. Keep evidence attached to the real owners and label remaining gaps before claiming release readiness.
