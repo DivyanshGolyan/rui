@@ -1,6 +1,6 @@
 {
   "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
-  "source_commit": "3bdadc8395716e587f3da11f0b85ecdb3b91274a",
+  "source_commit": "02a0382aab5c61c4bf9474e7fc1e0c2f8addf546",
   "sqlite_package": "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
   "sqlite_macros": [
     "-DSQLITE_THREADSAFE=0",
@@ -33,7 +33,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 60.668,
+          "ms": 60.775,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -41,7 +41,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 57.597,
+          "ms": 60.83,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -49,7 +49,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 56.148,
+          "ms": 60.616,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -57,7 +57,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 61.184,
+          "ms": 62.791,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -65,7 +65,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 60.387,
+          "ms": 59.733,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -73,7 +73,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 61.435,
+          "ms": 63.527,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -81,7 +81,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 62.075,
+          "ms": 62.555,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -89,7 +89,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 64.36,
+          "ms": 64.473,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -97,16 +97,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 61.909,
-        "dispatch_marker_ms": 61.909,
-        "settlement_ack_ms": 62.522,
+        "control_ack_ms": 61.931,
+        "dispatch_marker_ms": 61.931,
+        "settlement_ack_ms": 62.487,
         "complete": 0,
         "failed": 8,
         "total_scratch_written": 438088,
         "peak_logical_scratch": 54761,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1360704,
+        "footprint_after_churn": 1262272,
         "sqlite": "3.53.4"
       }
     },
@@ -124,7 +124,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 4.07,
+          "ms": 3.629,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -132,7 +132,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 1.978,
+          "ms": 3.494,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -140,7 +140,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 1.731,
+          "ms": 3.236,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -148,7 +148,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 1.882,
+          "ms": 3.223,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -156,7 +156,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 2.658,
+          "ms": 2.994,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -164,7 +164,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 2.787,
+          "ms": 3.017,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -172,7 +172,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 2.741,
+          "ms": 2.956,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -180,7 +180,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 2.669,
+          "ms": 2.959,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -188,16 +188,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 4.801,
-        "dispatch_marker_ms": 4.801,
-        "settlement_ack_ms": 5.426,
+        "control_ack_ms": 4.387,
+        "dispatch_marker_ms": 4.387,
+        "settlement_ack_ms": 4.937,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 4387608,
         "peak_logical_scratch": 1096902,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1213184,
+        "footprint_after_churn": 1196672,
         "sqlite": "3.53.4"
       }
     },
@@ -215,7 +215,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 3.324,
+          "ms": 3.526,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -223,7 +223,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 3.366,
+          "ms": 3.806,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -231,7 +231,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 3.56,
+          "ms": 4.216,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -239,7 +239,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 3.39,
+          "ms": 4.001,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -247,7 +247,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 3.518,
+          "ms": 3.643,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -255,7 +255,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 3.309,
+          "ms": 4.117,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -263,7 +263,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 3.43,
+          "ms": 4.055,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -271,7 +271,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 3.46,
+          "ms": 4.027,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -279,16 +279,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 4.123,
-        "dispatch_marker_ms": 4.123,
-        "settlement_ack_ms": 4.538,
+        "control_ack_ms": 4.611,
+        "dispatch_marker_ms": 4.611,
+        "settlement_ack_ms": 5.092,
         "complete": 0,
         "failed": 8,
         "total_scratch_written": 8783344,
         "peak_logical_scratch": 1097918,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1114688,
+        "footprint_after_churn": 1196672,
         "sqlite": "3.53.4"
       }
     },
@@ -306,7 +306,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 60.585,
+          "ms": 57.95,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -314,7 +314,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 60.482,
+          "ms": 60.453,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -322,7 +322,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 59.027,
+          "ms": 60.491,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -330,7 +330,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 61.072,
+          "ms": 52.337,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -338,7 +338,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 61.006,
+          "ms": 60.592,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -346,7 +346,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 62.767,
+          "ms": 55.477,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -354,7 +354,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 61.915,
+          "ms": 57.493,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -362,7 +362,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 59.828,
+          "ms": 63.847,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -370,16 +370,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 61.602,
-        "dispatch_marker_ms": 61.602,
-        "settlement_ack_ms": 62.163,
+        "control_ack_ms": 58.713,
+        "dispatch_marker_ms": 58.713,
+        "settlement_ack_ms": 59.391,
         "complete": 0,
         "failed": 8,
         "total_scratch_written": 438088,
         "peak_logical_scratch": 54761,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1114688,
+        "footprint_after_churn": 1245824,
         "sqlite": "3.53.4"
       }
     },
@@ -397,80 +397,80 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 10.112,
-          "bytes": 3570668,
-          "rows": 6500,
+          "ms": 10.16,
+          "bytes": 3625608,
+          "rows": 6600,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 10.107,
-          "bytes": 3680562,
-          "rows": 6700,
+          "ms": 10.085,
+          "bytes": 3625608,
+          "rows": 6600,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 10.02,
-          "bytes": 3680562,
-          "rows": 6700,
-          "aborted": true
-        },
-        {
-          "event": "capture",
-          "ordinal": 3,
-          "ms": 10.04,
+          "ms": 10.024,
           "bytes": 3515712,
           "rows": 6400,
           "aborted": true
         },
         {
           "event": "capture",
-          "ordinal": 4,
-          "ms": 10.068,
-          "bytes": 3570668,
-          "rows": 6500,
+          "ordinal": 3,
+          "ms": 10.061,
+          "bytes": 3845412,
+          "rows": 7000,
           "aborted": true
         },
         {
           "event": "capture",
-          "ordinal": 5,
-          "ms": 10.046,
+          "ordinal": 4,
+          "ms": 10.054,
           "bytes": 3295908,
           "rows": 6000,
           "aborted": true
         },
         {
           "event": "capture",
+          "ordinal": 5,
+          "ms": 10.076,
+          "bytes": 3460758,
+          "rows": 6300,
+          "aborted": true
+        },
+        {
+          "event": "capture",
           "ordinal": 6,
-          "ms": 10.094,
-          "bytes": 3570668,
-          "rows": 6500,
+          "ms": 10.033,
+          "bytes": 3240968,
+          "rows": 5900,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 10.094,
-          "bytes": 3735518,
-          "rows": 6800,
+          "ms": 10.193,
+          "bytes": 3076118,
+          "rows": 5600,
           "aborted": true
         }
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 11.185,
-        "dispatch_marker_ms": 11.185,
-        "settlement_ack_ms": 11.666,
+        "control_ack_ms": 12.839,
+        "dispatch_marker_ms": 12.839,
+        "settlement_ack_ms": 13.182,
         "complete": 0,
         "failed": 8,
-        "total_scratch_written": 28620266,
-        "peak_logical_scratch": 3735518,
+        "total_scratch_written": 27686092,
+        "peak_logical_scratch": 3845412,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1114688,
+        "footprint_after_churn": 1278656,
         "sqlite": "3.53.4"
       }
     },
@@ -488,7 +488,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 10.227,
+          "ms": 10.493,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -496,7 +496,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 10.198,
+          "ms": 10.475,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -504,7 +504,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 10.229,
+          "ms": 10.711,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -512,7 +512,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 10.339,
+          "ms": 10.575,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -520,7 +520,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 10.36,
+          "ms": 10.414,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -528,7 +528,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 10.432,
+          "ms": 10.552,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -536,7 +536,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 10.424,
+          "ms": 10.433,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -544,7 +544,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 10.422,
+          "ms": 10.528,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -552,16 +552,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 10.918,
-        "dispatch_marker_ms": 10.918,
-        "settlement_ack_ms": 11.325,
+        "control_ack_ms": 11.141,
+        "dispatch_marker_ms": 11.141,
+        "settlement_ack_ms": 11.592,
         "complete": 0,
         "failed": 8,
         "total_scratch_written": 2632056,
         "peak_logical_scratch": 329007,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1049152,
+        "footprint_after_churn": 1278592,
         "sqlite": "3.53.4"
       }
     },
@@ -579,7 +579,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 3.548,
+          "ms": 3.356,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -587,7 +587,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 3.34,
+          "ms": 3.122,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -595,7 +595,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 3.486,
+          "ms": 3.595,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -603,7 +603,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 3.605,
+          "ms": 3.729,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -611,7 +611,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 4.347,
+          "ms": 3.755,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -619,7 +619,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 3.191,
+          "ms": 3.429,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -627,7 +627,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 3.536,
+          "ms": 3.542,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -635,7 +635,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 3.791,
+          "ms": 3.566,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -643,16 +643,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 4.386,
-        "dispatch_marker_ms": 4.386,
-        "settlement_ack_ms": 4.842,
+        "control_ack_ms": 4.444,
+        "dispatch_marker_ms": 4.445,
+        "settlement_ack_ms": 4.882,
         "complete": 0,
         "failed": 8,
         "total_scratch_written": 8783344,
         "peak_logical_scratch": 1097918,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1147456,
+        "footprint_after_churn": 1245824,
         "sqlite": "3.53.4"
       }
     },
@@ -670,7 +670,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 26.258,
+          "ms": 24.353,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -678,7 +678,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 25.941,
+          "ms": 24.983,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -686,7 +686,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 25.423,
+          "ms": 25.845,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -694,7 +694,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 25.475,
+          "ms": 25.332,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -702,7 +702,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 25.362,
+          "ms": 26.683,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -710,7 +710,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 24.628,
+          "ms": 24.547,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -718,7 +718,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 24.631,
+          "ms": 24.317,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -726,7 +726,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 24.389,
+          "ms": 25.468,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -734,16 +734,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 26.983,
-        "dispatch_marker_ms": 26.983,
-        "settlement_ack_ms": 27.463,
+        "control_ack_ms": 24.928,
+        "dispatch_marker_ms": 24.928,
+        "settlement_ack_ms": 25.307,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1327808,
+        "footprint_after_churn": 1196672,
         "sqlite": "3.53.4"
       }
     },
@@ -761,7 +761,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 13.725,
+          "ms": 19.263,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -769,7 +769,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 13.703,
+          "ms": 15.326,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -777,7 +777,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 15.711,
+          "ms": 25.989,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -785,7 +785,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 14.846,
+          "ms": 16.317,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -793,7 +793,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 14.799,
+          "ms": 14.931,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -801,7 +801,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 13.967,
+          "ms": 14.616,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -809,7 +809,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 14.398,
+          "ms": 14.895,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -817,7 +817,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 14.169,
+          "ms": 14.676,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -825,16 +825,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 14.281,
-        "dispatch_marker_ms": 14.281,
-        "settlement_ack_ms": 14.651,
+        "control_ack_ms": 19.821,
+        "dispatch_marker_ms": 19.821,
+        "settlement_ack_ms": 20.176,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1180288,
+        "footprint_after_churn": 1229568,
         "sqlite": "3.53.4"
       }
     },
@@ -852,7 +852,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 164.913,
+          "ms": 172.878,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -860,7 +860,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 165.052,
+          "ms": 156.085,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -868,7 +868,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 169.473,
+          "ms": 169.452,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -876,7 +876,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 182.314,
+          "ms": 170.793,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -884,7 +884,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 180.005,
+          "ms": 170.361,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -892,7 +892,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 160.692,
+          "ms": 166.939,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -900,7 +900,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 149.375,
+          "ms": 172.713,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -908,7 +908,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 170.59,
+          "ms": 173.257,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -916,9 +916,9 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 165.629,
-        "dispatch_marker_ms": 165.629,
-        "settlement_ack_ms": 166.063,
+        "control_ack_ms": 173.488,
+        "dispatch_marker_ms": 173.488,
+        "settlement_ack_ms": 173.894,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 440311640,
@@ -943,80 +943,80 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 10.114,
+          "ms": 10.133,
+          "bytes": 3570668,
+          "rows": 6500,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 10.078,
           "bytes": 3405818,
           "rows": 6200,
           "aborted": true
         },
         {
           "event": "capture",
-          "ordinal": 1,
-          "ms": 10.032,
-          "bytes": 3625608,
-          "rows": 6600,
-          "aborted": true
-        },
-        {
-          "event": "capture",
           "ordinal": 2,
-          "ms": 10.022,
-          "bytes": 3570668,
-          "rows": 6500,
+          "ms": 10.025,
+          "bytes": 3350862,
+          "rows": 6100,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 10.058,
-          "bytes": 3570668,
-          "rows": 6500,
+          "ms": 10.11,
+          "bytes": 3295908,
+          "rows": 6000,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 10.02,
-          "bytes": 3460758,
-          "rows": 6300,
+          "ms": 10.162,
+          "bytes": 3405818,
+          "rows": 6200,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 10.126,
-          "bytes": 3570668,
-          "rows": 6500,
+          "ms": 10.068,
+          "bytes": 3295908,
+          "rows": 6000,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 10.011,
-          "bytes": 3460758,
-          "rows": 6300,
+          "ms": 10.035,
+          "bytes": 3295908,
+          "rows": 6000,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 10.131,
-          "bytes": 3570668,
-          "rows": 6500,
+          "ms": 10.142,
+          "bytes": 3350862,
+          "rows": 6100,
           "aborted": true
         }
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 11.141,
-        "dispatch_marker_ms": 11.141,
-        "settlement_ack_ms": 11.657,
+        "control_ack_ms": 11.916,
+        "dispatch_marker_ms": 11.916,
+        "settlement_ack_ms": 12.373,
         "complete": 0,
         "failed": 8,
-        "total_scratch_written": 28235614,
-        "peak_logical_scratch": 3625608,
+        "total_scratch_written": 26971752,
+        "peak_logical_scratch": 3570668,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1114688,
+        "footprint_after_churn": 1180288,
         "sqlite": "3.53.4"
       }
     },
@@ -1034,7 +1034,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 13.998,
+          "ms": 14.262,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1042,7 +1042,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 13.473,
+          "ms": 14.149,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1050,7 +1050,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 14.014,
+          "ms": 16.285,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1058,7 +1058,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 14.046,
+          "ms": 14.716,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1066,7 +1066,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 14.106,
+          "ms": 14.688,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1074,7 +1074,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 15.233,
+          "ms": 14.805,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1082,7 +1082,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 13.901,
+          "ms": 14.424,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1090,7 +1090,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 14.011,
+          "ms": 24.516,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1098,16 +1098,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 14.48,
-        "dispatch_marker_ms": 14.48,
-        "settlement_ack_ms": 14.843,
+        "control_ack_ms": 14.888,
+        "dispatch_marker_ms": 14.888,
+        "settlement_ack_ms": 15.341,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1114752,
+        "footprint_after_churn": 1196672,
         "sqlite": "3.53.4"
       }
     },
@@ -1125,7 +1125,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 10.298,
+          "ms": 10.24,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -1133,7 +1133,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 10.173,
+          "ms": 10.18,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -1141,7 +1141,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 10.371,
+          "ms": 10.178,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -1149,7 +1149,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 10.319,
+          "ms": 10.143,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -1157,7 +1157,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 10.351,
+          "ms": 10.187,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -1165,15 +1165,15 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 11.583,
-          "bytes": 383861,
-          "rows": 700,
+          "ms": 10.146,
+          "bytes": 329007,
+          "rows": 600,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 10.538,
+          "ms": 10.202,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -1181,7 +1181,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 10.55,
+          "ms": 10.149,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -1189,16 +1189,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 11.034,
-        "dispatch_marker_ms": 11.034,
-        "settlement_ack_ms": 11.438,
+        "control_ack_ms": 11.007,
+        "dispatch_marker_ms": 11.007,
+        "settlement_ack_ms": 11.465,
         "complete": 0,
         "failed": 8,
-        "total_scratch_written": 2686910,
-        "peak_logical_scratch": 383861,
+        "total_scratch_written": 2632056,
+        "peak_logical_scratch": 329007,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1114688,
+        "footprint_after_churn": 1049152,
         "sqlite": "3.53.4"
       }
     },
@@ -1216,7 +1216,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 160.067,
+          "ms": 155.882,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1224,7 +1224,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 155.627,
+          "ms": 165.526,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1232,7 +1232,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 163.91,
+          "ms": 181.884,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1240,7 +1240,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 157.677,
+          "ms": 156.932,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1248,7 +1248,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 163.009,
+          "ms": 155.79,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1256,7 +1256,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 158.972,
+          "ms": 151.642,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1264,7 +1264,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 158.366,
+          "ms": 173.477,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1272,7 +1272,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 158.892,
+          "ms": 200.427,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1280,16 +1280,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 160.807,
-        "dispatch_marker_ms": 160.807,
-        "settlement_ack_ms": 161.31,
+        "control_ack_ms": 156.547,
+        "dispatch_marker_ms": 156.547,
+        "settlement_ack_ms": 157.019,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 440311640,
         "peak_logical_scratch": 110077910,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1229440,
+        "footprint_after_churn": 1196672,
         "sqlite": "3.53.4"
       }
     },
@@ -1307,7 +1307,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 33.801,
+          "ms": 24.343,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1315,7 +1315,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 23.324,
+          "ms": 24.843,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1323,7 +1323,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 23.578,
+          "ms": 24.761,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1331,7 +1331,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 23.564,
+          "ms": 24.61,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1339,7 +1339,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 23.503,
+          "ms": 24.474,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1347,7 +1347,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 23.482,
+          "ms": 24.729,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1355,7 +1355,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 24.322,
+          "ms": 24.842,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1363,7 +1363,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 25.074,
+          "ms": 24.908,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1371,16 +1371,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 34.426,
-        "dispatch_marker_ms": 34.426,
-        "settlement_ack_ms": 34.805,
+        "control_ack_ms": 24.905,
+        "dispatch_marker_ms": 24.905,
+        "settlement_ack_ms": 25.32,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1180288,
+        "footprint_after_churn": 1262272,
         "sqlite": "3.53.4"
       }
     },
@@ -1398,80 +1398,80 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 10.132,
-          "bytes": 3680562,
-          "rows": 6700,
+          "ms": 10.081,
+          "bytes": 3405818,
+          "rows": 6200,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 10.119,
-          "bytes": 3625608,
-          "rows": 6600,
+          "ms": 10.012,
+          "bytes": 3405818,
+          "rows": 6200,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 10.04,
-          "bytes": 3460758,
-          "rows": 6300,
+          "ms": 10.135,
+          "bytes": 3295908,
+          "rows": 6000,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 10.017,
-          "bytes": 3460758,
-          "rows": 6300,
+          "ms": 10.328,
+          "bytes": 2911268,
+          "rows": 5300,
           "aborted": true
         },
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 10.07,
+          "ms": 10.16,
+          "bytes": 3350862,
+          "rows": 6100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 10.153,
+          "bytes": 3405818,
+          "rows": 6200,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 10.157,
           "bytes": 3515712,
           "rows": 6400,
           "aborted": true
         },
         {
           "event": "capture",
-          "ordinal": 5,
-          "ms": 10.079,
-          "bytes": 3570668,
-          "rows": 6500,
-          "aborted": true
-        },
-        {
-          "event": "capture",
-          "ordinal": 6,
-          "ms": 10.07,
-          "bytes": 3570668,
-          "rows": 6500,
-          "aborted": true
-        },
-        {
-          "event": "capture",
           "ordinal": 7,
-          "ms": 10.091,
-          "bytes": 3570668,
-          "rows": 6500,
+          "ms": 10.011,
+          "bytes": 3460758,
+          "rows": 6300,
           "aborted": true
         }
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 11.195,
-        "dispatch_marker_ms": 11.195,
-        "settlement_ack_ms": 11.587,
+        "control_ack_ms": 11.178,
+        "dispatch_marker_ms": 11.178,
+        "settlement_ack_ms": 11.534,
         "complete": 0,
         "failed": 8,
-        "total_scratch_written": 28455402,
-        "peak_logical_scratch": 3680562,
+        "total_scratch_written": 26751962,
+        "peak_logical_scratch": 3515712,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1114688,
+        "footprint_after_churn": 1213056,
         "sqlite": "3.53.4"
       }
     },
@@ -1489,7 +1489,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 15.052,
+          "ms": 15.193,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1497,7 +1497,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 15.113,
+          "ms": 15.018,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1505,7 +1505,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 15.812,
+          "ms": 15.688,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1513,7 +1513,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 15.642,
+          "ms": 16.353,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1521,7 +1521,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 15.638,
+          "ms": 15.818,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1529,7 +1529,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 15.576,
+          "ms": 15.646,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1537,7 +1537,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 15.555,
+          "ms": 15.539,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1545,7 +1545,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 15.623,
+          "ms": 15.92,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1553,16 +1553,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 15.619,
-        "dispatch_marker_ms": 15.619,
-        "settlement_ack_ms": 131.24,
+        "control_ack_ms": 15.774,
+        "dispatch_marker_ms": 15.774,
+        "settlement_ack_ms": 132.317,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1147456,
+        "footprint_after_churn": 1114688,
         "sqlite": "3.53.4"
       }
     },
@@ -1580,7 +1580,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 161.394,
+          "ms": 152.859,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1588,7 +1588,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 150.016,
+          "ms": 155.92,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1596,7 +1596,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 156.662,
+          "ms": 160.07,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1604,7 +1604,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 180.834,
+          "ms": 163.349,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1612,7 +1612,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 213.031,
+          "ms": 162.344,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1620,7 +1620,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 286.864,
+          "ms": 156.963,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1628,7 +1628,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 199.574,
+          "ms": 163.955,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1636,7 +1636,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 173.256,
+          "ms": 178.254,
           "bytes": 55038955,
           "rows": 100000,
           "aborted": false
@@ -1644,16 +1644,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 161.942,
-        "dispatch_marker_ms": 161.942,
-        "settlement_ack_ms": 162.292,
+        "control_ack_ms": 153.549,
+        "dispatch_marker_ms": 153.55,
+        "settlement_ack_ms": 153.943,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 440311640,
         "peak_logical_scratch": 110077910,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1245824,
+        "footprint_after_churn": 1180288,
         "sqlite": "3.53.4"
       }
     },
@@ -1671,7 +1671,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 2.021,
+          "ms": 1.927,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -1679,7 +1679,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 1.714,
+          "ms": 1.702,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -1687,7 +1687,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 2.032,
+          "ms": 2.084,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -1695,7 +1695,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 1.872,
+          "ms": 1.999,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -1703,7 +1703,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 1.944,
+          "ms": 2.061,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -1711,7 +1711,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 2.001,
+          "ms": 1.971,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -1719,7 +1719,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 1.962,
+          "ms": 2.235,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -1727,7 +1727,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 1.969,
+          "ms": 1.944,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -1735,16 +1735,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 2.576,
-        "dispatch_marker_ms": 2.576,
-        "settlement_ack_ms": 2.967,
+        "control_ack_ms": 2.411,
+        "dispatch_marker_ms": 2.411,
+        "settlement_ack_ms": 2.737,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 4387608,
         "peak_logical_scratch": 1096902,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1196672,
+        "footprint_after_churn": 1180288,
         "sqlite": "3.53.4"
       }
     },
@@ -1762,7 +1762,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 51.687,
+          "ms": 60.403,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -1770,7 +1770,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 58.934,
+          "ms": 50.87,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -1778,7 +1778,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 62.655,
+          "ms": 60.432,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -1786,7 +1786,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 54.016,
+          "ms": 55.732,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -1794,7 +1794,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 60.544,
+          "ms": 57.77,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -1802,7 +1802,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 56.472,
+          "ms": 57.802,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -1810,7 +1810,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 60.802,
+          "ms": 57.816,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -1818,7 +1818,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 58.947,
+          "ms": 60.945,
           "bytes": 54761,
           "rows": 100,
           "aborted": true
@@ -1826,16 +1826,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 52.826,
-        "dispatch_marker_ms": 52.826,
-        "settlement_ack_ms": 53.316,
+        "control_ack_ms": 61.481,
+        "dispatch_marker_ms": 61.481,
+        "settlement_ack_ms": 61.918,
         "complete": 0,
         "failed": 8,
         "total_scratch_written": 438088,
         "peak_logical_scratch": 54761,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1114688,
+        "footprint_after_churn": 1114752,
         "sqlite": "3.53.4"
       }
     },
@@ -1853,7 +1853,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 14.932,
+          "ms": 15.561,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1861,7 +1861,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 14.531,
+          "ms": 15.497,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1869,7 +1869,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 15.859,
+          "ms": 15.671,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1877,7 +1877,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 15.831,
+          "ms": 15.833,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1885,7 +1885,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 15.487,
+          "ms": 15.471,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1893,7 +1893,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 15.703,
+          "ms": 16.231,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1901,7 +1901,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 15.443,
+          "ms": 16.464,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1909,7 +1909,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 15.806,
+          "ms": 16.243,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1917,16 +1917,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 15.4,
-        "dispatch_marker_ms": 15.4,
-        "settlement_ack_ms": 15.73,
+        "control_ack_ms": 16.242,
+        "dispatch_marker_ms": 16.242,
+        "settlement_ack_ms": 16.699,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1164032,
+        "footprint_after_churn": 1229440,
         "sqlite": "3.53.4"
       }
     },
@@ -1944,7 +1944,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 18.684,
+          "ms": 15.034,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1952,7 +1952,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 16.941,
+          "ms": 14.655,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1960,7 +1960,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 16.662,
+          "ms": 15.534,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1968,7 +1968,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 17.456,
+          "ms": 15.411,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1976,7 +1976,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 16.57,
+          "ms": 16.001,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1984,7 +1984,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 17.506,
+          "ms": 15.583,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -1992,7 +1992,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 15.229,
+          "ms": 15.39,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2000,7 +2000,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 15.043,
+          "ms": 15.398,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2008,16 +2008,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 19.61,
-        "dispatch_marker_ms": 19.611,
-        "settlement_ack_ms": 19.978,
+        "control_ack_ms": 15.604,
+        "dispatch_marker_ms": 15.604,
+        "settlement_ack_ms": 16.0,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1278592,
+        "footprint_after_churn": 1262208,
         "sqlite": "3.53.4"
       }
     },
@@ -2035,7 +2035,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 757.683,
+          "ms": 780.669,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2043,7 +2043,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 884.963,
+          "ms": 986.137,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2051,7 +2051,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 934.191,
+          "ms": 805.555,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2059,7 +2059,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 857.823,
+          "ms": 939.771,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2067,7 +2067,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 884.249,
+          "ms": 767.862,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2075,7 +2075,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 801.932,
+          "ms": 844.053,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2083,7 +2083,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 822.756,
+          "ms": 844.586,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2091,7 +2091,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 761.695,
+          "ms": 811.429,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2099,9 +2099,9 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 758.423,
-        "dispatch_marker_ms": 758.423,
-        "settlement_ack_ms": 758.84,
+        "control_ack_ms": 781.234,
+        "dispatch_marker_ms": 781.234,
+        "settlement_ack_ms": 781.597,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 2411511640,
@@ -2126,7 +2126,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 23.991,
+          "ms": 26.304,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2134,7 +2134,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 23.334,
+          "ms": 27.282,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2142,7 +2142,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 24.856,
+          "ms": 27.006,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2150,7 +2150,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 23.754,
+          "ms": 26.659,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2158,7 +2158,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 23.617,
+          "ms": 26.727,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2166,7 +2166,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 23.955,
+          "ms": 27.119,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2174,7 +2174,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 23.707,
+          "ms": 26.16,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2182,7 +2182,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 24.325,
+          "ms": 25.563,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2190,16 +2190,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 24.55,
-        "dispatch_marker_ms": 24.55,
-        "settlement_ack_ms": 24.892,
+        "control_ack_ms": 26.839,
+        "dispatch_marker_ms": 26.839,
+        "settlement_ack_ms": 27.205,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1098304,
+        "footprint_after_churn": 1245824,
         "sqlite": "3.53.4"
       }
     },
@@ -2217,7 +2217,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 14.889,
+          "ms": 17.908,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2225,7 +2225,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 14.416,
+          "ms": 18.388,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2233,7 +2233,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 15.884,
+          "ms": 18.811,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2241,7 +2241,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 16.244,
+          "ms": 19.105,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2249,7 +2249,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 15.998,
+          "ms": 18.98,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2257,7 +2257,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 17.326,
+          "ms": 19.014,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2265,7 +2265,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 15.886,
+          "ms": 18.956,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2273,7 +2273,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 15.47,
+          "ms": 18.147,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2281,16 +2281,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 15.395,
-        "dispatch_marker_ms": 15.395,
-        "settlement_ack_ms": 133.208,
+        "control_ack_ms": 18.463,
+        "dispatch_marker_ms": 18.463,
+        "settlement_ack_ms": 157.304,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1245824,
+        "footprint_after_churn": 1262272,
         "sqlite": "3.53.4"
       }
     },
@@ -2308,7 +2308,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 169.301,
+          "ms": 172.13,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2316,7 +2316,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 178.596,
+          "ms": 170.429,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2324,7 +2324,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 203.75,
+          "ms": 169.851,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2332,7 +2332,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 177.397,
+          "ms": 167.743,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2340,7 +2340,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 181.829,
+          "ms": 178.012,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2348,7 +2348,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 177.013,
+          "ms": 172.051,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2356,7 +2356,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 242.762,
+          "ms": 168.839,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2364,7 +2364,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 256.952,
+          "ms": 168.641,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2372,16 +2372,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 170.182,
-        "dispatch_marker_ms": 170.182,
-        "settlement_ack_ms": 170.751,
+        "control_ack_ms": 172.768,
+        "dispatch_marker_ms": 172.768,
+        "settlement_ack_ms": 173.132,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1278720,
+        "footprint_after_churn": 1311360,
         "sqlite": "3.53.4"
       }
     },
@@ -2399,7 +2399,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 3.245,
+          "ms": 3.298,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -2407,7 +2407,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 3.193,
+          "ms": 3.409,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -2415,7 +2415,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 3.518,
+          "ms": 3.678,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -2423,7 +2423,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 3.423,
+          "ms": 3.564,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -2431,7 +2431,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 3.413,
+          "ms": 3.658,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -2439,7 +2439,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 3.613,
+          "ms": 3.49,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -2447,7 +2447,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 3.702,
+          "ms": 3.593,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -2455,7 +2455,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 3.601,
+          "ms": 3.622,
           "bytes": 1097918,
           "rows": 2000,
           "aborted": true
@@ -2463,9 +2463,9 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 4.144,
-        "dispatch_marker_ms": 4.144,
-        "settlement_ack_ms": 4.57,
+        "control_ack_ms": 4.105,
+        "dispatch_marker_ms": 4.105,
+        "settlement_ack_ms": 4.49,
         "complete": 0,
         "failed": 8,
         "total_scratch_written": 8783344,
@@ -2490,7 +2490,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 183.004,
+          "ms": 167.586,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2498,7 +2498,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 176.86,
+          "ms": 166.305,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2506,7 +2506,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 225.361,
+          "ms": 170.772,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2514,7 +2514,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 249.922,
+          "ms": 167.28,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2522,7 +2522,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 246.961,
+          "ms": 167.5,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2530,7 +2530,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 252.337,
+          "ms": 166.793,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2538,7 +2538,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 233.934,
+          "ms": 166.501,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2546,7 +2546,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 170.76,
+          "ms": 165.855,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2554,16 +2554,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 183.829,
-        "dispatch_marker_ms": 183.829,
-        "settlement_ack_ms": 184.357,
+        "control_ack_ms": 168.293,
+        "dispatch_marker_ms": 168.293,
+        "settlement_ack_ms": 168.801,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1327808,
+        "footprint_after_churn": 1180288,
         "sqlite": "3.53.4"
       }
     },
@@ -2581,7 +2581,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 725.892,
+          "ms": 915.026,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2589,7 +2589,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 771.664,
+          "ms": 880.832,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2597,7 +2597,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 855.469,
+          "ms": 1016.332,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2605,7 +2605,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 829.603,
+          "ms": 928.713,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2613,7 +2613,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 816.629,
+          "ms": 816.487,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2621,7 +2621,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 768.862,
+          "ms": 878.989,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2629,7 +2629,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 784.585,
+          "ms": 930.636,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2637,7 +2637,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 747.631,
+          "ms": 775.152,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2645,16 +2645,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 726.577,
-        "dispatch_marker_ms": 726.577,
-        "settlement_ack_ms": 727.011,
+        "control_ack_ms": 915.653,
+        "dispatch_marker_ms": 915.653,
+        "settlement_ack_ms": 915.999,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 2411511640,
         "peak_logical_scratch": 602877910,
         "heap_baseline": 176160,
         "heap_peak": 181840,
-        "footprint_after_churn": 1557248,
+        "footprint_after_churn": 1655616,
         "sqlite": "3.53.4"
       }
     },
@@ -2672,7 +2672,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 16.796,
+          "ms": 16.92,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2680,7 +2680,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 14.752,
+          "ms": 16.58,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2688,7 +2688,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 15.238,
+          "ms": 16.516,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2696,7 +2696,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 15.242,
+          "ms": 15.767,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2704,7 +2704,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 15.685,
+          "ms": 16.372,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2712,7 +2712,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 15.688,
+          "ms": 15.59,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2720,7 +2720,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 15.47,
+          "ms": 15.503,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2728,7 +2728,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 16.151,
+          "ms": 15.607,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2736,16 +2736,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 17.313,
-        "dispatch_marker_ms": 17.313,
-        "settlement_ack_ms": 132.023,
+        "control_ack_ms": 17.47,
+        "dispatch_marker_ms": 17.47,
+        "settlement_ack_ms": 135.851,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1114688,
+        "footprint_after_churn": 1311360,
         "sqlite": "3.53.4"
       }
     },
@@ -2763,7 +2763,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 774.207,
+          "ms": 773.508,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2771,7 +2771,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 923.185,
+          "ms": 873.11,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2779,7 +2779,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 913.686,
+          "ms": 1010.46,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2787,7 +2787,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 850.02,
+          "ms": 917.976,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2795,7 +2795,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 818.957,
+          "ms": 814.379,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2803,7 +2803,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 764.366,
+          "ms": 774.73,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2811,7 +2811,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 770.745,
+          "ms": 897.31,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2819,7 +2819,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 764.053,
+          "ms": 952.798,
           "bytes": 301438955,
           "rows": 100000,
           "aborted": false
@@ -2827,16 +2827,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 774.965,
-        "dispatch_marker_ms": 774.965,
-        "settlement_ack_ms": 775.571,
+        "control_ack_ms": 774.257,
+        "dispatch_marker_ms": 774.257,
+        "settlement_ack_ms": 774.604,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 2411511640,
         "peak_logical_scratch": 602877910,
         "heap_baseline": 176160,
         "heap_peak": 181840,
-        "footprint_after_churn": 1540800,
+        "footprint_after_churn": 1573632,
         "sqlite": "3.53.4"
       }
     },
@@ -2854,7 +2854,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 14.7,
+          "ms": 19.025,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2862,7 +2862,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 14.329,
+          "ms": 16.595,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2870,7 +2870,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 14.718,
+          "ms": 17.246,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2878,7 +2878,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 15.872,
+          "ms": 17.659,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2886,7 +2886,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 14.606,
+          "ms": 19.073,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2894,7 +2894,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 17.631,
+          "ms": 18.194,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2902,7 +2902,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 15.409,
+          "ms": 16.696,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2910,7 +2910,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 14.783,
+          "ms": 16.669,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2918,16 +2918,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 15.365,
-        "dispatch_marker_ms": 15.365,
-        "settlement_ack_ms": 15.781,
+        "control_ack_ms": 19.756,
+        "dispatch_marker_ms": 19.756,
+        "settlement_ack_ms": 20.276,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1098304,
+        "footprint_after_churn": 1393344,
         "sqlite": "3.53.4"
       }
     },
@@ -2945,7 +2945,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 15.848,
+          "ms": 17.993,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2953,7 +2953,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 14.825,
+          "ms": 19.53,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2961,7 +2961,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 15.403,
+          "ms": 19.59,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2969,7 +2969,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 16.094,
+          "ms": 22.282,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2977,7 +2977,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 15.313,
+          "ms": 20.637,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2985,7 +2985,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 14.908,
+          "ms": 28.141,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -2993,7 +2993,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 15.617,
+          "ms": 18.989,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -3001,7 +3001,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 15.732,
+          "ms": 17.822,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -3009,16 +3009,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 16.514,
-        "dispatch_marker_ms": 16.514,
-        "settlement_ack_ms": 16.991,
+        "control_ack_ms": 18.674,
+        "dispatch_marker_ms": 18.674,
+        "settlement_ack_ms": 19.16,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1180288,
+        "footprint_after_churn": 1344128,
         "sqlite": "3.53.4"
       }
     },
@@ -3036,7 +3036,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 10.373,
+          "ms": 10.649,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -3044,7 +3044,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 10.257,
+          "ms": 10.664,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -3052,7 +3052,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 10.328,
+          "ms": 10.589,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -3060,7 +3060,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 10.482,
+          "ms": 10.699,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -3068,7 +3068,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 10.298,
+          "ms": 10.376,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -3076,7 +3076,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 10.641,
+          "ms": 10.292,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -3084,7 +3084,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 10.483,
+          "ms": 10.918,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -3092,7 +3092,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 10.518,
+          "ms": 11.054,
           "bytes": 329007,
           "rows": 600,
           "aborted": true
@@ -3100,16 +3100,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 11.008,
-        "dispatch_marker_ms": 11.008,
-        "settlement_ack_ms": 11.454,
+        "control_ack_ms": 11.577,
+        "dispatch_marker_ms": 11.577,
+        "settlement_ack_ms": 12.1,
         "complete": 0,
         "failed": 8,
         "total_scratch_written": 2632056,
         "peak_logical_scratch": 329007,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1114688,
+        "footprint_after_churn": 1327808,
         "sqlite": "3.53.4"
       }
     },
@@ -3127,7 +3127,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 176.557,
+          "ms": 171.706,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -3135,7 +3135,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 227.663,
+          "ms": 170.251,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -3143,7 +3143,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 184.529,
+          "ms": 169.859,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -3151,7 +3151,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 236.688,
+          "ms": 169.763,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -3159,7 +3159,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 260.618,
+          "ms": 168.073,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -3167,7 +3167,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 198.167,
+          "ms": 166.865,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -3175,7 +3175,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 175.487,
+          "ms": 166.734,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -3183,7 +3183,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 184.217,
+          "ms": 166.813,
           "bytes": 5493953,
           "rows": 10000,
           "aborted": false
@@ -3191,16 +3191,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 178.23,
-        "dispatch_marker_ms": 178.23,
-        "settlement_ack_ms": 179.239,
+        "control_ack_ms": 172.523,
+        "dispatch_marker_ms": 172.523,
+        "settlement_ack_ms": 173.64,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 43951624,
         "peak_logical_scratch": 10987906,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1344320,
+        "footprint_after_churn": 1180288,
         "sqlite": "3.53.4"
       }
     },
@@ -3218,7 +3218,7 @@
         {
           "event": "capture",
           "ordinal": 0,
-          "ms": 1.922,
+          "ms": 1.704,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -3226,7 +3226,7 @@
         {
           "event": "capture",
           "ordinal": 1,
-          "ms": 1.781,
+          "ms": 1.636,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -3234,7 +3234,7 @@
         {
           "event": "capture",
           "ordinal": 2,
-          "ms": 1.938,
+          "ms": 1.942,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -3242,7 +3242,7 @@
         {
           "event": "capture",
           "ordinal": 3,
-          "ms": 2.072,
+          "ms": 1.582,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -3250,7 +3250,7 @@
         {
           "event": "capture",
           "ordinal": 4,
-          "ms": 1.859,
+          "ms": 2.159,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -3258,7 +3258,7 @@
         {
           "event": "capture",
           "ordinal": 5,
-          "ms": 2.143,
+          "ms": 1.895,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -3266,7 +3266,7 @@
         {
           "event": "capture",
           "ordinal": 6,
-          "ms": 2.034,
+          "ms": 1.891,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -3274,7 +3274,7 @@
         {
           "event": "capture",
           "ordinal": 7,
-          "ms": 2.008,
+          "ms": 1.909,
           "bytes": 548451,
           "rows": 1000,
           "aborted": false
@@ -3282,16 +3282,16 @@
       ],
       "summary": {
         "event": "summary",
-        "control_ack_ms": 2.45,
-        "dispatch_marker_ms": 2.45,
-        "settlement_ack_ms": 2.858,
+        "control_ack_ms": 2.107,
+        "dispatch_marker_ms": 2.107,
+        "settlement_ack_ms": 2.43,
         "complete": 8,
         "failed": 0,
         "total_scratch_written": 4387608,
         "peak_logical_scratch": 1096902,
         "heap_baseline": 176160,
         "heap_peak": 181376,
-        "footprint_after_churn": 1180288,
+        "footprint_after_churn": 1114752,
         "sqlite": "3.53.4"
       }
     }
