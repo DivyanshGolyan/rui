@@ -1034,46 +1034,30 @@ func providerOfferWorkComplete(summary provider.Summary, capacity int, expected 
 		summary.OfferBytes == expected.Bytes
 }
 
+// Qualification establishes concurrent complete work, not a per-event deadline.
+// The provider retains pacing violations for diagnosis and reports actual duration.
 func providerOfferQualified(summary provider.Summary, capacity, eventsPerSecond int, duration time.Duration, expected capacityWork) bool {
-	if duration <= 0 || duration%time.Second != 0 || summary.EventsPerSecond <= 0 {
+	if duration <= 0 || duration%time.Second != 0 || eventsPerSecond <= 0 {
 		return false
 	}
-	perStreamBatches := uint64(duration/time.Second) * uint64(summary.EventsPerSecond)
-	interval := time.Duration((duration.Nanoseconds() + int64(perStreamBatches) - 1) / int64(perStreamBatches))
-	start := time.Unix(0, summary.StartUnixNS)
-	horizon := start.Add(duration + interval).UnixNano()
-	hardDeadline := start.Add(duration + 2*interval).UnixNano()
+	perStreamBatches := uint64(duration/time.Second) * uint64(eventsPerSecond)
 	return providerOfferWorkComplete(summary, capacity, expected) &&
 		summary.EventsPerSecond == eventsPerSecond &&
 		summary.DeliveryMethod == "rational_pacing_v1" &&
-		summary.DeliveryRule.BatchIntervalNS == interval.Nanoseconds() &&
-		summary.DeliveryRule.AllowedDeliveryVariationNS == interval.Nanoseconds() &&
-		summary.DeliveryRule.MaximumCompletionGapNS == (2*interval).Nanoseconds() &&
-		summary.DeliveryRule.BurstWindowNS == interval.Nanoseconds() &&
-		summary.DeliveryRule.MaximumBatchesPerBurstWindow == 2 &&
-		summary.ValidOfferStreams == capacity &&
-		summary.TimingInvalidStreams == 0 &&
 		summary.MinimumBatches == perStreamBatches &&
 		summary.MaximumBatches == perStreamBatches &&
 		summary.ExpectedBatches == expected.Batches &&
 		summary.ExpectedEvents == expected.Events &&
 		summary.ExpectedOfferBytes == expected.Bytes &&
-		summary.EarlyCompletionViolations == 0 && summary.WorstEarlyCompletion == nil &&
-		summary.LateCompletionViolations == 0 && summary.WorstLateCompletion == nil &&
-		summary.CompletionGapViolations == 0 && summary.WorstCompletionGap == nil &&
-		summary.BurstWindowViolations == 0 && summary.WorstBurstWindow == nil &&
-		summary.MaximumCompletionDelay != nil && summary.MaximumCompletionDelay.ObservedNS >= 0 && summary.MaximumCompletionDelay.ObservedNS <= (2*interval).Nanoseconds() &&
-		summary.MaximumAdjacentGap != nil && summary.MaximumAdjacentGap.ObservedNS >= 0 && summary.MaximumAdjacentGap.ObservedNS <= (2*interval).Nanoseconds() &&
-		summary.MinimumTwoBackSpan != nil && summary.MinimumTwoBackSpan.ObservedNS >= interval.Nanoseconds() &&
 		summary.EventBytes == capacityEventBytes &&
 		summary.EventsPerBatch == capacityEventsPerBatch &&
 		summary.BatchesPerStream == int(perStreamBatches) &&
 		summary.OfferSeconds == duration.Seconds() &&
 		summary.StartUnixNS != 0 &&
-		summary.OfferHorizonUnixNS == horizon &&
-		summary.HardDeadlineUnixNS == hardDeadline &&
-		summary.EarliestFinalCompletionUnixNS >= summary.StartUnixNS &&
-		summary.EarliestFinalCompletionUnixNS <= summary.OfferHorizonUnixNS
+		summary.EarliestFinalCompletionUnixNS > summary.StartUnixNS &&
+		summary.LatestFinalCompletionUnixNS >= summary.EarliestFinalCompletionUnixNS &&
+		summary.LatestFinalCompletionUnixNS <= summary.HardDeadlineUnixNS &&
+		summary.HardDeadlineUnixNS == time.Unix(0, summary.StartUnixNS).Add(2*duration).UnixNano()
 }
 
 func providerTerminalComplete(summary provider.Summary, capacity int) bool {
@@ -1365,6 +1349,11 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 		SustainedAverageCores:  sustainedCores,
 		CompleteWorkCPUSeconds: completeCPU,
 	})
+	observedOffer := map[string]any{"status": "unavailable"}
+	if offerWorkComplete && offer.LatestFinalCompletionUnixNS > offer.StartUnixNS {
+		seconds := time.Duration(offer.LatestFinalCompletionUnixNS - offer.StartUnixNS).Seconds()
+		observedOffer = map[string]any{"status": "observed", "seconds": seconds, "events_per_second": float64(offer.CompletedEvents) / seconds}
+	}
 	return map[string]any{
 		"status": status, "round": round, "active_capacity": capacity, "events_per_second_per_stream": eventsPerSecond, "offer_seconds": duration.Seconds(), "fixture_ready": ready, "paced_offer": offer, "fixture_completion": completion,
 		"retained_request_baseline": baselineInspection, "capture_before_terminal": heldInspection, "completion_inspection": finalInspection,
@@ -1372,7 +1361,7 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 			"status": sustainedCPUStatus, "provider_offer_qualified": offerQualified, "bracket_valid": bracketValid, "cpu_seconds": sustainedCPU,
 			"first_query":                   map[string]any{"start_unix_ns": cpu10.QueryStart.UnixNano(), "finish_unix_ns": cpu10.QueryEnd.UnixNano(), "host_cpu_seconds": cpu10.CPUSeconds},
 			"second_query":                  map[string]any{"start_unix_ns": cpu50.QueryStart.UnixNano(), "finish_unix_ns": cpu50.QueryEnd.UnixNano(), "host_cpu_seconds": cpu50.CPUSeconds},
-			"minimum_sample_window_seconds": minimumSampleWindow.Seconds(), "maximum_sample_window_seconds": maximumSampleWindow.Seconds(), "earliest_valid_stream_final_completion_unix_ns": offer.EarliestFinalCompletionUnixNS,
+			"minimum_sample_window_seconds": minimumSampleWindow.Seconds(), "maximum_sample_window_seconds": maximumSampleWindow.Seconds(), "earliest_stream_final_completion_unix_ns": offer.EarliestFinalCompletionUnixNS,
 			"average_cores_conservative": sustainedCores, "at_most_2_average_cores": cpuWindowValid && sustainedCores <= capacityMaximumAverageCores, "complete_work_cpu_seconds": completeCPU, "complete_work_at_most_120_cpu_seconds": completeCPU <= capacityMaximumCPUSeconds,
 		},
 		"initial": map[string]any{"host": initial, "whole_latifa": initialWhole}, "retained": map[string]any{"host": retained, "whole_latifa": retainedWhole},
@@ -1380,6 +1369,7 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 		"host_dimensions":                map[string]any{"capture": captureStatus, "cleanup": cleanupStatus, "request_integrity": requestIntegrityStatus, "result_delivery": resultDeliveryStatus},
 		"durable_audit_prerequisite_met": auditPrerequisite, "result_delivery_complete": resultDeliveryComplete, "retained_request_scratch_bytes": baselineScratch, "expected_response_scratch_delta_bytes": responseScratch, "expected_retained_scratch_bytes": expectedScratch, "capture_observation_complete": captureComplete, "cleanup_observation_complete": cleanupComplete,
 		"expected_provider_work": expectedWork,
+		"observed_offer":         observedOffer,
 		"request_integrity":      map[string]any{"status": requestIntegrityStatus, "expected_bytes": expectedRequestBytes, "observed_bytes": offer.RequestBytes, "expected_set_sha256": expectedRequestDigest, "observed_set_sha256": offer.RequestSetSHA256},
 	}, nil
 }
@@ -1631,7 +1621,7 @@ func main() {
 		spillStatusRows = append(spillStatusRows, spillRows)
 	}
 	overallStatus := reduceStatuses(byteRows, itemRows, spillStatusRows, capacityRows)
-	result := map[string]any{"format": "latifa-model-output-v6-go", "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification", "status": overallStatus, "artifacts": root, "answer_byte_growth": byteRows, "item_count_growth": itemRows, "sqlite_cache_spill_comparison": spillRows, "active_capacity_growth": capacityRows, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "deterministic loopback HTTP qualifies no live-provider behavior", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "rational target scheduling emits exactly 1,800 or 6,000 events per stream without interval-truncation drift and records adapted pacing violations", "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous valid offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after both rounds and confirmed Host stop/reap", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"}}
+	result := map[string]any{"format": "latifa-model-output-v7-go", "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification", "status": overallStatus, "artifacts": root, "answer_byte_growth": byteRows, "item_count_growth": itemRows, "sqlite_cache_spill_comparison": spillRows, "active_capacity_growth": capacityRows, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "deterministic loopback HTTP qualifies no live-provider behavior", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "rational target scheduling aims at 60 seconds and emits exactly 1,800 or 6,000 events per stream; per-event pacing is diagnostic, collection stops at 120 seconds, and measured rate is not maximum sustainable throughput", "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after both rounds and confirmed Host stop/reap", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"}}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)

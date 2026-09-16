@@ -1,0 +1,12 @@
+?   	latifa.local/research/configuration-admission	[no test files]
+ok  	latifa.local/research/measurement	(cached)
+?   	latifa.local/research/message-admission	[no test files]
+ok  	latifa.local/research/model-control	(cached)
+?   	latifa.local/research/model-dispatch	[no test files]
+ok  	latifa.local/research/model-output	0.907s
+ok  	latifa.local/research/model-output/provider	7.123s
+ok  	latifa.local/research/model-retry	(cached)
+Build Summary: 2/2 steps succeeded
+measurement-check success
++- run go success 8s
+
