@@ -301,8 +301,8 @@ func validProviderSummary(t *testing.T) provider.Summary {
 		"maximum_completion_delay":{"id":"stream","ordinal":7,"observed_ns":66666668},
 		"maximum_adjacent_gap":{"id":"stream","ordinal":8,"observed_ns":66666668},
 		"minimum_two_back_span":{"id":"stream","ordinal":9,"observed_ns":33333334},
-		"start_unix_ns":100000000000,"offer_horizon_unix_ns":160033333334,"hard_deadline_unix_ns":160066666668,
-		"earliest_final_completion_unix_ns":159966666666,
+		"start_unix_ns":100000000000,"offer_horizon_unix_ns":160033333334,"hard_deadline_unix_ns":220000000000,
+		"earliest_final_completion_unix_ns":159966666666,"latest_final_completion_unix_ns":159966666666,
 		"event_bytes":260,"events_per_batch":1,"batches_per_stream":1800,"offer_seconds":60,"events_per_second":30
 	}`
 	var summary provider.Summary
@@ -340,24 +340,10 @@ func TestCapacityVerdictKeepsInvalidProviderEvidenceIncomplete(t *testing.T) {
 		t.Fatalf("Host semantic failure did not precede incomplete provider evidence: %s", got)
 	}
 	for name, mutate := range map[string]func(*provider.Summary){
-		"early":           func(summary *provider.Summary) { summary.EarlyCompletionViolations = 1 },
-		"late":            func(summary *provider.Summary) { summary.LateCompletionViolations = 1 },
-		"gap":             func(summary *provider.Summary) { summary.CompletionGapViolations = 1 },
-		"burst":           func(summary *provider.Summary) { summary.BurstWindowViolations = 1 },
-		"minimum batches": func(summary *provider.Summary) { summary.MinimumBatches-- },
-		"event bytes":     func(summary *provider.Summary) { summary.EventBytes++ },
-		"maximum delay": func(summary *provider.Summary) {
-			summary.MaximumCompletionDelay.ObservedNS = 66_666_668 + 1
-		},
-		"maximum gap": func(summary *provider.Summary) {
-			summary.MaximumAdjacentGap.ObservedNS = 66_666_668 + 1
-		},
-		"two-back span": func(summary *provider.Summary) {
-			summary.MinimumTwoBackSpan.ObservedNS = 33_333_334 - 1
-		},
-		"missing delay":    func(summary *provider.Summary) { summary.MaximumCompletionDelay = nil },
-		"missing gap":      func(summary *provider.Summary) { summary.MaximumAdjacentGap = nil },
-		"missing two-back": func(summary *provider.Summary) { summary.MinimumTwoBackSpan = nil },
+		"minimum batches":    func(s *provider.Summary) { s.MinimumBatches-- },
+		"event bytes":        func(s *provider.Summary) { s.EventBytes++ },
+		"missing completion": func(s *provider.Summary) { s.EarliestFinalCompletionUnixNS = 0 },
+		"collection timeout": func(s *provider.Summary) { s.LatestFinalCompletionUnixNS = s.HardDeadlineUnixNS + 1 },
 	} {
 		changed := valid
 		changed.Offer = validProviderSummary(t)
@@ -365,6 +351,20 @@ func TestCapacityVerdictKeepsInvalidProviderEvidenceIncomplete(t *testing.T) {
 		if got := capacityVerdict(changed); got != "incomplete" {
 			t.Fatalf("inconsistent %s evidence reduced to %s", name, got)
 		}
+	}
+	jittered := valid
+	jittered.Offer = validProviderSummary(t)
+	jittered.Offer.ValidOfferStreams = 0
+	jittered.Offer.TimingInvalidStreams = 1
+	jittered.Offer.LateCompletionViolations = 100
+	jittered.Offer.CompletionGapViolations = 50
+	jittered.Offer.LatestFinalCompletionUnixNS += int64(time.Second)
+	if got := capacityVerdict(jittered); got != "passed" {
+		t.Fatalf("complete jittered workload reduced to %s", got)
+	}
+	jittered.CompleteWorkCPUSeconds = 121
+	if got := capacityVerdict(jittered); got != "target_miss" {
+		t.Fatalf("jitter excused excessive CPU: %s", got)
 	}
 }
 

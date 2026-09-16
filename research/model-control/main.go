@@ -471,11 +471,15 @@ func slicesMax(values []float64) float64 {
 }
 
 func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (result map[string]any, resultError error) {
+	const capacity = 100
+	const measuredControls = 25
 	directory := filepath.Join(root, "active")
-	_ = os.Mkdir(directory, 0o700)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		return nil, err
+	}
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(4 * time.Minute)
-	host, err := measurement.StartHost(binary, store, url, 8, filepath.Join(directory, "host-stderr.log"), deadline)
+	host, err := measurement.StartHost(binary, store, url, capacity, filepath.Join(directory, "host-stderr.log"), deadline)
 	if err != nil {
 		return nil, err
 	}
@@ -483,52 +487,98 @@ func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (res
 		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
 	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
-	sessions := make([]string, 8)
-	for index := range 8 {
+	sessions := make([]string, capacity)
+	keys := make([]string, capacity)
+	for index := range capacity {
 		sessions[index] = fmt.Sprintf("measure/active/%d", index)
-		if err := client.Submit(fmt.Sprintf("active-%d", index), sessions[index], fmt.Sprintf("active-%d", index)); err != nil {
+		keys[index] = fmt.Sprintf("active-%d", index)
+		if err := client.Submit(keys[index], sessions[index], keys[index]); err != nil {
 			return nil, err
 		}
 	}
-	if err := measurement.WaitFor(deadline, 25*time.Millisecond, "eight live model streams", func() (bool, error) { requests, _ := endpoint.counts(); return requests >= 8, nil }); err != nil {
-		return nil, err
-	}
-	processings := make([]map[string]any, 8)
-	for index := range 8 {
-		if err := measurement.WaitFor(deadline, 25*time.Millisecond, "processing identity", func() (bool, error) {
-			observation, err := client.Observe(fmt.Sprintf("active-%d", index))
+	// Refill after each measured cancellation, so every sample starts at 100
+	// live transports rather than measuring a steadily declining population.
+	waitFull := func() error {
+		return measurement.WaitFor(deadline, 25*time.Millisecond, "100 live model streams", func() (bool, error) {
+			requests, disconnects := endpoint.counts()
+			if requests-disconnects != capacity {
+				return false, nil
+			}
+			observation, err := client.Inspect(sessions[0])
 			if err != nil {
 				return false, err
 			}
-			processing, ok := observation["processing"].(map[string]any)
-			if ok {
-				processings[index] = processing
-			}
-			return ok, nil
-		}); err != nil {
-			return nil, err
-		}
+			occupied, ok := measurement.IntStringField(observation, "execution", "custody_occupied")
+			return ok && occupied == capacity, nil
+		})
+	}
+	if err := waitFull(); err != nil {
+		return nil, err
 	}
 	before, err := sample(host, directory, "before-controls")
 	if err != nil {
 		return nil, err
 	}
-	started := time.Now()
-	reply, err := interrupt(client, "active-interrupt", sessions[0], processings[0])
-	interruptionMS := float64(time.Since(started).Microseconds()) / 1000
-	if err != nil || !accepted(reply) {
-		return nil, fmt.Errorf("interruption failed: %v: %w", reply, err)
-	}
 	stops := []float64{}
-	for index := 1; index < 8; index++ {
-		started = time.Now()
-		reply, err = stopSession(client, fmt.Sprintf("active-stop-%d", index), sessions[index])
-		stops = append(stops, float64(time.Since(started).Microseconds())/1000)
+	samples := []map[string]any{}
+	interruptionMS := 0.0
+	for index := range measuredControls {
+		if err := waitFull(); err != nil {
+			return nil, err
+		}
+		observation, err := client.Observe(keys[index])
+		if err != nil {
+			return nil, err
+		}
+		processing, ok := observation["processing"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("processing identity unavailable: %v", observation)
+		}
+		requests, disconnects := endpoint.counts()
+		if requests-disconnects != capacity {
+			return nil, fmt.Errorf("live stream population changed before control: %d", requests-disconnects)
+		}
+		started := time.Now()
+		var reply map[string]any
+		kind := "session_stop"
+		if index == 0 {
+			kind = "model_interruption"
+			reply, err = interrupt(client, "active-interrupt", sessions[index], processing)
+		} else {
+			reply, err = stopSession(client, fmt.Sprintf("active-stop-%d", index), sessions[index])
+		}
+		elapsed := float64(time.Since(started).Microseconds()) / 1000
 		if err != nil || !accepted(reply) {
-			return nil, fmt.Errorf("stop failed: %v: %w", reply, err)
+			return nil, fmt.Errorf("%s failed: %v: %w", kind, reply, err)
+		}
+		if index == 0 {
+			interruptionMS = elapsed
+		} else {
+			stops = append(stops, elapsed)
+		}
+		samples = append(samples, map[string]any{"kind": kind, "active_streams_before": requests - disconnects, "acknowledgment_ms": elapsed})
+		settled, err := client.WaitResult(keys[index])
+		if err != nil {
+			return nil, err
+		}
+		if status, _ := measurement.StringField(settled, "result", "status"); status != "cancelled" {
+			return nil, fmt.Errorf("control did not cancel original work: %v", settled)
+		}
+		keys[index] = fmt.Sprintf("replacement-%d", index)
+		if err := client.Message(keys[index], sessions[index], keys[index]); err != nil {
+			return nil, err
 		}
 	}
-	if err := measurement.WaitFor(deadline, 25*time.Millisecond, "provider disconnects", func() (bool, error) { _, disconnects := endpoint.counts(); return disconnects >= 8, nil }); err != nil {
+	if err := waitFull(); err != nil {
+		return nil, err
+	}
+	for index, session := range sessions {
+		reply, err := stopSession(client, fmt.Sprintf("cleanup-stop-%d", index), session)
+		if err != nil || !accepted(reply) {
+			return nil, fmt.Errorf("cleanup stop failed: %v: %w", reply, err)
+		}
+	}
+	if err := measurement.WaitFor(deadline, 25*time.Millisecond, "provider disconnects", func() (bool, error) { requests, disconnects := endpoint.counts(); return requests == disconnects, nil }); err != nil {
 		return nil, err
 	}
 	if err := measurement.WaitFor(deadline, 25*time.Millisecond, "control cleanup", func() (bool, error) { return inspectCustodyZero(client, sessions[0]) }); err != nil {
@@ -540,7 +590,7 @@ func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (res
 	}
 	_, disconnects := endpoint.counts()
 	stopP95 := p95(stops)
-	return map[string]any{"status": latencyStatus(1000, interruptionMS, stopP95), "active_capacity": 8, "active_model_streams": 8, "exact_interruption_acknowledgment_ms": interruptionMS, "session_stop_p95_acknowledgment_ms": stopP95, "qualification_limit_ms": 1000, "before_controls": before, "after_cleanup": after, "resource_delta_after_cleanup": delta(before, after), "provider_disconnects": disconnects}, nil
+	return map[string]any{"status": latencyStatus(1000, interruptionMS, stopP95), "active_capacity": capacity, "active_model_streams": capacity, "control_samples": samples, "exact_interruption_acknowledgment_ms": interruptionMS, "session_stop_p95_acknowledgment_ms": stopP95, "qualification_limit_ms": 1000, "before_controls": before, "after_cleanup": after, "resource_delta_after_cleanup": delta(before, after), "provider_disconnects": disconnects}, nil
 }
 
 type successEndpoint struct {
@@ -1361,7 +1411,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	result := map[string]any{"format": "latifa-model-control-v3-go", "scope": "issue-175 production Session stop and exact model interruption", "status": controlStatus(headroomResult, activeResult, controlFirstResult, realSettlementResult), "artifacts": root, "configurations": map[string]any{"stalled_incomplete_ingress_diagnostic": headroomResult, "live_model_cancellation": activeResult, "control_first_settlement_race": controlFirstResult, "real_settlement_import_contention_qualification": realSettlementResult}, "elapsed_seconds": time.Since(started).Seconds()}
+	result := map[string]any{"format": "latifa-model-control-v4-go", "scope": "issue-175 production Session stop and exact model interruption", "status": controlStatus(headroomResult, activeResult, controlFirstResult, realSettlementResult), "artifacts": root, "configurations": map[string]any{"stalled_incomplete_ingress_diagnostic": headroomResult, "live_model_cancellation": activeResult, "control_first_settlement_race": controlFirstResult, "real_settlement_import_contention_qualification": realSettlementResult}, "elapsed_seconds": time.Since(started).Seconds()}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)

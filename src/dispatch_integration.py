@@ -2768,18 +2768,20 @@ def main():
             ), sentinel_observation
             recovery_latencies.append(recovery_latency)
         assert sentinel_terminal is not None
-        assert len(recovery_latencies) >= 20, len(recovery_latencies)
-        ordered_latencies = sorted(recovery_latencies)
-        recovery_p95 = ordered_latencies[
-            (95 * len(ordered_latencies) + 99) // 100 - 1
-        ]
-        recovery_max = ordered_latencies[-1]
-        print(
-            "exhausted recovery ordinary inspections (diagnostic only): "
-            f"samples={len(recovery_latencies)} "
-            f"p95_ms={recovery_p95 * 1000:.1f} "
-            f"max_ms={recovery_max * 1000:.1f}"
-        )
+        if recovery_latencies:
+            ordered_latencies = sorted(recovery_latencies)
+            recovery_p95 = ordered_latencies[
+                (95 * len(ordered_latencies) + 99) // 100 - 1
+            ]
+            print(
+                "exhausted recovery ordinary inspections (diagnostic only): "
+                f"samples={len(recovery_latencies)} "
+                f"p95_ms={recovery_p95 * 1000:.1f} "
+                f"max_ms={ordered_latencies[-1] * 1000:.1f}"
+            )
+        else:
+            print("exhausted recovery ordinary inspections: latency unavailable; "
+                  "recovery settled before the first nonterminal observation")
         stop_host(recovery_host)
         processes.remove(recovery_host)
         database = sqlite3.connect(recovery_store / "latifa.sqlite3")

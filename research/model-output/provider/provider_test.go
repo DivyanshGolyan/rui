@@ -231,7 +231,7 @@ func TestOfferLoopStopsOnTransportFailureAndHardDeadline(t *testing.T) {
 		t.Fatalf("transport failure = delivery %+v writes %d err %v", delivery, writes, err)
 	}
 
-	for _, offset := range []time.Duration{60 * time.Millisecond, 60*time.Millisecond + time.Nanosecond} {
+	for _, offset := range []time.Duration{40 * time.Millisecond, 40*time.Millisecond + time.Nanosecond} {
 		writes := 0
 		_, err := offerBatches(start, 20*time.Millisecond, 1, 20*time.Millisecond, func() time.Time { return start.Add(offset) }, func(time.Time) error { return nil }, func() (int, time.Time, error) {
 			writes++
@@ -245,7 +245,7 @@ func TestOfferLoopStopsOnTransportFailureAndHardDeadline(t *testing.T) {
 	now := start
 	writes = 0
 	_, err = offerBatches(start, 20*time.Millisecond, 1, 20*time.Millisecond, func() time.Time { return now }, func(time.Time) error {
-		now = start.Add(60 * time.Millisecond)
+		now = start.Add(40 * time.Millisecond)
 		return nil
 	}, func() (int, time.Time, error) {
 		writes++
@@ -617,5 +617,33 @@ func TestFailedResetLeavesCurrentFixtureOwnedAndClosable(t *testing.T) {
 	server.currentFixture().record("after_failed_reset", map[string]any{})
 	if err := server.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCompleteOfferMayOutliveNominalCadence(t *testing.T) {
+	start := time.Unix(100, 0)
+	completions := make([]time.Time, 100)
+	for i := range completions {
+		completions[i] = start.Add(time.Duration(i)*10*time.Millisecond + 100*time.Millisecond)
+	}
+	delivery, err, _, writes := runDeterministicOffer(start, time.Second, completions, -1)
+	if err != nil || writes != 100 || delivery.completed != 100 || delivery.late.Count == 0 {
+		t.Fatalf("late but complete offer: %+v writes=%d err=%v", delivery, writes, err)
+	}
+	fixture, err := newFixture(1, time.Second, 100, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.startAt = start
+	fixture.started = true
+	var streamed deliveryEvidence
+	for i, completed := range completions {
+		streamed.addWritten(len(event))
+		streamed.recordCompletion(start, time.Second, 100, 10*time.Millisecond, i, completed)
+	}
+	fixture.streams["late"] = &stream{id: "late", delivery: streamed}
+	_, summary := fixture.factsSnapshot()
+	if summary.ValidOfferStreams != 0 || summary.TimingInvalidStreams != 1 || summary.EarliestFinalCompletionUnixNS != completions[99].UnixNano() || summary.LatestFinalCompletionUnixNS != completions[99].UnixNano() {
+		t.Fatalf("jitter discarded actual completion evidence: %+v", summary)
 	}
 }

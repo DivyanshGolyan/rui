@@ -141,6 +141,7 @@ type Summary struct {
 	MaximumCompletionDelay        *summaryTimingWitness    `json:"maximum_completion_delay,omitempty"`
 	MaximumAdjacentGap            *summaryTimingWitness    `json:"maximum_adjacent_gap,omitempty"`
 	MinimumTwoBackSpan            *summaryTimingWitness    `json:"minimum_two_back_span,omitempty"`
+	LatestFinalCompletionUnixNS   int64                    `json:"latest_final_completion_unix_ns,omitempty"`
 	EarliestFinalCompletionUnixNS int64                    `json:"earliest_final_completion_unix_ns,omitempty"`
 	TerminalBytes                 int                      `json:"terminal_bytes"`
 	RequestBytes                  int                      `json:"request_bytes"`
@@ -555,11 +556,16 @@ func waitForSlot(timer *time.Timer, delay time.Duration, done <-chan struct{}) b
 	}
 }
 
+// Collection is bounded independently of per-event timing diagnostics.
+func collectionDeadline(start time.Time, duration time.Duration) time.Time {
+	return start.Add(2 * duration)
+}
+
 var errOfferHardDeadline = errors.New("offer hard deadline expired")
 
 func offerBatches(start time.Time, duration time.Duration, batches int, interval time.Duration, now func() time.Time, waitUntil func(time.Time) error, write func() (int, time.Time, error)) (deliveryEvidence, error) {
 	var delivery deliveryEvidence
-	hardDeadline := start.Add(duration + 2*interval)
+	hardDeadline := collectionDeadline(start, duration)
 	for ordinal := 0; ordinal < batches; ordinal++ {
 		if !now().Before(hardDeadline) {
 			return delivery, errOfferHardDeadline
@@ -645,7 +651,7 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hardDeadline := f.startAt.Add(f.duration + 2*f.batchInterval)
+	hardDeadline := collectionDeadline(f.startAt, f.duration)
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
 		<-timer.C
@@ -796,7 +802,12 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 			row.Delivery.OfferBytes == f.perStreamWork.Bytes
 		if exact && row.Delivery.TimingValid && row.OfferError == "" {
 			result.ValidOfferStreams++
+		}
+		if exact && row.OfferError == "" {
 			completion := f.streams[row.ID].delivery.lastCompletion.UnixNano()
+			if completion > result.LatestFinalCompletionUnixNS {
+				result.LatestFinalCompletionUnixNS = completion
+			}
 			if result.EarliestFinalCompletionUnixNS == 0 || completion < result.EarliestFinalCompletionUnixNS {
 				result.EarliestFinalCompletionUnixNS = completion
 			}
@@ -806,7 +817,7 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 	if f.started {
 		result.StartUnixNS = f.startAt.UnixNano()
 		result.OfferHorizonUnixNS = f.startAt.Add(f.duration + f.batchInterval).UnixNano()
-		result.HardDeadlineUnixNS = f.startAt.Add(f.duration + 2*f.batchInterval).UnixNano()
+		result.HardDeadlineUnixNS = collectionDeadline(f.startAt, f.duration).UnixNano()
 	}
 	return rows, result
 }

@@ -1,0 +1,859 @@
+{
+  "active_capacity_growth": [],
+  "answer_byte_growth": [
+    {
+      "answer_bytes": 100000,
+      "answer_sha256": "d69e68988157833272305aaf21f453c800346e8a3640db6578e260215542e5d4",
+      "client_delivery": {
+        "destination_bytes": 100000,
+        "destination_sha256": "d69e68988157833272305aaf21f453c800346e8a3640db6578e260215542e5d4",
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3440640  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 461  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 154  messages received\n                   0  signals received\n                   1  voluntary context switches\n                  14  involuntary context switches\n            36526564  instructions retired\n            13098115  cycles elapsed\n             2130560  peak memory footprint\n"
+      },
+      "cold": {
+        "host": {
+          "rss_bytes": 7929856,
+          "virtual_bytes": 420265934848,
+          "cpu_user_seconds": 0.00493975,
+          "cpu_system_seconds": 0.008066625,
+          "threads": 4,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 15,
+          "disk_read_bytes": 3592192,
+          "disk_write_bytes": 151552,
+          "footprint": {
+            "physical_footprint_bytes": 3687424,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3687424,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 3687424,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3687936,
+          "physical_footprint_bytes": 3687424,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 7929856,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "execution_after_completion": {
+        "custody_occupied": "0",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output"
+        ]
+      },
+      "observation": {
+        "input": {
+          "bytes": "7",
+          "sha256": "76df5db2e650c56ab4bca45eec60a928840072ca3fb4fcb1cfae9b6f1194f144",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1",
+          "turn": "1"
+        },
+        "queue": {
+          "admission": "1",
+          "status": "completed"
+        },
+        "result": {
+          "status": "completed",
+          "text": {
+            "bytes": "100000",
+            "sha256": "91c16b9649aa393fd2a592e1b408da06a0c12a3c5129d320d7a9319fa0812950",
+            "type": "text"
+          }
+        },
+        "status": "accepted",
+        "target": "measure/bytes-100000"
+      },
+      "offline_audit": {
+        "canonical_output_items": 2,
+        "private_content_rows": 3,
+        "assistant_projections": 1
+      },
+      "reasoning_items": 1,
+      "request_bytes": 239,
+      "retained_idle": {
+        "host": {
+          "rss_bytes": 9945088,
+          "virtual_bytes": 420678598656,
+          "cpu_user_seconds": 0.0204375,
+          "cpu_system_seconds": 0.014749125,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 15,
+          "disk_read_bytes": 3690496,
+          "disk_write_bytes": 1134592,
+          "footprint": {
+            "physical_footprint_bytes": 5342208,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 5522432,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 5522432,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 5522944,
+          "physical_footprint_bytes": 5342208,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 9945088,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "scratch_limit_bytes": "8589934592",
+      "sse_bytes": 201083,
+      "status": "passed",
+      "total_output_items": 2
+    }
+  ],
+  "artifacts": "/private/tmp/latifa-output-measure-2469320846",
+  "binary": "/private/tmp/latifa-qualification-evidence-20260916/local-cache/o/d89b1d57e3d156f00341769d18e841eb/latifa-release-small-check",
+  "binary_sha256": "2a12cbe2f2b9be512a847e4f7a8a28cdf600dac43084b1a7759c9b762708e074",
+  "elapsed_seconds": 2.821337292,
+  "format": "latifa-model-output-v7-go",
+  "item_count_growth": [
+    {
+      "answer_bytes": 6,
+      "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+      "client_delivery": {
+        "destination_bytes": 6,
+        "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3440640  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 461  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   1  voluntary context switches\n                   4  involuntary context switches\n            34499589  instructions retired\n            11670329  cycles elapsed\n             2130560  peak memory footprint\n"
+      },
+      "cold": {
+        "host": {
+          "rss_bytes": 7946240,
+          "virtual_bytes": 420256497664,
+          "cpu_user_seconds": 0.004852291666666666,
+          "cpu_system_seconds": 0.003579958333333333,
+          "threads": 4,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 15,
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 151552,
+          "footprint": {
+            "physical_footprint_bytes": 3605504,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3605504,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 3605504,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3606016,
+          "physical_footprint_bytes": 3605504,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 7946240,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "execution_after_completion": {
+        "custody_occupied": "0",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output"
+        ]
+      },
+      "observation": {
+        "input": {
+          "bytes": "7",
+          "sha256": "76df5db2e650c56ab4bca45eec60a928840072ca3fb4fcb1cfae9b6f1194f144",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1",
+          "turn": "1"
+        },
+        "queue": {
+          "admission": "1",
+          "status": "completed"
+        },
+        "result": {
+          "status": "completed",
+          "text": {
+            "bytes": "6",
+            "sha256": "819d1bdbc293acf2c143f80d594379df62940f4c7db70fcdfdc8dafbff0d8906",
+            "type": "text"
+          }
+        },
+        "status": "accepted",
+        "target": "measure/items-1"
+      },
+      "offline_audit": {
+        "canonical_output_items": 2,
+        "private_content_rows": 3,
+        "assistant_projections": 1
+      },
+      "reasoning_items": 1,
+      "request_bytes": 239,
+      "retained_idle": {
+        "host": {
+          "rss_bytes": 9502720,
+          "virtual_bytes": 420391288832,
+          "cpu_user_seconds": 0.007738791666666666,
+          "cpu_system_seconds": 0.00843375,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 15,
+          "disk_read_bytes": 12288,
+          "disk_write_bytes": 835584,
+          "footprint": {
+            "physical_footprint_bytes": 4867072,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 5047296,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 5047296,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 5047808,
+          "physical_footprint_bytes": 4867072,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 9502720,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "scratch_limit_bytes": "8589934592",
+      "sse_bytes": 1060,
+      "status": "passed",
+      "total_output_items": 2
+    },
+    {
+      "answer_bytes": 6,
+      "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+      "client_delivery": {
+        "destination_bytes": 6,
+        "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3440640  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 461  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   1  voluntary context switches\n                   6  involuntary context switches\n            34613833  instructions retired\n            12349032  cycles elapsed\n             2130560  peak memory footprint\n"
+      },
+      "cold": {
+        "host": {
+          "rss_bytes": 7995392,
+          "virtual_bytes": 420265934848,
+          "cpu_user_seconds": 0.0047519166666666664,
+          "cpu_system_seconds": 0.0035921666666666667,
+          "threads": 4,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 15,
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 151552,
+          "footprint": {
+            "physical_footprint_bytes": 3638272,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3638272,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 3638272,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3638784,
+          "physical_footprint_bytes": 3638272,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 7995392,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "execution_after_completion": {
+        "custody_occupied": "0",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output"
+        ]
+      },
+      "observation": {
+        "input": {
+          "bytes": "7",
+          "sha256": "76df5db2e650c56ab4bca45eec60a928840072ca3fb4fcb1cfae9b6f1194f144",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1",
+          "turn": "1"
+        },
+        "queue": {
+          "admission": "1",
+          "status": "completed"
+        },
+        "result": {
+          "status": "completed",
+          "text": {
+            "bytes": "6",
+            "sha256": "819d1bdbc293acf2c143f80d594379df62940f4c7db70fcdfdc8dafbff0d8906",
+            "type": "text"
+          }
+        },
+        "status": "accepted",
+        "target": "measure/items-4"
+      },
+      "offline_audit": {
+        "canonical_output_items": 5,
+        "private_content_rows": 6,
+        "assistant_projections": 1
+      },
+      "reasoning_items": 4,
+      "request_bytes": 239,
+      "retained_idle": {
+        "host": {
+          "rss_bytes": 9666560,
+          "virtual_bytes": 420410163200,
+          "cpu_user_seconds": 0.00805875,
+          "cpu_system_seconds": 0.009157833333333332,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 15,
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 835584,
+          "footprint": {
+            "physical_footprint_bytes": 5030912,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 5211136,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 5211136,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 5211648,
+          "physical_footprint_bytes": 5030912,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 9666560,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "scratch_limit_bytes": "8589934592",
+      "sse_bytes": 2329,
+      "status": "passed",
+      "total_output_items": 5
+    },
+    {
+      "answer_bytes": 6,
+      "answer_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+      "client_delivery": {
+        "destination_bytes": 6,
+        "destination_sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+        "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3440640  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 461  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 125  messages received\n                   0  signals received\n                   1  voluntary context switches\n                   4  involuntary context switches\n            34515664  instructions retired\n            12375939  cycles elapsed\n             2130560  peak memory footprint\n"
+      },
+      "cold": {
+        "host": {
+          "rss_bytes": 8011776,
+          "virtual_bytes": 420248109056,
+          "cpu_user_seconds": 0.004526875,
+          "cpu_system_seconds": 0.00314775,
+          "threads": 4,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 15,
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 151552,
+          "footprint": {
+            "physical_footprint_bytes": 3556352,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3556352,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 3556352,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 3556864,
+          "physical_footprint_bytes": 3556352,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 8011776,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "execution_after_completion": {
+        "custody_occupied": "0",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output"
+        ]
+      },
+      "observation": {
+        "input": {
+          "bytes": "7",
+          "sha256": "76df5db2e650c56ab4bca45eec60a928840072ca3fb4fcb1cfae9b6f1194f144",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1",
+          "turn": "1"
+        },
+        "queue": {
+          "admission": "1",
+          "status": "completed"
+        },
+        "result": {
+          "status": "completed",
+          "text": {
+            "bytes": "6",
+            "sha256": "819d1bdbc293acf2c143f80d594379df62940f4c7db70fcdfdc8dafbff0d8906",
+            "type": "text"
+          }
+        },
+        "status": "accepted",
+        "target": "measure/items-32"
+      },
+      "offline_audit": {
+        "canonical_output_items": 33,
+        "private_content_rows": 34,
+        "assistant_projections": 1
+      },
+      "reasoning_items": 32,
+      "request_bytes": 239,
+      "retained_idle": {
+        "host": {
+          "rss_bytes": 9388032,
+          "virtual_bytes": 420534943744,
+          "cpu_user_seconds": 0.009449083333333332,
+          "cpu_system_seconds": 0.009481791666666666,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 15,
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 856064,
+          "footprint": {
+            "physical_footprint_bytes": 4801536,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 4981760,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "whole_latifa": {
+          "aggregate_equals_host": true,
+          "descendant_processes": 0,
+          "host_processes": 1,
+          "lifetime_peak_physical_footprint_bytes": 4981760,
+          "lifetime_peak_physical_footprint_upper_bound_bytes": 4982272,
+          "physical_footprint_bytes": 4801536,
+          "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+          "rss_bytes": 9388032,
+          "status": "complete",
+          "within_256_mib_target": true
+        }
+      },
+      "scratch_limit_bytes": "8589934592",
+      "sse_bytes": 14473,
+      "status": "passed",
+      "total_output_items": 33
+    }
+  ],
+  "limits": [
+    "macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only",
+    "deterministic loopback HTTP qualifies no live-provider behavior",
+    "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second",
+    "rational target scheduling aims at 60 seconds and emits exactly 1,800 or 6,000 events per stream; per-event pacing is diagnostic, collection stops at 120 seconds, and measured rate is not maximum sustainable throughput",
+    "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds",
+    "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after both rounds and confirmed Host stop/reap",
+    "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"
+  ],
+  "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+  "measurement_runtime": {
+    "go_arch": "arm64",
+    "go_os": "darwin",
+    "go_version": "go1.27.1",
+    "gopsutil_version": "v4.26.7",
+    "logical_cpus": 10,
+    "module_path": "latifa.local/research",
+    "physical_memory_bytes": 17179869184
+  },
+  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+  "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification",
+  "sqlite_cache_spill_comparison": {
+    "rows": [
+      {
+        "answer_bytes": 100000,
+        "cache_spill_requested": true,
+        "clean_transaction_rollback": false,
+        "client_delivery": {
+          "destination_bytes": 100000,
+          "destination_sha256": "ed1b345f8acb204cefc88d65c08bd8ea49e383b1c4960f760288689ed044c4d3",
+          "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3440640  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 461  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 154  messages received\n                   0  signals received\n                   1  voluntary context switches\n                   6  involuntary context switches\n            36461244  instructions retired\n            12758734  cycles elapsed\n             2130560  peak memory footprint\n"
+        },
+        "database_bytes_after_host_reaped": 241664,
+        "duration_seconds": 0.154965084,
+        "effective_sqlite_configuration_valid": true,
+        "execution": {
+          "custody_occupied": "0",
+          "dispatch_fenced": false,
+          "scratch_used_bytes": "0",
+          "status": "partial",
+          "unavailable": [
+            "structured_output"
+          ]
+        },
+        "expected_spill_off_memory_failure": false,
+        "final": {
+          "host": {
+            "rss_bytes": 9666560,
+            "virtual_bytes": 420553818112,
+            "cpu_user_seconds": 0.021579458333333332,
+            "cpu_system_seconds": 0.012294958333333331,
+            "threads": 5,
+            "live_descendant_processes": 0,
+            "open_descriptor_rows": 15,
+            "disk_read_bytes": 8192,
+            "disk_write_bytes": 1396736,
+            "footprint": {
+              "physical_footprint_bytes": 5112832,
+              "physical_footprint_rounding_tolerance_bytes": 512,
+              "lifetime_peak_physical_footprint_bytes": 5325824,
+              "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+            }
+          },
+          "whole_latifa": {
+            "aggregate_equals_host": true,
+            "descendant_processes": 0,
+            "host_processes": 1,
+            "lifetime_peak_physical_footprint_bytes": 5325824,
+            "lifetime_peak_physical_footprint_upper_bound_bytes": 5326336,
+            "physical_footprint_bytes": 5112832,
+            "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+            "rss_bytes": 9666560,
+            "status": "complete",
+            "within_256_mib_target": true
+          }
+        },
+        "host_exit_after_reap": {
+          "exited": true,
+          "code": -1,
+          "stop_signal_sent": true
+        },
+        "host_sqlite_diagnostics": [
+          {
+            "latifa_test_phase": "sqlite_diagnostic",
+            "at_ns": "1375747434414458",
+            "subject": "measure/spill",
+            "process_memory_scope": "SQLite process-global allocator; one Store per Host",
+            "process_memory_current_bytes": 236704,
+            "process_memory_highwater_bytes": 355376,
+            "cache_used_bytes": 31152,
+            "cache_used_scope": "connection-current approximate pager bytes",
+            "cache_spills": 35,
+            "cache_spills_scope": "connection cumulative mid-transaction spills",
+            "hard_heap_limit_bytes": 16777216,
+            "page_size_bytes": 4096,
+            "cache_size_setting": -32,
+            "cache_size_setting_scope": "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages",
+            "cache_spill_threshold": 7,
+            "mmap_size_bytes": 0,
+            "synchronous": 3,
+            "temp_store": 1,
+            "busy_timeout_ms": 0,
+            "journal_mode": "delete"
+          },
+          {
+            "latifa_test_phase": "sqlite_diagnostic",
+            "at_ns": "1375747755690458",
+            "subject": "measure/spill",
+            "process_memory_scope": "SQLite process-global allocator; one Store per Host",
+            "process_memory_current_bytes": 236816,
+            "process_memory_highwater_bytes": 706496,
+            "cache_used_bytes": 35504,
+            "cache_used_scope": "connection-current approximate pager bytes",
+            "cache_spills": 112,
+            "cache_spills_scope": "connection cumulative mid-transaction spills",
+            "hard_heap_limit_bytes": 16777216,
+            "page_size_bytes": 4096,
+            "cache_size_setting": -32,
+            "cache_size_setting_scope": "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages",
+            "cache_spill_threshold": 7,
+            "mmap_size_bytes": 0,
+            "synchronous": 3,
+            "temp_store": 1,
+            "busy_timeout_ms": 0,
+            "journal_mode": "delete"
+          }
+        ],
+        "host_stderr_tail": "{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1375747434347708\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1375747434414458\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":236704,\"process_memory_highwater_bytes\":355376,\"cache_used_bytes\":31152,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":35,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_setting\":-32,\"cache_size_setting_scope\":\"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages\",\"cache_spill_threshold\":7,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n{\"latifa_test_phase\":\"transport_handoff_committed\",\"at_ns\":\"1375747638408916\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_lock_acquired\",\"at_ns\":\"1375747652110125\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_complete\",\"at_ns\":\"1375747707327166\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"model_settlement_committed\",\"at_ns\":\"1375747707348250\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_started\",\"at_ns\":\"1375747707400541\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_completed\",\"at_ns\":\"1375747707407291\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1375747755654375\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1375747755690458\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":236816,\"process_memory_highwater_bytes\":706496,\"cache_used_bytes\":35504,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":112,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_setting\":-32,\"cache_size_setting_scope\":\"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages\",\"cache_spill_threshold\":7,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n",
+        "initial": {
+          "execution": {
+            "custody_occupied": "0",
+            "dispatch_fenced": false,
+            "scratch_used_bytes": "0",
+            "status": "partial",
+            "unavailable": [
+              "structured_output"
+            ]
+          },
+          "host": {
+            "rss_bytes": 8929280,
+            "virtual_bytes": 420409589760,
+            "cpu_user_seconds": 0.005657583333333333,
+            "cpu_system_seconds": 0.005497666666666666,
+            "threads": 4,
+            "live_descendant_processes": 0,
+            "open_descriptor_rows": 15,
+            "disk_read_bytes": 8192,
+            "disk_write_bytes": 286720,
+            "footprint": {
+              "physical_footprint_bytes": 4523008,
+              "physical_footprint_rounding_tolerance_bytes": 512,
+              "lifetime_peak_physical_footprint_bytes": 4670464,
+              "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+            }
+          },
+          "whole_latifa": {
+            "aggregate_equals_host": true,
+            "descendant_processes": 0,
+            "host_processes": 1,
+            "lifetime_peak_physical_footprint_bytes": 4670464,
+            "lifetime_peak_physical_footprint_upper_bound_bytes": 4670976,
+            "physical_footprint_bytes": 4523008,
+            "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+            "rss_bytes": 8929280,
+            "status": "complete",
+            "within_256_mib_target": true
+          }
+        },
+        "observed_outcome": "result",
+        "offline_after_host_reaped": {
+          "integrity_check": "ok",
+          "completed_turns": 1,
+          "partial_turns": 0,
+          "canonical_output_items": 2,
+          "assistant_projections": 1,
+          "operation_count": 1,
+          "attempt_ordinal": 1,
+          "resolution_code": "completed",
+          "uncertain": 0,
+          "retry_due_at_ms": null,
+          "last_failure_code": null
+        },
+        "process_disk_write_evidence": {
+          "delta_bytes": 1110016,
+          "final_bytes": 1396736,
+          "initial_bytes": 286720,
+          "status": "observed"
+        },
+        "provider_requests": 1,
+        "sse_bytes": 201111,
+        "status": "passed",
+        "test_cache_kib": 32
+      },
+      {
+        "answer_bytes": 100000,
+        "cache_spill_requested": false,
+        "clean_transaction_rollback": false,
+        "client_delivery": {
+          "destination_bytes": 100000,
+          "destination_sha256": "ed1b345f8acb204cefc88d65c08bd8ea49e383b1c4960f760288689ed044c4d3",
+          "time_stderr": "        0.01 real         0.00 user         0.00 sys\n             3506176  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 465  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   2  messages sent\n                 154  messages received\n                   0  signals received\n                   1  voluntary context switches\n                  11  involuntary context switches\n            36513658  instructions retired\n            13033824  cycles elapsed\n             2212544  peak memory footprint\n"
+        },
+        "database_bytes_after_host_reaped": 241664,
+        "duration_seconds": 0.094426083,
+        "effective_sqlite_configuration_valid": true,
+        "execution": {
+          "custody_occupied": "0",
+          "dispatch_fenced": false,
+          "scratch_used_bytes": "0",
+          "status": "partial",
+          "unavailable": [
+            "structured_output"
+          ]
+        },
+        "expected_spill_off_memory_failure": false,
+        "final": {
+          "host": {
+            "rss_bytes": 9256960,
+            "virtual_bytes": 420258119680,
+            "cpu_user_seconds": 0.020746666666666663,
+            "cpu_system_seconds": 0.009703416666666666,
+            "threads": 5,
+            "live_descendant_processes": 0,
+            "open_descriptor_rows": 15,
+            "disk_read_bytes": 12288,
+            "disk_write_bytes": 1134592,
+            "footprint": {
+              "physical_footprint_bytes": 4588544,
+              "physical_footprint_rounding_tolerance_bytes": 512,
+              "lifetime_peak_physical_footprint_bytes": 4801536,
+              "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+            }
+          },
+          "whole_latifa": {
+            "aggregate_equals_host": true,
+            "descendant_processes": 0,
+            "host_processes": 1,
+            "lifetime_peak_physical_footprint_bytes": 4801536,
+            "lifetime_peak_physical_footprint_upper_bound_bytes": 4802048,
+            "physical_footprint_bytes": 4588544,
+            "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+            "rss_bytes": 9256960,
+            "status": "complete",
+            "within_256_mib_target": true
+          }
+        },
+        "host_exit_after_reap": {
+          "exited": true,
+          "code": -1,
+          "stop_signal_sent": true
+        },
+        "host_sqlite_diagnostics": [
+          {
+            "latifa_test_phase": "sqlite_diagnostic",
+            "at_ns": "1375747973023541",
+            "subject": "measure/spill",
+            "process_memory_scope": "SQLite process-global allocator; one Store per Host",
+            "process_memory_current_bytes": 236704,
+            "process_memory_highwater_bytes": 402464,
+            "cache_used_bytes": 35504,
+            "cache_used_scope": "connection-current approximate pager bytes",
+            "cache_spills": 0,
+            "cache_spills_scope": "connection cumulative mid-transaction spills",
+            "hard_heap_limit_bytes": 16777216,
+            "page_size_bytes": 4096,
+            "cache_size_setting": -32,
+            "cache_size_setting_scope": "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages",
+            "cache_spill_threshold": 0,
+            "mmap_size_bytes": 0,
+            "synchronous": 3,
+            "temp_store": 1,
+            "busy_timeout_ms": 0,
+            "journal_mode": "delete"
+          },
+          {
+            "latifa_test_phase": "sqlite_diagnostic",
+            "at_ns": "1375748218286083",
+            "subject": "measure/spill",
+            "process_memory_scope": "SQLite process-global allocator; one Store per Host",
+            "process_memory_current_bytes": 236816,
+            "process_memory_highwater_bytes": 706496,
+            "cache_used_bytes": 35504,
+            "cache_used_scope": "connection-current approximate pager bytes",
+            "cache_spills": 0,
+            "cache_spills_scope": "connection cumulative mid-transaction spills",
+            "hard_heap_limit_bytes": 16777216,
+            "page_size_bytes": 4096,
+            "cache_size_setting": -32,
+            "cache_size_setting_scope": "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages",
+            "cache_spill_threshold": 0,
+            "mmap_size_bytes": 0,
+            "synchronous": 3,
+            "temp_store": 1,
+            "busy_timeout_ms": 0,
+            "journal_mode": "delete"
+          }
+        ],
+        "host_stderr_tail": "{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1375747972953333\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1375747973023541\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":236704,\"process_memory_highwater_bytes\":402464,\"cache_used_bytes\":35504,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":0,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_setting\":-32,\"cache_size_setting_scope\":\"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages\",\"cache_spill_threshold\":0,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n{\"latifa_test_phase\":\"transport_handoff_committed\",\"at_ns\":\"1375748152716208\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_lock_acquired\",\"at_ns\":\"1375748166217666\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"settlement_complete\",\"at_ns\":\"1375748179946750\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"model_settlement_committed\",\"at_ns\":\"1375748179956666\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_started\",\"at_ns\":\"1375748179981625\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"cleanup_completed\",\"at_ns\":\"1375748179986500\",\"turn\":\"1\",\"operation\":\"1\"}\n{\"latifa_test_phase\":\"inspection_captured\",\"at_ns\":\"1375748218250125\",\"subject_kind\":\"session\",\"subject\":\"measure/spill\"}\n{\"latifa_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"1375748218286083\",\"subject\":\"measure/spill\",\"process_memory_scope\":\"SQLite process-global allocator; one Store per Host\",\"process_memory_current_bytes\":236816,\"process_memory_highwater_bytes\":706496,\"cache_used_bytes\":35504,\"cache_used_scope\":\"connection-current approximate pager bytes\",\"cache_spills\":0,\"cache_spills_scope\":\"connection cumulative mid-transaction spills\",\"hard_heap_limit_bytes\":16777216,\"page_size_bytes\":4096,\"cache_size_setting\":-32,\"cache_size_setting_scope\":\"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages\",\"cache_spill_threshold\":0,\"mmap_size_bytes\":0,\"synchronous\":3,\"temp_store\":1,\"busy_timeout_ms\":0,\"journal_mode\":\"delete\"}\n",
+        "initial": {
+          "execution": {
+            "custody_occupied": "0",
+            "dispatch_fenced": false,
+            "scratch_used_bytes": "0",
+            "status": "partial",
+            "unavailable": [
+              "structured_output"
+            ]
+          },
+          "host": {
+            "rss_bytes": 8486912,
+            "virtual_bytes": 420256497664,
+            "cpu_user_seconds": 0.0053955,
+            "cpu_system_seconds": 0.004699,
+            "threads": 4,
+            "live_descendant_processes": 0,
+            "open_descriptor_rows": 15,
+            "disk_read_bytes": 8192,
+            "disk_write_bytes": 258048,
+            "footprint": {
+              "physical_footprint_bytes": 3916800,
+              "physical_footprint_rounding_tolerance_bytes": 512,
+              "lifetime_peak_physical_footprint_bytes": 4129792,
+              "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+            }
+          },
+          "whole_latifa": {
+            "aggregate_equals_host": true,
+            "descendant_processes": 0,
+            "host_processes": 1,
+            "lifetime_peak_physical_footprint_bytes": 4129792,
+            "lifetime_peak_physical_footprint_upper_bound_bytes": 4130304,
+            "physical_footprint_bytes": 3916800,
+            "qualification_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+            "rss_bytes": 8486912,
+            "status": "complete",
+            "within_256_mib_target": true
+          }
+        },
+        "observed_outcome": "result",
+        "offline_after_host_reaped": {
+          "integrity_check": "ok",
+          "completed_turns": 1,
+          "partial_turns": 0,
+          "canonical_output_items": 2,
+          "assistant_projections": 1,
+          "operation_count": 1,
+          "attempt_ordinal": 1,
+          "resolution_code": "completed",
+          "uncertain": 0,
+          "retry_due_at_ms": null,
+          "last_failure_code": null
+        },
+        "process_disk_write_evidence": {
+          "delta_bytes": 876544,
+          "final_bytes": 1134592,
+          "initial_bytes": 258048,
+          "status": "observed"
+        },
+        "provider_requests": 1,
+        "sse_bytes": 201111,
+        "status": "passed",
+        "test_cache_kib": 32
+      }
+    ],
+    "status": "passed",
+    "write_sync_qualification": {
+      "reason": "Darwin exposes per-process disk-write bytes but no direct per-process sync-call oracle; effective Host SQLite settings are recorded separately in Host diagnostics",
+      "status": "unavailable",
+      "sync_calls": null
+    }
+  },
+  "status": "smoke_passed",
+  "tested_revision": "45270a65ec4a02c7fe3eacf61ac28f103046ad26",
+  "working_tree_dirty": true,
+  "zig": "0.16.0"
+}
