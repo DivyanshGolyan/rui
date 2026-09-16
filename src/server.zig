@@ -58,6 +58,8 @@ pub const Faults = struct {
     report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
+    control_gate_keys: ?[]const u8 = null,
+    control_gate_path: ?[]const u8 = null,
     suppress_first_control_hint: bool = false,
     sqlite_diagnostics: bool = false,
     sqlite_cache_spill: bool = true,
@@ -1082,6 +1084,7 @@ const ControlTiming = struct {
     store_complete_ns: u64 = 0,
 
     fn init(host: *Host, command_key: []const u8, kind: []const u8, accepted_at_ns: u64) ControlTiming {
+        traceSubject(host, "control_store_queued", "command_key", command_key);
         return .{
             .host = host,
             .command_key = command_key,
@@ -1099,8 +1102,27 @@ const ControlTiming = struct {
     fn markStore(context: *anyopaque, phase: store_module.ControlTracePhase) void {
         const self: *ControlTiming = @ptrCast(@alignCast(context));
         switch (phase) {
-            .lock_acquired => self.lock_acquired_ns = nowNs(self.host),
+            .lock_acquired => {
+                self.lock_acquired_ns = nowNs(self.host);
+                traceSubject(self.host, "control_lock_acquired", "command_key", self.command_key);
+                self.waitAtTestGate();
+            },
             .store_complete => self.store_complete_ns = nowNs(self.host),
+        }
+    }
+
+    fn waitAtTestGate(self: *ControlTiming) void {
+        const keys = self.host.faults.control_gate_keys orelse return;
+        const path = self.host.faults.control_gate_path orelse return;
+        var candidates = std.mem.splitScalar(u8, keys, ',');
+        while (candidates.next()) |candidate| {
+            if (!std.mem.eql(u8, candidate, self.command_key)) continue;
+            var gate = std.Io.Dir.cwd().openFile(self.host.io, path, .{}) catch return;
+            defer gate.close(self.host.io);
+            var release: [1]u8 = undefined;
+            const count = gate.readStreaming(self.host.io, &.{&release}) catch return;
+            if (count == 1) traceSubject(self.host, "control_gate_released", "command_key", self.command_key);
+            return;
         }
     }
 
