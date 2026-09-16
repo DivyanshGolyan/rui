@@ -14,6 +14,10 @@ Inspect source before claiming implementation. Distinguish accepted behavior, pr
 
 ## Agent skills
 
+### Agent-facing documentation
+
+Use the `writing-for-agents` skill when creating or editing skills, `AGENTS.md` or Markdown reached from `AGENTS.md`.
+
 ### Issue tracker
 
 Issues are tracked in GitHub. See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
