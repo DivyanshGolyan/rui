@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"latifa.local/research/measurement"
+	"latifa.local/qualification/measurement"
 )
 
 var sessionCounts = []int{0, 100, 1_000, 10_000}

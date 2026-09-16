@@ -154,3 +154,24 @@ func TestRuntimeManifestPropagatesPhysicalMemoryFailure(t *testing.T) {
 		t.Fatalf("manifest=%v error=%v", manifest, err)
 	}
 }
+
+func TestRepositoryRootFromQualificationModule(t *testing.T) {
+	root := t.TempDir()
+	module := filepath.Join(root, "tests", "qualification")
+	if err := os.MkdirAll(module, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(module, "go.mod"), []byte("module fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(module)
+	got, err := RepositoryRoot()
+	if err != nil || got != root {
+		t.Fatalf("RepositoryRoot() = %q, %v; want %q", got, err, root)
+	}
+	t.Chdir(root)
+	got, err = RepositoryRoot()
+	if err != nil || got != root {
+		t.Fatalf("RepositoryRoot() from root = %q, %v; want %q", got, err, root)
+	}
+}

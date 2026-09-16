@@ -1,4 +1,4 @@
-module latifa.local/research
+module latifa.local/qualification
 
 go 1.27.0
 

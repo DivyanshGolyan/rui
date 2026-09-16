@@ -640,9 +640,9 @@ func RepositoryRoot() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if filepath.Base(working) == "research" {
+	if filepath.Base(working) == "qualification" && filepath.Base(filepath.Dir(working)) == "tests" {
 		if _, err := os.Stat(filepath.Join(working, "go.mod")); err == nil {
-			return filepath.Dir(working), nil
+			return filepath.Dir(filepath.Dir(working)), nil
 		}
 	}
 	return working, nil
@@ -661,7 +661,7 @@ func EnvironmentEvidence(deadline Deadline, binary, output string) (map[string]a
 	if err != nil {
 		return nil, err
 	}
-	sumHash, err := SHA256File(filepath.Join(root, "research", "go.sum"))
+	sumHash, err := SHA256File(filepath.Join(root, "tests", "qualification", "go.sum"))
 	if err != nil {
 		return nil, err
 	}
