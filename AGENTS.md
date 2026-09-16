@@ -12,6 +12,20 @@ For issue-driven work, read the live issue, relevant discussion and dependencies
 
 Inspect source before claiming implementation. Distinguish accepted behavior, prototype evidence, production qualification and remaining uncertainty.
 
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub. See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
+
+### Triage labels
+
+The default Matt Pocock triage vocabulary is used. See [docs/agents/triage-labels.md](docs/agents/triage-labels.md).
+
+### Domain docs
+
+Rui uses a single-context domain-doc layout. See [docs/agents/domain.md](docs/agents/domain.md).
+
 ## Make changes
 
 Inspect the working-tree diff first; preserve concurrent work. Keep reviews read-only unless fixes are requested. Complete authorized work within scope without reopening settled choices.

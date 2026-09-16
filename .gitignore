@@ -5,6 +5,10 @@ snapshots/
 consults/
 .amp/portals/*
 
+# Installed by .agents/setup from the latest upstream revisions
+.agents/skills/
+.agents/skills-revisions
+
 # Generated Python bytecode
 __pycache__/
 *.py[cod]
