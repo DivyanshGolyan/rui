@@ -2650,7 +2650,16 @@ def main():
         ).fetchone()[0] is None
         database.close()
         assert len(capacity_endpoint.requests) == 1
+        capacity_release_started = time.monotonic()
         capacity_release.set()
+        wait_for(
+            lambda: len(capacity_endpoint.requests) == 2,
+            "capacity release discovery without notification",
+            timeout=8,
+        )
+        capacity_release_discovery_ms = (
+            time.monotonic() - capacity_release_started
+        ) * 1000
         wait_for(
             lambda: completed_observation(
                 durable_wait_store, "capacity-wait-message-b"
@@ -2662,6 +2671,10 @@ def main():
             durable_wait_store, "capacity-wait-message-b"
         ) == b"capacity released"
         assert len(capacity_endpoint.requests) == 2
+        print(
+            "queued capacity-release discovery (diagnostic): "
+            f"{capacity_release_discovery_ms:.1f} ms"
+        )
         stop_host(durable_wait_host)
         processes.remove(durable_wait_host)
         capacity_endpoint.shutdown()

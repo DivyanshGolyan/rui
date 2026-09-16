@@ -203,6 +203,18 @@ pub fn build(b: *std.Build) void {
     );
     measure_retry_step.dependOn(&measure_retry.step);
 
+    const measure_queue = b.addSystemCommand(&.{
+        "go", "run", "-mod=readonly", "./model-queue",
+    });
+    measure_queue.setCwd(b.path("tests/qualification"));
+    measure_queue.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    measure_queue.addArtifactArg(release);
+    const measure_queue_step = b.step(
+        "measure-model-queue",
+        "Measure macOS model queue discovery, ordering, settlement, and mixed resources",
+    );
+    measure_queue_step.dependOn(&measure_queue.step);
+
     const measure_control = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-control",
     });

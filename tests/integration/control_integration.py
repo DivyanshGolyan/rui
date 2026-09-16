@@ -1360,6 +1360,153 @@ def prove_real_settlement_contention(
         stop_success_endpoint(endpoint, endpoint_thread)
 
 
+def prove_queued_stop_reuse_after_newer_work(state):
+    endpoint = StreamingEndpoint()
+    endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoint_thread.start()
+    store = state / "queued-stop-reuse-store"
+    blocker_session = "direct/queued-stop-blocker"
+    target_session = "direct/queued-stop-target"
+    process = None
+    try:
+        url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
+        process, _ = start_host(store, url, active_capacity=1)
+        configure(state, store, "queued-stop-blocker-config", blocker_session)
+        message(
+            state,
+            store,
+            "queued-stop-blocker-message",
+            blocker_session,
+            "occupy capacity",
+        )
+        wait_for(lambda: endpoint.counts()[0] == 1, "queued-stop blocker request")
+
+        configure(state, store, "queued-stop-target-config", target_session)
+        message(
+            state,
+            store,
+            "queued-stop-excluded-message",
+            target_session,
+            "must remain excluded",
+        )
+        queued = observe(store, "queued-stop-excluded-message")
+        assert queued["queue"]["status"] == "queued", queued
+
+        record = state / "queued-stop-original.json"
+        dropped = subprocess.run(
+            [
+                str(RUI),
+                "stop-session",
+                "--store",
+                str(store),
+                "--record",
+                str(record),
+                "--key",
+                "queued-stop-original",
+                "--session",
+                target_session,
+                "--test-drop-reply",
+                "after-commit",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        assert dropped.returncode != 0, dropped
+        excluded = observe(store, "queued-stop-excluded-message")
+        assert excluded["queue"]["status"] == "excluded", excluded
+        assert excluded["result"] == {
+            "status": "cancelled",
+            "code": "session_stopped",
+        }, excluded
+
+        blocker_stop = stop_session(
+            state,
+            store,
+            "queued-stop-blocker-stop",
+            blocker_session,
+        )
+        assert blocker_stop["answer"]["status"] == "accepted", blocker_stop
+        wait_for(lambda: endpoint.counts()[1] == 1, "queued-stop blocker disconnect")
+        wait_for(
+            lambda: inspect_execution(store, blocker_session)["custody_occupied"]
+            == "0",
+            "queued-stop blocker cleanup",
+        )
+        assert endpoint.counts()[0] == 1
+
+        message(
+            state,
+            store,
+            "queued-stop-newer-message",
+            target_session,
+            "newer work",
+        )
+        newer = wait_for(
+            lambda: observe(store, "queued-stop-newer-message").get("processing"),
+            "newer work after queued stop",
+        )
+        wait_for(lambda: endpoint.counts()[0] == 2, "newer provider request")
+
+        replayed = command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            record,
+            "--kind",
+            "session-stop",
+        )
+        assert replayed["answer"]["status"] == "accepted", replayed
+        assert replayed["answer"]["replayed"] is True, replayed
+        assert replayed["answer"]["selection"] == {
+            "turn": None,
+            "admission_cutoff": excluded["queue"]["admission"],
+        }, replayed
+        still_newer = observe(store, "queued-stop-newer-message")
+        assert still_newer["processing"] == newer, still_newer
+        assert "result" not in still_newer, still_newer
+        assert observe(store, "queued-stop-excluded-message") == excluded
+
+        fresh_stop = stop_session(
+            state,
+            store,
+            "queued-stop-newer-stop",
+            target_session,
+        )
+        assert fresh_stop["answer"]["status"] == "accepted", fresh_stop
+        assert fresh_stop["answer"]["selection"]["turn"] == newer["turn"], fresh_stop
+        wait_for(
+            lambda: observe(store, "queued-stop-newer-message").get("result", {}).get(
+                "status"
+            )
+            == "cancelled",
+            "fresh stop of newer work",
+        )
+
+        stop_process(process)
+        process = None
+        process, _ = start_host(store)
+        restarted = command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            record,
+            "--kind",
+            "session-stop",
+        )
+        assert restarted["answer"] == replayed["answer"], restarted
+        assert observe(store, "queued-stop-excluded-message") == excluded
+    finally:
+        if process is not None:
+            stop_process(process)
+        endpoint.release.set()
+        endpoint.shutdown()
+        endpoint.server_close()
+        endpoint_thread.join(timeout=5)
+
+
 def prove_retry_wait_control(state, kind):
     retry_wait_ms = 2500
     endpoint = RetryWaitEndpoint(kind)
@@ -1485,15 +1632,44 @@ def prove_retry_wait_control(state, kind):
         assert endpoint.count() == 1, endpoint.count()
         assert observe(store, f"retry-wait-{kind}-message") == cancelled
 
+        newer_key = f"retry-wait-{kind}-newer"
+        message(state, store, newer_key, session, "newer work after recovered control")
+        wait_for(lambda: endpoint.count() == 2, f"{kind} newer provider request")
+        newer = wait_for(
+            lambda: (
+                value
+                if (value := observe(store, newer_key)).get("result", {}).get(
+                    "status"
+                )
+                == "completed"
+                else None
+            ),
+            f"{kind} newer result",
+        )
+        replayed_after_newer = command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            record,
+            "--kind",
+            retry_kind,
+        )
+        assert replayed_after_newer["answer"] == replayed["answer"], (
+            replayed_after_newer,
+            replayed,
+        )
+        assert observe(store, newer_key) == newer
+
         stop_process(process)
         process = None
         database = sqlite3.connect(store / "rui.sqlite3")
         try:
             assert database.execute(
-                "SELECT attempt_ordinal FROM model_operation"
+                "SELECT attempt_ordinal FROM model_operation ORDER BY operation_id LIMIT 1"
             ).fetchall() == [(1,)]
             assert database.execute(
-                "SELECT count(*) FROM model_output_item"
+                "SELECT count(*) FROM model_output_item WHERE operation_id=(SELECT min(operation_id) FROM model_operation)"
             ).fetchone()[0] == 0
         finally:
             database.close()
@@ -1722,6 +1898,7 @@ def main():
 
         prove_pre_handoff_stop(state)
         prove_sealed_interruption_and_cleanup(state)
+        prove_queued_stop_reuse_after_newer_work(state)
         prove_retry_wait_control(state, "stop")
         prove_retry_wait_control(state, "interruption")
         control_first = prove_delivery_and_settlement_contention(state)
