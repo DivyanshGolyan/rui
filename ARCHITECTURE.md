@@ -265,21 +265,23 @@ Keep call/result pairs intact when selecting the frontier. Missing/duplicate com
 
 ### Accepting an answer or tool calls
 
-A valid model response contains assistant-only output or an optional assistant-text prefix with ordered Tool Calls. Validate the entire candidate and all descriptors before atomic admission; one invalid member rejects all. Append prefix and calls in order. Assistant-only nonempty output is a Final Answer only if settlement finds no earlier applicable pending User Message. A message committed first requires further model work; settlement committed first ends that Turn. SQLite commit order resolves this race.
+A valid model response contains assistant-only output or an optional assistant-text prefix with ordered Tool Calls. Before atomic admission, validate the complete provider candidate: terminal agreement, supported consequential variants, item order, required field types, nonempty required provider identities and unique item/call identities must establish exact trustworthy call envelopes. A malformed or contradictory envelope rejects the complete candidate; no prefix, call, rejection result or Action is admitted. Preserve each trustworthy call's exact item ID, call ID, name, raw argument string, originating ordinal and supported provider metadata.
 
-A **Tool Call** is the model's proposed invocation of a tool. Each accepted Tool Call creates one child **Action Operation**, the unit of work whose permission and result core owns, linked to its model parent and stable call ordinal. No Step/group entity is required. Children run and settle independently, including within one Workspace.
+A **Tool Call** is one trustworthy model-proposed invocation. Classify every Tool Call against the proposing model Operation's frozen Tool Catalog in the same admission transaction. An unknown tool, malformed argument JSON, wrong argument shape or deterministic descriptor failure receives an immutable bounded rejection result owned by that model call. Its eventual Tool Result identifies the unknown tool or invalid arguments without exposing parser, storage, permission-policy or approval-audit internals. It creates no Action, Permission Request, Authorization, Attempt, custody or dispatch authority. Do not repair, coerce or reinterpret the arguments. Valid siblings remain admissible; candidate import still commits every prefix, call, classification, rejection and Action consequence together or none.
 
-Once every child resolves, one transaction appends typed Tool Results in call order; only then may the next model Operation start. Physical completion order cannot reorder Conversation. Denial, failure, cancellation and uncertainty all produce results.
+Each applicable Tool Call creates one child **Action Operation**, the unit of executable work whose permission and result core owns, linked to its model parent and stable call ordinal. Keeping rejected calls outside Action preserves the invariant that every Action has a canonical executable descriptor. No Step/group entity is required. Actions run and settle independently, including within one Workspace.
+
+Once every Tool Call has either its immutable rejection result or a resolved Action, one transaction appends typed Tool Results in call order; only then may the next model Operation start. Physical completion order cannot reorder Conversation. Call rejection, Action denial, failure, cancellation and uncertainty all produce results.
 
 ### Authorizing exact actions
 
-The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority. The closed executable mapping is `bash` and `edit`; Session configuration selects the offered subset. Validate proposed Tool Calls against the proposing model Operation's frozen Tool Catalog, not the latest Session configuration. Removing Bash while that model request runs changes future model requests, not the validity of its Bash proposal. Execution still requires the exact Action authorization below.
+The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority. The closed executable mapping is `bash` and `edit`; Session configuration selects the offered subset. Classify proposed Tool Calls against the proposing model Operation's frozen Tool Catalog, not the latest Session configuration. Removing Bash while that model request runs changes future model requests, not the applicability of its Bash proposal. A later Operation that was not offered Bash can still contain a trustworthy Bash call envelope, but classification saves its rejection result and creates no Action. Execution still requires the exact Action authorization below.
 
 Core owns and enforces Permission Mode per Session. Workflow Runtime configures the Sessions it uses through the ordinary Session configuration API, as other authorized clients do; clients present exact Permission Requests and submit decisions. Mode persists across client disconnect, Host restart and later Session reuse until explicitly changed. Bypass therefore permits unattended progress without a connected approver; ask retains unanswered requests durably for a later client, without a resident client or per-Session worker.
 
 Sharing a Session shares its permission policy under ordinary configuration ordering. Concurrent use by multiple Workflows is allowed but is not an expected V1 flow; it adds no Workflow-local grant, policy copy or lifetime. One retained policy and one application boundary keep unattended work explainable without coupling authority to connection lifetime.
 
-**Authorization** durably permits one exact validated Action. At child admission select current Session Permission Mode, default `ask`, and save descriptor plus configuration provenance.
+**Authorization** durably permits one exact validated Action. At applicable-Action admission select current Session Permission Mode, default `ask`, and save descriptor plus configuration provenance. Rejected Tool Calls never consult permission policy.
 
 `ask` creates one immutable Permission Request; explicit `bypass` directly creates Authorization. Siblings admitted together share that view. Permission Decisions allow once or deny one exact request/Operation/descriptor under Local Owner authority; server access never implies bypass.
 
@@ -323,9 +325,9 @@ Unresolved Operations distinguish no Attempt, admitted uncertainty, and retryabl
 
 Admission atomically checks applicability, absent Resolution and due policy, records fresh ordinal, consumes allowance and replaces eligibility with uncertainty. Retryable settlement saves current failure/accounting/eligibility.
 
-Final Resolution/content is immutable; further admission/acceptance rejects. Denial, validation, stop or interruption need no invented Attempt. Diagnostics require no permanent failed-try history.
+Final Resolution/content is immutable; further admission/acceptance rejects. Action denial, stop or interruption need no invented Attempt. A rejected model Tool Call is not an Action and has no Resolution or Attempt. Diagnostics require no permanent failed-try history.
 
-For example, denying a proposed Bash action resolves its Action Operation without an Attempt. A temporary model failure can settle one Attempt while leaving the Operation unresolved and eligible for another Attempt. Neither that failed try nor the later retry creates a new Operation. A Resolution ends the Operation; the Turn may still need other Operations before it can finish.
+For example, invalid Bash arguments create a call-bound rejection result without an Action. Denying a valid proposed Bash Action resolves its Action Operation without an Attempt. A temporary model failure can settle one Attempt while leaving the Operation unresolved and eligible for another Attempt. Neither that failed try nor the later retry creates a new Operation. A Resolution ends the Operation; the Turn may still need other Operations or ordered Tool Result publication before it can finish.
 
 ### Launching once and retaining cleanup ownership
 
@@ -344,7 +346,7 @@ Core invokes private provider/Bash/Edit interfaces through closed effect-specifi
 | Consumer | Input and returned evidence |
 | --- | --- |
 | Provider preparation/transport | The Operation-bound historical view supplies lowering inputs; transport consumes only the completed request scratch and late-bound credentials/transport settings. Return sealed capture with observed HTTP/protocol termination and available response correlation, or a typed preparation/transport failure. HTTP success alone is not a model candidate. |
-| Provider interpretation | Read the sealed capture and producing request's output contract in the serial workspace. Return complete validated output ranges and descriptors, or typed rejection with required provenance. It cannot admit Actions, grant permission, choose retries or finish a Turn. |
+| Provider interpretation | Read the sealed capture and producing request's wire/output contract in the serial workspace. Return complete provider-validated output ranges and exact trustworthy call envelopes, or typed rejection when the wire contract cannot form a trustworthy candidate. It cannot look up the Tool Catalog, validate executable descriptors, admit Actions, grant permission, choose retries or finish a Turn. |
 | Bash execution | Read the saved command, Workspace and admitted execution settings. Return process termination, capture completeness and sealed output readers for core's Tool Result publication. Process exit alone does not establish complete capture or descendant cleanup. |
 | Edit execution | Read the exact authorized proposal through bounded readers. Return successful checked copyback, established failure before mutation, or failure/uncertainty after mutation may have begun. Target/scratch ownership and mutation rules remain with [Exact Edit](#exact-edit). |
 
@@ -356,7 +358,7 @@ Owned sealed sources retain their contents and extent from handoff through the l
 
 After terminal seal, one shared serial validation/import workspace parses complete output sequentially. No validation worker or manually yielding parser is selected without measured need. Variable items use ranges into sealed source and one sequential unlinked metadata file, traversed through fixed windows, not resident item collections or per-item files.
 
-Charge metadata growth; retain source/metadata through cleanup. Post-commit request-materialization failure remains evidence for the admitted Attempt. Complete provider validation precedes incremental atomic import of content, Resolution/current retry facts and consequences. Late validation/import failure cannot publish partial success.
+Charge metadata growth; retain source/metadata through cleanup. Post-commit request-materialization failure remains evidence for the admitted Attempt. Complete provider-envelope validation and Core call classification precede incremental atomic import of content, Resolution/current retry facts and consequences. Late validation/classification/import failure cannot publish partial success.
 
 Caller content enters as a sealed source at its first semantic reference: import verifies length/digest/type/stable bytes; there is no independent public content-publication operation or staged Content Reference. Bounded memory does not bound SQLite/import or validation elapsed time.
 

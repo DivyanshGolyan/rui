@@ -12,6 +12,8 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Permission ownership prior art](permission-prior-art.md) compares Pi, DeepSeek Harness, OpenCode v2 and Codex CLI approval ownership, grant lifetimes and client reconnect versus process restart; pinned source evidence only, with no accepted contract change.
 
+[Rejected tool-call prior art](rejected-tool-call-prior-art.md) compares malformed provider output, invalid parameters, unknown tools, execution failures, denial, sibling isolation and model feedback across the same four runtimes; the accepted contract now uses its provider-envelope versus call-descriptor boundary for issue #198.
+
 [Output retention prior art](output-retention-prior-art.md) compares byte/count budgets, disk-backed FIFO bookkeeping and cleanup behavior in primary sources; design evidence only, with no accepted contract change or runtime qualification.
 
 [Session identity evidence](session-identity-evidence.md) records SQLite integer-allocation guarantees and JavaScript integer/JSON representation limits from primary sources; no runtime qualification.
