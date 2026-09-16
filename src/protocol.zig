@@ -81,8 +81,11 @@ pub const Kind = enum {
     message,
     session_stop,
     model_interruption,
+    permission_decision,
     observe_command,
     read_result,
+    read_action_call_id,
+    read_action_arguments,
     inspect_session,
 };
 
@@ -175,6 +178,29 @@ pub const ModelInterruptionCommand = struct {
     }
 };
 
+pub const PermissionDecisionCommand = struct {
+    store: Bounded(max_store_bytes) = .{},
+    key: Bounded(max_key_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    action_id: u64 = 0,
+
+    pub fn semanticDigest(self: *const PermissionDecisionCommand) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, "rui/core/permission-decision/deny/v1");
+        hashField(&hash, self.session.slice());
+        var value: [8]u8 = undefined;
+        std.mem.writeInt(u64, &value, self.action_id, .big);
+        hash.update(&value);
+        return hash.finalResult();
+    }
+};
+
+pub const ReadActionArguments = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    action_id: u64 = 0,
+};
+
 pub const ObserveCommand = struct {
     store: Bounded(max_store_bytes) = .{},
     key: Bounded(max_key_bytes) = .{},
@@ -188,6 +214,7 @@ pub const ReadResult = struct {
 pub const InspectSession = struct {
     store: Bounded(max_store_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
+    after_action_id: u64 = 0,
 };
 
 pub const Request = union(Kind) {
@@ -195,15 +222,18 @@ pub const Request = union(Kind) {
     message: MessageCommand,
     session_stop: SessionStopCommand,
     model_interruption: ModelInterruptionCommand,
+    permission_decision: PermissionDecisionCommand,
     observe_command: ObserveCommand,
     read_result: ReadResult,
+    read_action_call_id: ReadActionArguments,
+    read_action_arguments: ReadActionArguments,
     inspect_session: InspectSession,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .session_stop, .model_interruption, .observe_command, .read_result, .inspect_session => {},
+            .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session => {},
         }
     }
 
@@ -339,10 +369,16 @@ const Parser = struct {
             .session_stop
         else if (kind_text.eql("model_interruption"))
             .model_interruption
+        else if (kind_text.eql("permission_decision"))
+            .permission_decision
         else if (kind_text.eql("observe_command"))
             .observe_command
         else if (kind_text.eql("read_result"))
             .read_result
+        else if (kind_text.eql("read_action_call_id"))
+            .read_action_call_id
+        else if (kind_text.eql("read_action_arguments"))
+            .read_action_arguments
         else if (kind_text.eql("inspect_session"))
             .inspect_session
         else
@@ -358,8 +394,11 @@ const Parser = struct {
             .message => .{ .message = try self.parseMessage(store) },
             .session_stop => .{ .session_stop = try self.parseSessionStop(store) },
             .model_interruption => .{ .model_interruption = try self.parseModelInterruption(store) },
+            .permission_decision => .{ .permission_decision = try self.parsePermissionDecision(store) },
             .observe_command => .{ .observe_command = try self.parseObserve(store) },
             .read_result => .{ .read_result = try self.parseReadResult(store) },
+            .read_action_call_id => .{ .read_action_call_id = try self.parseReadActionArguments(store) },
+            .read_action_arguments => .{ .read_action_arguments = try self.parseReadActionArguments(store) },
             .inspect_session => .{ .inspect_session = try self.parseInspect(store) },
         };
         errdefer request.removeTemporaryContent(self.options.io) catch {
@@ -456,6 +495,36 @@ const Parser = struct {
         return request;
     }
 
+    fn parsePermissionDecision(self: *Parser, store: Bounded(max_store_bytes)) !PermissionDecisionCommand {
+        var request = PermissionDecisionCommand{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("key");
+        try self.readSmallString(&request.key);
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("action");
+        request.action_id = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("decision");
+        var decision: Bounded(16) = .{};
+        try self.readSmallString(&decision);
+        if (!decision.eql("deny")) return error.UnsupportedPermissionDecision;
+        return request;
+    }
+
+    fn parseReadActionArguments(self: *Parser, store: Bounded(max_store_bytes)) !ReadActionArguments {
+        var request = ReadActionArguments{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("action");
+        request.action_id = try self.readCanonicalU64();
+        return request;
+    }
+
     fn readCanonicalU64(self: *Parser) !u64 {
         try self.expectByte('"');
         var digits: [20]u8 = undefined;
@@ -484,6 +553,9 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("session");
         try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("after_action");
+        request.after_action_id = try self.readCanonicalU64();
         return request;
     }
 
@@ -826,13 +898,21 @@ pub const max_model_interruption_request_bytes =
     ",\"turn\":\"".len + 20 +
     "\",\"operation\":\"".len + 20 + "\"}}".len;
 
+pub const max_permission_decision_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"permission_decision\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) +
+    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"action\":\"".len + 20 + "\",\"decision\":\"deny\"}".len;
+
 pub const max_control_request_bytes = @max(
-    max_session_stop_request_bytes,
-    max_model_interruption_request_bytes,
+    @max(max_session_stop_request_bytes, max_model_interruption_request_bytes),
+    max_permission_decision_request_bytes,
 );
 
 const max_session_stop_rejection_code_bytes = "invalid_session_reference".len;
 const max_model_interruption_rejection_code_bytes = "invalid_session_reference".len;
+const max_permission_decision_rejection_code_bytes = "invalid_session_reference".len;
 
 pub const max_session_stop_accepted_reply_bytes =
     "{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":".len +
@@ -883,6 +963,18 @@ pub const max_model_interruption_reply_bytes = @max(
     @max(max_model_interruption_conflict_reply_bytes, max_model_interruption_infrastructure_reply_bytes),
 );
 
+const permission_decision_reply_prefix_bytes =
+    "{\"version\":\"1\",\"type\":\"permission_decision_reply\",\"answer\":{\"status\":\"".len;
+const max_permission_decision_target_bytes =
+    "\",\"replayed\":false,\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"action\":\"".len + 20 + "\",\"decision\":\"deny\"".len;
+pub const max_permission_decision_reply_bytes = @max(
+    permission_decision_reply_prefix_bytes + "infrastructure_failure".len + max_permission_decision_target_bytes +
+        ",\"code\":\"canonical_store_failure\"}}".len,
+    permission_decision_reply_prefix_bytes + "rejected".len + max_permission_decision_target_bytes +
+        ",\"code\":\"".len + max_permission_decision_rejection_code_bytes + "\"}}".len,
+);
+
 const control_observation_prefix_bytes =
     "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":".len +
     maximumJsonStringBytes(max_key_bytes) + ",\"observation\":{\"status\":\"".len;
@@ -905,8 +997,13 @@ pub const max_model_interruption_rejected_observation_bytes =
     "\",\"kind\":\"model_interruption\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
     ",\"code\":\"".len + max_model_interruption_rejection_code_bytes +
     "\",\"interruption_target\":".len + max_model_interruption_target_bytes + "}}".len;
+pub const max_permission_decision_observation_bytes =
+    control_observation_prefix_bytes + "rejected".len +
+    "\",\"kind\":\"permission_decision\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"code\":\"".len + max_permission_decision_rejection_code_bytes +
+    "\",\"permission_target\":{\"action\":\"".len + 20 + "\",\"decision\":\"deny\"}}}".len;
 pub const max_control_observation_bytes = @max(
-    @max(max_session_stop_accepted_observation_bytes, max_session_stop_rejected_observation_bytes),
+    @max(@max(max_session_stop_accepted_observation_bytes, max_session_stop_rejected_observation_bytes), max_permission_decision_observation_bytes),
     @max(max_model_interruption_accepted_observation_bytes, max_model_interruption_rejected_observation_bytes),
 );
 
@@ -915,13 +1012,15 @@ pub const max_control_error_response_bytes =
     ",\"code\":".len + maximumJsonStringBytes(96) + "}".len;
 
 pub const max_control_response_bytes = @max(
-    @max(max_session_stop_reply_bytes, max_model_interruption_reply_bytes),
+    @max(@max(max_session_stop_reply_bytes, max_model_interruption_reply_bytes), max_permission_decision_reply_bytes),
     @max(max_control_observation_bytes, max_control_error_response_bytes),
 );
 
-// The Session inspection is the largest issue-174 response. This bound uses
+// The Session inspection is the largest response. This bound uses
 // every literal emitted by renderSessionObservation, maximum decimal u64
 // widths, both tools, a present schema, and worst-case JSON escaping.
+const max_content_reference_bytes =
+    "{\"type\":\"text\",\"bytes\":\"".len + 20 + "\",\"sha256\":\"".len + 64 + "\"}".len;
 const max_session_observation_response_bytes =
     "{\"version\":\"1\",\"type\":\"session_observation\",\"session\":{\"reference\":".len +
     maximumJsonStringBytes(max_session_bytes) +
@@ -934,7 +1033,22 @@ const max_session_observation_response_bytes =
     "\"},\"output_schema\":{\"bytes\":\"".len + 20 +
     "\",\"sha256\":\"".len + 64 +
     "\"}},\"pending_messages\":\"".len + 20 +
-    "\",\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"18446744073709551615\",\"scratch_used_bytes\":\"18446744073709551615\",\"unavailable\":[\"structured_output\"]}}".len;
+    "\",\"actions\":{\"count\":\"".len + 20 +
+    "\",\"permission_request\":{\"action\":\"".len + 20 +
+    "\",\"parent_operation\":\"".len + 20 +
+    "\",\"call_ordinal\":\"".len + 20 +
+    "\",\"tool\":\"bash\",\"permission_revision\":\"".len + 20 +
+    "\",\"authorization\":\"pending\",\"call_id\":".len + max_content_reference_bytes +
+    ",\"arguments\":".len + max_content_reference_bytes +
+    "}},\"rejected_calls\":{\"count\":\"".len + 20 +
+    "\",\"first\":{\"parent_operation\":\"".len + 20 +
+    "\",\"call_ordinal\":\"".len + 20 +
+    "\",\"code\":".len + maximumJsonStringBytes(32) +
+    ",\"item_id\":".len + max_content_reference_bytes +
+    ",\"name\":".len + max_content_reference_bytes +
+    ",\"call_id\":".len + max_content_reference_bytes +
+    ",\"arguments\":".len + max_content_reference_bytes +
+    "}},\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"18446744073709551615\",\"scratch_used_bytes\":\"18446744073709551615\",\"unavailable\":[\"structured_output\",\"allow_once\",\"bash_execution\",\"tool_result_publication\"]}}".len;
 
 pub const max_response_bytes = @max(max_session_observation_response_bytes, max_control_response_bytes);
 

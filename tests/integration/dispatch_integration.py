@@ -213,6 +213,31 @@ def sse_many(response_id, reasoning_count, answer):
     return encode_sse(payloads)
 
 
+def sse_tool_calls(response_id, calls):
+    items = [
+        {
+            "type": "function_call",
+            "id": f"{response_id}-item-{index}",
+            "status": "completed",
+            "name": name,
+            "call_id": call_id,
+            "arguments": arguments,
+        }
+        for index, (name, call_id, arguments) in enumerate(calls)
+    ]
+    payloads = [
+        {"type": "response.output_item.done", "output_index": index, "item": item}
+        for index, item in enumerate(items)
+    ]
+    payloads.append(
+        {
+            "type": "response.completed",
+            "response": {"id": response_id, "status": "completed", "output": items},
+        }
+    )
+    return encode_sse(payloads)
+
+
 class SuccessEndpoint(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
 
@@ -478,6 +503,20 @@ def read_result(store, key):
     return completed.stdout
 
 
+def read_action(store, session, action, field):
+    completed = subprocess.run(
+        [str(RUI), f"read-action-{field}", "--store", str(store), "--session", session, "--action", action],
+        capture_output=True,
+        timeout=15,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"read-action-{field} failed for {action}: {completed.returncode}\n"
+            f"stdout: {completed.stdout!r}\nstderr: {completed.stderr!r}"
+        )
+    return completed.stdout
+
+
 def wait_for(predicate, description, timeout=8):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -502,8 +541,83 @@ def main():
     processes = []
     success_endpoint = None
     success_thread = None
+    proposal_endpoint = None
+    proposal_thread = None
     completed = False
     try:
+        forbidden_effect = state / "proposal-must-not-launch"
+        calls = [
+            ("bash", "call\nA", json.dumps({"cmd": f"touch {forbidden_effect}"}, separators=(",", ":"))),
+            ("other", "call-unknown", "{}"),
+            ("bash", "call-invalid", "{"),
+            ("bash", "call-B", json.dumps({"cmd": "printf second"}, separators=(",", ":"))),
+        ]
+        proposal_endpoint = SuccessEndpoint([sse_tool_calls("proposal-response", calls)])
+        proposal_thread = threading.Thread(target=proposal_endpoint.serve_forever, daemon=True)
+        proposal_thread.start()
+        proposal_url = f"http://127.0.0.1:{proposal_endpoint.server_port}/responses"
+        proposal_store = state / "proposal-store"
+        proposal_host = start_host(proposal_store, proposal_url)
+        processes.append(proposal_host)
+        configure(state, proposal_store, "proposal-config", "direct/proposal", "model-a")
+        message(state, proposal_store, "proposal-message", "direct/proposal", "propose mixed calls")
+        proposal = wait_for(
+            lambda: (value := command("inspect-session", "--store", proposal_store, "--session", "direct/proposal"))["actions"]["permission_request"] and value,
+            "first exact permission request",
+        )
+        assert proposal["actions"]["count"] == "2", proposal
+        assert proposal["rejected_calls"]["count"] == "2", proposal
+        assert proposal["rejected_calls"]["first"]["call_ordinal"] == "1", proposal
+        assert proposal["rejected_calls"]["first"]["code"] == "unknown_tool", proposal
+        first_request = proposal["actions"]["permission_request"]
+        assert first_request["call_ordinal"] == "0", first_request
+        assert read_action(proposal_store, "direct/proposal", first_request["action"], "call-id") == calls[0][1].encode()
+        assert read_action(proposal_store, "direct/proposal", first_request["action"], "arguments") == calls[0][2].encode()
+        second_before_denial = command(
+            "inspect-session", "--store", proposal_store, "--session", "direct/proposal",
+            "--after-action", first_request["action"],
+        )["actions"]["permission_request"]
+        assert second_before_denial["call_ordinal"] == "3", second_before_denial
+        denied = subprocess.run(
+            [
+                str(RUI), "deny-action", "--store", str(proposal_store),
+                "--record", str(state / "proposal-denial.json"), "--key", "proposal-denial",
+                "--session", "direct/proposal", "--action", first_request["action"],
+                "--test-drop-reply", "after-commit",
+            ],
+            capture_output=True,
+            timeout=15,
+        )
+        assert denied.returncode != 0, denied
+        stop_host(proposal_host)
+        processes.remove(proposal_host)
+        proposal_host = start_host(proposal_store, None)
+        processes.append(proposal_host)
+        replay = command(
+            "retry", "--store", proposal_store, "--record", state / "proposal-denial.json",
+            "--kind", "permission-decision",
+        )
+        assert replay["answer"]["status"] == "accepted" and replay["answer"]["replayed"] is True, replay
+        recovered = command("inspect-session", "--store", proposal_store, "--session", "direct/proposal")
+        assert recovered["rejected_calls"]["count"] == "2", recovered
+        second = recovered["actions"]["permission_request"]
+        assert second["call_ordinal"] == "3", second
+        assert read_action(proposal_store, "direct/proposal", second["action"], "call-id") == calls[3][1].encode()
+        assert read_action(proposal_store, "direct/proposal", second["action"], "arguments") == calls[3][2].encode()
+        stopped = command(
+            "stop-session", "--store", proposal_store, "--record", state / "proposal-stop.json",
+            "--key", "proposal-stop", "--session", "direct/proposal",
+        )
+        assert stopped["answer"]["status"] == "accepted", stopped
+        stale = command(
+            "deny-action", "--store", proposal_store, "--record", state / "proposal-stale.json",
+            "--key", "proposal-stale", "--session", "direct/proposal", "--action", second["action"],
+        )
+        assert stale["answer"]["status"] == "rejected" and stale["answer"]["code"] == "action_not_pending", stale
+        assert not forbidden_effect.exists()
+        stop_host(proposal_host)
+        processes.remove(proposal_host)
+
         first_answer = 'First "answer"\n🙂'.encode()
         second_answer = ("second answer " + "x" * 5000).encode()
         first_sse, first_reasoning, first_message_item = sse_answer(
@@ -1058,10 +1172,11 @@ def main():
         continued_later, _, _ = sse_answer(
             "continued-later", "continued-r-3", "continued-m-3", "later answer"
         )
+        continued_retry_release = threading.Event()
         continued_endpoint = SuccessEndpoint(
             [
                 continued_first,
-                ResponseSpec(b"temporary", {}, 503),
+                (ResponseSpec(b"temporary", {}, 503), continued_retry_release),
                 continued_retry,
                 continued_later,
             ]
@@ -1102,7 +1217,7 @@ def main():
             "direct/continued-retry",
             "historical retry input",
         )
-        wait_for(lambda: len(continued_endpoint.requests) == 2, "first continued Attempt")
+        wait_for(lambda: len(continued_endpoint.requests) >= 2, "first continued Attempt")
         configure(
             state,
             continued_store,
@@ -1118,7 +1233,8 @@ def main():
             "direct/continued-retry",
             "unselected later input",
         )
-        wait_for(lambda: len(continued_endpoint.requests) == 3, "replacement continued Attempt")
+        continued_retry_release.set()
+        wait_for(lambda: len(continued_endpoint.requests) >= 3, "replacement continued Attempt")
         assert continued_endpoint.requests[1] == continued_endpoint.requests[2]
         frozen_retry = json.loads(continued_endpoint.requests[2])
         expected_private = dict(continued_reasoning)
@@ -1490,7 +1606,7 @@ def main():
             ],
             done=False,
         )
-        unsupported_tool = encode_sse(
+        incomplete_tool = encode_sse(
             [
                 {
                     "type": "response.output_item.added",
@@ -1522,7 +1638,7 @@ def main():
                 changed_terminal,
                 duplicate_identity,
                 late_malformed,
-                unsupported_tool,
+                incomplete_tool,
                 *encrypted_cases,
             ]
         )
@@ -1535,7 +1651,7 @@ def main():
                 "malformed_provider_output",
                 "malformed_provider_output",
                 "malformed_provider_output",
-                "unsupported_provider_output",
+                "malformed_provider_output",
                 "malformed_provider_output",
                 "continuation_unavailable",
                 "malformed_provider_output",
@@ -1870,7 +1986,18 @@ def main():
                 {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
             ],
             "tools": [
-                {"type": "function", "name": "bash", "description": "Run Bash"},
+                {
+                    "type": "function",
+                    "name": "bash",
+                    "description": "Run Bash",
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"cmd": {"type": "string"}},
+                        "required": ["cmd"],
+                        "additionalProperties": False,
+                    },
+                },
                 {"type": "function", "name": "edit", "description": "Edit one file"},
             ],
             "text": {
@@ -2526,9 +2653,9 @@ def main():
             "direct/backlog-stall",
             "occupy-one-slot",
         )
-        wait_for(lambda: len(backlog_endpoint.requests) == 2, "stalled live backlog request")
+        wait_for(lambda: len(backlog_endpoint.requests) >= 2, "stalled live backlog request")
         wait_for(
-            lambda: len(backlog_endpoint.requests) == 3,
+            lambda: len(backlog_endpoint.requests) >= 3,
             "due retry behind future history",
             timeout=5,
         )
@@ -3237,7 +3364,8 @@ def main():
                 assert observation["processing"]["attempt"] == "1", observation
                 with sqlite3.connect(transient_store / "rui.sqlite3") as database:
                     retry = database.execute(
-                        "SELECT allowance_used,uncertain,resolution_code,last_failure_code,retry_due_at_ms>CAST(unixepoch('subsec')*1000 AS INTEGER) FROM model_operation"
+                        "SELECT allowance_used,uncertain,resolution_code,last_failure_code,retry_due_at_ms>? FROM model_operation",
+                        (int(time.time() * 1000),),
                     ).fetchall()
                     expected_code = (
                         "provider_transport_failure"
@@ -3431,6 +3559,11 @@ def main():
             success_endpoint.server_close()
         if success_thread is not None:
             success_thread.join(timeout=5)
+        if proposal_endpoint is not None:
+            proposal_endpoint.shutdown()
+            proposal_endpoint.server_close()
+        if proposal_thread is not None:
+            proposal_thread.join(timeout=5)
         if completed:
             shutil.rmtree(state)
         else:

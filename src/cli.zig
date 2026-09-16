@@ -12,9 +12,12 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "message")) return message(init.io, args[2..]);
     if (std.mem.eql(u8, command, "stop-session")) return stopSession(init.io, args[2..]);
     if (std.mem.eql(u8, command, "interrupt-model")) return interruptModel(init.io, args[2..]);
+    if (std.mem.eql(u8, command, "deny-action")) return denyAction(init.io, args[2..]);
     if (std.mem.eql(u8, command, "retry")) return retry(init.io, args[2..]);
     if (std.mem.eql(u8, command, "observe-command")) return observe(init.io, args[2..]);
     if (std.mem.eql(u8, command, "read-result")) return readResult(init.io, args[2..]);
+    if (std.mem.eql(u8, command, "read-action-call-id")) return readActionContent(init.io, args[2..], .call_id);
+    if (std.mem.eql(u8, command, "read-action-arguments")) return readActionArguments(init.io, args[2..]);
     if (std.mem.eql(u8, command, "inspect-session")) return inspect(init.io, args[2..]);
     return usage();
 }
@@ -186,6 +189,29 @@ fn interruptModel(io: std.Io, args: []const []const u8) !void {
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
+fn denyAction(io: std.Io, args: []const []const u8) !void {
+    var input = client.PermissionDecisionInput{ .store = "", .record = "", .key = "", .session = "", .action_id = 0 };
+    var key_seen = false;
+    var action_seen = false;
+    var index: usize = 0;
+    while (index < args.len) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--store")) input.store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+            input.key = try takeValue(args, &index);
+            key_seen = true;
+        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--action")) {
+            input.action_id = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
+            action_seen = true;
+        } else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
+        index += 1;
+    }
+    if (input.store.len == 0 or input.record.len == 0 or input.session.len == 0 or !key_seen or !action_seen) return usage();
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try client.denyPermission(io, input, &reply_buffer);
+    try writeCommandReply(io, reply);
+    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+}
+
 fn retry(io: std.Io, args: []const []const u8) !void {
     var store_path: ?[]const u8 = null;
     var record: ?[]const u8 = null;
@@ -220,14 +246,15 @@ fn observe(io: std.Io, args: []const []const u8) !void {
 fn inspect(io: std.Io, args: []const []const u8) !void {
     var store_path: ?[]const u8 = null;
     var session: ?[]const u8 = null;
+    var after_action: u64 = 0;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else return error.UnknownArgument;
+        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--after-action")) after_action = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
         index += 1;
     }
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try client.inspectSession(io, store_path orelse return usage(), session orelse return usage(), &reply_buffer);
+    const reply = try client.inspectSessionAfter(io, store_path orelse return usage(), session orelse return usage(), after_action, &reply_buffer);
     try writeCommandReply(io, reply);
     if (reply.status != 200) return error.HostInvocationFailed;
 }
@@ -258,6 +285,34 @@ fn readResult(io: std.Io, args: []const []const u8) !void {
     }
 }
 
+fn readActionArguments(io: std.Io, args: []const []const u8) !void {
+    return readActionContent(io, args, .arguments);
+}
+
+fn readActionContent(io: std.Io, args: []const []const u8, field: enum { call_id, arguments }) !void {
+    var store_path: ?[]const u8 = null;
+    var session: ?[]const u8 = null;
+    var action: ?u64 = null;
+    var index: usize = 0;
+    while (index < args.len) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--action")) action = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
+        index += 1;
+    }
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = switch (field) {
+        .call_id => try client.readActionCallId(io, store_path orelse return usage(), session orelse return usage(), action orelse return usage(), std.Io.File.stdout(), &reply_buffer),
+        .arguments => try client.readActionArguments(io, store_path orelse return usage(), session orelse return usage(), action orelse return usage(), std.Io.File.stdout(), &reply_buffer),
+    };
+    switch (reply) {
+        .answer => {},
+        .command => |command_reply| {
+            try writeCommandReply(io, command_reply);
+            return error.HostInvocationFailed;
+        },
+    }
+}
+
 fn writeCommandReply(io: std.Io, reply: client.CommandReply) !void {
     try std.Io.File.stdout().writeStreamingAll(io, reply.body);
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
@@ -277,10 +332,13 @@ fn usage() error{InvalidArguments} {
         \\  rui message --store PATH --record FILE --key KEY --session REF --text FILE|-
         \\  rui stop-session --store PATH --record FILE --key KEY --session REF
         \\  rui interrupt-model --store PATH --record FILE --key KEY --session REF --turn ID --operation ID
-        \\  rui retry --store PATH --record FILE --kind configure|message|session-stop|model-interruption
+        \\  rui deny-action --store PATH --record FILE --key KEY --session REF --action ID
+        \\  rui retry --store PATH --record FILE --kind configure|message|session-stop|model-interruption|permission-decision
         \\  rui observe-command --store PATH --key KEY
         \\  rui read-result --store PATH --key KEY
-        \\  rui inspect-session --store PATH --session REF
+        \\  rui read-action-call-id --store PATH --session REF --action ID
+        \\  rui read-action-arguments --store PATH --session REF --action ID
+        \\  rui inspect-session --store PATH --session REF [--after-action ID]
         \\
     , .{});
     return error.InvalidArguments;

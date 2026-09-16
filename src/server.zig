@@ -793,6 +793,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         .source_length = response.length,
         .metadata = metadata.file,
         .item_count = validated.item_count,
+        .call_count = validated.call_count,
         .answer_length = validated.answer_length,
         .answer_digest = validated.answer_digest,
         .response_id = validated.evidence.response_id,
@@ -808,6 +809,11 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     }) catch |err| {
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
+        } else if (err == error.InvalidProviderEnvelope) {
+            host.store.settleModelAttemptFailure(owner.binding, "contradictory_provider_output", .terminal, .{
+                .before_commit = host.faults.result_before_commit,
+            }) catch |failure_err| if (failure_err != error.SupersededByControl)
+                fenceDispatch(host, "model envelope rejection save", failure_err);
         } else {
             fenceDispatch(host, "model output import", err);
         }
@@ -1164,13 +1170,16 @@ const Route = enum {
     message,
     session_stop,
     model_interruption,
+    permission_decision,
     observe,
     read_result,
+    read_action_call_id,
+    read_action_arguments,
     inspect,
     unsupported_control,
 
     fn isControl(self: Route) bool {
-        return self == .session_stop or self == .model_interruption or self == .unsupported_control;
+        return self == .session_stop or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
     }
 };
 const DropMode = enum { none, before_admission, during_admission, after_commit };
@@ -1211,6 +1220,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
     const control_limit: u64 = switch (header.route) {
         .session_stop => protocol.max_session_stop_request_bytes,
         .model_interruption => protocol.max_model_interruption_request_bytes,
+        .permission_decision => protocol.max_permission_decision_request_bytes,
         else => 0,
     };
     if (header.route.isControl() and header.content_length > control_limit) {
@@ -1246,8 +1256,11 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         .message => header.route == .message,
         .session_stop => header.route == .session_stop,
         .model_interruption => header.route == .model_interruption,
+        .permission_decision => header.route == .permission_decision,
         .observe_command => header.route == .observe,
         .read_result => header.route == .read_result,
+        .read_action_call_id => header.route == .read_action_call_id,
+        .read_action_arguments => header.route == .read_action_arguments,
         .inspect_session => header.route == .inspect,
     };
     if (!route_matches) {
@@ -1339,6 +1352,27 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             deliverResponse(host.io, fd, status, response.slice());
             timing.replyComplete();
         },
+        .permission_decision => |*command| {
+            var timing = ControlTiming.init(host, command.key.slice(), "permission_decision", accepted_at_ns);
+            const result = host.store.denyPermission(command, .{
+                .before_commit = host.faults.before_commit,
+                .control_trace = timing.storeTrace(),
+            });
+            if (result == .infrastructure_failure and host.store.isFenced()) {
+                fenceDispatch(host, "permission decision save", error.CanonicalStoreFailure);
+            }
+            if (result == .accepted) publishControlHint(host, command.key.slice());
+            if (header.drop == .after_commit and result != .infrastructure_failure) return;
+            var response: protocol.ResponseBuffer = .{};
+            try renderPermissionDecisionReply(&response, command, result);
+            const status: u16 = switch (result) {
+                .accepted, .rejected => 200,
+                .conflict => 409,
+                .infrastructure_failure => 500,
+            };
+            deliverResponse(host.io, fd, status, response.slice());
+            timing.replyComplete();
+        },
         .observe_command => |command| {
             const observation = host.store.observeCommand(command.key.slice()) catch |err| {
                 fenceDispatch(host, "command observation", err);
@@ -1365,8 +1399,32 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             defer reader.close();
             deliverContent(host.io, fd, &reader) catch {};
         },
+        .read_action_arguments => |command| {
+            const reference = host.store.actionArguments(command.session.slice(), command.action_id) catch |err| switch (err) {
+                error.ActionNotFound => return respondStatic(host.io, fd, 404, "action_unavailable", "action_not_found"),
+                else => {
+                    fenceDispatch(host, "Action argument observation", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            var reader = try host.store.openContent(reference);
+            defer reader.close();
+            deliverContent(host.io, fd, &reader) catch {};
+        },
+        .read_action_call_id => |command| {
+            const reference = host.store.actionCallId(command.session.slice(), command.action_id) catch |err| switch (err) {
+                error.ActionNotFound => return respondStatic(host.io, fd, 404, "action_unavailable", "action_not_found"),
+                else => {
+                    fenceDispatch(host, "Action call identity observation", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            var reader = try host.store.openContent(reference);
+            defer reader.close();
+            deliverContent(host.io, fd, &reader) catch {};
+        },
         .inspect_session => |request_value| {
-            const observation = host.store.inspectSession(request_value.session.slice()) catch |err| {
+            const observation = host.store.inspectSessionAfter(request_value.session.slice(), request_value.after_action_id) catch |err| {
                 fenceDispatch(host, "session inspection", err);
                 return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
             };
@@ -1430,10 +1488,16 @@ const HeaderReader = struct {
             .session_stop
         else if (std.mem.eql(u8, path, "/v1/control/model-interruption"))
             .model_interruption
+        else if (std.mem.eql(u8, path, "/v1/control/permission-decision"))
+            .permission_decision
         else if (std.mem.eql(u8, path, "/v1/observe-command"))
             .observe
         else if (std.mem.eql(u8, path, "/v1/read-result"))
             .read_result
+        else if (std.mem.eql(u8, path, "/v1/read-action-call-id"))
+            .read_action_call_id
+        else if (std.mem.eql(u8, path, "/v1/read-action-arguments"))
+            .read_action_arguments
         else if (std.mem.eql(u8, path, "/v1/inspect-session"))
             .inspect
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
@@ -1658,6 +1722,34 @@ fn renderModelInterruptionReply(
     try response.append("}}");
 }
 
+fn renderPermissionDecisionReply(
+    response: *protocol.ResponseBuffer,
+    command: *const protocol.PermissionDecisionCommand,
+    result: store_module.PermissionDecisionReply,
+) !void {
+    try response.append("{\"version\":\"1\",\"type\":\"permission_decision_reply\",\"answer\":{\"status\":\"");
+    try response.append(@tagName(result));
+    const replayed = switch (result) {
+        .accepted => |value| value.replayed,
+        .rejected => |value| value.replayed,
+        .conflict, .infrastructure_failure => false,
+    };
+    try response.append(if (replayed) "\",\"replayed\":true" else "\",\"replayed\":false");
+    try response.append(",\"session\":");
+    try response.appendJsonString(command.session.slice());
+    try response.appendFmt(",\"action\":\"{d}\",\"decision\":\"deny\"", .{command.action_id});
+    switch (result) {
+        .rejected => |value| {
+            try response.append(",\"code\":");
+            try response.appendJsonString(@tagName(value.code));
+        },
+        .conflict => try response.append(",\"code\":\"idempotency_key_conflict\""),
+        .infrastructure_failure => try response.append(",\"code\":\"canonical_store_failure\""),
+        .accepted => {},
+    }
+    try response.append("}}");
+}
+
 fn renderCommandObservation(
     response: *protocol.ResponseBuffer,
     key: []const u8,
@@ -1738,6 +1830,9 @@ fn renderCommandObservation(
                 target.operation_id,
             });
         }
+        if (observation.permission_action_id) |action_id| {
+            try response.appendFmt(",\"permission_target\":{{\"action\":\"{d}\",\"decision\":\"deny\"}}", .{action_id});
+        }
     }
     try response.append("}}");
 }
@@ -1794,8 +1889,41 @@ fn renderSessionObservation(
     } else {
         try response.append("null");
     }
-    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\"]}}}}", .{
+    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"actions\":{{\"count\":\"{d}\",\"permission_request\":", .{
         observation.pending_messages,
+        observation.action_count,
+    });
+    if (observation.permission_request) |action| {
+        try response.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"{d}\",\"authorization\":\"{s}\",\"call_id\":", .{
+            action.action_id,
+            action.parent_operation_id,
+            action.call_ordinal,
+            action.permission_revision,
+            @tagName(action.authorization),
+        });
+        try renderContentReference(response, action.call_id);
+        try response.append(",\"arguments\":");
+        try renderContentReference(response, action.arguments);
+        try response.append("}");
+    } else try response.append("null");
+    try response.appendFmt("}},\"rejected_calls\":{{\"count\":\"{d}\",\"first\":", .{observation.rejected_call_count});
+    if (observation.rejected_call) |call| {
+        try response.appendFmt("{{\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"code\":", .{
+            call.parent_operation_id,
+            call.call_ordinal,
+        });
+        try response.appendJsonString(call.code.slice());
+        try response.append(",\"item_id\":");
+        try renderContentReference(response, call.item_id);
+        try response.append(",\"name\":");
+        try renderContentReference(response, call.name);
+        try response.append(",\"call_id\":");
+        try renderContentReference(response, call.call_id);
+        try response.append(",\"arguments\":");
+        try renderContentReference(response, call.arguments);
+        try response.append("}");
+    } else try response.append("null");
+    try response.appendFmt("}},\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\",\"allow_once\",\"bash_execution\",\"tool_result_publication\"]}}}}", .{
         if (execution_observation.dispatch_fenced) "true" else "false",
         execution_observation.custody_occupied,
         execution_observation.scratch_used_bytes,
@@ -1902,7 +2030,7 @@ test "Session observation buffer covers worst-case JSON escaping" {
     try observation.session.set(&([_]u8{0x1f} ** protocol.max_session_bytes));
     try observation.workspace.set(&([_]u8{0x1f} ** protocol.max_workspace_bytes));
     try observation.model.set(&([_]u8{0x1f} ** protocol.max_model_bytes));
-    try observation.permission_mode.set("bypass");
+    try observation.permission_mode.set(&([_]u8{0x1f} ** 16));
     observation.revision = std.math.maxInt(u64);
     observation.tools_mask = 3;
     observation.instructions = .{
@@ -1913,9 +2041,35 @@ test "Session observation buffer covers worst-case JSON escaping" {
         .length = std.math.maxInt(u64),
         .digest = [_]u8{0xff} ** 32,
     };
+    observation.pending_messages = std.math.maxInt(u64);
+    observation.action_count = std.math.maxInt(u64);
+    observation.rejected_call_count = std.math.maxInt(u64);
+    observation.permission_request = .{
+        .action_id = std.math.maxInt(u64),
+        .parent_operation_id = std.math.maxInt(u64),
+        .call_ordinal = std.math.maxInt(u64),
+        .permission_revision = std.math.maxInt(u64),
+        .authorization = .pending,
+        .call_id = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
+        .arguments = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
+    };
+    var rejection_code: protocol.Bounded(32) = .{};
+    try rejection_code.set(&([_]u8{0x1f} ** 32));
+    observation.rejected_call = .{
+        .parent_operation_id = std.math.maxInt(u64),
+        .call_ordinal = std.math.maxInt(u64),
+        .code = rejection_code,
+        .item_id = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
+        .name = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
+        .call_id = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
+        .arguments = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
+    };
     var response: protocol.ResponseBuffer = .{};
-    try renderSessionObservation(&response, observation, .{});
-    try std.testing.expect(response.len <= protocol.max_response_bytes);
+    try renderSessionObservation(&response, observation, .{
+        .custody_occupied = std.math.maxInt(usize),
+        .scratch_used_bytes = std.math.maxInt(u64),
+    });
+    try std.testing.expectEqual(protocol.max_response_bytes, response.len);
 }
 
 test "message observation renders every closed queue state without fabricated rejection state" {
@@ -2124,8 +2278,8 @@ test "control response variants fit exact worst-case JSON bounds" {
 
 fn finishTestClient(host: *Host, release: *std.atomic.Value(bool), completed: *std.atomic.Value(bool)) void {
     while (!release.load(.acquire)) std.atomic.spinLoopHint();
-    host.clientFinished();
     completed.store(true, .release);
+    host.clientFinished();
 }
 
 test "shutdown drain retains stack-owned Host until active clients finish" {

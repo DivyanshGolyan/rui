@@ -4,9 +4,9 @@ Rui (रुई, Hindi for cotton) is a local runtime for coding-agent workflows.
 
 ## Status
 
-In development. The current runtime supports direct CLI Sessions, queued messages, text-model responses, retries, stops and exact model interruption. Saved request keys recover original answers after a lost reply or restart.
+In development. The current runtime supports direct CLI Sessions, queued messages, text-model responses, retries, stops, exact model interruption, and ordered Tool Call classification. Trustworthy calls retain exact identities and arguments; valid Bash descriptors become inspectable Actions, while unknown tools and invalid descriptors become stable call-local rejections without execution authority. Saved request keys recover original answers after a lost reply or restart; pending permission requests, denials and rejected calls also survive Host restart.
 
-JavaScript workflows, Bash/Edit tools, permissions, structured answers and provider authentication are not implemented yet. Codex subscription is the planned first live provider; production and live-provider qualification remain outstanding.
+JavaScript workflows, Bash execution, Edit, allow-once permission, Tool Result publication/continuation, structured answers and provider authentication are not implemented yet. The current Bash slice admits valid proposals under `ask` or `bypass`, pages through exact pending Actions, and supports keyed sibling-local denial; it never launches a process. Codex subscription is the planned first live provider; production and live-provider qualification remain outstanding.
 
 Targets Linux and macOS on x86-64 and ARM64. All four cross-compile; runtime and resource checks have run only on Apple Silicon macOS.
 

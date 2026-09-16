@@ -15,6 +15,7 @@ pub const Evidence = struct {
 
 pub const Validated = struct {
     item_count: u64,
+    call_count: u64,
     answer_length: u64,
     answer_digest: [32]u8,
     evidence: Evidence,
@@ -426,7 +427,7 @@ fn validateMetadataAuthority(io: std.Io, file: std.Io.File, metadata_range: ?Ran
     }
 }
 
-const item_field_names = &.{ "type", "id", "status", "role", "phase", "internal_chat_message_metadata_passthrough", "content", "text", "encrypted_content", "summary" };
+const item_field_names = &.{ "type", "id", "status", "role", "phase", "internal_chat_message_metadata_passthrough", "content", "text", "encrypted_content", "summary", "name", "call_id", "arguments" };
 const ItemFields = Fields(item_field_names);
 
 fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
@@ -496,6 +497,33 @@ fn validateItem(
         try validateReasoning(io, file, fields);
         return .{ .kind = .reasoning, .id_digest = id_digest };
     }
+    if (kind_name.eql("function_call")) {
+        try optionalCompleted(io, file, try fields.get("status"));
+        inline for (.{
+            .{ "id", store.OutputRecordTag.item_id, true },
+            .{ "name", store.OutputRecordTag.name, true },
+            .{ "call_id", store.OutputRecordTag.call_id, true },
+            .{ "arguments", store.OutputRecordTag.arguments, false },
+        }) |descriptor| {
+            var hash = protocol.contentHasher();
+            var decoded = Decoded{ .hash = &hash };
+            var source = try FileSource.init(io, file, try fields.required(descriptor[0]));
+            const value = try parseString(&source, &decoded);
+            try source.expectEnd();
+            if (descriptor[2] and value.decoded_length == 0) return error.EmptyProviderIdentity;
+            const digest = hash.finalResult();
+            try metadata.append(.{
+                .tag = descriptor[1],
+                .kind = .function_call,
+                .ordinal = ordinal,
+                .start = value.encoded.start,
+                .length = value.encoded.length,
+                .decoded_length = value.decoded_length,
+                .content_digest = digest,
+            });
+        }
+        return .{ .kind = .function_call, .id_digest = id_digest };
+    }
     if (!kind_name.eql("message")) return error.UnsupportedProviderOutput;
     try optionalCompleted(io, file, try fields.get("status"));
     var role: protocol.Bounded(max_evidence_bytes) = .{};
@@ -553,6 +581,8 @@ fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
         .reasoning
     else if (kind_name.eql("message"))
         .message
+    else if (kind_name.eql("function_call"))
+        .function_call
     else
         return error.UnsupportedProviderOutput;
     return .{
@@ -607,14 +637,6 @@ fn validateCompleted(
     }
 }
 
-fn identityAlreadySeen(metadata: *store.OutputMetadataWriter, identity: *const [32]u8) !bool {
-    var reader = try store.OutputMetadataReader.init(metadata.io, metadata.file, 0);
-    while (try reader.nextItem()) |record| {
-        if (std.mem.eql(u8, &record.id_digest, identity)) return true;
-    }
-    return false;
-}
-
 fn knownNonterminal(kind: []const u8) bool {
     const values = [_][]const u8{
         "response.created",
@@ -643,6 +665,8 @@ fn processEvent(
     completed: *bool,
     item_count: *u64,
     message_count: *u64,
+    call_count: *u64,
+    saw_action: *bool,
     answer_length: *u64,
     answer_hash: *std.crypto.hash.sha2.Sha256,
     evidence: *Evidence,
@@ -664,11 +688,17 @@ fn processEvent(
         if (index != item_count.*) return error.ContradictoryProviderOutput;
         const item = try fields.required("item");
         const validation = try validateItem(io, file, item, index, metadata, answer_hash);
-        if (try identityAlreadySeen(metadata, &validation.id_digest)) return error.ContradictoryProviderOutput;
         if (added.active and (added.index != index or added.kind != validation.kind or
             !std.mem.eql(u8, &added.id_digest, &validation.id_digest))) return error.ContradictoryProviderOutput;
         added.active = false;
-        if (validation.kind == .message) message_count.* += 1;
+        if (validation.kind == .message) {
+            if (saw_action.*) return error.UnsupportedProviderOutput;
+            message_count.* += 1;
+        }
+        if (validation.kind == .function_call) {
+            saw_action.* = true;
+            call_count.* += 1;
+        }
         answer_length.* = metadata.decoded_length;
         try metadata.append(.{
             .tag = .item,
@@ -683,7 +713,8 @@ fn processEvent(
         return;
     }
     if (kind.eql("response.completed")) {
-        if (added.active or item_count.* == 0 or message_count.* != 1) return error.IncompleteProviderOutput;
+        if (added.active or item_count.* == 0 or message_count.* > 1 or
+            (message_count.* == 0 and call_count.* == 0)) return error.IncompleteProviderOutput;
         try validateCompleted(io, file, try fields.required("response"), metadata, item_count.*, evidence);
         try metadata.sealForRead();
         completed.* = true;
@@ -741,6 +772,8 @@ pub fn validate(
     var done_marker = false;
     var item_count: u64 = 0;
     var message_count: u64 = 0;
+    var call_count: u64 = 0;
+    var saw_action = false;
     var answer_length: u64 = 0;
     var answer_hash = protocol.contentHasher();
     var evidence: Evidence = .{};
@@ -778,6 +811,8 @@ pub fn validate(
                         &completed,
                         &item_count,
                         &message_count,
+                        &call_count,
+                        &saw_action,
                         &answer_length,
                         &answer_hash,
                         &evidence,
@@ -811,9 +846,10 @@ pub fn validate(
     }
     if (data != null) return error.IncompleteSseEvent;
     if (!completed) return error.IncompleteProviderOutput;
-    if (answer_length == 0) return error.EmptyProviderAnswer;
+    if (answer_length == 0 and call_count == 0) return error.EmptyProviderAnswer;
     return .{
         .item_count = item_count,
+        .call_count = call_count,
         .answer_length = answer_length,
         .answer_digest = answer_hash.finalResult(),
         .evidence = evidence,
@@ -929,6 +965,105 @@ fn testingObject(tmp: *std.testing.TmpDir, bytes: []const u8) !FileSource {
     errdefer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, bytes);
     return FileSource.init(std.testing.io, file, .{ .start = 0, .length = bytes.len });
+}
+
+const TestingValidation = struct { output: Validated, metadata_bytes: u64 };
+
+fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64) !TestingValidation {
+    const source = try tmp.dir.createFile(std.testing.io, "provider-sse", .{ .read = true });
+    errdefer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, bytes);
+    try source.sync(std.testing.io);
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?store.RetainedOutputMetadata = null;
+    var metadata = try store.OutputMetadataWriter.init(
+        std.testing.io,
+        root[0..root_length],
+        "provider-test-metadata",
+        &used,
+        metadata_limit,
+        false,
+        &retained,
+    );
+    errdefer metadata.deinit();
+    const validated = try validate(std.testing.io, source, bytes.len, &metadata, .{});
+    const metadata_bytes = used.load(.acquire);
+    metadata.deinit();
+    source.close(std.testing.io);
+    return .{ .output = validated, .metadata_bytes = metadata_bytes };
+}
+
+test "provider preserves ordered trustworthy function call envelopes" {
+    const first = "{\"type\":\"function_call\",\"id\":\"item-1\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"call\\nA\",\"arguments\":\"{\\\"cmd\\\":\\\"one\\\"}\"}";
+    const second = "{\"type\":\"function_call\",\"id\":\"item-2\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"call-B\",\"arguments\":\"{\\\"cmd\\\":\\\"two\\\"}\"}";
+    const valid = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ first ++ "}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ second ++ "}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"status\":\"completed\",\"output\":[" ++ first ++ "," ++ second ++ "]}}\n\n";
+    var valid_tmp = std.testing.tmpDir(.{});
+    defer valid_tmp.cleanup();
+    const accepted = try validateTestingSse(&valid_tmp, valid, 64 * 1024);
+    try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
+    try std.testing.expectEqual(@as(u64, 2), accepted.output.call_count);
+    try std.testing.expectEqual(@as(u64, 0), accepted.output.answer_length);
+    try std.testing.expectEqual(@as(u64, 2 * 5 * 104), accepted.metadata_bytes);
+
+    const invalid_second = "{\"type\":\"function_call\",\"id\":\"item-2\",\"status\":\"completed\",\"name\":\"edit\",\"call_id\":\"call-B\",\"arguments\":\"{}\"}";
+    const late_invalid = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ first ++ "}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ invalid_second ++ "}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-2\",\"status\":\"completed\",\"output\":[" ++ first ++ "," ++ invalid_second ++ "]}}\n\n";
+    var invalid_tmp = std.testing.tmpDir(.{});
+    defer invalid_tmp.cleanup();
+    const mixed = try validateTestingSse(&invalid_tmp, late_invalid, 64 * 1024);
+    try std.testing.expectEqual(@as(u64, 2), mixed.output.call_count);
+
+    const message = "{\"type\":\"message\",\"id\":\"message-1\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"late\",\"annotations\":[]}]}";
+    const late_message = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ first ++ "}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ message ++ "}\n\n";
+    var order_tmp = std.testing.tmpDir(.{});
+    defer order_tmp.cleanup();
+    try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingSse(&order_tmp, late_message, 64 * 1024));
+}
+
+test "Bash proposal metadata growth is linear and disk-backed" {
+    const action_count = 1_000;
+    var bytes: [1024 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    var item_buffer: [256]u8 = undefined;
+    for (0..action_count) |index| {
+        const item = try std.fmt.bufPrint(
+            &item_buffer,
+            "{{\"type\":\"function_call\",\"id\":\"item-{d}\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"call-{d}\",\"arguments\":\"{{}}\"}}",
+            .{ index, index },
+        );
+        var event_buffer: [512]u8 = undefined;
+        try writer.writeAll(try std.fmt.bufPrint(
+            &event_buffer,
+            "data: {{\"type\":\"response.output_item.done\",\"output_index\":{d},\"item\":{s}}}\n\n",
+            .{ index, item },
+        ));
+    }
+    try writer.writeAll("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"growth\",\"status\":\"completed\",\"output\":[");
+    for (0..action_count) |index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll(try std.fmt.bufPrint(
+            &item_buffer,
+            "{{\"type\":\"function_call\",\"id\":\"item-{d}\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"call-{d}\",\"arguments\":\"{{}}\"}}",
+            .{ index, index },
+        ));
+    }
+    try writer.writeAll("]}}\n\n");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const validated = try validateTestingSse(
+        &tmp,
+        writer.buffered(),
+        action_count * 5 * 104,
+    );
+    try std.testing.expectEqual(@as(u64, action_count), validated.output.call_count);
+    try std.testing.expectEqual(@as(u64, action_count * 5 * 104), validated.metadata_bytes);
+    try std.testing.expect(@sizeOf(Validated) < protocol.content_window_bytes);
 }
 
 test "provider field collection traverses large open values once for all lookups" {
