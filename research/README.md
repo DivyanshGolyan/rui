@@ -1,5 +1,9 @@
 # Research evidence
 
+[Proportionate testing evidence](testing-practices-sources.md) compares primary-source guidance on product goals, failure checks, noisy measurements and explicit assumptions; recommendations only, with no qualification-contract change.
+
+[Resource profiling sources](resource-profiling-sources.md) evaluates reusable CPU, memory, waiting and I/O evidence, platform tools and measurement validity; recommendations only, with no runtime or qualification change.
+
 [Permission ownership prior art](permission-prior-art.md) compares Pi, DeepSeek Harness, OpenCode v2 and Codex CLI approval ownership, grant lifetimes and client reconnect versus process restart; pinned source evidence only, with no accepted contract change.
 
 [Output retention prior art](output-retention-prior-art.md) compares byte/count budgets, disk-backed FIFO bookkeeping and cleanup behavior in primary sources; design evidence only, with no accepted contract change or runtime qualification.
@@ -100,5 +104,7 @@ Primary-source pins inspected on 2026-09-10:
 The [official compaction guide](https://developers.openai.com/api/docs/guides/compaction) describes generic API automatic and standalone modes and keeping a compaction item plus later output. It is a mutable reference, not the subscription capability pin. V1 selects the route-specific retained-host-input recipe above. Reproduce source inspection by checking out the exact commits and reading the linked paths; running this local probe needs no upstream checkout or credentials.
 
 ## Opt-in provider timing
+
+[Stream resumption probe](stream-resumption/probe.py) tests the subscription route outside production; its docstring gives reproduction commands. [Live results](stream-resumption/results.jsonl), 2026-09-13, repository `d27dc494411c1cba3d5cd07f08c2f331ee7384ac`, macOS 15.7.7 arm64, Python 3.14.7, requested/reported `gpt-6-astra`: `background:true` rejected with HTTP 400 `Unsupported parameter: background`; ordinary `store:false` streaming succeeded; after saving the response ID and event cursor, the connection-owning process exited abruptly with code 73. Fresh-process GET retrieval and GET streaming with `starting_after=4` both returned HTTP 403 HTML. `store:true` rejected with HTTP 400 `Store must be set to false`. The 403s establish unsuccessful access, not absence of an internal retrieval capability; provider cancellation and continued computation were not observable. An earlier ordinary request hit a probe logging `TypeError` and closed through cleanup; only the subsequent exit-73 run establishes abrupt process termination. Synthetic input, no tools, no refresh/account changes, no production integration or contract change. Credentials and response content are not recorded; explicit `--live` is required and consumes subscription usage.
 
 [Stream inactivity](stream-inactivity/probe.py) makes a real Codex request only with explicit `--live`. It reads local sign-in credentials; never include it in default reproduction. Example: `python3 research/stream-inactivity/probe.py --live --model gpt-6-astra --case reasoning --output /tmp/new-timing.jsonl`. It records arrival timing without payloads, tools, retries or refresh. Python HTTP/1.1 buffering and a few samples cannot establish provider silence bounds or qualify OnePage's libcurl callbacks.
