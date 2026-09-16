@@ -17,20 +17,36 @@ func TestDiscoveryStatusInclusiveBoundary(t *testing.T) {
 
 func TestOverallStatusPrecedence(t *testing.T) {
 	tests := []struct {
-		behaviorFailure bool
-		statuses        []string
-		wantStatus      string
-		wantExit        bool
+		statuses   []string
+		wantStatus string
 	}{
-		{false, []string{"passed"}, "passed", false},
-		{false, []string{"passed", "target_miss"}, "target_miss", false},
-		{false, []string{"target_miss", "unavailable"}, "unavailable", false},
-		{true, []string{"unavailable", "target_miss"}, "behavior_error", true},
+		{[]string{"passed"}, "passed"},
+		{[]string{"passed", "target_miss"}, "target_miss"},
+		{[]string{"target_miss", "unavailable"}, "unavailable"},
+		{[]string{"unavailable", "behavior_error"}, "behavior_error"},
 	}
 	for _, test := range tests {
-		gotStatus, gotExit := classifyOutcome(test.behaviorFailure, test.statuses...)
-		if gotStatus != test.wantStatus || gotExit != test.wantExit {
-			t.Errorf("classifyOutcome(%v, %v) = (%q, %v), want (%q, %v)", test.behaviorFailure, test.statuses, gotStatus, gotExit, test.wantStatus, test.wantExit)
+		if got := overallStatus(test.statuses...); got != test.wantStatus {
+			t.Errorf("overallStatus(%v) = %q, want %q", test.statuses, got, test.wantStatus)
+		}
+	}
+}
+
+func TestCaseStatusDistinguishesBehaviorAndMeasurementOutcomes(t *testing.T) {
+	tests := []struct {
+		behaviorFailure      bool
+		measurementAvailable bool
+		milliseconds         int64
+		want                 string
+	}{
+		{true, false, 0, "behavior_error"},
+		{false, false, 0, "unavailable"},
+		{false, true, 2000, "passed"},
+		{false, true, 2001, "target_miss"},
+	}
+	for _, test := range tests {
+		if got := caseStatus(test.behaviorFailure, test.measurementAvailable, test.milliseconds); got != test.want {
+			t.Errorf("caseStatus(%v, %v, %d) = %q, want %q", test.behaviorFailure, test.measurementAvailable, test.milliseconds, got, test.want)
 		}
 	}
 }

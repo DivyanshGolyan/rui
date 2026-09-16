@@ -26,13 +26,17 @@ const runnable_probe_sql =
     "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending WHERE " ++
     runnable_eligibility_sql ++ " LIMIT 1";
 const runnable_selection_sql =
+    "WITH candidate AS (" ++
+    "SELECT m.session_ref FROM message_admission m INDEXED BY message_admission_pending WHERE " ++
+    runnable_eligibility_sql ++ " ORDER BY m.admission_id LIMIT 1) " ++
     "SELECT m.session_ref,min(m.admission_id),max(m.admission_id),count(*),s.revision,s.next_position," ++
     "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     "WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
     "AND current.resolution_code IN ('continued','interrupted')) " ++
-    "FROM message_admission m INDEXED BY message_admission_pending JOIN session s ON s.session_ref=m.session_ref " ++
+    "FROM candidate chosen JOIN message_admission m INDEXED BY message_admission_session_order " ++
+    "ON m.session_ref=chosen.session_ref JOIN session s ON s.session_ref=m.session_ref " ++
     "WHERE " ++ runnable_eligibility_sql ++
-    " GROUP BY m.session_ref ORDER BY min(m.admission_id) LIMIT 1";
+    " GROUP BY m.session_ref";
 const continuation_risk_sql =
     "SELECT 1 FROM model_output_item WHERE session_ref=?1 UNION ALL " ++
     "SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
@@ -7427,6 +7431,35 @@ test "idle runnable probe uses the pending-only admission index" {
     try std.testing.expect(uses_pending_index);
 }
 
+test "runnable selection finds age through pending index then groups one session" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const statement = try prepare(storage.database, "EXPLAIN QUERY PLAN " ++ runnable_selection_sql);
+    defer _ = c.sqlite3_finalize(statement);
+    var uses_pending_index = false;
+    var uses_session_index = false;
+    while (true) switch (c.sqlite3_step(statement)) {
+        c.SQLITE_ROW => {
+            const detail = c.sqlite3_column_text(statement, 3);
+            if (detail == null) return error.InvalidQueryPlan;
+            const length = c.sqlite3_column_bytes(statement, 3);
+            if (length < 0) return error.InvalidQueryPlan;
+            const text = detail[0..@intCast(length)];
+            uses_pending_index = uses_pending_index or
+                std.mem.indexOf(u8, text, "message_admission_pending") != null;
+            uses_session_index = uses_session_index or
+                std.mem.indexOf(u8, text, "message_admission_session_order") != null;
+        },
+        c.SQLITE_DONE => break,
+        else => return error.InvalidQueryPlan,
+    };
+    try std.testing.expect(uses_pending_index);
+    try std.testing.expect(uses_session_index);
+}
+
 test "runnable discovery measures eligible ineligible and history populations independently" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -7511,6 +7544,28 @@ test "runnable discovery measures eligible ineligible and history populations in
                 .first_admission = first_admission,
             };
         }
+
+        fn measureDrain(database: *c.sqlite3, eligible: usize) !i64 {
+            const mark = try prepare(database, "UPDATE message_admission SET turn_id=admission_id WHERE admission_id=?1");
+            defer _ = c.sqlite3_finalize(mark);
+            var total_steps: i64 = 0;
+            for (0..eligible) |index| {
+                const statement = try prepare(database, runnable_selection_sql);
+                defer _ = c.sqlite3_finalize(statement);
+                if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.RunnableSelectionFailed;
+                const first_admission = c.sqlite3_column_int64(statement, 1);
+                if (first_admission != index + 1) return error.RunnableSelectionFailed;
+                if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.RunnableSelectionFailed;
+                total_steps += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+
+                try bindI64(mark, 1, first_admission);
+                try expectDone(mark);
+                if (c.sqlite3_changes(database) != 1) return error.RunnableSelectionFailed;
+                if (c.sqlite3_reset(mark) != c.SQLITE_OK) return error.RunnableSelectionFailed;
+                if (c.sqlite3_clear_bindings(mark) != c.SQLITE_OK) return error.RunnableSelectionFailed;
+            }
+            return total_steps;
+        }
     };
 
     var history_probe_costs: [3]i32 = undefined;
@@ -7542,14 +7597,19 @@ test "runnable discovery measures eligible ineligible and history populations in
     try std.testing.expect(ineligible_selection_costs[2] > ineligible_selection_costs[1]);
 
     var eligible_selection_costs: [3]i32 = undefined;
+    var eligible_drain_costs: [3]i64 = undefined;
     for ([_]usize{ 10, 100, 1_000 }, 0..) |eligible, index| {
         try QueryCost.reset(storage.database, eligible, 0, 0);
         const measured = try QueryCost.measureSelection(storage.database);
         try std.testing.expectEqual(@as(i64, 1), measured.first_admission);
         eligible_selection_costs[index] = measured.steps;
+        try QueryCost.reset(storage.database, eligible, 0, 0);
+        eligible_drain_costs[index] = try QueryCost.measureDrain(storage.database, eligible);
     }
-    try std.testing.expect(eligible_selection_costs[1] > eligible_selection_costs[0]);
-    try std.testing.expect(eligible_selection_costs[2] > eligible_selection_costs[1]);
+    try std.testing.expect(@max(eligible_selection_costs[0], eligible_selection_costs[1], eligible_selection_costs[2]) -
+        @min(eligible_selection_costs[0], eligible_selection_costs[1], eligible_selection_costs[2]) <= 32);
+    try std.testing.expect(eligible_drain_costs[1] <= eligible_drain_costs[0] * 12);
+    try std.testing.expect(eligible_drain_costs[2] <= eligible_drain_costs[1] * 12);
 }
 
 test "content reader metadata and decode window remain bounded" {

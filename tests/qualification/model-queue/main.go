@@ -37,6 +37,11 @@ func discoveryStatus(milliseconds int64, available bool) string {
 
 func overallStatus(statuses ...string) string {
 	for _, status := range statuses {
+		if status == "behavior_error" {
+			return "behavior_error"
+		}
+	}
+	for _, status := range statuses {
 		if status == "unavailable" {
 			return "unavailable"
 		}
@@ -49,11 +54,11 @@ func overallStatus(statuses ...string) string {
 	return "passed"
 }
 
-func classifyOutcome(behaviorFailure bool, statuses ...string) (status string, exitNonzero bool) {
+func caseStatus(behaviorFailure, measurementAvailable bool, milliseconds int64) string {
 	if behaviorFailure {
-		return "behavior_error", true
+		return "behavior_error"
 	}
-	return overallStatus(statuses...), false
+	return discoveryStatus(milliseconds, measurementAvailable)
 }
 
 type endpoint struct {
@@ -90,10 +95,6 @@ func (e *endpoint) serve(writer http.ResponseWriter, request *http.Request) {
 
 func (e *endpoint) URL() string { return "http://" + e.listener.Addr().String() + "/responses" }
 func (e *endpoint) Release()    { close(e.release) }
-func (e *endpoint) Close() error {
-	e.Release()
-	return e.server.Close()
-}
 
 func sql(deadline measurement.Deadline, store, query string) (string, error) {
 	output, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-noheader", filepath.Join(store, "rui.sqlite3"), query)
@@ -239,29 +240,42 @@ func runCase(binary, root, name string, p population, resources bool) (map[strin
 		e.Release()
 		return nil, err
 	}
+	result := map[string]any{"population": p, "capacity": 1, "discovery_target_ms": discoveryTargetMS, "target_inclusive": true}
 	var first time.Time
 	select {
 	case first = <-e.first:
 	case <-time.After(10 * time.Second):
 		e.Release()
-		return nil, errors.Join(errors.New("behavior failure: missing first provider request"), host.Stop(measurement.TeardownAllowance))
-	}
-	result := map[string]any{"population": p, "capacity": 1, "discovery_target_ms": discoveryTargetMS, "target_inclusive": true}
-	if resources {
-		sample, sampleErr := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-held.txt"))
-		database, databaseErr := measurement.DatabaseSize(store)
-		if sampleErr != nil || databaseErr != nil {
-			e.Release()
-			return nil, errors.Join(sampleErr, databaseErr, host.Stop(measurement.TeardownAllowance))
+		if err := host.Stop(measurement.TeardownAllowance); err != nil {
+			return nil, err
 		}
-		result["held_first_request_resources"] = map[string]any{"process": sample, "ready_record": host.Ready, "database": database}
+		result["status"] = caseStatus(true, false, 0)
+		result["behavior_failure"] = "missing_first_provider_request"
+		return result, nil
 	}
 	discoveryMS := first.Sub(started).Milliseconds()
 	result["discovery_ms"] = discoveryMS
-	result["status"] = discoveryStatus(discoveryMS, !first.IsZero())
+	result["status"] = caseStatus(false, true, discoveryMS)
+	if resources {
+		sample, sampleErr := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-held.txt"))
+		if sampleErr != nil {
+			result["resource_status"] = "unavailable"
+			result["status"] = overallStatus(result["status"].(string), "unavailable")
+		} else {
+			database, databaseErr := measurement.DatabaseSize(store)
+			if databaseErr != nil {
+				e.Release()
+				return nil, errors.Join(databaseErr, host.Stop(measurement.TeardownAllowance))
+			}
+			result["resource_status"] = "passed"
+			result["held_first_request_resources"] = map[string]any{"process": sample, "ready_record": host.Ready, "database": database}
+		}
+	}
 	e.Release()
 	settlementStarted := time.Now()
-	err = measurement.WaitFor(deadline, 20*time.Millisecond, "all eligible operations to settle", func() (bool, error) {
+	const settlementPollInterval = 250 * time.Millisecond
+	result["settlement_poll_interval_ms"] = settlementPollInterval.Milliseconds()
+	err = measurement.WaitFor(deadline, settlementPollInterval, "all eligible operations to settle", func() (bool, error) {
 		value, queryErr := sql(deadline, store, fmt.Sprintf("SELECT count(*) FROM model_operation WHERE operation_id>%d AND resolution_code='provider_http_422';", launchFloor))
 		return value == strconv.Itoa(p.Eligible), queryErr
 	})
@@ -338,10 +352,7 @@ func main() {
 		panic(err)
 	}
 	statuses = append(statuses, mixed["status"].(string))
-	status, exitNonzero := classifyOutcome(false, statuses...)
-	if exitNonzero {
-		panic("behavior failure")
-	}
+	status := overallStatus(statuses...)
 	result := map[string]any{
 		"format": "rui-model-queue-v1-go", "scope": "issue-202 production model-only queue discovery, order, settlement, and resource observation",
 		"status": status, "cases": cases, "maximum_mixed": mixed, "artifacts": root,
@@ -362,5 +373,8 @@ func main() {
 	}
 	if err != nil {
 		panic(err)
+	}
+	if status == "behavior_error" {
+		os.Exit(1)
 	}
 }
