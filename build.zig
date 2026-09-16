@@ -100,10 +100,20 @@ pub fn build(b: *std.Build) void {
     );
     measurement_test_step.dependOn(&measurement_tests.step);
 
+    const linux_cross_step = b.step(
+        "cross-check-linux",
+        "Compile the supported Linux x86-64/ARM64 targets",
+    );
+    const macos_cross_step = b.step(
+        "cross-check-macos",
+        "Compile the supported macOS x86-64/ARM64 targets (requires Xcode/Command Line Tools)",
+    );
     const cross_step = b.step(
         "cross-check",
         "Compile the supported Linux/macOS x86-64/ARM64 targets",
     );
+    cross_step.dependOn(linux_cross_step);
+    cross_step.dependOn(macos_cross_step);
     const targets = [_]std.Target.Query{
         .{ .cpu_arch = .aarch64, .os_tag = .macos },
         .{ .cpu_arch = .x86_64, .os_tag = .macos },
@@ -126,7 +136,11 @@ pub fn build(b: *std.Build) void {
             }),
             cross_transport,
         );
-        cross_step.dependOn(&executable.step);
+        switch (resolved.result.os.tag) {
+            .linux => linux_cross_step.dependOn(&executable.step),
+            .macos => macos_cross_step.dependOn(&executable.step),
+            else => unreachable,
+        }
     }
 
     const measure = b.addSystemCommand(&.{

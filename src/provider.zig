@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const protocol = @import("protocol.zig");
 const provider_output = @import("provider_output.zig");
 const store = @import("store.zig");
+const tools = @import("tools.zig");
 const transport_options = @import("transport_options");
 
 const c = @cImport({
@@ -259,7 +260,7 @@ pub fn materialize(
     try writer.write("],\"tools\":[");
     var comma = false;
     if (settings.tools_mask & 1 != 0) {
-        try writer.write("{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash\"}");
+        try writer.write(tools.bash_definition_json);
         comma = true;
     }
     if (settings.tools_mask & 2 != 0) {

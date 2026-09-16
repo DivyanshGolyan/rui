@@ -6,6 +6,7 @@ import concurrent.futures
 import hashlib
 import json
 import pathlib
+import select
 import shutil
 import socket
 import sqlite3
@@ -500,16 +501,17 @@ def prepare_raw_request(socket_path, route, body):
         + b"X-Rui-Wire-Version: 1\r\n\r\n"
         + body
     )
-    return connection, request
+    connection.sendall(request[:-1])
+    return connection, request[-1:]
 
 
 def submit_prepared_request(prepared, start):
-    connection, request = prepared
+    connection, suffix = prepared
     if not start.wait(20):
         raise TimeoutError("prepared control was not released")
     started = time.monotonic_ns()
     try:
-        connection.sendall(request)
+        connection.sendall(suffix)
         head, body = read_http_response(connection, timeout=20)
         assert b" 200 " in head, (head, body)
         return json.loads(body), (time.monotonic_ns() - started) / 1_000_000
@@ -693,7 +695,7 @@ def maximum_body(kind):
 def check_schema(database_path):
     database = sqlite3.connect(database_path)
     try:
-        assert database.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 11
         stop_columns = [
             row[1] for row in database.execute("PRAGMA table_info(session_stop)")
         ]
@@ -768,7 +770,9 @@ def fill_ordinary_capacity(socket_path):
     raise AssertionError("ordinary admission never stabilized at capacity")
 
 
-def assert_ordinary_capacity_busy(socket_path):
+def assert_ordinary_capacity_busy(
+    socket_path, expected_code=b"ordinary_capacity_exhausted"
+):
     extra = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         extra.settimeout(3)
@@ -776,7 +780,7 @@ def assert_ordinary_capacity_busy(socket_path):
         extra.sendall(b"POST /v1/inspect-session HTTP/1.1\r\n")
         extra_head, extra_body = read_http_response(extra)
         assert b" 503 " in extra_head, extra_head
-        assert b"ordinary_capacity_exhausted" in extra_body, extra_body
+        assert expected_code in extra_body, extra_body
     finally:
         extra.close()
 
@@ -1171,7 +1175,6 @@ def prove_real_settlement_contention(
             timeout=10,
             subject=session,
         )
-        assert_ordinary_capacity_busy(fields["socket"])
         if sample_host is not None:
             resource_samples["reports_captured_before_settlement"] = sample_host(
                 process.pid, "reports_captured_before_settlement"
@@ -1209,6 +1212,9 @@ def prove_real_settlement_contention(
             prepared_controls.append(
                 prepare_raw_request(fields["socket"], route, body)
             )
+        assert_ordinary_capacity_busy(
+            fields["socket"], b"connection_capacity_exhausted"
+        )
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=CONTROL_HEADROOM
@@ -1696,15 +1702,16 @@ def main():
 
         classification = [
             open_partial(socket_path, "/v1/control/session-stop", complete_headers=False)
-            for _ in range(CONTROL_HEADROOM)
+            for _ in range(CONTROL_HEADROOM + 1)
         ]
-        extra_classification = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        extra_classification.settimeout(3)
-        extra_classification.connect(socket_path)
-        extra_head, extra_body = read_http_response(extra_classification)
-        extra_classification.close()
+        readable, _, _ = select.select(classification, [], [], 3)
+        assert readable, "classification overflow did not receive a response"
+        overflow = readable[0]
+        extra_head, extra_body = read_http_response(overflow)
         assert b" 503 " in extra_head, extra_head
         assert b"classification_capacity_exhausted" in extra_body, extra_body
+        overflow.close()
+        classification.remove(overflow)
         for connection in classification:
             connection.close()
         time.sleep(1)

@@ -55,6 +55,7 @@ pub const Faults = struct {
     before_launch_delay_ms: i64 = 0,
     before_result_delay_ms: i64 = 0,
     inspection_reply_delay_ms: i64 = 0,
+    report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
     suppress_first_control_hint: bool = false,
@@ -793,6 +794,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         .source_length = response.length,
         .metadata = metadata.file,
         .item_count = validated.item_count,
+        .call_count = validated.call_count,
         .answer_length = validated.answer_length,
         .answer_digest = validated.answer_digest,
         .response_id = validated.evidence.response_id,
@@ -808,6 +810,11 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     }) catch |err| {
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
+        } else if (err == error.InvalidProviderEnvelope) {
+            host.store.settleModelAttemptFailure(owner.binding, "contradictory_provider_output", .terminal, .{
+                .before_commit = host.faults.result_before_commit,
+            }) catch |failure_err| if (failure_err != error.SupersededByControl)
+                fenceDispatch(host, "model envelope rejection save", failure_err);
         } else {
             fenceDispatch(host, "model output import", err);
         }
@@ -1164,13 +1171,16 @@ const Route = enum {
     message,
     session_stop,
     model_interruption,
+    permission_decision,
     observe,
     read_result,
+    read_action_call_id,
+    read_action_arguments,
     inspect,
     unsupported_control,
 
     fn isControl(self: Route) bool {
-        return self == .session_stop or self == .model_interruption or self == .unsupported_control;
+        return self == .session_stop or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
     }
 };
 const DropMode = enum { none, before_admission, during_admission, after_commit };
@@ -1211,6 +1221,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
     const control_limit: u64 = switch (header.route) {
         .session_stop => protocol.max_session_stop_request_bytes,
         .model_interruption => protocol.max_model_interruption_request_bytes,
+        .permission_decision => protocol.max_permission_decision_request_bytes,
         else => 0,
     };
     if (header.route.isControl() and header.content_length > control_limit) {
@@ -1246,8 +1257,11 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         .message => header.route == .message,
         .session_stop => header.route == .session_stop,
         .model_interruption => header.route == .model_interruption,
+        .permission_decision => header.route == .permission_decision,
         .observe_command => header.route == .observe,
         .read_result => header.route == .read_result,
+        .read_action_call_id => header.route == .read_action_call_id,
+        .read_action_arguments => header.route == .read_action_arguments,
         .inspect_session => header.route == .inspect,
     };
     if (!route_matches) {
@@ -1339,6 +1353,27 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             deliverResponse(host.io, fd, status, response.slice());
             timing.replyComplete();
         },
+        .permission_decision => |*command| {
+            var timing = ControlTiming.init(host, command.key.slice(), "permission_decision", accepted_at_ns);
+            const result = host.store.denyPermission(command, .{
+                .before_commit = host.faults.before_commit,
+                .control_trace = timing.storeTrace(),
+            });
+            if (result == .infrastructure_failure and host.store.isFenced()) {
+                fenceDispatch(host, "permission decision save", error.CanonicalStoreFailure);
+            }
+            if (result == .accepted) publishControlHint(host, command.key.slice());
+            if (header.drop == .after_commit and result != .infrastructure_failure) return;
+            var response: protocol.ResponseBuffer = .{};
+            try renderPermissionDecisionReply(&response, command, result);
+            const status: u16 = switch (result) {
+                .accepted, .rejected => 200,
+                .conflict => 409,
+                .infrastructure_failure => 500,
+            };
+            deliverResponse(host.io, fd, status, response.slice());
+            timing.replyComplete();
+        },
         .observe_command => |command| {
             const observation = host.store.observeCommand(command.key.slice()) catch |err| {
                 fenceDispatch(host, "command observation", err);
@@ -1365,25 +1400,66 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             defer reader.close();
             deliverContent(host.io, fd, &reader) catch {};
         },
+        .read_action_arguments => |command| deliverActionContent(host, fd, command, false),
+        .read_action_call_id => |command| deliverActionContent(host, fd, command, true),
         .inspect_session => |request_value| {
-            const observation = host.store.inspectSession(request_value.session.slice()) catch |err| {
-                fenceDispatch(host, "session inspection", err);
-                return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+            var report = host.store.captureSessionReport(request_value.session.slice(), .{
+                .scratch_path = host.lease.paths.scratch.slice(),
+                .scratch_budget = .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },
+                .request_number = request_number,
+                .fail_unlink = host.faults.report_unlink,
+                .execution = .{
+                    .dispatch_fenced = host.dispatch_fenced.load(.acquire),
+                    .custody_occupied = host.custody.occupied(),
+                    .scratch_used_bytes = host.scratch_used.load(.acquire),
+                },
+            }) catch |err| {
+                if (err == error.ReportScratchCleanupFailed) {
+                    fenceDispatch(host, "session report scratch cleanup", err);
+                    return respondStatic(host.io, fd, 500, "observation_error", "report_scratch_cleanup_failed");
+                }
+                if (host.store.isFenced()) {
+                    fenceDispatch(host, "session inspection", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                }
+                return respondStatic(
+                    host.io,
+                    fd,
+                    if (err == error.ReportScratchExhausted) 507 else 500,
+                    "observation_error",
+                    @errorName(err),
+                );
             };
-            var response: protocol.ResponseBuffer = .{};
-            try renderSessionObservation(&response, observation, .{
-                .dispatch_fenced = host.dispatch_fenced.load(.acquire),
-                .custody_occupied = host.custody.occupied(),
-                .scratch_used_bytes = host.scratch_used.load(.acquire),
-            });
+            defer report.deinit();
             traceSubject(host, "inspection_captured", "session", request_value.session.slice());
             traceSqliteDiagnostic(host, request_value.session.slice());
             if (host.faults.inspection_reply_delay_ms != 0) {
                 _ = host.io.sleep(.fromMilliseconds(host.faults.inspection_reply_delay_ms), .awake) catch {};
             }
-            deliverResponse(host.io, fd, 200, response.slice());
+            deliverReport(host.io, fd, &report) catch {};
         },
     }
+}
+
+fn deliverActionContent(host: *Host, fd: std.posix.fd_t, command: anytype, comptime call_id: bool) void {
+    const phase = if (call_id) "Action call identity observation" else "Action argument observation";
+    const reference = if (call_id)
+        host.store.actionCallId(command.session.slice(), command.action_id)
+    else
+        host.store.actionArguments(command.session.slice(), command.action_id);
+    const resolved = reference catch |err| switch (err) {
+        error.ActionNotFound => return respondStatic(host.io, fd, 404, "action_unavailable", "action_not_found"),
+        else => {
+            fenceDispatch(host, phase, err);
+            return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+        },
+    };
+    var reader = host.store.openContent(resolved) catch |err| {
+        fenceDispatch(host, phase, err);
+        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+    };
+    defer reader.close();
+    deliverContent(host.io, fd, &reader) catch {};
 }
 
 fn nextRequestNumber(host: *Host) !u64 {
@@ -1430,10 +1506,16 @@ const HeaderReader = struct {
             .session_stop
         else if (std.mem.eql(u8, path, "/v1/control/model-interruption"))
             .model_interruption
+        else if (std.mem.eql(u8, path, "/v1/control/permission-decision"))
+            .permission_decision
         else if (std.mem.eql(u8, path, "/v1/observe-command"))
             .observe
         else if (std.mem.eql(u8, path, "/v1/read-result"))
             .read_result
+        else if (std.mem.eql(u8, path, "/v1/read-action-call-id"))
+            .read_action_call_id
+        else if (std.mem.eql(u8, path, "/v1/read-action-arguments"))
+            .read_action_arguments
         else if (std.mem.eql(u8, path, "/v1/inspect-session"))
             .inspect
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
@@ -1658,6 +1740,34 @@ fn renderModelInterruptionReply(
     try response.append("}}");
 }
 
+fn renderPermissionDecisionReply(
+    response: *protocol.ResponseBuffer,
+    command: *const protocol.PermissionDecisionCommand,
+    result: store_module.PermissionDecisionReply,
+) !void {
+    try response.append("{\"version\":\"1\",\"type\":\"permission_decision_reply\",\"answer\":{\"status\":\"");
+    try response.append(@tagName(result));
+    const replayed = switch (result) {
+        .accepted => |value| value.replayed,
+        .rejected => |value| value.replayed,
+        .conflict, .infrastructure_failure => false,
+    };
+    try response.append(if (replayed) "\",\"replayed\":true" else "\",\"replayed\":false");
+    try response.append(",\"session\":");
+    try response.appendJsonString(command.session.slice());
+    try response.appendFmt(",\"action\":\"{d}\",\"decision\":\"deny\"", .{command.action_id});
+    switch (result) {
+        .rejected => |value| {
+            try response.append(",\"code\":");
+            try response.appendJsonString(@tagName(value.code));
+        },
+        .conflict => try response.append(",\"code\":\"idempotency_key_conflict\""),
+        .infrastructure_failure => try response.append(",\"code\":\"canonical_store_failure\""),
+        .accepted => {},
+    }
+    try response.append("}}");
+}
+
 fn renderCommandObservation(
     response: *protocol.ResponseBuffer,
     key: []const u8,
@@ -1738,6 +1848,9 @@ fn renderCommandObservation(
                 target.operation_id,
             });
         }
+        if (observation.permission_action_id) |action_id| {
+            try response.appendFmt(",\"permission_target\":{{\"action\":\"{d}\",\"decision\":\"deny\"}}", .{action_id});
+        }
     }
     try response.append("}}");
 }
@@ -1747,58 +1860,6 @@ fn renderProcessingBinding(response: *protocol.ResponseBuffer, binding: store_mo
         binding.turn_id,
         binding.operation_id,
         binding.attempt_ordinal,
-    });
-}
-
-const ExecutionObservation = struct {
-    dispatch_fenced: bool = false,
-    custody_occupied: usize = 0,
-    scratch_used_bytes: u64 = 0,
-};
-
-fn renderSessionObservation(
-    response: *protocol.ResponseBuffer,
-    observation: store_module.SessionObservation,
-    execution_observation: ExecutionObservation,
-) !void {
-    try response.append("{\"version\":\"1\",\"type\":\"session_observation\",\"session\":");
-    if (!observation.found) {
-        try response.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}");
-        return;
-    }
-    try response.append("{\"reference\":");
-    try response.appendJsonString(observation.session.slice());
-    try response.append(",\"workspace\":");
-    try response.appendJsonString(observation.workspace.slice());
-    try response.append(",\"model\":");
-    try response.appendJsonString(observation.model.slice());
-    try response.appendFmt(",\"revision\":\"{d}\",\"tools\":[", .{observation.revision});
-    var need_comma = false;
-    if (observation.tools_mask & 1 != 0) {
-        try response.append("\"bash\"");
-        need_comma = true;
-    }
-    if (observation.tools_mask & 2 != 0) {
-        if (need_comma) try response.append(",");
-        try response.append("\"edit\"");
-    }
-    try response.append("],\"permission_mode\":");
-    try response.appendJsonString(observation.permission_mode.slice());
-    try response.appendFmt(",\"instructions\":{{\"bytes\":\"{d}\",\"sha256\":\"", .{observation.instructions.length});
-    try appendHex(response, &observation.instructions.digest);
-    try response.append("\"},\"output_schema\":");
-    if (observation.output_schema) |reference| {
-        try response.appendFmt("{{\"bytes\":\"{d}\",\"sha256\":\"", .{reference.length});
-        try appendHex(response, &reference.digest);
-        try response.append("\"}");
-    } else {
-        try response.append("null");
-    }
-    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\"]}}}}", .{
-        observation.pending_messages,
-        if (execution_observation.dispatch_fenced) "true" else "false",
-        execution_observation.custody_occupied,
-        execution_observation.scratch_used_bytes,
     });
 }
 
@@ -1843,6 +1904,22 @@ fn deliverContent(io: std.Io, fd: std.posix.fd_t, reader: *store_module.ContentR
         const wanted: usize = @intCast(@min(reader.reference.length - offset, buffer.len));
         const count = try reader.read(offset, buffer[0..wanted]);
         if (count != wanted) return error.ShortCanonicalRead;
+        try writeAll(fd, buffer[0..count]);
+        offset += count;
+    }
+}
+
+fn deliverReport(io: std.Io, fd: std.posix.fd_t, report: *store_module.SessionReport) !void {
+    _ = io;
+    var header_buffer: [256]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{report.length});
+    try writeAll(fd, header);
+    var buffer: [store_module.SessionReport.read_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < report.length) {
+        const wanted: usize = @intCast(@min(report.length - offset, buffer.len));
+        const count = try report.read(offset, buffer[0..wanted]);
+        if (count != wanted) return error.ShortReportRead;
         try writeAll(fd, buffer[0..count]);
         offset += count;
     }
@@ -1895,27 +1972,6 @@ test "model retry and inactivity defaults match the owning resource contract" {
         store_module.maximum_model_attempts,
         @as(u64, default_retry_waits_ms.len + 1),
     );
-}
-
-test "Session observation buffer covers worst-case JSON escaping" {
-    var observation: store_module.SessionObservation = .{ .found = true };
-    try observation.session.set(&([_]u8{0x1f} ** protocol.max_session_bytes));
-    try observation.workspace.set(&([_]u8{0x1f} ** protocol.max_workspace_bytes));
-    try observation.model.set(&([_]u8{0x1f} ** protocol.max_model_bytes));
-    try observation.permission_mode.set("bypass");
-    observation.revision = std.math.maxInt(u64);
-    observation.tools_mask = 3;
-    observation.instructions = .{
-        .length = std.math.maxInt(u64),
-        .digest = [_]u8{0xff} ** 32,
-    };
-    observation.output_schema = .{
-        .length = std.math.maxInt(u64),
-        .digest = [_]u8{0xff} ** 32,
-    };
-    var response: protocol.ResponseBuffer = .{};
-    try renderSessionObservation(&response, observation, .{});
-    try std.testing.expect(response.len <= protocol.max_response_bytes);
 }
 
 test "message observation renders every closed queue state without fabricated rejection state" {
@@ -2124,8 +2180,8 @@ test "control response variants fit exact worst-case JSON bounds" {
 
 fn finishTestClient(host: *Host, release: *std.atomic.Value(bool), completed: *std.atomic.Value(bool)) void {
     while (!release.load(.acquire)) std.atomic.spinLoopHint();
-    host.clientFinished();
     completed.store(true, .release);
+    host.clientFinished();
 }
 
 test "shutdown drain retains stack-owned Host until active clients finish" {

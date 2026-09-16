@@ -53,6 +53,15 @@ pub const ModelInterruptionInput = struct {
     drop_reply: ?[]const u8 = null,
 };
 
+pub const PermissionDecisionInput = struct {
+    store: []const u8,
+    record: []const u8,
+    key: []const u8,
+    session: []const u8,
+    action_id: u64,
+    drop_reply: ?[]const u8 = null,
+};
+
 pub const ReplyBuffer = protocol.ResponseBuffer;
 
 pub const CommandReply = struct {
@@ -65,6 +74,31 @@ pub const ResultReply = union(enum) {
     answer: struct { bytes: u64 },
     command: CommandReply,
 };
+
+pub const ReportReply = union(enum) {
+    report: struct { bytes: u64 },
+    command: CommandReply,
+};
+
+fn renderReadRequest(
+    body: *protocol.RequestBuffer,
+    kind: []const u8,
+    store: []const u8,
+    target_name: []const u8,
+    target: []const u8,
+    action_id: ?u64,
+) !void {
+    try body.append("{\"version\":\"1\",\"kind\":");
+    try body.appendJsonString(kind);
+    try body.append(",\"store\":");
+    try body.appendJsonString(store);
+    try body.append(",");
+    try body.appendJsonString(target_name);
+    try body.append(":");
+    try body.appendJsonString(target);
+    if (action_id) |id| try body.appendFmt(",\"action\":\"{d}\"", .{id});
+    try body.append("}");
+}
 
 pub fn configure(io: std.Io, input: ConfigureInput, reply_buffer: *ReplyBuffer) !CommandReply {
     reply_buffer.len = 0;
@@ -113,6 +147,15 @@ pub fn interruptModel(io: std.Io, input: ModelInterruptionInput, reply_buffer: *
     );
 }
 
+pub fn denyPermission(io: std.Io, input: PermissionDecisionInput, reply_buffer: *ReplyBuffer) !CommandReply {
+    reply_buffer.len = 0;
+    const paths = try platform.resolveClientPaths(io, input.store);
+    try validateIdentityInputs(input.key, input.session);
+    if (input.action_id == 0) return error.InvalidTarget;
+    try capturePermissionDecision(io, &paths, input);
+    return sendRecord(io, &paths, input.record, "/v1/control/permission-decision", input.drop_reply, reply_buffer);
+}
+
 pub fn retry(
     io: std.Io,
     store_path: []const u8,
@@ -130,6 +173,8 @@ pub fn retry(
         "/v1/control/session-stop"
     else if (std.mem.eql(u8, kind, "model-interruption"))
         "/v1/control/model-interruption"
+    else if (std.mem.eql(u8, kind, "permission-decision"))
+        "/v1/control/permission-decision"
     else
         return error.InvalidRetryKind;
     return sendRecord(io, &paths, record, route, null, reply_buffer);
@@ -144,12 +189,8 @@ pub fn observeCommand(
     reply_buffer.len = 0;
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     const paths = try platform.resolveClientPaths(io, store_path);
-    var body: protocol.ResponseBuffer = .{};
-    try body.append("{\"version\":\"1\",\"kind\":\"observe_command\",\"store\":");
-    try body.appendJsonString(paths.store.slice());
-    try body.append(",\"key\":");
-    try body.appendJsonString(key);
-    try body.append("}");
+    var body: protocol.RequestBuffer = .{};
+    try renderReadRequest(&body, "observe_command", paths.store.slice(), "key", key, null);
     return sendBytes(io, &paths, "/v1/observe-command", body.slice(), null, reply_buffer);
 }
 
@@ -163,12 +204,8 @@ pub fn readResult(
     reply_buffer.len = 0;
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     const paths = try platform.resolveClientPaths(io, store_path);
-    var body: protocol.ResponseBuffer = .{};
-    try body.append("{\"version\":\"1\",\"kind\":\"read_result\",\"store\":");
-    try body.appendJsonString(paths.store.slice());
-    try body.append(",\"key\":");
-    try body.appendJsonString(key);
-    try body.append("}");
+    var body: protocol.RequestBuffer = .{};
+    try renderReadRequest(&body, "read_result", paths.store.slice(), "key", key, null);
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
     const stream = try address.connect(io);
     defer stream.close(io);
@@ -184,19 +221,72 @@ pub fn inspectSession(
     io: std.Io,
     store_path: []const u8,
     session: []const u8,
+    destination: std.Io.File,
     reply_buffer: *ReplyBuffer,
-) !CommandReply {
+) !ReportReply {
     reply_buffer.len = 0;
     if (session.len == 0 or session.len > protocol.max_session_bytes or
         !std.unicode.utf8ValidateSlice(session)) return error.InvalidSession;
     const paths = try platform.resolveClientPaths(io, store_path);
-    var body: protocol.ResponseBuffer = .{};
-    try body.append("{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":");
-    try body.appendJsonString(paths.store.slice());
-    try body.append(",\"session\":");
-    try body.appendJsonString(session);
-    try body.append("}");
-    return sendBytes(io, &paths, "/v1/inspect-session", body.slice(), null, reply_buffer);
+    var body: protocol.RequestBuffer = .{};
+    try renderReadRequest(&body, "inspect_session", paths.store.slice(), "session", session, null);
+    const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
+    const stream = try address.connect(io);
+    defer stream.close(io);
+    const fd = stream.socket.handle;
+    var header_buffer: [512]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/inspect-session HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{body.len});
+    try writeAll(fd, header);
+    try writeAll(fd, body.slice());
+    return readReportResponse(io, fd, destination, reply_buffer);
+}
+
+pub fn readActionArguments(
+    io: std.Io,
+    store_path: []const u8,
+    session: []const u8,
+    action_id: u64,
+    destination: std.Io.File,
+    reply_buffer: *ReplyBuffer,
+) !ResultReply {
+    return readActionContent(io, store_path, session, action_id, "read_action_arguments", "/v1/read-action-arguments", destination, reply_buffer);
+}
+
+pub fn readActionCallId(
+    io: std.Io,
+    store_path: []const u8,
+    session: []const u8,
+    action_id: u64,
+    destination: std.Io.File,
+    reply_buffer: *ReplyBuffer,
+) !ResultReply {
+    return readActionContent(io, store_path, session, action_id, "read_action_call_id", "/v1/read-action-call-id", destination, reply_buffer);
+}
+
+fn readActionContent(
+    io: std.Io,
+    store_path: []const u8,
+    session: []const u8,
+    action_id: u64,
+    comptime kind: []const u8,
+    comptime route: []const u8,
+    destination: std.Io.File,
+    reply_buffer: *ReplyBuffer,
+) !ResultReply {
+    reply_buffer.len = 0;
+    if (session.len == 0 or session.len > protocol.max_session_bytes or action_id == 0) return error.InvalidTarget;
+    const paths = try platform.resolveClientPaths(io, store_path);
+    var body: protocol.RequestBuffer = .{};
+    try renderReadRequest(&body, kind, paths.store.slice(), "session", session, action_id);
+    const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
+    const stream = try address.connect(io);
+    defer stream.close(io);
+    const fd = stream.socket.handle;
+    var header_buffer: [512]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ route, body.len });
+    try writeAll(fd, header);
+    try writeAll(fd, body.slice());
+    return readResultResponse(io, fd, destination, reply_buffer);
 }
 
 fn validateIdentityInputs(key: []const u8, session: []const u8) !void {
@@ -284,6 +374,21 @@ fn captureModelInterruption(
     try capture.commit();
 }
 
+fn capturePermissionDecision(io: std.Io, paths: *const platform.Paths, input: PermissionDecisionInput) !void {
+    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var capture = try Capture.open(io, input.record, &output_buffer);
+    errdefer capture.abort();
+    try capture.write("{\"version\":\"1\",\"kind\":\"permission_decision\",\"store\":");
+    try capture.writeJsonString(paths.store.slice());
+    try capture.write(",\"key\":");
+    try capture.writeJsonString(input.key);
+    try capture.write(",\"session\":");
+    try capture.writeJsonString(input.session);
+    var suffix: [96]u8 = undefined;
+    try capture.write(try std.fmt.bufPrint(&suffix, ",\"action\":\"{d}\",\"decision\":\"deny\"}}", .{input.action_id}));
+    try capture.commit();
+}
+
 const Capture = struct {
     io: std.Io,
     file: std.Io.File,
@@ -302,6 +407,9 @@ const Capture = struct {
         const final_name = std.fs.path.basename(record_path);
         if (final_name.len == 0) return error.InvalidRecordPath;
         var parent = try std.Io.Dir.cwd().createDirPathOpen(io, parent_path, .{
+            // Linux opens non-iterable directories with O_PATH, which cannot
+            // be fsynced after publishing the record.
+            .open_options = .{ .iterate = true },
             .permissions = .fromMode(0o700),
         });
         errdefer parent.close(io);
@@ -641,6 +749,32 @@ fn readResultResponse(
     return .{ .answer = .{ .bytes = head.content_length } };
 }
 
+fn readReportResponse(
+    io: std.Io,
+    fd: std.posix.fd_t,
+    destination: std.Io.File,
+    reply_buffer: *ReplyBuffer,
+) !ReportReply {
+    reply_buffer.len = 0;
+    const head = try readResponseHead(fd);
+    if (head.status != 200) {
+        if (head.kind != .command_json) return error.InvalidResponse;
+        return .{ .command = try readCommandBody(fd, head, reply_buffer) };
+    }
+    if (head.kind != .command_json) return error.InvalidResponse;
+    var remaining = head.content_length;
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    while (remaining != 0) {
+        if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
+        const wanted: usize = @intCast(@min(remaining, buffer.len));
+        const count = try std.posix.read(fd, buffer[0..wanted]);
+        if (count == 0) return error.TruncatedResponse;
+        try destination.writeStreamingAll(io, buffer[0..count]);
+        remaining -= count;
+    }
+    return .{ .report = .{ .bytes = head.content_length } };
+}
+
 fn readCommandBody(fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer) !CommandReply {
     reply_buffer.len = 0;
     errdefer reply_buffer.len = 0;
@@ -763,7 +897,7 @@ test "capture batches escaped file output and flushes before publication" {
             return std.testing.io.vtable.operate(userdata, operation);
         }
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -814,7 +948,7 @@ test "capture validates split UTF8 and does not publish after final flush failur
         }
     };
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -865,7 +999,7 @@ test "capture validates split UTF8 and does not publish after final flush failur
 
 test "capture bounds decoded bytes and preserves record ownership" {
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -910,7 +1044,7 @@ test "stdin capture uses the same decoded bound before publication" {
         }
     };
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -969,6 +1103,27 @@ test "command reply borrows the caller buffer" {
     try std.testing.expectEqual(@intFromPtr(buffer.bytes[0..].ptr), @intFromPtr(reply.body.ptr));
 }
 
+test "bounded read requests attain their independent worst-case capacities" {
+    const escaped_store = [_]u8{1} ** protocol.max_store_bytes;
+    const escaped_key = [_]u8{1} ** protocol.max_key_bytes;
+    const escaped_session = [_]u8{1} ** protocol.max_session_bytes;
+    const cases = .{
+        .{ "observe_command", "key", &escaped_key, null, protocol.max_observe_command_request_bytes },
+        .{ "read_result", "key", &escaped_key, null, protocol.max_read_result_request_bytes },
+        .{ "inspect_session", "session", &escaped_session, null, protocol.max_inspect_session_request_bytes },
+        .{ "read_action_call_id", "session", &escaped_session, std.math.maxInt(u64), protocol.max_read_action_call_id_request_bytes },
+        .{ "read_action_arguments", "session", &escaped_session, std.math.maxInt(u64), protocol.max_read_action_arguments_request_bytes },
+    };
+    inline for (cases) |case| {
+        var body: protocol.RequestBuffer = .{};
+        try renderReadRequest(&body, case[0], &escaped_store, case[1], case[2], case[3]);
+        try std.testing.expectEqual(@as(usize, case[4]), body.len);
+    }
+    var full: protocol.RequestBuffer = .{};
+    full.len = full.bytes.len;
+    try std.testing.expectError(error.BufferTooLarge, full.append("x"));
+}
+
 test "control captures attain their exact worst-case request bounds" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1023,6 +1178,26 @@ test "control captures attain their exact worst-case request bounds" {
     try std.testing.expectEqual(
         @as(u64, protocol.max_model_interruption_request_bytes),
         try interruption_file.length(std.testing.io),
+    );
+
+    var permission_path_buffer: [protocol.max_store_bytes + "/records/permission-record".len]u8 = undefined;
+    const permission_path = try std.fmt.bufPrint(
+        &permission_path_buffer,
+        "{s}/records/permission-record",
+        .{root_buffer[0..root_length]},
+    );
+    try capturePermissionDecision(std.testing.io, &paths, .{
+        .store = "unused",
+        .record = permission_path,
+        .key = &escaped_key,
+        .session = &escaped_session,
+        .action_id = std.math.maxInt(u64),
+    });
+    const permission_file = try std.Io.Dir.cwd().openFile(std.testing.io, permission_path, .{});
+    defer permission_file.close(std.testing.io);
+    try std.testing.expectEqual(
+        @as(u64, protocol.max_permission_decision_request_bytes),
+        try permission_file.length(std.testing.io),
     );
 }
 

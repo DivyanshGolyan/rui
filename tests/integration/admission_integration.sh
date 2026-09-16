@@ -249,22 +249,56 @@ import select, socket, sys, time
 
 socket_path = sys.argv[1]
 ordinary = []
+
+def read_response(client):
+    client.settimeout(3)
+    chunks = []
+    while True:
+        chunk = client.recv(4096)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
 for _ in range(10):
-    client = socket.socket(socket.AF_UNIX)
-    client.connect(socket_path)
-    client.sendall(
-        b"POST /v1/configure HTTP/1.1\r\n"
-        b"Host: local\r\n"
-        b"Content-Type: application/json\r\n"
-        b"Content-Length: 1024\r\n"
-        b"X-Rui-Wire-Version: 1\r\n\r\n{"
-    )
-    ordinary.append(client)
-    time.sleep(0.002)
-time.sleep(0.05)
-ready, _, _ = select.select(ordinary, [], [], 0)
-if ready:
-    raise SystemExit("ordinary capacity rejected before 10 connections")
+    while len(ordinary) < 10:
+        client = socket.socket(socket.AF_UNIX)
+        client.connect(socket_path)
+        client.sendall(
+            b"POST /v1/configure HTTP/1.1\r\n"
+            b"Host: local\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 1024\r\n"
+            b"X-Rui-Wire-Version: 1\r\n\r\n{"
+        )
+        time.sleep(0.05)
+        client.settimeout(0.001)
+        try:
+            early = client.recv(1, socket.MSG_PEEK)
+        except TimeoutError:
+            client.settimeout(None)
+            ordinary.append(client)
+            continue
+        if early and not read_response(client).startswith(b"HTTP/1.1 503 "):
+            raise SystemExit("ordinary classifier returned an unexpected response")
+        client.close()
+    time.sleep(1)
+    live = []
+    for client in ordinary:
+        client.settimeout(0.001)
+        try:
+            early = client.recv(1, socket.MSG_PEEK)
+        except TimeoutError:
+            client.settimeout(None)
+            live.append(client)
+            continue
+        if early and not read_response(client).startswith(b"HTTP/1.1 503 "):
+            raise SystemExit("ordinary classifier returned an unexpected delayed response")
+        client.close()
+    ordinary = live
+    if len(ordinary) == 10:
+        break
+else:
+    raise SystemExit("ordinary admission never stabilized at capacity")
 
 control = socket.socket(socket.AF_UNIX)
 control.connect(socket_path)
@@ -286,17 +320,19 @@ if not control_response.startswith(b"HTTP/1.1 501 "):
     raise SystemExit("control headroom was not serviceable")
 
 classification = []
-for _ in range(2):
+for _ in range(3):
     client = socket.socket(socket.AF_UNIX)
     client.connect(socket_path)
     classification.append(client)
-time.sleep(0.05)
-overflow = socket.socket(socket.AF_UNIX)
-overflow.connect(socket_path)
+ready, _, _ = select.select(classification, [], [], 3)
+if not ready:
+    raise SystemExit("13th connection did not receive a capacity response")
+overflow = ready[0]
 overflow_response = overflow.recv(4096)
-overflow.close()
 if not overflow_response.startswith(b"HTTP/1.1 503 "):
     raise SystemExit("13th connection was not rejected")
+overflow.close()
+classification.remove(overflow)
 
 for client in classification + ordinary:
     client.close()
@@ -315,7 +351,8 @@ s.sendall(("POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: applicat
 s.sendall(body)
 s.close()
 PY
-sleep 0.05
+stop_host
+start_host
 partial=$($rui observe-command --store "$store" --key partial-key)
 contains "$partial" '"status":"absent"'
 
@@ -440,7 +477,8 @@ client.sendall(
 client.sendall(body)
 client.close()
 PY
-sleep 0.05
+stop_host
+start_host
 partial_message=$($rui observe-command --store "$store" --key partial-message-key)
 contains "$partial_message" '"status":"absent"'
 partial_session=$($rui inspect-session --store "$store" --session direct/main)
@@ -736,7 +774,7 @@ expected = {
     "journal_mode": "delete",
     "mmap_size": 0,
     "application_id": 0x4C544631,
-    "user_version": 9,
+    "user_version": 11,
 }
 for name, value in expected.items():
     actual = db.execute("PRAGMA " + name).fetchone()[0]
