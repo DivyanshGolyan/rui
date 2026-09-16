@@ -419,6 +419,59 @@ fn optionalCompleted(io: std.Io, file: std.Io.File, status_range: ?Range) !void 
     if (!value.eql("completed")) return error.UnsupportedProviderOutput;
 }
 
+fn optionalFalse(io: std.Io, file: std.Io.File, value_range: ?Range) !void {
+    const value = value_range orelse return;
+    var source = try FileSource.init(io, file, value);
+    try source.space();
+    if (try source.peek() == 'n') {
+        try literal(&source, "null");
+    } else if (try source.peek() == 't') {
+        try literal(&source, "true");
+        try source.expectEnd();
+        return error.UnsupportedProviderOutput;
+    } else {
+        try literal(&source, "false");
+    }
+    try source.expectEnd();
+}
+
+fn optionalEmptyString(io: std.Io, file: std.Io.File, value_range: ?Range) !void {
+    const value = value_range orelse return;
+    var source = try FileSource.init(io, file, value);
+    try source.space();
+    if (try source.peek() == 'n') {
+        try literal(&source, "null");
+        try source.expectEnd();
+        return;
+    }
+    const parsed = try parseString(&source, null);
+    try source.expectEnd();
+    if (parsed.decoded_length != 0) return error.UnsupportedProviderOutput;
+}
+
+fn validateCaller(io: std.Io, file: std.Io.File, caller_range: ?Range) !void {
+    const caller = caller_range orelse return;
+    var source = try FileSource.init(io, file, caller);
+    try source.space();
+    if (try source.peek() == 'n') {
+        try literal(&source, "null");
+        try source.expectEnd();
+        return;
+    }
+    const fields = try collectFields(&source, &.{"type"});
+    const type_range = try fields.get("type") orelse return error.UnsupportedProviderOutput;
+    var caller_type: protocol.Bounded(max_evidence_bytes) = .{};
+    _ = try readString(io, file, type_range, &caller_type);
+    if (!caller_type.eql("direct")) return error.UnsupportedProviderOutput;
+}
+
+fn validateFunctionCallControls(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
+    try validateCaller(io, file, try fields.get("caller"));
+    try optionalFalse(io, file, try fields.get("async"));
+    try optionalEmptyString(io, file, try fields.get("namespace"));
+    try optionalEmptyString(io, file, try fields.get("encrypted_function_args"));
+}
+
 fn validateMetadataAuthority(io: std.Io, file: std.Io.File, metadata_range: ?Range) !void {
     const metadata = metadata_range orelse return;
     const fields = try readFields(io, file, metadata, &.{ "cell_id", "executed_tool_calls", "tool_calls_complete" });
@@ -427,7 +480,7 @@ fn validateMetadataAuthority(io: std.Io, file: std.Io.File, metadata_range: ?Ran
     }
 }
 
-const item_field_names = &.{ "type", "id", "status", "role", "phase", "internal_chat_message_metadata_passthrough", "content", "text", "encrypted_content", "summary", "name", "call_id", "arguments" };
+const item_field_names = &.{ "type", "id", "status", "role", "phase", "internal_chat_message_metadata_passthrough", "content", "text", "encrypted_content", "summary", "name", "call_id", "arguments", "caller", "async", "namespace", "encrypted_function_args" };
 const ItemFields = Fields(item_field_names);
 
 fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
@@ -499,6 +552,7 @@ fn validateItem(
     }
     if (kind_name.eql("function_call")) {
         try optionalCompleted(io, file, try fields.get("status"));
+        try validateFunctionCallControls(io, file, fields);
         inline for (.{
             .{ "id", store.OutputRecordTag.item_id, true },
             .{ "name", store.OutputRecordTag.name, true },
@@ -1024,6 +1078,35 @@ test "provider preserves ordered trustworthy function call envelopes" {
     var order_tmp = std.testing.tmpDir(.{});
     defer order_tmp.cleanup();
     try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingSse(&order_tmp, late_message, 64 * 1024));
+}
+
+test "provider rejects unsupported consequential function call controls" {
+    const supported = "{\"type\":\"function_call\",\"id\":\"item-1\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"call-1\",\"arguments\":\"{}\",\"caller\":{\"type\":\"direct\",\"future\":1},\"async\":false,\"namespace\":\"\",\"encrypted_function_args\":null}";
+    const cases = .{
+        .{ supported, false },
+        .{ "{\"type\":\"function_call\",\"id\":\"item-1\",\"name\":\"bash\",\"call_id\":\"call-1\",\"arguments\":\"{}\",\"caller\":{\"type\":\"program\"}}", true },
+        .{ "{\"type\":\"function_call\",\"id\":\"item-1\",\"name\":\"bash\",\"call_id\":\"call-1\",\"arguments\":\"{}\",\"caller\":{}}", true },
+        .{ "{\"type\":\"function_call\",\"id\":\"item-1\",\"name\":\"bash\",\"call_id\":\"call-1\",\"arguments\":\"{}\",\"async\":true}", true },
+        .{ "{\"type\":\"function_call\",\"id\":\"item-1\",\"name\":\"bash\",\"call_id\":\"call-1\",\"arguments\":\"{}\",\"namespace\":\"remote\"}", true },
+        .{ "{\"type\":\"function_call\",\"id\":\"item-1\",\"name\":\"bash\",\"call_id\":\"call-1\",\"arguments\":\"{}\",\"encrypted_function_args\":\"opaque\"}", true },
+    };
+    inline for (cases) |case| {
+        const sse = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n" ++
+                "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"response-1\",\"status\":\"completed\",\"output\":[{s}]}}}}\n\n",
+            .{ case[0], case[0] },
+        );
+        defer std.testing.allocator.free(sse);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        if (case[1]) {
+            try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingSse(&tmp, sse, 64 * 1024));
+        } else {
+            const accepted = try validateTestingSse(&tmp, sse, 64 * 1024);
+            try std.testing.expectEqual(@as(u64, 1), accepted.output.call_count);
+        }
+    }
 }
 
 test "Bash proposal metadata growth is linear and disk-backed" {

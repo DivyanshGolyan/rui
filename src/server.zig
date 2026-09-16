@@ -1424,22 +1424,35 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             deliverContent(host.io, fd, &reader) catch {};
         },
         .inspect_session => |request_value| {
-            const observation = host.store.inspectSessionAfter(request_value.session.slice(), request_value.after_action_id) catch |err| {
-                fenceDispatch(host, "session inspection", err);
-                return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+            var report = host.store.captureSessionReport(request_value.session.slice(), .{
+                .scratch_path = host.lease.paths.scratch.slice(),
+                .scratch_budget = .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },
+                .request_number = request_number,
+                .execution = .{
+                    .dispatch_fenced = host.dispatch_fenced.load(.acquire),
+                    .custody_occupied = host.custody.occupied(),
+                    .scratch_used_bytes = host.scratch_used.load(.acquire),
+                },
+            }) catch |err| {
+                if (host.store.isFenced()) {
+                    fenceDispatch(host, "session inspection", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                }
+                return respondStatic(
+                    host.io,
+                    fd,
+                    if (err == error.ReportScratchExhausted) 507 else 500,
+                    "observation_error",
+                    @errorName(err),
+                );
             };
-            var response: protocol.ResponseBuffer = .{};
-            try renderSessionObservation(&response, observation, .{
-                .dispatch_fenced = host.dispatch_fenced.load(.acquire),
-                .custody_occupied = host.custody.occupied(),
-                .scratch_used_bytes = host.scratch_used.load(.acquire),
-            });
+            defer report.deinit();
             traceSubject(host, "inspection_captured", "session", request_value.session.slice());
             traceSqliteDiagnostic(host, request_value.session.slice());
             if (host.faults.inspection_reply_delay_ms != 0) {
                 _ = host.io.sleep(.fromMilliseconds(host.faults.inspection_reply_delay_ms), .awake) catch {};
             }
-            deliverResponse(host.io, fd, 200, response.slice());
+            deliverReport(host.io, fd, &report) catch {};
         },
     }
 }
@@ -1845,91 +1858,6 @@ fn renderProcessingBinding(response: *protocol.ResponseBuffer, binding: store_mo
     });
 }
 
-const ExecutionObservation = struct {
-    dispatch_fenced: bool = false,
-    custody_occupied: usize = 0,
-    scratch_used_bytes: u64 = 0,
-};
-
-fn renderSessionObservation(
-    response: *protocol.ResponseBuffer,
-    observation: store_module.SessionObservation,
-    execution_observation: ExecutionObservation,
-) !void {
-    try response.append("{\"version\":\"1\",\"type\":\"session_observation\",\"session\":");
-    if (!observation.found) {
-        try response.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}");
-        return;
-    }
-    try response.append("{\"reference\":");
-    try response.appendJsonString(observation.session.slice());
-    try response.append(",\"workspace\":");
-    try response.appendJsonString(observation.workspace.slice());
-    try response.append(",\"model\":");
-    try response.appendJsonString(observation.model.slice());
-    try response.appendFmt(",\"revision\":\"{d}\",\"tools\":[", .{observation.revision});
-    var need_comma = false;
-    if (observation.tools_mask & 1 != 0) {
-        try response.append("\"bash\"");
-        need_comma = true;
-    }
-    if (observation.tools_mask & 2 != 0) {
-        if (need_comma) try response.append(",");
-        try response.append("\"edit\"");
-    }
-    try response.append("],\"permission_mode\":");
-    try response.appendJsonString(observation.permission_mode.slice());
-    try response.appendFmt(",\"instructions\":{{\"bytes\":\"{d}\",\"sha256\":\"", .{observation.instructions.length});
-    try appendHex(response, &observation.instructions.digest);
-    try response.append("\"},\"output_schema\":");
-    if (observation.output_schema) |reference| {
-        try response.appendFmt("{{\"bytes\":\"{d}\",\"sha256\":\"", .{reference.length});
-        try appendHex(response, &reference.digest);
-        try response.append("\"}");
-    } else {
-        try response.append("null");
-    }
-    try response.appendFmt("}},\"pending_messages\":\"{d}\",\"actions\":{{\"count\":\"{d}\",\"permission_request\":", .{
-        observation.pending_messages,
-        observation.action_count,
-    });
-    if (observation.permission_request) |action| {
-        try response.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"{d}\",\"authorization\":\"{s}\",\"call_id\":", .{
-            action.action_id,
-            action.parent_operation_id,
-            action.call_ordinal,
-            action.permission_revision,
-            @tagName(action.authorization),
-        });
-        try renderContentReference(response, action.call_id);
-        try response.append(",\"arguments\":");
-        try renderContentReference(response, action.arguments);
-        try response.append("}");
-    } else try response.append("null");
-    try response.appendFmt("}},\"rejected_calls\":{{\"count\":\"{d}\",\"first\":", .{observation.rejected_call_count});
-    if (observation.rejected_call) |call| {
-        try response.appendFmt("{{\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"code\":", .{
-            call.parent_operation_id,
-            call.call_ordinal,
-        });
-        try response.appendJsonString(call.code.slice());
-        try response.append(",\"item_id\":");
-        try renderContentReference(response, call.item_id);
-        try response.append(",\"name\":");
-        try renderContentReference(response, call.name);
-        try response.append(",\"call_id\":");
-        try renderContentReference(response, call.call_id);
-        try response.append(",\"arguments\":");
-        try renderContentReference(response, call.arguments);
-        try response.append("}");
-    } else try response.append("null");
-    try response.appendFmt("}},\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\",\"allow_once\",\"bash_execution\",\"tool_result_publication\"]}}}}", .{
-        if (execution_observation.dispatch_fenced) "true" else "false",
-        execution_observation.custody_occupied,
-        execution_observation.scratch_used_bytes,
-    });
-}
-
 fn renderContentReference(response: *protocol.ResponseBuffer, reference: store_module.ContentReference) !void {
     try response.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{reference.length});
     try appendHex(response, &reference.digest);
@@ -1971,6 +1899,22 @@ fn deliverContent(io: std.Io, fd: std.posix.fd_t, reader: *store_module.ContentR
         const wanted: usize = @intCast(@min(reader.reference.length - offset, buffer.len));
         const count = try reader.read(offset, buffer[0..wanted]);
         if (count != wanted) return error.ShortCanonicalRead;
+        try writeAll(fd, buffer[0..count]);
+        offset += count;
+    }
+}
+
+fn deliverReport(io: std.Io, fd: std.posix.fd_t, report: *store_module.SessionReport) !void {
+    _ = io;
+    var header_buffer: [256]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{report.length});
+    try writeAll(fd, header);
+    var buffer: [store_module.SessionReport.read_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < report.length) {
+        const wanted: usize = @intCast(@min(report.length - offset, buffer.len));
+        const count = try report.read(offset, buffer[0..wanted]);
+        if (count != wanted) return error.ShortReportRead;
         try writeAll(fd, buffer[0..count]);
         offset += count;
     }
@@ -2023,53 +1967,6 @@ test "model retry and inactivity defaults match the owning resource contract" {
         store_module.maximum_model_attempts,
         @as(u64, default_retry_waits_ms.len + 1),
     );
-}
-
-test "Session observation buffer covers worst-case JSON escaping" {
-    var observation: store_module.SessionObservation = .{ .found = true };
-    try observation.session.set(&([_]u8{0x1f} ** protocol.max_session_bytes));
-    try observation.workspace.set(&([_]u8{0x1f} ** protocol.max_workspace_bytes));
-    try observation.model.set(&([_]u8{0x1f} ** protocol.max_model_bytes));
-    try observation.permission_mode.set(&([_]u8{0x1f} ** 16));
-    observation.revision = std.math.maxInt(u64);
-    observation.tools_mask = 3;
-    observation.instructions = .{
-        .length = std.math.maxInt(u64),
-        .digest = [_]u8{0xff} ** 32,
-    };
-    observation.output_schema = .{
-        .length = std.math.maxInt(u64),
-        .digest = [_]u8{0xff} ** 32,
-    };
-    observation.pending_messages = std.math.maxInt(u64);
-    observation.action_count = std.math.maxInt(u64);
-    observation.rejected_call_count = std.math.maxInt(u64);
-    observation.permission_request = .{
-        .action_id = std.math.maxInt(u64),
-        .parent_operation_id = std.math.maxInt(u64),
-        .call_ordinal = std.math.maxInt(u64),
-        .permission_revision = std.math.maxInt(u64),
-        .authorization = .pending,
-        .call_id = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
-        .arguments = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
-    };
-    var rejection_code: protocol.Bounded(32) = .{};
-    try rejection_code.set(&([_]u8{0x1f} ** 32));
-    observation.rejected_call = .{
-        .parent_operation_id = std.math.maxInt(u64),
-        .call_ordinal = std.math.maxInt(u64),
-        .code = rejection_code,
-        .item_id = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
-        .name = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
-        .call_id = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
-        .arguments = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
-    };
-    var response: protocol.ResponseBuffer = .{};
-    try renderSessionObservation(&response, observation, .{
-        .custody_occupied = std.math.maxInt(usize),
-        .scratch_used_bytes = std.math.maxInt(u64),
-    });
-    try std.testing.expectEqual(protocol.max_response_bytes, response.len);
 }
 
 test "message observation renders every closed queue state without fabricated rejection state" {

@@ -144,7 +144,8 @@ fn validatePrivateDirectory(dir: std.Io.Dir, io: std.Io) !void {
 fn isOwnedIngressName(name: []const u8) bool {
     return isOwnedNumericScratch(name, "request-") or
         isOwnedNumericScratch(name, "response-") or
-        isOwnedNumericScratch(name, "response-metadata-");
+        isOwnedNumericScratch(name, "response-metadata-") or
+        isOwnedNumericScratch(name, "report-");
 }
 
 fn isOwnedNumericScratch(name: []const u8, prefix: []const u8) bool {
@@ -337,7 +338,8 @@ test "startup cleanup recognizes only owned ingress names" {
     try std.testing.expect(isOwnedIngressName("request-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("response-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("response-metadata-12-2.tmp"));
-    inline for (.{ "request-", "response-", "response-metadata-" }) |prefix| {
+    try std.testing.expect(isOwnedIngressName("report-12-2.tmp"));
+    inline for (.{ "request-", "response-", "response-metadata-", "report-" }) |prefix| {
         var name_buffer: [64]u8 = undefined;
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}-2.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-.tmp", .{prefix})));

@@ -526,7 +526,6 @@ def open_complete_inspection(socket_path, store, session):
             "kind": "inspect_session",
             "store": str(store),
             "session": session,
-            "after_action": "0",
         },
         separators=(",", ":"),
     ).encode()

@@ -204,26 +204,6 @@ pub const PermissionDecisionReply = union(enum) {
     infrastructure_failure,
 };
 
-pub const ActionObservation = struct {
-    action_id: u64,
-    parent_operation_id: u64,
-    call_ordinal: u64,
-    permission_revision: u64,
-    authorization: enum { pending, bypass, denied },
-    call_id: ContentReference,
-    arguments: ContentReference,
-};
-
-pub const RejectedCallObservation = struct {
-    parent_operation_id: u64,
-    call_ordinal: u64,
-    code: protocol.Bounded(32),
-    item_id: ContentReference,
-    name: ContentReference,
-    call_id: ContentReference,
-    arguments: ContentReference,
-};
-
 pub const ContentReference = struct {
     length: u64,
     digest: [32]u8,
@@ -843,8 +823,199 @@ pub const SessionObservation = struct {
     pending_messages: u64 = 0,
     action_count: u64 = 0,
     rejected_call_count: u64 = 0,
-    permission_request: ?ActionObservation = null,
-    rejected_call: ?RejectedCallObservation = null,
+};
+
+pub const SessionReportExecution = struct {
+    dispatch_fenced: bool,
+    custody_occupied: usize,
+    scratch_used_bytes: u64,
+};
+
+pub const SessionReportOptions = struct {
+    scratch_path: []const u8,
+    scratch_budget: protocol.ScratchBudget,
+    request_number: u64,
+    execution: SessionReportExecution,
+};
+
+pub const SessionReport = struct {
+    pub const read_window_bytes = 64 * 1024;
+
+    io: std.Io,
+    file: std.Io.File,
+    length: u64,
+    charged: u64,
+    budget: protocol.ScratchBudget,
+
+    pub fn read(self: *SessionReport, start: u64, destination: []u8) !usize {
+        if (destination.len > read_window_bytes) return error.WindowTooLarge;
+        if (start > self.length) return error.RangeOutOfBounds;
+        const wanted: usize = @intCast(@min(self.length - start, destination.len));
+        return self.file.readPositionalAll(self.io, destination[0..wanted], start);
+    }
+
+    pub fn deinit(self: *SessionReport) void {
+        self.file.close(self.io);
+        self.budget.release(self.charged);
+        self.* = undefined;
+    }
+};
+
+const SessionReportCapture = struct {
+    const buffer_bytes = 4096;
+
+    io: std.Io,
+    writer: ?std.Io.File,
+    readonly: ?std.Io.File,
+    budget: protocol.ScratchBudget,
+    buffer: [buffer_bytes]u8 = undefined,
+    buffered: usize = 0,
+    length: u64 = 0,
+    charged: u64 = 0,
+    ordinary_failure: bool = false,
+
+    fn init(io: std.Io, options: SessionReportOptions) !SessionReportCapture {
+        var scratch = try std.Io.Dir.cwd().openDir(io, options.scratch_path, .{});
+        defer scratch.close(io);
+        var name_buffer: [96]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "report-{d}-1.tmp", .{options.request_number});
+        const writer = try scratch.createFile(io, name, .{
+            .read = true,
+            .exclusive = true,
+            .permissions = .fromMode(0o600),
+        });
+        errdefer writer.close(io);
+        const readonly = try scratch.openFile(io, name, .{});
+        errdefer readonly.close(io);
+        try scratch.deleteFile(io, name);
+        return .{
+            .io = io,
+            .writer = writer,
+            .readonly = readonly,
+            .budget = options.scratch_budget,
+        };
+    }
+
+    fn append(self: *SessionReportCapture, bytes: []const u8) !void {
+        var remaining = bytes;
+        while (remaining.len != 0) {
+            if (self.buffered == self.buffer.len) try self.flush();
+            const count = @min(remaining.len, self.buffer.len - self.buffered);
+            @memcpy(self.buffer[self.buffered..][0..count], remaining[0..count]);
+            self.buffered += count;
+            remaining = remaining[count..];
+        }
+    }
+
+    fn appendFmt(self: *SessionReportCapture, comptime format: []const u8, args: anytype) !void {
+        var bytes: [512]u8 = undefined;
+        const value = std.fmt.bufPrint(&bytes, format, args) catch {
+            self.ordinary_failure = true;
+            return error.ReportEncodingFailed;
+        };
+        try self.append(value);
+    }
+
+    fn appendJsonString(self: *SessionReportCapture, value: []const u8) !void {
+        try self.append("\"");
+        var run_start: usize = 0;
+        for (value, 0..) |byte, index| {
+            const escaped: ?[]const u8 = switch (byte) {
+                '"' => "\\\"",
+                '\\' => "\\\\",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                8 => "\\b",
+                12 => "\\f",
+                0...7, 11, 14...31 => null,
+                else => continue,
+            };
+            if (index != run_start) try self.append(value[run_start..index]);
+            if (escaped) |bytes| {
+                try self.append(bytes);
+            } else {
+                var control: [6]u8 = undefined;
+                _ = std.fmt.bufPrint(&control, "\\u00{x:0>2}", .{byte}) catch unreachable;
+                try self.append(&control);
+            }
+            run_start = index + 1;
+        }
+        if (run_start != value.len) try self.append(value[run_start..]);
+        try self.append("\"");
+    }
+
+    fn appendContentReference(self: *SessionReportCapture, reference: ContentReference) !void {
+        try self.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{reference.length});
+        try self.append(&std.fmt.bytesToHex(reference.digest, .lower));
+        try self.append("\"}");
+    }
+
+    fn appendBareContentReference(self: *SessionReportCapture, reference: ContentReference) !void {
+        try self.appendFmt("{{\"bytes\":\"{d}\",\"sha256\":\"", .{reference.length});
+        try self.append(&std.fmt.bytesToHex(reference.digest, .lower));
+        try self.append("\"}");
+    }
+
+    fn flush(self: *SessionReportCapture) !void {
+        if (self.buffered == 0) return;
+        const amount: u64 = self.buffered;
+        const next_charged = std.math.add(u64, self.charged, amount) catch {
+            self.ordinary_failure = true;
+            return error.ReportLengthOverflow;
+        };
+        const next_length = std.math.add(u64, self.length, amount) catch {
+            self.ordinary_failure = true;
+            return error.ReportLengthOverflow;
+        };
+        if (!self.budget.reserve(amount)) {
+            self.ordinary_failure = true;
+            return error.ReportScratchExhausted;
+        }
+        self.charged = next_charged;
+        const writer = self.writer orelse unreachable;
+        writer.writeStreamingAll(self.io, self.buffer[0..self.buffered]) catch |err| {
+            self.ordinary_failure = true;
+            return err;
+        };
+        self.length = next_length;
+        self.buffered = 0;
+    }
+
+    fn seal(self: *SessionReportCapture) !SessionReport {
+        try self.flush();
+        const writer = self.writer orelse unreachable;
+        writer.sync(self.io) catch |err| {
+            self.ordinary_failure = true;
+            return err;
+        };
+        if (writer.length(self.io) catch |err| {
+            self.ordinary_failure = true;
+            return err;
+        } != self.length) {
+            self.ordinary_failure = true;
+            return error.ReportSealFailed;
+        }
+        writer.close(self.io);
+        self.writer = null;
+        const report = SessionReport{
+            .io = self.io,
+            .file = self.readonly orelse unreachable,
+            .length = self.length,
+            .charged = self.charged,
+            .budget = self.budget,
+        };
+        self.readonly = null;
+        self.charged = 0;
+        return report;
+    }
+
+    fn deinit(self: *SessionReportCapture) void {
+        if (self.writer) |writer| writer.close(self.io);
+        if (self.readonly) |readonly| readonly.close(self.io);
+        self.budget.release(self.charged);
+        self.* = undefined;
+    }
 };
 
 /// Raw values allow ranged reads; derived values are read sequentially from
@@ -2017,10 +2188,6 @@ pub const Store = struct {
     }
 
     pub fn inspectSession(self: *Store, session_ref: []const u8) !SessionObservation {
-        return self.inspectSessionAfter(session_ref, 0);
-    }
-
-    pub fn inspectSessionAfter(self: *Store, session_ref: []const u8, after_action_id: u64) !SessionObservation {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -2050,11 +2217,202 @@ pub const Store = struct {
             return self.fenceReadFailure(err);
         observation.rejected_call_count = self.countRejectedCalls(session_ref) catch |err|
             return self.fenceReadFailure(err);
-        observation.permission_request = self.readPendingPermission(session_ref, after_action_id) catch |err|
-            return self.fenceReadFailure(err);
-        observation.rejected_call = self.readRejectedCall(session_ref) catch |err|
-            return self.fenceReadFailure(err);
         return observation;
+    }
+
+    pub fn captureSessionReport(
+        self: *Store,
+        session_ref: []const u8,
+        options: SessionReportOptions,
+    ) !SessionReport {
+        var capture = try SessionReportCapture.init(self.io, options);
+        errdefer capture.deinit();
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        const capture_result = self.renderSessionReportLocked(session_ref, options.execution, &capture);
+        self.mutex.unlock(self.io);
+        capture_result catch |err| {
+            if (capture.ordinary_failure) return err;
+            return self.fenceReadFailure(err);
+        };
+        return capture.seal();
+    }
+
+    fn renderSessionReportLocked(
+        self: *Store,
+        session_ref: []const u8,
+        execution: SessionReportExecution,
+        capture: *SessionReportCapture,
+    ) !void {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const maybe_current = try self.readSession(session_ref);
+        try capture.append("{\"version\":\"1\",\"type\":\"session_observation\",\"session\":");
+        const current = maybe_current orelse {
+            try capture.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}");
+            return;
+        };
+        const instructions = try self.readContentMetadata(current.instructions_id orelse return error.CorruptStore);
+        const output_schema = if (current.output_schema_id) |content_id|
+            try self.readContentMetadata(content_id)
+        else
+            null;
+        const pending_messages = try self.countPendingMessages(session_ref);
+        const action_count = try self.countActions(session_ref);
+        const rejected_call_count = try self.countRejectedCalls(session_ref);
+
+        try capture.append("{\"reference\":");
+        try capture.appendJsonString(session_ref);
+        try capture.append(",\"workspace\":");
+        try capture.appendJsonString(current.workspace.slice());
+        try capture.append(",\"model\":");
+        try capture.appendJsonString(current.model.slice());
+        try capture.appendFmt(",\"revision\":\"{d}\",\"tools\":[", .{current.revision});
+        var need_comma = false;
+        if (current.tools_mask & 1 != 0) {
+            try capture.append("\"bash\"");
+            need_comma = true;
+        }
+        if (current.tools_mask & 2 != 0) {
+            if (need_comma) try capture.append(",");
+            try capture.append("\"edit\"");
+        }
+        try capture.append("],\"permission_mode\":\"");
+        try capture.append(if (current.permission_mode == 0) "ask" else "bypass");
+        try capture.append("\",\"instructions\":");
+        try capture.appendBareContentReference(.{ .length = instructions.length, .digest = instructions.digest });
+        try capture.append(",\"output_schema\":");
+        if (output_schema) |reference| {
+            try capture.appendBareContentReference(.{ .length = reference.length, .digest = reference.digest });
+        } else {
+            try capture.append("null");
+        }
+        try capture.appendFmt("}},\"pending_messages\":\"{d}\",\"actions\":{{\"count\":\"{d}\",\"unresolved\":[", .{
+            pending_messages,
+            action_count,
+        });
+        try self.appendUnresolvedActions(session_ref, capture);
+        try capture.appendFmt("]}},\"rejected_calls\":{{\"count\":\"{d}\",\"items\":[", .{rejected_call_count});
+        try self.appendRejectedCalls(session_ref, capture);
+        try capture.appendFmt("]}},\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\",\"allow_once\",\"bash_execution\",\"tool_result_publication\"]}}}}", .{
+            if (execution.dispatch_fenced) "true" else "false",
+            execution.custody_occupied,
+            execution.scratch_used_bytes,
+        });
+    }
+
+    fn appendUnresolvedActions(
+        self: *Store,
+        session_ref: []const u8,
+        capture: *SessionReportCapture,
+    ) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.permission_state," ++
+                "call_id.byte_length,call_id.digest,arguments.byte_length,arguments.digest " ++
+                "FROM action_operation a JOIN model_tool_call call " ++
+                "ON call.operation_id=a.parent_operation_id AND call.call_ordinal=a.call_ordinal " ++
+                "JOIN turn t ON t.operation_id=a.parent_operation_id " ++
+                "JOIN content call_id ON call_id.content_id=call.call_id_content_id " ++
+                "JOIN content arguments ON arguments.content_id=call.arguments_content_id " ++
+                "WHERE a.session_ref=?1 AND a.permission_state IN (0,1) " ++
+                "AND a.resolution_code IS NULL AND t.outcome_code IS NULL ORDER BY a.action_id",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (true) {
+            const result = c.sqlite3_step(statement);
+            if (result == c.SQLITE_DONE) return;
+            if (result != c.SQLITE_ROW) return error.ActionReadFailed;
+            const action_id = c.sqlite3_column_int64(statement, 0);
+            const parent = c.sqlite3_column_int64(statement, 1);
+            const ordinal = c.sqlite3_column_int64(statement, 2);
+            const revision = c.sqlite3_column_int64(statement, 3);
+            const permission = c.sqlite3_column_int(statement, 4);
+            const call_id_length = c.sqlite3_column_int64(statement, 5);
+            const arguments_length = c.sqlite3_column_int64(statement, 7);
+            if (action_id <= 0 or parent <= 0 or ordinal < 0 or revision <= 0 or
+                permission < 0 or permission > 1 or call_id_length < 0 or arguments_length < 0)
+            {
+                return error.CorruptStore;
+            }
+            if (!first) try capture.append(",");
+            first = false;
+            try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"{d}\",\"authorization\":\"{s}\",\"call_id\":", .{
+                action_id,
+                parent,
+                ordinal,
+                revision,
+                if (permission == 0) "pending" else "bypass",
+            });
+            try capture.appendContentReference(.{
+                .length = @intCast(call_id_length),
+                .digest = try readDigest(statement, 6),
+            });
+            try capture.append(",\"arguments\":");
+            try capture.appendContentReference(.{
+                .length = @intCast(arguments_length),
+                .digest = try readDigest(statement, 8),
+            });
+            try capture.append("}");
+        }
+    }
+
+    fn appendRejectedCalls(
+        self: *Store,
+        session_ref: []const u8,
+        capture: *SessionReportCapture,
+    ) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT call.operation_id,call.call_ordinal,call.rejection_code," ++
+                "item_id.byte_length,item_id.digest,name.byte_length,name.digest," ++
+                "call_id.byte_length,call_id.digest,arguments.byte_length,arguments.digest " ++
+                "FROM model_tool_call call JOIN model_operation operation ON operation.operation_id=call.operation_id " ++
+                "JOIN content item_id ON item_id.content_id=call.item_id_content_id " ++
+                "JOIN content name ON name.content_id=call.name_content_id " ++
+                "JOIN content call_id ON call_id.content_id=call.call_id_content_id " ++
+                "JOIN content arguments ON arguments.content_id=call.arguments_content_id " ++
+                "WHERE operation.session_ref=?1 AND call.rejection_code IS NOT NULL " ++
+                "ORDER BY call.operation_id,call.call_ordinal",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (true) {
+            const result = c.sqlite3_step(statement);
+            if (result == c.SQLITE_DONE) return;
+            if (result != c.SQLITE_ROW) return error.CallReadFailed;
+            const operation_id = c.sqlite3_column_int64(statement, 0);
+            const call_ordinal = c.sqlite3_column_int64(statement, 1);
+            if (operation_id <= 0 or call_ordinal < 0) return error.CorruptStore;
+            var code: protocol.Bounded(32) = .{};
+            try readText(statement, 2, &code);
+            if (!first) try capture.append(",");
+            first = false;
+            try capture.appendFmt("{{\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"code\":", .{
+                operation_id,
+                call_ordinal,
+            });
+            try capture.appendJsonString(code.slice());
+            inline for (.{
+                .{ "item_id", 3, 4 },
+                .{ "name", 5, 6 },
+                .{ "call_id", 7, 8 },
+                .{ "arguments", 9, 10 },
+            }) |field| {
+                const length = c.sqlite3_column_int64(statement, field[1]);
+                if (length < 0) return error.CorruptStore;
+                try capture.append(",\"");
+                try capture.append(field[0]);
+                try capture.append("\":");
+                try capture.appendContentReference(.{
+                    .length = @intCast(length),
+                    .digest = try readDigest(statement, field[2]),
+                });
+            }
+            try capture.append("}");
+        }
     }
 
     fn countActions(self: *Store, session_ref: []const u8) !u64 {
@@ -2081,72 +2439,6 @@ pub const Store = struct {
         return @intCast(value);
     }
 
-    fn readRejectedCall(self: *Store, session_ref: []const u8) !?RejectedCallObservation {
-        const statement = try prepare(
-            self.database,
-            "SELECT call.operation_id,call.call_ordinal,call.rejection_code,call.item_id_content_id,call.name_content_id," ++
-                "call.call_id_content_id,call.arguments_content_id FROM model_tool_call call JOIN model_operation operation " ++
-                "ON operation.operation_id=call.operation_id WHERE operation.session_ref=?1 AND call.rejection_code IS NOT NULL " ++
-                "ORDER BY call.operation_id,call.call_ordinal LIMIT 1",
-        );
-        defer _ = c.sqlite3_finalize(statement);
-        try bindText(statement, 1, session_ref);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return null;
-        if (result != c.SQLITE_ROW) return error.CallReadFailed;
-        const operation_id = c.sqlite3_column_int64(statement, 0);
-        const call_ordinal = c.sqlite3_column_int64(statement, 1);
-        if (operation_id <= 0 or call_ordinal < 0) return error.CorruptStore;
-        var code: protocol.Bounded(32) = .{};
-        try readText(statement, 2, &code);
-        const item_id = try self.readContentMetadata(c.sqlite3_column_int64(statement, 3));
-        const name = try self.readContentMetadata(c.sqlite3_column_int64(statement, 4));
-        const call_id = try self.readContentMetadata(c.sqlite3_column_int64(statement, 5));
-        const arguments = try self.readContentMetadata(c.sqlite3_column_int64(statement, 6));
-        return .{
-            .parent_operation_id = @intCast(operation_id),
-            .call_ordinal = @intCast(call_ordinal),
-            .code = code,
-            .item_id = .{ .length = item_id.length, .digest = item_id.digest },
-            .name = .{ .length = name.length, .digest = name.digest },
-            .call_id = .{ .length = call_id.length, .digest = call_id.digest },
-            .arguments = .{ .length = arguments.length, .digest = arguments.digest },
-        };
-    }
-
-    fn readPendingPermission(self: *Store, session_ref: []const u8, after_action_id: u64) !?ActionObservation {
-        const statement = try prepare(
-            self.database,
-            "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,call.call_id_content_id,call.arguments_content_id " ++
-                "FROM action_operation a JOIN model_tool_call call ON call.operation_id=a.parent_operation_id AND call.call_ordinal=a.call_ordinal " ++
-                "JOIN turn t ON t.operation_id=a.parent_operation_id " ++
-                "WHERE a.session_ref=?1 AND a.action_id>?2 AND a.permission_state=0 AND a.resolution_code IS NULL AND t.outcome_code IS NULL " ++
-                "ORDER BY a.action_id LIMIT 1",
-        );
-        defer _ = c.sqlite3_finalize(statement);
-        try bindText(statement, 1, session_ref);
-        try bindU64(statement, 2, after_action_id);
-        const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return null;
-        if (result != c.SQLITE_ROW) return error.ActionReadFailed;
-        const action_id = c.sqlite3_column_int64(statement, 0);
-        const parent = c.sqlite3_column_int64(statement, 1);
-        const ordinal = c.sqlite3_column_int64(statement, 2);
-        const revision = c.sqlite3_column_int64(statement, 3);
-        if (action_id <= 0 or parent <= 0 or ordinal < 0 or revision <= 0) return error.CorruptStore;
-        const call_id = try self.readContentMetadata(c.sqlite3_column_int64(statement, 4));
-        const arguments = try self.readContentMetadata(c.sqlite3_column_int64(statement, 5));
-        return .{
-            .action_id = @intCast(action_id),
-            .parent_operation_id = @intCast(parent),
-            .call_ordinal = @intCast(ordinal),
-            .permission_revision = @intCast(revision),
-            .authorization = .pending,
-            .call_id = .{ .length = call_id.length, .digest = call_id.digest },
-            .arguments = .{ .length = arguments.length, .digest = arguments.digest },
-        };
-    }
-
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
         return self.actionContent(session_ref, action_id, "arguments_content_id");
     }
@@ -2157,6 +2449,7 @@ pub const Store = struct {
 
     fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
+        if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const statement = try prepare(
@@ -4605,6 +4898,66 @@ fn expectContent(storage: *Store, reference: ContentReference, expected: []const
     try std.testing.expectEqual(@as(usize, 0), try reader.read(count, &actual));
 }
 
+const TestingReportAction = struct {
+    action: []const u8,
+    call_ordinal: []const u8,
+    permission_revision: []const u8,
+    authorization: []const u8,
+};
+
+const TestingContentReference = struct {
+    bytes: []const u8,
+    sha256: []const u8,
+};
+
+const TestingRejectedCall = struct {
+    call_ordinal: []const u8,
+    code: []const u8,
+    item_id: TestingContentReference,
+    name: TestingContentReference,
+    call_id: TestingContentReference,
+    arguments: TestingContentReference,
+};
+
+const TestingSessionReport = struct {
+    actions: struct {
+        count: []const u8,
+        unresolved: []TestingReportAction,
+    },
+    rejected_calls: struct {
+        count: []const u8,
+        items: []TestingRejectedCall,
+    },
+};
+
+fn testingSessionReport(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    session_ref: []const u8,
+    limit: u64,
+) ![]u8 {
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root);
+    var used = std.atomic.Value(u64).init(0);
+    var report = try storage.captureSessionReport(session_ref, .{
+        .scratch_path = root[0..root_length],
+        .scratch_budget = .{ .used = &used, .limit = limit },
+        .request_number = 1,
+        .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 },
+    });
+    const bytes = try std.testing.allocator.alloc(u8, @intCast(report.length));
+    errdefer std.testing.allocator.free(bytes);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const count = try report.read(offset, bytes[offset..@min(bytes.len, offset + SessionReport.read_window_bytes)]);
+        if (count == 0) return error.ShortReportRead;
+        offset += count;
+    }
+    report.deinit();
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    return bytes;
+}
+
 test "Bash proposals retain exact order permission provenance denial and stop terminality" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4617,15 +4970,25 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, binding, "action-metadata");
 
-    var observation = try storage.inspectSession("direct/actions");
-    try std.testing.expectEqual(@as(u64, 2), observation.action_count);
-    const first = observation.permission_request.?;
-    try std.testing.expectEqual(@as(u64, 0), first.call_ordinal);
-    try std.testing.expectEqual(@as(u64, 1), first.permission_revision);
-    try expectContent(&storage, first.call_id, "call\nA");
-    try expectContent(&storage, first.arguments, "{\"cmd\":\"one\"}");
+    const first_action_id = first: {
+        const report_bytes = try testingSessionReport(&storage, &tmp, "direct/actions", 1024 * 1024);
+        defer std.testing.allocator.free(report_bytes);
+        const parsed = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("2", parsed.value.actions.count);
+        try std.testing.expectEqual(@as(usize, 2), parsed.value.actions.unresolved.len);
+        const first = parsed.value.actions.unresolved[0];
+        try std.testing.expectEqualStrings("0", first.call_ordinal);
+        try std.testing.expectEqualStrings("1", first.permission_revision);
+        break :first try std.fmt.parseInt(u64, first.action, 10);
+    };
+    try std.testing.expectError(error.ActionNotFound, storage.actionCallId("direct/actions", std.math.maxInt(u64)));
+    try std.testing.expectError(error.ActionNotFound, storage.actionArguments("direct/actions", std.math.maxInt(u64)));
+    try std.testing.expect(!storage.isFenced());
+    try expectContent(&storage, try storage.actionCallId("direct/actions", first_action_id), "call\nA");
+    try expectContent(&storage, try storage.actionArguments("direct/actions", first_action_id), "{\"cmd\":\"one\"}");
 
-    var deny: protocol.PermissionDecisionCommand = .{ .action_id = first.action_id };
+    var deny: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny.key.set("deny-first");
     try deny.session.set("direct/actions");
     const accepted = storage.denyPermission(&deny, .{});
@@ -4640,16 +5003,23 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     permission_update.configuration.permission_mode.state = .value;
     try permission_update.configuration.permission_mode.value.set("bypass");
     try std.testing.expect(storage.configure(&permission_update, .{}) == .accepted);
-    observation = try storage.inspectSession("direct/actions");
-    const second = observation.permission_request.?;
-    try std.testing.expectEqual(@as(u64, 1), second.call_ordinal);
-    try std.testing.expectEqual(@as(u64, 1), second.permission_revision);
-    try expectContent(&storage, second.call_id, "call-B");
-    try expectContent(&storage, second.arguments, "{\"cmd\":\"two\"}");
+    const second_action_id = second: {
+        const report_bytes = try testingSessionReport(&storage, &tmp, "direct/actions", 1024 * 1024);
+        defer std.testing.allocator.free(report_bytes);
+        const parsed = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(usize, 1), parsed.value.actions.unresolved.len);
+        const second = parsed.value.actions.unresolved[0];
+        try std.testing.expectEqualStrings("1", second.call_ordinal);
+        try std.testing.expectEqualStrings("1", second.permission_revision);
+        break :second try std.fmt.parseInt(u64, second.action, 10);
+    };
+    try expectContent(&storage, try storage.actionCallId("direct/actions", second_action_id), "call-B");
+    try expectContent(&storage, try storage.actionArguments("direct/actions", second_action_id), "{\"cmd\":\"two\"}");
 
     var stop = try completeSessionStop("action-stop", "direct/actions");
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    var stale: protocol.PermissionDecisionCommand = .{ .action_id = second.action_id };
+    var stale: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
     try stale.key.set("stale-denial");
     try stale.session.set("direct/actions");
     const rejected = storage.denyPermission(&stale, .{});
@@ -4674,6 +5044,35 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     );
     defer reopened.close() catch unreachable;
     try std.testing.expectEqual(@as(u64, 2), try queryU64(reopened.database, "SELECT count(*) FROM action_operation WHERE permission_state=1 AND permission_revision=2 AND resolution_code IS NULL"));
+    const recovered_bytes = try testingSessionReport(&reopened, &tmp, "direct/actions", 1024 * 1024);
+    defer std.testing.allocator.free(recovered_bytes);
+    const recovered = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, recovered_bytes, .{ .ignore_unknown_fields = true });
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(usize, 2), recovered.value.actions.unresolved.len);
+    for (recovered.value.actions.unresolved) |action| {
+        try std.testing.expectEqualStrings("bypass", action.authorization);
+        try std.testing.expectEqualStrings("2", action.permission_revision);
+    }
+}
+
+test "report scratch exhaustion is an observation failure without Store fencing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "report-config", "direct/report-failure");
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root);
+    var used = std.atomic.Value(u64).init(0);
+    try std.testing.expectError(error.ReportScratchExhausted, storage.captureSessionReport("direct/report-failure", .{
+        .scratch_path = root[0..root_length],
+        .scratch_budget = .{ .used = &used, .limit = 1 },
+        .request_number = 1,
+        .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 },
+    }));
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expect((try storage.inspectSession("direct/report-failure")).found);
 }
 
 test "Core classifies trustworthy calls atomically without Action-shaped rejections" {
@@ -4719,27 +5118,45 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     var observation = try storage.inspectSession("direct/mixed-calls");
     try std.testing.expectEqual(@as(u64, 2), observation.action_count);
     try std.testing.expectEqual(@as(u64, 5), observation.rejected_call_count);
-    const rejected = observation.rejected_call.?;
-    try std.testing.expectEqual(@as(u64, 1), rejected.call_ordinal);
-    try std.testing.expect(rejected.code.eql("unknown_tool"));
-    try expectContent(&storage, rejected.item_id, "item-2");
-    try expectContent(&storage, rejected.name, "other");
-    try expectContent(&storage, rejected.call_id, "call-2");
-    try expectContent(&storage, rejected.arguments, "{}");
-
-    const first = observation.permission_request.?;
-    try std.testing.expectEqual(@as(u64, 0), first.call_ordinal);
-    try std.testing.expectEqual(
-        @as(u64, 6),
-        (try storage.inspectSessionAfter("direct/mixed-calls", first.action_id)).permission_request.?.call_ordinal,
-    );
-    var deny: protocol.PermissionDecisionCommand = .{ .action_id = first.action_id };
+    const first_action_id = first: {
+        const report_bytes = try testingSessionReport(&storage, &tmp, "direct/mixed-calls", 1024 * 1024);
+        defer std.testing.allocator.free(report_bytes);
+        const report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
+        defer report.deinit();
+        try std.testing.expectEqual(@as(usize, 2), report.value.actions.unresolved.len);
+        try std.testing.expectEqualStrings("0", report.value.actions.unresolved[0].call_ordinal);
+        try std.testing.expectEqualStrings("6", report.value.actions.unresolved[1].call_ordinal);
+        try std.testing.expectEqual(@as(usize, 5), report.value.rejected_calls.items.len);
+        const rejected = report.value.rejected_calls.items[0];
+        try std.testing.expectEqualStrings("1", rejected.call_ordinal);
+        try std.testing.expectEqualStrings("unknown_tool", rejected.code);
+        inline for (.{
+            .{ rejected.item_id, "item-2" },
+            .{ rejected.name, "other" },
+            .{ rejected.call_id, "call-2" },
+            .{ rejected.arguments, "{}" },
+        }) |expected| {
+            var length_buffer: [20]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&length_buffer, "{d}", .{expected[1].len}), expected[0].bytes);
+            const digest = protocol.contentDigest(expected[1]);
+            try std.testing.expectEqualStrings(&std.fmt.bytesToHex(digest, .lower), expected[0].sha256);
+        }
+        break :first try std.fmt.parseInt(u64, report.value.actions.unresolved[0].action, 10);
+    };
+    var deny: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny.key.set("mixed-deny");
     try deny.session.set("direct/mixed-calls");
     try std.testing.expect(storage.denyPermission(&deny, .{}) == .accepted);
     observation = try storage.inspectSession("direct/mixed-calls");
-    try std.testing.expectEqual(@as(u64, 6), observation.permission_request.?.call_ordinal);
     try std.testing.expectEqual(@as(u64, 5), observation.rejected_call_count);
+    {
+        const report_bytes = try testingSessionReport(&storage, &tmp, "direct/mixed-calls", 1024 * 1024);
+        defer std.testing.allocator.free(report_bytes);
+        const report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
+        defer report.deinit();
+        try std.testing.expectEqual(@as(usize, 1), report.value.actions.unresolved.len);
+        try std.testing.expectEqualStrings("6", report.value.actions.unresolved[0].call_ordinal);
+    }
 
     try storage.close();
     storage_open = false;
@@ -4755,8 +5172,13 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     const recovered = try reopened.inspectSession("direct/mixed-calls");
     try std.testing.expectEqual(@as(u64, 2), recovered.action_count);
     try std.testing.expectEqual(@as(u64, 5), recovered.rejected_call_count);
-    try std.testing.expectEqual(@as(u64, 6), recovered.permission_request.?.call_ordinal);
-    try std.testing.expect(recovered.rejected_call.?.code.eql("unknown_tool"));
+    const recovered_bytes = try testingSessionReport(&reopened, &tmp, "direct/mixed-calls", 1024 * 1024);
+    defer std.testing.allocator.free(recovered_bytes);
+    const recovered_report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, recovered_bytes, .{ .ignore_unknown_fields = true });
+    defer recovered_report.deinit();
+    try std.testing.expectEqual(@as(usize, 1), recovered_report.value.actions.unresolved.len);
+    try std.testing.expectEqualStrings("6", recovered_report.value.actions.unresolved[0].call_ordinal);
+    try std.testing.expectEqual(@as(usize, 5), recovered_report.value.rejected_calls.items.len);
 }
 
 test "call classification uses the proposing Operation frozen catalog" {
@@ -4860,6 +5282,11 @@ test "valid and rejected call populations grow independently" {
     const valid_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleCallsForTesting(&storage, &tmp, valid_binding, "valid-growth-metadata", &valid_calls);
     try std.testing.expectEqual(@as(u64, population), (try storage.inspectSession("direct/valid-growth")).action_count);
+    const valid_report_bytes = try testingSessionReport(&storage, &tmp, "direct/valid-growth", 1024 * 1024);
+    defer std.testing.allocator.free(valid_report_bytes);
+    const valid_report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, valid_report_bytes, .{ .ignore_unknown_fields = true });
+    defer valid_report.deinit();
+    try std.testing.expectEqual(@as(usize, population), valid_report.value.actions.unresolved.len);
 
     try configureTestSession(&storage, "rejected-growth-config", "direct/rejected-growth");
     try submitTestMessage(&storage, &tmp, "rejected-growth-message", "rejected-growth-message", "direct/rejected-growth", "rejected");
@@ -4868,6 +5295,11 @@ test "valid and rejected call populations grow independently" {
     const rejected = try storage.inspectSession("direct/rejected-growth");
     try std.testing.expectEqual(@as(u64, 0), rejected.action_count);
     try std.testing.expectEqual(@as(u64, population), rejected.rejected_call_count);
+    const rejected_report_bytes = try testingSessionReport(&storage, &tmp, "direct/rejected-growth", 1024 * 1024);
+    defer std.testing.allocator.free(rejected_report_bytes);
+    const rejected_report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, rejected_report_bytes, .{ .ignore_unknown_fields = true });
+    defer rejected_report.deinit();
+    try std.testing.expectEqual(@as(usize, population), rejected_report.value.rejected_calls.items.len);
 }
 
 test "Session stop freezes its selection and excludes only the admitted prefix" {

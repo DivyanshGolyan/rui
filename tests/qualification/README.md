@@ -5,7 +5,7 @@
 | Purpose | Entry point |
 | --- | --- |
 | Native tests and process integration | `zig build check`; Zig tests plus [admission](../integration/admission_integration.sh), [dispatch](../integration/dispatch_integration.py), [controls](../integration/control_integration.py) and [process checks](../integration/host_process_test.py) |
-| Supported-target compilation | `zig build cross-check` |
+| Supported-target compilation | `zig build cross-check`; use `zig build cross-check-linux` in Linux-only environments and `zig build cross-check-macos` where Xcode or Command Line Tools provides the Apple SDK |
 | Go measurement-runner tests | `GOTOOLCHAIN=local go -C tests/qualification mod download`, then `zig build measurement-check` |
 | Resource qualification | The six `zig build measure-*` commands below; shared Go support in [measurement/](measurement/) |
 

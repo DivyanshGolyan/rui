@@ -75,6 +75,11 @@ pub const ResultReply = union(enum) {
     command: CommandReply,
 };
 
+pub const ReportReply = union(enum) {
+    report: struct { bytes: u64 },
+    command: CommandReply,
+};
+
 pub fn configure(io: std.Io, input: ConfigureInput, reply_buffer: *ReplyBuffer) !CommandReply {
     reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, input.store);
@@ -204,18 +209,9 @@ pub fn inspectSession(
     io: std.Io,
     store_path: []const u8,
     session: []const u8,
+    destination: std.Io.File,
     reply_buffer: *ReplyBuffer,
-) !CommandReply {
-    return inspectSessionAfter(io, store_path, session, 0, reply_buffer);
-}
-
-pub fn inspectSessionAfter(
-    io: std.Io,
-    store_path: []const u8,
-    session: []const u8,
-    after_action_id: u64,
-    reply_buffer: *ReplyBuffer,
-) !CommandReply {
+) !ReportReply {
     reply_buffer.len = 0;
     if (session.len == 0 or session.len > protocol.max_session_bytes or
         !std.unicode.utf8ValidateSlice(session)) return error.InvalidSession;
@@ -225,8 +221,16 @@ pub fn inspectSessionAfter(
     try body.appendJsonString(paths.store.slice());
     try body.append(",\"session\":");
     try body.appendJsonString(session);
-    try body.appendFmt(",\"after_action\":\"{d}\"}}", .{after_action_id});
-    return sendBytes(io, &paths, "/v1/inspect-session", body.slice(), null, reply_buffer);
+    try body.append("}");
+    const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
+    const stream = try address.connect(io);
+    defer stream.close(io);
+    const fd = stream.socket.handle;
+    var header_buffer: [512]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/inspect-session HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{body.len});
+    try writeAll(fd, header);
+    try writeAll(fd, body.slice());
+    return readReportResponse(io, fd, destination, reply_buffer);
 }
 
 pub fn readActionArguments(
@@ -741,6 +745,32 @@ fn readResultResponse(
         remaining -= count;
     }
     return .{ .answer = .{ .bytes = head.content_length } };
+}
+
+fn readReportResponse(
+    io: std.Io,
+    fd: std.posix.fd_t,
+    destination: std.Io.File,
+    reply_buffer: *ReplyBuffer,
+) !ReportReply {
+    reply_buffer.len = 0;
+    const head = try readResponseHead(fd);
+    if (head.status != 200) {
+        if (head.kind != .command_json) return error.InvalidResponse;
+        return .{ .command = try readCommandBody(fd, head, reply_buffer) };
+    }
+    if (head.kind != .command_json) return error.InvalidResponse;
+    var remaining = head.content_length;
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    while (remaining != 0) {
+        if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
+        const wanted: usize = @intCast(@min(remaining, buffer.len));
+        const count = try std.posix.read(fd, buffer[0..wanted]);
+        if (count == 0) return error.TruncatedResponse;
+        try destination.writeStreamingAll(io, buffer[0..count]);
+        remaining -= count;
+    }
+    return .{ .report = .{ .bytes = head.content_length } };
 }
 
 fn readCommandBody(fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer) !CommandReply {

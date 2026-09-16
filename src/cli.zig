@@ -246,17 +246,27 @@ fn observe(io: std.Io, args: []const []const u8) !void {
 fn inspect(io: std.Io, args: []const []const u8) !void {
     var store_path: ?[]const u8 = null;
     var session: ?[]const u8 = null;
-    var after_action: u64 = 0;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--after-action")) after_action = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
+        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try client.inspectSessionAfter(io, store_path orelse return usage(), session orelse return usage(), after_action, &reply_buffer);
-    try writeCommandReply(io, reply);
-    if (reply.status != 200) return error.HostInvocationFailed;
+    const reply = try client.inspectSession(
+        io,
+        store_path orelse return usage(),
+        session orelse return usage(),
+        std.Io.File.stdout(),
+        &reply_buffer,
+    );
+    switch (reply) {
+        .report => try std.Io.File.stdout().writeStreamingAll(io, "\n"),
+        .command => |command_reply| {
+            try writeCommandReply(io, command_reply);
+            return error.HostInvocationFailed;
+        },
+    }
 }
 
 fn readResult(io: std.Io, args: []const []const u8) !void {
@@ -338,7 +348,7 @@ fn usage() error{InvalidArguments} {
         \\  rui read-result --store PATH --key KEY
         \\  rui read-action-call-id --store PATH --session REF --action ID
         \\  rui read-action-arguments --store PATH --session REF --action ID
-        \\  rui inspect-session --store PATH --session REF [--after-action ID]
+        \\  rui inspect-session --store PATH --session REF
         \\
     , .{});
     return error.InvalidArguments;

@@ -214,7 +214,6 @@ pub const ReadResult = struct {
 pub const InspectSession = struct {
     store: Bounded(max_store_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
-    after_action_id: u64 = 0,
 };
 
 pub const Request = union(Kind) {
@@ -553,9 +552,6 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("session");
         try self.readSmallString(&request.session);
-        try self.expectByte(',');
-        try self.expectKey("after_action");
-        request.after_action_id = try self.readCanonicalU64();
         return request;
     }
 
@@ -1016,41 +1012,9 @@ pub const max_control_response_bytes = @max(
     @max(max_control_observation_bytes, max_control_error_response_bytes),
 );
 
-// The Session inspection is the largest response. This bound uses
-// every literal emitted by renderSessionObservation, maximum decimal u64
-// widths, both tools, a present schema, and worst-case JSON escaping.
-const max_content_reference_bytes =
-    "{\"type\":\"text\",\"bytes\":\"".len + 20 + "\",\"sha256\":\"".len + 64 + "\"}".len;
-const max_session_observation_response_bytes =
-    "{\"version\":\"1\",\"type\":\"session_observation\",\"session\":{\"reference\":".len +
-    maximumJsonStringBytes(max_session_bytes) +
-    ",\"workspace\":".len + maximumJsonStringBytes(max_workspace_bytes) +
-    ",\"model\":".len + maximumJsonStringBytes(max_model_bytes) +
-    ",\"revision\":\"".len + 20 +
-    "\",\"tools\":[\"bash\",\"edit\"],\"permission_mode\":".len + maximumJsonStringBytes(16) +
-    ",\"instructions\":{\"bytes\":\"".len + 20 +
-    "\",\"sha256\":\"".len + 64 +
-    "\"},\"output_schema\":{\"bytes\":\"".len + 20 +
-    "\",\"sha256\":\"".len + 64 +
-    "\"}},\"pending_messages\":\"".len + 20 +
-    "\",\"actions\":{\"count\":\"".len + 20 +
-    "\",\"permission_request\":{\"action\":\"".len + 20 +
-    "\",\"parent_operation\":\"".len + 20 +
-    "\",\"call_ordinal\":\"".len + 20 +
-    "\",\"tool\":\"bash\",\"permission_revision\":\"".len + 20 +
-    "\",\"authorization\":\"pending\",\"call_id\":".len + max_content_reference_bytes +
-    ",\"arguments\":".len + max_content_reference_bytes +
-    "}},\"rejected_calls\":{\"count\":\"".len + 20 +
-    "\",\"first\":{\"parent_operation\":\"".len + 20 +
-    "\",\"call_ordinal\":\"".len + 20 +
-    "\",\"code\":".len + maximumJsonStringBytes(32) +
-    ",\"item_id\":".len + max_content_reference_bytes +
-    ",\"name\":".len + max_content_reference_bytes +
-    ",\"call_id\":".len + max_content_reference_bytes +
-    ",\"arguments\":".len + max_content_reference_bytes +
-    "}},\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"18446744073709551615\",\"scratch_used_bytes\":\"18446744073709551615\",\"unavailable\":[\"structured_output\",\"allow_once\",\"bash_execution\",\"tool_result_publication\"]}}".len;
-
-pub const max_response_bytes = @max(max_session_observation_response_bytes, max_control_response_bytes);
+// Only bounded replies and errors use this resident buffer. Complete reports
+// and result content use their independent streamed delivery paths.
+pub const max_response_bytes = max_control_response_bytes;
 
 pub const ResponseBuffer = struct {
     bytes: [max_response_bytes]u8 = undefined,
