@@ -836,6 +836,7 @@ pub const SessionReportOptions = struct {
     scratch_budget: protocol.ScratchBudget,
     request_number: u64,
     execution: SessionReportExecution,
+    fail_unlink: bool = false,
 };
 
 pub const SessionReport = struct {
@@ -866,7 +867,6 @@ const SessionReportCapture = struct {
 
     io: std.Io,
     writer: ?std.Io.File,
-    readonly: ?std.Io.File,
     budget: protocol.ScratchBudget,
     buffer: [buffer_bytes]u8 = undefined,
     buffered: usize = 0,
@@ -885,13 +885,11 @@ const SessionReportCapture = struct {
             .permissions = .fromMode(0o600),
         });
         errdefer writer.close(io);
-        const readonly = try scratch.openFile(io, name, .{});
-        errdefer readonly.close(io);
-        try scratch.deleteFile(io, name);
+        if (options.fail_unlink) return error.ReportScratchCleanupFailed;
+        scratch.deleteFile(io, name) catch return error.ReportScratchCleanupFailed;
         return .{
             .io = io,
             .writer = writer,
-            .readonly = readonly,
             .budget = options.scratch_budget,
         };
     }
@@ -996,23 +994,20 @@ const SessionReportCapture = struct {
             self.ordinary_failure = true;
             return error.ReportSealFailed;
         }
-        writer.close(self.io);
-        self.writer = null;
         const report = SessionReport{
             .io = self.io,
-            .file = self.readonly orelse unreachable,
+            .file = writer,
             .length = self.length,
             .charged = self.charged,
             .budget = self.budget,
         };
-        self.readonly = null;
+        self.writer = null;
         self.charged = 0;
         return report;
     }
 
     fn deinit(self: *SessionReportCapture) void {
         if (self.writer) |writer| writer.close(self.io);
-        if (self.readonly) |readonly| readonly.close(self.io);
         self.budget.release(self.charged);
         self.* = undefined;
     }
@@ -1960,6 +1955,7 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (faults.control_trace) |trace| trace.mark(.lock_acquired);
         const result: PermissionDecisionReply = result: {
+            if (self.fenced.load(.acquire)) break :result .infrastructure_failure;
             break :result self.denyPermissionLocked(command, faults) catch {
                 self.finishTransactionFailure(faults);
                 break :result .infrastructure_failure;
@@ -2230,11 +2226,12 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         const capture_result = self.renderSessionReportLocked(session_ref, options.execution, &capture);
-        self.mutex.unlock(self.io);
         capture_result catch |err| {
-            if (capture.ordinary_failure) return err;
-            return self.fenceReadFailure(err);
+            if (!capture.ordinary_failure) self.fenced.store(true, .release);
+            self.mutex.unlock(self.io);
+            return err;
         };
+        self.mutex.unlock(self.io);
         return capture.seal();
     }
 
@@ -2452,6 +2449,14 @@ pub const Store = struct {
         if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.actionContentLocked(session_ref, action_id, column) catch |err| switch (err) {
+            error.ActionNotFound => error.ActionNotFound,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn actionContentLocked(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {
         const statement = try prepare(
             self.database,
             "SELECT call." ++ column ++ " FROM action_operation action JOIN model_tool_call call " ++
@@ -2461,8 +2466,14 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, action_id);
         try bindText(statement, 2, session_ref);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ActionNotFound;
-        const metadata = try self.readContentMetadata(c.sqlite3_column_int64(statement, 0));
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => return error.ActionNotFound,
+            c.SQLITE_ROW => {},
+            else => return error.ActionReadFailed,
+        }
+        const content_id = c.sqlite3_column_int64(statement, 0);
+        if (content_id <= 0) return error.CorruptStore;
+        const metadata = try self.readContentMetadata(content_id);
         return .{ .length = metadata.length, .digest = metadata.digest };
     }
 
@@ -3537,11 +3548,16 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
-        const id = self.resolveContentReference(reference, private) catch |err| return self.fenceReadFailure(err);
+        return self.openContentIdentityLocked(reference, private) catch |err|
+            return self.fenceReadFailure(err);
+    }
+
+    fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentReader {
+        const id = try self.resolveContentReference(reference, private);
         const statement = try prepare(self.database, "SELECT payload IS NULL FROM content WHERE content_id=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindI64(statement, 1, id);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return self.fenceReadFailure(error.CorruptStore);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
         return .{ .store = self, .reference = reference, .content_id = id, .representation = if (c.sqlite3_column_int(statement, 0) == 0) .raw else .{ .projection = .{} } };
     }
 
@@ -5073,6 +5089,68 @@ test "report scratch exhaustion is an observation failure without Store fencing"
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expect(!storage.isFenced());
     try std.testing.expect((try storage.inspectSession("direct/report-failure")).found);
+}
+
+test "report unlink failure retains a startup-owned zero-request file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "report-unlink-config", "direct/report-unlink");
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root);
+    var used = std.atomic.Value(u64).init(0);
+    try std.testing.expectError(error.ReportScratchCleanupFailed, storage.captureSessionReport("direct/report-unlink", .{
+        .scratch_path = root[0..root_length],
+        .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
+        .request_number = 0,
+        .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 },
+        .fail_unlink = true,
+    }));
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(std.Io.File.Kind.file, (try tmp.dir.statFile(std.testing.io, "report-0-1.tmp", .{})).kind);
+    try tmp.dir.deleteFile(std.testing.io, "report-0-1.tmp");
+}
+
+test "canonical report and Action read failures fence later commands" {
+    var report_tmp = std.testing.tmpDir(.{});
+    defer report_tmp.cleanup();
+    var report_store = try testingStore(&report_tmp, std.testing.io);
+    defer report_store.close() catch unreachable;
+    try configureTestSession(&report_store, "report-corrupt-config", "direct/report-corrupt");
+    try exec(report_store.database, "PRAGMA foreign_keys=OFF");
+    try exec(report_store.database, "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref='direct/report-corrupt'");
+    try exec(report_store.database, "PRAGMA foreign_keys=ON");
+    var report_root: [protocol.max_store_bytes]u8 = undefined;
+    const report_root_length = try report_tmp.dir.realPath(std.testing.io, &report_root);
+    var report_used = std.atomic.Value(u64).init(0);
+    try std.testing.expectError(error.CorruptStore, report_store.captureSessionReport("direct/report-corrupt", .{
+        .scratch_path = report_root[0..report_root_length],
+        .scratch_budget = .{ .used = &report_used, .limit = 1024 * 1024 },
+        .request_number = 1,
+        .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 },
+    }));
+    try std.testing.expect(report_store.isFenced());
+    var blocked_denial: protocol.PermissionDecisionCommand = .{ .action_id = 1 };
+    try blocked_denial.key.set("blocked-after-report-failure");
+    try blocked_denial.session.set("direct/report-corrupt");
+    try std.testing.expectEqual(PermissionDecisionReply.infrastructure_failure, report_store.denyPermission(&blocked_denial, .{}));
+
+    var action_tmp = std.testing.tmpDir(.{});
+    defer action_tmp.cleanup();
+    var action_store = try testingStore(&action_tmp, std.testing.io);
+    defer action_store.close() catch unreachable;
+    try configureTestSession(&action_store, "action-corrupt-config", "direct/action-corrupt");
+    try submitTestMessage(&action_store, &action_tmp, "action-corrupt-message", "action-corrupt-message", "direct/action-corrupt", "propose");
+    const binding = (try action_store.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&action_store, &action_tmp, binding, "action-corrupt-metadata");
+    const action_id = try queryU64(action_store.database, "SELECT min(action_id) FROM action_operation");
+    try exec(action_store.database, "PRAGMA foreign_keys=OFF");
+    try exec(action_store.database, "DELETE FROM content WHERE content_id=(SELECT call_id_content_id FROM model_tool_call ORDER BY operation_id,call_ordinal LIMIT 1)");
+    try exec(action_store.database, "PRAGMA foreign_keys=ON");
+    try std.testing.expectError(error.CorruptStore, action_store.actionCallId("direct/action-corrupt", action_id));
+    try std.testing.expect(action_store.isFenced());
+    try std.testing.expectError(error.StoreFenced, action_store.actionArguments("direct/action-corrupt", action_id));
 }
 
 test "Core classifies trustworthy calls atomically without Action-shaped rejections" {

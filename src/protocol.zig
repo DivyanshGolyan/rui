@@ -906,6 +906,36 @@ pub const max_control_request_bytes = @max(
     max_permission_decision_request_bytes,
 );
 
+pub const max_observe_command_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"observe_command\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) + "}".len;
+pub const max_read_result_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"read_result\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) + "}".len;
+pub const max_inspect_session_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) + "}".len;
+pub const max_read_action_arguments_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"read_action_arguments\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"action\":\"".len + 20 + "\"}".len;
+pub const max_read_action_call_id_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"read_action_call_id\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"action\":\"".len + 20 + "\"}".len;
+pub const max_client_request_bytes = @max(
+    @max(max_observe_command_request_bytes, max_read_result_request_bytes),
+    @max(
+        max_inspect_session_request_bytes,
+        @max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes),
+    ),
+);
+
 const max_session_stop_rejection_code_bytes = "invalid_session_reference".len;
 const max_model_interruption_rejection_code_bytes = "invalid_session_reference".len;
 const max_permission_decision_rejection_code_bytes = "invalid_session_reference".len;
@@ -1016,31 +1046,37 @@ pub const max_control_response_bytes = @max(
 // and result content use their independent streamed delivery paths.
 pub const max_response_bytes = max_control_response_bytes;
 
-pub const ResponseBuffer = struct {
-    bytes: [max_response_bytes]u8 = undefined,
-    len: usize = 0,
+pub fn FixedJsonBuffer(comptime capacity: usize) type {
+    return struct {
+        bytes: [capacity]u8 = undefined,
+        len: usize = 0,
 
-    pub fn append(self: *ResponseBuffer, value: []const u8) !void {
-        if (self.len + value.len > self.bytes.len) return error.ResponseTooLarge;
-        @memcpy(self.bytes[self.len..][0..value.len], value);
-        self.len += value.len;
-    }
+        pub fn append(self: *@This(), value: []const u8) !void {
+            if (self.len + value.len > self.bytes.len) return error.BufferTooLarge;
+            @memcpy(self.bytes[self.len..][0..value.len], value);
+            self.len += value.len;
+        }
 
-    pub fn appendFmt(self: *ResponseBuffer, comptime format: []const u8, args: anytype) !void {
-        const value = try std.fmt.bufPrint(self.bytes[self.len..], format, args);
-        self.len += value.len;
-    }
+        pub fn appendFmt(self: *@This(), comptime format: []const u8, args: anytype) !void {
+            const value = std.fmt.bufPrint(self.bytes[self.len..], format, args) catch
+                return error.BufferTooLarge;
+            self.len += value.len;
+        }
 
-    pub fn appendJsonString(self: *ResponseBuffer, value: []const u8) !void {
-        var writer = std.Io.Writer.fixed(self.bytes[self.len..]);
-        defer self.len += writer.end;
-        std.json.Stringify.encodeJsonString(value, .{}, &writer) catch return error.ResponseTooLarge;
-    }
+        pub fn appendJsonString(self: *@This(), value: []const u8) !void {
+            var writer = std.Io.Writer.fixed(self.bytes[self.len..]);
+            defer self.len += writer.end;
+            std.json.Stringify.encodeJsonString(value, .{}, &writer) catch return error.BufferTooLarge;
+        }
 
-    pub fn slice(self: *const ResponseBuffer) []const u8 {
-        return self.bytes[0..self.len];
-    }
-};
+        pub fn slice(self: *const @This()) []const u8 {
+            return self.bytes[0..self.len];
+        }
+    };
+}
+
+pub const RequestBuffer = FixedJsonBuffer(max_client_request_bytes);
+pub const ResponseBuffer = FixedJsonBuffer(max_response_bytes);
 
 test "semantic digest distinguishes omission, null, and value" {
     var omitted = ConfigureCommand{};
@@ -1106,14 +1142,14 @@ test "content sink enforces the decoded consumer boundary before retention" {
     try std.testing.expectEqual(max_sqlite_content_bytes, multibyte.length);
     try std.testing.expectError(error.ContentTooLarge, multibyte.write("x"));
 }
-test "response JSON preserves control bytes and enforces capacity" {
+test "fixed JSON buffers preserve control bytes and enforce capacity" {
     var response: ResponseBuffer = .{};
     try response.appendJsonString("\x00\x1f\"\\\n\r\t\x08\x0c\xc3\xa9");
     try std.testing.expectEqualStrings("\"\\u0000\\u001f\\\"\\\\\\n\\r\\t\\b\\f\xc3\xa9\"", response.slice());
     response.len = response.bytes.len - 2;
     try response.appendJsonString("");
     try std.testing.expectEqual(response.bytes.len, response.len);
-    try std.testing.expectError(error.ResponseTooLarge, response.appendJsonString("x"));
+    try std.testing.expectError(error.BufferTooLarge, response.appendJsonString("x"));
 }
 test "ingress charges decoded growth and transfers file charge through cleanup" {
     const io = std.testing.io;

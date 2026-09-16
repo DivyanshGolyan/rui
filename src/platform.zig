@@ -153,8 +153,9 @@ fn isOwnedNumericScratch(name: []const u8, prefix: []const u8) bool {
     const middle = name[prefix.len .. name.len - ".tmp".len];
     const separator = std.mem.indexOfScalar(u8, middle, '-') orelse return false;
     if (std.mem.indexOfScalar(u8, middle[separator + 1 ..], '-') != null) return false;
-    const request_zero = std.mem.eql(u8, prefix, "request-") and std.mem.eql(u8, middle[0..separator], "0");
-    return (request_zero or isCanonicalPositiveDecimal(middle[0..separator])) and
+    const zero_request_number = (std.mem.eql(u8, prefix, "request-") or
+        std.mem.eql(u8, prefix, "report-")) and std.mem.eql(u8, middle[0..separator], "0");
+    return (zero_request_number or isCanonicalPositiveDecimal(middle[0..separator])) and
         isCanonicalPositiveDecimal(middle[separator + 1 ..]);
 }
 
@@ -346,7 +347,10 @@ test "startup cleanup recognizes only owned ingress names" {
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}--.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}x-2.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}12-x.tmp", .{prefix})));
-        try std.testing.expectEqual(std.mem.eql(u8, prefix, "request-"), isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}0-2.tmp", .{prefix})));
+        try std.testing.expectEqual(
+            std.mem.eql(u8, prefix, "request-") or std.mem.eql(u8, prefix, "report-"),
+            isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}0-2.tmp", .{prefix})),
+        );
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-0.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}00-2.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}02-2.tmp", .{prefix})));
@@ -357,4 +361,19 @@ test "startup cleanup recognizes only owned ingress names" {
     }
     try std.testing.expect(!isOwnedIngressName("response-secret.tmp"));
     try std.testing.expect(!isOwnedIngressName("canonical.sqlite3"));
+}
+
+test "startup cleanup removes the first zero-numbered report" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const report = try tmp.dir.createFile(std.testing.io, "report-0-1.tmp", .{});
+    report.close(std.testing.io);
+    const unrelated = try tmp.dir.createFile(std.testing.io, "canonical.sqlite3", .{});
+    unrelated.close(std.testing.io);
+
+    var root = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer root.close(std.testing.io);
+    try cleanupOwnedIngress(&root, std.testing.io, false);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "report-0-1.tmp", .{}));
+    try std.testing.expectEqual(std.Io.File.Kind.file, (try tmp.dir.statFile(std.testing.io, "canonical.sqlite3", .{})).kind);
 }

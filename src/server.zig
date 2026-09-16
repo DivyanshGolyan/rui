@@ -55,6 +55,7 @@ pub const Faults = struct {
     before_launch_delay_ms: i64 = 0,
     before_result_delay_ms: i64 = 0,
     inspection_reply_delay_ms: i64 = 0,
+    report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
     suppress_first_control_hint: bool = false,
@@ -1399,41 +1400,24 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             defer reader.close();
             deliverContent(host.io, fd, &reader) catch {};
         },
-        .read_action_arguments => |command| {
-            const reference = host.store.actionArguments(command.session.slice(), command.action_id) catch |err| switch (err) {
-                error.ActionNotFound => return respondStatic(host.io, fd, 404, "action_unavailable", "action_not_found"),
-                else => {
-                    fenceDispatch(host, "Action argument observation", err);
-                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-                },
-            };
-            var reader = try host.store.openContent(reference);
-            defer reader.close();
-            deliverContent(host.io, fd, &reader) catch {};
-        },
-        .read_action_call_id => |command| {
-            const reference = host.store.actionCallId(command.session.slice(), command.action_id) catch |err| switch (err) {
-                error.ActionNotFound => return respondStatic(host.io, fd, 404, "action_unavailable", "action_not_found"),
-                else => {
-                    fenceDispatch(host, "Action call identity observation", err);
-                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-                },
-            };
-            var reader = try host.store.openContent(reference);
-            defer reader.close();
-            deliverContent(host.io, fd, &reader) catch {};
-        },
+        .read_action_arguments => |command| deliverActionContent(host, fd, command, false),
+        .read_action_call_id => |command| deliverActionContent(host, fd, command, true),
         .inspect_session => |request_value| {
             var report = host.store.captureSessionReport(request_value.session.slice(), .{
                 .scratch_path = host.lease.paths.scratch.slice(),
                 .scratch_budget = .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },
                 .request_number = request_number,
+                .fail_unlink = host.faults.report_unlink,
                 .execution = .{
                     .dispatch_fenced = host.dispatch_fenced.load(.acquire),
                     .custody_occupied = host.custody.occupied(),
                     .scratch_used_bytes = host.scratch_used.load(.acquire),
                 },
             }) catch |err| {
+                if (err == error.ReportScratchCleanupFailed) {
+                    fenceDispatch(host, "session report scratch cleanup", err);
+                    return respondStatic(host.io, fd, 500, "observation_error", "report_scratch_cleanup_failed");
+                }
                 if (host.store.isFenced()) {
                     fenceDispatch(host, "session inspection", err);
                     return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
@@ -1455,6 +1439,27 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             deliverReport(host.io, fd, &report) catch {};
         },
     }
+}
+
+fn deliverActionContent(host: *Host, fd: std.posix.fd_t, command: anytype, comptime call_id: bool) void {
+    const phase = if (call_id) "Action call identity observation" else "Action argument observation";
+    const reference = if (call_id)
+        host.store.actionCallId(command.session.slice(), command.action_id)
+    else
+        host.store.actionArguments(command.session.slice(), command.action_id);
+    const resolved = reference catch |err| switch (err) {
+        error.ActionNotFound => return respondStatic(host.io, fd, 404, "action_unavailable", "action_not_found"),
+        else => {
+            fenceDispatch(host, phase, err);
+            return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+        },
+    };
+    var reader = host.store.openContent(resolved) catch |err| {
+        fenceDispatch(host, phase, err);
+        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+    };
+    defer reader.close();
+    deliverContent(host.io, fd, &reader) catch {};
 }
 
 fn nextRequestNumber(host: *Host) !u64 {

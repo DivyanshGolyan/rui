@@ -705,6 +705,8 @@ fn knownNonterminal(kind: []const u8) bool {
         "response.reasoning_text.done",
         "response.content_part.added",
         "response.content_part.done",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
     };
     for (values) |value| if (std.mem.eql(u8, kind, value)) return true;
     return false;
@@ -1078,6 +1080,28 @@ test "provider preserves ordered trustworthy function call envelopes" {
     var order_tmp = std.testing.tmpDir(.{});
     defer order_tmp.cleanup();
     try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingSse(&order_tmp, late_message, 64 * 1024));
+}
+
+test "function call argument stream events are scratch and completed items remain authority" {
+    const complete = "{\"type\":\"function_call\",\"id\":\"item-1\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"call-1\",\"arguments\":\"{\\\"cmd\\\":\\\"echo ok\\\"}\"}";
+    const stream = "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"item-1\"}}\n\n" ++
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"item-1\",\"delta\":\"ignored\"}\n\n" ++
+        "data: {\"type\":\"response.function_call_arguments.done\",\"output_index\":0,\"item_id\":\"item-1\",\"arguments\":\"ignored\"}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ complete ++ "}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"status\":\"completed\",\"output\":[" ++ complete ++ "]}}\n\n";
+    var valid_tmp = std.testing.tmpDir(.{});
+    defer valid_tmp.cleanup();
+    const accepted = try validateTestingSse(&valid_tmp, stream, 64 * 1024);
+    try std.testing.expectEqual(@as(u64, 1), accepted.output.call_count);
+    try std.testing.expectEqual(@as(u64, 5 * 104), accepted.metadata_bytes);
+
+    const malformed = "{\"type\":\"function_call\",\"id\":\"item-1\",\"name\":\"bash\",\"call_id\":\"call-1\"}";
+    const malformed_stream = "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{}\"}\n\n" ++
+        "data: {\"type\":\"response.function_call_arguments.done\",\"output_index\":0,\"arguments\":\"{}\"}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ malformed ++ "}\n\n";
+    var malformed_tmp = std.testing.tmpDir(.{});
+    defer malformed_tmp.cleanup();
+    try std.testing.expectError(error.MissingProviderField, validateTestingSse(&malformed_tmp, malformed_stream, 64 * 1024));
 }
 
 test "provider rejects unsupported consequential function call controls" {

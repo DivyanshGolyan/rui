@@ -225,10 +225,28 @@ def sse_tool_calls(response_id, calls):
         }
         for index, (name, call_id, arguments) in enumerate(calls)
     ]
-    payloads = [
-        {"type": "response.output_item.done", "output_index": index, "item": item}
-        for index, item in enumerate(items)
-    ]
+    payloads = []
+    for index, item in enumerate(items):
+        payloads += [
+            {
+                "type": "response.output_item.added",
+                "output_index": index,
+                "item": {"type": "function_call", "id": item["id"]},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "output_index": index,
+                "item_id": item["id"],
+                "delta": "non-authoritative",
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "output_index": index,
+                "item_id": item["id"],
+                "arguments": "non-authoritative",
+            },
+            {"type": "response.output_item.done", "output_index": index, "item": item},
+        ]
     payloads.append(
         {
             "type": "response.completed",
@@ -3442,6 +3460,61 @@ def main():
         processes.append(repaired)
         stop_host(repaired)
         processes.remove(repaired)
+
+        # The first report uses request number zero. If immediate unlink fails,
+        # the Host stops instead of accumulating ownerless names; startup owns
+        # the recognizable empty file and either removes it or refuses service.
+        report_unlink_store = state / "report-unlink-store"
+        report_unlink_host = start_host(
+            report_unlink_store, None, "--fault", "report-unlink"
+        )
+        processes.append(report_unlink_host)
+        report_failure = subprocess.run(
+            [
+                str(RUI),
+                "inspect-session",
+                "--store",
+                str(report_unlink_store),
+                "--session",
+                "direct/report-unlink",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert report_failure.returncode != 0, report_failure
+        wait_for(
+            lambda: report_unlink_host.poll() is not None,
+            "report unlink effect-aware Host shutdown",
+            timeout=5,
+        )
+        assert report_unlink_host.returncode != 0
+        processes.remove(report_unlink_host)
+        report_leftover = report_unlink_store / "scratch" / "report-0-1.tmp"
+        assert report_leftover.exists(), report_leftover
+
+        failed_report_cleanup = subprocess.run(
+            [
+                str(RUI),
+                "serve",
+                "--store",
+                str(report_unlink_store),
+                "--active-capacity",
+                "1",
+                "--fault",
+                "startup-cleanup",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert failed_report_cleanup.returncode != 0, failed_report_cleanup
+        assert report_leftover.exists()
+        report_cleanup_host = start_host(report_unlink_store, None)
+        processes.append(report_cleanup_host)
+        assert not report_leftover.exists()
+        stop_host(report_cleanup_host)
+        processes.remove(report_cleanup_host)
 
         # Response and validation-metadata unlink failures retain one named
         # file under custody and fence dispatch. A second failed cleanup leaves
