@@ -1079,18 +1079,16 @@ const ControlTiming = struct {
     command_key: []const u8,
     kind: []const u8,
     accepted_at_ns: u64,
-    store_queued_ns: u64,
+    store_queued_ns: u64 = 0,
     lock_acquired_ns: u64 = 0,
     store_complete_ns: u64 = 0,
 
     fn init(host: *Host, command_key: []const u8, kind: []const u8, accepted_at_ns: u64) ControlTiming {
-        traceSubject(host, "control_store_queued", "command_key", command_key);
         return .{
             .host = host,
             .command_key = command_key,
             .kind = kind,
             .accepted_at_ns = accepted_at_ns,
-            .store_queued_ns = nowNs(host),
         };
     }
 
@@ -1102,6 +1100,10 @@ const ControlTiming = struct {
     fn markStore(context: *anyopaque, phase: store_module.ControlTracePhase) void {
         const self: *ControlTiming = @ptrCast(@alignCast(context));
         switch (phase) {
+            .lock_requested => {
+                self.store_queued_ns = nowNs(self.host);
+                traceSubject(self.host, "control_store_queued", "command_key", self.command_key);
+            },
             .lock_acquired => {
                 self.lock_acquired_ns = nowNs(self.host);
                 traceSubject(self.host, "control_lock_acquired", "command_key", self.command_key);
@@ -1129,7 +1131,7 @@ const ControlTiming = struct {
     fn replyComplete(self: *ControlTiming) void {
         if (!self.host.faults.test_phase_trace) return;
         const reply_complete_ns = nowNs(self.host);
-        if (self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
+        if (self.store_queued_ns == 0 or self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
         var trace: protocol.ResponseBuffer = .{};
         trace.append("{\"rui_test_phase\":\"control_timing\",\"command_key\":") catch return;
         trace.appendJsonString(self.command_key) catch return;

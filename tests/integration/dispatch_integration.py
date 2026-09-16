@@ -714,16 +714,20 @@ def main():
             first_process = start_command(*(deny_args if order == "denial-first" else stop_args))
             second_process = None
             try:
-                proposal_milestones.wait("control_lock_acquired", subject=first_key)
+                first_lock = proposal_milestones.wait("control_lock_acquired", subject=first_key)[0]
                 assert first_process.poll() is None, "first control did not remain held at the Store owner"
                 second_process = start_command(*(stop_args if order == "denial-first" else deny_args))
-                proposal_milestones.wait("control_store_queued", subject=second_key)
+                second_request = proposal_milestones.wait("control_store_queued", subject=second_key)[0]
                 assert second_process.poll() is None, "second control did not remain queued at the Store owner"
                 with control_gate.open("wb", buffering=0) as release:
                     release.write(b"x")
-                proposal_milestones.wait("control_gate_released", subject=first_key)
+                gate_release = proposal_milestones.wait("control_gate_released", subject=first_key)[0]
                 first_result = finish_command(first_process)
+                second_lock = proposal_milestones.wait("control_lock_acquired", subject=second_key)[0]
                 second_result = finish_command(second_process)
+                assert int(first_lock["at_ns"]) < int(second_request["at_ns"])
+                assert int(second_request["at_ns"]) < int(gate_release["at_ns"])
+                assert int(gate_release["at_ns"]) < int(second_lock["at_ns"])
             finally:
                 if first_process.poll() is None:
                     first_process.kill()

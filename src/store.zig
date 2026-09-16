@@ -45,7 +45,7 @@ pub const Faults = struct {
     settlement_trace: ?SettlementTrace = null,
 };
 
-pub const ControlTracePhase = enum { lock_acquired, store_complete };
+pub const ControlTracePhase = enum { lock_requested, lock_acquired, store_complete };
 
 pub const ControlTrace = struct {
     context: *anyopaque,
@@ -1597,6 +1597,7 @@ pub const Store = struct {
         faults: Faults,
     ) SessionStopReply {
         if (self.fenced.load(.acquire)) return .infrastructure_failure;
+        if (faults.control_trace) |trace| trace.mark(.lock_requested);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (faults.control_trace) |trace| trace.mark(.lock_acquired);
@@ -1763,6 +1764,7 @@ pub const Store = struct {
         faults: Faults,
     ) ModelInterruptionReply {
         if (self.fenced.load(.acquire)) return .infrastructure_failure;
+        if (faults.control_trace) |trace| trace.mark(.lock_requested);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (faults.control_trace) |trace| trace.mark(.lock_acquired);
@@ -1951,6 +1953,7 @@ pub const Store = struct {
         faults: Faults,
     ) PermissionDecisionReply {
         if (self.fenced.load(.acquire)) return .infrastructure_failure;
+        if (faults.control_trace) |trace| trace.mark(.lock_requested);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (faults.control_trace) |trace| trace.mark(.lock_acquired);
