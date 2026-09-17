@@ -1,11 +1,11 @@
 {
-  "artifacts": "/tmp/rui-model-queue-2408864942",
+  "artifacts": "/tmp/rui-model-queue-2010480091",
   "binary": "/home/user/workspace/repo/.zig-cache/o/c3c65f9dd8937e6b893b3cbacbfac0e9/rui-release-small-check",
   "binary_sha256": "dd6952fb9c37f147a64a7851fbfb241e052a09e02088dab12b6ad0599ccdc210",
   "cases": {
     "baseline": {
       "capacity": 1,
-      "discovery_ms": 9,
+      "discovery_ms": 6,
       "discovery_target_ms": 2000,
       "expected_oldest_first_order": [
         "queue/eligible/000001"
@@ -20,7 +20,7 @@
       },
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 4
+      "terminal_observation_ms": 3
     },
     "eligible-1": {
       "population": {
@@ -32,7 +32,7 @@
     },
     "eligible-10": {
       "capacity": 1,
-      "discovery_ms": 8,
+      "discovery_ms": 6,
       "discovery_target_ms": 2000,
       "expected_oldest_first_order": [
         "queue/eligible/000001",
@@ -65,11 +65,11 @@
       },
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 84
+      "terminal_observation_ms": 76
     },
     "eligible-100": {
       "capacity": 1,
-      "discovery_ms": 10,
+      "discovery_ms": 7,
       "discovery_target_ms": 2000,
       "expected_oldest_first_order": [
         "queue/eligible/000001",
@@ -282,11 +282,11 @@
       },
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 735
+      "terminal_observation_ms": 523
     },
     "history-1000": {
       "capacity": 1,
-      "discovery_ms": 8,
+      "discovery_ms": 6,
       "discovery_target_ms": 2000,
       "expected_oldest_first_order": [
         "queue/eligible/000001"
@@ -305,7 +305,7 @@
     },
     "history-10000": {
       "capacity": 1,
-      "discovery_ms": 8,
+      "discovery_ms": 7,
       "discovery_target_ms": 2000,
       "expected_oldest_first_order": [
         "queue/eligible/000001"
@@ -320,7 +320,7 @@
       },
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 13
+      "terminal_observation_ms": 3
     },
     "ineligible-0": {
       "population": {
@@ -332,7 +332,7 @@
     },
     "ineligible-100": {
       "capacity": 1,
-      "discovery_ms": 7,
+      "discovery_ms": 6,
       "discovery_target_ms": 2000,
       "expected_oldest_first_order": [
         "queue/eligible/000001"
@@ -347,7 +347,7 @@
       },
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 4
+      "terminal_observation_ms": 3
     },
     "ineligible-1000": {
       "capacity": 1,
@@ -387,7 +387,7 @@
   ],
   "maximum_mixed": {
     "capacity": 1,
-    "discovery_ms": 8,
+    "discovery_ms": 7,
     "discovery_target_ms": 2000,
     "expected_oldest_first_order": [
       "queue/eligible/000001",
@@ -497,7 +497,7 @@
         "database_logical_bytes": 5361664
       },
       "process": {
-        "rss_bytes": 6664192,
+        "rss_bytes": 6586368,
         "virtual_bytes": 94294016,
         "cpu_user_seconds": 0,
         "cpu_system_seconds": 0,
@@ -515,13 +515,14 @@
         "execution_slot_bytes": "1216",
         "openssl": "OpenSSL/3.6.3",
         "scratch_limit_bytes": "8589934592",
-        "socket": "/tmp/rui-1000/0763b8954fd068db68eb9849e27ba075.sock",
-        "store": "/tmp/rui-model-queue-2408864942/maximum-mixed/store"
+        "socket": "/tmp/rui-1000/768b536f0e6ef249b9cb45d6b68e5824.sock",
+        "store": "/tmp/rui-model-queue-2010480091/maximum-mixed/store"
       }
     },
     "macos_physical_footprint": {
       "reason": "requires macOS footprint(1)",
-      "status": "unavailable"
+      "status": "unavailable",
+      "target_bytes": 268435456
     },
     "operation_launch_order": [
       "queue/eligible/000001",
@@ -630,10 +631,11 @@
       "ineligible_stopped_pending": 1000,
       "eligible": 100
     },
-    "resource_status": "passed",
-    "status": "passed",
+    "resource_collection_status": "passed",
+    "resource_status": "unavailable",
+    "status": "unavailable",
     "target_inclusive": true,
-    "terminal_observation_ms": 648
+    "terminal_observation_ms": 548
   },
   "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
   "measurement_runtime": {
@@ -649,8 +651,8 @@
   "scope": "issue-202 production model-only queue discovery, order, settlement, and resource observation",
   "sqlite_binary": "/home/user/workspace/repo/.zig-cache/o/7b0928a464f4035a2d8952f39ab93f69/rui-qualification-sqlite3",
   "sqlite_binary_sha256": "2ae94eed0d43488af48aaa62a06e714c0121292324f94532ecb6ee0349a2fd62",
-  "status": "passed",
-  "tested_revision": "e31763e6b2b708135d2395ac859e13f152604db4",
+  "status": "unavailable",
+  "tested_revision": "bd0fa5167e7663b5f200724e1ce5f42d588ee18b",
   "working_tree_dirty": false,
   "zig": "0.16.0"
 }
