@@ -14,6 +14,8 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Rejected tool-call prior art](rejected-tool-call-prior-art.md) compares malformed provider output, invalid parameters, unknown tools, execution failures, denial, sibling isolation and model feedback across the same four runtimes; the accepted contract now uses its provider-envelope versus call-descriptor boundary for issue #198.
 
+[Parallel tool-result ordering](tool-result-ordering.md) compares the Responses `call_id` contract with call-ordered rendering in first-party Codex, SDK and Agents implementations. It supports deriving results from authoritative terminal facts without a publication copy; no live reordered-output fixture or provider qualification.
+
 [Request-failure ownership](request-failure-ownership.md) classifies failures from Message admission through provider output against source, the pre-decision contract and pinned Pi, community DeepSeek CLI, OpenCode v2 and Codex CLI evidence. Its finding that no concrete provider-independent pre-Operation rejection exists led to removing issue #201's premise; decision evidence only, with no runtime qualification.
 
 [Instruction updates under prompt caching](instruction-update-prompt-caching.md) compares current OpenAI and Anthropic prefix matching, later authoritative messages and same-level precedence. It supports the accepted separation between append-only canonical instruction history and adapter-owned provider projection; primary-source decision evidence only, with no provider qualification.
