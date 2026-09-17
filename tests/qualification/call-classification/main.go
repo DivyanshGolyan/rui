@@ -388,6 +388,13 @@ func combineStatus(current, next string) string {
 	return current
 }
 
+func aggregatePhysicalStatus(host measurement.FootprintVerdict) (string, string) {
+	if host.Status == "target_miss" {
+		return "target_miss", "Host lower bound alone exceeds the aggregate 256 MiB target"
+	}
+	return "unavailable", "separate ordinary Rui CLI physical footprint and aggregate accounting are not collected"
+}
+
 func deny(client measurement.Client, directory, session, action string, index int) (float64, error) {
 	started := time.Now()
 	var answer map[string]any
@@ -677,8 +684,9 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 			result["physical_footprint_error"] = physicalError.Error()
 		} else {
 			verdict := measurement.ClassifyFootprint(physical.Footprint, physicalFootprintTargetBytes)
-			result["physical_footprint_status"] = verdict.Status
-			result["physical_footprint"] = map[string]any{"lifecycle": "same Host cold through work, drain, and retained idle", "verdict": verdict, "retained_sample": physical}
+			status, reason := aggregatePhysicalStatus(verdict)
+			result["physical_footprint_status"] = status
+			result["physical_footprint"] = map[string]any{"lifecycle": "same Host cold through work, drain, and retained idle", "host_component_verdict": verdict, "aggregate_reason": reason, "retained_sample": physical}
 		}
 	} else {
 		result["physical_footprint_status"] = "unavailable"
@@ -794,9 +802,9 @@ func main() {
 		cases[candidate.Name] = value
 	}
 	result := map[string]any{
-		"format": "rui-call-classification-v2-go", "scope": "GitHub issue #228 production raw-provider call classification, exact denial, restart recovery, and independent population scaling",
+		"format": "rui-call-classification-v3-go", "scope": "GitHub issue #228 production raw-provider call classification, exact denial, restart recovery, and independent population scaling",
 		"status": status, "cases": cases, "artifacts": root,
-		"classification_legend": map[string]string{"behavior_error": "a provider/Store/server/client invariant failed", "unavailable": "a required measurement was absent or its uncertainty interval crossed the target", "target_miss": "the lower bound of a valid macOS lifetime-peak interval exceeded 256 MiB", "passed": "behavior and required measurements passed", "diagnostic": "portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold"},
+		"classification_legend": map[string]string{"behavior_error": "a provider/Store/server/client invariant failed", "unavailable": "a required measurement was absent, its uncertainty interval crossed the target, or aggregate helper accounting was incomplete", "target_miss": "the lower bound of a valid macOS lifetime-peak interval exceeded 256 MiB", "passed": "behavior and required aggregate measurements passed", "diagnostic": "component or portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold"},
 		"limits":                []string{"Linux execution is deterministic production-path development evidence; macOS runtime and physical footprint remain unavailable in this orb", "loopback deterministic provider; no live provider, TLS, filesystem power-loss, or Bash execution qualification", "Bash launch is intentionally forbidden: denial qualification ends before the later execution slice", "population and payload values are workloads, not product quotas", "process-crash and restart evidence does not certify power loss"},
 	}
 	evidence, evidenceError := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)

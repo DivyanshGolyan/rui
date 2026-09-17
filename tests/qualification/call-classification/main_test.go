@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+
+	"rui.local/qualification/measurement"
 )
 
 func TestScenarioCallsVaryClassificationAndPayloadIndependently(t *testing.T) {
@@ -61,5 +63,16 @@ func TestCombineStatusPreservesVerdictPrecedence(t *testing.T) {
 	}
 	if got := combineStatus("behavior_error", "passed"); got != "behavior_error" {
 		t.Fatalf("behavior failure overwritten: %q", got)
+	}
+}
+
+func TestAggregatePhysicalStatusCannotPassWithoutCLIEvidence(t *testing.T) {
+	status, reason := aggregatePhysicalStatus(measurement.FootprintVerdict{Status: "passed"})
+	if status != "unavailable" || reason == "" {
+		t.Fatalf("Host-only pass became aggregate %q: %q", status, reason)
+	}
+	status, _ = aggregatePhysicalStatus(measurement.FootprintVerdict{Status: "target_miss"})
+	if status != "target_miss" {
+		t.Fatalf("Host-only miss was hidden as %q", status)
 	}
 }
