@@ -130,12 +130,20 @@ def wait_for_phase(process, phase, timeout=8):
 
 
 def resolution(store, session):
-    values = rows(
-        store,
-        "SELECT resolution_code FROM action_operation WHERE session_ref=?",
-        (session,),
+    report = fixture.command(
+        "inspect-session", "--store", store, "--session", session, "--profile", "full"
     )
-    return values[0][0] if len(values) == 1 and values[0][0] is not None else None
+    actions = report["full"]["actions"]
+    return actions[0]["resolution"] if len(actions) == 1 else None
+
+
+def result_text(store, session):
+    report = fixture.command(
+        "inspect-session", "--store", store, "--session", session, "--profile", "full"
+    )
+    actions = report["full"]["actions"]
+    assert len(actions) == 1 and actions[0]["resolution"] is not None, report
+    return actions[0]["result"]["text"]
 
 
 def add_exchange(responses, name, command, answer="continued", timeout_ms=None):
@@ -391,12 +399,12 @@ def main():
         allow(state, store, "rollback-allow", "direct/rollback", rollback_action["action"])
         time.sleep(0.2)
         assert not rollback_marker.exists()
+        fixture.stop_host(host)
         assert rows(
             store,
             "SELECT attempt_ordinal,uncertain FROM action_operation WHERE session_ref=?",
             ("direct/rollback",),
         ) == [(0, 0)]
-        fixture.stop_host(host)
         host = fixture.start_host(store, None)
         fixture.wait_for(lambda: rollback_marker.exists(), "Bash launch without provider transport")
         fixture.wait_for(
@@ -429,11 +437,7 @@ def main():
             "direct/unattempted",
         )
         assert stopped["answer"]["status"] == "accepted", stopped
-        assert rows(
-            store,
-            "SELECT attempt_ordinal,resolution_code FROM action_operation WHERE session_ref=?",
-            ("direct/unattempted",),
-        ) == [(0, "cancelled")]
+        assert resolution(store, "direct/unattempted") == "cancelled"
         assert not unattempted_marker.exists()
 
         configure(state, store, "prelaunch-stop-config", "direct/prelaunch-stop")
@@ -447,6 +451,7 @@ def main():
             endpoint_url,
             "--test-before-launch-delay-ms",
             "1000",
+            "--test-phase-trace",
         )
         allow(
             state,
@@ -455,14 +460,7 @@ def main():
             "direct/prelaunch-stop",
             prelaunch_stop_action["action"],
         )
-        fixture.wait_for(
-            lambda: rows(
-                store,
-                "SELECT uncertain FROM action_operation WHERE session_ref=?",
-                ("direct/prelaunch-stop",),
-            ) == [(1,)],
-            "pre-launch stoppable Attempt",
-        )
+        wait_for_phase(host, "prepared_before_handoff")
         fixture.command(
             "stop-session",
             "--store",
@@ -510,26 +508,20 @@ def main():
         )
         assert len(report["actions"]["unresolved"]) == 1, report
         assert report["actions"]["unresolved"][0]["authorization"] == "allow_once", report
+        fixture.stop_host(host)
         assert rows(
             store,
             "SELECT permission_state,attempt_ordinal FROM action_operation WHERE session_ref=?",
             ("direct/before-launch",),
         ) == [(1, 0)]
-        fixture.stop_host(host)
         host = fixture.start_host(
             store,
             endpoint_url,
             "--test-before-launch-delay-ms",
             "5000",
+            "--test-phase-trace",
         )
-        fixture.wait_for(
-            lambda: rows(
-                store,
-                "SELECT uncertain FROM action_operation WHERE session_ref=?",
-                ("direct/before-launch",),
-            ) == [(1,)],
-            "committed pre-launch Attempt",
-        )
+        wait_for_phase(host, "prepared_before_handoff")
         named_first_acquisition = sorted((store / "scratch").glob("bash-*-*.tmp"))
         assert len(named_first_acquisition) >= 3, named_first_acquisition
         assert not before_launch_marker.exists()
@@ -574,11 +566,12 @@ def main():
         stop_action = fixture.wait_for(lambda: action_for(store, "direct/stop"), "stoppable Bash Action")
         allow(state, store, "stop-allow", "direct/stop", stop_action["action"])
         fixture.wait_for(
-            lambda: rows(
-                store,
-                "SELECT uncertain FROM action_operation WHERE session_ref=?",
-                ("direct/stop",),
-            ) == [(1,)],
+            lambda: int(
+                fixture.command(
+                    "inspect-session", "--store", store, "--session", "direct/stop"
+                )["execution"]["custody_occupied"]
+            )
+            > 0,
             "launched stoppable Bash",
         )
         active_resources = fixture.command(
@@ -605,11 +598,11 @@ def main():
         )
         assert stopped["answer"]["status"] == "accepted", stopped
         fixture.wait_for(lambda: resolution(store, "direct/stop") == "cancelled", "cancelled Bash")
+        fixture.stop_host(host)
         assert rows(store, "SELECT outcome_code FROM turn WHERE session_ref=?", ("direct/stop",)) == [
             ("cancelled",)
         ]
 
-        fixture.stop_host(host)
         host = fixture.start_host(
             store,
             endpoint_url,
@@ -654,13 +647,7 @@ def main():
             lambda: resolution(store, "direct/settlement-stop") == "cancelled",
             "stop winning sealed Bash settlement",
         )
-        assert rows(
-            store,
-            "SELECT content.payload FROM action_operation action "
-            "JOIN content ON content.content_id=action.resolution_content_id "
-            "WHERE action.session_ref=?",
-            ("direct/settlement-stop",),
-        ) == [(b"Cancelled by Session stop.",)]
+        assert result_text(store, "direct/settlement-stop") == "Cancelled by Session stop."
         assert int(
             fixture.command(
                 "inspect-session", "--store", store, "--session", "direct/settlement-stop"
@@ -787,18 +774,12 @@ def main():
             "detached writer leader result",
             timeout=20,
         )
-        result = rows(
-            store,
-            "SELECT content.payload FROM action_operation action "
-            "JOIN content ON content.content_id=action.resolution_content_id "
-            "WHERE action.session_ref=?",
-            ("direct/detached-timeout",),
-        )[0][0]
-        assert b"Capture may be incomplete" in result, result
+        result = result_text(store, "direct/detached-timeout")
+        assert "Capture may be incomplete" in result, result
         stdout_path = pathlib.Path(
-            next(line for line in result.splitlines() if line.startswith(b"Full stdout: "))[
-                len(b"Full stdout: ") :
-            ].decode()
+            next(line for line in result.splitlines() if line.startswith("Full stdout: "))[
+                len("Full stdout: ") :
+            ]
         )
         assert stdout_path.stat().st_size >= 32768, stdout_path.stat().st_size
         assert process_exists(detached_process)
@@ -1083,17 +1064,22 @@ def main():
             lambda: fixture.completed_observation(store, "sibling-message"),
             "independent sibling continuation",
         )
-        sibling_rows = rows(
+        sibling_rows = fixture.command(
+            "inspect-session",
+            "--store",
             store,
-            "SELECT call_ordinal,permission_state,resolution_code,acceptance_position "
-            "FROM action_operation WHERE session_ref=? ORDER BY call_ordinal",
-            ("direct/sibling",),
-        )
-        assert [row[:3] for row in sibling_rows] == [
-            (0, 1, "succeeded"),
-            (1, 1, "succeeded"),
+            "--session",
+            "direct/sibling",
+            "--profile",
+            "full",
+        )["full"]["actions"]
+        assert [(row["call_ordinal"], row["resolution"]) for row in sibling_rows] == [
+            ("0", "succeeded"),
+            ("1", "succeeded"),
         ], sibling_rows
-        assert sibling_rows[1][3] < sibling_rows[0][3], sibling_rows
+        assert int(sibling_rows[1]["acceptance_position"]) < int(
+            sibling_rows[0]["acceptance_position"]
+        ), sibling_rows
         assert sibling_marker.read_text() == "ba"
         sibling_request = json.loads(endpoint.requests[-1])
         sibling_outputs = [
@@ -1115,6 +1101,8 @@ def main():
             }
         )
 
+        fixture.stop_host(host)
+        host = None
         assert rows(
             store,
             "SELECT count(*) FROM action_operation WHERE attempt_ordinal=1 AND uncertain!=0",

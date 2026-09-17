@@ -366,6 +366,8 @@ Sealed-source handoff grants bounded reads through the last range read and impor
 
 Captures waiting for the serial workspace remain with occupied execution custody, without another growing payload queue. Import creates canonical Content References only at commit. Scratch closes after its final consumer, while callbacks may retain custody longer. Interruption/rejection fences publication before cleanup.
 
+Delayed physical cleanup is an elapsed-time policy measured against the awake monotonic clock, not a count of orchestration passes; transport availability, Bash activity and scheduler oversleep cannot multiply the requested delay. Cleanup expiry permits release only after the owning cleanup fact is established.
+
 ### Commit boundaries and crash recovery
 
 Recovery uses committed facts only; it cannot establish an outcome or permission to execute from temporary artifacts, diagnostics or caller-supplied evidence. The committing owner alone publishes semantic consequences. Attempt admission transfers one-shot launch authority, not canonical-state ownership, to the reserved execution owner. Terminal delivery hands sealed evidence to core validation/import under the ownership and sealing rules above. A live owner can report a known failure before launch; after custody loss, recovery uses committed uncertainty even if launch never happened.

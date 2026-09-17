@@ -35,7 +35,13 @@ def main():
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash-lifecycle."))
     completed = False
     try:
-        for fault in ("observe", "reap", "group-probe", "cleanup-watchdog"):
+        for fault in (
+            "observe",
+            "reap",
+            "reap-watchdog",
+            "group-probe",
+            "cleanup-watchdog",
+        ):
             name = f"lifecycle-{fault}"
             state = root / name
             state.mkdir(mode=0o700)
@@ -51,12 +57,17 @@ def main():
                 )
                 host.communicate(timeout=5)
                 host = None
-                assert bash_fixture.resolution(store, session) is None
+                assert bash_fixture.rows(
+                    store,
+                    "SELECT resolution_code FROM action_operation WHERE session_ref=?",
+                    (session,),
+                ) == [(None,)]
                 assert list((store / "scratch").glob("bash-*.tmp"))
                 host = fixture.start_host(store, endpoint_url)
                 fixture.wait_for(
                     lambda: bash_fixture.resolution(store, session) == "indeterminate",
                     f"{fault} indeterminate recovery",
+                    interval=0.5,
                 )
                 fixture.wait_for(
                     lambda: fixture.completed_observation(store, f"{name}-message"),
@@ -81,6 +92,7 @@ def main():
             fixture.wait_for(
                 lambda: bash_fixture.resolution(store, session) == "storage_failed",
                 "tail-snapshot capture failure",
+                interval=0.5,
             )
             fixture.wait_for(
                 lambda: fixture.completed_observation(store, f"{name}-message"),
@@ -104,15 +116,10 @@ def main():
             fixture.wait_for(
                 lambda: bash_fixture.resolution(store, session) == "succeeded",
                 "signal failure with independently confirmed cleanup",
+                interval=0.5,
             )
-            result = bash_fixture.rows(
-                store,
-                "SELECT content.payload FROM action_operation action "
-                "JOIN content ON content.content_id=action.resolution_content_id "
-                "WHERE action.session_ref=?",
-                (session,),
-            )[0][0]
-            assert b"signaling reported a failure" in result, result
+            result = bash_fixture.result_text(store, session)
+            assert "signaling reported a failure" in result, result
             fixture.wait_for(
                 lambda: fixture.completed_observation(store, f"{name}-message"),
                 "signal-failure continuation",

@@ -553,13 +553,13 @@ def read_action(store, session, action, field):
     return completed.stdout
 
 
-def wait_for(predicate, description, timeout=8):
+def wait_for(predicate, description, timeout=8, interval=0.025):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
         if value:
             return value
-        time.sleep(0.025)
+        time.sleep(interval)
     raise AssertionError(f"timed out waiting for {description}")
 
 

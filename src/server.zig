@@ -309,7 +309,7 @@ const ProviderSlot = struct {
 
 const CleanupSlot = struct {
     owner: AttemptOwner,
-    cleanup_ticks: u32 = 0,
+    ready_at: std.Io.Clock.Timestamp,
 };
 
 const RetainedScratchSlot = struct {
@@ -1196,20 +1196,23 @@ fn modelObservationsAgree(body: []const u8, openai: []const u8, x_openai: []cons
 fn beginCleanup(host: *Host, slot: *ExecutionSlot, owner: AttemptOwner) void {
     host.custody.detach(owner.token) catch unreachable;
     traceOperation(host, "cleanup_started", owner.binding);
+    const started = std.Io.Clock.Timestamp.now(host.io, .awake);
     slot.* = .{ .cleanup = .{
         .owner = owner,
-        .cleanup_ticks = @intCast(@divFloor(host.faults.cleanup_delay_ms + 24, 25)),
+        .ready_at = started.addDuration(.{
+            .raw = .fromMilliseconds(host.faults.cleanup_delay_ms),
+            .clock = .awake,
+        }),
     } };
-    if (slot.cleanup.cleanup_ticks == 0) finishSlotCleanup(host, slot);
+    if (host.faults.cleanup_delay_ms == 0) finishSlotCleanup(host, slot);
 }
 
 fn advanceCleanup(host: *Host, slots: []ExecutionSlot) void {
+    const now = std.Io.Clock.Timestamp.now(host.io, .awake);
     for (slots) |*slot| {
         switch (slot.*) {
             .cleanup => |*cleanup| {
-                if (cleanup.cleanup_ticks == 0) continue;
-                cleanup.cleanup_ticks -= 1;
-                if (cleanup.cleanup_ticks == 0) finishSlotCleanup(host, slot);
+                if (now.raw.nanoseconds >= cleanup.ready_at.raw.nanoseconds) finishSlotCleanup(host, slot);
             },
             else => {},
         }

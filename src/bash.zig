@@ -22,7 +22,16 @@ extern fn rui_bash_reap(pid: c_int, observation: *BashObservation) c_int;
 extern fn rui_bash_pipe_queued_bytes(fd: c_int, bytes: *u64) c_int;
 extern fn rui_bash_group_absent(pgid: c_int) c_int;
 
-pub const LifecycleFault = enum { none, observe, reap, group_probe, tail_snapshot, signal, cleanup_watchdog };
+pub const LifecycleFault = enum {
+    none,
+    observe,
+    reap,
+    reap_watchdog,
+    group_probe,
+    tail_snapshot,
+    signal,
+    cleanup_watchdog,
+};
 
 pub const Faults = struct {
     preparation: bool = false,
@@ -324,7 +333,7 @@ pub const Execution = struct {
             self.finishSignaling();
             made_progress = true;
         }
-        made_progress = try self.reapLeader() or made_progress;
+        made_progress = try self.reapLeader(now) or made_progress;
         if (self.process == .checking_group) {
             if (self.faults.lifecycle == .group_probe) return error.InjectedBashGroupProbeFailure;
             const check = if (self.faults.lifecycle == .cleanup_watchdog)
@@ -568,14 +577,20 @@ pub const Execution = struct {
         return true;
     }
 
-    fn reapLeader(self: *Execution) !bool {
+    fn reapLeader(self: *Execution, now: std.Io.Clock.Timestamp) !bool {
         if (self.process != .reaping) return false;
         if (self.faults.lifecycle == .reap) return error.InjectedBashReapFailure;
         var reaping = self.process.reaping;
         const child_id = reaping.owner.child.id.?;
         var observation: BashObservation = undefined;
-        const result = rui_bash_reap(child_id, &observation);
-        if (result == 0) return false;
+        const result = if (self.faults.lifecycle == .reap_watchdog)
+            0
+        else
+            rui_bash_reap(child_id, &observation);
+        if (result == 0) {
+            if (timestampReached(now, reaping.cleanup_deadline)) return error.BashCleanupUnconfirmed;
+            return false;
+        }
         if (result < 0) return error.BashWaitFailed;
         reaping.owner.child.id = null;
         const term = decodeObservation(observation);
