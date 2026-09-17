@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"flag"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -119,6 +120,12 @@ func TestExecutionAuditQueryRejectsHiddenEntities(t *testing.T) {
 	if *sqliteTestBinary == "" {
 		t.Skip("requires Rui's pinned SQLite shell")
 	}
+	sqliteBinary := *sqliteTestBinary
+	if !filepath.IsAbs(sqliteBinary) {
+		// go test runs this package from model-queue/, while Zig renders the
+		// artifact relative to the tests/qualification command directory.
+		sqliteBinary = filepath.Join("..", sqliteBinary)
+	}
 	tests := []struct {
 		name           string
 		fixture        string
@@ -146,13 +153,13 @@ INSERT INTO model_operation VALUES(1,1,'queue/eligible/000001','provider_http_42
 		t.Run(test.name, func(t *testing.T) {
 			store := t.TempDir()
 			deadline := measurement.NewDeadline(measurement.TeardownAllowance)
-			_, err := sql(deadline, *sqliteTestBinary, store, `CREATE TABLE message_admission(admission_id INTEGER PRIMARY KEY,command_key TEXT,session_ref TEXT,turn_id INTEGER);
+			_, err := sql(deadline, sqliteBinary, store, `CREATE TABLE message_admission(admission_id INTEGER PRIMARY KEY,command_key TEXT,session_ref TEXT,turn_id INTEGER);
 CREATE TABLE turn(turn_id INTEGER PRIMARY KEY,session_ref TEXT,operation_id INTEGER,outcome_code TEXT);
 CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,session_ref TEXT,resolution_code TEXT);`+test.fixture)
 			if err != nil {
 				t.Fatal(err)
 			}
-			rows, err := sql(deadline, *sqliteTestBinary, store, executionAuditSQL)
+			rows, err := sql(deadline, sqliteBinary, store, executionAuditSQL)
 			if err != nil {
 				t.Fatal(err)
 			}
