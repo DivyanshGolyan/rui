@@ -265,6 +265,9 @@ pub const ActionResolutionCode = enum {
     infrastructure_shutdown,
 };
 
+const max_action_resolution_code_bytes = maxEnumTagBytes(ActionResolutionCode);
+const max_permission_decision_bytes = maxEnumTagBytes(protocol.PermissionDecision);
+
 pub const ActionSettlement = enum { effect, session_stop };
 
 pub const ActionDispatchPermit = struct {
@@ -3090,7 +3093,7 @@ pub const Store = struct {
                 2 => "denied",
                 else => unreachable,
             } });
-            try appendNullableColumnString(statement, 5, 16, capture);
+            try appendNullableColumnString(statement, 5, max_action_resolution_code_bytes, capture);
             try capture.append(",\"result\":");
             if (try readNullablePositiveI64(statement, 6)) |content_id| try self.appendInlineContent(content_id, capture) else try capture.append("null");
             try capture.append(",\"acceptance_position\":");
@@ -3100,7 +3103,7 @@ pub const Store = struct {
     }
 
     fn appendPermissionDecisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-        const statement = try prepare(self.database, "SELECT decision.command_key,decision.action_id,command.accepted,command.code FROM permission_decision_command decision JOIN core_command command ON command.command_key=decision.command_key WHERE command.kind=5 AND command.target=?1 ORDER BY command.rowid");
+        const statement = try prepare(self.database, "SELECT decision.command_key,decision.action_id,decision.decision,command.accepted,command.code FROM permission_decision_command decision JOIN core_command command ON command.command_key=decision.command_key WHERE command.kind=5 AND command.target=?1 ORDER BY command.rowid");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         var first = true;
@@ -3109,8 +3112,14 @@ pub const Store = struct {
             try appendColumnString(statement, 0, 128, capture);
             try capture.append(",\"action\":");
             try appendColumnString(statement, 1, 20, capture);
-            try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{if (c.sqlite3_column_int(statement, 2) == 0) "rejected" else "accepted"});
-            try appendColumnString(statement, 3, 96, capture);
+            var decision_text: protocol.Bounded(max_permission_decision_bytes) = .{};
+            try readText(statement, 2, &decision_text);
+            const decision = std.meta.stringToEnum(protocol.PermissionDecision, decision_text.slice()) orelse return error.CorruptStore;
+            try capture.appendFmt(",\"decision\":\"{s}\",\"status\":\"{s}\",\"code\":", .{
+                @tagName(decision),
+                if (c.sqlite3_column_int(statement, 3) == 0) "rejected" else "accepted",
+            });
+            try appendColumnString(statement, 4, 96, capture);
             try capture.append("}");
         }
     }
@@ -6094,6 +6103,12 @@ fn appendNullableColumnString(statement: *c.sqlite3_stmt, index: c_int, comptime
     try appendColumnString(statement, index, capacity, capture);
 }
 
+fn maxEnumTagBytes(comptime Enum: type) usize {
+    var maximum: usize = 0;
+    for (std.meta.tags(Enum)) |value| maximum = @max(maximum, @tagName(value).len);
+    return maximum;
+}
+
 fn appendNullablePositiveInteger(statement: *c.sqlite3_stmt, index: c_int, capture: *SessionReportCapture) !void {
     if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return capture.append("null");
     const value = c.sqlite3_column_int64(statement, index);
@@ -6832,10 +6847,22 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     var stale: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
     try stale.key.set("stale-denial");
     try stale.session.set("direct/actions");
+    stale.decision = .allow_once;
     const rejected = storage.denyPermission(&stale, .{});
     try std.testing.expect(rejected == .rejected);
     try std.testing.expectEqual(PermissionDecisionRejection.action_not_pending, rejected.rejected.code);
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL"));
+
+    const full_bytes = try testingSessionReportWithProfile(&storage, &tmp, "direct/actions", 1024 * 1024, .full);
+    defer std.testing.allocator.free(full_bytes);
+    var full = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full_bytes, .{});
+    defer full.deinit();
+    const decisions = full.value.object.get("full").?.object.get("permission_decisions").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), decisions.len);
+    try std.testing.expectEqualStrings("deny", decisions[0].object.get("decision").?.string);
+    try std.testing.expectEqualStrings("accepted", decisions[0].object.get("status").?.string);
+    try std.testing.expectEqualStrings("allow_once", decisions[1].object.get("decision").?.string);
+    try std.testing.expectEqualStrings("rejected", decisions[1].object.get("status").?.string);
 
     try submitTestMessage(&storage, &tmp, "bypass-message", "bypass-message", "direct/actions", "bypass proposal");
     const bypass_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -6921,6 +6948,47 @@ test "Action settlement atomically yields to an earlier Session stop" {
         storage.database,
         "SELECT count(*) FROM turn WHERE session_ref='direct/settlement-stop' AND outcome_code='cancelled'",
     ));
+}
+
+test "Full reports every closed Action resolution without fencing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "shutdown-report-config", "direct/shutdown-report");
+    try submitTestMessage(&storage, &tmp, "shutdown-report-message", "shutdown-report-message", "direct/shutdown-report", "execute");
+    const model_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{.{
+        .item_id = "shutdown-report-item",
+        .name = "bash",
+        .encoded_call_id = "shutdown-report-call",
+        .decoded_call_id = "shutdown-report-call",
+        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\"}",
+        .decoded_arguments = "{\"cmd\":\"true\"}",
+    }};
+    try settleCallsForTesting(&storage, &tmp, model_binding, "shutdown-report-metadata", &calls);
+    const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
+    try allow.key.set("shutdown-report-allow");
+    try allow.session.set("direct/shutdown-report");
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    try std.testing.expectEqual(
+        ActionSettlement.effect,
+        try storage.settleActionAttempt(action_binding, .infrastructure_shutdown, "Host shutdown.", .{}),
+    );
+
+    const report_bytes = try testingSessionReportWithProfile(&storage, &tmp, "direct/shutdown-report", 1024 * 1024, .full);
+    defer std.testing.allocator.free(report_bytes);
+    var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
+    defer report.deinit();
+    const actions = report.value.object.get("full").?.object.get("actions").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("infrastructure_shutdown", actions[0].object.get("resolution").?.string);
+    try std.testing.expectEqualStrings("Host shutdown.", actions[0].object.get("result").?.object.get("text").?.string);
+    try std.testing.expect(!storage.isFenced());
+    _ = try storage.inspectSession("direct/shutdown-report");
 }
 
 test "report scratch exhaustion is an observation failure without Store fencing" {

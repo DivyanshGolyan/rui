@@ -194,6 +194,7 @@ pub const Execution = struct {
     capture_failure: CaptureFailure = .none,
     signal_started: ?std.Io.Clock.Timestamp = null,
     killed: bool = false,
+    capture_incomplete: bool = false,
     read_fault_used: bool = false,
     output_reservation: ?output_retention.Pair = null,
 
@@ -216,6 +217,12 @@ pub const Execution = struct {
         try self.readPipe(&self.stdout_pipe, &self.stdout_capture, window);
         try self.readPipe(&self.stderr_pipe, &self.stderr_capture, window);
         try self.reap();
+        if (self.killed and self.term != null and
+            (self.stdout_pipe != null or self.stderr_pipe != null))
+        {
+            self.closePipes();
+            self.capture_incomplete = true;
+        }
         return self.term != null and self.stdout_pipe == null and self.stderr_pipe == null;
     }
 
@@ -284,10 +291,7 @@ pub const Execution = struct {
             _ = self.child.wait(self.io) catch {};
             self.term = .{ .unknown = 0 };
         }
-        if (self.stdout_pipe) |pipe| pipe.close(self.io);
-        self.stdout_pipe = null;
-        if (self.stderr_pipe) |pipe| pipe.close(self.io);
-        self.stderr_pipe = null;
+        self.closePipes();
         var first_error: ?anyerror = null;
         self.script.cleanup(self.scratch_path) catch |err| {
             first_error = err;
@@ -311,6 +315,13 @@ pub const Execution = struct {
 
     fn signal(self: *Execution, signal_value: std.posix.SIG) void {
         std.posix.kill(-self.child_id, signal_value) catch {};
+    }
+
+    fn closePipes(self: *Execution) void {
+        if (self.stdout_pipe) |pipe| pipe.close(self.io);
+        self.stdout_pipe = null;
+        if (self.stderr_pipe) |pipe| pipe.close(self.io);
+        self.stderr_pipe = null;
     }
 
     fn readPipe(
@@ -405,6 +416,8 @@ pub const Execution = struct {
         }
         if (self.capture_failure != .none) {
             try writer.print("Capture failure: {s}; output may be incomplete.\n", .{@tagName(self.capture_failure)});
+        } else if (self.capture_incomplete) {
+            try writer.writeAll("Capture may be incomplete because writers outlived process-group termination.\n");
         }
         var tail: [excerpt_bytes]u8 = undefined;
         const stdout_length = try self.stdout_capture.file.?.length(self.io);

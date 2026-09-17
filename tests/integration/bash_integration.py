@@ -191,6 +191,12 @@ def main():
         )
     )
     add_exchange(responses, "timeout", "sleep 30")
+    detached_pid = state / "detached-pid"
+    add_exchange(
+        responses,
+        "detached-timeout",
+        f"setsid sh -c 'trap \"\" TERM PIPE; echo $$ > {detached_pid}; while :; do printf detached; sleep 1; done' & sleep 30",
+    )
     add_exchange(responses, "preparation", "printf never")
     add_exchange(responses, "spawn", "printf never")
     add_exchange(responses, "capture-read", "printf captured")
@@ -247,6 +253,7 @@ def main():
     endpoint_url = f"http://127.0.0.1:{endpoint.server_port}/responses"
     store = state / "store"
     host = None
+    detached_process = None
     completed = False
     resource_samples = []
     try:
@@ -660,6 +667,52 @@ def main():
             lambda: fixture.completed_observation(store, "timeout-message"), "timeout continuation"
         )
 
+        configure(state, store, "detached-timeout-config", "direct/detached-timeout")
+        fixture.message(
+            state, store, "detached-timeout-message", "direct/detached-timeout", "execute"
+        )
+        detached_action = fixture.wait_for(
+            lambda: action_for(store, "direct/detached-timeout"), "detached timeout Action"
+        )
+        allow(
+            state,
+            store,
+            "detached-timeout-allow",
+            "direct/detached-timeout",
+            detached_action["action"],
+        )
+        fixture.wait_for(lambda: detached_pid.exists(), "detached writer identity")
+        detached_process = int(detached_pid.read_text())
+        fixture.wait_for(
+            lambda: resolution(store, "direct/detached-timeout") == "timed_out",
+            "detached writer timeout",
+            timeout=20,
+        )
+        result = rows(
+            store,
+            "SELECT content.payload FROM action_operation action "
+            "JOIN content ON content.content_id=action.resolution_content_id "
+            "WHERE action.session_ref=?",
+            ("direct/detached-timeout",),
+        )[0][0]
+        assert b"Capture may be incomplete" in result, result
+        assert process_exists(detached_process)
+        fixture.wait_for(
+            lambda: int(
+                fixture.command(
+                    "inspect-session",
+                    "--store",
+                    store,
+                    "--session",
+                    "direct/detached-timeout",
+                )["execution"]["custody_occupied"]
+            )
+            == 0,
+            "detached timeout custody release",
+        )
+        os.kill(detached_process, signal.SIGKILL)
+        detached_process = None
+
         for name, fault, expected in (
             ("preparation", "bash-preparation", "storage_failed"),
             ("spawn", "bash-spawn", "spawn_failed"),
@@ -914,12 +967,14 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 24 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 25 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:
         if host is not None:
             fixture.stop_host(host)
+        if detached_process is not None and process_exists(detached_process):
+            os.kill(detached_process, signal.SIGKILL)
         endpoint.shutdown()
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
