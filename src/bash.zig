@@ -8,6 +8,7 @@ const tools = @import("tools.zig");
 
 pub const excerpt_bytes: usize = 10_000;
 pub const copy_window_bytes: usize = 16 * 1024;
+const command_write_window_bytes: usize = 4096;
 
 pub const Faults = struct {
     preparation: bool = false,
@@ -202,29 +203,42 @@ pub const Execution = struct {
         self.stop(.stopped);
     }
 
-    pub fn service(self: *Execution, window: []u8, shutdown: bool) !bool {
+    pub const ServiceResult = struct {
+        made_progress: bool,
+        complete: bool,
+    };
+
+    pub fn service(self: *Execution, window: []u8, shutdown: bool) !ServiceResult {
         std.debug.assert(window.len == copy_window_bytes);
         if (self.faults.service) return error.InjectedBashServiceFailure;
         const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+        var made_progress = false;
+        const signal_was_started = self.signal_started != null;
         if (shutdown) self.stop(.infrastructure_shutdown);
         if (now.raw.nanoseconds >= self.deadline.raw.nanoseconds) self.stop(.timed_out);
+        made_progress = made_progress or (!signal_was_started and self.signal_started != null);
         if (self.signal_started) |signal_started| {
             if (!self.killed and signal_started.durationTo(now).raw.nanoseconds >= 100 * std.time.ns_per_ms) {
                 self.signal(.KILL);
                 self.killed = true;
+                made_progress = true;
             }
         }
-        try self.readPipe(&self.stdout_pipe, &self.stdout_capture, window);
-        try self.readPipe(&self.stderr_pipe, &self.stderr_capture, window);
-        try self.reap();
+        made_progress = try self.readPipe(&self.stdout_pipe, &self.stdout_capture, window) or made_progress;
+        made_progress = try self.readPipe(&self.stderr_pipe, &self.stderr_capture, window) or made_progress;
+        made_progress = try self.reap() or made_progress;
         if (self.killed and self.term != null and
             (self.stdout_pipe != null or self.stderr_pipe != null))
         {
             self.closePipes();
             self.capture_incomplete = true;
+            made_progress = true;
         }
-        return self.term != null and self.stdout_pipe == null and self.stderr_pipe == null and
-            (self.signal_started == null or self.killed);
+        return .{
+            .made_progress = made_progress,
+            .complete = self.term != null and self.stdout_pipe == null and self.stderr_pipe == null and
+                (self.signal_started == null or self.killed),
+        };
     }
 
     pub fn reserveOutput(self: *Execution, retention: *output_retention.Queue) !bool {
@@ -330,50 +344,50 @@ pub const Execution = struct {
         pipe_slot: *?std.Io.File,
         destination: *OwnedFile,
         window: []u8,
-    ) !void {
-        const pipe = pipe_slot.* orelse return;
+    ) !bool {
+        const pipe = pipe_slot.* orelse return false;
         var descriptor = [_]std.posix.pollfd{.{
             .fd = pipe.handle,
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
-        if (try std.posix.poll(&descriptor, 0) == 0) return;
+        if (try std.posix.poll(&descriptor, 0) == 0) return false;
         const reserved: usize = @intCast(destination.budget.reserveUpTo(window.len));
         if (reserved == 0) {
             var probe: [1]u8 = undefined;
             const count = std.posix.read(pipe.handle, &probe) catch |err| {
-                if (err == error.WouldBlock) return;
+                if (err == error.WouldBlock) return false;
                 self.capture_failure = .read;
                 self.stop(.capture_failed);
                 pipe.close(self.io);
                 pipe_slot.* = null;
-                return;
+                return true;
             };
             if (count == 0) {
                 pipe.close(self.io);
                 pipe_slot.* = null;
-                return;
+                return true;
             }
             self.capture_failure = .exhausted;
             self.stop(.capture_failed);
             pipe.close(self.io);
             pipe_slot.* = null;
-            return;
+            return true;
         }
         const count = std.posix.read(pipe.handle, window[0..reserved]) catch |err| {
             destination.budget.release(reserved);
-            if (err == error.WouldBlock) return;
+            if (err == error.WouldBlock) return false;
             self.capture_failure = .read;
             self.stop(.capture_failed);
             pipe.close(self.io);
             pipe_slot.* = null;
-            return;
+            return true;
         };
         if (count < reserved) destination.budget.release(reserved - count);
         if (count == 0) {
             pipe.close(self.io);
             pipe_slot.* = null;
-            return;
+            return true;
         }
         if (self.faults.capture_read and !self.read_fault_used) {
             self.read_fault_used = true;
@@ -382,7 +396,7 @@ pub const Execution = struct {
             self.stop(.capture_failed);
             pipe.close(self.io);
             pipe_slot.* = null;
-            return;
+            return true;
         }
         destination.charged += count;
         if (self.faults.capture_write) {
@@ -390,7 +404,7 @@ pub const Execution = struct {
             self.stop(.capture_failed);
             pipe.close(self.io);
             pipe_slot.* = null;
-            return;
+            return true;
         }
         destination.file.?.writeStreamingAll(self.io, window[0..count]) catch {
             self.capture_failure = .write;
@@ -398,13 +412,17 @@ pub const Execution = struct {
             pipe.close(self.io);
             pipe_slot.* = null;
         };
+        return true;
     }
 
-    fn reap(self: *Execution) !void {
-        if (self.term != null) return;
+    fn reap(self: *Execution) !bool {
+        if (self.term != null) return false;
+        // The waitable leader pins the numeric process-group identity while a later stop may signal it.
+        if (self.signal_started != null and !self.killed) return false;
+        if (self.signal_started == null and (self.stdout_pipe != null or self.stderr_pipe != null)) return false;
         var status: c_int = 0;
         const result = std.c.waitpid(self.child_id, &status, std.c.W.NOHANG);
-        if (result == 0) return;
+        if (result == 0) return false;
         if (result < 0) return error.BashWaitFailed;
         if (result != self.child_id) return error.BashWaitFailed;
         self.child.id = null;
@@ -415,6 +433,7 @@ pub const Execution = struct {
             .{ .signal = @intCast(@intFromEnum(std.c.W.TERMSIG(raw_status))) }
         else
             .{ .unknown = raw_status };
+        return true;
     }
 
     fn formatResult(
@@ -543,6 +562,8 @@ pub fn prepare(
     if (!valid) {
         return .{ .failed = .{ .cause = error.InvalidCanonicalBashDescriptor, .cleanup = cleanup } };
     }
+    destination.finish() catch |err|
+        return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
     cleanup.script.?.file.?.sync(io) catch |err|
         return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
     cleanup.stdout_capture = createOwnedFile(
@@ -606,11 +627,30 @@ fn createOwnedFile(
 
 const CommandWriter = struct {
     file: *OwnedFile,
+    buffer: [command_write_window_bytes]u8 = undefined,
+    length: usize = 0,
 
     pub fn writeAll(self: *CommandWriter, bytes: []const u8) !void {
-        if (!self.file.budget.reserve(bytes.len)) return error.ScratchCapacityExhausted;
-        self.file.charged += bytes.len;
-        try self.file.file.?.writeStreamingAll(self.file.io, bytes);
+        var remaining = bytes;
+        while (remaining.len != 0) {
+            const count = @min(remaining.len, self.buffer.len - self.length);
+            @memcpy(self.buffer[self.length .. self.length + count], remaining[0..count]);
+            self.length += count;
+            remaining = remaining[count..];
+            if (self.length == self.buffer.len) try self.flush();
+        }
+    }
+
+    pub fn finish(self: *CommandWriter) !void {
+        try self.flush();
+    }
+
+    fn flush(self: *CommandWriter) !void {
+        if (self.length == 0) return;
+        if (!self.file.budget.reserve(self.length)) return error.ScratchCapacityExhausted;
+        self.file.charged += self.length;
+        try self.file.file.?.writeStreamingAll(self.file.io, self.buffer[0..self.length]);
+        self.length = 0;
     }
 };
 
@@ -744,4 +784,18 @@ test "Bash descriptor decoding preserves authorized command bytes" {
     var writer = std.Io.Writer.fixed(&output_buffer);
     try std.testing.expect(try tools.writeBashCommand(&source, &writer));
     try std.testing.expectEqualStrings("false && touch marker", writer.buffered());
+
+    var override = Source{ .bytes = "{\"timeout_ms\":17,\"cmd\":\"echo ok\"}" };
+    const inspected = (try tools.inspectBashArguments(&override)).?;
+    try std.testing.expectEqual(@as(?u64, 17), inspected.timeout_ms);
+    inline for (.{
+        "{\"cmd\":\"echo\\u0000bad\"}",
+        "{\"cmd\":\"echo\",\"timeout_ms\":0}",
+        "{\"cmd\":\"echo\",\"timeout_ms\":9223372036854775808}",
+        "{\"cmd\":\"echo\",\"timeout_ms\":1.5}",
+        "{\"cmd\":\"echo\",}",
+    }) |invalid| {
+        var invalid_source = Source{ .bytes = invalid };
+        try std.testing.expect(!try tools.validBashArguments(&invalid_source));
+    }
 }

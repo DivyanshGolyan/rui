@@ -6,6 +6,7 @@ import select
 import shutil
 import signal
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -94,6 +95,19 @@ def process_exists(pid):
         return False
 
 
+def process_is_zombie(pid):
+    status = pathlib.Path(f"/proc/{pid}/stat")
+    if status.exists():
+        return status.read_text().split()[2] == "Z"
+    result = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.lstrip().startswith("Z")
+
+
 def wait_for_phase(process, phase, timeout=8):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -121,11 +135,14 @@ def resolution(store, session):
     return values[0][0] if len(values) == 1 and values[0][0] is not None else None
 
 
-def add_exchange(responses, name, command, answer="continued"):
+def add_exchange(responses, name, command, answer="continued", timeout_ms=None):
+    arguments = {"cmd": command}
+    if timeout_ms is not None:
+        arguments["timeout_ms"] = timeout_ms
     responses.append(
         fixture.sse_tool_calls(
             f"{name}-calls",
-            [("bash", f"{name}-call", json.dumps({"cmd": command}, separators=(",", ":")))],
+            [("bash", f"{name}-call", json.dumps(arguments, separators=(",", ":")))],
         )
     )
     responses.append(fixture.sse_answer(f"{name}-answer", f"{name}-reasoning", f"{name}-message", answer)[0])
@@ -190,18 +207,27 @@ def main():
             )],
         )
     )
-    add_exchange(responses, "timeout", "sleep 30")
+    add_exchange(responses, "timeout", "sleep 30", timeout_ms=100)
+    detached_bash_pid = state / "detached-bash-pid"
     detached_pid = state / "detached-pid"
     add_exchange(
         responses,
         "detached-timeout",
-        f"setsid sh -c 'trap \"\" TERM PIPE; echo $$ > {detached_pid}; while :; do printf detached; sleep 1; done' & sleep 30",
+        f"printf $$ > {detached_bash_pid}; setsid sh -c 'trap \"\" TERM PIPE; echo $$ > {detached_pid}; while :; do printf detached; sleep 1; done' &",
+        timeout_ms=100,
     )
     same_group_pid = state / "same-group-pid"
     add_exchange(
         responses,
         "same-group-timeout",
         f"(trap '' TERM; exec >/dev/null 2>&1; echo $BASHPID > {same_group_pid}; sleep 30) & wait",
+        timeout_ms=100,
+    )
+    add_exchange(
+        responses,
+        "busy-output",
+        "head -c 2097152 /dev/zero | tr '\\0' q",
+        timeout_ms=2000,
     )
     add_exchange(responses, "preparation", "printf never")
     add_exchange(responses, "spawn", "printf never")
@@ -635,7 +661,7 @@ def main():
         )
         bash_pid = int(exited_bash_pid.read_text())
         child_pid = int(exited_child_pid.read_text())
-        fixture.wait_for(lambda: not process_exists(bash_pid), "Bash exit with descendant pipes open")
+        fixture.wait_for(lambda: process_is_zombie(bash_pid), "unreaped Bash with descendant pipes open")
         assert process_exists(child_pid)
         assert resolution(store, "direct/exited-pipes") is None
         fixture.command(
@@ -657,7 +683,7 @@ def main():
         fixture.wait_for(lambda: not process_exists(child_pid), "exited Bash descendant cleanup")
 
         fixture.stop_host(host)
-        host = fixture.start_host(store, endpoint_url, "--bash-timeout-ms", "100")
+        host = fixture.start_host(store, endpoint_url, "--bash-timeout-ms", "30000")
         configure(state, store, "timeout-config", "direct/timeout")
         fixture.message(state, store, "timeout-message", "direct/timeout", "execute")
         timeout_action = fixture.wait_for(
@@ -687,8 +713,16 @@ def main():
             "direct/detached-timeout",
             detached_action["action"],
         )
-        fixture.wait_for(lambda: detached_pid.exists(), "detached writer identity")
+        fixture.wait_for(
+            lambda: detached_bash_pid.exists() and detached_pid.exists(),
+            "detached Bash and writer identities",
+        )
+        detached_bash_process = int(detached_bash_pid.read_text())
         detached_process = int(detached_pid.read_text())
+        fixture.wait_for(
+            lambda: process_is_zombie(detached_bash_process),
+            "unreaped Bash identity anchor",
+        )
         fixture.wait_for(
             lambda: resolution(store, "direct/detached-timeout") == "timed_out",
             "detached writer timeout",
@@ -747,6 +781,28 @@ def main():
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "same-group-timeout-message"),
             "same-group timeout continuation",
+        )
+
+        configure(state, store, "busy-output-config", "direct/busy-output")
+        fixture.message(state, store, "busy-output-message", "direct/busy-output", "execute")
+        busy_output_action = fixture.wait_for(
+            lambda: action_for(store, "direct/busy-output"), "busy-output Bash Action"
+        )
+        allow(
+            state,
+            store,
+            "busy-output-allow",
+            "direct/busy-output",
+            busy_output_action["action"],
+        )
+        fixture.wait_for(
+            lambda: resolution(store, "direct/busy-output") == "succeeded",
+            "productive capture service without idle throttling",
+            timeout=20,
+        )
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "busy-output-message"),
+            "busy-output continuation",
         )
 
         for name, fault, expected in (
@@ -1003,7 +1059,7 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 26 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 27 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:

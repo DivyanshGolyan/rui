@@ -3,30 +3,84 @@ const protocol = @import("protocol.zig");
 
 pub const bash_definition_json =
     "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash\",\"strict\":true," ++
-    "\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}}," ++
-    "\"required\":[\"cmd\"],\"additionalProperties\":false}}";
+    "\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}," ++
+    "\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"minimum\":1,\"maximum\":9223372036854775807}}," ++
+    "\"required\":[\"cmd\",\"timeout_ms\"],\"additionalProperties\":false}}";
+
+pub const BashArguments = struct {
+    timeout_ms: ?u64 = null,
+};
 
 pub fn validBashArguments(source: anytype) !bool {
+    var discard: Discard = .{};
+    return try parseBashArguments(source, &discard) != null;
+}
+
+pub fn inspectBashArguments(source: anytype) !?BashArguments {
     var discard: Discard = .{};
     return parseBashArguments(source, &discard);
 }
 
 pub fn writeBashCommand(source: anytype, writer: anytype) !bool {
-    return parseBashArguments(source, writer);
+    return try parseBashArguments(source, writer) != null;
 }
 
-fn parseBashArguments(source: anytype, writer: anytype) !bool {
-    source.expect('{') catch |err| return descriptorSyntax(err);
-    var key: protocol.Bounded(16) = .{};
-    decodeString(source, &key, null) catch |err| return descriptorSyntax(err);
-    if (!key.eql("cmd")) return false;
-    source.expect(':') catch |err| return descriptorSyntax(err);
-    decodeString(source, null, writer) catch |err| return descriptorSyntax(err);
+fn parseBashArguments(source: anytype, writer: anytype) !?BashArguments {
+    return parseBashArgumentsStrict(source, writer) catch |err| {
+        if (isDescriptorError(err)) return null;
+        return err;
+    };
+}
+
+fn parseBashArgumentsStrict(source: anytype, writer: anytype) !?BashArguments {
+    try source.expect('{');
+    var result: BashArguments = .{};
+    var has_command = false;
+    var has_timeout = false;
+    while (true) {
+        try source.space();
+        if (try source.peek() == '}') return null;
+        var key: protocol.Bounded(16) = .{};
+        try decodeString(source, &key, null);
+        try source.expect(':');
+        if (key.eql("cmd")) {
+            if (has_command) return null;
+            try decodeString(source, null, writer);
+            has_command = true;
+        } else if (key.eql("timeout_ms")) {
+            if (has_timeout) return null;
+            result.timeout_ms = try parseTimeout(source);
+            has_timeout = true;
+        } else return null;
+        try source.space();
+        switch (try source.take()) {
+            ',' => {},
+            '}' => break,
+            else => return null,
+        }
+    }
     try source.space();
-    const close = source.take() catch |err| return descriptorSyntax(err);
-    if (close != '}') return false;
+    if (try source.peek() != null or !has_command) return null;
+    return result;
+}
+
+fn parseTimeout(source: anytype) !?u64 {
     try source.space();
-    return try source.peek() == null;
+    if (try source.peek() == 'n') {
+        inline for ("null") |expected| if (try source.take() != expected) return error.InvalidDescriptorShape;
+        return null;
+    }
+    var byte = try source.take();
+    if (byte < '1' or byte > '9') return error.InvalidDescriptorShape;
+    var value: u64 = byte - '0';
+    while (try source.peek()) |next| {
+        if (next < '0' or next > '9') break;
+        byte = try source.take();
+        value = std.math.mul(u64, value, 10) catch return error.InvalidDescriptorShape;
+        value = std.math.add(u64, value, byte - '0') catch return error.InvalidDescriptorShape;
+        if (value > std.math.maxInt(i64)) return error.InvalidDescriptorShape;
+    }
+    return value;
 }
 
 fn decodeString(source: anytype, destination: ?*protocol.Bounded(16), writer: anytype) !void {
@@ -65,6 +119,7 @@ fn decodeString(source: anytype, destination: ?*protocol.Bounded(16), writer: an
             if (low < 0xdc00 or low > 0xdfff) return error.InvalidDescriptorJson;
             scalar = 0x10000 + ((scalar - 0xd800) << 10) + (low - 0xdc00);
         } else if (scalar >= 0xdc00 and scalar <= 0xdfff) return error.InvalidDescriptorJson;
+        if (scalar == 0) return error.InvalidDescriptorShape;
         var encoded: [4]u8 = undefined;
         const count = std.unicode.utf8Encode(scalar, &encoded) catch return error.InvalidDescriptorJson;
         try emit(destination, writer, encoded[0..count]);
@@ -99,9 +154,9 @@ const Discard = struct {
     fn writeAll(_: *Discard, _: []const u8) !void {}
 };
 
-fn descriptorSyntax(err: anyerror) anyerror!bool {
+fn isDescriptorError(err: anyerror) bool {
     return switch (err) {
-        error.InvalidDescriptorJson, error.InvalidDescriptorShape, error.InvalidEncodedString => false,
-        else => err,
+        error.InvalidDescriptorJson, error.InvalidDescriptorShape, error.InvalidEncodedString => true,
+        else => false,
     };
 }

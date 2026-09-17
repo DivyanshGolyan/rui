@@ -536,13 +536,13 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8, shutdown: bool
     var made_progress = false;
     for (slots) |*slot| switch (slot.*) {
         .bash => |*active| {
-            const complete = active.execution.service(window, shutdown) catch |err| {
+            const service = active.execution.service(window, shutdown) catch |err| {
                 retainBashCleanup(host, slot, false, true, "Bash process service", err);
                 made_progress = true;
                 continue;
             };
-            if (!complete) continue;
-            made_progress = true;
+            made_progress = made_progress or service.made_progress;
+            if (!service.complete) continue;
             completeBash(host, slot);
         },
         else => {},

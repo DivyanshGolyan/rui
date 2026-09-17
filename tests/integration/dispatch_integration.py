@@ -2424,8 +2424,15 @@ def main():
                     "strict": True,
                     "parameters": {
                         "type": "object",
-                        "properties": {"cmd": {"type": "string"}},
-                        "required": ["cmd"],
+                        "properties": {
+                            "cmd": {"type": "string"},
+                            "timeout_ms": {
+                                "type": ["integer", "null"],
+                                "minimum": 1,
+                                "maximum": 9223372036854775807,
+                            },
+                        },
+                        "required": ["cmd", "timeout_ms"],
                         "additionalProperties": False,
                     },
                 },

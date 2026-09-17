@@ -879,9 +879,9 @@ fn metadataStringEql(
     return try source.next() == null;
 }
 
-fn validBashArguments(io: std.Io, file: std.Io.File, record: OutputMetadataRecord) !bool {
+fn bashArguments(io: std.Io, file: std.Io.File, record: OutputMetadataRecord) !?tool_catalog.BashArguments {
     var source = JsonStringSource{ .encoded = try EncodedStringReader.init(io, file, record) };
-    return tool_catalog.validBashArguments(&source);
+    return tool_catalog.inspectBashArguments(&source);
 }
 
 pub const ValidatedOutput = struct {
@@ -3434,7 +3434,7 @@ pub const Store = struct {
         try exec(self.database, "BEGIN IMMEDIATE");
         const select = try prepare(
             self.database,
-            "SELECT action.action_id,action.parent_operation_id,operation.turn_id FROM action_operation action " ++
+            "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action " ++
                 "INDEXED BY action_operation_executable JOIN model_operation operation " ++
                 "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
                 "WHERE action.permission_state=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
@@ -3453,6 +3453,10 @@ pub const Store = struct {
         const parent_operation_id = c.sqlite3_column_int64(select, 1);
         const turn_id = c.sqlite3_column_int64(select, 2);
         if (action_id <= 0 or parent_operation_id <= 0 or turn_id <= 0) return error.CorruptStore;
+        const selected_timeout_ms = if (try readNullablePositiveI64(select, 3)) |override|
+            @as(u64, @intCast(override))
+        else
+            bash_timeout_ms;
         const update = try prepare(
             self.database,
             "UPDATE action_operation SET attempt_ordinal=1,uncertain=1,bash_timeout_ms=?2 " ++
@@ -3460,7 +3464,7 @@ pub const Store = struct {
         );
         defer _ = c.sqlite3_finalize(update);
         try bindI64(update, 1, action_id);
-        try bindU64(update, 2, bash_timeout_ms);
+        try bindU64(update, 2, selected_timeout_ms);
         try expectDone(update);
         if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
         if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
@@ -4636,9 +4640,13 @@ pub const Store = struct {
 
                 const is_bash = try metadataStringEql(self.io, output.source, name, "bash");
                 const is_edit = try metadataStringEql(self.io, output.source, name, "edit");
+                const bash_arguments = if (is_bash and frozen_tools & 1 != 0)
+                    try bashArguments(self.io, output.source, record)
+                else
+                    null;
                 const rejection_code: ?[]const u8 = if (is_bash and frozen_tools & 1 == 0)
                     "unknown_tool"
-                else if (is_bash and !try validBashArguments(self.io, output.source, record))
+                else if (is_bash and bash_arguments == null)
                     "invalid_arguments"
                 else if (is_edit and frozen_tools & 2 != 0)
                     "tool_unavailable"
@@ -4683,8 +4691,8 @@ pub const Store = struct {
                     const action_id = try nextIdentity(self.database, "action_operation", "action_id");
                     const insert_action = try prepare(
                         self.database,
-                        "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,permission_state,resolution_code) " ++
-                            "VALUES(?1,?2,?3,?4,1,?5,?6,NULL)",
+                        "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,permission_state,bash_timeout_override_ms,resolution_code) " ++
+                            "VALUES(?1,?2,?3,?4,1,?5,?6,?7,NULL)",
                     );
                     defer _ = c.sqlite3_finalize(insert_action);
                     try bindU64(insert_action, 1, action_id);
@@ -4693,6 +4701,7 @@ pub const Store = struct {
                     try bindText(insert_action, 4, session_ref.slice());
                     try bindU64(insert_action, 5, current.revision);
                     try bindI64(insert_action, 6, @as(i64, if (current.permission_mode == 0) 0 else 1));
+                    try bindNullableU64(insert_action, 7, bash_arguments.?.timeout_ms);
                     try expectDone(insert_action);
                 }
                 item_id_record = null;
@@ -5820,6 +5829,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ permission_state INTEGER NOT NULL CHECK(permission_state IN (0,1,2)),
         \\ attempt_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(attempt_ordinal IN (0,1)),
         \\ uncertain INTEGER NOT NULL DEFAULT 0 CHECK(uncertain IN (0,1)),
+        \\ bash_timeout_override_ms INTEGER CHECK(bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0),
         \\ bash_timeout_ms INTEGER CHECK(bash_timeout_ms IS NULL OR bash_timeout_ms>0),
         \\ resolution_code TEXT CHECK(resolution_code IS NULL OR resolution_code IN ('denied','cancelled','succeeded','failed','timed_out','indeterminate','storage_failed','spawn_failed','infrastructure_shutdown')),
         \\ resolution_content_id INTEGER REFERENCES content(content_id),
@@ -6964,8 +6974,8 @@ test "Full reports every closed Action resolution without fencing" {
         .name = "bash",
         .encoded_call_id = "shutdown-report-call",
         .decoded_call_id = "shutdown-report-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\"}",
-        .decoded_arguments = "{\"cmd\":\"true\"}",
+        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":1234}",
+        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":1234}",
     }};
     try settleCallsForTesting(&storage, &tmp, model_binding, "shutdown-report-metadata", &calls);
     const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
@@ -6974,6 +6984,7 @@ test "Full reports every closed Action resolution without fencing" {
     try allow.session.set("direct/shutdown-report");
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
     const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    try std.testing.expectEqual(@as(u64, 1234), (try storage.readBashExecutionInput(action_binding)).timeout_ms);
     try std.testing.expectEqual(
         ActionSettlement.effect,
         try storage.settleActionAttempt(action_binding, .infrastructure_shutdown, "Host shutdown.", .{}),
