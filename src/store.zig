@@ -13,12 +13,16 @@ pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const complete_tool_results_sql =
     "current.resolution_code='tool_calls' AND EXISTS(" ++
-    " SELECT 1 FROM model_tool_call call WHERE call.operation_id=current.operation_id" ++
+    " SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3" ++
+    ") AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=(" ++
+    " SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3" ++
     ") AND NOT EXISTS(" ++
-    " SELECT 1 FROM model_tool_call call LEFT JOIN action_operation action " ++
-    " ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-    " WHERE call.operation_id=current.operation_id AND call.rejection_code IS NULL " ++
-    " AND (action.action_id IS NULL OR action.resolution_code IS NULL)" ++
+    " SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call " ++
+    " ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal " ++
+    " LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id " ++
+    " AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND (" ++
+    " call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))" ++
+    ")" ++
     ")";
 const runnable_eligibility_sql =
     "m.turn_id IS NULL AND NOT EXISTS(" ++
@@ -371,7 +375,9 @@ pub const HistoricalView = struct {
     readers: usize = 0,
     tool_group_initialized: bool = false,
     tool_group_scan_after: u64 = 0,
+    tool_group_source_cursor: u64 = 0,
     next_tool_group: ?HistoricalEntry = null,
+    validated_tool_group_source_id: ?u64 = null,
 
     pub fn settings(self: *HistoricalView) !HistoricalSettings {
         std.debug.assert(self.active);
@@ -2054,7 +2060,8 @@ pub const Store = struct {
             const action = try prepare(
                 self.database,
                 "SELECT a.session_ref,a.permission_state,a.resolution_code,t.outcome_code FROM action_operation a " ++
-                    "JOIN turn t ON t.operation_id=a.parent_operation_id WHERE a.action_id=?1",
+                    "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id " ++
+                    "JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
             );
             defer _ = c.sqlite3_finalize(action);
             try bindU64(action, 1, command.action_id);
@@ -2329,6 +2336,7 @@ pub const Store = struct {
         else
             null;
         const pending_messages = try self.countPendingMessages(session_ref);
+        try self.validateSessionToolCalls(session_ref);
         const action_count = try self.countActions(session_ref);
         const rejected_call_count = try self.countRejectedCalls(session_ref);
 
@@ -2566,6 +2574,80 @@ pub const Store = struct {
         const value = c.sqlite3_column_int64(statement, 0);
         if (value < 0) return error.CorruptStore;
         return @intCast(value);
+    }
+
+    fn validateSessionToolCalls(self: *Store, session_ref: []const u8) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT operation_id FROM model_operation INDEXED BY model_operation_session_history " ++
+                "WHERE session_ref=?1 AND resolution_code='tool_calls' ORDER BY operation_id",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        while (true) switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => {
+                const operation_id = c.sqlite3_column_int64(statement, 0);
+                if (operation_id <= 0) return error.CorruptStore;
+                _ = try self.readToolOutcomeFacts(@intCast(operation_id), false);
+            },
+            c.SQLITE_DONE => return,
+            else => return error.CallReadFailed,
+        };
+    }
+
+    const ToolOutcomeFacts = struct {
+        position: ?u64,
+    };
+
+    /// Validates the immutable function-call cardinality and every canonical
+    /// classification row. When terminal outcomes are required, it also
+    /// proves that each accepted call has a canonical result.
+    fn readToolOutcomeFacts(
+        self: *Store,
+        operation_id: u64,
+        require_terminal: bool,
+    ) !ToolOutcomeFacts {
+        const statement = try prepare(
+            self.database,
+            "SELECT (SELECT count(*) FROM model_output_item expected " ++
+                "WHERE expected.operation_id=?1 AND expected.item_kind=3),count(call.operation_id)," ++
+                "coalesce(sum(CASE WHEN item.operation_id IS NOT NULL AND item.item_kind=3 " ++
+                "AND item_content.content_id IS NOT NULL AND item_id.content_id IS NOT NULL " ++
+                "AND name.content_id IS NOT NULL AND call_id.content_id IS NOT NULL " ++
+                "AND arguments.content_id IS NOT NULL AND ((call.rejection_code IS NOT NULL " ++
+                "AND rejection.content_id IS NOT NULL AND call.acceptance_position IS NOT NULL " ++
+                "AND action.action_id IS NULL) OR (call.rejection_code IS NULL AND action.action_id IS NOT NULL " ++
+                "AND ((action.resolution_code IS NULL AND action.resolution_content_id IS NULL " ++
+                "AND action.acceptance_position IS NULL) OR (action.resolution_code IS NOT NULL " ++
+                "AND result.content_id IS NOT NULL AND action.acceptance_position IS NOT NULL)))) THEN 1 ELSE 0 END),0)," ++
+                "coalesce(sum(CASE WHEN call.rejection_code IS NOT NULL AND rejection.content_id IS NOT NULL " ++
+                "AND call.acceptance_position IS NOT NULL OR call.rejection_code IS NULL " ++
+                "AND action.resolution_code IS NOT NULL AND result.content_id IS NOT NULL " ++
+                "AND action.acceptance_position IS NOT NULL THEN 1 ELSE 0 END),0)," ++
+                "max(coalesce(call.acceptance_position,action.acceptance_position)) " ++
+                "FROM model_tool_call call LEFT JOIN model_output_item item ON item.operation_id=call.operation_id " ++
+                "AND item.item_ordinal=call.item_ordinal LEFT JOIN content item_content ON item_content.content_id=item.content_id " ++
+                "LEFT JOIN content item_id ON item_id.content_id=call.item_id_content_id " ++
+                "LEFT JOIN content name ON name.content_id=call.name_content_id " ++
+                "LEFT JOIN content call_id ON call_id.content_id=call.call_id_content_id " ++
+                "LEFT JOIN content arguments ON arguments.content_id=call.arguments_content_id " ++
+                "LEFT JOIN content rejection ON rejection.content_id=call.rejection_content_id " ++
+                "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id " ++
+                "AND action.call_ordinal=call.call_ordinal LEFT JOIN content result " ++
+                "ON result.content_id=action.resolution_content_id WHERE call.operation_id=?1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CallReadFailed;
+        const expected = c.sqlite3_column_int64(statement, 0);
+        const calls = c.sqlite3_column_int64(statement, 1);
+        const valid = c.sqlite3_column_int64(statement, 2);
+        const terminal = c.sqlite3_column_int64(statement, 3);
+        if (expected <= 0 or calls != expected or valid != expected or
+            (require_terminal and terminal != expected)) return error.CorruptStore;
+        const position = try readNullablePositiveI64(statement, 4);
+        if (require_terminal and position == null) return error.CorruptStore;
+        return .{ .position = if (position) |value| @intCast(value) else null };
     }
 
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
@@ -2962,13 +3044,28 @@ pub const Store = struct {
 
     fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64) !?HistoricalEntry {
         try self.validateCurrentAttempt(view.binding);
-        if (!view.tool_group_initialized or after_position < view.tool_group_scan_after or
-            (view.next_tool_group != null and view.next_tool_group.?.position <= after_position))
-        {
-            view.next_tool_group = try self.readNextHistoricalToolGroup(view, after_position);
-            view.tool_group_initialized = true;
-            view.tool_group_scan_after = after_position;
+        var scan_tool_groups = !view.tool_group_initialized;
+        if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
+            view.tool_group_source_cursor = 0;
+            view.next_tool_group = null;
+            scan_tool_groups = true;
+        } else if (view.next_tool_group) |group| {
+            if (group.position <= after_position) {
+                view.next_tool_group = null;
+                scan_tool_groups = true;
+            }
         }
+        if (scan_tool_groups) {
+            while (try self.readNextHistoricalToolGroup(view)) |group| {
+                view.tool_group_source_cursor = group.source_operation_id.?;
+                if (group.position > after_position) {
+                    view.next_tool_group = group;
+                    break;
+                }
+            }
+            view.tool_group_initialized = true;
+        }
+        view.tool_group_scan_after = after_position;
         const statement = try prepare(
             self.database,
             "SELECT position,kind,content_id FROM (" ++
@@ -3017,31 +3114,30 @@ pub const Store = struct {
     fn readNextHistoricalToolGroup(
         self: *Store,
         view: *HistoricalView,
-        after_position: u64,
     ) !?HistoricalEntry {
         const statement = try prepare(
             self.database,
-            "SELECT max(coalesce(call.acceptance_position,action.acceptance_position)) AS position,source.operation_id " ++
-                "FROM model_operation current JOIN model_operation source ON source.session_ref=current.session_ref " ++
-                "JOIN model_tool_call call ON call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
-                "ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-                "WHERE current.operation_id=?1 AND source.resolution_code='tool_calls' GROUP BY source.operation_id " ++
-                "HAVING position>?2 AND position<current.admission_position AND count(*)=sum(CASE " ++
-                "WHEN call.rejection_code IS NOT NULL AND call.rejection_content_id IS NOT NULL AND call.acceptance_position IS NOT NULL THEN 1 " ++
-                "WHEN call.rejection_code IS NULL AND action.resolution_code IS NOT NULL AND action.resolution_content_id IS NOT NULL " ++
-                "AND action.acceptance_position IS NOT NULL THEN 1 ELSE 0 END) ORDER BY position LIMIT 1",
+            "SELECT source.operation_id,current.admission_position FROM model_operation current " ++
+                "JOIN model_operation source INDEXED BY model_operation_session_history " ++
+                "ON source.session_ref=current.session_ref WHERE current.operation_id=?1 " ++
+                "AND source.operation_id>?2 AND source.operation_id<current.operation_id " ++
+                "AND source.resolution_code='tool_calls' ORDER BY source.operation_id LIMIT 1",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, view.binding.operation_id);
-        try bindU64(statement, 2, after_position);
+        try bindU64(statement, 2, view.tool_group_source_cursor);
         const result = c.sqlite3_step(statement);
         if (result == c.SQLITE_DONE) return null;
         if (result != c.SQLITE_ROW) return error.HistoricalEntryReadFailed;
-        const position = c.sqlite3_column_int64(statement, 0);
-        const source_operation_id = c.sqlite3_column_int64(statement, 1);
-        if (position <= 0 or source_operation_id <= 0) return error.CorruptStore;
+        const source_operation_id = c.sqlite3_column_int64(statement, 0);
+        const admission_position = c.sqlite3_column_int64(statement, 1);
+        if (source_operation_id <= 0 or admission_position <= 0) return error.CorruptStore;
+        const facts = try self.readToolOutcomeFacts(@intCast(source_operation_id), true);
+        const position = facts.position orelse return error.CorruptStore;
+        if (position >= admission_position) return error.CorruptStore;
+        view.validated_tool_group_source_id = @intCast(source_operation_id);
         return .{
-            .position = @intCast(position),
+            .position = position,
             .kind = .tool_results,
             .source_operation_id = @intCast(source_operation_id),
         };
@@ -3069,10 +3165,15 @@ pub const Store = struct {
         after_call_ordinal: ?u64,
     ) !?HistoricalToolResult {
         try self.validateCurrentAttempt(view.binding);
+        if (view.validated_tool_group_source_id != source_operation_id) {
+            _ = try self.readToolOutcomeFacts(source_operation_id, true);
+            view.validated_tool_group_source_id = source_operation_id;
+        }
         const statement = try prepare(
             self.database,
             "SELECT call.call_ordinal,call.call_id_content_id," ++
-                "coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation current " ++
+                "coalesce(call.rejection_content_id,action.resolution_content_id),current.admission_position " ++
+                "FROM model_operation current " ++
                 "JOIN model_operation source ON source.operation_id=?2 AND source.session_ref=current.session_ref " ++
                 "JOIN model_tool_call call ON call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
                 "ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
@@ -3090,7 +3191,9 @@ pub const Store = struct {
         const call_ordinal = c.sqlite3_column_int64(statement, 0);
         const call_id_content_id = c.sqlite3_column_int64(statement, 1);
         const output_content_id = c.sqlite3_column_int64(statement, 2);
-        if (call_ordinal < 0 or call_id_content_id <= 0 or output_content_id <= 0) return error.CorruptStore;
+        const admission_position = c.sqlite3_column_int64(statement, 3);
+        if (call_ordinal < 0 or call_id_content_id <= 0 or output_content_id <= 0 or admission_position <= 0)
+            return error.CorruptStore;
         const call_id = try self.readContentMetadata(call_id_content_id);
         const output = try self.readContentMetadata(output_content_id);
         return .{
@@ -5634,6 +5737,16 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try std.testing.expectEqual(first_binding.operation_id + 1, continuation.operation_id);
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
 
+    const replayed_denial = storage.denyPermission(&deny_first, .{});
+    try std.testing.expect(replayed_denial == .accepted);
+    try std.testing.expect(replayed_denial.accepted.replayed);
+    var stale_denial: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
+    try stale_denial.key.set("result-stale-denial");
+    try stale_denial.session.set("direct/tool-results");
+    const stale_reply = storage.denyPermission(&stale_denial, .{});
+    try std.testing.expect(stale_reply == .rejected);
+    try std.testing.expectEqual(PermissionDecisionRejection.action_not_pending, stale_reply.rejected.code);
+
     var view = try storage.openHistoricalView(continuation);
     defer view.close();
     var position: u64 = 0;
@@ -5712,16 +5825,175 @@ test "terminal call-result import and read failures preserve canonical authority
     var view = try read_store.openHistoricalView(continuation);
     defer view.close();
     var position: u64 = 0;
-    var group: ?HistoricalEntry = null;
-    while (try view.nextEntry(position)) |entry| {
-        position = entry.position;
-        if (entry.kind == .tool_results) {
-            group = entry;
+    while (true) {
+        const entry = view.nextEntry(position) catch |err| {
+            try std.testing.expectEqual(error.CorruptStore, err);
             break;
-        }
+        } orelse return error.MissingCorruptionFailure;
+        position = entry.position;
     }
-    try std.testing.expectError(error.CorruptStore, view.nextToolResult(group.?.source_operation_id.?, null));
     try std.testing.expect(read_store.isFenced());
+}
+
+test "missing canonical call outcome rows fence history and inspection" {
+    const corruptions = [_]enum { action, call, result_content }{ .action, .call, .result_content };
+    const session_refs = [_][]const u8{
+        "direct/missing-outcome-action",
+        "direct/missing-outcome-call",
+        "direct/missing-outcome-content",
+    };
+    const config_keys = [_][]const u8{ "missing-config-action", "missing-config-call", "missing-config-content" };
+    const message_keys = [_][]const u8{ "missing-message-action", "missing-message-call", "missing-message-content" };
+    const message_files = [_][]const u8{ "missing-file-action", "missing-file-call", "missing-file-content" };
+    const metadata_files = [_][]const u8{ "missing-metadata-action", "missing-metadata-call", "missing-metadata-content" };
+    const denial_keys = [_][]const u8{ "missing-denial-action", "missing-denial-call", "missing-denial-content" };
+    for (corruptions, 0..) |corruption, index| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session_ref = session_refs[index];
+        try configureTestSession(&storage, config_keys[index], session_ref);
+        try submitTestMessage(
+            &storage,
+            &tmp,
+            message_files[index],
+            message_keys[index],
+            session_ref,
+            "call",
+        );
+        const source = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{.{
+            .item_id = "missing-item",
+            .name = "bash",
+            .encoded_call_id = "missing-call",
+            .decoded_call_id = "missing-call",
+            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\"}",
+            .decoded_arguments = "{\"cmd\":\"true\"}",
+        }};
+        try settleCallsForTesting(
+            &storage,
+            &tmp,
+            source,
+            metadata_files[index],
+            &calls,
+        );
+        var denial: protocol.PermissionDecisionCommand = .{
+            .action_id = try queryU64(storage.database, "SELECT max(action_id) FROM action_operation"),
+        };
+        try denial.key.set(denial_keys[index]);
+        try denial.session.set(session_ref);
+        try std.testing.expect(storage.denyPermission(&denial, .{}) == .accepted);
+        const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+        try exec(storage.database, "PRAGMA foreign_keys=OFF");
+        switch (corruption) {
+            .action => try exec(storage.database, "DELETE FROM action_operation"),
+            .call => try exec(storage.database, "DELETE FROM action_operation; DELETE FROM model_tool_call"),
+            .result_content => try exec(
+                storage.database,
+                "DELETE FROM content WHERE content_id=(SELECT resolution_content_id FROM action_operation LIMIT 1)",
+            ),
+        }
+        try exec(storage.database, "PRAGMA foreign_keys=ON");
+
+        if (corruption == .action) {
+            var view = try storage.openHistoricalView(continuation);
+            defer view.close();
+            var position: u64 = 0;
+            while (true) {
+                const entry = view.nextEntry(position) catch |err| {
+                    try std.testing.expectEqual(error.CorruptStore, err);
+                    break;
+                } orelse return error.MissingCorruptionFailure;
+                position = entry.position;
+            }
+        } else {
+            try std.testing.expectError(
+                error.CorruptStore,
+                testingSessionReport(&storage, &tmp, session_ref, 1024 * 1024),
+            );
+        }
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
+test "complete historical tool-result traversal scales with groups and calls" {
+    const Measure = struct {
+        const Counter = struct {
+            steps: u64 = 0,
+
+            fn progress(context: ?*anyopaque) callconv(.c) c_int {
+                const counter: *Counter = @ptrCast(@alignCast(context orelse return 1));
+                counter.steps += 1;
+                return 0;
+            }
+        };
+
+        fn run(group_count: usize, calls_per_group: usize) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "scale-config", "direct/tool-result-scale");
+            try submitTestMessage(
+                &storage,
+                &tmp,
+                "scale-message-file",
+                "scale-message",
+                "direct/tool-result-scale",
+                "scale",
+            );
+            var binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{
+                .{ .item_id = "scale-item-0", .name = "unknown", .encoded_call_id = "scale-call-0", .decoded_call_id = "scale-call-0", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "scale-item-1", .name = "unknown", .encoded_call_id = "scale-call-1", .decoded_call_id = "scale-call-1", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "scale-item-2", .name = "unknown", .encoded_call_id = "scale-call-2", .decoded_call_id = "scale-call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "scale-item-3", .name = "unknown", .encoded_call_id = "scale-call-3", .decoded_call_id = "scale-call-3", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            };
+            for (0..group_count) |index| {
+                var prefix_buffer: [64]u8 = undefined;
+                try settleCallsForTesting(
+                    &storage,
+                    &tmp,
+                    binding,
+                    try std.fmt.bufPrint(&prefix_buffer, "scale-metadata-{d}", .{index}),
+                    calls[0..calls_per_group],
+                );
+                binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+
+            var counter: Counter = .{};
+            c.sqlite3_progress_handler(storage.database, 1, Counter.progress, &counter);
+            defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+            var view = try storage.openHistoricalView(binding);
+            defer view.close();
+            var position: u64 = 0;
+            var groups_seen: usize = 0;
+            var results_seen: usize = 0;
+            while (try view.nextEntry(position)) |entry| {
+                position = entry.position;
+                if (entry.kind != .tool_results) continue;
+                groups_seen += 1;
+                var after_call: ?u64 = null;
+                while (try view.nextToolResult(entry.source_operation_id.?, after_call)) |result| {
+                    results_seen += 1;
+                    after_call = result.call_ordinal;
+                }
+            }
+            try std.testing.expectEqual(group_count, groups_seen);
+            try std.testing.expectEqual(group_count * calls_per_group, results_seen);
+            return counter.steps;
+        }
+    };
+
+    const baseline = try Measure.run(4, 1);
+    const more_groups = try Measure.run(16, 1);
+    const more_calls = try Measure.run(4, 4);
+    try std.testing.expect(more_groups > baseline);
+    try std.testing.expect(more_groups < baseline * 7);
+    try std.testing.expect(more_calls > baseline);
+    try std.testing.expect(more_calls < baseline * 7);
 }
 
 test "call classification uses the proposing Operation frozen catalog" {

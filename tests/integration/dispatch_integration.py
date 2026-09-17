@@ -810,7 +810,6 @@ def main():
             ),
             "continuation Actions",
         )
-        message(state, continuation_store, "continuation-pending", "direct/continuation", "after results")
         continuation_actions = continuation_report["actions"]["unresolved"]
         stop_host(continuation_host)
         processes.remove(continuation_host)
@@ -854,20 +853,51 @@ def main():
         assert complete_results["actions"]["unresolved"] == [], complete_results
         assert [item["call_ordinal"] for item in complete_results["actions"]["resolved"]] == ["0", "3"]
         assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
-        stop_host(continuation_host)
+        with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
+            assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (1,)
+        continuation_before_admission_crash = crash_host(
+            continuation_host, state, "continuation-before-admission-crash"
+        )
         processes.remove(continuation_host)
+        assert continuation_before_admission_crash["returncode"] == -signal.SIGKILL
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+            "--test-before-launch-delay-ms",
+            "5000",
+        )
+        processes.append(continuation_host)
+
+        def continuation_successor_admitted():
+            with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
+                return database.execute(
+                    "SELECT count(*) FROM model_operation"
+                ).fetchone() == (2,)
+
+        wait_for(continuation_successor_admitted, "tool-result successor admission")
+        assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
+        continuation_after_admission_crash = crash_host(
+            continuation_host, state, "continuation-after-admission-crash"
+        )
+        processes.remove(continuation_host)
+        assert continuation_after_admission_crash["returncode"] == -signal.SIGKILL
+        with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT operation_id,attempt_ordinal,uncertain,resolution_code "
+                "FROM model_operation ORDER BY operation_id"
+            ).fetchall() == [(1, 1, 0, "tool_calls"), (2, 1, 1, None)]
+
         continuation_host = start_host(
             continuation_store,
             f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
         )
         processes.append(continuation_host)
-        wait_for(lambda: len(continuation_endpoint.requests) == 2, "tool-result continuation request")
+        wait_for(lambda: len(continuation_endpoint.requests) == 2, "recovered tool-result continuation request")
         wait_for(
             lambda: completed_observation(continuation_store, "continuation-first"),
             "tool-result continuation answer",
         )
         assert read_result(continuation_store, "continuation-first") == continuation_answer
-        assert read_result(continuation_store, "continuation-pending") == continuation_answer
         continuation_request = json.loads(continuation_endpoint.requests[1])
         continuation_input = continuation_request["input"]
         output_items = [item for item in continuation_input if item.get("type") == "function_call_output"]
@@ -878,15 +908,31 @@ def main():
             "Invalid arguments for tool 'bash'.",
             "Permission denied.",
         ], output_items
-        output_end = max(continuation_input.index(item) for item in output_items)
-        pending_index = next(
-            index for index, item in enumerate(continuation_input)
+        assert [
+            item.get("content", [{}])[0].get("text")
+            for item in continuation_input
             if item.get("role") == "user"
-            and item.get("content", [{}])[0].get("text") == "after results"
+        ] == ["make calls"], continuation_input
+        replayed_denial = command(
+            "retry", "--store", continuation_store,
+            "--record", state / "continuation-deny-0.json",
+            "--kind", "permission-decision",
         )
-        assert output_end < pending_index, continuation_input
+        assert replayed_denial["answer"]["status"] == "accepted", replayed_denial
+        assert replayed_denial["answer"]["replayed"] is True, replayed_denial
+        stale_denial = command(
+            "deny-action", "--store", continuation_store,
+            "--record", state / "continuation-stale-denial.json",
+            "--key", "continuation-stale-denial", "--session", "direct/continuation",
+            "--action", continuation_actions[0]["action"],
+        )
+        assert stale_denial["answer"]["status"] == "rejected", stale_denial
+        assert stale_denial["answer"]["code"] == "action_not_pending", stale_denial
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
             assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (2,)
+            assert database.execute(
+                "SELECT attempt_ordinal FROM model_operation WHERE operation_id=2"
+            ).fetchone() == (2,)
             assert database.execute(
                 "SELECT count(*),count(DISTINCT acceptance_position) FROM model_tool_call "
                 "WHERE rejection_code IS NOT NULL AND rejection_content_id IS NOT NULL "
