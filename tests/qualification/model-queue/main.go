@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"rui.local/qualification/measurement"
@@ -29,13 +30,15 @@ type population struct {
 	Eligible   int `json:"eligible"`
 }
 
-type settlementFact struct {
+type executionFact struct {
 	CommandKey          string `json:"command_key"`
 	MessageSession      string `json:"message_session"`
+	MessageTurnID       int64  `json:"message_turn_id"`
 	TurnID              int64  `json:"turn_id"`
 	TurnSession         string `json:"turn_session"`
-	OperationID         int64  `json:"operation_id"`
+	TurnOperationID     int64  `json:"turn_operation_id"`
 	TurnOutcome         string `json:"turn_outcome"`
+	OperationID         int64  `json:"operation_id"`
 	OperationTurnID     int64  `json:"operation_turn_id"`
 	OperationSession    string `json:"operation_session"`
 	OperationResolution string `json:"operation_resolution"`
@@ -83,6 +86,7 @@ type endpoint struct {
 	first    chan time.Time
 	release  chan struct{}
 	once     sync.Once
+	requests atomic.Int64
 }
 
 func startEndpoint() (*endpoint, error) {
@@ -97,6 +101,7 @@ func startEndpoint() (*endpoint, error) {
 }
 
 func (e *endpoint) serve(writer http.ResponseWriter, request *http.Request) {
+	e.requests.Add(1)
 	_, _ = io.Copy(io.Discard, request.Body)
 	e.once.Do(func() {
 		e.first <- time.Now()
@@ -111,6 +116,9 @@ func (e *endpoint) serve(writer http.ResponseWriter, request *http.Request) {
 
 func (e *endpoint) URL() string { return "http://" + e.listener.Addr().String() + "/responses" }
 func (e *endpoint) Release()    { close(e.release) }
+func (e *endpoint) Requests() int64 {
+	return e.requests.Load()
+}
 
 func sql(deadline measurement.Deadline, sqliteBinary, store, query string) (string, error) {
 	output, err := measurement.Run(deadline, sqliteBinary, "-noheader", filepath.Join(store, "rui.sqlite3"), query)
@@ -224,48 +232,54 @@ func expectedOrder(count int) []string {
 	return result
 }
 
-func parseSettlementFacts(rows string) ([]settlementFact, error) {
+func parseExecutionFacts(rows string) ([]executionFact, error) {
 	if rows == "" {
-		return []settlementFact{}, nil
+		return []executionFact{}, nil
 	}
-	result := make([]settlementFact, 0, strings.Count(rows, "\n")+1)
+	result := make([]executionFact, 0, strings.Count(rows, "\n")+1)
 	for _, row := range strings.Split(rows, "\n") {
 		fields := strings.Split(row, "|")
-		if len(fields) != 9 {
-			return result, fmt.Errorf("malformed settlement fact %q", row)
+		if len(fields) != 11 {
+			return result, fmt.Errorf("malformed execution fact %q", row)
 		}
-		turnID, turnError := strconv.ParseInt(fields[2], 10, 64)
-		operationID, operationError := strconv.ParseInt(fields[4], 10, 64)
-		operationTurnID, operationTurnError := strconv.ParseInt(fields[6], 10, 64)
-		if turnError != nil || operationError != nil || operationTurnError != nil {
-			return result, fmt.Errorf("malformed settlement identities %q", row)
+		messageTurnID, messageTurnError := strconv.ParseInt(fields[2], 10, 64)
+		turnID, turnError := strconv.ParseInt(fields[3], 10, 64)
+		turnOperationID, turnOperationError := strconv.ParseInt(fields[5], 10, 64)
+		operationID, operationError := strconv.ParseInt(fields[7], 10, 64)
+		operationTurnID, operationTurnError := strconv.ParseInt(fields[8], 10, 64)
+		if messageTurnError != nil || turnError != nil || turnOperationError != nil || operationError != nil || operationTurnError != nil {
+			return result, fmt.Errorf("malformed execution identities %q", row)
 		}
-		result = append(result, settlementFact{
-			CommandKey: fields[0], MessageSession: fields[1], TurnID: turnID, TurnSession: fields[3],
-			OperationID: operationID, TurnOutcome: fields[5], OperationTurnID: operationTurnID,
-			OperationSession: fields[7], OperationResolution: fields[8],
+		result = append(result, executionFact{
+			CommandKey: fields[0], MessageSession: fields[1], MessageTurnID: messageTurnID,
+			TurnID: turnID, TurnSession: fields[4], TurnOperationID: turnOperationID, TurnOutcome: fields[6],
+			OperationID: operationID, OperationTurnID: operationTurnID, OperationSession: fields[9], OperationResolution: fields[10],
 		})
 	}
 	return result, nil
 }
 
-func auditSettlementFacts(facts []settlementFact, expected []string) ([]string, error) {
+func auditExecutions(facts []executionFact, expected []string, providerRequests int64) ([]string, error) {
 	actual := make([]string, 0, len(facts))
 	for _, fact := range facts {
 		actual = append(actual, fact.MessageSession)
 	}
 	if len(facts) != len(expected) {
-		return actual, fmt.Errorf("settlement fact count=%d want=%d", len(facts), len(expected))
+		return actual, fmt.Errorf("eligible Operation count=%d want=%d", len(facts), len(expected))
+	}
+	if providerRequests != int64(len(expected)) {
+		return actual, fmt.Errorf("provider request count=%d want=%d", providerRequests, len(expected))
 	}
 	var firstError error
 	for index, fact := range facts {
 		expectedKey := fmt.Sprintf("e-msg-%d", index+1)
 		if firstError == nil && (fact.CommandKey != expectedKey ||
 			fact.MessageSession != expected[index] ||
-			fact.TurnID <= 0 || fact.TurnSession != expected[index] ||
+			fact.MessageTurnID <= 0 || fact.MessageTurnID != fact.TurnID || fact.TurnSession != expected[index] ||
+			fact.TurnOperationID <= 0 || fact.TurnOperationID != fact.OperationID ||
 			fact.OperationID <= 0 || fact.OperationTurnID != fact.TurnID || fact.OperationSession != expected[index] ||
 			fact.TurnOutcome != "provider_http_422" || fact.OperationResolution != "provider_http_422") {
-			firstError = fmt.Errorf("settlement fact[%d]=%+v", index, fact)
+			firstError = fmt.Errorf("execution fact[%d]=%+v", index, fact)
 		}
 	}
 	return actual, firstError
@@ -434,22 +448,29 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 		recordBehaviorFailure(result, "Host stop after settlement observation: "+stopError.Error())
 	}
 	auditDeadline := measurement.NewDeadline(15 * time.Second)
-	rows, auditQueryError := sql(auditDeadline, sqliteBinary, store, `SELECT m.command_key||'|'||m.session_ref||'|'||coalesce(m.turn_id,'')||'|'||coalesce(t.session_ref,'')||'|'||coalesce(t.operation_id,'')||'|'||coalesce(t.outcome_code,'')||'|'||coalesce(o.turn_id,'')||'|'||coalesce(o.session_ref,'')||'|'||coalesce(o.resolution_code,'')
-FROM message_admission m
-LEFT JOIN turn t ON t.turn_id=m.turn_id
-LEFT JOIN model_operation o ON o.operation_id=t.operation_id
-WHERE m.command_key GLOB 'e-msg-[0-9]*'
+	// Root the audit at every controlled Operation so an older or duplicate
+	// Operation cannot hide behind Turn's current operation_id pointer.
+	rows, auditQueryError := sql(auditDeadline, sqliteBinary, store, `SELECT coalesce(m.command_key,'')||'|'||coalesce(m.session_ref,'')||'|'||coalesce(m.turn_id,'')||'|'||coalesce(t.turn_id,'')||'|'||coalesce(t.session_ref,'')||'|'||coalesce(t.operation_id,'')||'|'||coalesce(t.outcome_code,'')||'|'||o.operation_id||'|'||o.turn_id||'|'||o.session_ref||'|'||coalesce(o.resolution_code,'')
+FROM model_operation o
+LEFT JOIN turn t ON t.turn_id=o.turn_id
+LEFT JOIN message_admission m ON m.turn_id=t.turn_id AND m.command_key GLOB 'e-msg-[0-9]*'
+WHERE o.session_ref GLOB 'queue/eligible/[0-9]*'
+   OR t.session_ref GLOB 'queue/eligible/[0-9]*'
+   OR m.session_ref GLOB 'queue/eligible/[0-9]*'
 ORDER BY o.operation_id,m.admission_id;`)
 	expected := expectedOrder(p.Eligible)
+	providerRequests := e.Requests()
+	result["provider_request_count"] = providerRequests
+	result["expected_provider_request_count"] = p.Eligible
 	if auditQueryError != nil {
-		result["settlement_audit_error"] = auditQueryError.Error()
-		recordAdmissionOrder(result, []string{}, expected, fmt.Errorf("settlement audit query: %w", auditQueryError))
+		result["execution_audit_error"] = auditQueryError.Error()
+		recordAdmissionOrder(result, []string{}, expected, fmt.Errorf("execution audit query: %w", auditQueryError))
 		return result, nil
 	}
-	facts, parseError := parseSettlementFacts(rows)
-	result["settlement_facts"] = facts
-	actual, settlementError := auditSettlementFacts(facts, expected)
-	recordAdmissionOrder(result, actual, expected, errors.Join(parseError, settlementError))
+	facts, parseError := parseExecutionFacts(rows)
+	result["execution_facts"] = facts
+	actual, executionError := auditExecutions(facts, expected, providerRequests)
+	recordAdmissionOrder(result, actual, expected, errors.Join(parseError, executionError))
 	return result, nil
 }
 

@@ -57,30 +57,43 @@ func TestCaseStatusDistinguishesBehaviorAndMeasurementOutcomes(t *testing.T) {
 	}
 }
 
-func TestSettledOrderRequiresEveryExpectedResolution(t *testing.T) {
+func TestExecutionAuditRequiresOneSettledOperationAndRequestPerTurn(t *testing.T) {
 	want := expectedOrder(2)
-	valid := []settlementFact{
-		{CommandKey: "e-msg-1", MessageSession: want[0], TurnID: 1, TurnSession: want[0], OperationID: 1, TurnOutcome: "provider_http_422", OperationTurnID: 1, OperationSession: want[0], OperationResolution: "provider_http_422"},
-		{CommandKey: "e-msg-2", MessageSession: want[1], TurnID: 2, TurnSession: want[1], OperationID: 2, TurnOutcome: "provider_http_422", OperationTurnID: 2, OperationSession: want[1], OperationResolution: "provider_http_422"},
+	valid := []executionFact{
+		{CommandKey: "e-msg-1", MessageSession: want[0], MessageTurnID: 1, TurnID: 1, TurnSession: want[0], TurnOperationID: 1, TurnOutcome: "provider_http_422", OperationID: 1, OperationTurnID: 1, OperationSession: want[0], OperationResolution: "provider_http_422"},
+		{CommandKey: "e-msg-2", MessageSession: want[1], MessageTurnID: 2, TurnID: 2, TurnSession: want[1], TurnOperationID: 2, TurnOutcome: "provider_http_422", OperationID: 2, OperationTurnID: 2, OperationSession: want[1], OperationResolution: "provider_http_422"},
 	}
-	if actual, err := auditSettlementFacts(valid, want); err != nil || !reflect.DeepEqual(actual, want) {
-		t.Fatalf("auditSettlementFacts(valid) = %v, %v; want %v", actual, err, want)
+	if actual, err := auditExecutions(valid, want, 2); err != nil || !reflect.DeepEqual(actual, want) {
+		t.Fatalf("auditExecutions(valid) = %v, %v; want %v", actual, err, want)
 	}
 	tests := []struct {
 		name   string
-		mutate func([]settlementFact)
+		mutate func([]executionFact)
 	}{
-		{"wrong turn outcome", func(facts []settlementFact) { facts[0].TurnOutcome = "cancelled" }},
-		{"unresolved earlier turn", func(facts []settlementFact) { facts[0].TurnOutcome = "" }},
-		{"wrong message binding", func(facts []settlementFact) { facts[0].TurnSession = want[1] }},
-		{"wrong operation turn binding", func(facts []settlementFact) { facts[0].OperationTurnID = facts[1].TurnID }},
+		{"wrong turn outcome", func(facts []executionFact) { facts[0].TurnOutcome = "cancelled" }},
+		{"unresolved earlier turn", func(facts []executionFact) { facts[0].TurnOutcome = "" }},
+		{"wrong message binding", func(facts []executionFact) { facts[0].MessageTurnID = facts[1].TurnID }},
+		{"wrong current operation binding", func(facts []executionFact) { facts[0].TurnOperationID = facts[1].OperationID }},
+		{"wrong operation turn binding", func(facts []executionFact) { facts[0].OperationTurnID = facts[1].TurnID }},
 	}
 	for _, test := range tests {
-		facts := append([]settlementFact(nil), valid...)
+		facts := append([]executionFact(nil), valid...)
 		test.mutate(facts)
-		if _, err := auditSettlementFacts(facts, want); err == nil {
-			t.Errorf("%s passed settlement audit", test.name)
+		if _, err := auditExecutions(facts, want, 2); err == nil {
+			t.Errorf("%s passed execution audit", test.name)
 		}
+	}
+	extraOperation := append([]executionFact(nil), valid...)
+	extraOperation = append(extraOperation, executionFact{
+		CommandKey: "e-msg-2", MessageSession: want[1], MessageTurnID: 2, TurnID: 2, TurnSession: want[1],
+		TurnOperationID: 2, TurnOutcome: "provider_http_422", OperationID: 3, OperationTurnID: 2,
+		OperationSession: want[1], OperationResolution: "provider_http_422",
+	})
+	if _, err := auditExecutions(extraOperation, want, 3); err == nil {
+		t.Error("duplicate Operation passed execution audit")
+	}
+	if _, err := auditExecutions(valid, want, 3); err == nil {
+		t.Error("duplicate provider request passed execution audit")
 	}
 }
 
