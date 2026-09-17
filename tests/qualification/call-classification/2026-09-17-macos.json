@@ -1,20 +1,13 @@
 {
-  "artifacts": "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3938566305",
-  "binary": "/Users/divyanshgolyan/code/personal/rui-issue228/.zig-cache/o/b8021d65108340818dcda751c77885dc/rui-release-small-check",
-  "binary_sha256": "be5bae762bced92a3fab5831eefa2a6d6cfdee42e83ef00a680e28070dc7ee93",
+  "artifacts": "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016",
+  "binary": "/Users/divyanshgolyan/code/personal/rui-issue228/.zig-cache/o/f45ae3f90175ad77a5827022fad08ec9/rui-release-small-check",
+  "binary_sha256": "692772ac2a2b3a941856e96e0dd5f90714b00a6047a033a666d02e562b5f22b0",
   "cases": {
     "mixed-restart": {
-      "aggregate_process_set": {
-        "samples": 3,
-        "host_component_peak_bytes": 9045504,
-        "cli_component_peak_bytes": 2933632,
-        "cli_deduplicated_increment_peak_bytes": 2884480,
-        "observed_deduplicated_aggregate_peak_bytes": 11929984
-      },
-      "classification_admission_ms": 121.929,
+      "classification_admission_ms": 797.055,
       "database": {
-        "database_allocated_bytes": 192512,
-        "database_logical_bytes": 192512
+        "database_allocated_bytes": 208896,
+        "database_logical_bytes": 208896
       },
       "delayed_cleanup_execution": {
         "custody_occupied": "1",
@@ -24,8 +17,7 @@
         "unavailable": [
           "structured_output",
           "allow_once",
-          "bash_execution",
-          "tool_result_publication"
+          "bash_execution"
         ]
       },
       "delayed_cleanup_named_scratch": {
@@ -34,24 +26,24 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 11747328,
-          "virtual_bytes": 421437833216,
-          "cpu_user_seconds": 0.01653720833333333,
-          "cpu_system_seconds": 0.027316666666666663,
+          "rss_bytes": 11517952,
+          "virtual_bytes": 421447335936,
+          "cpu_user_seconds": 0.015802375,
+          "cpu_system_seconds": 0.0260445,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 4661248,
-          "disk_write_bytes": 1048576
+          "disk_read_bytes": 4763648,
+          "disk_write_bytes": 1134592
         },
         "status": "diagnostic"
       },
       "denial_latency": {
         "count": 2,
-        "maximum_ms": 31.114,
-        "minimum_ms": 28.478,
-        "p50_ms": 28.478,
-        "p95_ms": 31.114
+        "maximum_ms": 857.255,
+        "minimum_ms": 30.882,
+        "p50_ms": 30.882,
+        "p95_ms": 857.255
       },
       "denial_replay": {
         "answer": {
@@ -112,6 +104,33 @@
         ]
       },
       "forbidden_bash_launch_absent": true,
+      "host_lifetime_peak": {
+        "lifecycle": "same Host from cold start through live loopback HTTP/SSE production transport, classification, all denials, automatic continuation, completed outcome, cleanup, and retained idle",
+        "sample": {
+          "rss_bytes": 11993088,
+          "virtual_bytes": 421715230720,
+          "cpu_user_seconds": 0.031085416666666664,
+          "cpu_system_seconds": 0.05016645833333333,
+          "threads": 4,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "open_descriptors": 12,
+          "disk_read_bytes": 4763648,
+          "disk_write_bytes": 1912832,
+          "footprint": {
+            "physical_footprint_bytes": 10127360,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 10485760,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+          }
+        },
+        "verdict": {
+          "status": "passed",
+          "target_bytes": 25165824,
+          "lifetime_peak_lower_bound_bytes": 9961472,
+          "lifetime_peak_upper_bound_bytes": 11010048
+        }
+      },
       "inputs": {
         "name": "mixed-restart",
         "valid_calls": 2,
@@ -120,58 +139,167 @@
         "restart_and_replay_denial": true,
         "change_catalog_while_response_pending": true
       },
-      "inspection_ms": 21.079,
-      "physical_footprint": {
-        "aggregate_reason": "installed footprint reports a de-duplicated current total but no de-duplicated process-set lifetime peak upper bound",
-        "aggregate_verdict": {
-          "status": "unavailable",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 11929984,
-          "lifetime_peak_upper_bound_bytes": 18446744073709551615
+      "inspection_ms": 62.649,
+      "ordinary_cli_measurements": {
+        "configuration": {
+          "family": "configuration",
+          "command": [
+            "rui-release-small-check",
+            "configure",
+            "--store",
+            "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/store",
+            "--record",
+            "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/mixed-restart-configure.json",
+            "--key",
+            "mixed-restart-configure",
+            "--session",
+            "qualification/mixed-restart",
+            "--workspace",
+            "/Users/divyanshgolyan/code/personal/rui-issue228",
+            "--model",
+            "model-a",
+            "--tools",
+            "bash"
+          ],
+          "process": {
+            "rss_bytes": 4341760,
+            "virtual_bytes": 420549967872,
+            "cpu_user_seconds": 0.003066625,
+            "cpu_system_seconds": 0.003333833333333333,
+            "threads": 1,
+            "live_descendant_processes": 0,
+            "open_descriptor_rows": 9,
+            "open_descriptors": 6,
+            "disk_read_bytes": 0,
+            "disk_write_bytes": 4096,
+            "footprint": {
+              "physical_footprint_bytes": 3064832,
+              "physical_footprint_rounding_tolerance_bytes": 512,
+              "lifetime_peak_physical_footprint_bytes": 3064832,
+              "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+            }
+          },
+          "direct_process_set": {
+            "samples": 3,
+            "host_component_peak_bytes": 6227264,
+            "cli_component_peak_bytes": 3031936,
+            "cli_deduplicated_increment_peak_bytes": 2982784,
+            "observed_deduplicated_aggregate_peak_bytes": 9210048
+          },
+          "output_sha256": "4098210455da83ce8d04662f1fe48ff37c2f3366980037cda9ef717696ed6fab",
+          "host_live_descendants": 0,
+          "cli_live_descendants": 0,
+          "completed_work_hold": true
         },
-        "host_component_verdict": {
-          "status": "passed",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 9209344,
-          "lifetime_peak_upper_bound_bytes": 9210368
+        "denial": {
+          "family": "denial",
+          "command": [
+            "rui-release-small-check",
+            "deny-action",
+            "--store",
+            "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/store",
+            "--record",
+            "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/deny-0.json",
+            "--key",
+            "deny-0",
+            "--session",
+            "qualification/mixed-restart",
+            "--action",
+            "1"
+          ],
+          "process": {
+            "rss_bytes": 4227072,
+            "virtual_bytes": 420558356480,
+            "cpu_user_seconds": 0.003628625,
+            "cpu_system_seconds": 0.004588083333333333,
+            "threads": 1,
+            "live_descendant_processes": 0,
+            "open_descriptor_rows": 9,
+            "open_descriptors": 6,
+            "disk_read_bytes": 0,
+            "disk_write_bytes": 4096,
+            "footprint": {
+              "physical_footprint_bytes": 2966528,
+              "physical_footprint_rounding_tolerance_bytes": 512,
+              "lifetime_peak_physical_footprint_bytes": 2966528,
+              "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+            }
+          },
+          "direct_process_set": {
+            "samples": 3,
+            "host_component_peak_bytes": 9782976,
+            "cli_component_peak_bytes": 2933632,
+            "cli_deduplicated_increment_peak_bytes": 2884480,
+            "observed_deduplicated_aggregate_peak_bytes": 12667456
+          },
+          "output_sha256": "fe16cea5f24c416eb549b6a9528ccd590368220bc275e8c4d58ba8c4b9d10d13",
+          "host_live_descendants": 0,
+          "cli_live_descendants": 0,
+          "completed_work_hold": true
         },
-        "lifecycle": "same Host lifetime peak from cold through work, drain, and retained idle; one ordinary Rui CLI directly sampled with that retained Host",
-        "maximum_live_rui_clis": 1,
-        "retained_sample": {
-          "rss_bytes": 13615104,
-          "virtual_bytes": 421571510272,
-          "cpu_user_seconds": 0.051144125,
-          "cpu_system_seconds": 0.08812341666666666,
-          "threads": 4,
-          "live_descendant_processes": 0,
-          "open_descriptor_rows": 16,
-          "open_descriptors": 12,
-          "disk_read_bytes": 4661248,
-          "disk_write_bytes": 1691648,
-          "footprint": {
-            "physical_footprint_bytes": 9078784,
-            "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 9209856,
-            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
-          }
+        "message": {
+          "family": "message",
+          "command": [
+            "rui-release-small-check",
+            "message",
+            "--store",
+            "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/store",
+            "--record",
+            "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/mixed-restart.json",
+            "--key",
+            "mixed-restart",
+            "--session",
+            "qualification/mixed-restart",
+            "--text",
+            "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/mixed-restart.txt"
+          ],
+          "process": {
+            "rss_bytes": 4128768,
+            "virtual_bytes": 420540530688,
+            "cpu_user_seconds": 0.0030947916666666667,
+            "cpu_system_seconds": 0.003418625,
+            "threads": 1,
+            "live_descendant_processes": 0,
+            "open_descriptor_rows": 9,
+            "open_descriptors": 6,
+            "disk_read_bytes": 0,
+            "disk_write_bytes": 4096,
+            "footprint": {
+              "physical_footprint_bytes": 2851840,
+              "physical_footprint_rounding_tolerance_bytes": 512,
+              "lifetime_peak_physical_footprint_bytes": 2851840,
+              "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+            }
+          },
+          "direct_process_set": {
+            "samples": 2,
+            "host_component_peak_bytes": 7128512,
+            "cli_component_peak_bytes": 2818880,
+            "cli_deduplicated_increment_peak_bytes": 2769728,
+            "observed_deduplicated_aggregate_peak_bytes": 9898240
+          },
+          "output_sha256": "0ac5f79a81e710688b1e5be7b457a7ead8355403673f7934e61e0c7b0b83ff0a",
+          "host_live_descendants": 0,
+          "cli_live_descendants": 0,
+          "completed_work_hold": true
         }
       },
-      "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 278,
-          "succeeded": 278,
+          "attempts": 234,
+          "succeeded": 234,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 13729792,
-          "virtual_bytes": 421573148672,
+          "rss_bytes": 12632064,
+          "virtual_bytes": 421716869120,
           "open_descriptors": 18,
           "threads": 6
         }
       },
+      "provider_requests": 2,
       "provider_response_bytes": 3757,
       "public_action_content": {
         "actions_read": 2,
@@ -183,38 +311,43 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 15.186,
+      "response_end_to_classification_ms": 36.87,
       "response_end_to_classification_status": "diagnostic",
       "restart_exact_content": {
         "denied_actions_read": 2,
-        "rejected_references_checked": 8,
+        "full_report": {
+          "call_content_references_checked": 16,
+          "calls_checked": 4,
+          "denied_actions_checked": 2,
+          "profile": "full"
+        },
         "status": "passed"
       },
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 13598720,
-          "virtual_bytes": 421571510272,
-          "cpu_user_seconds": 0.05057220833333333,
-          "cpu_system_seconds": 0.08746666666666665,
+          "rss_bytes": 11993088,
+          "virtual_bytes": 421715230720,
+          "cpu_user_seconds": 0.031085416666666664,
+          "cpu_system_seconds": 0.05016645833333333,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 4661248,
-          "disk_write_bytes": 1687552
+          "disk_read_bytes": 4763648,
+          "disk_write_bytes": 1912832
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 9617408,
-          "virtual_bytes": 420996857856,
-          "cpu_user_seconds": 0.013494,
-          "cpu_system_seconds": 0.020244583333333333,
+          "rss_bytes": 10813440,
+          "virtual_bytes": 421026283520,
+          "cpu_user_seconds": 0.010998791666666665,
+          "cpu_system_seconds": 0.016281,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 4657152,
-          "disk_write_bytes": 307200
+          "disk_read_bytes": 4763648,
+          "disk_write_bytes": 323584
         },
         "status": "diagnostic"
       },
@@ -225,17 +358,10 @@
       "status": "passed"
     },
     "payload-100000": {
-      "aggregate_process_set": {
-        "samples": 3,
-        "host_component_peak_bytes": 9062208,
-        "cli_component_peak_bytes": 2851712,
-        "cli_deduplicated_increment_peak_bytes": 2802560,
-        "observed_deduplicated_aggregate_peak_bytes": 11864768
-      },
-      "classification_admission_ms": 187.502,
+      "classification_admission_ms": 235.061,
       "database": {
-        "database_allocated_bytes": 290816,
-        "database_logical_bytes": 290816
+        "database_allocated_bytes": 307200,
+        "database_logical_bytes": 307200
       },
       "delayed_cleanup_execution": {
         "custody_occupied": "1",
@@ -245,8 +371,7 @@
         "unavailable": [
           "structured_output",
           "allow_once",
-          "bash_execution",
-          "tool_result_publication"
+          "bash_execution"
         ]
       },
       "delayed_cleanup_named_scratch": {
@@ -255,24 +380,24 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 11993088,
-          "virtual_bytes": 421275303936,
-          "cpu_user_seconds": 0.02133675,
-          "cpu_system_seconds": 0.014468458333333331,
+          "rss_bytes": 12550144,
+          "virtual_bytes": 421294243840,
+          "cpu_user_seconds": 0.022599583333333333,
+          "cpu_system_seconds": 0.017282458333333334,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 1269760
+          "disk_read_bytes": 16384,
+          "disk_write_bytes": 1359872
         },
         "status": "diagnostic"
       },
       "denial_latency": {
         "count": 1,
-        "maximum_ms": 22.326,
-        "minimum_ms": 22.326,
-        "p50_ms": 22.326,
-        "p95_ms": 22.326
+        "maximum_ms": 34.524,
+        "minimum_ms": 34.524,
+        "p50_ms": 34.524,
+        "p95_ms": 34.524
       },
       "durable_audit": {
         "counts": {
@@ -298,6 +423,33 @@
         ]
       },
       "forbidden_bash_launch_absent": true,
+      "host_lifetime_peak": {
+        "lifecycle": "same Host from cold start through live loopback HTTP/SSE production transport, classification, all denials, automatic continuation, completed outcome, cleanup, and retained idle",
+        "sample": {
+          "rss_bytes": 14352384,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.038186375,
+          "cpu_system_seconds": 0.03775975,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "open_descriptors": 12,
+          "disk_read_bytes": 16384,
+          "disk_write_bytes": 2105344,
+          "footprint": {
+            "physical_footprint_bytes": 9701376,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 9865216,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "verdict": {
+          "status": "passed",
+          "target_bytes": 25165824,
+          "lifetime_peak_lower_bound_bytes": 9864704,
+          "lifetime_peak_upper_bound_bytes": 9865728
+        }
+      },
       "inputs": {
         "name": "payload-100000",
         "valid_calls": 1,
@@ -306,58 +458,67 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 12.867,
-      "physical_footprint": {
-        "aggregate_reason": "installed footprint reports a de-duplicated current total but no de-duplicated process-set lifetime peak upper bound",
-        "aggregate_verdict": {
-          "status": "unavailable",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 11864768,
-          "lifetime_peak_upper_bound_bytes": 18446744073709551615
-        },
-        "host_component_verdict": {
-          "status": "passed",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 9242112,
-          "lifetime_peak_upper_bound_bytes": 9243136
-        },
-        "lifecycle": "same Host lifetime peak from cold through work, drain, and retained idle; one ordinary Rui CLI directly sampled with that retained Host",
-        "maximum_live_rui_clis": 1,
-        "retained_sample": {
-          "rss_bytes": 13549568,
-          "virtual_bytes": 421562073088,
-          "cpu_user_seconds": 0.05177079166666666,
-          "cpu_system_seconds": 0.067702125,
-          "threads": 4,
-          "live_descendant_processes": 0,
-          "open_descriptor_rows": 16,
-          "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 1757184,
-          "footprint": {
-            "physical_footprint_bytes": 9095168,
-            "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 9242624,
-            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
-          }
+      "inspection_ms": 20.831,
+      "ordinary_cli_measurements": {
+        "action_read": {
+          "family": "action_read",
+          "command": [
+            "rui-release-small-check",
+            "read-action-arguments",
+            "--store",
+            "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/payload-100000/store",
+            "--session",
+            "qualification/payload-100000",
+            "--action",
+            "1"
+          ],
+          "process": {
+            "rss_bytes": 4849664,
+            "virtual_bytes": 420569890816,
+            "cpu_user_seconds": 0.0030275416666666667,
+            "cpu_system_seconds": 0.002474458333333333,
+            "threads": 1,
+            "live_descendant_processes": 0,
+            "open_descriptor_rows": 9,
+            "open_descriptors": 6,
+            "disk_read_bytes": 0,
+            "disk_write_bytes": 0,
+            "footprint": {
+              "physical_footprint_bytes": 3621888,
+              "physical_footprint_rounding_tolerance_bytes": 512,
+              "lifetime_peak_physical_footprint_bytes": 3621888,
+              "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+            }
+          },
+          "direct_process_set": {
+            "samples": 3,
+            "host_component_peak_bytes": 8275456,
+            "cli_component_peak_bytes": 3589056,
+            "cli_deduplicated_increment_peak_bytes": 3539904,
+            "observed_deduplicated_aggregate_peak_bytes": 11815360
+          },
+          "output_sha256": "ab41f0e1a2b3d04c4f2c300d07bf5e66ae1bbbfaebb1d5a73d97f4337c7c91ba",
+          "host_live_descendants": 0,
+          "cli_live_descendants": 0,
+          "completed_work_hold": true
         }
       },
-      "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 255,
-          "succeeded": 255,
+          "attempts": 134,
+          "succeeded": 134,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 13680640,
-          "virtual_bytes": 421563711488,
-          "open_descriptors": 16,
+          "rss_bytes": 14417920,
+          "virtual_bytes": 421563777024,
+          "open_descriptors": 15,
           "threads": 6
         }
       },
+      "provider_requests": 2,
       "provider_response_bytes": 201157,
       "public_action_content": {
         "actions_read": 1,
@@ -369,33 +530,33 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 26.671,
+      "response_end_to_classification_ms": 29.702,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 13549568,
-          "virtual_bytes": 421562073088,
-          "cpu_user_seconds": 0.051129125,
-          "cpu_system_seconds": 0.06699595833333333,
-          "threads": 4,
+          "rss_bytes": 14352384,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.038186375,
+          "cpu_system_seconds": 0.03775975,
+          "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 1753088
+          "disk_read_bytes": 16384,
+          "disk_write_bytes": 2105344
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 9027584,
-          "virtual_bytes": 420977983488,
-          "cpu_user_seconds": 0.0052175,
-          "cpu_system_seconds": 0.005110458333333333,
+          "rss_bytes": 9748480,
+          "virtual_bytes": 420872142848,
+          "cpu_user_seconds": 0.005718916666666666,
+          "cpu_system_seconds": 0.00595575,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 307200
+          "disk_read_bytes": 16384,
+          "disk_write_bytes": 323584
         },
         "status": "diagnostic"
       },
@@ -406,17 +567,10 @@
       "status": "passed"
     },
     "payload-4096": {
-      "aggregate_process_set": {
-        "samples": 3,
-        "host_component_peak_bytes": 9078464,
-        "cli_component_peak_bytes": 3310464,
-        "cli_deduplicated_increment_peak_bytes": 3261312,
-        "observed_deduplicated_aggregate_peak_bytes": 12339776
-      },
-      "classification_admission_ms": 185.33,
+      "classification_admission_ms": 223.799,
       "database": {
-        "database_allocated_bytes": 196608,
-        "database_logical_bytes": 196608
+        "database_allocated_bytes": 212992,
+        "database_logical_bytes": 212992
       },
       "delayed_cleanup_execution": {
         "custody_occupied": "1",
@@ -426,8 +580,7 @@
         "unavailable": [
           "structured_output",
           "allow_once",
-          "bash_execution",
-          "tool_result_publication"
+          "bash_execution"
         ]
       },
       "delayed_cleanup_named_scratch": {
@@ -436,24 +589,24 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 11796480,
-          "virtual_bytes": 421418958848,
-          "cpu_user_seconds": 0.009515916666666666,
-          "cpu_system_seconds": 0.014837125,
+          "rss_bytes": 12058624,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.011779791666666666,
+          "cpu_system_seconds": 0.016307083333333333,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 983040
+          "disk_read_bytes": 4096,
+          "disk_write_bytes": 1077248
         },
         "status": "diagnostic"
       },
       "denial_latency": {
         "count": 1,
-        "maximum_ms": 23.979,
-        "minimum_ms": 23.979,
-        "p50_ms": 23.979,
-        "p95_ms": 23.979
+        "maximum_ms": 27.352,
+        "minimum_ms": 27.352,
+        "p50_ms": 27.352,
+        "p95_ms": 27.352
       },
       "durable_audit": {
         "counts": {
@@ -479,6 +632,33 @@
         ]
       },
       "forbidden_bash_launch_absent": true,
+      "host_lifetime_peak": {
+        "lifecycle": "same Host from cold start through live loopback HTTP/SSE production transport, classification, all denials, automatic continuation, completed outcome, cleanup, and retained idle",
+        "sample": {
+          "rss_bytes": 14368768,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.03291345833333333,
+          "cpu_system_seconds": 0.04611604166666666,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "open_descriptors": 12,
+          "disk_read_bytes": 4096,
+          "disk_write_bytes": 1806336,
+          "footprint": {
+            "physical_footprint_bytes": 9684992,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 9848832,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "verdict": {
+          "status": "passed",
+          "target_bytes": 25165824,
+          "lifetime_peak_lower_bound_bytes": 9848320,
+          "lifetime_peak_upper_bound_bytes": 9849344
+        }
+      },
       "inputs": {
         "name": "payload-4096",
         "valid_calls": 1,
@@ -487,58 +667,23 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 10.73,
-      "physical_footprint": {
-        "aggregate_reason": "installed footprint reports a de-duplicated current total but no de-duplicated process-set lifetime peak upper bound",
-        "aggregate_verdict": {
-          "status": "unavailable",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 12339776,
-          "lifetime_peak_upper_bound_bytes": 18446744073709551615
-        },
-        "host_component_verdict": {
-          "status": "passed",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 9258496,
-          "lifetime_peak_upper_bound_bytes": 9259520
-        },
-        "lifecycle": "same Host lifetime peak from cold through work, drain, and retained idle; one ordinary Rui CLI directly sampled with that retained Host",
-        "maximum_live_rui_clis": 1,
-        "retained_sample": {
-          "rss_bytes": 13615104,
-          "virtual_bytes": 421562073088,
-          "cpu_user_seconds": 0.0429885,
-          "cpu_system_seconds": 0.07491854166666666,
-          "threads": 4,
-          "live_descendant_processes": 0,
-          "open_descriptor_rows": 16,
-          "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 1519616,
-          "footprint": {
-            "physical_footprint_bytes": 9111552,
-            "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 9259008,
-            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
-          }
-        }
-      },
-      "physical_footprint_status": "unavailable",
+      "inspection_ms": 15.193,
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 270,
-          "succeeded": 270,
+          "attempts": 114,
+          "succeeded": 114,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 13680640,
-          "virtual_bytes": 421563711488,
+          "rss_bytes": 14368768,
+          "virtual_bytes": 421563777024,
           "open_descriptors": 15,
           "threads": 6
         }
       },
+      "provider_requests": 2,
       "provider_response_bytes": 9333,
       "public_action_content": {
         "actions_read": 1,
@@ -550,33 +695,33 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 27.782,
+      "response_end_to_classification_ms": 20.827,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 13615104,
-          "virtual_bytes": 421562073088,
-          "cpu_user_seconds": 0.04245245833333333,
-          "cpu_system_seconds": 0.074284625,
-          "threads": 4,
+          "rss_bytes": 14368768,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.03291345833333333,
+          "cpu_system_seconds": 0.04611604166666666,
+          "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 1515520
+          "disk_read_bytes": 4096,
+          "disk_write_bytes": 1806336
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 9928704,
-          "virtual_bytes": 421006295040,
-          "cpu_user_seconds": 0.005207625,
-          "cpu_system_seconds": 0.006031125,
+          "rss_bytes": 9175040,
+          "virtual_bytes": 420709613568,
+          "cpu_user_seconds": 0.005521875,
+          "cpu_system_seconds": 0.005511875,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 307200
+          "disk_read_bytes": 4096,
+          "disk_write_bytes": 323584
         },
         "status": "diagnostic"
       },
@@ -587,17 +732,10 @@
       "status": "passed"
     },
     "rejected-1": {
-      "aggregate_process_set": {
-        "samples": 3,
-        "host_component_peak_bytes": 9127424,
-        "cli_component_peak_bytes": 3310464,
-        "cli_deduplicated_increment_peak_bytes": 3261312,
-        "observed_deduplicated_aggregate_peak_bytes": 12388736
-      },
-      "classification_admission_ms": 141.705,
+      "classification_admission_ms": 216.265,
       "database": {
-        "database_allocated_bytes": 192512,
-        "database_logical_bytes": 192512
+        "database_allocated_bytes": 208896,
+        "database_logical_bytes": 208896
       },
       "delayed_cleanup_execution": {
         "custody_occupied": "1",
@@ -607,8 +745,7 @@
         "unavailable": [
           "structured_output",
           "allow_once",
-          "bash_execution",
-          "tool_result_publication"
+          "bash_execution"
         ]
       },
       "delayed_cleanup_named_scratch": {
@@ -617,15 +754,15 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 11878400,
-          "virtual_bytes": 421418958848,
-          "cpu_user_seconds": 0.008244041666666667,
-          "cpu_system_seconds": 0.011912458333333332,
+          "rss_bytes": 11829248,
+          "virtual_bytes": 421294243840,
+          "cpu_user_seconds": 0.011189916666666666,
+          "cpu_system_seconds": 0.014813083333333333,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 954368
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 1052672
         },
         "status": "diagnostic"
       },
@@ -656,6 +793,33 @@
         ]
       },
       "forbidden_bash_launch_absent": true,
+      "host_lifetime_peak": {
+        "lifecycle": "same Host from cold start through live loopback HTTP/SSE production transport, classification, all denials, automatic continuation, completed outcome, cleanup, and retained idle",
+        "sample": {
+          "rss_bytes": 13434880,
+          "virtual_bytes": 421428461568,
+          "cpu_user_seconds": 0.030537291666666664,
+          "cpu_system_seconds": 0.04123108333333333,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "open_descriptors": 12,
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 1634304,
+          "footprint": {
+            "physical_footprint_bytes": 8816640,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 8980480,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "verdict": {
+          "status": "passed",
+          "target_bytes": 25165824,
+          "lifetime_peak_lower_bound_bytes": 8979968,
+          "lifetime_peak_upper_bound_bytes": 8980992
+        }
+      },
       "inputs": {
         "name": "rejected-1",
         "valid_calls": 0,
@@ -664,58 +828,23 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 14.83,
-      "physical_footprint": {
-        "aggregate_reason": "installed footprint reports a de-duplicated current total but no de-duplicated process-set lifetime peak upper bound",
-        "aggregate_verdict": {
-          "status": "unavailable",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 12388736,
-          "lifetime_peak_upper_bound_bytes": 18446744073709551615
-        },
-        "host_component_verdict": {
-          "status": "passed",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 9307648,
-          "lifetime_peak_upper_bound_bytes": 9308672
-        },
-        "lifecycle": "same Host lifetime peak from cold through work, drain, and retained idle; one ordinary Rui CLI directly sampled with that retained Host",
-        "maximum_live_rui_clis": 1,
-        "retained_sample": {
-          "rss_bytes": 13713408,
-          "virtual_bytes": 421562073088,
-          "cpu_user_seconds": 0.040774625,
-          "cpu_system_seconds": 0.06870908333333332,
-          "threads": 4,
-          "live_descendant_processes": 0,
-          "open_descriptor_rows": 16,
-          "open_descriptors": 12,
-          "disk_read_bytes": 4096,
-          "disk_write_bytes": 1372160,
-          "footprint": {
-            "physical_footprint_bytes": 9160704,
-            "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 9308160,
-            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
-          }
-        }
-      },
-      "physical_footprint_status": "unavailable",
+      "inspection_ms": 19.249,
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 268,
-          "succeeded": 268,
+          "attempts": 108,
+          "succeeded": 108,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 13844480,
-          "virtual_bytes": 421563711488,
+          "rss_bytes": 13582336,
+          "virtual_bytes": 421429559296,
           "open_descriptors": 15,
           "threads": 6
         }
       },
+      "provider_requests": 2,
       "provider_response_bytes": 857,
       "public_action_content": {
         "actions_read": 0,
@@ -727,33 +856,33 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 24.779,
+      "response_end_to_classification_ms": 15.217,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 13713408,
-          "virtual_bytes": 421562073088,
-          "cpu_user_seconds": 0.04011625,
-          "cpu_system_seconds": 0.067972375,
-          "threads": 4,
+          "rss_bytes": 13434880,
+          "virtual_bytes": 421428461568,
+          "cpu_user_seconds": 0.030537291666666664,
+          "cpu_system_seconds": 0.04123108333333333,
+          "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 4096,
-          "disk_write_bytes": 1368064
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 1634304
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 9551872,
-          "virtual_bytes": 420853202944,
-          "cpu_user_seconds": 0.005193625,
-          "cpu_system_seconds": 0.005096041666666666,
+          "rss_bytes": 9879552,
+          "virtual_bytes": 421006360576,
+          "cpu_user_seconds": 0.006093916666666666,
+          "cpu_system_seconds": 0.005666625,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 307200
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 323584
         },
         "status": "diagnostic"
       },
@@ -764,17 +893,10 @@
       "status": "passed"
     },
     "rejected-256": {
-      "aggregate_process_set": {
-        "samples": 3,
-        "host_component_peak_bytes": 9635392,
-        "cli_component_peak_bytes": 3310464,
-        "cli_deduplicated_increment_peak_bytes": 3261312,
-        "observed_deduplicated_aggregate_peak_bytes": 12896704
-      },
-      "classification_admission_ms": 174.063,
+      "classification_admission_ms": 270.097,
       "database": {
-        "database_allocated_bytes": 385024,
-        "database_logical_bytes": 385024
+        "database_allocated_bytes": 405504,
+        "database_logical_bytes": 405504
       },
       "delayed_cleanup_execution": {
         "custody_occupied": "1",
@@ -784,8 +906,7 @@
         "unavailable": [
           "structured_output",
           "allow_once",
-          "bash_execution",
-          "tool_result_publication"
+          "bash_execution"
         ]
       },
       "delayed_cleanup_named_scratch": {
@@ -795,14 +916,14 @@
       "delayed_cleanup_sample": {
         "sample": {
           "rss_bytes": 12763136,
-          "virtual_bytes": 421562613760,
-          "cpu_user_seconds": 0.04503904166666666,
-          "cpu_system_seconds": 0.0304255,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.048705875,
+          "cpu_system_seconds": 0.03030345833333333,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 8192,
-          "disk_write_bytes": 1740800
+          "disk_read_bytes": 4096,
+          "disk_write_bytes": 1916928
         },
         "status": "diagnostic"
       },
@@ -2873,6 +2994,33 @@
         ]
       },
       "forbidden_bash_launch_absent": true,
+      "host_lifetime_peak": {
+        "lifecycle": "same Host from cold start through live loopback HTTP/SSE production transport, classification, all denials, automatic continuation, completed outcome, cleanup, and retained idle",
+        "sample": {
+          "rss_bytes": 14893056,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.12298004166666665,
+          "cpu_system_seconds": 0.105327125,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "open_descriptors": 12,
+          "disk_read_bytes": 4096,
+          "disk_write_bytes": 6049792,
+          "footprint": {
+            "physical_footprint_bytes": 10485760,
+            "physical_footprint_rounding_tolerance_bytes": 524288,
+            "lifetime_peak_physical_footprint_bytes": 10485760,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+          }
+        },
+        "verdict": {
+          "status": "passed",
+          "target_bytes": 25165824,
+          "lifetime_peak_lower_bound_bytes": 9961472,
+          "lifetime_peak_upper_bound_bytes": 11010048
+        }
+      },
       "inputs": {
         "name": "rejected-256",
         "valid_calls": 0,
@@ -2881,58 +3029,23 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 13.357,
-      "physical_footprint": {
-        "aggregate_reason": "installed footprint reports a de-duplicated current total but no de-duplicated process-set lifetime peak upper bound",
-        "aggregate_verdict": {
-          "status": "unavailable",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 12896704,
-          "lifetime_peak_upper_bound_bytes": 18446744073709551615
-        },
-        "host_component_verdict": {
-          "status": "passed",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 9668096,
-          "lifetime_peak_upper_bound_bytes": 9669120
-        },
-        "lifecycle": "same Host lifetime peak from cold through work, drain, and retained idle; one ordinary Rui CLI directly sampled with that retained Host",
-        "maximum_live_rui_clis": 1,
-        "retained_sample": {
-          "rss_bytes": 14024704,
-          "virtual_bytes": 421562073088,
-          "cpu_user_seconds": 0.11348766666666665,
-          "cpu_system_seconds": 0.12675970833333333,
-          "threads": 4,
-          "live_descendant_processes": 0,
-          "open_descriptor_rows": 16,
-          "open_descriptors": 12,
-          "disk_read_bytes": 8192,
-          "disk_write_bytes": 15110144,
-          "footprint": {
-            "physical_footprint_bytes": 9504768,
-            "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 9668608,
-            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
-          }
-        }
-      },
-      "physical_footprint_status": "unavailable",
+      "inspection_ms": 21.41,
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 283,
-          "succeeded": 283,
+          "attempts": 119,
+          "succeeded": 119,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 14188544,
-          "virtual_bytes": 421563711488,
+          "rss_bytes": 15040512,
+          "virtual_bytes": 421563777024,
           "open_descriptors": 17,
           "threads": 6
         }
       },
+      "provider_requests": 2,
       "provider_response_bytes": 193980,
       "public_action_content": {
         "actions_read": 0,
@@ -2944,33 +3057,33 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 70.564,
+      "response_end_to_classification_ms": 68.596,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 14024704,
-          "virtual_bytes": 421562073088,
-          "cpu_user_seconds": 0.11251391666666666,
-          "cpu_system_seconds": 0.12560004166666666,
-          "threads": 4,
+          "rss_bytes": 14893056,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.12298004166666665,
+          "cpu_system_seconds": 0.105327125,
+          "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 8192,
-          "disk_write_bytes": 14970880
+          "disk_read_bytes": 4096,
+          "disk_write_bytes": 6049792
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 9551872,
-          "virtual_bytes": 420996857856,
-          "cpu_user_seconds": 0.005899583333333333,
-          "cpu_system_seconds": 0.005408791666666666,
+          "rss_bytes": 9338880,
+          "virtual_bytes": 420853268480,
+          "cpu_user_seconds": 0.005369291666666666,
+          "cpu_system_seconds": 0.005458041666666666,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 307200
+          "disk_read_bytes": 4096,
+          "disk_write_bytes": 323584
         },
         "status": "diagnostic"
       },
@@ -2981,17 +3094,10 @@
       "status": "passed"
     },
     "rejected-32": {
-      "aggregate_process_set": {
-        "samples": 3,
-        "host_component_peak_bytes": 9487936,
-        "cli_component_peak_bytes": 3130240,
-        "cli_deduplicated_increment_peak_bytes": 3081088,
-        "observed_deduplicated_aggregate_peak_bytes": 12569024
-      },
-      "classification_admission_ms": 244.553,
+      "classification_admission_ms": 238.296,
       "database": {
-        "database_allocated_bytes": 212992,
-        "database_logical_bytes": 212992
+        "database_allocated_bytes": 229376,
+        "database_logical_bytes": 229376
       },
       "delayed_cleanup_execution": {
         "custody_occupied": "1",
@@ -3001,8 +3107,7 @@
         "unavailable": [
           "structured_output",
           "allow_once",
-          "bash_execution",
-          "tool_result_publication"
+          "bash_execution"
         ]
       },
       "delayed_cleanup_named_scratch": {
@@ -3011,15 +3116,15 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 12992512,
-          "virtual_bytes": 421562613760,
-          "cpu_user_seconds": 0.014462666666666665,
-          "cpu_system_seconds": 0.017319875,
+          "rss_bytes": 12337152,
+          "virtual_bytes": 421428461568,
+          "cpu_user_seconds": 0.015344125,
+          "cpu_system_seconds": 0.017052875,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 1060864
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 1155072
         },
         "status": "diagnostic"
       },
@@ -3298,6 +3403,33 @@
         ]
       },
       "forbidden_bash_launch_absent": true,
+      "host_lifetime_peak": {
+        "lifecycle": "same Host from cold start through live loopback HTTP/SSE production transport, classification, all denials, automatic continuation, completed outcome, cleanup, and retained idle",
+        "sample": {
+          "rss_bytes": 13991936,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.040149125,
+          "cpu_system_seconds": 0.04956225,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "open_descriptors": 12,
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 2166784,
+          "footprint": {
+            "physical_footprint_bytes": 9308160,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 9472000,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "verdict": {
+          "status": "passed",
+          "target_bytes": 25165824,
+          "lifetime_peak_lower_bound_bytes": 9471488,
+          "lifetime_peak_upper_bound_bytes": 9472512
+        }
+      },
       "inputs": {
         "name": "rejected-32",
         "valid_calls": 0,
@@ -3306,58 +3438,23 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 18.539,
-      "physical_footprint": {
-        "aggregate_reason": "installed footprint reports a de-duplicated current total but no de-duplicated process-set lifetime peak upper bound",
-        "aggregate_verdict": {
-          "status": "unavailable",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 12569024,
-          "lifetime_peak_upper_bound_bytes": 18446744073709551615
-        },
-        "host_component_verdict": {
-          "status": "passed",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 9537024,
-          "lifetime_peak_upper_bound_bytes": 9538048
-        },
-        "lifecycle": "same Host lifetime peak from cold through work, drain, and retained idle; one ordinary Rui CLI directly sampled with that retained Host",
-        "maximum_live_rui_clis": 1,
-        "retained_sample": {
-          "rss_bytes": 13910016,
-          "virtual_bytes": 421562073088,
-          "cpu_user_seconds": 0.0532315,
-          "cpu_system_seconds": 0.08613041666666665,
-          "threads": 4,
-          "live_descendant_processes": 0,
-          "open_descriptor_rows": 16,
-          "open_descriptors": 12,
-          "disk_read_bytes": 8192,
-          "disk_write_bytes": 3231744,
-          "footprint": {
-            "physical_footprint_bytes": 9390080,
-            "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 9537536,
-            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
-          }
-        }
-      },
-      "physical_footprint_status": "unavailable",
+      "inspection_ms": 12.246,
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 284,
-          "succeeded": 284,
+          "attempts": 108,
+          "succeeded": 108,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 14041088,
-          "virtual_bytes": 421563711488,
-          "open_descriptors": 15,
+          "rss_bytes": 14123008,
+          "virtual_bytes": 421563777024,
+          "open_descriptors": 17,
           "threads": 6
         }
       },
+      "provider_requests": 2,
       "provider_response_bytes": 24075,
       "public_action_content": {
         "actions_read": 0,
@@ -3369,33 +3466,33 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 30.283,
+      "response_end_to_classification_ms": 25.333,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 13910016,
-          "virtual_bytes": 421562073088,
-          "cpu_user_seconds": 0.05246483333333333,
-          "cpu_system_seconds": 0.08537775,
-          "threads": 4,
+          "rss_bytes": 13991936,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.040149125,
+          "cpu_system_seconds": 0.04956225,
+          "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
           "disk_read_bytes": 8192,
-          "disk_write_bytes": 3211264
+          "disk_write_bytes": 2166784
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 9814016,
-          "virtual_bytes": 421140512768,
-          "cpu_user_seconds": 0.00573825,
-          "cpu_system_seconds": 0.005711125,
+          "rss_bytes": 9011200,
+          "virtual_bytes": 420843831296,
+          "cpu_user_seconds": 0.005232958333333333,
+          "cpu_system_seconds": 0.00508475,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 307200
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 323584
         },
         "status": "diagnostic"
       },
@@ -3406,17 +3503,10 @@
       "status": "passed"
     },
     "valid-1": {
-      "aggregate_process_set": {
-        "samples": 3,
-        "host_component_peak_bytes": 8898112,
-        "cli_component_peak_bytes": 3064704,
-        "cli_deduplicated_increment_peak_bytes": 3015552,
-        "observed_deduplicated_aggregate_peak_bytes": 11913664
-      },
-      "classification_admission_ms": 159.762,
+      "classification_admission_ms": 105.667,
       "database": {
-        "database_allocated_bytes": 192512,
-        "database_logical_bytes": 192512
+        "database_allocated_bytes": 208896,
+        "database_logical_bytes": 208896
       },
       "delayed_cleanup_execution": {
         "custody_occupied": "1",
@@ -3426,8 +3516,7 @@
         "unavailable": [
           "structured_output",
           "allow_once",
-          "bash_execution",
-          "tool_result_publication"
+          "bash_execution"
         ]
       },
       "delayed_cleanup_named_scratch": {
@@ -3436,24 +3525,24 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 11354112,
-          "virtual_bytes": 421275303936,
-          "cpu_user_seconds": 0.010044375,
-          "cpu_system_seconds": 0.013485583333333332,
+          "rss_bytes": 11698176,
+          "virtual_bytes": 421419024384,
+          "cpu_user_seconds": 0.00940325,
+          "cpu_system_seconds": 0.0135935,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 4096,
-          "disk_write_bytes": 966656
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 1044480
         },
         "status": "diagnostic"
       },
       "denial_latency": {
         "count": 1,
-        "maximum_ms": 28.847,
-        "minimum_ms": 28.847,
-        "p50_ms": 28.847,
-        "p95_ms": 28.847
+        "maximum_ms": 26.452,
+        "minimum_ms": 26.452,
+        "p50_ms": 26.452,
+        "p95_ms": 26.452
       },
       "durable_audit": {
         "counts": {
@@ -3479,6 +3568,33 @@
         ]
       },
       "forbidden_bash_launch_absent": true,
+      "host_lifetime_peak": {
+        "lifecycle": "same Host from cold start through live loopback HTTP/SSE production transport, classification, all denials, automatic continuation, completed outcome, cleanup, and retained idle",
+        "sample": {
+          "rss_bytes": 14336000,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.03335120833333333,
+          "cpu_system_seconds": 0.048091375,
+          "threads": 5,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "open_descriptors": 12,
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 1794048,
+          "footprint": {
+            "physical_footprint_bytes": 9734144,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 9897984,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "verdict": {
+          "status": "passed",
+          "target_bytes": 25165824,
+          "lifetime_peak_lower_bound_bytes": 9897472,
+          "lifetime_peak_upper_bound_bytes": 9898496
+        }
+      },
       "inputs": {
         "name": "valid-1",
         "valid_calls": 1,
@@ -3487,58 +3603,23 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 14.364,
-      "physical_footprint": {
-        "aggregate_reason": "installed footprint reports a de-duplicated current total but no de-duplicated process-set lifetime peak upper bound",
-        "aggregate_verdict": {
-          "status": "unavailable",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 11913664,
-          "lifetime_peak_upper_bound_bytes": 18446744073709551615
-        },
-        "host_component_verdict": {
-          "status": "passed",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 9078272,
-          "lifetime_peak_upper_bound_bytes": 9079296
-        },
-        "lifecycle": "same Host lifetime peak from cold through work, drain, and retained idle; one ordinary Rui CLI directly sampled with that retained Host",
-        "maximum_live_rui_clis": 1,
-        "retained_sample": {
-          "rss_bytes": 13451264,
-          "virtual_bytes": 421562073088,
-          "cpu_user_seconds": 0.03967920833333333,
-          "cpu_system_seconds": 0.06589083333333333,
-          "threads": 4,
-          "live_descendant_processes": 0,
-          "open_descriptor_rows": 16,
-          "open_descriptors": 12,
-          "disk_read_bytes": 4096,
-          "disk_write_bytes": 1454080,
-          "footprint": {
-            "physical_footprint_bytes": 8931328,
-            "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 9078784,
-            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
-          }
-        }
-      },
-      "physical_footprint_status": "unavailable",
+      "inspection_ms": 11.628,
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 254,
-          "succeeded": 254,
+          "attempts": 119,
+          "succeeded": 119,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 13500416,
-          "virtual_bytes": 421562073088,
-          "open_descriptors": 15,
+          "rss_bytes": 14483456,
+          "virtual_bytes": 421563777024,
+          "open_descriptors": 18,
           "threads": 6
         }
       },
+      "provider_requests": 2,
       "provider_response_bytes": 1133,
       "public_action_content": {
         "actions_read": 1,
@@ -3550,33 +3631,33 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 33.307,
+      "response_end_to_classification_ms": 15.322,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 13385728,
-          "virtual_bytes": 421427855360,
-          "cpu_user_seconds": 0.039023375,
-          "cpu_system_seconds": 0.06518920833333333,
-          "threads": 4,
+          "rss_bytes": 14336000,
+          "virtual_bytes": 421562679296,
+          "cpu_user_seconds": 0.03335120833333333,
+          "cpu_system_seconds": 0.048091375,
+          "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 4096,
-          "disk_write_bytes": 1449984
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 1794048
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 9355264,
-          "virtual_bytes": 420844814336,
-          "cpu_user_seconds": 0.006704291666666666,
-          "cpu_system_seconds": 0.005786375,
+          "rss_bytes": 9994240,
+          "virtual_bytes": 421274796032,
+          "cpu_user_seconds": 0.005735541666666666,
+          "cpu_system_seconds": 0.006126458333333333,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 4096,
-          "disk_write_bytes": 307200
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 323584
         },
         "status": "diagnostic"
       },
@@ -3587,17 +3668,10 @@
       "status": "passed"
     },
     "valid-256": {
-      "aggregate_process_set": {
-        "samples": 3,
-        "host_component_peak_bytes": 10290880,
-        "cli_component_peak_bytes": 3113792,
-        "cli_deduplicated_increment_peak_bytes": 3064640,
-        "observed_deduplicated_aggregate_peak_bytes": 13355520
-      },
-      "classification_admission_ms": 237.408,
+      "classification_admission_ms": 158.059,
       "database": {
-        "database_allocated_bytes": 507904,
-        "database_logical_bytes": 475136
+        "database_allocated_bytes": 528384,
+        "database_logical_bytes": 499712
       },
       "delayed_cleanup_execution": {
         "custody_occupied": "1",
@@ -3607,8 +3681,7 @@
         "unavailable": [
           "structured_output",
           "allow_once",
-          "bash_execution",
-          "tool_result_publication"
+          "bash_execution"
         ]
       },
       "delayed_cleanup_named_scratch": {
@@ -3617,24 +3690,24 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 13008896,
-          "virtual_bytes": 421562613760,
-          "cpu_user_seconds": 0.05344441666666666,
-          "cpu_system_seconds": 0.029563208333333334,
+          "rss_bytes": 12369920,
+          "virtual_bytes": 421284806656,
+          "cpu_user_seconds": 0.054925875,
+          "cpu_system_seconds": 0.027117291666666665,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 8192,
-          "disk_write_bytes": 1798144
+          "disk_read_bytes": 24576,
+          "disk_write_bytes": 1900544
         },
         "status": "diagnostic"
       },
       "denial_latency": {
         "count": 256,
-        "maximum_ms": 51.349,
-        "minimum_ms": 19.005,
-        "p50_ms": 25.933,
-        "p95_ms": 33.463
+        "maximum_ms": 69.582,
+        "minimum_ms": 22.447,
+        "p50_ms": 29.001,
+        "p95_ms": 39.253
       },
       "durable_audit": {
         "counts": {
@@ -5700,6 +5773,33 @@
         ]
       },
       "forbidden_bash_launch_absent": true,
+      "host_lifetime_peak": {
+        "lifecycle": "same Host from cold start through live loopback HTTP/SSE production transport, classification, all denials, automatic continuation, completed outcome, cleanup, and retained idle",
+        "sample": {
+          "rss_bytes": 14581760,
+          "virtual_bytes": 421848875008,
+          "cpu_user_seconds": 0.37865079166666665,
+          "cpu_system_seconds": 0.511268125,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "open_descriptors": 12,
+          "disk_read_bytes": 208896,
+          "disk_write_bytes": 38658048,
+          "footprint": {
+            "physical_footprint_bytes": 11534336,
+            "physical_footprint_rounding_tolerance_bytes": 524288,
+            "lifetime_peak_physical_footprint_bytes": 11534336,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+          }
+        },
+        "verdict": {
+          "status": "passed",
+          "target_bytes": 25165824,
+          "lifetime_peak_lower_bound_bytes": 11010048,
+          "lifetime_peak_upper_bound_bytes": 12058624
+        }
+      },
       "inputs": {
         "name": "valid-256",
         "valid_calls": 256,
@@ -5708,58 +5808,65 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 17.345,
-      "physical_footprint": {
-        "aggregate_reason": "installed footprint reports a de-duplicated current total but no de-duplicated process-set lifetime peak upper bound",
-        "aggregate_verdict": {
-          "status": "unavailable",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 13355520,
-          "lifetime_peak_upper_bound_bytes": 18446744073709551615
-        },
-        "host_component_verdict": {
-          "status": "passed",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 9961472,
-          "lifetime_peak_upper_bound_bytes": 11010048
-        },
-        "lifecycle": "same Host lifetime peak from cold through work, drain, and retained idle; one ordinary Rui CLI directly sampled with that retained Host",
-        "maximum_live_rui_clis": 1,
-        "retained_sample": {
-          "rss_bytes": 13058048,
-          "virtual_bytes": 421838323712,
-          "cpu_user_seconds": 0.20808741666666666,
-          "cpu_system_seconds": 0.3973240416666666,
-          "threads": 3,
-          "live_descendant_processes": 0,
-          "open_descriptor_rows": 16,
-          "open_descriptors": 12,
-          "disk_read_bytes": 69632,
-          "disk_write_bytes": 33447936,
-          "footprint": {
-            "physical_footprint_bytes": 10485760,
-            "physical_footprint_rounding_tolerance_bytes": 524288,
-            "lifetime_peak_physical_footprint_bytes": 10485760,
-            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
-          }
+      "inspection_ms": 17.66,
+      "ordinary_cli_measurements": {
+        "inspection": {
+          "family": "inspection",
+          "command": [
+            "rui-release-small-check",
+            "inspect-session",
+            "--store",
+            "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/valid-256/store",
+            "--session",
+            "qualification/valid-256"
+          ],
+          "process": {
+            "rss_bytes": 4800512,
+            "virtual_bytes": 420562550784,
+            "cpu_user_seconds": 0.0036809166666666665,
+            "cpu_system_seconds": 0.003826583333333333,
+            "threads": 1,
+            "live_descendant_processes": 0,
+            "open_descriptor_rows": 9,
+            "open_descriptors": 6,
+            "disk_read_bytes": 0,
+            "disk_write_bytes": 0,
+            "footprint": {
+              "physical_footprint_bytes": 3556352,
+              "physical_footprint_rounding_tolerance_bytes": 512,
+              "lifetime_peak_physical_footprint_bytes": 3556352,
+              "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+            }
+          },
+          "direct_process_set": {
+            "samples": 3,
+            "host_component_peak_bytes": 11306944,
+            "cli_component_peak_bytes": 3523456,
+            "cli_deduplicated_increment_peak_bytes": 3474304,
+            "observed_deduplicated_aggregate_peak_bytes": 14781248
+          },
+          "output_sha256": "1f54b66e003ba1b5607711f4649e8ff754b10f40b0b5d7001aa0bcda766c962b",
+          "host_live_descendants": 0,
+          "cli_live_descendants": 0,
+          "completed_work_hold": true
         }
       },
-      "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 1018,
-          "succeeded": 1018,
+          "attempts": 1129,
+          "succeeded": 1129,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 14843904,
-          "virtual_bytes": 421839421440,
+          "rss_bytes": 15581184,
+          "virtual_bytes": 421849972736,
           "open_descriptors": 17,
           "threads": 6
         }
       },
+      "provider_requests": 2,
       "provider_response_bytes": 266937,
       "public_action_content": {
         "actions_read": 256,
@@ -5771,33 +5878,33 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 76.245,
+      "response_end_to_classification_ms": 75.781,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 13025280,
-          "virtual_bytes": 421838323712,
-          "cpu_user_seconds": 0.2072999583333333,
-          "cpu_system_seconds": 0.396656,
+          "rss_bytes": 14581760,
+          "virtual_bytes": 421848875008,
+          "cpu_user_seconds": 0.37865079166666665,
+          "cpu_system_seconds": 0.511268125,
           "threads": 3,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 69632,
-          "disk_write_bytes": 33443840
+          "disk_read_bytes": 208896,
+          "disk_write_bytes": 38658048
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 9797632,
-          "virtual_bytes": 421006295040,
-          "cpu_user_seconds": 0.005354208333333333,
-          "cpu_system_seconds": 0.005609833333333333,
+          "rss_bytes": 9371648,
+          "virtual_bytes": 420854317056,
+          "cpu_user_seconds": 0.005412541666666666,
+          "cpu_system_seconds": 0.005467916666666666,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 307200
+          "disk_read_bytes": 16384,
+          "disk_write_bytes": 323584
         },
         "status": "diagnostic"
       },
@@ -5808,17 +5915,10 @@
       "status": "passed"
     },
     "valid-32": {
-      "aggregate_process_set": {
-        "samples": 3,
-        "host_component_peak_bytes": 9504512,
-        "cli_component_peak_bytes": 3244928,
-        "cli_deduplicated_increment_peak_bytes": 3195776,
-        "observed_deduplicated_aggregate_peak_bytes": 12700288
-      },
-      "classification_admission_ms": 259.505,
+      "classification_admission_ms": 126.676,
       "database": {
-        "database_allocated_bytes": 217088,
-        "database_logical_bytes": 217088
+        "database_allocated_bytes": 233472,
+        "database_logical_bytes": 233472
       },
       "delayed_cleanup_execution": {
         "custody_occupied": "1",
@@ -5828,8 +5928,7 @@
         "unavailable": [
           "structured_output",
           "allow_once",
-          "bash_execution",
-          "tool_result_publication"
+          "bash_execution"
         ]
       },
       "delayed_cleanup_named_scratch": {
@@ -5838,24 +5937,24 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 12255232,
-          "virtual_bytes": 421418958848,
-          "cpu_user_seconds": 0.015137625,
-          "cpu_system_seconds": 0.017934,
+          "rss_bytes": 12189696,
+          "virtual_bytes": 421302632448,
+          "cpu_user_seconds": 0.014961166666666666,
+          "cpu_system_seconds": 0.015338583333333333,
           "threads": 5,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 1073152
+          "disk_read_bytes": 4096,
+          "disk_write_bytes": 1146880
         },
         "status": "diagnostic"
       },
       "denial_latency": {
         "count": 32,
-        "maximum_ms": 39.565,
-        "minimum_ms": 21.696,
-        "p50_ms": 27.749,
-        "p95_ms": 37.984
+        "maximum_ms": 46.225,
+        "minimum_ms": 24,
+        "p50_ms": 28.634,
+        "p95_ms": 41.653
       },
       "durable_audit": {
         "counts": {
@@ -6129,6 +6228,33 @@
         ]
       },
       "forbidden_bash_launch_absent": true,
+      "host_lifetime_peak": {
+        "lifecycle": "same Host from cold start through live loopback HTTP/SSE production transport, classification, all denials, automatic continuation, completed outcome, cleanup, and retained idle",
+        "sample": {
+          "rss_bytes": 14991360,
+          "virtual_bytes": 421704744960,
+          "cpu_user_seconds": 0.056372875,
+          "cpu_system_seconds": 0.09050991666666666,
+          "threads": 4,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 16,
+          "open_descriptors": 12,
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 5799936,
+          "footprint": {
+            "physical_footprint_bytes": 10485760,
+            "physical_footprint_rounding_tolerance_bytes": 524288,
+            "lifetime_peak_physical_footprint_bytes": 10485760,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+          }
+        },
+        "verdict": {
+          "status": "passed",
+          "target_bytes": 25165824,
+          "lifetime_peak_lower_bound_bytes": 9961472,
+          "lifetime_peak_upper_bound_bytes": 11010048
+        }
+      },
       "inputs": {
         "name": "valid-32",
         "valid_calls": 32,
@@ -6137,58 +6263,23 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 11.238,
-      "physical_footprint": {
-        "aggregate_reason": "installed footprint reports a de-duplicated current total but no de-duplicated process-set lifetime peak upper bound",
-        "aggregate_verdict": {
-          "status": "unavailable",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 12700288,
-          "lifetime_peak_upper_bound_bytes": 18446744073709551615
-        },
-        "host_component_verdict": {
-          "status": "passed",
-          "target_bytes": 268435456,
-          "lifetime_peak_lower_bound_bytes": 9668096,
-          "lifetime_peak_upper_bound_bytes": 9669120
-        },
-        "lifecycle": "same Host lifetime peak from cold through work, drain, and retained idle; one ordinary Rui CLI directly sampled with that retained Host",
-        "maximum_live_rui_clis": 1,
-        "retained_sample": {
-          "rss_bytes": 14008320,
-          "virtual_bytes": 421696290816,
-          "cpu_user_seconds": 0.03786679166666666,
-          "cpu_system_seconds": 0.07117408333333333,
-          "threads": 4,
-          "live_descendant_processes": 0,
-          "open_descriptor_rows": 16,
-          "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 4534272,
-          "footprint": {
-            "physical_footprint_bytes": 9537536,
-            "physical_footprint_rounding_tolerance_bytes": 512,
-            "lifetime_peak_physical_footprint_bytes": 9668608,
-            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
-          }
-        }
-      },
-      "physical_footprint_status": "unavailable",
+      "inspection_ms": 12.17,
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 224,
-          "succeeded": 224,
+          "attempts": 191,
+          "succeeded": 191,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 14123008,
-          "virtual_bytes": 421697929216,
+          "rss_bytes": 14991360,
+          "virtual_bytes": 421706383360,
           "open_descriptors": 15,
           "threads": 6
         }
       },
+      "provider_requests": 2,
       "provider_response_bytes": 33128,
       "public_action_content": {
         "actions_read": 32,
@@ -6200,33 +6291,33 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 35.544,
+      "response_end_to_classification_ms": 31.554,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 13991936,
-          "virtual_bytes": 421696290816,
-          "cpu_user_seconds": 0.037266375,
-          "cpu_system_seconds": 0.07046104166666665,
+          "rss_bytes": 14991360,
+          "virtual_bytes": 421704744960,
+          "cpu_user_seconds": 0.056372875,
+          "cpu_system_seconds": 0.09050991666666666,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 4530176
+          "disk_read_bytes": 8192,
+          "disk_write_bytes": 5799936
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 9715712,
-          "virtual_bytes": 421005246464,
-          "cpu_user_seconds": 0.00521825,
-          "cpu_system_seconds": 0.005282875,
+          "rss_bytes": 9994240,
+          "virtual_bytes": 421005312000,
+          "cpu_user_seconds": 0.005462583333333333,
+          "cpu_system_seconds": 0.005438041666666666,
           "threads": 4,
           "live_descendant_processes": 0,
           "open_descriptors": 12,
-          "disk_read_bytes": 0,
-          "disk_write_bytes": 307200
+          "disk_read_bytes": 4096,
+          "disk_write_bytes": 323584
         },
         "status": "diagnostic"
       },
@@ -6241,11 +6332,11 @@
     "behavior_error": "a provider/Store/server/client invariant failed",
     "diagnostic": "component or portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold",
     "passed": "behavior and required aggregate measurements passed",
-    "target_miss": "the lower bound of a valid macOS lifetime-peak interval exceeded 256 MiB",
+    "target_miss": "the lower bound of a valid macOS lifetime-peak interval exceeded 24 MiB",
     "unavailable": "a required measurement was absent, its uncertainty interval crossed the target, or aggregate helper accounting was incomplete"
   },
   "environment_evidence_status": "passed",
-  "format": "rui-call-classification-v4-go",
+  "format": "rui-call-classification-v5-go",
   "limits": [
     "loopback deterministic provider; no live provider, TLS, filesystem power-loss, or Bash execution qualification",
     "Bash launch is intentionally forbidden: denial qualification ends before the later execution slice",
@@ -6263,12 +6354,268 @@
     "module_path": "rui.local/qualification",
     "physical_memory_bytes": 17179869184
   },
+  "physical_footprint": {
+    "aggregate_reason": "Host lifetime-peak upper plus one maximum ordinary-CLI lifetime-peak upper is within the target",
+    "aggregate_verdict": {
+      "status": "passed",
+      "target_bytes": 25165824,
+      "lifetime_peak_lower_bound_bytes": 14781248,
+      "lifetime_peak_upper_bound_bytes": 15681024
+    },
+    "helper_census_complete": true,
+    "host_lifetime_peak": {
+      "status": "passed",
+      "target_bytes": 25165824,
+      "lifetime_peak_lower_bound_bytes": 11010048,
+      "lifetime_peak_upper_bound_bytes": 12058624
+    },
+    "host_scenarios_required": 9,
+    "host_scenarios_sampled": 9,
+    "maximum_simultaneously_live_ordinary_clis": 1,
+    "network_boundary": "real loopback HTTP/SSE production transport drove Rui's in-process network allocations during each same-Host lifetime; external deterministic provider fixture process memory is excluded; kernel/socket buffers absent from macOS process phys_footprint remain separate network/kernel counters",
+    "observed_deduplicated_current_lower_bound_bytes": 14781248,
+    "ordinary_cli_family_peaks": {
+      "action_read": {
+        "family": "action_read",
+        "command": [
+          "rui-release-small-check",
+          "read-action-arguments",
+          "--store",
+          "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/payload-100000/store",
+          "--session",
+          "qualification/payload-100000",
+          "--action",
+          "1"
+        ],
+        "process": {
+          "rss_bytes": 4849664,
+          "virtual_bytes": 420569890816,
+          "cpu_user_seconds": 0.0030275416666666667,
+          "cpu_system_seconds": 0.002474458333333333,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 9,
+          "open_descriptors": 6,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 0,
+          "footprint": {
+            "physical_footprint_bytes": 3621888,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3621888,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "direct_process_set": {
+          "samples": 3,
+          "host_component_peak_bytes": 8275456,
+          "cli_component_peak_bytes": 3589056,
+          "cli_deduplicated_increment_peak_bytes": 3539904,
+          "observed_deduplicated_aggregate_peak_bytes": 11815360
+        },
+        "output_sha256": "ab41f0e1a2b3d04c4f2c300d07bf5e66ae1bbbfaebb1d5a73d97f4337c7c91ba",
+        "host_live_descendants": 0,
+        "cli_live_descendants": 0,
+        "completed_work_hold": true
+      },
+      "configuration": {
+        "family": "configuration",
+        "command": [
+          "rui-release-small-check",
+          "configure",
+          "--store",
+          "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/store",
+          "--record",
+          "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/mixed-restart-configure.json",
+          "--key",
+          "mixed-restart-configure",
+          "--session",
+          "qualification/mixed-restart",
+          "--workspace",
+          "/Users/divyanshgolyan/code/personal/rui-issue228",
+          "--model",
+          "model-a",
+          "--tools",
+          "bash"
+        ],
+        "process": {
+          "rss_bytes": 4341760,
+          "virtual_bytes": 420549967872,
+          "cpu_user_seconds": 0.003066625,
+          "cpu_system_seconds": 0.003333833333333333,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 9,
+          "open_descriptors": 6,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 4096,
+          "footprint": {
+            "physical_footprint_bytes": 3064832,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3064832,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "direct_process_set": {
+          "samples": 3,
+          "host_component_peak_bytes": 6227264,
+          "cli_component_peak_bytes": 3031936,
+          "cli_deduplicated_increment_peak_bytes": 2982784,
+          "observed_deduplicated_aggregate_peak_bytes": 9210048
+        },
+        "output_sha256": "4098210455da83ce8d04662f1fe48ff37c2f3366980037cda9ef717696ed6fab",
+        "host_live_descendants": 0,
+        "cli_live_descendants": 0,
+        "completed_work_hold": true
+      },
+      "denial": {
+        "family": "denial",
+        "command": [
+          "rui-release-small-check",
+          "deny-action",
+          "--store",
+          "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/store",
+          "--record",
+          "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/deny-0.json",
+          "--key",
+          "deny-0",
+          "--session",
+          "qualification/mixed-restart",
+          "--action",
+          "1"
+        ],
+        "process": {
+          "rss_bytes": 4227072,
+          "virtual_bytes": 420558356480,
+          "cpu_user_seconds": 0.003628625,
+          "cpu_system_seconds": 0.004588083333333333,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 9,
+          "open_descriptors": 6,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 4096,
+          "footprint": {
+            "physical_footprint_bytes": 2966528,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 2966528,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "direct_process_set": {
+          "samples": 3,
+          "host_component_peak_bytes": 9782976,
+          "cli_component_peak_bytes": 2933632,
+          "cli_deduplicated_increment_peak_bytes": 2884480,
+          "observed_deduplicated_aggregate_peak_bytes": 12667456
+        },
+        "output_sha256": "fe16cea5f24c416eb549b6a9528ccd590368220bc275e8c4d58ba8c4b9d10d13",
+        "host_live_descendants": 0,
+        "cli_live_descendants": 0,
+        "completed_work_hold": true
+      },
+      "inspection": {
+        "family": "inspection",
+        "command": [
+          "rui-release-small-check",
+          "inspect-session",
+          "--store",
+          "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/valid-256/store",
+          "--session",
+          "qualification/valid-256"
+        ],
+        "process": {
+          "rss_bytes": 4800512,
+          "virtual_bytes": 420562550784,
+          "cpu_user_seconds": 0.0036809166666666665,
+          "cpu_system_seconds": 0.003826583333333333,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 9,
+          "open_descriptors": 6,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 0,
+          "footprint": {
+            "physical_footprint_bytes": 3556352,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 3556352,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "direct_process_set": {
+          "samples": 3,
+          "host_component_peak_bytes": 11306944,
+          "cli_component_peak_bytes": 3523456,
+          "cli_deduplicated_increment_peak_bytes": 3474304,
+          "observed_deduplicated_aggregate_peak_bytes": 14781248
+        },
+        "output_sha256": "1f54b66e003ba1b5607711f4649e8ff754b10f40b0b5d7001aa0bcda766c962b",
+        "host_live_descendants": 0,
+        "cli_live_descendants": 0,
+        "completed_work_hold": true
+      },
+      "message": {
+        "family": "message",
+        "command": [
+          "rui-release-small-check",
+          "message",
+          "--store",
+          "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/store",
+          "--record",
+          "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/mixed-restart.json",
+          "--key",
+          "mixed-restart",
+          "--session",
+          "qualification/mixed-restart",
+          "--text",
+          "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-call-classification-3691358016/mixed-restart/mixed-restart.txt"
+        ],
+        "process": {
+          "rss_bytes": 4128768,
+          "virtual_bytes": 420540530688,
+          "cpu_user_seconds": 0.0030947916666666667,
+          "cpu_system_seconds": 0.003418625,
+          "threads": 1,
+          "live_descendant_processes": 0,
+          "open_descriptor_rows": 9,
+          "open_descriptors": 6,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 4096,
+          "footprint": {
+            "physical_footprint_bytes": 2851840,
+            "physical_footprint_rounding_tolerance_bytes": 512,
+            "lifetime_peak_physical_footprint_bytes": 2851840,
+            "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+          }
+        },
+        "direct_process_set": {
+          "samples": 2,
+          "host_component_peak_bytes": 7128512,
+          "cli_component_peak_bytes": 2818880,
+          "cli_deduplicated_increment_peak_bytes": 2769728,
+          "observed_deduplicated_aggregate_peak_bytes": 9898240
+        },
+        "output_sha256": "0ac5f79a81e710688b1e5be7b457a7ead8355403673f7934e61e0c7b0b83ff0a",
+        "host_live_descendants": 0,
+        "cli_live_descendants": 0,
+        "completed_work_hold": true
+      }
+    },
+    "target_bytes": 25165824,
+    "target_scope": "current up-to-100-operation milestone aggregate Rui-owned process footprint, including in-process transport/TLS/network-library allocations and all Rui helper processes"
+  },
   "physical_measurement_method": {
     "aggregate_lower_bound": "maximum directly observed de-duplicated Host-plus-CLI total footprint",
-    "aggregate_upper_bound": "unavailable: installed footprint exposes no de-duplicated process-set lifetime peak",
-    "incomparable_counters_excluded": "RSS and separately sampled per-process footprint values are not added",
+    "aggregate_upper_bound": "checked Host lifetime-peak upper plus one maximum ordinary-CLI lifetime-peak upper; conservative sharing double-count is allowed",
+    "incomparable_counters_excluded": "RSS and kernel/socket counters are not added to process phys_footprint",
     "installed_tool_contract": "multiple -p arguments de-duplicate multiply mapped objects and report a total de-duplicated footprint",
-    "ordinary_cli_command": "rui inspect-session",
+    "ordinary_cli_commands": [
+      "inspection",
+      "action_read",
+      "configuration",
+      "message",
+      "denial"
+    ],
+    "ordinary_cli_hold": "opt-in inherited descriptors signal after successful output completion and hold that same CLI until sampling and explicit release",
     "ordinary_cli_population": 1,
     "sampling_interval_seconds": 0.2,
     "tool": "/usr/bin/footprint"
@@ -6278,8 +6625,8 @@
   "sqlite_binary": "/Users/divyanshgolyan/code/personal/rui-issue228/.zig-cache/o/d2a31fd724a48906166dd73b543dd14b/rui-qualification-sqlite3",
   "sqlite_binary_sha256": "8e6483a65f462178c8aa464d3190c0525708223f9585c547712287104b23beeb",
   "sqlite_binary_status": "passed",
-  "status": "unavailable",
-  "tested_revision": "8d315f8ed399c9223f2abed842c9c9124b824666",
+  "status": "passed",
+  "tested_revision": "07f9b7557e2727147900b9a7b91d14677a4793c4",
   "working_tree_dirty": false,
   "zig": "0.16.0"
 }
