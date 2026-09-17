@@ -386,7 +386,6 @@ pub const Execution = struct {
             self.capture_failure = .seal;
         };
         if (self.faults.seal) self.capture_failure = .seal;
-        try self.script.cleanup(self.scratch_path);
         const code: store.ActionResolutionCode = switch (self.stop_reason) {
             .stopped => .cancelled,
             .timed_out => .timed_out,

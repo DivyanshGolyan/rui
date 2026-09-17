@@ -266,6 +266,7 @@ def main():
         "head -c 2097152 /dev/zero | tr '\\0' q",
         timeout_ms=2000,
     )
+    add_exchange(responses, "cleanup", "printf cleaned")
     add_exchange(responses, "preparation", "printf never")
     add_exchange(responses, "spawn", "printf never")
     add_exchange(responses, "capture-read", "printf captured")
@@ -851,6 +852,32 @@ def main():
             "busy-output continuation",
         )
 
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url, "--fault", "bash-cleanup")
+        configure(state, store, "cleanup-config", "direct/cleanup")
+        fixture.message(state, store, "cleanup-message", "direct/cleanup", "execute")
+        cleanup_action = fixture.wait_for(
+            lambda: action_for(store, "direct/cleanup"), "cleanup-failure Bash Action"
+        )
+        allow(state, store, "cleanup-allow", "direct/cleanup", cleanup_action["action"])
+        fixture.wait_for(
+            lambda: resolution(store, "direct/cleanup") == "succeeded",
+            "known result before cleanup failure",
+        )
+        cleanup_report = fixture.command(
+            "inspect-session", "--store", store, "--session", "direct/cleanup"
+        )
+        assert cleanup_report["execution"]["dispatch_fenced"] is True, cleanup_report
+        assert int(cleanup_report["execution"]["custody_occupied"]) > 0, cleanup_report
+        assert list((store / "scratch").glob("bash-*-*.tmp"))
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url)
+        assert resolution(store, "direct/cleanup") == "succeeded"
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "cleanup-message"),
+            "cleanup-failure continuation",
+        )
+
         for name, fault, expected in (
             ("preparation", "bash-preparation", "storage_failed"),
             ("spawn", "bash-spawn", "spawn_failed"),
@@ -1112,7 +1139,7 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 28 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 29 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:
