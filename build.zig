@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 
     const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
+    const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests.zig"),
@@ -216,6 +217,9 @@ pub fn build(b: *std.Build) void {
     });
     measure_queue.setCwd(b.path("tests/qualification"));
     measure_queue.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    if (model_queue_output) |output| {
+        measure_queue.addArgs(&.{ "-output", output });
+    }
     measure_queue.addArtifactArg(release);
     measure_queue.addArtifactArg(addSqliteShell(b, target, .ReleaseSmall));
     const measure_queue_step = b.step(

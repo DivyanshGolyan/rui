@@ -178,6 +178,9 @@ CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,se
 }
 
 func TestPhysicalFootprintStatusUsesConservativeUpperBound(t *testing.T) {
+	if physicalFootprintTargetBytes != 24*1024*1024 {
+		t.Fatalf("physical footprint target = %d, want 24 MiB", physicalFootprintTargetBytes)
+	}
 	tests := []struct {
 		footprint  measurement.Footprint
 		wantStatus string

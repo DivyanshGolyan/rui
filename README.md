@@ -8,7 +8,7 @@ In development. The current runtime supports direct CLI Sessions, queued message
 
 JavaScript workflows, Bash execution, Edit, allow-once permission, Tool Result publication/continuation, structured answers and provider authentication are not implemented yet. The current Bash slice admits valid proposals under `ask` or `bypass`, reports every unresolved Action with its saved authorization, and supports keyed sibling-local denial; it never launches a process. Codex subscription is the planned first live provider; production and live-provider qualification remain outstanding.
 
-Targets Linux and macOS on x86-64 and ARM64. All four cross-compile. Broad runtime/resource qualification has run on Apple Silicon macOS; the model-queue qualification also runs on Linux, where portable counters provide development evidence and macOS physical footprint remains unavailable.
+Targets Linux and macOS on x86-64 and ARM64. All four cross-compile. Broad runtime/resource qualification has run on Apple Silicon macOS. The model-queue workload has run on Linux and macOS; its macOS run passed the required physical-footprint target.
 
 ## Build
 
