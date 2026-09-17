@@ -63,6 +63,10 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             if (faults.client_send_buffer_bytes.? == 0 or faults.client_send_buffer_bytes.? > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
         } else if (std.mem.eql(u8, arg, "--test-phase-trace")) {
             faults.test_phase_trace = true;
+        } else if (std.mem.eql(u8, arg, "--test-control-gate-keys")) {
+            faults.control_gate_keys = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--test-control-gate-path")) {
+            faults.control_gate_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-suppress-first-control-hint")) {
             faults.suppress_first_control_hint = true;
         } else if (std.mem.eql(u8, arg, "--test-sqlite-diagnostics")) {
@@ -77,6 +81,7 @@ fn serve(io: std.Io, args: []const []const u8) !void {
         } else return error.UnknownArgument;
         index += 1;
     }
+    if ((faults.control_gate_keys == null) != (faults.control_gate_path == null)) return error.IncompleteControlGate;
     return server.serve(io, std.heap.c_allocator, store_path orelse return usage(), active_capacity, faults, provider_endpoint);
 }
 

@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from host_process import start_ready_process, stop_process
+from host_process import MilestoneLog, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -359,6 +359,24 @@ def command(*args, expect=0):
     return json.loads(completed.stdout)
 
 
+def start_command(*args):
+    return subprocess.Popen(
+        [str(RUI), *map(str, args)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def finish_command(process):
+    stdout, stderr = process.communicate(timeout=15)
+    if process.returncode != 0:
+        raise AssertionError(
+            f"command returned {process.returncode}: stdout={stdout} stderr={stderr}"
+        )
+    return json.loads(stdout)
+
+
 def start_host(store, endpoint, *extra, accelerated_retries=True):
     args = [
         str(RUI),
@@ -561,6 +579,8 @@ def main():
     success_thread = None
     proposal_endpoint = None
     proposal_thread = None
+    proposal_milestones = None
+    proposal_gate_keeper = None
     completed = False
     try:
         forbidden_effect = state / "proposal-must-not-launch"
@@ -570,7 +590,21 @@ def main():
             ("bash", "call-invalid", "{"),
             ("bash", "call-B", json.dumps({"cmd": "printf second"}, separators=(",", ":"))),
         ]
-        proposal_endpoint = SuccessEndpoint([sse_tool_calls("proposal-response", calls)])
+        race_calls = []
+        race_responses = []
+        for order in ("denial-first", "stop-first"):
+            first_effect = state / f"{order}-first-must-not-launch"
+            second_effect = state / f"{order}-second-must-not-launch"
+            order_calls = [
+                ("bash", f"{order}-call-0", json.dumps({"cmd": f"touch {first_effect}"}, separators=(",", ":"))),
+                ("bash", f"{order}-call-1", json.dumps({"cmd": f"touch {second_effect}"}, separators=(",", ":"))),
+            ]
+            race_calls.append((order_calls, first_effect, second_effect))
+            race_responses.append(sse_tool_calls(f"{order}-response", order_calls))
+        proposal_endpoint = SuccessEndpoint([
+            sse_tool_calls("proposal-response", calls),
+            *race_responses,
+        ])
         proposal_thread = threading.Thread(target=proposal_endpoint.serve_forever, daemon=True)
         proposal_thread.start()
         proposal_url = f"http://127.0.0.1:{proposal_endpoint.server_port}/responses"
@@ -608,8 +642,22 @@ def main():
         assert denied.returncode != 0, denied
         stop_host(proposal_host)
         processes.remove(proposal_host)
-        proposal_host = start_host(proposal_store, None)
+        control_gate = state / "proposal-control-gate"
+        os.mkfifo(control_gate)
+        # Keep both FIFO ends present so neither the Host reader nor fixture
+        # writer can hang during open if its peer fails between milestones.
+        proposal_gate_keeper = os.open(control_gate, os.O_RDWR | os.O_NONBLOCK)
+        proposal_host = start_host(
+            proposal_store,
+            proposal_url,
+            "--test-phase-trace",
+            "--test-control-gate-keys",
+            "denial-first-deny,stop-first-stop",
+            "--test-control-gate-path",
+            control_gate,
+        )
         processes.append(proposal_host)
+        proposal_milestones = MilestoneLog(proposal_host)
         replay = command(
             "retry", "--store", proposal_store, "--record", state / "proposal-denial.json",
             "--kind", "permission-decision",
@@ -619,6 +667,14 @@ def main():
         assert recovered["rejected_calls"]["count"] == "2", recovered
         assert len(recovered["rejected_calls"]["items"]) == 2, recovered
         assert len(recovered["actions"]["unresolved"]) == 1, recovered
+        assert read_action(proposal_store, "direct/proposal", first_request["action"], "call-id") == calls[0][1].encode()
+        assert read_action(proposal_store, "direct/proposal", first_request["action"], "arguments") == calls[0][2].encode()
+        with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT permission_state,resolution_code FROM action_operation WHERE action_id=?",
+                (int(first_request["action"]),),
+            ).fetchone() == (2, "denied")
+        assert recovered["execution"]["custody_occupied"] == "0", recovered
         second = recovered["actions"]["unresolved"][0]
         assert second["call_ordinal"] == "3", second
         assert read_action(proposal_store, "direct/proposal", second["action"], "call-id") == calls[3][1].encode()
@@ -634,8 +690,93 @@ def main():
         )
         assert stale["answer"]["status"] == "rejected" and stale["answer"]["code"] == "action_not_pending", stale
         assert not forbidden_effect.exists()
+
+        for index, order in enumerate(("denial-first", "stop-first")):
+            order_calls, first_effect, second_effect = race_calls[index]
+            session = f"direct/{order}"
+            configure(state, proposal_store, f"{order}-config", session, "model-a")
+            message(state, proposal_store, f"{order}-message", session, f"race {order}")
+            before = wait_for(
+                lambda: (lambda value: value if len(value["actions"]["unresolved"]) == 2 else None)(
+                    command("inspect-session", "--store", proposal_store, "--session", session)
+                ),
+                f"{order} Actions",
+            )
+            actions = before["actions"]["unresolved"]
+            first_key = f"{order}-deny" if order == "denial-first" else f"{order}-stop"
+            second_key = f"{order}-stop" if order == "denial-first" else f"{order}-deny"
+            deny_args = (
+                "deny-action", "--store", proposal_store,
+                "--record", state / f"{order}-deny.json", "--key", f"{order}-deny",
+                "--session", session, "--action", actions[0]["action"],
+            )
+            stop_args = (
+                "stop-session", "--store", proposal_store,
+                "--record", state / f"{order}-stop.json", "--key", f"{order}-stop",
+                "--session", session,
+            )
+            first_process = start_command(*(deny_args if order == "denial-first" else stop_args))
+            second_process = None
+            try:
+                first_lock = proposal_milestones.wait("control_lock_acquired", subject=first_key)[0]
+                assert first_process.poll() is None, "first control did not remain held at the Store owner"
+                second_process = start_command(*(stop_args if order == "denial-first" else deny_args))
+                second_request = proposal_milestones.wait("control_store_queued", subject=second_key)[0]
+                assert second_process.poll() is None, "second control did not remain queued at the Store owner"
+                with control_gate.open("wb", buffering=0) as release:
+                    release.write(b"x")
+                gate_release = proposal_milestones.wait("control_gate_released", subject=first_key)[0]
+                first_result = finish_command(first_process)
+                second_lock = proposal_milestones.wait("control_lock_acquired", subject=second_key)[0]
+                second_result = finish_command(second_process)
+                assert int(first_lock["at_ns"]) < int(second_request["at_ns"])
+                assert int(second_request["at_ns"]) < int(gate_release["at_ns"])
+                assert int(gate_release["at_ns"]) < int(second_lock["at_ns"])
+            finally:
+                if first_process.poll() is None:
+                    first_process.kill()
+                    first_process.wait(timeout=5)
+                if second_process is not None and second_process.poll() is None:
+                    second_process.kill()
+                    second_process.wait(timeout=5)
+
+            denial = first_result if order == "denial-first" else second_result
+            stop = second_result if order == "denial-first" else first_result
+            assert stop["answer"]["status"] == "accepted", stop
+            if order == "denial-first":
+                assert denial["answer"]["status"] == "accepted", denial
+                expected_rows = [(0, 2, "denied"), (1, 0, "cancelled")]
+            else:
+                assert denial["answer"]["status"] == "rejected", denial
+                assert denial["answer"]["code"] == "action_not_pending", denial
+                expected_rows = [(0, 0, "cancelled"), (1, 0, "cancelled")]
+            after = command("inspect-session", "--store", proposal_store, "--session", session)
+            assert after["actions"]["count"] == "2", after
+            assert after["actions"]["unresolved"] == [], after
+            assert after["execution"]["custody_occupied"] == "0", after
+            assert "bash_execution" in after["execution"]["unavailable"], after
+            with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
+                rows = database.execute(
+                    "SELECT call_ordinal,permission_state,resolution_code FROM action_operation "
+                    "WHERE session_ref=? ORDER BY call_ordinal",
+                    (session,),
+                ).fetchall()
+                assert rows == expected_rows, rows
+                assert database.execute(
+                    "SELECT outcome_code FROM turn WHERE session_ref=?", (session,)
+                ).fetchone() == ("cancelled",)
+            for action, expected in zip(actions, order_calls):
+                assert read_action(proposal_store, session, action["action"], "call-id") == expected[1].encode()
+                assert read_action(proposal_store, session, action["action"], "arguments") == expected[2].encode()
+            assert not first_effect.exists()
+            assert not second_effect.exists()
+
         stop_host(proposal_host)
         processes.remove(proposal_host)
+        proposal_milestones.close()
+        proposal_milestones = None
+        os.close(proposal_gate_keeper)
+        proposal_gate_keeper = None
 
         first_answer = 'First "answer"\n🙂'.encode()
         second_answer = ("second answer " + "x" * 5000).encode()
@@ -3638,6 +3779,10 @@ def main():
             proposal_endpoint.server_close()
         if proposal_thread is not None:
             proposal_thread.join(timeout=5)
+        if proposal_milestones is not None:
+            proposal_milestones.close()
+        if proposal_gate_keeper is not None:
+            os.close(proposal_gate_keeper)
         if completed:
             shutil.rmtree(state)
         else:

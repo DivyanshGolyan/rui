@@ -58,6 +58,8 @@ pub const Faults = struct {
     report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
+    control_gate_keys: ?[]const u8 = null,
+    control_gate_path: ?[]const u8 = null,
     suppress_first_control_hint: bool = false,
     sqlite_diagnostics: bool = false,
     sqlite_cache_spill: bool = true,
@@ -1077,7 +1079,7 @@ const ControlTiming = struct {
     command_key: []const u8,
     kind: []const u8,
     accepted_at_ns: u64,
-    store_queued_ns: u64,
+    store_queued_ns: u64 = 0,
     lock_acquired_ns: u64 = 0,
     store_complete_ns: u64 = 0,
 
@@ -1087,7 +1089,6 @@ const ControlTiming = struct {
             .command_key = command_key,
             .kind = kind,
             .accepted_at_ns = accepted_at_ns,
-            .store_queued_ns = nowNs(host),
         };
     }
 
@@ -1099,15 +1100,42 @@ const ControlTiming = struct {
     fn markStore(context: *anyopaque, phase: store_module.ControlTracePhase) void {
         const self: *ControlTiming = @ptrCast(@alignCast(context));
         switch (phase) {
-            .lock_acquired => self.lock_acquired_ns = nowNs(self.host),
+            .lock_requested => {
+                self.store_queued_ns = nowNs(self.host);
+                traceSubject(self.host, "control_store_queued", "command_key", self.command_key);
+            },
+            .lock_acquired => {
+                self.lock_acquired_ns = nowNs(self.host);
+                traceSubject(self.host, "control_lock_acquired", "command_key", self.command_key);
+                self.waitAtTestGate();
+            },
             .store_complete => self.store_complete_ns = nowNs(self.host),
+        }
+    }
+
+    fn waitAtTestGate(self: *ControlTiming) void {
+        const keys = self.host.faults.control_gate_keys orelse return;
+        const path = self.host.faults.control_gate_path orelse return;
+        var candidates = std.mem.splitScalar(u8, keys, ',');
+        while (candidates.next()) |candidate| {
+            if (!std.mem.eql(u8, candidate, self.command_key)) continue;
+            // Integration tests deliberately hold this acquired Store mutex
+            // until a competing control reaches lock_requested. Their keeper
+            // descriptor prevents FIFO-open deadlock; process teardown bounds
+            // a missing release without granting this gate semantic authority.
+            var gate = std.Io.Dir.cwd().openFile(self.host.io, path, .{}) catch return;
+            defer gate.close(self.host.io);
+            var release: [1]u8 = undefined;
+            const count = gate.readStreaming(self.host.io, &.{&release}) catch return;
+            if (count == 1) traceSubject(self.host, "control_gate_released", "command_key", self.command_key);
+            return;
         }
     }
 
     fn replyComplete(self: *ControlTiming) void {
         if (!self.host.faults.test_phase_trace) return;
         const reply_complete_ns = nowNs(self.host);
-        if (self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
+        if (self.store_queued_ns == 0 or self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
         var trace: protocol.ResponseBuffer = .{};
         trace.append("{\"rui_test_phase\":\"control_timing\",\"command_key\":") catch return;
         trace.appendJsonString(self.command_key) catch return;

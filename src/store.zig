@@ -45,7 +45,7 @@ pub const Faults = struct {
     settlement_trace: ?SettlementTrace = null,
 };
 
-pub const ControlTracePhase = enum { lock_acquired, store_complete };
+pub const ControlTracePhase = enum { lock_requested, lock_acquired, store_complete };
 
 pub const ControlTrace = struct {
     context: *anyopaque,
@@ -1597,6 +1597,7 @@ pub const Store = struct {
         faults: Faults,
     ) SessionStopReply {
         if (self.fenced.load(.acquire)) return .infrastructure_failure;
+        if (faults.control_trace) |trace| trace.mark(.lock_requested);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (faults.control_trace) |trace| trace.mark(.lock_acquired);
@@ -1763,6 +1764,7 @@ pub const Store = struct {
         faults: Faults,
     ) ModelInterruptionReply {
         if (self.fenced.load(.acquire)) return .infrastructure_failure;
+        if (faults.control_trace) |trace| trace.mark(.lock_requested);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (faults.control_trace) |trace| trace.mark(.lock_acquired);
@@ -1951,6 +1953,7 @@ pub const Store = struct {
         faults: Faults,
     ) PermissionDecisionReply {
         if (self.fenced.load(.acquire)) return .infrastructure_failure;
+        if (faults.control_trace) |trace| trace.mark(.lock_requested);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (faults.control_trace) |trace| trace.mark(.lock_acquired);
@@ -5250,6 +5253,19 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     const recovered = try reopened.inspectSession("direct/mixed-calls");
     try std.testing.expectEqual(@as(u64, 2), recovered.action_count);
     try std.testing.expectEqual(@as(u64, 5), recovered.rejected_call_count);
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        reopened.database,
+        "SELECT count(*) FROM action_operation WHERE action_id=(SELECT min(action_id) FROM action_operation) " ++
+            "AND parent_operation_id=(SELECT min(parent_operation_id) FROM action_operation) " ++
+            "AND call_ordinal=0 AND permission_state=2 AND resolution_code='denied'",
+    ));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        reopened.database,
+        "SELECT count(*) FROM permission_decision_command WHERE command_key='mixed-deny' " ++
+            "AND action_id=CAST((SELECT min(action_id) FROM action_operation) AS TEXT)",
+    ));
+    try expectContent(&reopened, try reopened.actionCallId("direct/mixed-calls", first_action_id), "call-1");
+    try expectContent(&reopened, try reopened.actionArguments("direct/mixed-calls", first_action_id), "{\"cmd\":\"one\"}");
     const recovered_bytes = try testingSessionReport(&reopened, &tmp, "direct/mixed-calls", 1024 * 1024);
     defer std.testing.allocator.free(recovered_bytes);
     const recovered_report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, recovered_bytes, .{ .ignore_unknown_fields = true });

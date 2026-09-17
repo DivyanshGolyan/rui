@@ -1,0 +1,104 @@
+{
+  "recorded_utc": "2026-09-16T18:37:55Z",
+  "tested_revision": "1cf4a17c108d15e68745f80464c8abd36f604165",
+  "working_tree_dirty": false,
+  "environment": {
+    "runtime": "Amp Linux orb",
+    "platform": "Linux 6.1.158+ x86_64",
+    "os": "Debian GNU/Linux 12 (bookworm)",
+    "cpu_model": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "logical_cpu_count": 1,
+    "memory_bytes": 2079363072,
+    "zig_version": "0.16.0",
+    "python_version": "3.11.6",
+    "go_version_available_but_not_used": "1.27.1",
+    "xcrun": "unavailable"
+  },
+  "cache_conditions": "Existing orb Zig dependency and compiler caches; no dependency, build-graph, or persisted-format change in this follow-up",
+  "dependencies": {
+    "sqlite": {
+      "version": "3.53.4",
+      "zig_package_hash": "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8"
+    },
+    "curl": {
+      "version": "8.22.0",
+      "zig_package_hash": "N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM"
+    },
+    "openssl": {
+      "version": "3.6.3",
+      "zig_package_hash": "N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM"
+    }
+  },
+  "inputs": {
+    "race_commit_orders": [
+      "permission denial before Session stop",
+      "Session stop before permission denial"
+    ],
+    "owner_milestones": [
+      "first control acquired Store mutex",
+      "second control requested Store mutex",
+      "test gate released",
+      "second control acquired Store mutex"
+    ],
+    "restart_population": "two rejected calls, one denied Bash Action, and one unresolved Bash Action",
+    "source_sha256": {
+      "src/server.zig": "bbf7032095501b7cd811c9b943086e05b22c0a90dfd3fcc8fa518cb3a59b2f0c",
+      "src/store.zig": "a2e145ab89b7d87c8c5b9802f8926c5ddf098685dd40019c22cf82f7b79cc2a8",
+      "tests/integration/dispatch_integration.py": "bf42c268cfa1cc3f7f7dfd5974e55d3e55ec5dd68507236c1fc1b67ef25adfad",
+      "tests/integration/host_process.py": "8a9e2f8f4e5238b87616324fd1aa20d65f45a8db9f857bf4acbbff8d72cc4a6f",
+      "build.zig": "2ec46a4694813e702d52056db98f0b398bd80223830fa635a6d905e6abc09151",
+      "build.zig.zon": "b89b0baf9cfaa6be2bc72fa9f386243094c1ce70d113540743c1969f80d6a7fc"
+    }
+  },
+  "gates": [
+    {
+      "command": "zig build check",
+      "exit_code": 0,
+      "elapsed_seconds": 263.38,
+      "result": "passed",
+      "diagnostics": {
+        "control_count": 25,
+        "control_p95_ms": 7.0,
+        "control_first_p95_ms": 10.0,
+        "real_settlement_p95_ms": 8.7,
+        "overlap_controls": 2,
+        "blocked_result_control_ms": 5.4,
+        "exact_ack_ms": 1.9,
+        "exhausted_recovery_inspection_samples": 7,
+        "exhausted_recovery_inspection_p95_ms": 38.0,
+        "non_failing_admission_diagnostics": "transient missing drain-ready and wire-ready marker files"
+      }
+    },
+    {
+      "command": "zig build cross-check-linux",
+      "exit_code": 0,
+      "elapsed_seconds": 1.29,
+      "result": "passed",
+      "targets": [
+        "Linux x86-64",
+        "Linux ARM64"
+      ]
+    },
+    {
+      "command": "python3 -m py_compile tests/integration/host_process.py tests/integration/control_integration.py tests/integration/dispatch_integration.py",
+      "exit_code": 0,
+      "result": "passed"
+    },
+    {
+      "command": "zig fmt --check --ast-check build.zig src",
+      "exit_code": 0,
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0,
+      "result": "passed"
+    }
+  ],
+  "qualification_limits": [
+    "Deterministic development evidence, not resource qualification",
+    "Bash execution, Action Attempts, allow-once, Tool Result publication, and model continuation remain unavailable",
+    "No live provider, macOS runtime, Linux filesystem durability, or power-loss qualification",
+    "macOS cross-compilation was not run because the Linux orb has no Apple SDK or xcrun"
+  ]
+}

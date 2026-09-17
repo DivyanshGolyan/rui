@@ -1,13 +1,70 @@
 """Bounded startup and cleanup for Host processes used by integration evidence."""
 
+import json
 import os
 import selectors
 import subprocess
+import threading
 import time
 
 
 READINESS_LIMIT = 16 * 1024
 STDERR_TAIL_LIMIT = 16 * 1024
+
+
+class MilestoneLog:
+    """Collect test-only Host phase records without competing stderr readers."""
+
+    def __init__(self, process):
+        self.process = process
+        self.condition = threading.Condition()
+        self.records = []
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        for raw_line in self.process.stderr:
+            try:
+                record = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if "rui_test_phase" not in record:
+                continue
+            with self.condition:
+                self.records.append(record)
+                self.condition.notify_all()
+
+    def matching(self, phase, **fields):
+        with self.condition:
+            return [
+                record
+                for record in self.records
+                if record["rui_test_phase"] == phase
+                and all(record.get(name) == value for name, value in fields.items())
+            ]
+
+    def wait(self, phase, count=1, timeout=10, **fields):
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while True:
+                matches = [
+                    record
+                    for record in self.records
+                    if record["rui_test_phase"] == phase
+                    and all(record.get(name) == value for name, value in fields.items())
+                ]
+                if len(matches) >= count:
+                    return matches
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(
+                        f"timed out waiting for {count} {phase} milestones: "
+                        f"{self.records[-12:]}"
+                    )
+                self.condition.wait(remaining)
+
+    def close(self):
+        self.thread.join(timeout=3)
 
 
 class HostStartError(RuntimeError):
