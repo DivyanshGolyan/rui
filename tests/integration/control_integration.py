@@ -464,16 +464,16 @@ def submit_prepared_request(prepared, start):
         connection.close()
 
 
-def open_complete_inspection(socket_path, store, session):
-    body = json.dumps(
-        {
-            "version": "1",
-            "kind": "inspect_session",
-            "store": str(store),
-            "session": session,
-        },
-        separators=(",", ":"),
-    ).encode()
+def open_complete_inspection(socket_path, store, session, profile):
+    request = {
+        "version": "1",
+        "kind": "inspect_session",
+        "store": str(store),
+        "session": session,
+    }
+    if profile == "full":
+        request["profile"] = "full"
+    body = json.dumps(request, separators=(",", ":")).encode()
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(15)
     connection.connect(socket_path)
@@ -493,7 +493,12 @@ def fill_complete_inspections(socket_path, store, session):
     while len(held) < ORDINARY_CLIENTS and attempts < ORDINARY_CLIENTS * 5:
         attempts += 1
         try:
-            candidate = open_complete_inspection(socket_path, store, session)
+            candidate = open_complete_inspection(
+                socket_path,
+                store,
+                session,
+                "current" if attempts % 2 else "full",
+            )
         except (BrokenPipeError, ConnectionResetError):
             time.sleep(0.01)
             continue
@@ -640,7 +645,7 @@ def maximum_body(kind):
 def check_schema(database_path):
     database = sqlite3.connect(database_path)
     try:
-        assert database.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 13
         stop_columns = [
             row[1] for row in database.execute("PRAGMA table_info(session_stop)")
         ]

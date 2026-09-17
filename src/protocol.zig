@@ -211,9 +211,12 @@ pub const ReadResult = struct {
     key: Bounded(max_key_bytes) = .{},
 };
 
+pub const ReportProfile = enum { current, full };
+
 pub const InspectSession = struct {
     store: Bounded(max_store_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
+    profile: ReportProfile = .current,
 };
 
 pub const Request = union(Kind) {
@@ -552,6 +555,12 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("session");
         try self.readSmallString(&request.session);
+        if (try self.consumeIf(',')) {
+            try self.expectKey("profile");
+            var profile: Bounded(16) = .{};
+            try self.readSmallString(&profile);
+            request.profile = if (profile.eql("full")) .full else return error.UnknownReportProfile;
+        }
         return request;
     }
 
@@ -917,7 +926,8 @@ pub const max_read_result_request_bytes =
 pub const max_inspect_session_request_bytes =
     "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) +
-    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) + "}".len;
+    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"profile\":\"full\"}".len;
 pub const max_read_action_arguments_request_bytes =
     "{\"version\":\"1\",\"kind\":\"read_action_arguments\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) +
@@ -1277,4 +1287,41 @@ test "observation needs no scratch at a full budget" {
     const request = try parser.parse();
     try std.testing.expect(request == .observe_command);
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+}
+
+test "Session report profile is closed and omission selects Current" {
+    const cases = [_]struct { json: []const u8, expected: ?ReportProfile }{
+        .{
+            .json = "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\"}",
+            .expected = .current,
+        },
+        .{
+            .json = "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"full\"}",
+            .expected = .full,
+        },
+        .{
+            .json = "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"current\"}",
+            .expected = null,
+        },
+    };
+    for (cases) |case| {
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..case.json.len], case.json);
+        source.end = case.json.len;
+        var cleanup_failed = false;
+        var parser = Parser{ .source = &source, .options = .{
+            .io = std.testing.io,
+            .fd = -1,
+            .content_length = case.json.len,
+            .scratch_path = "unused",
+            .request_number = 0,
+            .cleanup_failed = &cleanup_failed,
+        } };
+        if (case.expected) |expected| {
+            const request = try parser.parse();
+            try std.testing.expectEqual(expected, request.inspect_session.profile);
+        } else {
+            try std.testing.expectError(error.UnknownReportProfile, parser.parse());
+        }
+    }
 }

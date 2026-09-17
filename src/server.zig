@@ -1435,6 +1435,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
                 .scratch_path = host.lease.paths.scratch.slice(),
                 .scratch_budget = .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },
                 .request_number = request_number,
+                .profile = request_value.profile,
                 .fail_unlink = host.faults.report_unlink,
                 .execution = .{
                     .dispatch_fenced = host.dispatch_fenced.load(.acquire),

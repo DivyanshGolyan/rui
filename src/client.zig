@@ -87,6 +87,7 @@ fn renderReadRequest(
     target_name: []const u8,
     target: []const u8,
     action_id: ?u64,
+    report_profile: ?protocol.ReportProfile,
 ) !void {
     try body.append("{\"version\":\"1\",\"kind\":");
     try body.appendJsonString(kind);
@@ -97,6 +98,9 @@ fn renderReadRequest(
     try body.append(":");
     try body.appendJsonString(target);
     if (action_id) |id| try body.appendFmt(",\"action\":\"{d}\"", .{id});
+    if (report_profile) |profile| {
+        if (profile == .full) try body.append(",\"profile\":\"full\"");
+    }
     try body.append("}");
 }
 
@@ -190,7 +194,7 @@ pub fn observeCommand(
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     const paths = try platform.resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
-    try renderReadRequest(&body, "observe_command", paths.store.slice(), "key", key, null);
+    try renderReadRequest(&body, "observe_command", paths.store.slice(), "key", key, null, null);
     return sendBytes(io, &paths, "/v1/observe-command", body.slice(), null, reply_buffer);
 }
 
@@ -205,7 +209,7 @@ pub fn readResult(
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     const paths = try platform.resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
-    try renderReadRequest(&body, "read_result", paths.store.slice(), "key", key, null);
+    try renderReadRequest(&body, "read_result", paths.store.slice(), "key", key, null, null);
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
     const stream = try address.connect(io);
     defer stream.close(io);
@@ -221,6 +225,7 @@ pub fn inspectSession(
     io: std.Io,
     store_path: []const u8,
     session: []const u8,
+    profile: protocol.ReportProfile,
     destination: std.Io.File,
     reply_buffer: *ReplyBuffer,
 ) !ReportReply {
@@ -229,7 +234,7 @@ pub fn inspectSession(
         !std.unicode.utf8ValidateSlice(session)) return error.InvalidSession;
     const paths = try platform.resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
-    try renderReadRequest(&body, "inspect_session", paths.store.slice(), "session", session, null);
+    try renderReadRequest(&body, "inspect_session", paths.store.slice(), "session", session, null, profile);
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
     const stream = try address.connect(io);
     defer stream.close(io);
@@ -277,7 +282,7 @@ fn readActionContent(
     if (session.len == 0 or session.len > protocol.max_session_bytes or action_id == 0) return error.InvalidTarget;
     const paths = try platform.resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
-    try renderReadRequest(&body, kind, paths.store.slice(), "session", session, action_id);
+    try renderReadRequest(&body, kind, paths.store.slice(), "session", session, action_id, null);
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
     const stream = try address.connect(io);
     defer stream.close(io);
@@ -1108,16 +1113,16 @@ test "bounded read requests attain their independent worst-case capacities" {
     const escaped_key = [_]u8{1} ** protocol.max_key_bytes;
     const escaped_session = [_]u8{1} ** protocol.max_session_bytes;
     const cases = .{
-        .{ "observe_command", "key", &escaped_key, null, protocol.max_observe_command_request_bytes },
-        .{ "read_result", "key", &escaped_key, null, protocol.max_read_result_request_bytes },
-        .{ "inspect_session", "session", &escaped_session, null, protocol.max_inspect_session_request_bytes },
-        .{ "read_action_call_id", "session", &escaped_session, std.math.maxInt(u64), protocol.max_read_action_call_id_request_bytes },
-        .{ "read_action_arguments", "session", &escaped_session, std.math.maxInt(u64), protocol.max_read_action_arguments_request_bytes },
+        .{ "observe_command", "key", &escaped_key, null, null, protocol.max_observe_command_request_bytes },
+        .{ "read_result", "key", &escaped_key, null, null, protocol.max_read_result_request_bytes },
+        .{ "inspect_session", "session", &escaped_session, null, protocol.ReportProfile.full, protocol.max_inspect_session_request_bytes },
+        .{ "read_action_call_id", "session", &escaped_session, std.math.maxInt(u64), null, protocol.max_read_action_call_id_request_bytes },
+        .{ "read_action_arguments", "session", &escaped_session, std.math.maxInt(u64), null, protocol.max_read_action_arguments_request_bytes },
     };
     inline for (cases) |case| {
         var body: protocol.RequestBuffer = .{};
-        try renderReadRequest(&body, case[0], &escaped_store, case[1], case[2], case[3]);
-        try std.testing.expectEqual(@as(usize, case[4]), body.len);
+        try renderReadRequest(&body, case[0], &escaped_store, case[1], case[2], case[3], case[4]);
+        try std.testing.expectEqual(@as(usize, case[5]), body.len);
     }
     var full: protocol.RequestBuffer = .{};
     full.len = full.bytes.len;

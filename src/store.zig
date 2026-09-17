@@ -8,7 +8,7 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 12;
+pub const schema_version: u32 = 13;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const complete_tool_results_sql =
@@ -61,6 +61,10 @@ const continuation_risk_sql =
     "SELECT 1 FROM model_output_item WHERE session_ref=?1 UNION ALL " ++
     "SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND current.resolution_code IS NULL LIMIT 1";
+const session_stop_cutoff_sql =
+    "SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1";
+const pending_message_count_sql =
+    "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2";
 const retry_admission_select_sql =
     "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation " ++
     "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND allowance_used<4 " ++
@@ -890,6 +894,7 @@ pub const SessionReportOptions = struct {
     scratch_path: []const u8,
     scratch_budget: protocol.ScratchBudget,
     request_number: u64,
+    profile: protocol.ReportProfile = .current,
     execution: SessionReportExecution,
     fail_unlink: bool = false,
 };
@@ -971,6 +976,11 @@ const SessionReportCapture = struct {
 
     fn appendJsonString(self: *SessionReportCapture, value: []const u8) !void {
         try self.append("\"");
+        try self.appendJsonStringBytes(value);
+        try self.append("\"");
+    }
+
+    fn appendJsonStringBytes(self: *SessionReportCapture, value: []const u8) !void {
         var run_start: usize = 0;
         for (value, 0..) |byte, index| {
             const escaped: ?[]const u8 = switch (byte) {
@@ -995,7 +1005,6 @@ const SessionReportCapture = struct {
             run_start = index + 1;
         }
         if (run_start != value.len) try self.append(value[run_start..]);
-        try self.append("\"");
     }
 
     fn appendContentReference(self: *SessionReportCapture, reference: ContentReference) !void {
@@ -1099,6 +1108,22 @@ const CurrentConfiguration = struct {
     output_schema_id: ?i64 = null,
     revision: u64 = 0,
     next_position: u64 = 1,
+};
+
+const MessageProjection = struct {
+    admission_id: u64,
+    command_key: protocol.Bounded(128),
+    session: protocol.Bounded(protocol.max_session_bytes),
+    content_id: i64,
+    state: union(enum) {
+        pending,
+        excluded: protocol.Bounded(128),
+        applied: struct {
+            binding: AttemptBinding,
+            outcome_code: ?protocol.Bounded(96),
+            outcome_content_id: ?i64,
+        },
+    },
 };
 
 const ConfigurationContentAction = enum(u2) {
@@ -2168,9 +2193,11 @@ pub const Store = struct {
     ) !?AcceptedMessageQueue {
         const statement = try prepare(
             self.database,
-            "SELECT m.session_ref,m.content_id,m.admission_id,m.turn_id,t.operation_id,t.outcome_code,o.attempt_ordinal,t.outcome_content_id," ++
-                "EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
-                "AND m.admission_id<=stopped.admission_cutoff) " ++
+            "SELECT m.session_ref,m.content_id,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal," ++
+                "t.outcome_code,t.outcome_content_id,CASE WHEN m.turn_id IS NULL THEN (" ++
+                "SELECT stopped.command_key FROM session_stop stopped JOIN core_command stop_command " ++
+                "ON stop_command.command_key=stopped.command_key WHERE stopped.session_ref=m.session_ref " ++
+                "AND m.admission_id<=stopped.admission_cutoff ORDER BY stop_command.rowid LIMIT 1) END " ++
                 "FROM message_admission m " ++
                 "LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
                 "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
@@ -2182,58 +2209,32 @@ pub const Store = struct {
         if (step == c.SQLITE_DONE) return if (accepted) error.CorruptStore else null;
         if (step != c.SQLITE_ROW) return error.CorruptStore;
         if (!accepted) return error.CorruptStore;
-        var actual_session: protocol.Bounded(protocol.max_session_bytes) = .{};
-        readText(statement, 0, &actual_session) catch return error.CorruptStore;
-        if (!actual_session.eql(session_ref)) return error.CorruptStore;
-        const actual_content_id = c.sqlite3_column_int64(statement, 1);
-        if (actual_content_id <= 0 or actual_content_id != content_id) return error.CorruptStore;
-        const admission_id = c.sqlite3_column_int64(statement, 2);
-        if (admission_id <= 0) return error.CorruptStore;
-        const turn_id = try readNullablePositiveI64(statement, 3);
-        if (turn_id == null) {
-            if (c.sqlite3_column_int(statement, 8) != 0) {
+        const projection = try readMessageProjectionRow(statement);
+        if (!projection.session.eql(session_ref) or projection.content_id != content_id or
+            !projection.command_key.eql(command_key)) return error.CorruptStore;
+        return switch (projection.state) {
+            .pending => .{ .admission_id = projection.admission_id, .state = .queued },
+            .excluded => blk: {
                 var code: protocol.Bounded(96) = .{};
                 try code.set("session_stopped");
-                return .{ .admission_id = @intCast(admission_id), .state = .{ .excluded = .{ .code = code } } };
-            }
-            return .{ .admission_id = @intCast(admission_id), .state = .queued };
-        }
-        const binding = AttemptBinding{
-            .turn_id = @intCast(turn_id.?),
-            .operation_id = @intCast(try readNullablePositiveI64(statement, 4) orelse
-                return error.CorruptStore),
-            .attempt_ordinal = @intCast(try readNullablePositiveI64(statement, 6) orelse
-                return error.CorruptStore),
-        };
-        if (c.sqlite3_column_type(statement, 5) == c.SQLITE_NULL) {
-            if (c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL) return error.CorruptStore;
-            return .{ .admission_id = @intCast(admission_id), .state = .{ .processing = binding } };
-        }
-        var outcome: protocol.Bounded(96) = .{};
-        try readText(statement, 5, &outcome);
-        if (outcome.eql("completed")) {
-            const answer_id = try readNullablePositiveI64(statement, 7) orelse return error.CorruptStore;
-            const answer = try self.readContentMetadata(answer_id);
-            return .{
-                .admission_id = @intCast(admission_id),
-                .state = .{ .completed = .{
-                    .binding = binding,
-                    .answer = .{ .length = answer.length, .digest = answer.digest },
-                } },
-            };
-        }
-        if (outcome.eql("cancelled")) {
-            if (c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL) return error.CorruptStore;
-            return .{
-                .admission_id = @intCast(admission_id),
-                .state = .{ .cancelled = .{ .binding = binding, .code = outcome } },
-            };
-        }
-        if (outcome.len == 0 or c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL)
-            return error.CorruptStore;
-        return .{
-            .admission_id = @intCast(admission_id),
-            .state = .{ .failed = .{ .binding = binding, .code = outcome } },
+                break :blk .{ .admission_id = projection.admission_id, .state = .{ .excluded = .{ .code = code } } };
+            },
+            .applied => |applied| blk: {
+                const outcome = applied.outcome_code orelse
+                    break :blk .{ .admission_id = projection.admission_id, .state = .{ .processing = applied.binding } };
+                if (outcome.eql("completed")) {
+                    const answer = try self.readContentMetadata(applied.outcome_content_id orelse return error.CorruptStore);
+                    break :blk .{ .admission_id = projection.admission_id, .state = .{ .completed = .{
+                        .binding = applied.binding,
+                        .answer = .{ .length = answer.length, .digest = answer.digest },
+                    } } };
+                }
+                if (applied.outcome_content_id != null) return error.CorruptStore;
+                break :blk if (outcome.eql("cancelled"))
+                    .{ .admission_id = projection.admission_id, .state = .{ .cancelled = .{ .binding = applied.binding, .code = outcome } } }
+                else
+                    .{ .admission_id = projection.admission_id, .state = .{ .failed = .{ .binding = applied.binding, .code = outcome } } };
+            },
         };
     }
 
@@ -2309,7 +2310,7 @@ pub const Store = struct {
         errdefer capture.deinit();
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
-        const capture_result = self.renderSessionReportLocked(session_ref, options.execution, &capture);
+        const capture_result = self.renderSessionReportLocked(session_ref, options.profile, options.execution, &capture);
         capture_result catch |err| {
             if (!capture.ordinary_failure) self.fenced.store(true, .release);
             self.mutex.unlock(self.io);
@@ -2322,12 +2323,15 @@ pub const Store = struct {
     fn renderSessionReportLocked(
         self: *Store,
         session_ref: []const u8,
+        profile: protocol.ReportProfile,
         execution: SessionReportExecution,
         capture: *SessionReportCapture,
     ) !void {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         const maybe_current = try self.readSession(session_ref);
-        try capture.append("{\"version\":\"1\",\"type\":\"session_observation\",\"session\":");
+        try capture.append("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"");
+        try capture.append(@tagName(profile));
+        try capture.append("\",\"session\":");
         const current = maybe_current orelse {
             try capture.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}");
             return;
@@ -2368,8 +2372,9 @@ pub const Store = struct {
         } else {
             try capture.append("null");
         }
-        try capture.appendFmt("}},\"pending_messages\":\"{d}\",\"actions\":{{\"count\":\"{d}\",\"unresolved\":[", .{
-            pending_messages,
+        try capture.appendFmt("}},\"pending_messages\":\"{d}\",\"work\":", .{pending_messages});
+        try self.appendCurrentWork(session_ref, pending_messages, capture);
+        try capture.appendFmt(",\"actions\":{{\"count\":\"{d}\",\"unresolved\":[", .{
             action_count,
         });
         try self.appendUnresolvedActions(session_ref, capture);
@@ -2377,11 +2382,149 @@ pub const Store = struct {
         try self.appendResolvedActions(session_ref, capture);
         try capture.appendFmt("]}},\"rejected_calls\":{{\"count\":\"{d}\",\"items\":[", .{rejected_call_count});
         try self.appendRejectedCalls(session_ref, capture);
-        try capture.appendFmt("]}},\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\",\"allow_once\",\"bash_execution\"]}}}}", .{
+        try capture.append("]},\"actionable_permissions\":[");
+        try self.appendActionablePermissions(session_ref, capture);
+        try capture.append("]");
+        if (profile == .full) {
+            try capture.append(",\"full\":{\"session_revisions\":[");
+            try self.appendSessionRevisions(session_ref, capture);
+            try capture.append("],\"messages\":[");
+            try self.appendMessages(session_ref, capture);
+            try capture.append("],\"conversation\":[");
+            try self.appendConversation(session_ref, capture);
+            try capture.append("],\"turns\":[");
+            try self.appendTurns(session_ref, capture);
+            try capture.append("],\"model_operations\":[");
+            try self.appendModelOperations(session_ref, capture);
+            try capture.append("],\"tool_calls\":[");
+            try self.appendToolCalls(session_ref, capture);
+            try capture.append("],\"actions\":[");
+            try self.appendAllActions(session_ref, capture);
+            try capture.append("],\"permission_decisions\":[");
+            try self.appendPermissionDecisions(session_ref, capture);
+            try capture.append("],\"session_stops\":[");
+            try self.appendSessionStops(session_ref, capture);
+            try capture.append("],\"model_interruptions\":[");
+            try self.appendModelInterruptions(session_ref, capture);
+            try capture.append("],\"tool_results\":[");
+            try self.appendToolResults(session_ref, capture);
+            try capture.append("]}");
+        }
+        try capture.appendFmt(",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\",\"allow_once\",\"bash_execution\"]}}}}", .{
             if (execution.dispatch_fenced) "true" else "false",
             execution.custody_occupied,
             execution.scratch_used_bytes,
         });
+    }
+
+    fn appendCurrentWork(self: *Store, session_ref: []const u8, pending_messages: u64, capture: *SessionReportCapture) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.resolution_code " ++
+                "FROM turn t JOIN model_operation o ON o.operation_id=t.operation_id " ++
+                "WHERE t.session_ref=?1 ORDER BY t.turn_id DESC LIMIT 1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return capture.append(if (pending_messages == 0)
+            "{\"status\":\"idle\",\"latest_outcome\":null}"
+        else
+            "{\"status\":\"runnable\",\"latest_outcome\":null}");
+        if (result != c.SQLITE_ROW) return error.TurnReadFailed;
+        const turn_id = c.sqlite3_column_int64(statement, 0);
+        const operation_id = c.sqlite3_column_int64(statement, 1);
+        if (turn_id <= 0 or operation_id <= 0) return error.CorruptStore;
+        if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) {
+            const actionable = try self.countActionablePermissions(session_ref);
+            const unresolved_actions = try self.countUnresolvedActiveActions(session_ref);
+            var status: []const u8 = "in_flight";
+            if (c.sqlite3_column_type(statement, 4) != c.SQLITE_NULL) {
+                var resolution: protocol.Bounded(96) = .{};
+                try readText(statement, 4, &resolution);
+                status = if (resolution.eql("continued") or resolution.eql("interrupted"))
+                    "runnable"
+                else if (resolution.eql("tool_calls") and actionable != 0)
+                    "waiting_for_permission"
+                else if (resolution.eql("tool_calls") and unresolved_actions == 0)
+                    "runnable"
+                else
+                    "in_flight";
+            }
+            return capture.appendFmt("{{\"status\":\"{s}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"latest_outcome\":null}}", .{ status, turn_id, operation_id });
+        }
+        var code: protocol.Bounded(96) = .{};
+        try readText(statement, 2, &code);
+        const status = if (pending_messages != 0)
+            "runnable"
+        else if (code.eql("completed"))
+            "completed"
+        else if (code.eql("cancelled"))
+            "cancelled"
+        else
+            "failed";
+        try capture.append("{\"status\":");
+        try capture.appendJsonString(status);
+        try capture.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"latest_outcome\":{{\"code\":", .{ turn_id, operation_id });
+        try capture.appendJsonString(code.slice());
+        try capture.append(",\"content\":");
+        if (try readNullablePositiveI64(statement, 3)) |content_id| {
+            const metadata = try self.readContentMetadata(content_id);
+            try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
+        } else {
+            try capture.append("null");
+        }
+        try capture.append("}}");
+    }
+
+    fn countActionablePermissions(self: *Store, session_ref: []const u8) !u64 {
+        const statement = try prepare(
+            self.database,
+            "SELECT count(*) FROM turn active INDEXED BY turn_one_active_per_session " ++
+                "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
+                "WHERE active.session_ref=?1 AND active.outcome_code IS NULL " ++
+                "AND action.permission_state=0 AND action.resolution_code IS NULL",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ActionReadFailed;
+        const count = c.sqlite3_column_int64(statement, 0);
+        if (count < 0) return error.CorruptStore;
+        return @intCast(count);
+    }
+
+    fn countUnresolvedActiveActions(self: *Store, session_ref: []const u8) !u64 {
+        const statement = try prepare(
+            self.database,
+            "SELECT count(*) FROM turn active INDEXED BY turn_one_active_per_session " ++
+                "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
+                "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND action.resolution_code IS NULL",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ActionReadFailed;
+        const count = c.sqlite3_column_int64(statement, 0);
+        if (count < 0) return error.CorruptStore;
+        return @intCast(count);
+    }
+
+    fn appendActionablePermissions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT action.action_id,action.permission_revision FROM turn active INDEXED BY turn_one_active_per_session " ++
+                "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
+                "WHERE active.session_ref=?1 AND active.outcome_code IS NULL " ++
+                "AND action.permission_state=0 AND action.resolution_code IS NULL ORDER BY action.action_id",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.ActionReadFailed)) {
+            const action_id = c.sqlite3_column_int64(statement, 0);
+            const revision = c.sqlite3_column_int64(statement, 1);
+            if (action_id <= 0 or revision <= 0) return error.CorruptStore;
+            try capture.appendFmt("{{\"action\":\"{d}\",\"permission_revision\":\"{d}\"}}", .{ action_id, revision });
+        }
     }
 
     fn appendUnresolvedActions(
@@ -2558,6 +2701,351 @@ pub const Store = struct {
             }
             try capture.append("}");
         }
+    }
+
+    fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT revision,command_key,workspace,model,tools_mask,permission_mode,instructions_content_id,output_schema_content_id " ++
+                "FROM session_revision WHERE session_ref=?1 ORDER BY revision",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.SessionReadFailed)) {
+            const revision = c.sqlite3_column_int64(statement, 0);
+            const tools = c.sqlite3_column_int(statement, 4);
+            const permission = c.sqlite3_column_int(statement, 5);
+            const instructions_id = c.sqlite3_column_int64(statement, 6);
+            if (revision <= 0 or tools < 0 or tools > 3 or permission < 0 or permission > 1 or instructions_id <= 0) return error.CorruptStore;
+            try capture.appendFmt("{{\"revision\":\"{d}\",\"command_key\":", .{revision});
+            try appendColumnString(statement, 1, 128, capture);
+            try capture.append(",\"workspace\":");
+            try appendColumnString(statement, 2, protocol.max_workspace_bytes, capture);
+            try capture.append(",\"model\":");
+            try appendColumnString(statement, 3, protocol.max_model_bytes, capture);
+            try capture.appendFmt(",\"tools_mask\":\"{d}\",\"permission_mode\":\"{s}\",\"instructions\":", .{ tools, if (permission == 0) "ask" else "bypass" });
+            try self.appendInlineContent(instructions_id, capture);
+            try capture.append(",\"output_schema\":");
+            if (try readNullablePositiveI64(statement, 7)) |content_id| try self.appendInlineContent(content_id, capture) else try capture.append("null");
+            try capture.append("}");
+        }
+    }
+
+    fn appendMessages(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT m.session_ref,m.content_id,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal," ++
+                "t.outcome_code,t.outcome_content_id,CASE WHEN m.turn_id IS NULL THEN (" ++
+                "SELECT stopped.command_key FROM session_stop stopped JOIN core_command stop_command " ++
+                "ON stop_command.command_key=stopped.command_key WHERE stopped.session_ref=m.session_ref " ++
+                "AND m.admission_id<=stopped.admission_cutoff ORDER BY stop_command.rowid LIMIT 1) END " ++
+                "FROM message_admission m LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
+                "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
+                "WHERE m.session_ref=?1 ORDER BY m.admission_id",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.MessageReadFailed)) {
+            const projection = try readMessageProjectionRow(statement);
+            if (!projection.session.eql(session_ref)) return error.CorruptStore;
+            try capture.appendFmt("{{\"admission\":\"{d}\",\"command_key\":", .{projection.admission_id});
+            try capture.appendJsonString(projection.command_key.slice());
+            try capture.append(",\"content\":");
+            try self.appendInlineContent(projection.content_id, capture);
+            try capture.append(",\"turn\":");
+            switch (projection.state) {
+                .applied => |applied| try capture.appendFmt("\"{d}\"", .{applied.binding.turn_id}),
+                .pending, .excluded => try capture.append("null"),
+            }
+            try capture.append(",\"application\":");
+            try capture.appendJsonString(@tagName(projection.state));
+            try capture.append(",\"exclusion\":");
+            switch (projection.state) {
+                .excluded => |stop_key| {
+                    try capture.append("{\"code\":\"session_stopped\",\"command_key\":");
+                    try capture.appendJsonString(stop_key.slice());
+                    try capture.append("}");
+                },
+                .pending, .applied => try capture.append("null"),
+            }
+            try capture.append(",\"outcome\":");
+            switch (projection.state) {
+                .applied => |applied| if (applied.outcome_code) |code| {
+                    try capture.append("{\"code\":");
+                    try capture.appendJsonString(code.slice());
+                    try capture.append(",\"content\":");
+                    if (applied.outcome_content_id) |content_id| {
+                        const metadata = try self.readContentMetadata(content_id);
+                        try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
+                    } else try capture.append("null");
+                    try capture.append("}");
+                } else try capture.append("null"),
+                .pending, .excluded => try capture.append("null"),
+            }
+            try capture.append("}");
+        }
+    }
+
+    fn appendConversation(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id " ++
+                "FROM conversation_entry WHERE session_ref=?1 ORDER BY entry_ordinal",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.ConversationReadFailed)) {
+            const ordinal = c.sqlite3_column_int64(statement, 0);
+            const position = c.sqlite3_column_int64(statement, 1);
+            const kind = c.sqlite3_column_int(statement, 2);
+            const turn_id = c.sqlite3_column_int64(statement, 3);
+            const content_id = c.sqlite3_column_int64(statement, 7);
+            if (ordinal <= 0 or position <= 0 or kind < 1 or kind > 3 or turn_id <= 0 or content_id <= 0) return error.CorruptStore;
+            try capture.appendFmt("{{\"ordinal\":\"{d}\",\"position\":\"{d}\",\"kind\":\"{s}\",\"turn\":\"{d}\",\"source_admission\":", .{ ordinal, position, switch (kind) {
+                1 => "message",
+                2 => "settings",
+                3 => "assistant",
+                else => unreachable,
+            }, turn_id });
+            try appendNullablePositiveInteger(statement, 4, capture);
+            try capture.append(",\"source_revision\":");
+            try appendNullablePositiveInteger(statement, 5, capture);
+            try capture.append(",\"source_operation\":");
+            try appendNullablePositiveInteger(statement, 6, capture);
+            try capture.append(",\"content\":");
+            try self.appendInlineContent(content_id, capture);
+            try capture.append("}");
+        }
+    }
+
+    fn appendTurns(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(self.database, "SELECT turn_id,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id FROM turn WHERE session_ref=?1 ORDER BY turn_id");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.TurnReadFailed)) {
+            const turn_id = c.sqlite3_column_int64(statement, 0);
+            const first_admission = c.sqlite3_column_int64(statement, 1);
+            const cutoff = c.sqlite3_column_int64(statement, 2);
+            const operation = c.sqlite3_column_int64(statement, 3);
+            if (turn_id <= 0 or first_admission <= 0 or cutoff < first_admission or operation <= 0) return error.CorruptStore;
+            try capture.appendFmt("{{\"turn\":\"{d}\",\"first_admission\":\"{d}\",\"input_cutoff\":\"{d}\",\"operation\":\"{d}\",\"outcome\":", .{ turn_id, first_admission, cutoff, operation });
+            try self.appendReferencedOutcome(statement, 4, 5, capture);
+            try capture.append("}");
+        }
+    }
+
+    fn appendModelOperations(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(self.database, "SELECT operation_id,turn_id,resolution_code,resolution_content_id,interrupted_by_command_key FROM model_operation WHERE session_ref=?1 ORDER BY operation_id");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.OperationReadFailed)) {
+            const operation = c.sqlite3_column_int64(statement, 0);
+            const turn_id = c.sqlite3_column_int64(statement, 1);
+            if (operation <= 0 or turn_id <= 0) return error.CorruptStore;
+            try capture.appendFmt("{{\"operation\":\"{d}\",\"turn\":\"{d}\",\"resolution\":", .{ operation, turn_id });
+            try self.appendInlineOutcome(statement, 2, 3, capture);
+            try capture.append(",\"interrupted_by\":");
+            try appendNullableColumnString(statement, 4, 128, capture);
+            try capture.append("}");
+        }
+    }
+
+    fn appendToolCalls(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT call.operation_id,call.call_ordinal,call.item_ordinal,call.rejection_code,call.acceptance_position," ++
+                "call.item_id_content_id,call.name_content_id,call.call_id_content_id,call.arguments_content_id,call.rejection_content_id " ++
+                "FROM model_tool_call call JOIN model_operation operation ON operation.operation_id=call.operation_id " ++
+                "WHERE operation.session_ref=?1 ORDER BY call.operation_id,call.call_ordinal",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.CallReadFailed)) {
+            const operation = c.sqlite3_column_int64(statement, 0);
+            const ordinal = c.sqlite3_column_int64(statement, 1);
+            const item = c.sqlite3_column_int64(statement, 2);
+            if (operation <= 0 or ordinal < 0 or item < 0) return error.CorruptStore;
+            try capture.appendFmt("{{\"operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"item_ordinal\":\"{d}\",\"rejection\":", .{ operation, ordinal, item });
+            try appendNullableColumnString(statement, 3, 32, capture);
+            try capture.append(",\"acceptance_position\":");
+            try appendNullablePositiveInteger(statement, 4, capture);
+            inline for (.{ .{ "item_id", 5 }, .{ "name", 6 }, .{ "call_id", 7 }, .{ "arguments", 8 } }) |field| {
+                try capture.append(",\"");
+                try capture.append(field[0]);
+                try capture.append("\":");
+                const content_id = c.sqlite3_column_int64(statement, field[1]);
+                if (content_id <= 0) return error.CorruptStore;
+                try self.appendInlineContent(content_id, capture);
+            }
+            try capture.append(",\"rejection_result\":");
+            if (try readNullablePositiveI64(statement, 9)) |content_id| try self.appendInlineContent(content_id, capture) else try capture.append("null");
+            try capture.append("}");
+        }
+    }
+
+    fn appendAllActions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(self.database, "SELECT action_id,parent_operation_id,call_ordinal,permission_revision,permission_state,resolution_code,resolution_content_id,acceptance_position FROM action_operation WHERE session_ref=?1 ORDER BY action_id");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.ActionReadFailed)) {
+            const action = c.sqlite3_column_int64(statement, 0);
+            const parent = c.sqlite3_column_int64(statement, 1);
+            const ordinal = c.sqlite3_column_int64(statement, 2);
+            const revision = c.sqlite3_column_int64(statement, 3);
+            const permission = c.sqlite3_column_int(statement, 4);
+            if (action <= 0 or parent <= 0 or ordinal < 0 or revision <= 0 or permission < 0 or permission > 2) return error.CorruptStore;
+            try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"permission_revision\":\"{d}\",\"permission\":\"{s}\",\"resolution\":", .{ action, parent, ordinal, revision, switch (permission) {
+                0 => "requested",
+                1 => "authorized",
+                2 => "denied",
+                else => unreachable,
+            } });
+            try appendNullableColumnString(statement, 5, 16, capture);
+            try capture.append(",\"result\":");
+            if (try readNullablePositiveI64(statement, 6)) |content_id| try self.appendInlineContent(content_id, capture) else try capture.append("null");
+            try capture.append(",\"acceptance_position\":");
+            try appendNullablePositiveInteger(statement, 7, capture);
+            try capture.append("}");
+        }
+    }
+
+    fn appendPermissionDecisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(self.database, "SELECT decision.command_key,decision.action_id,command.accepted,command.code FROM permission_decision_command decision JOIN core_command command ON command.command_key=decision.command_key WHERE command.kind=5 AND command.target=?1 ORDER BY command.rowid");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.PermissionReadFailed)) {
+            try capture.append("{\"command_key\":");
+            try appendColumnString(statement, 0, 128, capture);
+            try capture.append(",\"action\":");
+            try appendColumnString(statement, 1, 20, capture);
+            try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{if (c.sqlite3_column_int(statement, 2) == 0) "rejected" else "accepted"});
+            try appendColumnString(statement, 3, 96, capture);
+            try capture.append("}");
+        }
+    }
+
+    fn appendSessionStops(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(self.database, "SELECT command.command_key,command.accepted,command.code,stop.selected_turn_id,stop.admission_cutoff FROM core_command command LEFT JOIN session_stop stop ON stop.command_key=command.command_key WHERE command.kind=3 AND command.target=?1 ORDER BY command.rowid");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.SessionStopReadFailed)) {
+            try capture.append("{\"command_key\":");
+            try appendColumnString(statement, 0, 128, capture);
+            try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{if (c.sqlite3_column_int(statement, 1) == 0) "rejected" else "accepted"});
+            try appendColumnString(statement, 2, 96, capture);
+            try capture.append(",\"selected_turn\":");
+            try appendNullablePositiveInteger(statement, 3, capture);
+            try capture.append(",\"admission_cutoff\":");
+            try appendNullableNonnegativeInteger(statement, 4, capture);
+            try capture.append("}");
+        }
+    }
+
+    fn appendModelInterruptions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(self.database, "SELECT command.command_key,command.accepted,command.code,interruption.turn_id,interruption.operation_id FROM model_interruption_command interruption JOIN core_command command ON command.command_key=interruption.command_key WHERE interruption.session_ref=?1 ORDER BY command.rowid");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.InterruptionReadFailed)) {
+            try capture.append("{\"command_key\":");
+            try appendColumnString(statement, 0, 128, capture);
+            try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{if (c.sqlite3_column_int(statement, 1) == 0) "rejected" else "accepted"});
+            try appendColumnString(statement, 2, 96, capture);
+            try capture.append(",\"turn\":");
+            try appendNullablePositiveInteger(statement, 3, capture);
+            try capture.append(",\"operation\":");
+            try appendNullablePositiveInteger(statement, 4, capture);
+            try capture.append("}");
+        }
+    }
+
+    fn appendToolResults(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT call.operation_id,call.call_ordinal,coalesce(call.acceptance_position,action.acceptance_position)," ++
+                "call.call_id_content_id,coalesce(call.rejection_code,action.resolution_code)," ++
+                "coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_tool_call call " ++
+                "JOIN model_operation operation ON operation.operation_id=call.operation_id " ++
+                "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+                "WHERE operation.session_ref=?1 AND coalesce(call.rejection_code,action.resolution_code) IS NOT NULL " ++
+                "ORDER BY call.operation_id,coalesce(call.acceptance_position,action.acceptance_position)",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.CallReadFailed)) {
+            const operation = c.sqlite3_column_int64(statement, 0);
+            const ordinal = c.sqlite3_column_int64(statement, 1);
+            const position = c.sqlite3_column_int64(statement, 2);
+            const call_id = c.sqlite3_column_int64(statement, 3);
+            const result = c.sqlite3_column_int64(statement, 5);
+            if (operation <= 0 or ordinal < 0 or position <= 0 or call_id <= 0 or result <= 0) return error.CorruptStore;
+            try capture.appendFmt("{{\"operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"acceptance_position\":\"{d}\",\"call_id\":", .{ operation, ordinal, position });
+            try self.appendInlineContent(call_id, capture);
+            try capture.append(",\"code\":");
+            try appendColumnString(statement, 4, 32, capture);
+            try capture.append(",\"result\":");
+            try self.appendInlineContent(result, capture);
+            try capture.append("}");
+        }
+    }
+
+    fn appendReferencedOutcome(self: *Store, statement: *c.sqlite3_stmt, code_index: c_int, content_id_index: c_int, capture: *SessionReportCapture) !void {
+        if (c.sqlite3_column_type(statement, code_index) == c.SQLITE_NULL) {
+            if (c.sqlite3_column_type(statement, content_id_index) != c.SQLITE_NULL) return error.CorruptStore;
+            return capture.append("null");
+        }
+        try capture.append("{\"code\":");
+        try appendColumnString(statement, code_index, 96, capture);
+        try capture.append(",\"content\":");
+        if (try readNullablePositiveI64(statement, content_id_index)) |content_id| {
+            const metadata = try self.readContentMetadata(content_id);
+            try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
+        } else try capture.append("null");
+        try capture.append("}");
+    }
+
+    fn appendInlineOutcome(self: *Store, statement: *c.sqlite3_stmt, code_index: c_int, content_id_index: c_int, capture: *SessionReportCapture) !void {
+        if (c.sqlite3_column_type(statement, code_index) == c.SQLITE_NULL) {
+            if (c.sqlite3_column_type(statement, content_id_index) != c.SQLITE_NULL) return error.CorruptStore;
+            return capture.append("null");
+        }
+        try capture.append("{\"code\":");
+        try appendColumnString(statement, code_index, 96, capture);
+        try capture.append(",\"content\":");
+        if (try readNullablePositiveI64(statement, content_id_index)) |content_id| try self.appendInlineContent(content_id, capture) else try capture.append("null");
+        try capture.append("}");
+    }
+
+    fn appendInlineContent(self: *Store, content_id: i64, capture: *SessionReportCapture) !void {
+        const metadata = try self.readContentMetadata(content_id);
+        const statement = try prepare(self.database, "SELECT payload IS NULL FROM content WHERE content_id=?1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindI64(statement, 1, content_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        var reader = ContentReader{ .content_id = content_id, .representation = if (c.sqlite3_column_int(statement, 0) == 0) .raw else .{ .projection = .{} }, .store = self, .reference = .{ .length = metadata.length, .digest = metadata.digest } };
+        try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{metadata.length});
+        try capture.append(&std.fmt.bytesToHex(metadata.digest, .lower));
+        try capture.append("\",\"text\":\"");
+        var buffer: [4096]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < metadata.length) {
+            const wanted: usize = @intCast(@min(metadata.length - offset, buffer.len));
+            const count = try self.readOwnedContentLocked(&reader, offset, buffer[0..wanted]);
+            if (count != wanted) return error.CorruptStore;
+            try capture.appendJsonStringBytes(buffer[0..count]);
+            offset += count;
+        }
+        try capture.append("\"}");
     }
 
     fn countActions(self: *Store, session_ref: []const u8) !u64 {
@@ -4190,14 +4678,11 @@ pub const Store = struct {
     }
 
     fn countPendingMessages(self: *Store, session_ref: []const u8) !u64 {
-        const statement = try prepare(
-            self.database,
-            "SELECT count(*) FROM message_admission m WHERE session_ref=?1 AND turn_id IS NULL AND NOT EXISTS(" ++
-                "SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
-                "AND m.admission_id<=stopped.admission_cutoff)",
-        );
+        const cutoff = try self.latestSessionStopCutoff(session_ref);
+        const statement = try prepare(self.database, pending_message_count_sql);
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
+        try bindU64(statement, 2, cutoff);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.MessageAdmissionReadFailed;
         const count = c.sqlite3_column_int64(statement, 0);
         if (count < 0) return error.CorruptStore;
@@ -4205,18 +4690,33 @@ pub const Store = struct {
     }
 
     fn hasApplicablePendingMessage(self: *Store, session_ref: []const u8) !bool {
+        const cutoff = try self.latestSessionStopCutoff(session_ref);
         const statement = try prepare(
             self.database,
-            "SELECT 1 FROM message_admission m WHERE m.session_ref=?1 AND m.turn_id IS NULL AND NOT EXISTS(" ++
-                "SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
-                "AND m.admission_id<=stopped.admission_cutoff) LIMIT 1",
+            "SELECT 1 FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 LIMIT 1",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
+        try bindU64(statement, 2, cutoff);
         return switch (c.sqlite3_step(statement)) {
             c.SQLITE_ROW => true,
             c.SQLITE_DONE => false,
             else => error.MessageAdmissionReadFailed,
+        };
+    }
+
+    fn latestSessionStopCutoff(self: *Store, session_ref: []const u8) !u64 {
+        const statement = try prepare(self.database, session_stop_cutoff_sql);
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        return switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => 0,
+            c.SQLITE_ROW => blk: {
+                const cutoff = c.sqlite3_column_int64(statement, 0);
+                if (cutoff < 0) return error.CorruptStore;
+                break :blk @intCast(cutoff);
+            },
+            else => error.SessionStopReadFailed,
         };
     }
 
@@ -4833,6 +5333,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\) STRICT, WITHOUT ROWID;
         \\CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id);
         \\CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL;
+        \\CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL;
         \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff);
         \\CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id);
         \\CREATE INDEX model_tool_call_rejections ON model_tool_call(operation_id,call_ordinal) WHERE rejection_code IS NOT NULL;
@@ -4842,6 +5343,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
         \\CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
+        \\CREATE INDEX turn_session_latest ON turn(session_ref,turn_id DESC);
     );
     try exec(database, "PRAGMA application_id=1280591409");
     try exec(database, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version}));
@@ -4861,7 +5363,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','session_stop_exclusion','action_operation_session_order','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','conversation_entry_history','model_output_history')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','conversation_entry_history','model_output_history','turn_session_latest')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -5058,6 +5560,81 @@ fn readText(statement: *c.sqlite3_stmt, index: c_int, destination: anytype) !voi
     const pointer = c.sqlite3_column_text(statement, index) orelse return error.CorruptStore;
     const bytes: [*]const u8 = @ptrCast(pointer);
     try destination.set(bytes[0..@intCast(length)]);
+}
+
+fn nextReportRow(statement: *c.sqlite3_stmt, first: *bool, capture: *SessionReportCapture, read_error: anyerror) !bool {
+    const result = c.sqlite3_step(statement);
+    if (result == c.SQLITE_DONE) return false;
+    if (result != c.SQLITE_ROW) return read_error;
+    if (!first.*) try capture.append(",");
+    first.* = false;
+    return true;
+}
+
+fn appendColumnString(statement: *c.sqlite3_stmt, index: c_int, comptime capacity: usize, capture: *SessionReportCapture) !void {
+    var value: protocol.Bounded(capacity) = .{};
+    try readText(statement, index, &value);
+    try capture.appendJsonString(value.slice());
+}
+
+fn appendNullableColumnString(statement: *c.sqlite3_stmt, index: c_int, comptime capacity: usize, capture: *SessionReportCapture) !void {
+    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return capture.append("null");
+    try appendColumnString(statement, index, capacity, capture);
+}
+
+fn appendNullablePositiveInteger(statement: *c.sqlite3_stmt, index: c_int, capture: *SessionReportCapture) !void {
+    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return capture.append("null");
+    const value = c.sqlite3_column_int64(statement, index);
+    if (value <= 0) return error.CorruptStore;
+    try capture.appendFmt("\"{d}\"", .{value});
+}
+
+fn appendNullableNonnegativeInteger(statement: *c.sqlite3_stmt, index: c_int, capture: *SessionReportCapture) !void {
+    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return capture.append("null");
+    const value = c.sqlite3_column_int64(statement, index);
+    if (value < 0) return error.CorruptStore;
+    try capture.appendFmt("\"{d}\"", .{value});
+}
+
+fn readMessageProjectionRow(statement: *c.sqlite3_stmt) !MessageProjection {
+    var projection: MessageProjection = undefined;
+    try readText(statement, 0, &projection.session);
+    projection.content_id = c.sqlite3_column_int64(statement, 1);
+    const admission_id = c.sqlite3_column_int64(statement, 2);
+    try readText(statement, 3, &projection.command_key);
+    if (projection.content_id <= 0 or admission_id <= 0) return error.CorruptStore;
+    projection.admission_id = @intCast(admission_id);
+    const turn_id = try readNullablePositiveI64(statement, 4);
+    if (turn_id == null) {
+        if (c.sqlite3_column_type(statement, 5) != c.SQLITE_NULL or c.sqlite3_column_type(statement, 6) != c.SQLITE_NULL or
+            c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL or c.sqlite3_column_type(statement, 8) != c.SQLITE_NULL) return error.CorruptStore;
+        if (c.sqlite3_column_type(statement, 9) == c.SQLITE_NULL) {
+            projection.state = .pending;
+        } else {
+            var stop_key: protocol.Bounded(128) = .{};
+            try readText(statement, 9, &stop_key);
+            projection.state = .{ .excluded = stop_key };
+        }
+        return projection;
+    }
+    if (c.sqlite3_column_type(statement, 9) != c.SQLITE_NULL) return error.CorruptStore;
+    const operation_id = try readNullablePositiveI64(statement, 5) orelse return error.CorruptStore;
+    const attempt_ordinal = try readNullablePositiveI64(statement, 6) orelse return error.CorruptStore;
+    var outcome_code: ?protocol.Bounded(96) = null;
+    if (c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL) {
+        var code: protocol.Bounded(96) = .{};
+        try readText(statement, 7, &code);
+        if (code.len == 0) return error.CorruptStore;
+        outcome_code = code;
+    }
+    const outcome_content_id = try readNullablePositiveI64(statement, 8);
+    if (outcome_code == null and outcome_content_id != null) return error.CorruptStore;
+    projection.state = .{ .applied = .{
+        .binding = .{ .turn_id = @intCast(turn_id.?), .operation_id = @intCast(operation_id), .attempt_ordinal = @intCast(attempt_ordinal) },
+        .outcome_code = outcome_code,
+        .outcome_content_id = outcome_content_id,
+    } };
+    return projection;
 }
 
 fn readDigest(statement: *c.sqlite3_stmt, index: c_int) ![32]u8 {
@@ -5426,6 +6003,16 @@ fn testingSessionReport(
     session_ref: []const u8,
     limit: u64,
 ) ![]u8 {
+    return testingSessionReportWithProfile(storage, tmp, session_ref, limit, .current);
+}
+
+fn testingSessionReportWithProfile(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    session_ref: []const u8,
+    limit: u64,
+    profile: protocol.ReportProfile,
+) ![]u8 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     var used = std.atomic.Value(u64).init(0);
@@ -5433,6 +6020,7 @@ fn testingSessionReport(
         .scratch_path = root[0..root_length],
         .scratch_budget = .{ .used = &used, .limit = limit },
         .request_number = 1,
+        .profile = profile,
         .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 },
     });
     const bytes = try std.testing.allocator.alloc(u8, @intCast(report.length));
@@ -5446,6 +6034,37 @@ fn testingSessionReport(
     report.deinit();
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     return bytes;
+}
+
+test "Current excludes history while Full exposes exact closed Session inventory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "profile-config", "direct/profile");
+
+    const current = try testingSessionReportWithProfile(&storage, &tmp, "direct/profile", 1024 * 1024, .current);
+    defer std.testing.allocator.free(current);
+    try std.testing.expect(std.mem.indexOf(u8, current, "\"profile\":\"current\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, current, "\"full\"") == null);
+
+    const unit = "quoted: \\\" line\ncontrol:\t snowman: ☃ ";
+    const text = try std.testing.allocator.alloc(u8, unit.len * 2048);
+    defer std.testing.allocator.free(text);
+    for (0..2048) |index| @memcpy(text[index * unit.len ..][0..unit.len], unit);
+    try submitTestMessage(&storage, &tmp, "profile-message", "profile-message", "direct/profile", text);
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    const full = try testingSessionReportWithProfile(&storage, &tmp, "direct/profile", 1024 * 1024, .full);
+    defer std.testing.allocator.free(full);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("full", parsed.value.object.get("profile").?.string);
+    const inventory = parsed.value.object.get("full").?.object;
+    inline for (.{ "session_revisions", "messages", "conversation", "turns", "model_operations", "tool_calls", "actions", "permission_decisions", "session_stops", "model_interruptions", "tool_results" }) |name| {
+        try std.testing.expect(inventory.get(name) != null);
+    }
+    try std.testing.expectEqualStrings(text, inventory.get("messages").?.array.items[0].object.get("content").?.object.get("text").?.string);
+    try std.testing.expectEqualStrings(text, inventory.get("conversation").?.array.items[0].object.get("content").?.object.get("text").?.string);
 }
 
 test "Bash proposals retain exact order permission provenance denial and stop terminality" {
@@ -5463,6 +6082,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     const first_action_id = first: {
         const report_bytes = try testingSessionReport(&storage, &tmp, "direct/actions", 1024 * 1024);
         defer std.testing.allocator.free(report_bytes);
+        try std.testing.expect(std.mem.indexOf(u8, report_bytes, "\"work\":{\"status\":\"waiting_for_permission\"") != null);
         const parsed = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         try std.testing.expectEqualStrings("2", parsed.value.actions.count);
@@ -5671,7 +6291,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try std.testing.expectEqual(@as(u64, 2), observation.action_count);
     try std.testing.expectEqual(@as(u64, 5), observation.rejected_call_count);
     const first_action_id = first: {
-        const report_bytes = try testingSessionReport(&storage, &tmp, "direct/mixed-calls", 1024 * 1024);
+        const report_bytes = try testingSessionReportWithProfile(&storage, &tmp, "direct/mixed-calls", 1024 * 1024, .full);
         defer std.testing.allocator.free(report_bytes);
         const report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
         defer report.deinit();
@@ -5699,6 +6319,12 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
             const digest = protocol.contentDigest(expected[1]);
             try std.testing.expectEqualStrings(&std.fmt.bytesToHex(digest, .lower), expected[0].sha256);
         }
+        var full = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
+        defer full.deinit();
+        const full_rejected = full.value.object.get("full").?.object.get("tool_calls").?.array.items[1].object;
+        try std.testing.expectEqualStrings("other", full_rejected.get("name").?.object.get("text").?.string);
+        try std.testing.expectEqualStrings("{}", full_rejected.get("arguments").?.object.get("text").?.string);
+        try std.testing.expectEqualStrings("Unknown tool: other.", full_rejected.get("rejection_result").?.object.get("text").?.string);
         break :first try std.fmt.parseInt(u64, report.value.actions.unresolved[0].action, 10);
     };
     {
@@ -6238,6 +6864,50 @@ test "Current report work is independent of terminal tool history" {
     try std.testing.expectEqual(one_group, sixteen_groups);
 }
 
+test "Current pending count skips excluded Message history by indexed cutoff" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "pending-cost-config", "direct/pending-cost");
+    try exec(storage.database, "PRAGMA foreign_keys=OFF");
+
+    var costs: [2]i32 = undefined;
+    for ([_]usize{ 100, 10_000 }, 0..) |history, index| {
+        try exec(storage.database, "DELETE FROM message_admission; DELETE FROM session_stop");
+        const insert = try std.fmt.allocPrintSentinel(
+            std.testing.allocator,
+            "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
+                "SELECT value,'direct/pending-cost',printf('excluded-%d',value),1,NULL FROM sequence; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
+                "VALUES({0}+1,'direct/pending-cost','eligible',1,NULL); " ++
+                "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) " ++
+                "VALUES('history-stop','direct/pending-cost',NULL,{0})",
+            .{history},
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try exec(storage.database, insert);
+        try std.testing.expectEqual(@as(u64, 1), try storage.countPendingMessages("direct/pending-cost"));
+
+        const cutoff_statement = try prepare(storage.database, session_stop_cutoff_sql);
+        defer _ = c.sqlite3_finalize(cutoff_statement);
+        try bindText(cutoff_statement, 1, "direct/pending-cost");
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(cutoff_statement));
+        const cutoff = c.sqlite3_column_int64(cutoff_statement, 0);
+        const count_statement = try prepare(storage.database, pending_message_count_sql);
+        defer _ = c.sqlite3_finalize(count_statement);
+        try bindText(count_statement, 1, "direct/pending-cost");
+        try bindI64(count_statement, 2, cutoff);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(count_statement));
+        try std.testing.expectEqual(@as(i64, 1), c.sqlite3_column_int64(count_statement, 0));
+        costs[index] = c.sqlite3_stmt_status(cutoff_statement, c.SQLITE_STMTSTATUS_VM_STEP, 0) +
+            c.sqlite3_stmt_status(count_statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+    }
+    try std.testing.expect(costs[1] <= costs[0] + 8);
+}
+
 test "call classification uses the proposing Operation frozen catalog" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6386,6 +7056,13 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
     };
     try std.testing.expectEqual(binding.turn_id, cancellation.binding.turn_id);
     try std.testing.expectEqualStrings("cancelled", cancellation.code.slice());
+    const active_report = try testingSessionReportWithProfile(&storage, &tmp, "direct/stop", 1024 * 1024, .full);
+    defer std.testing.allocator.free(active_report);
+    var active_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, active_report, .{});
+    defer active_json.deinit();
+    const active_message = active_json.value.object.get("full").?.object.get("messages").?.array.items[0].object;
+    try std.testing.expectEqualStrings("applied", active_message.get("application").?.string);
+    try std.testing.expect(active_message.get("exclusion").? == .null);
 
     var after_stop = try completeModelInterruption("interrupt-after-stop", "direct/stop", binding);
     const rejected_interrupt = storage.interruptModel(&after_stop, .{});
@@ -6405,6 +7082,37 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
     try std.testing.expect(later.permit.binding.turn_id != binding.turn_id);
 }
 
+test "later idle stop does not reclassify a completed Message" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "completed-stop-config", "direct/completed-stop");
+    try submitTestMessage(&storage, &tmp, "completed-stop-file", "completed-stop-message", "direct/completed-stop", "answer");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    try exec(
+        storage.database,
+        "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='completed'," ++
+            "resolution_content_id=(SELECT content_id FROM message_admission WHERE command_key='completed-stop-message');" ++
+            "UPDATE turn SET outcome_code='completed',outcome_content_id=(SELECT content_id FROM message_admission " ++
+            "WHERE command_key='completed-stop-message') WHERE session_ref='direct/completed-stop'",
+    );
+    var stop = try completeSessionStop("completed-stop", "direct/completed-stop");
+    const accepted = storage.stopSession(&stop, .{});
+    try std.testing.expect(accepted == .accepted);
+    try std.testing.expect(accepted.accepted.selection.selected_turn_id == null);
+    try std.testing.expect((try storage.observeCommand("completed-stop-message")).message.?.queue.?.state == .completed);
+
+    const report = try testingSessionReportWithProfile(&storage, &tmp, "direct/completed-stop", 1024 * 1024, .full);
+    defer std.testing.allocator.free(report);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+    defer parsed.deinit();
+    const message = parsed.value.object.get("full").?.object.get("messages").?.array.items[0].object;
+    try std.testing.expectEqualStrings("applied", message.get("application").?.string);
+    try std.testing.expect(message.get("exclusion").? == .null);
+    try std.testing.expect(message.get("outcome").?.object.get("content").?.object.get("text") == null);
+}
+
 test "idle Session stop excludes queued work but not later admissions" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6421,6 +7129,13 @@ test "idle Session stop excludes queued work but not later admissions" {
     const excluded = (try storage.observeCommand("idle-message-a")).message.?.queue.?;
     try std.testing.expect(excluded.state == .excluded);
     try std.testing.expectEqualStrings("session_stopped", excluded.state.excluded.code.slice());
+    const excluded_report = try testingSessionReportWithProfile(&storage, &tmp, "direct/idle-stop", 1024 * 1024, .full);
+    defer std.testing.allocator.free(excluded_report);
+    var excluded_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, excluded_report, .{});
+    defer excluded_json.deinit();
+    const excluded_message = excluded_json.value.object.get("full").?.object.get("messages").?.array.items[0].object;
+    try std.testing.expectEqualStrings("excluded", excluded_message.get("application").?.string);
+    try std.testing.expectEqualStrings("idle-stop", excluded_message.get("exclusion").?.object.get("command_key").?.string);
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
 
     try submitTestMessage(&storage, &tmp, "idle-stop-b", "idle-message-b", "direct/idle-stop", "after");

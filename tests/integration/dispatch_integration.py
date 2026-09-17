@@ -616,15 +616,17 @@ def main():
         configure(state, proposal_store, "proposal-config", "direct/proposal", "model-a")
         message(state, proposal_store, "proposal-message", "direct/proposal", "propose mixed calls")
         proposal = wait_for(
-            lambda: (value := command("inspect-session", "--store", proposal_store, "--session", "direct/proposal"))["actions"]["unresolved"] and value,
+            lambda: (value := command("inspect-session", "--store", proposal_store, "--session", "direct/proposal", "--profile", "full"))["actions"]["unresolved"] and value,
             "complete exact Action collection",
         )
         assert proposal["actions"]["count"] == "2", proposal
         assert len(proposal["actions"]["unresolved"]) == 2, proposal
-        assert proposal["rejected_calls"]["count"] == "2", proposal
-        assert len(proposal["rejected_calls"]["items"]) == 2, proposal
-        assert proposal["rejected_calls"]["items"][0]["call_ordinal"] == "1", proposal
-        assert proposal["rejected_calls"]["items"][0]["code"] == "unknown_tool", proposal
+        rejected_calls = [
+            call for call in proposal["full"]["tool_calls"] if call["rejection"] is not None
+        ]
+        assert len(rejected_calls) == 2, proposal
+        assert rejected_calls[0]["call_ordinal"] == "1", proposal
+        assert rejected_calls[0]["rejection"] == "unknown_tool", proposal
         first_request = proposal["actions"]["unresolved"][0]
         assert first_request["call_ordinal"] == "0", first_request
         assert read_action(proposal_store, "direct/proposal", first_request["action"], "call-id") == calls[0][1].encode()
@@ -665,9 +667,10 @@ def main():
             "--kind", "permission-decision",
         )
         assert replay["answer"]["status"] == "accepted" and replay["answer"]["replayed"] is True, replay
-        recovered = command("inspect-session", "--store", proposal_store, "--session", "direct/proposal")
-        assert recovered["rejected_calls"]["count"] == "2", recovered
-        assert len(recovered["rejected_calls"]["items"]) == 2, recovered
+        recovered = command("inspect-session", "--store", proposal_store, "--session", "direct/proposal", "--profile", "full")
+        assert len([
+            call for call in recovered["full"]["tool_calls"] if call["rejection"] is not None
+        ]) == 2, recovered
         assert len(recovered["actions"]["unresolved"]) == 1, recovered
         assert read_action(proposal_store, "direct/proposal", first_request["action"], "call-id") == calls[0][1].encode()
         assert read_action(proposal_store, "direct/proposal", first_request["action"], "arguments") == calls[0][2].encode()
@@ -3899,6 +3902,8 @@ def main():
                 str(report_unlink_store),
                 "--session",
                 "direct/report-unlink",
+                "--profile",
+                "full",
             ],
             text=True,
             capture_output=True,
