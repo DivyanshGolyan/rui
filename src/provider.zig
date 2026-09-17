@@ -239,22 +239,42 @@ pub fn materialize(
     input_comma = true;
     var after_position: u64 = 0;
     while (try view.nextEntry(after_position)) |entry| {
-        if (input_comma) try writer.write(",");
-        {
-            var content = try view.openContent(entry.content);
-            defer content.close();
-            if (entry.kind == .provider_output) {
-                try provider_output.writeReplayItem(&content, &writer);
-            } else {
-                try writer.write(if (entry.kind == .user)
-                    "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":"
-                else
-                    "{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
-                try writer.jsonContent(&content);
-                try writer.write("}]}");
+        if (entry.kind == .tool_results) {
+            while (try view.nextToolResult()) |result| {
+                if (input_comma) try writer.write(",");
+                try writer.write("{\"type\":\"function_call_output\",\"call_id\":");
+                {
+                    var call_id = try view.openContent(result.call_id);
+                    defer call_id.close();
+                    try writer.jsonContent(&call_id);
+                }
+                try writer.write(",\"output\":");
+                {
+                    var output = try view.openContent(result.output);
+                    defer output.close();
+                    try writer.jsonContent(&output);
+                }
+                try writer.write("}");
+                input_comma = true;
             }
+        } else {
+            if (input_comma) try writer.write(",");
+            {
+                var content = try view.openContent(entry.content.?);
+                defer content.close();
+                if (entry.kind == .provider_output) {
+                    try provider_output.writeReplayItem(&content, &writer);
+                } else {
+                    try writer.write(if (entry.kind == .user)
+                        "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":"
+                    else
+                        "{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
+                    try writer.jsonContent(&content);
+                    try writer.write("}]}");
+                }
+            }
+            input_comma = true;
         }
-        input_comma = true;
         after_position = entry.position;
     }
     try writer.write("],\"tools\":[");

@@ -271,7 +271,7 @@ A **Tool Call** is one trustworthy model-proposed invocation. Classify every Too
 
 Each applicable Tool Call creates one child **Action Operation**, the unit of executable work whose permission and result core owns, linked to its model parent and stable call ordinal. Keeping rejected calls outside Action preserves the invariant that every Action has a canonical executable descriptor. No Step/group entity is required. Actions run and settle independently, including within one Workspace.
 
-Once every Tool Call has either its immutable rejection result or a resolved Action, one transaction appends typed Tool Results in call order; only then may the next model Operation start. Physical completion order cannot reorder Conversation. Call rejection, Action denial, failure, cancellation and uncertainty all produce results.
+Each call rejection or Action Resolution owns its canonical result content and Conversation acceptance position; siblings settle independently and never rewrite one another. Once every Tool Call has exactly one outcome, the next model Operation may start without another user message. Its frozen core-owned historical view joins each original call to that outcome and derives one provider `function_call_output` with the exact call ID in original call order. The complete group precedes input selected at the same boundary. No copied Tool Result, result batch or publication marker is durable authority. Physical completion order cannot reorder provider input. Call rejection, Action denial, failure, cancellation and uncertainty all produce results.
 
 ### Authorizing exact actions
 
@@ -574,7 +574,7 @@ Combine Runtime records with ordinary core observations. Each owner’s observat
 
 ### Capturing and delivering reports
 
-Reports have exactly two closed profiles. **Current**, the default, contains effective settings, current execution state, the latest relevant outcome, pending-message count, every unresolved Action and every actionable permission; growing historical collections are excluded. Explicit **Full** contains Current plus the following closed inventory:
+Reports have exactly two closed profiles. **Current**, the default, contains effective settings, current execution state, the latest relevant outcome, pending-message count, every unresolved Action and actionable permission, and accepted call outcomes still participating in the active Turn; growing terminal history is excluded. Explicit **Full** contains Current plus the following closed inventory:
 
 - for a Session, every Session Context Revision; admitted Message with its binding, application or exclusion and public outcome; canonical Conversation entry; Turn; model or Action Operation with its public Resolution; Tool Call and ordered Tool Result, including bounded call rejection; Permission Request, Decision and Authorization; and committed Session stop or Model Interruption command with its public outcome;
 - for a Workflow, every accepted configuration or message submission with its saved public result or failure, associated Session reference, terminal Workflow outcome, cancellation, and cancellation-owned Session-stop intent with its public outcome.

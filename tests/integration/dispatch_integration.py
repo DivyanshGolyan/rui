@@ -377,14 +377,14 @@ def finish_command(process):
     return json.loads(stdout)
 
 
-def start_host(store, endpoint, *extra, accelerated_retries=True):
+def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
     args = [
         str(RUI),
         "serve",
         "--store",
         str(store),
         "--active-capacity",
-        "1",
+        str(active_capacity),
     ]
     if endpoint is not None:
         args += ["--provider-endpoint", endpoint]
@@ -579,6 +579,8 @@ def main():
     success_thread = None
     proposal_endpoint = None
     proposal_thread = None
+    continuation_endpoint = None
+    continuation_thread = None
     proposal_milestones = None
     proposal_gate_keeper = None
     completed = False
@@ -751,8 +753,10 @@ def main():
                 assert denial["answer"]["code"] == "action_not_pending", denial
                 expected_rows = [(0, 0, "cancelled"), (1, 0, "cancelled")]
             after = command("inspect-session", "--store", proposal_store, "--session", session)
-            assert after["actions"]["count"] == "2", after
+            assert after["actions"]["count"] == "0", after
             assert after["actions"]["unresolved"] == [], after
+            assert after["actions"]["resolved"] == [], after
+            assert after["rejected_calls"] == {"count": "0", "items": []}, after
             assert after["execution"]["custody_occupied"] == "0", after
             assert "bash_execution" in after["execution"]["unavailable"], after
             with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
@@ -777,6 +781,270 @@ def main():
         proposal_milestones = None
         os.close(proposal_gate_keeper)
         proposal_gate_keeper = None
+
+        continuation_calls = [
+            ("bash", "continuation-call-0", json.dumps({"cmd": "printf zero"}, separators=(",", ":"))),
+            ("missing-tool", "continuation-call-1", "{}"),
+            ("bash", "continuation-call-2", "{"),
+            ("bash", "continuation-call-3", json.dumps({"cmd": "printf three"}, separators=(",", ":"))),
+        ]
+        continuation_answer = b"continued after complete tool results"
+        continuation_sse, _, _ = sse_answer(
+            "continuation-answer", "continuation-reasoning", "continuation-message", continuation_answer.decode()
+        )
+        queued_calls = [
+            ("bash", "queued-call-0", json.dumps({"cmd": "printf queued"}, separators=(",", ":"))),
+            ("missing-tool", "queued-call-1", "{}"),
+        ]
+        queued_answer = b"continued with queued input"
+        queued_sse, _, _ = sse_answer(
+            "queued-answer", "queued-reasoning", "queued-message", queued_answer.decode()
+        )
+        continuation_endpoint = SuccessEndpoint([
+            sse_tool_calls("continuation-calls", continuation_calls),
+            continuation_sse,
+            sse_tool_calls("queued-calls", queued_calls),
+            queued_sse,
+        ])
+        continuation_thread = threading.Thread(target=continuation_endpoint.serve_forever, daemon=True)
+        continuation_thread.start()
+        continuation_store = state / "continuation-store"
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+        )
+        processes.append(continuation_host)
+        configure(state, continuation_store, "continuation-config", "direct/continuation", "model-a")
+        message(state, continuation_store, "continuation-first", "direct/continuation", "make calls")
+        continuation_report = wait_for(
+            lambda: (lambda value: value if len(value["actions"]["unresolved"]) == 2 else None)(
+                command("inspect-session", "--store", continuation_store, "--session", "direct/continuation")
+            ),
+            "continuation Actions",
+        )
+        continuation_actions = continuation_report["actions"]["unresolved"]
+        stop_host(continuation_host)
+        processes.remove(continuation_host)
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+            active_capacity=0,
+        )
+        processes.append(continuation_host)
+        command(
+            "deny-action", "--store", continuation_store,
+            "--record", state / "continuation-deny-3.json", "--key", "continuation-deny-3",
+            "--session", "direct/continuation", "--action", continuation_actions[1]["action"],
+        )
+        partial_results = command(
+            "inspect-session", "--store", continuation_store, "--session", "direct/continuation"
+        )
+        assert len(partial_results["actions"]["unresolved"]) == 1, partial_results
+        assert len(partial_results["actions"]["resolved"]) == 1, partial_results
+        assert partial_results["actions"]["resolved"][0]["call_ordinal"] == "3", partial_results
+        assert partial_results["actions"]["resolved"][0]["code"] == "denied", partial_results
+        assert int(partial_results["actions"]["resolved"][0]["acceptance_position"]) > 0
+        assert all(int(call["acceptance_position"]) > 0 for call in partial_results["rejected_calls"]["items"])
+        assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
+        stop_host(continuation_host)
+        processes.remove(continuation_host)
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+            active_capacity=0,
+        )
+        processes.append(continuation_host)
+        command(
+            "deny-action", "--store", continuation_store,
+            "--record", state / "continuation-deny-0.json", "--key", "continuation-deny-0",
+            "--session", "direct/continuation", "--action", continuation_actions[0]["action"],
+        )
+        complete_results = command(
+            "inspect-session", "--store", continuation_store, "--session", "direct/continuation"
+        )
+        assert complete_results["actions"]["unresolved"] == [], complete_results
+        assert [item["call_ordinal"] for item in complete_results["actions"]["resolved"]] == ["0", "3"]
+        assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
+        with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
+            assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (1,)
+        continuation_before_admission_crash = crash_host(
+            continuation_host, state, "continuation-before-admission-crash"
+        )
+        processes.remove(continuation_host)
+        assert continuation_before_admission_crash["returncode"] == -signal.SIGKILL
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+            "--test-before-launch-delay-ms",
+            "5000",
+        )
+        processes.append(continuation_host)
+
+        def continuation_successor_admitted():
+            with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
+                return database.execute(
+                    "SELECT count(*) FROM model_operation"
+                ).fetchone() == (2,)
+
+        wait_for(continuation_successor_admitted, "tool-result successor admission")
+        assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
+        continuation_after_admission_crash = crash_host(
+            continuation_host, state, "continuation-after-admission-crash"
+        )
+        processes.remove(continuation_host)
+        assert continuation_after_admission_crash["returncode"] == -signal.SIGKILL
+        with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT operation_id,attempt_ordinal,uncertain,resolution_code "
+                "FROM model_operation ORDER BY operation_id"
+            ).fetchall() == [(1, 1, 0, "tool_calls"), (2, 1, 1, None)]
+
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+        )
+        processes.append(continuation_host)
+        wait_for(lambda: len(continuation_endpoint.requests) == 2, "recovered tool-result continuation request")
+        wait_for(
+            lambda: completed_observation(continuation_store, "continuation-first"),
+            "tool-result continuation answer",
+        )
+        assert read_result(continuation_store, "continuation-first") == continuation_answer
+        continuation_request = json.loads(continuation_endpoint.requests[1])
+        continuation_input = continuation_request["input"]
+        output_items = [item for item in continuation_input if item.get("type") == "function_call_output"]
+        assert [item["call_id"] for item in output_items] == [call[1] for call in continuation_calls], output_items
+        assert [item["output"] for item in output_items] == [
+            "Permission denied.",
+            "Unknown tool: missing-tool.",
+            "Invalid arguments for tool 'bash'.",
+            "Permission denied.",
+        ], output_items
+        assert [
+            item.get("content", [{}])[0].get("text")
+            for item in continuation_input
+            if item.get("role") == "user"
+        ] == ["make calls"], continuation_input
+        replayed_denial = command(
+            "retry", "--store", continuation_store,
+            "--record", state / "continuation-deny-0.json",
+            "--kind", "permission-decision",
+        )
+        assert replayed_denial["answer"]["status"] == "accepted", replayed_denial
+        assert replayed_denial["answer"]["replayed"] is True, replayed_denial
+        stale_denial = command(
+            "deny-action", "--store", continuation_store,
+            "--record", state / "continuation-stale-denial.json",
+            "--key", "continuation-stale-denial", "--session", "direct/continuation",
+            "--action", continuation_actions[0]["action"],
+        )
+        assert stale_denial["answer"]["status"] == "rejected", stale_denial
+        assert stale_denial["answer"]["code"] == "action_not_pending", stale_denial
+        with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
+            assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (2,)
+            assert database.execute(
+                "SELECT attempt_ordinal FROM model_operation WHERE operation_id=2"
+            ).fetchone() == (2,)
+            assert database.execute(
+                "SELECT count(*),count(DISTINCT acceptance_position) FROM model_tool_call "
+                "WHERE rejection_code IS NOT NULL AND rejection_content_id IS NOT NULL "
+                "AND acceptance_position IS NOT NULL"
+            ).fetchone() == (2, 2)
+            assert database.execute(
+                "SELECT count(*),count(DISTINCT acceptance_position) FROM action_operation "
+                "WHERE resolution_code='denied' AND resolution_content_id IS NOT NULL "
+                "AND acceptance_position IS NOT NULL"
+            ).fetchone() == (2, 2)
+            assert database.execute(
+                "SELECT count(*) FROM sqlite_schema WHERE name LIKE '%tool_result%'"
+            ).fetchone() == (0,)
+
+        configure(state, continuation_store, "queued-config", "direct/queued-continuation", "model-a")
+        message(
+            state,
+            continuation_store,
+            "queued-first",
+            "direct/queued-continuation",
+            "make queued calls",
+        )
+        queued_report = wait_for(
+            lambda: (lambda value: value if len(value["actions"]["unresolved"]) == 1 else None)(
+                command(
+                    "inspect-session",
+                    "--store",
+                    continuation_store,
+                    "--session",
+                    "direct/queued-continuation",
+                )
+            ),
+            "queued-input continuation Action",
+        )
+        queued_action = queued_report["actions"]["unresolved"][0]
+        stop_host(continuation_host)
+        processes.remove(continuation_host)
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+            active_capacity=0,
+        )
+        processes.append(continuation_host)
+        message(
+            state,
+            continuation_store,
+            "queued-second",
+            "direct/queued-continuation",
+            "input queued during tool wait",
+        )
+        command(
+            "deny-action",
+            "--store",
+            continuation_store,
+            "--record",
+            state / "queued-denial.json",
+            "--key",
+            "queued-denial",
+            "--session",
+            "direct/queued-continuation",
+            "--action",
+            queued_action["action"],
+        )
+        assert len(continuation_endpoint.requests) == 3, continuation_endpoint.requests
+        stop_host(continuation_host)
+        processes.remove(continuation_host)
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+        )
+        processes.append(continuation_host)
+        wait_for(lambda: len(continuation_endpoint.requests) == 4, "queued-input continuation request")
+        wait_for(
+            lambda: completed_observation(continuation_store, "queued-second"),
+            "queued-input continuation answer",
+        )
+        assert read_result(continuation_store, "queued-first") == queued_answer
+        assert read_result(continuation_store, "queued-second") == queued_answer
+        queued_input = json.loads(continuation_endpoint.requests[3])["input"]
+        queued_outputs = [item for item in queued_input if item.get("type") == "function_call_output"]
+        assert [item["call_id"] for item in queued_outputs] == [call[1] for call in queued_calls], queued_outputs
+        assert [item["output"] for item in queued_outputs] == [
+            "Permission denied.",
+            "Unknown tool: missing-tool.",
+        ], queued_outputs
+        relevant_input = [
+            ("output", item["call_id"])
+            if item.get("type") == "function_call_output"
+            else ("user", item.get("content", [{}])[0].get("text"))
+            for item in queued_input
+            if item.get("type") == "function_call_output" or item.get("role") == "user"
+        ]
+        assert relevant_input == [
+            ("user", "make queued calls"),
+            ("output", "queued-call-0"),
+            ("output", "queued-call-1"),
+            ("user", "input queued during tool wait"),
+        ], relevant_input
+        stop_host(continuation_host)
+        processes.remove(continuation_host)
 
         first_answer = 'First "answer"\n🙂'.encode()
         second_answer = ("second answer " + "x" * 5000).encode()
@@ -3792,6 +4060,11 @@ def main():
             proposal_endpoint.server_close()
         if proposal_thread is not None:
             proposal_thread.join(timeout=5)
+        if continuation_endpoint is not None:
+            continuation_endpoint.shutdown()
+            continuation_endpoint.server_close()
+        if continuation_thread is not None:
+            continuation_thread.join(timeout=5)
         if proposal_milestones is not None:
             proposal_milestones.close()
         if proposal_gate_keeper is not None:
