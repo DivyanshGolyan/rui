@@ -1,11 +1,11 @@
 {
-  "artifacts": "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-model-queue-3014013550",
+  "artifacts": "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-model-queue-1749370991",
   "binary": "/Users/divyanshgolyan/code/personal/rui/.zig-cache/o/1451043f57d8941f22f6993eda4875ec/rui-release-small-check",
   "binary_sha256": "f7e85dd3a91b80e9af3b97b275c261f647847f8eb13718a6e73de03fa29f5ae5",
   "cases": {
     "baseline": {
       "capacity": 1,
-      "discovery_ms": 30,
+      "discovery_ms": 44,
       "discovery_target_ms": 2000,
       "execution_facts": {
         "messages": [
@@ -71,7 +71,7 @@
       "provider_request_count": 1,
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 19
+      "terminal_observation_ms": 17
     },
     "eligible-1": {
       "population": {
@@ -83,7 +83,7 @@
     },
     "eligible-10": {
       "capacity": 1,
-      "discovery_ms": 31,
+      "discovery_ms": 30,
       "discovery_target_ms": 2000,
       "execution_facts": {
         "messages": [
@@ -320,11 +320,11 @@
       "provider_request_count": 10,
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 294
+      "terminal_observation_ms": 308
     },
     "eligible-100": {
       "capacity": 1,
-      "discovery_ms": 31,
+      "discovery_ms": 32,
       "discovery_target_ms": 2000,
       "execution_facts": {
         "messages": [
@@ -2271,11 +2271,11 @@
       "provider_request_count": 100,
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 2855
+      "terminal_observation_ms": 3194
     },
     "history-1000": {
       "capacity": 1,
-      "discovery_ms": 28,
+      "discovery_ms": 35,
       "discovery_target_ms": 2000,
       "execution_facts": {
         "messages": [
@@ -2341,11 +2341,11 @@
       "provider_request_count": 1,
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 12
+      "terminal_observation_ms": 20
     },
     "history-10000": {
       "capacity": 1,
-      "discovery_ms": 40,
+      "discovery_ms": 48,
       "discovery_target_ms": 2000,
       "execution_facts": {
         "messages": [
@@ -2411,7 +2411,7 @@
       "provider_request_count": 1,
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 18
+      "terminal_observation_ms": 20
     },
     "ineligible-0": {
       "population": {
@@ -2423,7 +2423,7 @@
     },
     "ineligible-100": {
       "capacity": 1,
-      "discovery_ms": 39,
+      "discovery_ms": 31,
       "discovery_target_ms": 2000,
       "execution_facts": {
         "messages": [
@@ -2489,11 +2489,11 @@
       "provider_request_count": 1,
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 18
+      "terminal_observation_ms": 20
     },
     "ineligible-1000": {
       "capacity": 1,
-      "discovery_ms": 32,
+      "discovery_ms": 31,
       "discovery_target_ms": 2000,
       "execution_facts": {
         "messages": [
@@ -2559,7 +2559,7 @@
       "provider_request_count": 1,
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 19
+      "terminal_observation_ms": 13
     }
   },
   "classification_legend": {
@@ -2582,7 +2582,7 @@
   ],
   "maximum_mixed": {
     "capacity": 1,
-    "discovery_ms": 42,
+    "discovery_ms": 47,
     "discovery_target_ms": 2000,
     "execution_facts": {
       "messages": [
@@ -4401,10 +4401,10 @@
         "database_logical_bytes": 5369856
       },
       "process": {
-        "rss_bytes": 10010624,
-        "virtual_bytes": 420872650752,
-        "cpu_user_seconds": 0.0055955,
-        "cpu_system_seconds": 0.005513208333333333,
+        "rss_bytes": 10190848,
+        "virtual_bytes": 420728995840,
+        "cpu_user_seconds": 0.005604458333333333,
+        "cpu_system_seconds": 0.005804708333333333,
         "threads": 5,
         "live_descendant_processes": 0,
         "open_descriptors": 16,
@@ -4419,8 +4419,8 @@
         "execution_slot_bytes": "1216",
         "openssl": "OpenSSL/3.6.3",
         "scratch_limit_bytes": "8589934592",
-        "socket": "/tmp/rui-502/f277abf34ec586639013ad454081973c.sock",
-        "store": "/private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-model-queue-3014013550/maximum-mixed/store"
+        "socket": "/tmp/rui-502/92cbfed9aaa5d7513161d1d0ee3f23dd.sock",
+        "store": "/private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/rui-model-queue-1749370991/maximum-mixed/store"
       }
     },
     "last_message_observation": {
@@ -4448,12 +4448,12 @@
       "target": "queue/eligible/000100"
     },
     "macos_physical_footprint": {
-      "lifetime_peak_upper_bound_bytes": 5506560,
+      "lifetime_peak_upper_bound_bytes": 5654016,
       "process": {
-        "rss_bytes": 10010624,
-        "virtual_bytes": 420872650752,
-        "cpu_user_seconds": 0.0055955,
-        "cpu_system_seconds": 0.005513208333333333,
+        "rss_bytes": 10190848,
+        "virtual_bytes": 420728995840,
+        "cpu_user_seconds": 0.005604458333333333,
+        "cpu_system_seconds": 0.005804708333333333,
         "threads": 5,
         "live_descendant_processes": 0,
         "open_descriptor_rows": 20,
@@ -4461,9 +4461,9 @@
         "disk_read_bytes": 0,
         "disk_write_bytes": 344064,
         "footprint": {
-          "physical_footprint_bytes": 5506048,
+          "physical_footprint_bytes": 5653504,
           "physical_footprint_rounding_tolerance_bytes": 512,
-          "lifetime_peak_physical_footprint_bytes": 5506048,
+          "lifetime_peak_physical_footprint_bytes": 5653504,
           "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
         }
       },
@@ -4582,7 +4582,7 @@
     "resource_status": "passed",
     "status": "passed",
     "target_inclusive": true,
-    "terminal_observation_ms": 3244
+    "terminal_observation_ms": 4100
   },
   "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
   "measurement_runtime": {
@@ -4600,7 +4600,7 @@
   "sqlite_binary_sha256": "8e6483a65f462178c8aa464d3190c0525708223f9585c547712287104b23beeb",
   "sqlite_binary_status": "passed",
   "status": "passed",
-  "tested_revision": "624717480c9adf939ffd2a86353fba352f128b78",
-  "working_tree_dirty": true,
+  "tested_revision": "c709eec27ae025475baa7e605b4f58c61a12e3ec",
+  "working_tree_dirty": false,
   "zig": "0.16.0"
 }
