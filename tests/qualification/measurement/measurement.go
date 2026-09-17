@@ -481,6 +481,7 @@ type ProcessSample struct {
 	Threads                 int32     `json:"threads"`
 	LiveDescendantProcesses int       `json:"live_descendant_processes"`
 	OpenDescriptorRows      int       `json:"open_descriptor_rows"`
+	OpenDescriptors         int32     `json:"open_descriptors"`
 	DiskReadBytes           uint64    `json:"disk_read_bytes"`
 	DiskWriteBytes          uint64    `json:"disk_write_bytes"`
 	Footprint               Footprint `json:"footprint"`
@@ -499,11 +500,12 @@ type PortableProcessSample struct {
 }
 
 type processSampleCore struct {
-	memory     *process.MemoryInfoStat
-	times      *cpu.TimesStat
-	threads    int32
-	children   []*process.Process
-	ioCounters *process.IOCountersStat
+	memory      *process.MemoryInfoStat
+	times       *cpu.TimesStat
+	threads     int32
+	children    []*process.Process
+	descriptors int32
+	ioCounters  *process.IOCountersStat
 }
 
 func sampleProcessCore(target *process.Process) (processSampleCore, error) {
@@ -523,25 +525,26 @@ func sampleProcessCore(target *process.Process) (processSampleCore, error) {
 	if err != nil {
 		return processSampleCore{}, err
 	}
+	descriptors, err := target.NumFDs()
+	if err != nil {
+		return processSampleCore{}, err
+	}
 	ioCounters, err := target.IOCounters()
 	if err != nil {
 		return processSampleCore{}, err
 	}
 	return processSampleCore{
-		memory:     memory,
-		times:      times,
-		threads:    threads,
-		children:   children,
-		ioCounters: ioCounters,
+		memory:      memory,
+		times:       times,
+		threads:     threads,
+		children:    children,
+		descriptors: descriptors,
+		ioCounters:  ioCounters,
 	}, nil
 }
 
 func SamplePortableProcess(target *process.Process) (PortableProcessSample, error) {
 	core, err := sampleProcessCore(target)
-	if err != nil {
-		return PortableProcessSample{}, err
-	}
-	descriptors, err := target.NumFDs()
 	if err != nil {
 		return PortableProcessSample{}, err
 	}
@@ -552,7 +555,7 @@ func SamplePortableProcess(target *process.Process) (PortableProcessSample, erro
 		CPUSystemSeconds:        core.times.System,
 		Threads:                 core.threads,
 		LiveDescendantProcesses: len(core.children),
-		OpenDescriptors:         descriptors,
+		OpenDescriptors:         core.descriptors,
 		DiskReadBytes:           core.ioCounters.DiskReadBytes,
 		DiskWriteBytes:          core.ioCounters.DiskWriteBytes,
 	}, nil
@@ -592,6 +595,7 @@ func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSam
 		Threads:                 core.threads,
 		LiveDescendantProcesses: len(core.children),
 		OpenDescriptorRows:      rows,
+		OpenDescriptors:         core.descriptors,
 		DiskReadBytes:           core.ioCounters.DiskReadBytes,
 		DiskWriteBytes:          core.ioCounters.DiskWriteBytes,
 		Footprint:               footprint,
@@ -606,7 +610,7 @@ func (s ProcessSample) Portable() PortableProcessSample {
 		CPUSystemSeconds:        s.CPUSystemSeconds,
 		Threads:                 s.Threads,
 		LiveDescendantProcesses: s.LiveDescendantProcesses,
-		OpenDescriptors:         int32(s.OpenDescriptorRows),
+		OpenDescriptors:         s.OpenDescriptors,
 		DiskReadBytes:           s.DiskReadBytes,
 		DiskWriteBytes:          s.DiskWriteBytes,
 	}

@@ -180,8 +180,8 @@ func TestSamplePortableProcessReadsCurrentProcess(t *testing.T) {
 func TestProcessSamplePortableProjection(t *testing.T) {
 	full := ProcessSample{
 		RSSBytes: 1, VirtualBytes: 2, CPUUserSeconds: 3, CPUSystemSeconds: 4,
-		Threads: 5, LiveDescendantProcesses: 6, OpenDescriptorRows: 7,
-		DiskReadBytes: 8, DiskWriteBytes: 9,
+		Threads: 5, LiveDescendantProcesses: 6, OpenDescriptorRows: 70,
+		OpenDescriptors: 7, DiskReadBytes: 8, DiskWriteBytes: 9,
 	}
 	got := full.Portable()
 	want := PortableProcessSample{

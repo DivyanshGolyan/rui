@@ -29,6 +29,17 @@ type population struct {
 	Eligible   int `json:"eligible"`
 }
 
+type settlementFact struct {
+	CommandKey          string `json:"command_key"`
+	MessageSession      string `json:"message_session"`
+	TurnID              int64  `json:"turn_id"`
+	TurnSession         string `json:"turn_session"`
+	OperationID         int64  `json:"operation_id"`
+	TurnOutcome         string `json:"turn_outcome"`
+	OperationSession    string `json:"operation_session"`
+	OperationResolution string `json:"operation_resolution"`
+}
+
 func discoveryStatus(milliseconds int64, available bool) string {
 	if !available {
 		return "unavailable"
@@ -212,23 +223,49 @@ func expectedOrder(count int) []string {
 	return result
 }
 
-func settledOrder(rows string) ([]string, error) {
-	result := []string{}
-	var firstError error
+func parseSettlementFacts(rows string) ([]settlementFact, error) {
 	if rows == "" {
-		return result, nil
+		return []settlementFact{}, nil
 	}
+	result := make([]settlementFact, 0, strings.Count(rows, "\n")+1)
 	for _, row := range strings.Split(rows, "\n") {
-		session, resolution, ok := strings.Cut(row, "|")
-		if !ok {
-			session = row
+		fields := strings.Split(row, "|")
+		if len(fields) != 8 {
+			return result, fmt.Errorf("malformed settlement fact %q", row)
 		}
-		result = append(result, session)
-		if (!ok || resolution != "provider_http_422") && firstError == nil {
-			firstError = fmt.Errorf("operation settlement %q", row)
+		turnID, turnError := strconv.ParseInt(fields[2], 10, 64)
+		operationID, operationError := strconv.ParseInt(fields[4], 10, 64)
+		if turnError != nil || operationError != nil {
+			return result, fmt.Errorf("malformed settlement identities %q", row)
+		}
+		result = append(result, settlementFact{
+			CommandKey: fields[0], MessageSession: fields[1], TurnID: turnID, TurnSession: fields[3],
+			OperationID: operationID, TurnOutcome: fields[5], OperationSession: fields[6], OperationResolution: fields[7],
+		})
+	}
+	return result, nil
+}
+
+func auditSettlementFacts(facts []settlementFact, expected []string) ([]string, error) {
+	actual := make([]string, 0, len(facts))
+	for _, fact := range facts {
+		actual = append(actual, fact.MessageSession)
+	}
+	if len(facts) != len(expected) {
+		return actual, fmt.Errorf("settlement fact count=%d want=%d", len(facts), len(expected))
+	}
+	var firstError error
+	for index, fact := range facts {
+		expectedKey := fmt.Sprintf("e-msg-%d", index+1)
+		if firstError == nil && (fact.CommandKey != expectedKey ||
+			fact.MessageSession != expected[index] ||
+			fact.TurnID <= 0 || fact.TurnSession != expected[index] ||
+			fact.OperationID <= 0 || fact.OperationSession != expected[index] ||
+			fact.TurnOutcome != "provider_http_422" || fact.OperationResolution != "provider_http_422") {
+			firstError = fmt.Errorf("settlement fact[%d]=%+v", index, fact)
 		}
 	}
-	return result, firstError
+	return actual, firstError
 }
 
 func physicalFootprintStatus(footprint measurement.Footprint) (string, uint64) {
@@ -239,9 +276,35 @@ func physicalFootprintStatus(footprint measurement.Footprint) (string, uint64) {
 	return "passed", upper
 }
 
-func recordOrder(result map[string]any, actual, expected []string, settlementError error) {
-	result["operation_launch_order"] = actual
-	result["expected_oldest_first_order"] = expected
+func recordBehaviorFailure(result map[string]any, failure string) {
+	if failure == "" {
+		return
+	}
+	failures, _ := result["behavior_failures"].([]string)
+	failures = append(failures, failure)
+	result["behavior_failures"] = failures
+	result["behavior_failure"] = failures[0]
+	result["status"] = overallStatus(result["status"].(string), "behavior_error")
+}
+
+func recordTerminalObservation(result map[string]any, observation map[string]any, observationError error) {
+	if observation != nil {
+		result["last_message_observation"] = observation
+	}
+	if observationError != nil {
+		recordBehaviorFailure(result, "terminal observation: "+observationError.Error())
+		return
+	}
+	status, statusOK := measurement.StringField(observation, "result", "status")
+	code, codeOK := measurement.StringField(observation, "result", "code")
+	if !statusOK || !codeOK || status != "failed" || code != "provider_http_422" {
+		recordBehaviorFailure(result, fmt.Sprintf("last message result status=%q code=%q", status, code))
+	}
+}
+
+func recordAdmissionOrder(result map[string]any, actual, expected []string, settlementError error) {
+	result["operation_admission_order"] = actual
+	result["expected_oldest_first_admission_order"] = expected
 	failure := ""
 	if settlementError != nil {
 		failure = settlementError.Error()
@@ -255,10 +318,7 @@ func recordOrder(result map[string]any, actual, expected []string, settlementErr
 			}
 		}
 	}
-	if failure != "" {
-		result["status"] = overallStatus(result["status"].(string), "behavior_error")
-		result["behavior_failure"] = failure
-	}
+	recordBehaviorFailure(result, failure)
 }
 
 func runCase(binary, sqliteBinary, root, name string, p population, resources bool) (map[string]any, error) {
@@ -272,14 +332,6 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 		return nil, err
 	}
 	if err := populate(deadline, sqliteBinary, store, p); err != nil {
-		return nil, err
-	}
-	maximumText, err := sql(deadline, sqliteBinary, store, "SELECT coalesce(max(operation_id),0) FROM model_operation;")
-	if err != nil {
-		return nil, err
-	}
-	launchFloor, err := strconv.ParseInt(maximumText, 10, 64)
-	if err != nil {
 		return nil, err
 	}
 	e, err := startEndpoint()
@@ -299,11 +351,12 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 	case first = <-e.first:
 	case <-time.After(10 * time.Second):
 		e.Release()
-		if err := host.Stop(measurement.TeardownAllowance); err != nil {
-			return nil, err
-		}
 		result["status"] = caseStatus(true, false, 0)
-		result["behavior_failure"] = "missing_first_provider_request"
+		recordBehaviorFailure(result, "missing_first_provider_request")
+		if stopError := host.Stop(measurement.TeardownAllowance); stopError != nil {
+			result["host_stop_error"] = stopError.Error()
+			recordBehaviorFailure(result, "Host stop after missing first request: "+stopError.Error())
+		}
 		return result, nil
 	}
 	discoveryMS := first.Sub(started).Milliseconds()
@@ -350,19 +403,31 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 	e.Release()
 	settlementStarted := time.Now()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
-	_, err = client.WaitResult(fmt.Sprintf("e-msg-%d", p.Eligible))
-	err = errors.Join(err, host.Stop(measurement.TeardownAllowance))
-	if err != nil {
-		return nil, err
-	}
+	observation, observationError := client.WaitResult(fmt.Sprintf("e-msg-%d", p.Eligible))
+	stopError := host.Stop(measurement.TeardownAllowance)
 	result["terminal_observation_ms"] = time.Since(settlementStarted).Milliseconds()
-	rows, err := sql(deadline, sqliteBinary, store, fmt.Sprintf("SELECT session_ref||'|'||coalesce(resolution_code,'') FROM model_operation WHERE operation_id>%d ORDER BY operation_id;", launchFloor))
-	if err != nil {
-		return nil, err
+	recordTerminalObservation(result, observation, observationError)
+	if stopError != nil {
+		result["host_stop_error"] = stopError.Error()
+		recordBehaviorFailure(result, "Host stop after settlement observation: "+stopError.Error())
 	}
-	actual, settlementError := settledOrder(rows)
+	auditDeadline := measurement.NewDeadline(15 * time.Second)
+	rows, auditQueryError := sql(auditDeadline, sqliteBinary, store, `SELECT m.command_key||'|'||m.session_ref||'|'||coalesce(m.turn_id,'')||'|'||coalesce(t.session_ref,'')||'|'||coalesce(t.operation_id,'')||'|'||coalesce(t.outcome_code,'')||'|'||coalesce(o.session_ref,'')||'|'||coalesce(o.resolution_code,'')
+FROM message_admission m
+LEFT JOIN turn t ON t.turn_id=m.turn_id
+LEFT JOIN model_operation o ON o.operation_id=t.operation_id
+WHERE m.command_key GLOB 'e-msg-[0-9]*'
+ORDER BY o.operation_id,m.admission_id;`)
 	expected := expectedOrder(p.Eligible)
-	recordOrder(result, actual, expected, settlementError)
+	if auditQueryError != nil {
+		result["settlement_audit_error"] = auditQueryError.Error()
+		recordAdmissionOrder(result, []string{}, expected, fmt.Errorf("settlement audit query: %w", auditQueryError))
+		return result, nil
+	}
+	facts, parseError := parseSettlementFacts(rows)
+	result["settlement_facts"] = facts
+	actual, settlementError := auditSettlementFacts(facts, expected)
+	recordAdmissionOrder(result, actual, expected, errors.Join(parseError, settlementError))
 	return result, nil
 }
 
@@ -415,24 +480,34 @@ func main() {
 	statuses = append(statuses, mixed["status"].(string))
 	status := overallStatus(statuses...)
 	result := map[string]any{
-		"format": "rui-model-queue-v1-go", "scope": "issue-202 production model-only queue discovery, order, settlement, and resource observation",
+		"format": "rui-model-queue-v1-go", "scope": "issue-202 production model-only queue discovery, Operation admission order, settlement, and resource observation",
 		"status": status, "cases": cases, "maximum_mixed": mixed, "artifacts": root,
 		"classification_legend": map[string]string{"behavior_failure": "runner exits nonzero", "unavailable": "required discovery timestamp/counter could not be validly measured", "target_miss": "valid discovery exceeds the inclusive 2000 ms target", "passed": "behavior passed and valid discovery is at most 2000 ms", "diagnostic": "reported observation such as terminal-observation duration; not a qualification target"},
-		"limits":                []string{"model-only qualification; Bash composition remains GitHub issue #168", "Linux runtime results are development evidence under the current platform contract; macOS physical footprint is reported only when available", "deterministic loopback HTTP; no TLS or live-provider behavior", "Rui's pinned SQLite builds controlled populations in stopped Stores, but subsequent Host discovery, admission, launch, and settlement are authoritative", "process termination is not power-loss qualification", "population sizes are qualification workloads, not product quotas"},
+		"limits":                []string{"model-only qualification; Bash composition remains GitHub issue #168", "Linux runtime results are development evidence under the current platform contract; macOS physical footprint is reported only when available", "deterministic loopback HTTP; no TLS or live-provider behavior", "Rui's pinned SQLite builds controlled populations in stopped Stores, but subsequent Host discovery, Operation admission, provider request, and settlement are authoritative", "Operation IDs prove admission order, not independent provider-request launch identity", "process termination is not power-loss qualification", "population sizes are qualification workloads, not product quotas"},
 	}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
-		panic(err)
-	}
-	for key, value := range evidence {
-		result[key] = value
+		result["environment_evidence_status"] = "unavailable"
+		result["environment_evidence_error"] = err.Error()
+		status = overallStatus(status, "unavailable")
+		result["status"] = status
+	} else {
+		result["environment_evidence_status"] = "passed"
+		for key, value := range evidence {
+			result[key] = value
+		}
 	}
 	sqliteHash, err := measurement.SHA256File(sqliteBinary)
 	if err != nil {
-		panic(err)
+		result["sqlite_binary_status"] = "unavailable"
+		result["sqlite_binary_error"] = err.Error()
+		status = overallStatus(status, "unavailable")
+		result["status"] = status
+	} else {
+		result["sqlite_binary_status"] = "passed"
+		result["sqlite_binary"] = sqliteBinary
+		result["sqlite_binary_sha256"] = sqliteHash
 	}
-	result["sqlite_binary"] = sqliteBinary
-	result["sqlite_binary_sha256"] = sqliteHash
 	if *output != "" {
 		err = measurement.WriteJSON(*output, result)
 	} else {
