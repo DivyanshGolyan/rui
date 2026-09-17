@@ -20,13 +20,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/process"
 	"rui.local/qualification/measurement"
 )
 
-const physicalFootprintTargetBytes uint64 = 256 * 1024 * 1024
+const physicalFootprintTargetBytes uint64 = 24 * 1024 * 1024
+
+var requiredCLIFamilies = []string{"inspection", "action_read", "configuration", "message", "denial"}
 
 type call struct {
 	ItemID    string
@@ -73,13 +75,18 @@ func (e *endpoint) serve(writer http.ResponseWriter, request *http.Request) {
 	_, _ = io.Copy(io.Discard, request.Body)
 	e.mu.Lock()
 	e.requests++
+	requestNumber := e.requests
 	e.mu.Unlock()
 	<-e.release
+	payload := e.payload
+	if requestNumber > 1 {
+		payload = encodeCompletedAnswer("continuation-completed")
+	}
 	writer.Header().Set("Content-Type", "text/event-stream")
-	writer.Header().Set("Content-Length", strconv.Itoa(len(e.payload)))
+	writer.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 	writer.Header().Set("Connection", "close")
 	writer.WriteHeader(http.StatusOK)
-	_, _ = writer.Write(e.payload)
+	_, _ = writer.Write(payload)
 	e.mu.Lock()
 	e.responseEnd = time.Now()
 	e.mu.Unlock()
@@ -116,6 +123,25 @@ func encodeCalls(responseID string, calls []call) []byte {
 		write(map[string]any{"type": "response.output_item.done", "output_index": index, "item": item})
 	}
 	write(map[string]any{"type": "response.completed", "response": map[string]any{"id": responseID, "status": "completed", "output": items}})
+	output.WriteString("data: [DONE]\n\n")
+	return output.Bytes()
+}
+
+func encodeCompletedAnswer(responseID string) []byte {
+	message := map[string]any{
+		"type": "message", "id": responseID + "-message", "status": "completed", "role": "assistant", "phase": "final_answer",
+		"content": []any{map[string]any{"type": "output_text", "text": "classification complete", "annotations": []any{}}},
+	}
+	var output bytes.Buffer
+	write := func(value any) {
+		encoded, _ := json.Marshal(value)
+		output.WriteString("data: ")
+		output.Write(encoded)
+		output.WriteString("\n\n")
+	}
+	write(map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "message", "id": message["id"]}})
+	write(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": message})
+	write(map[string]any{"type": "response.completed", "response": map[string]any{"id": responseID, "status": "completed", "output": []any{message}}})
 	output.WriteString("data: [DONE]\n\n")
 	return output.Bytes()
 }
@@ -323,6 +349,55 @@ func verifyRejectedReferences(inspection map[string]any, expected []call, valid 
 	return map[string]any{"status": "passed", "calls_checked": len(rows), "references_per_call": 4}, nil
 }
 
+func verifyFullCallHistory(report map[string]any, expected []call, valid int, actionIDs []string) (map[string]any, error) {
+	full, ok := report["full"].(map[string]any)
+	if !ok {
+		return nil, errors.New("Full report omitted full inventory")
+	}
+	toolCalls, ok := full["tool_calls"].([]any)
+	if !ok || len(toolCalls) != len(expected) {
+		return nil, fmt.Errorf("Full report tool-call count=%d want=%d", len(toolCalls), len(expected))
+	}
+	for index, raw := range toolCalls {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("Full report tool call %d is malformed", index)
+		}
+		for field, want := range map[string]string{"item_id": expected[index].ItemID, "name": expected[index].Name, "call_id": expected[index].ID, "arguments": expected[index].Arguments} {
+			content, ok := item[field].(map[string]any)
+			got, textOK := content["text"].(string)
+			if !ok || !textOK || got != want {
+				return nil, fmt.Errorf("Full report tool call %d field %s mismatch", index, field)
+			}
+		}
+		rejection, _ := item["rejection"].(string)
+		if index < valid {
+			if item["rejection"] != nil {
+				return nil, fmt.Errorf("Full report valid call %d was rejected", index)
+			}
+		} else {
+			want := "unknown_tool"
+			if (index-valid)%2 == 1 {
+				want = "invalid_arguments"
+			}
+			if rejection != want {
+				return nil, fmt.Errorf("Full report rejected call %d code=%q want=%q", index, rejection, want)
+			}
+		}
+	}
+	actions, ok := full["actions"].([]any)
+	if !ok || len(actions) != len(actionIDs) {
+		return nil, fmt.Errorf("Full report Action count=%d want=%d", len(actions), len(actionIDs))
+	}
+	for index, raw := range actions {
+		action, ok := raw.(map[string]any)
+		if !ok || action["action"] != actionIDs[index] || action["permission"] != "denied" || action["resolution"] != "denied" {
+			return nil, fmt.Errorf("Full report Action %d mismatch: %v", index, raw)
+		}
+	}
+	return map[string]any{"profile": "full", "calls_checked": len(toolCalls), "call_content_references_checked": len(toolCalls) * 4, "denied_actions_checked": len(actions)}, nil
+}
+
 func recordPortableSample(result map[string]any, name string, host *measurement.Host) {
 	sample, err := measurement.SamplePortableProcess(host.Process)
 	if err != nil {
@@ -359,6 +434,22 @@ func observedCounts(inspection map[string]any) (int, int, error) {
 	}
 	invalid, err := strconv.Atoi(rejectedText)
 	return valid, invalid, err
+}
+
+func completedAndReleased(inspection map[string]any) (bool, error) {
+	work, ok := inspection["work"].(map[string]any)
+	if !ok {
+		return false, errors.New("inspection omitted work")
+	}
+	latest, _ := work["latest_outcome"].(map[string]any)
+	if work["status"] != "completed" || latest["code"] != "completed" {
+		return false, nil
+	}
+	execution, ok := inspection["execution"].(map[string]any)
+	if !ok {
+		return false, errors.New("inspection omitted execution")
+	}
+	return execution["custody_occupied"] == "0" && execution["scratch_used_bytes"] == "0", nil
 }
 
 func latencySummary(samples []float64) map[string]any {
@@ -446,22 +537,68 @@ func summarizeAggregateFootprint(report footprintSamples, hostPID, cliPID int) (
 	return result, nil
 }
 
-func classifyAggregateFootprint(host *measurement.FootprintVerdict, aggregate *aggregateFootprint, target uint64) (measurement.FootprintVerdict, string) {
+func classifyAggregateFootprint(host *measurement.FootprintVerdict, families map[string]measurement.Footprint, observedLower, maximumCLIs uint64, helperCensus, hostComplete bool, target uint64) (measurement.FootprintVerdict, string) {
 	lower := uint64(0)
 	if host != nil {
 		lower = host.LowerBoundBytes
 	}
-	if aggregate != nil {
-		lower = max(lower, aggregate.ObservedAggregatePeakBytes)
+	lower = max(lower, observedLower)
+	if host == nil || maximumCLIs != 1 || !helperCensus || !hostComplete {
+		if lower > target {
+			return measurement.FootprintVerdict{Status: "target_miss", TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: ^uint64(0)}, "aggregate lifetime-peak lower bound exceeds the target"
+		}
+		return measurement.FootprintVerdict{Status: "unavailable", TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: ^uint64(0)}, "complete per-scenario Host evidence, maximum one-live-CLI invariant, or complete Rui helper census is missing"
 	}
+	var cliLower, cliUpper uint64
+	for _, family := range requiredCLIFamilies {
+		footprint, ok := families[family]
+		if !ok {
+			status := "unavailable"
+			if lower > target {
+				status = "target_miss"
+			}
+			return measurement.FootprintVerdict{Status: status, TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: ^uint64(0)}, "ordinary Rui CLI command-family lifetime-peak evidence is missing"
+		}
+		candidate := measurement.ClassifyFootprint(footprint, target)
+		cliLower = max(cliLower, candidate.LowerBoundBytes)
+		cliUpper = max(cliUpper, candidate.UpperBoundBytes)
+	}
+	lower = max(lower, cliLower)
+	if host.UpperBoundBytes > ^uint64(0)-cliUpper {
+		status := "unavailable"
+		if lower > target {
+			status = "target_miss"
+		}
+		return measurement.FootprintVerdict{Status: status, TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: ^uint64(0)}, "checked Host-plus-CLI lifetime-peak upper bound overflowed"
+	}
+	upper := host.UpperBoundBytes + cliUpper
+	status := "unavailable"
+	reason := "conservative lifetime-peak interval straddles the target"
 	if lower > target {
-		return measurement.FootprintVerdict{Status: "target_miss", TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: ^uint64(0)}, "observed de-duplicated aggregate lower bound exceeds the target"
+		status = "target_miss"
+		reason = "aggregate lifetime-peak lower bound exceeds the target"
+	} else if upper <= target {
+		status = "passed"
+		reason = "Host lifetime-peak upper plus one maximum ordinary-CLI lifetime-peak upper is within the target"
 	}
-	if aggregate == nil {
-		return measurement.FootprintVerdict{Status: "unavailable", TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: ^uint64(0)}, "ordinary Rui CLI or de-duplicated process-set evidence is missing"
-	}
-	return measurement.FootprintVerdict{Status: "unavailable", TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: ^uint64(0)}, "installed footprint reports a de-duplicated current total but no de-duplicated process-set lifetime peak upper bound"
+	return measurement.FootprintVerdict{Status: status, TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: upper}, reason
 }
+
+type cliMeasurementPopulation struct {
+	live    uint64
+	maximum uint64
+}
+
+func (p *cliMeasurementPopulation) begin() error {
+	if p.live != 0 {
+		return errors.New("ordinary CLI measurements must be sequential")
+	}
+	p.live = 1
+	p.maximum = max(p.maximum, p.live)
+	return nil
+}
+
+func (p *cliMeasurementPopulation) end() { p.live = 0 }
 
 func deny(client measurement.Client, directory, session, action string, index int) (float64, error) {
 	started := time.Now()
@@ -574,18 +711,6 @@ func audit(deadline measurement.Deadline, sqliteBinary, store string, expected s
 	return map[string]any{"counts": counts, "ordered_calls": rows}, nil
 }
 
-type aggregateCollector struct {
-	hostPID       int
-	cli           *exec.Cmd
-	cliOutput     bytes.Buffer
-	cliError      bytes.Buffer
-	sampler       *exec.Cmd
-	samplerOutput *os.File
-	samplerError  *os.File
-	jsonPath      string
-	finished      bool
-}
-
 var (
 	errChildCleanupTimedOut = errors.New("child cleanup timed out")
 	errChildDidNotReap      = errors.New("child did not reap after forced termination")
@@ -626,126 +751,191 @@ func killCommand(command *exec.Cmd) error {
 	return errors.Join(killError, waitError)
 }
 
-func startAggregateCollector(binary, store, session, directory string, hostPID int) (*aggregateCollector, error, error) {
-	collector := &aggregateCollector{hostPID: hostPID}
-	if err := syscall.Kill(hostPID, syscall.SIGSTOP); err != nil {
-		return nil, fmt.Errorf("hold retained Host before ordinary CLI launch: %w", err), nil
-	}
-	collector.cli = exec.Command(binary, "inspect-session", "--store", store, "--session", session)
-	collector.cli.Stdout = &collector.cliOutput
-	collector.cli.Stderr = &collector.cliError
-	if err := collector.cli.Start(); err != nil {
-		return nil, err, syscall.Kill(hostPID, syscall.SIGCONT)
-	}
-	time.Sleep(20 * time.Millisecond)
-	if err := syscall.Kill(collector.cli.Process.Pid, syscall.SIGSTOP); err != nil {
-		return nil, fmt.Errorf("hold ordinary Rui CLI: %w", err), errors.Join(killCommand(collector.cli), syscall.Kill(hostPID, syscall.SIGCONT))
-	}
-	if err := syscall.Kill(hostPID, syscall.SIGCONT); err != nil {
-		return nil, nil, errors.Join(fmt.Errorf("resume retained Host: %w", err), killCommand(collector.cli))
-	}
-	collector.jsonPath = filepath.Join(directory, "aggregate-footprint.json")
-	var err error
-	collector.samplerOutput, err = os.OpenFile(filepath.Join(directory, "aggregate-footprint.txt"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err, collector.abort()
-	}
-	collector.samplerError, err = os.OpenFile(filepath.Join(directory, "aggregate-footprint-stderr.txt"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err, collector.abort()
-	}
-	collector.sampler = exec.Command(
-		"/usr/bin/footprint", "-f", "bytes", "--sample", "0.2", "--sample-duration", "0.5", "-j", collector.jsonPath,
-		"-p", strconv.Itoa(hostPID), "-p", strconv.Itoa(collector.cli.Process.Pid),
-	)
-	collector.sampler.Stdout = collector.samplerOutput
-	collector.sampler.Stderr = collector.samplerError
-	if err := collector.sampler.Start(); err != nil {
-		return nil, err, collector.abort()
-	}
-	return collector, nil, nil
+type cliFamilyMeasurement struct {
+	Family            string                    `json:"family"`
+	Command           []string                  `json:"command"`
+	Process           measurement.ProcessSample `json:"process"`
+	DirectProcessSet  aggregateFootprint        `json:"direct_process_set"`
+	OutputSHA256      string                    `json:"output_sha256"`
+	HostDescendants   int                       `json:"host_live_descendants"`
+	CLIDescendants    int                       `json:"cli_live_descendants"`
+	CompletedWorkHold bool                      `json:"completed_work_hold"`
 }
 
-func (c *aggregateCollector) abort() error {
-	if c == nil || c.finished {
+type physicalMeasurementUnavailable struct{ cause error }
+
+func (e physicalMeasurementUnavailable) Error() string { return e.cause.Error() }
+func (e physicalMeasurementUnavailable) Unwrap() error { return e.cause }
+
+type physicalQualification struct {
+	hostLower      uint64
+	hostUpper      uint64
+	families       map[string]measurement.Footprint
+	familyEvidence map[string]cliFamilyMeasurement
+	observedLower  uint64
+	maximumCLIs    uint64
+	helperCensus   bool
+	population     cliMeasurementPopulation
+	hostScenarios  map[string]struct{}
+}
+
+func newPhysicalQualification() *physicalQualification {
+	return &physicalQualification{
+		families:       map[string]measurement.Footprint{},
+		familyEvidence: map[string]cliFamilyMeasurement{},
+		helperCensus:   true,
+		hostScenarios:  map[string]struct{}{},
+	}
+}
+
+func (q *physicalQualification) addHost(scenario string, verdict measurement.FootprintVerdict) {
+	q.hostLower = max(q.hostLower, verdict.LowerBoundBytes)
+	q.hostUpper = max(q.hostUpper, verdict.UpperBoundBytes)
+	q.hostScenarios[scenario] = struct{}{}
+}
+
+func (q *physicalQualification) addCLI(value cliFamilyMeasurement) {
+	q.maximumCLIs = max(q.maximumCLIs, q.population.maximum)
+	q.observedLower = max(q.observedLower, value.DirectProcessSet.ObservedAggregatePeakBytes)
+	q.helperCensus = q.helperCensus && value.HostDescendants == 0 && value.CLIDescendants == 0
+	current, exists := q.families[value.Family]
+	if !exists || measurement.ClassifyFootprint(value.Process.Footprint, ^uint64(0)).UpperBoundBytes > measurement.ClassifyFootprint(current, ^uint64(0)).UpperBoundBytes {
+		q.families[value.Family] = value.Process.Footprint
+		q.familyEvidence[value.Family] = value
+	}
+}
+
+func (q *physicalQualification) hostVerdict() *measurement.FootprintVerdict {
+	if q.hostUpper == 0 {
 		return nil
 	}
-	c.finished = true
-	var result error
-	if c.sampler != nil && c.sampler.Process != nil {
-		signalError := c.sampler.Process.Signal(os.Interrupt)
-		if errors.Is(signalError, os.ErrProcessDone) {
-			signalError = nil
-		}
-		result = errors.Join(result, signalError, waitCommand(c.sampler, measurement.TeardownAllowance))
+	status := "unavailable"
+	if q.hostUpper <= physicalFootprintTargetBytes {
+		status = "passed"
+	} else if q.hostLower > physicalFootprintTargetBytes {
+		status = "target_miss"
 	}
-	if c.samplerOutput != nil {
-		result = errors.Join(result, c.samplerOutput.Close())
-	}
-	if c.samplerError != nil {
-		result = errors.Join(result, c.samplerError.Close())
-	}
-	if c.cli != nil && c.cli.Process != nil {
-		continueError := syscall.Kill(c.cli.Process.Pid, syscall.SIGCONT)
-		if errors.Is(continueError, os.ErrProcessDone) {
-			continueError = nil
-		}
-		result = errors.Join(result, continueError, killCommand(c.cli))
-	}
-	return result
+	return &measurement.FootprintVerdict{Status: status, LowerBoundBytes: q.hostLower, UpperBoundBytes: q.hostUpper, TargetBytes: physicalFootprintTargetBytes}
 }
 
-func (c *aggregateCollector) finish() (aggregateFootprint, error, error) {
-	if c == nil || c.finished {
-		return aggregateFootprint{}, nil, errors.New("aggregate collector is not live")
-	}
-	var measurementError, behaviorError error
-	waitError := waitCommand(c.sampler, measurement.TeardownAllowance)
-	if errors.Is(waitError, errChildDidNotReap) {
-		behaviorError = errors.Join(behaviorError, waitError)
-	} else {
-		measurementError = errors.Join(measurementError, waitError)
-	}
-	c.sampler = nil
-	closeError := errors.Join(c.samplerOutput.Close(), c.samplerError.Close())
-	c.samplerOutput = nil
-	c.samplerError = nil
-	behaviorError = errors.Join(behaviorError, closeError)
-	var aggregate aggregateFootprint
-	if measurementError == nil {
-		encoded, readError := os.ReadFile(c.jsonPath)
-		if readError != nil {
-			measurementError = errors.Join(measurementError, readError)
-		} else {
-			var report footprintSamples
-			if decodeError := json.Unmarshal(encoded, &report); decodeError != nil {
-				measurementError = errors.Join(measurementError, fmt.Errorf("decode aggregate footprint: %w", decodeError))
-			} else {
-				aggregate, measurementError = summarizeAggregateFootprint(report, c.hostPID, c.cli.Process.Pid)
-			}
+func waitForReady(file *os.File) error {
+	done := make(chan error, 1)
+	go func() {
+		var signal [1]byte
+		_, err := io.ReadFull(file, signal[:])
+		if err == nil && signal[0] != 1 {
+			err = errors.New("ordinary CLI emitted invalid post-command hold signal")
 		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(measurement.TeardownAllowance):
+		return errors.New("ordinary CLI post-command hold timed out")
 	}
-	cliPID := c.cli.Process.Pid
-	if err := syscall.Kill(cliPID, syscall.SIGCONT); err != nil {
-		behaviorError = errors.Join(behaviorError, fmt.Errorf("resume ordinary Rui CLI: %w", err), killCommand(c.cli))
-		c.cli = nil
-	} else {
-		waitError = waitCommand(c.cli, measurement.TeardownAllowance)
-		c.cli = nil
-		if waitError != nil {
-			behaviorError = errors.Join(behaviorError, fmt.Errorf("ordinary Rui CLI failed: %w; stderr=%q", waitError, c.cliError.String()))
-		} else {
-			var inspection map[string]any
-			if err := json.Unmarshal(c.cliOutput.Bytes(), &inspection); err != nil {
-				behaviorError = errors.Join(behaviorError, fmt.Errorf("ordinary Rui CLI output: %w", err))
-			}
-		}
-	}
-	c.finished = true
-	return aggregate, measurementError, behaviorError
 }
 
-func runScenario(binary, sqliteBinary, root string, value scenario) (result map[string]any, returnedError error) {
+func measureHeldCLI(binary string, arguments []string, host *measurement.Host, directory, label, family string, population *cliMeasurementPopulation) (cliFamilyMeasurement, []byte, error) {
+	var result cliFamilyMeasurement
+	if err := population.begin(); err != nil {
+		return result, nil, err
+	}
+	defer population.end()
+	releaseRead, releaseWrite, err := os.Pipe()
+	if err != nil {
+		return result, nil, err
+	}
+	readyRead, readyWrite, err := os.Pipe()
+	if err != nil {
+		_ = releaseRead.Close()
+		_ = releaseWrite.Close()
+		return result, nil, err
+	}
+	command := exec.Command(binary, arguments...)
+	command.Env = append(os.Environ(), "RUI_TEST_POST_COMMAND_RELEASE_FD=3", "RUI_TEST_POST_COMMAND_READY_FD=4")
+	command.ExtraFiles = []*os.File{releaseRead, readyWrite}
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		_ = releaseRead.Close()
+		_ = releaseWrite.Close()
+		_ = readyRead.Close()
+		_ = readyWrite.Close()
+		return result, nil, err
+	}
+	_ = releaseRead.Close()
+	_ = readyWrite.Close()
+	cleanup := func() error {
+		_ = readyRead.Close()
+		_ = releaseWrite.Close()
+		return killCommand(command)
+	}
+	if err := waitForReady(readyRead); err != nil {
+		return result, nil, errors.Join(err, cleanup())
+	}
+	_ = readyRead.Close()
+	cli, err := process.NewProcess(int32(command.Process.Pid))
+	if err != nil {
+		return result, nil, errors.Join(err, cleanup())
+	}
+	cliProcess, err := measurement.SampleProcess(cli, filepath.Join(directory, label+"-cli-footprint.txt"))
+	if err != nil {
+		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+	}
+	hostChildren, err := host.Process.Children()
+	if err != nil {
+		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+	}
+	jsonPath := filepath.Join(directory, label+"-aggregate-footprint.json")
+	toolOutput, err := os.OpenFile(filepath.Join(directory, label+"-aggregate-footprint.txt"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+	}
+	toolError, err := os.OpenFile(filepath.Join(directory, label+"-aggregate-footprint-stderr.txt"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		_ = toolOutput.Close()
+		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+	}
+	sampler := exec.Command("/usr/bin/footprint", "-f", "bytes", "--sample", "0.2", "--sample-duration", "0.5", "-j", jsonPath, "-p", strconv.Itoa(host.Cmd.Process.Pid), "-p", strconv.Itoa(command.Process.Pid))
+	sampler.Stdout = toolOutput
+	sampler.Stderr = toolError
+	if err = sampler.Start(); err == nil {
+		err = waitCommand(sampler, measurement.TeardownAllowance)
+	}
+	err = errors.Join(err, toolOutput.Close(), toolError.Close())
+	if err != nil {
+		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+	}
+	encoded, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+	}
+	var report footprintSamples
+	if err := json.Unmarshal(encoded, &report); err != nil {
+		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+	}
+	aggregate, err := summarizeAggregateFootprint(report, host.Cmd.Process.Pid, command.Process.Pid)
+	if err != nil {
+		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+	}
+	if _, err := releaseWrite.Write([]byte{1}); err != nil {
+		return result, nil, errors.Join(err, cleanup())
+	}
+	_ = releaseWrite.Close()
+	if err := waitCommand(command, measurement.TeardownAllowance); err != nil {
+		return result, nil, fmt.Errorf("ordinary Rui CLI failed after completed-work hold: %w; stderr=%q", err, stderr.String())
+	}
+	digest := sha256.Sum256(stdout.Bytes())
+	return cliFamilyMeasurement{
+		Family: family, Command: append([]string{filepath.Base(binary)}, arguments...), Process: cliProcess,
+		DirectProcessSet: aggregate, OutputSHA256: hex.EncodeToString(digest[:]), HostDescendants: len(hostChildren),
+		CLIDescendants: cliProcess.LiveDescendantProcesses, CompletedWorkHold: true,
+	}, append([]byte(nil), stdout.Bytes()...), nil
+}
+
+func runScenario(binary, sqliteBinary, root string, value scenario, qualification *physicalQualification) (result map[string]any, returnedError error) {
 	result = map[string]any{"inputs": value, "status": "behavior_error"}
 	directory := filepath.Join(root, value.Name)
 	store := filepath.Join(directory, "store")
@@ -783,12 +973,62 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 		}
 	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
-	if err := client.Configure(value.Name, "qualification/"+value.Name, "--tools", "bash"); err != nil {
+	measurements := map[string]cliFamilyMeasurement{}
+	physicalUnavailable := false
+	physicalErrors := []string{}
+	measure := func(label, family string, arguments []string, verify func([]byte) error) error {
+		measured, output, measureError := measureHeldCLI(binary, arguments, host, directory, label, family, &qualification.population)
+		if verifyError := verify(output); verifyError != nil {
+			return verifyError
+		}
+		if measureError != nil {
+			var unavailable physicalMeasurementUnavailable
+			if !errors.As(measureError, &unavailable) {
+				return measureError
+			}
+			physicalUnavailable = true
+			physicalErrors = append(physicalErrors, family+": "+measureError.Error())
+			return nil
+		}
+		measurements[family] = measured
+		qualification.addCLI(measured)
+		return nil
+	}
+	accepted := func(output []byte) error {
+		var reply map[string]any
+		if err := json.Unmarshal(output, &reply); err != nil {
+			return err
+		}
+		if status, _ := measurement.StringField(reply, "answer", "status"); status != "accepted" {
+			return fmt.Errorf("held CLI command did not preserve accepted output: %v", reply)
+		}
+		return nil
+	}
+	session := "qualification/" + value.Name
+	if runtime.GOOS == "darwin" && value.Name == "mixed-restart" {
+		workspace, err := measurement.RepositoryRoot()
+		if err != nil {
+			return result, err
+		}
+		if err := measure("cli-configuration", "configuration", []string{"configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--session", session, "--workspace", workspace, "--model", "model-a", "--tools", "bash"}, accepted); err != nil {
+			return result, err
+		}
+	} else if err := client.Configure(value.Name, session, "--tools", "bash"); err != nil {
 		return result, err
 	}
 	recordPortableSample(result, "retained_idle_before", host)
 	admissionStarted := time.Now()
-	if err := client.Message(value.Name, "qualification/"+value.Name, "classify raw provider calls"); err != nil {
+	if runtime.GOOS == "darwin" && value.Name == "mixed-restart" {
+		textPath := filepath.Join(directory, value.Name+".txt")
+		if err := os.WriteFile(textPath, []byte("classify raw provider calls"), 0o600); err != nil {
+			return result, err
+		}
+		if err := measure("cli-message", "message", []string{"message", "--store", store, "--record", filepath.Join(directory, value.Name+".json"), "--key", value.Name, "--session", session, "--text", textPath}, accepted); err != nil {
+			return result, err
+		}
+		deadline = measurement.NewDeadline(2 * time.Minute)
+		client.Deadline = deadline
+	} else if err := client.Message(value.Name, session, "classify raw provider calls"); err != nil {
 		return result, err
 	}
 	if value.FreezeCatalog {
@@ -870,13 +1110,44 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 	if len(actions) != value.Valid {
 		return result, fmt.Errorf("got %d unresolved actions, want %d", len(actions), value.Valid)
 	}
+	if runtime.GOOS == "darwin" && value.Name == "valid-256" {
+		if err := measure("cli-inspection", "inspection", []string{"inspect-session", "--store", store, "--session", session}, func(output []byte) error {
+			var report map[string]any
+			if err := json.Unmarshal(output, &report); err != nil {
+				return err
+			}
+			valid, rejected, err := observedCounts(report)
+			if err != nil || valid != value.Valid || rejected != value.Rejected {
+				return fmt.Errorf("held inspection changed classified populations: valid=%d rejected=%d error=%v", valid, rejected, err)
+			}
+			return nil
+		}); err != nil {
+			return result, err
+		}
+	}
+	if runtime.GOOS == "darwin" && value.Name == "payload-100000" {
+		if err := measure("cli-action-read", "action_read", []string{"read-action-arguments", "--store", store, "--session", session, "--action", actions[0]}, func(output []byte) error {
+			if string(output) != calls[0].Arguments {
+				return fmt.Errorf("held Action read changed exact bytes: got=%d want=%d", len(output), len(calls[0].Arguments))
+			}
+			return nil
+		}); err != nil {
+			return result, err
+		}
+	}
 	denialLatencies := make([]float64, 0, len(actions))
 	for index, action := range actions {
-		latency, denialError := deny(client, directory, "qualification/"+value.Name, action, index)
+		started := time.Now()
+		var denialError error
+		if runtime.GOOS == "darwin" && value.Name == "mixed-restart" && index == 0 {
+			denialError = measure("cli-denial", "denial", []string{"deny-action", "--store", store, "--record", filepath.Join(directory, "deny-0.json"), "--key", "deny-0", "--session", session, "--action", action}, accepted)
+		} else {
+			_, denialError = deny(client, directory, "qualification/"+value.Name, action, index)
+		}
 		if denialError != nil {
 			return result, denialError
 		}
-		denialLatencies = append(denialLatencies, latency)
+		denialLatencies = append(denialLatencies, float64(time.Since(started).Microseconds())/1000)
 		if value.ReplayDenial {
 			afterDenial, inspectError := client.Inspect("qualification/" + value.Name)
 			if inspectError != nil {
@@ -893,20 +1164,21 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 		}
 	}
 	result["denial_latency"] = latencySummary(denialLatencies)
-	err = measurement.WaitFor(deadline, 10*time.Millisecond, "physical cleanup", func() (bool, error) {
+	err = measurement.WaitFor(client.Deadline, 10*time.Millisecond, "completed work and physical cleanup", func() (bool, error) {
 		candidate, inspectError := client.Inspect("qualification/" + value.Name)
 		if inspectError != nil {
 			return false, inspectError
 		}
-		execution, ok := candidate["execution"].(map[string]any)
-		if !ok {
-			return false, errors.New("inspection omitted execution")
-		}
-		return execution["custody_occupied"] == "0" && execution["scratch_used_bytes"] == "0", nil
+		return completedAndReleased(candidate)
 	})
 	if err != nil {
 		return result, err
 	}
+	requests, _ = endpoint.facts()
+	if requests != 2 {
+		return result, fmt.Errorf("provider requests after automatic continuation=%d want=2", requests)
+	}
+	result["provider_requests"] = requests
 	recordPortableSample(result, "retained_idle_after", host)
 	result["database"], err = measurement.DatabaseSize(store)
 	if err != nil {
@@ -917,51 +1189,27 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 		return result, err
 	}
 	if runtime.GOOS == "darwin" {
-		aggregateCollectorValue, aggregateCollectorError, aggregateCleanupError := startAggregateCollector(binary, store, "qualification/"+value.Name, directory, host.Cmd.Process.Pid)
-		if aggregateCleanupError != nil {
-			return result, aggregateCleanupError
+		if len(measurements) != 0 {
+			result["ordinary_cli_measurements"] = measurements
 		}
-		if aggregateCollectorValue != nil {
-			defer measurement.JoinCleanup(&returnedError, aggregateCollectorValue.abort)
-		}
-		var aggregate *aggregateFootprint
-		if aggregateCollectorError == nil && aggregateCollectorValue != nil {
-			measured, measurementError, behaviorError := aggregateCollectorValue.finish()
-			if behaviorError != nil {
-				return result, behaviorError
-			}
-			aggregateCollectorError = measurementError
-			if measurementError == nil {
-				aggregate = &measured
-				result["aggregate_process_set"] = measured
-			}
-		}
-		if aggregateCollectorError != nil {
-			result["aggregate_process_set_error"] = aggregateCollectorError.Error()
-		}
-		var hostVerdict *measurement.FootprintVerdict
-		var retainedSample any
-		physical, physicalError := measurement.SampleProcess(host.Process, filepath.Join(directory, "retained-footprint.txt"))
-		if physicalError != nil {
-			result["physical_footprint_error"] = physicalError.Error()
+		physical, sampleError := measurement.SampleProcess(host.Process, filepath.Join(directory, "retained-footprint.txt"))
+		if sampleError != nil {
+			result["physical_footprint_error"] = sampleError.Error()
+			physicalUnavailable = true
+			physicalErrors = append(physicalErrors, "Host: "+sampleError.Error())
 		} else {
-			value := measurement.ClassifyFootprint(physical.Footprint, physicalFootprintTargetBytes)
-			hostVerdict = &value
-			retainedSample = physical
-		}
-		aggregateVerdict, reason := classifyAggregateFootprint(hostVerdict, aggregate, physicalFootprintTargetBytes)
-		result["physical_footprint_status"] = aggregateVerdict.Status
-		result["physical_footprint"] = map[string]any{
-			"lifecycle":              "same Host lifetime peak from cold through work, drain, and retained idle; one ordinary Rui CLI directly sampled with that retained Host",
-			"maximum_live_rui_clis":  1,
-			"host_component_verdict": hostVerdict,
-			"aggregate_verdict":      aggregateVerdict,
-			"aggregate_reason":       reason,
-			"retained_sample":        retainedSample,
+			hostVerdict := measurement.ClassifyFootprint(physical.Footprint, physicalFootprintTargetBytes)
+			qualification.addHost(value.Name, hostVerdict)
+			result["host_lifetime_peak"] = map[string]any{
+				"lifecycle": "same Host from cold start through live loopback HTTP/SSE production transport, classification, all denials, automatic continuation, completed outcome, cleanup, and retained idle",
+				"verdict":   hostVerdict, "sample": physical,
+			}
 		}
 	} else {
-		result["physical_footprint_status"] = "unavailable"
 		result["physical_footprint_error"] = "accepted physical-footprint counter requires macOS /usr/bin/footprint"
+	}
+	if len(physicalErrors) != 0 {
+		result["physical_measurement_errors"] = physicalErrors
 	}
 	portablePeak := samples.finish()
 	result["portable_observed_peak"] = portablePeak
@@ -977,14 +1225,16 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 		return result, err
 	}
 	hostRunning = false
+	postMeasurementDeadline := measurement.NewDeadline(2 * time.Minute)
+	client.Deadline = postMeasurementDeadline
 	if value.ReplayDenial && len(actions) > 0 {
-		host, err = measurement.StartHost(binary, store, endpoint.URL(), 1, filepath.Join(directory, "restart-stderr.log"), deadline)
+		host, err = measurement.StartHost(binary, store, endpoint.URL(), 1, filepath.Join(directory, "restart-stderr.log"), postMeasurementDeadline)
 		if err != nil {
 			return result, err
 		}
 		hostRunning = true
 		var replay map[string]any
-		if err := measurement.RunJSON(deadline, &replay, binary, "retry", "--store", store,
+		if err := measurement.RunJSON(postMeasurementDeadline, &replay, binary, "retry", "--store", store,
 			"--record", filepath.Join(directory, "deny-0.json"), "--kind", "permission-decision"); err != nil {
 			return result, err
 		}
@@ -998,17 +1248,18 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 		if inspectError != nil {
 			return result, inspectError
 		}
-		valid, rejected, countError := observedCounts(recovered)
-		if countError != nil || valid != value.Valid || rejected != value.Rejected {
-			return result, fmt.Errorf("restart changed classified populations: actions=%d rejected=%d error=%v", valid, rejected, countError)
-		}
-		if _, referenceError := verifyRejectedReferences(recovered, calls, value.Valid); referenceError != nil {
-			return result, fmt.Errorf("restart changed rejected call references: %w", referenceError)
-		}
 		if contentError := verifyActionBytes(client, "qualification/"+value.Name, actions, calls[:value.Valid]); contentError != nil {
 			return result, fmt.Errorf("restart changed denied Action content: %w", contentError)
 		}
-		result["restart_exact_content"] = map[string]any{"status": "passed", "denied_actions_read": len(actions), "rejected_references_checked": value.Rejected * 4}
+		var recoveredFull map[string]any
+		if err := measurement.RunJSON(postMeasurementDeadline, &recoveredFull, binary, "inspect-session", "--store", store, "--session", "qualification/"+value.Name, "--profile", "full"); err != nil {
+			return result, err
+		}
+		historyEvidence, historyError := verifyFullCallHistory(recoveredFull, calls, value.Valid, actions)
+		if historyError != nil {
+			return result, fmt.Errorf("restart changed Full call history: %w", historyError)
+		}
+		result["restart_exact_content"] = map[string]any{"status": "passed", "denied_actions_read": len(actions), "full_report": historyEvidence}
 		remaining, identityError := actionIDs(recovered)
 		if identityError != nil || len(remaining) != 0 {
 			return result, fmt.Errorf("restart changed denial outcomes: unresolved=%v error=%v", remaining, identityError)
@@ -1018,12 +1269,16 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 		}
 		hostRunning = false
 	}
-	facts, err := audit(deadline, sqliteBinary, store, value)
+	facts, err := audit(postMeasurementDeadline, sqliteBinary, store, value)
 	result["durable_audit"] = facts
 	if err != nil {
 		return result, err
 	}
-	result["status"] = "passed"
+	if physicalUnavailable {
+		result["status"] = "unavailable"
+	} else {
+		result["status"] = "passed"
+	}
 	return result, nil
 }
 
@@ -1057,21 +1312,28 @@ func main() {
 	}
 	cases := map[string]any{}
 	status := "passed"
+	physical := newPhysicalQualification()
 	for _, candidate := range scenarios {
-		value, caseError := runScenario(binary, sqliteBinary, root, candidate)
+		value, caseError := runScenario(binary, sqliteBinary, root, candidate, physical)
 		if caseError != nil {
 			value["status"] = "behavior_error"
 			value["error"] = caseError.Error()
 			status = combineStatus(status, "behavior_error")
 		}
-		if physicalStatus, ok := value["physical_footprint_status"].(string); ok {
-			status = combineStatus(status, physicalStatus)
-		}
 		if portableStatus, ok := value["portable_measurement_status"].(string); ok && portableStatus == "unavailable" {
 			status = combineStatus(status, portableStatus)
 		}
+		if caseStatus, ok := value["status"].(string); ok {
+			status = combineStatus(status, caseStatus)
+		}
 		cases[candidate.Name] = value
 	}
+	physicalVerdict := measurement.FootprintVerdict{Status: "unavailable", TargetBytes: physicalFootprintTargetBytes, UpperBoundBytes: ^uint64(0)}
+	physicalReason := "accepted physical-footprint counter requires macOS /usr/bin/footprint"
+	if runtime.GOOS == "darwin" {
+		physicalVerdict, physicalReason = classifyAggregateFootprint(physical.hostVerdict(), physical.families, physical.observedLower, physical.maximumCLIs, physical.helperCensus, len(physical.hostScenarios) == len(scenarios), physicalFootprintTargetBytes)
+	}
+	status = combineStatus(status, physicalVerdict.Status)
 	limits := []string{"loopback deterministic provider; no live provider, TLS, filesystem power-loss, or Bash execution qualification", "Bash launch is intentionally forbidden: denial qualification ends before the later execution slice", "population and payload values are workloads, not product quotas", "process-crash and restart evidence does not certify power loss"}
 	if runtime.GOOS == "darwin" {
 		limits = append(limits, fmt.Sprintf("macOS %s runtime evidence; the other supported architecture is compile-only", runtime.GOARCH))
@@ -1079,18 +1341,27 @@ func main() {
 		limits = append(limits, "Linux execution cannot supply the accepted macOS physical-footprint counter")
 	}
 	result := map[string]any{
-		"format": "rui-call-classification-v4-go", "scope": "GitHub issue #228 production raw-provider call classification, exact denial, restart recovery, and independent population scaling",
+		"format": "rui-call-classification-v5-go", "scope": "GitHub issue #228 production raw-provider call classification, exact denial, restart recovery, and independent population scaling",
 		"status": status, "cases": cases, "artifacts": root,
-		"classification_legend": map[string]string{"behavior_error": "a provider/Store/server/client invariant failed", "unavailable": "a required measurement was absent, its uncertainty interval crossed the target, or aggregate helper accounting was incomplete", "target_miss": "the lower bound of a valid macOS lifetime-peak interval exceeded 256 MiB", "passed": "behavior and required aggregate measurements passed", "diagnostic": "component or portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold"},
+		"classification_legend": map[string]string{"behavior_error": "a provider/Store/server/client invariant failed", "unavailable": "a required measurement was absent, its uncertainty interval crossed the target, or aggregate helper accounting was incomplete", "target_miss": "the lower bound of a valid macOS lifetime-peak interval exceeded 24 MiB", "passed": "behavior and required aggregate measurements passed", "diagnostic": "component or portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold"},
+		"physical_footprint": map[string]any{
+			"target_bytes": physicalFootprintTargetBytes, "target_scope": "current up-to-100-operation milestone aggregate Rui-owned process footprint, including in-process transport/TLS/network-library allocations and all Rui helper processes",
+			"host_lifetime_peak": physical.hostVerdict(), "ordinary_cli_family_peaks": physical.familyEvidence,
+			"host_scenarios_sampled": len(physical.hostScenarios), "host_scenarios_required": len(scenarios),
+			"maximum_simultaneously_live_ordinary_clis": physical.maximumCLIs, "helper_census_complete": physical.helperCensus,
+			"observed_deduplicated_current_lower_bound_bytes": physical.observedLower, "aggregate_verdict": physicalVerdict, "aggregate_reason": physicalReason,
+			"network_boundary": "real loopback HTTP/SSE production transport drove Rui's in-process network allocations during each same-Host lifetime; external deterministic provider fixture process memory is excluded; kernel/socket buffers absent from macOS process phys_footprint remain separate network/kernel counters",
+		},
 		"physical_measurement_method": map[string]any{
 			"tool":                           "/usr/bin/footprint",
 			"installed_tool_contract":        "multiple -p arguments de-duplicate multiply mapped objects and report a total de-duplicated footprint",
 			"sampling_interval_seconds":      0.2,
 			"ordinary_cli_population":        1,
-			"ordinary_cli_command":           "rui inspect-session",
+			"ordinary_cli_commands":          requiredCLIFamilies,
+			"ordinary_cli_hold":              "opt-in inherited descriptors signal after successful output completion and hold that same CLI until sampling and explicit release",
 			"aggregate_lower_bound":          "maximum directly observed de-duplicated Host-plus-CLI total footprint",
-			"aggregate_upper_bound":          "unavailable: installed footprint exposes no de-duplicated process-set lifetime peak",
-			"incomparable_counters_excluded": "RSS and separately sampled per-process footprint values are not added",
+			"aggregate_upper_bound":          "checked Host lifetime-peak upper plus one maximum ordinary-CLI lifetime-peak upper; conservative sharing double-count is allowed",
+			"incomparable_counters_excluded": "RSS and kernel/socket counters are not added to process phys_footprint",
 		},
 		"limits": limits,
 	}

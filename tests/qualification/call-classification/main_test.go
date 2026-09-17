@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"os"
 	"os/exec"
 	"testing"
@@ -69,29 +70,87 @@ func TestCombineStatusPreservesVerdictPrecedence(t *testing.T) {
 	}
 }
 
-func TestAggregatePhysicalVerdictBoundaries(t *testing.T) {
+func TestAggregatePhysicalVerdictUsesCheckedLifetimePeakBounds(t *testing.T) {
+	target := uint64(24 * 1024 * 1024)
+	complete := func(peak, tolerance uint64) map[string]measurement.Footprint {
+		result := map[string]measurement.Footprint{}
+		for _, family := range requiredCLIFamilies {
+			result[family] = measurement.Footprint{LifetimePeakBytes: peak, LifetimePeakTolerance: tolerance}
+		}
+		return result
+	}
 	tests := []struct {
-		name      string
-		host      *measurement.FootprintVerdict
-		aggregate *aggregateFootprint
-		want      string
+		name         string
+		host         *measurement.FootprintVerdict
+		families     map[string]measurement.Footprint
+		observed     uint64
+		maximumCLIs  uint64
+		helperCensus bool
+		hostComplete bool
+		want         string
+		wantUpper    uint64
 	}{
-		{"aggregate miss without Host evidence", nil, &aggregateFootprint{ObservedAggregatePeakBytes: 101}, "target_miss"},
-		{"target-straddling uncertainty", &measurement.FootprintVerdict{Status: "passed", LowerBoundBytes: 90, UpperBoundBytes: 95}, &aggregateFootprint{ObservedAggregatePeakBytes: 99}, "unavailable"},
-		{"sampled lower bound only", &measurement.FootprintVerdict{Status: "passed", LowerBoundBytes: 90, UpperBoundBytes: 95}, &aggregateFootprint{ObservedAggregatePeakBytes: 95}, "unavailable"},
-		{"missing CLI", &measurement.FootprintVerdict{Status: "passed", LowerBoundBytes: 90, UpperBoundBytes: 95}, nil, "unavailable"},
-		{"Host miss", &measurement.FootprintVerdict{Status: "target_miss", LowerBoundBytes: 101, UpperBoundBytes: 102}, nil, "target_miss"},
+		{"pass at 24 MiB", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete(4<<20, 0), 23 << 20, 1, true, true, "passed", target},
+		{"target miss", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete(4<<20, 0), target + 1, 1, true, true, "target_miss", target},
+		{"target straddle from rounding", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete((4<<20)+1, 1), 23 << 20, 1, true, true, "unavailable", target + 2},
+		{"missing command family", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, map[string]measurement.Footprint{"inspection": {LifetimePeakBytes: 4 << 20}}, 23 << 20, 1, true, true, "unavailable", math.MaxUint64},
+		{"missing family preserves established miss", &measurement.FootprintVerdict{LowerBoundBytes: target + 1, UpperBoundBytes: target + 1}, map[string]measurement.Footprint{"inspection": {LifetimePeakBytes: 4 << 20}}, 23 << 20, 1, true, true, "target_miss", math.MaxUint64},
+		{"missing Host scenario", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete(4<<20, 0), 23 << 20, 1, true, false, "unavailable", math.MaxUint64},
+		{"maximum CLI population not one", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete(4<<20, 0), 23 << 20, 2, true, true, "unavailable", math.MaxUint64},
+		{"helper omission", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete(4<<20, 0), 23 << 20, 1, false, true, "unavailable", math.MaxUint64},
+		{"checked addition overflow", &measurement.FootprintVerdict{LowerBoundBytes: math.MaxUint64 - 2, UpperBoundBytes: math.MaxUint64 - 1}, complete(2, 0), math.MaxUint64 - 2, 1, true, true, "target_miss", math.MaxUint64},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			verdict, reason := classifyAggregateFootprint(test.host, test.aggregate, 100)
+			verdict, reason := classifyAggregateFootprint(test.host, test.families, test.observed, test.maximumCLIs, test.helperCensus, test.hostComplete, target)
 			if verdict.Status != test.want || reason == "" {
 				t.Fatalf("verdict=%+v reason=%q", verdict, reason)
 			}
-			if verdict.UpperBoundBytes != ^uint64(0) {
-				t.Fatalf("aggregate upper bound falsely finite: %+v", verdict)
+			if verdict.UpperBoundBytes != test.wantUpper {
+				t.Fatalf("upper bound=%d want %d: %+v", verdict.UpperBoundBytes, test.wantUpper, verdict)
 			}
 		})
+	}
+}
+
+func TestCompletedAndReleasedRequiresOutcomeBeforeEmptyCustody(t *testing.T) {
+	transientlyEmpty := map[string]any{
+		"work":      map[string]any{"status": "runnable", "latest_outcome": nil},
+		"execution": map[string]any{"custody_occupied": "0", "scratch_used_bytes": "0"},
+	}
+	if ready, err := completedAndReleased(transientlyEmpty); err != nil || ready {
+		t.Fatalf("transient empty custody qualified completion: ready=%v error=%v", ready, err)
+	}
+	completed := map[string]any{
+		"work": map[string]any{"status": "completed", "latest_outcome": map[string]any{"code": "completed"}},
+		"execution": map[string]any{
+			"custody_occupied": "0", "scratch_used_bytes": "0",
+		},
+	}
+	if ready, err := completedAndReleased(completed); err != nil || !ready {
+		t.Fatalf("completed drained work did not qualify: ready=%v error=%v", ready, err)
+	}
+	completed["execution"].(map[string]any)["scratch_used_bytes"] = "1"
+	if ready, err := completedAndReleased(completed); err != nil || ready {
+		t.Fatalf("live scratch qualified retained idle: ready=%v error=%v", ready, err)
+	}
+}
+
+func TestCLIMeasurementPopulationRejectsOverlapAndReleases(t *testing.T) {
+	var population cliMeasurementPopulation
+	if err := population.begin(); err != nil {
+		t.Fatal(err)
+	}
+	if err := population.begin(); err == nil {
+		t.Fatal("overlapping ordinary CLI measurement was accepted")
+	}
+	population.end()
+	if err := population.begin(); err != nil {
+		t.Fatalf("released CLI measurement did not permit reuse: %v", err)
+	}
+	population.end()
+	if population.maximum != 1 || population.live != 0 {
+		t.Fatalf("population=%+v", population)
 	}
 }
 

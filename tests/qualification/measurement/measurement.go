@@ -621,7 +621,9 @@ func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSam
 		return ProcessSample{}, err
 	}
 	pid := strconv.Itoa(int(target.Pid))
-	footprintCommand := exec.Command("/usr/bin/footprint", "-p", pid)
+	footprintContext, cancelFootprint := context.WithTimeout(context.Background(), TeardownAllowance)
+	defer cancelFootprint()
+	footprintCommand := exec.CommandContext(footprintContext, "/usr/bin/footprint", "-p", pid)
 	report, err := footprintCommand.CombinedOutput()
 	if err != nil {
 		return ProcessSample{}, fmt.Errorf("footprint failed: %w; output=%q", err, report)
@@ -633,7 +635,9 @@ func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSam
 	if err != nil {
 		return ProcessSample{}, err
 	}
-	lsof, err := exec.Command("/usr/sbin/lsof", "-n", "-P", "-p", pid).Output()
+	lsofContext, cancelLsof := context.WithTimeout(context.Background(), TeardownAllowance)
+	defer cancelLsof()
+	lsof, err := exec.CommandContext(lsofContext, "/usr/sbin/lsof", "-n", "-P", "-p", pid).Output()
 	if err != nil {
 		return ProcessSample{}, fmt.Errorf("lsof failed: %w", err)
 	}
