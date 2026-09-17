@@ -16,6 +16,8 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Request-failure ownership](request-failure-ownership.md) classifies failures from Message admission through provider output against source, the pre-decision contract and pinned Pi, community DeepSeek CLI, OpenCode v2 and Codex CLI evidence. Its finding that no concrete provider-independent pre-Operation rejection exists led to removing issue #201's premise; decision evidence only, with no runtime qualification.
 
+[Instruction updates under prompt caching](instruction-update-prompt-caching.md) compares current OpenAI and Anthropic prefix matching, later authoritative messages and same-level precedence. It supports the accepted separation between append-only canonical instruction history and adapter-owned provider projection; primary-source decision evidence only, with no provider qualification.
+
 [Output retention prior art](output-retention-prior-art.md) compares byte/count budgets, disk-backed FIFO bookkeeping and cleanup behavior in primary sources; design evidence only, with no accepted contract change or runtime qualification.
 
 [Session identity evidence](session-identity-evidence.md) records SQLite integer-allocation guarantees and JavaScript integer/JSON representation limits from primary sources; no runtime qualification.
